@@ -333,8 +333,13 @@ async function recoverTokenPair(auth: McpHostRuntimeAuth): Promise<void> {
 }
 
 /**
- * Every refresh attempt failed without an answer from control-api: a network
- * error (status 0) or a 5xx. control-api did not judge the refresh token.
+ * Every refresh attempt failed with a network error (status 0) or a 5xx: no
+ * attempt was refused. That does not prove the refresh token is unconsumed.
+ * control-api leaves the token unconsumed when the caller has already gone
+ * before the consume, but the consume itself can outlast the gateway timeout,
+ * its commit acknowledgement can be lost (control-api then answers 500 with the
+ * token spent), and a connection can drop after control-api answered. The next
+ * attempt with a consumed token gets 401, which counts at once.
  * Read only through `instanceof`; `name` stays `Error`, so logs are unchanged.
  */
 class RefreshUnavailableError extends Error {}

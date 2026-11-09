@@ -672,16 +672,48 @@ describe('refreshWithRecovery — scheduled renewal while control-api is unavail
     expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(0)
   })
 
+  it.each([
+    ['a network error, 401, 503', [0, 401, 503]],
+    ['500, 500, 401', [500, 500, 401]],
+  ])(
+    'counts a refresh refused on any attempt, not only the first (%s)',
+    async (_label, statuses) => {
+      vi.stubEnv('MCP_HOST_RUNTIME_AUTH_DEGRADED_AFTER_FAILURES', '1')
+      for (const status of statuses) {
+        if (status === 0) mockFetch.mockRejectedValueOnce(new Error('ECONNRESET'))
+        else mockFetch.mockResolvedValueOnce(textResponse(status, 'refresh answer'))
+      }
+      const auth = makeAuth({ accessToken: accessTokenValidFor(200) })
+
+      await settle(
+        refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
+        /Token refresh failed after 3 attempts/
+      )
+
+      // Witnesses: all three attempts reached the gateway, and the failure was
+      // counted (the threshold is 1, so a counted failure sets degraded).
+      expect(mockFetch).toHaveBeenCalledTimes(3)
+      expect(runtimeAuthHealthSnapshot()).toMatchObject({
+        state: 'degraded',
+        consecutiveFailures: 1,
+        lastFailureReason: 'refresh_recovery_failed',
+      })
+      // A single 401 stays below the re-issue threshold, and nothing was deferred.
+      expect(auth.reIssueTokens).not.toHaveBeenCalled()
+      expect(await recoveryCount('refresh_unavailable_token_valid')).toBe(0)
+    }
+  )
+
   it('counts a refused refresh whose re-issue fails (consumed bootstrap token)', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     try {
       mockFetch.mockResolvedValue(textResponse(401, 'invalid_refresh_token'))
       const auth = makeAuth({ accessToken: accessTokenValidFor(200) })
-      auth.reIssueTokens.mockRejectedValueOnce(new Error('re-issue returned HTTP 503'))
+      auth.reIssueTokens.mockRejectedValueOnce(new Error('reIssueTokens: unauthorized (401)'))
 
       await settle(
         refreshWithRecovery(auth, { deferUnavailableWhileAccessValidMs: NEXT_RETRY_MS }),
-        /re-issue returned HTTP 503/
+        /reIssueTokens: unauthorized \(401\)/
       )
 
       expect(mockFetch).toHaveBeenCalledTimes(2)

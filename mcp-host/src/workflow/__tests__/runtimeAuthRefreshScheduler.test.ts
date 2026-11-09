@@ -382,9 +382,14 @@ describe('startRuntimeAuthProactiveRefresh: control-api outage, real refresh pat
       v => v.labels.reason === 'refresh_unavailable_token_valid'
     )?.value ?? 0
 
+  let stateDir: string
+
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(0)
+    // Empty state dir, so a persisted token pair cannot stand in for a refresh.
+    stateDir = mkdtempSync(join(tmpdir(), 'mcp-host-refresh-scheduler-'))
+    vi.stubEnv('MCP_HOST_RUNTIME_AUTH_STATE_DIR', stateDir)
     resetRuntimeAuthHealthForTests()
     runtimeAuthRecoveryFailuresCounter.reset()
   })
@@ -392,7 +397,9 @@ describe('startRuntimeAuthProactiveRefresh: control-api outage, real refresh pat
   afterEach(() => {
     stopRuntimeAuthProactiveRefresh()
     vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
     vi.useRealTimers()
+    rmSync(stateDir, { recursive: true, force: true })
   })
 
   it('a Host pod rides out a 250 s outage that starts at a renewal tick', async () => {
