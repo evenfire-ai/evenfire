@@ -75,6 +75,11 @@ trees: services the hook does not bump (`workflow-approval-request-reader`,
 request retargeted to `dev` after its last push also has no run of the check, because
 GitHub starts no run when the base changes: close and reopen it, or push a commit.
 
+**A `stayed at` failure means a service changed with no bump.** The usual cause is
+a commit made without the hook: `--no-verify`, a web edit, or a clone where
+`make install-git-hooks` never ran. Make a commit in that service with the hook on,
+or set its version above the base's with the `npm version` command below.
+
 **A revert fails this check on purpose.** `git revert` and GitHub's Revert button run
 no hook, so a revert lowers every version it touches and the check reports `went down`.
 The next hook bump would otherwise issue a number that already named the reverted code.
