@@ -1733,30 +1733,16 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       REVOKE ALL ON TABLE workflow_authority_bindings FROM control_api_runtime;
       REVOKE ALL ON TABLE pr2_readiness_activations FROM control_api_runtime;
       REVOKE ALL ON TABLE pr2_readiness_evidence FROM control_api_runtime;
-      ALTER TABLE workflow_authority_bindings
-        DROP CONSTRAINT workflow_authority_bindings_entity_type_check;
-      ALTER TABLE workflow_authority_bindings
-        ADD CONSTRAINT workflow_authority_bindings_entity_type_check CHECK (entity_type IN (
-          'workflow_trigger', 'workflow_run', 'workflow_approval', 'workflow_artifact'
-        ));
       DELETE FROM schema_migrations
-       WHERE version IN (
-         '0142_pr2_runtime_privileges',
-         '0143_workflow_recipe_authority_entity'
-       );
+       WHERE version = '0142_pr2_runtime_privileges';
     `)
     await initDb(connector)
     const upgradedPr2Corrections = await dbPool.query<{ version: string }>(
       `SELECT version FROM schema_migrations
-        WHERE version IN (
-          '0142_pr2_runtime_privileges',
-          '0143_workflow_recipe_authority_entity'
-        )
-        ORDER BY version`
+        WHERE version = '0142_pr2_runtime_privileges'`
     )
     expect(upgradedPr2Corrections.rows.map(row => row.version)).toEqual([
       '0142_pr2_runtime_privileges',
-      '0143_workflow_recipe_authority_entity',
     ])
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0063_workflow_approval_trace_binding'
@@ -2104,33 +2090,51 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       const revision = 'd'.repeat(40)
       await pr2RuntimeClient.query('BEGIN')
       await pr2RuntimeClient.query('SET LOCAL ROLE control_api_runtime')
-      await pr2RuntimeClient.query(
-        `INSERT INTO workflow_authority_bindings (
-           id, binding_kind, entity_type, entity_id, binding_version, binding_hash,
-           user_id, session_id, session_version, delegation_jti, operation_id,
-           resource, target, target_hash, access_path_id, authorization_revision,
-           path_kind, effective_team_id, behavior_binding_hash,
-           source_issued_at, source_expires_at
-         ) VALUES (
-           $1, 'workflow_read', 'workflow_recipe', 'sandbox-recipes/runtime-role', 2, $2,
-           $3, $4, 1, $5, 'workflow.read',
-           $6::jsonb, $7::jsonb, $8, $9, $10,
-           'direct', NULL, $11, NOW(), NOW() + interval '1 minute'
-         )`,
-        [
-          bindingId,
-          'a'.repeat(64),
-          randomUUID(),
-          randomUUID(),
-          randomUUID(),
-          JSON.stringify({ type: 'workflow_recipe', logicalId: 'sandbox-recipes/runtime-role' }),
-          JSON.stringify({ recipeNamespace: 'sandbox-recipes', recipeName: 'runtime-role' }),
-          `ath2_${'b'.repeat(43)}`,
-          `ap1_${'c'.repeat(43)}`,
-          `ar1_${'d'.repeat(43)}`,
-          `bh2_${'e'.repeat(43)}`,
-        ]
-      )
+      const insertBinding = (id: string, bindingKind: string, entityType: string) =>
+        pr2RuntimeClient.query(
+          `INSERT INTO workflow_authority_bindings (
+             id, binding_kind, entity_type, entity_id, binding_version, binding_hash,
+             user_id, session_id, session_version, delegation_jti, operation_id,
+             resource, target, target_hash, access_path_id, authorization_revision,
+             path_kind, effective_team_id, behavior_binding_hash,
+             source_issued_at, source_expires_at
+           ) VALUES (
+             $1, $12, $13, 'sandbox-recipes/runtime-role', 2, $2,
+             $3, $4, 1, $5, 'workflow.trigger',
+             $6::jsonb, $7::jsonb, $8, $9, $10,
+             'direct', NULL, $11, NOW(), NOW() + interval '1 minute'
+           )`,
+          [
+            id,
+            'a'.repeat(64),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            JSON.stringify({ type: 'workflow_recipe', logicalId: 'sandbox-recipes/runtime-role' }),
+            JSON.stringify({ recipeNamespace: 'sandbox-recipes', recipeName: 'runtime-role' }),
+            `ath2_${'b'.repeat(43)}`,
+            `ap1_${'c'.repeat(43)}`,
+            `ar1_${'d'.repeat(43)}`,
+            `bh2_${'e'.repeat(43)}`,
+            bindingKind,
+            entityType,
+          ]
+        )
+      await insertBinding(bindingId, 'trigger', 'workflow_trigger')
+      // WF-14 (A6 E1): reads persist no binding, so the read kinds and the
+      // workflow_recipe entity are outside the closed vocabulary.
+      for (const [bindingKind, entityType] of [
+        ['workflow_read', 'workflow_trigger'],
+        ['artifact_list', 'workflow_run'],
+        ['artifact_read', 'workflow_artifact'],
+        ['trigger', 'workflow_recipe'],
+      ] as const) {
+        await pr2RuntimeClient.query('SAVEPOINT removed_read_vocabulary')
+        await expect(insertBinding(randomUUID(), bindingKind, entityType)).rejects.toMatchObject({
+          code: '23514',
+        })
+        await pr2RuntimeClient.query('ROLLBACK TO SAVEPOINT removed_read_vocabulary')
+      }
       await pr2RuntimeClient.query(
         `INSERT INTO pr2_readiness_activations (
            environment_id, source_revision, accepted_by, accepted_at,

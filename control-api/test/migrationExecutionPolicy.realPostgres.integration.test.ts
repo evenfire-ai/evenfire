@@ -469,8 +469,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(await versions(databasePool)).toContain('0137_user_access_foundation')
   })
 
-  it('reruns 0145 after a crash between its online builds, the replaced-index drops and its receipt', async () => {
-    const version = '0145_workflow_authorization_pause'
+  it('reruns 0144 after a crash between its online builds, the replaced-index drops and its receipt', async () => {
+    const version = '0144_workflow_authorization_pause'
     const replacing = PR2_ONLINE_INDEX_PLAN.filter(entry => entry.replaces !== undefined)
     expect(replacing.map(entry => [entry.migrationVersion, entry.name, entry.replaces])).toEqual([
       [version, 'idx_wr_phase_v2', 'idx_wr_phase'],

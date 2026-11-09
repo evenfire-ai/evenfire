@@ -57,9 +57,8 @@ export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '0140_gfs_upload_authority_bindings',
   '0141_pr2_readiness_evidence',
   '0142_pr2_runtime_privileges',
-  '0143_workflow_recipe_authority_entity',
-  '0144_workflow_run_failure_reason',
-  '0145_workflow_authorization_pause',
+  '0143_workflow_run_failure_reason',
+  '0144_workflow_authorization_pause',
 ])
 
 export const RUNNER_MIGRATION_VERSIONS = Object.freeze([

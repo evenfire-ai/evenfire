@@ -57,16 +57,15 @@ describe('D34 migration execution policy', () => {
       '0137_user_access_foundation',
       '0138_legacy_password_security_epoch_backfill',
     ])
-    // PR2 follows dev's last migration (0138) in consecutive slots; 0145 keeps
-    // its name.
+    // PR2 follows dev's last migration (0138) in consecutive slots. No read
+    // binding entity migration remains (WF-14, A6 E1).
     expect(PR2_MIGRATION_VERSIONS).toEqual([
       '0139_workflow_authority_bindings',
       '0140_gfs_upload_authority_bindings',
       '0141_pr2_readiness_evidence',
       '0142_pr2_runtime_privileges',
-      '0143_workflow_recipe_authority_entity',
-      '0144_workflow_run_failure_reason',
-      '0145_workflow_authorization_pause',
+      '0143_workflow_run_failure_reason',
+      '0144_workflow_authorization_pause',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -134,8 +133,8 @@ describe('D34 migration execution policy', () => {
         'after-schema',
         undefined,
       ],
-      ['0145_workflow_authorization_pause', 'idx_wr_phase_v2', 'after-schema', 'idx_wr_phase'],
-      ['0145_workflow_authorization_pause', 'idx_wr_owner_v2', 'after-schema', 'idx_wr_owner'],
+      ['0144_workflow_authorization_pause', 'idx_wr_phase_v2', 'after-schema', 'idx_wr_phase'],
+      ['0144_workflow_authorization_pause', 'idx_wr_owner_v2', 'after-schema', 'idx_wr_owner'],
     ])
     expect(
       PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => [
@@ -169,17 +168,17 @@ describe('D34 migration execution policy', () => {
         'gfs_upload_sessions',
         'gfs_upload_sessions_action_authority_object',
       ],
-      ['0144_workflow_run_failure_reason', 'workflow_runs', 'workflow_runs_failure_reason_check'],
-      ['0145_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_phase_check'],
-      ['0145_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+      ['0143_workflow_run_failure_reason', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+      ['0144_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_phase_check'],
+      ['0144_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_failure_reason_check'],
     ])
-    // A version with only constraint validations (0140, 0144) still has
+    // A version with only constraint validations (0140, 0143) still has
     // post-schema work; the versions without either have none.
     expect(PR2_MIGRATION_VERSIONS.filter(version => hasPostSchemaWork(version))).toEqual([
       '0139_workflow_authority_bindings',
       '0140_gfs_upload_authority_bindings',
-      '0144_workflow_run_failure_reason',
-      '0145_workflow_authorization_pause',
+      '0143_workflow_run_failure_reason',
+      '0144_workflow_authorization_pause',
     ])
     expect(PR1_MIGRATION_VERSIONS.filter(version => hasPostSchemaWork(version))).toEqual([])
   })
@@ -397,10 +396,10 @@ describe('D34 PR1 migration runner', () => {
 
     expect(applied).toEqual([...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS])
     // One transaction per version without post-schema work (0137, 0138,
-    // 0141-0143); a version with it commits its schema, each validation and
-    // its receipt separately: 0139 1 + 4 + 1, 0140 1 + 1 + 1, 0144 1 + 1 + 1,
-    // 0145 1 + 2 + 1.
-    const transactions = 5 + 6 + 3 + 3 + 4
+    // 0141-0142); a version with it commits its schema, each validation and
+    // its receipt separately: 0139 1 + 4 + 1, 0140 1 + 1 + 1, 0143 1 + 1 + 1,
+    // 0144 1 + 2 + 1.
+    const transactions = 4 + 6 + 3 + 3 + 4
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
@@ -471,7 +470,7 @@ describe('D34 PR1 migration runner', () => {
 
   it.each([
     ['0140_gfs_upload_authority_bindings', ['gfs_upload_sessions_action_authority_object']],
-    ['0144_workflow_run_failure_reason', ['workflow_runs_failure_reason_check']],
+    ['0143_workflow_run_failure_reason', ['workflow_runs_failure_reason_check']],
   ])(
     'validates the constraints of %s, which has no online index, after its schema commits',
     async (pendingVersion, constraints) => {
@@ -555,7 +554,7 @@ describe('D34 PR1 migration runner', () => {
       }
       return { rows: [], rowCount: 0 }
     })
-    const pendingVersion = '0144_workflow_run_failure_reason'
+    const pendingVersion = '0143_workflow_run_failure_reason'
     const appliedVersions = new Set<string>([
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),

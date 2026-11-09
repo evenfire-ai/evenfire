@@ -120,7 +120,7 @@ export const PR2_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
     where: '(initiating_authority_binding_id IS NOT NULL)',
   }),
   onlineIndex({
-    migrationVersion: '0145_workflow_authorization_pause',
+    migrationVersion: '0144_workflow_authorization_pause',
     phase: 'after-schema',
     name: 'idx_wr_phase_v2',
     table: 'workflow_runs',
@@ -129,7 +129,7 @@ export const PR2_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
     replaces: 'idx_wr_phase',
   }),
   onlineIndex({
-    migrationVersion: '0145_workflow_authorization_pause',
+    migrationVersion: '0144_workflow_authorization_pause',
     phase: 'after-schema',
     name: 'idx_wr_owner_v2',
     table: 'workflow_runs',
@@ -199,17 +199,17 @@ export const PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS: readonly PostSchemaConstrai
       constraint: 'gfs_upload_sessions_action_authority_object',
     }),
     constraintValidation({
-      migrationVersion: '0144_workflow_run_failure_reason',
+      migrationVersion: '0143_workflow_run_failure_reason',
       table: 'workflow_runs',
       constraint: 'workflow_runs_failure_reason_check',
     }),
     constraintValidation({
-      migrationVersion: '0145_workflow_authorization_pause',
+      migrationVersion: '0144_workflow_authorization_pause',
       table: 'workflow_runs',
       constraint: 'workflow_runs_phase_check',
     }),
     constraintValidation({
-      migrationVersion: '0145_workflow_authorization_pause',
+      migrationVersion: '0144_workflow_authorization_pause',
       table: 'workflow_runs',
       constraint: 'workflow_runs_failure_reason_check',
     }),

@@ -3181,8 +3181,8 @@ async function applyWorkflowAuthorityBindingsSchema(db: DbClient): Promise<void>
     CREATE TABLE IF NOT EXISTS workflow_authority_bindings (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       binding_kind TEXT NOT NULL CHECK (binding_kind IN (
-        'trigger', 'workflow_read', 'approval_decision', 'approval_consume',
-        'run_management', 'artifact_list', 'artifact_read', 'artifact_delete'
+        'trigger', 'approval_decision', 'approval_consume', 'run_management',
+        'artifact_delete'
       )),
       entity_type TEXT NOT NULL CHECK (entity_type IN (
         'workflow_trigger', 'workflow_run', 'workflow_approval', 'workflow_artifact'
@@ -3342,18 +3342,6 @@ async function applyPr2RuntimePrivilegesSchema(db: DbClient): Promise<void> {
         GRANT SELECT, INSERT, UPDATE ON TABLE pr2_readiness_evidence TO control_api_runtime;
       END IF;
     END $$;
-  `)
-}
-
-async function applyWorkflowRecipeAuthorityEntitySchema(db: DbClient): Promise<void> {
-  await db.query(`
-    ALTER TABLE workflow_authority_bindings
-      DROP CONSTRAINT IF EXISTS workflow_authority_bindings_entity_type_check;
-    ALTER TABLE workflow_authority_bindings
-      ADD CONSTRAINT workflow_authority_bindings_entity_type_check CHECK (entity_type IN (
-        'workflow_trigger', 'workflow_recipe', 'workflow_run',
-        'workflow_approval', 'workflow_artifact'
-      ));
   `)
 }
 
@@ -6634,15 +6622,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyPr2RuntimePrivilegesSchema,
   },
   {
-    version: '0143_workflow_recipe_authority_entity',
-    apply: applyWorkflowRecipeAuthorityEntitySchema,
-  },
-  {
-    version: '0144_workflow_run_failure_reason',
+    version: '0143_workflow_run_failure_reason',
     apply: applyWorkflowRunFailureReasonSchema,
   },
   {
-    version: '0145_workflow_authorization_pause',
+    version: '0144_workflow_authorization_pause',
     apply: applyWorkflowRunAuthorizationPauseSchema,
   },
 ]

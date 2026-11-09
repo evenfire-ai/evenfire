@@ -21,25 +21,41 @@ describe('PR2 runtime correction migrations', () => {
     expect(sql).not.toMatch(/GRANT .*DELETE|GRANT .*TRUNCATE/)
   })
 
-  it('admits workflow recipes while preserving a closed entity vocabulary', async () => {
+  it('registers no migration that widens the binding entity vocabulary to workflow recipes', async () => {
+    // WF-14 (A6 E1): reads persist no binding, so the workflow_recipe entity
+    // and its migration are gone; bindings keep 0139's closed vocabulary.
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
-    const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0143_workflow_recipe_authority_entity'
-    )!
-    const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
-
-    await migration.apply({ query })
-
-    const sql = query.mock.calls.map(call => String(call[0])).join('\n')
-    expect(sql).toContain("'workflow_trigger', 'workflow_recipe', 'workflow_run'")
-    expect(sql).toContain('ADD CONSTRAINT workflow_authority_bindings_entity_type_check')
-    expect(sql).not.toContain('NOT VALID')
+    const pr2Versions = CONTROL_API_MIGRATIONS.map(candidate => candidate.version).filter(
+      version => version >= '0139_'
+    )
+    expect(pr2Versions).toEqual([
+      '0139_workflow_authority_bindings',
+      '0140_gfs_upload_authority_bindings',
+      '0141_pr2_readiness_evidence',
+      '0142_pr2_runtime_privileges',
+      '0143_workflow_run_failure_reason',
+      '0144_workflow_authorization_pause',
+    ])
+    const sql: string[] = []
+    for (const version of pr2Versions) {
+      const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+      await CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)!.apply({
+        query,
+      })
+      sql.push(...query.mock.calls.map(call => String(call[0])))
+    }
+    // Witness: the 0139 entity vocabulary was applied and read here.
+    expect(sql.join('\n')).toContain(
+      "'workflow_trigger', 'workflow_run', 'workflow_approval', 'workflow_artifact'"
+    )
+    expect(sql.join('\n')).not.toContain("'workflow_recipe'")
+    expect(sql.join('\n')).not.toContain('workflow_authority_bindings_entity_type_check')
   })
 
   it('adds only the closed workflow authority failure vocabulary', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0144_workflow_run_failure_reason'
+      candidate => candidate.version === '0143_workflow_run_failure_reason'
     )!
     const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
 
@@ -59,10 +75,10 @@ describe('PR2 runtime correction migrations', () => {
     expect(sql).not.toMatch(/token|delegation|https?:\/\//i)
   })
 
-  it('adds both 0145 workflow_runs CHECKs without a scan and builds no index in its transaction', async () => {
+  it('adds both 0144 workflow_runs CHECKs without a scan and builds no index in its transaction', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0145_workflow_authorization_pause'
+      candidate => candidate.version === '0144_workflow_authorization_pause'
     )!
     const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
 

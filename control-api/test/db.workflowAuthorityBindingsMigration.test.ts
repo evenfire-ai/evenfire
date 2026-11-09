@@ -27,7 +27,13 @@ describe('workflow authority bindings migration', () => {
     expect(sql).not.toContain('effective_team_id UUID NULL REFERENCES teams')
     expect(sql).toContain('source_expires_at TIMESTAMPTZ NOT NULL')
     expect(sql).toContain('workflow.approval.decide->workflow.approval.consume')
-    expect(sql).toContain("'run_management', 'artifact_list', 'artifact_read', 'artifact_delete'")
+    // WF-14 (A6 E1): bindings are kept only for effects; reads persist none.
+    expect(sql).toContain(
+      "'trigger', 'approval_decision', 'approval_consume', 'run_management',\n        'artifact_delete'"
+    )
+    for (const readKind of ['workflow_read', 'artifact_list', 'artifact_read']) {
+      expect(sql).not.toContain(`'${readKind}'`)
+    }
     expect(sql).toContain('enforce_workflow_authority_binding_parent')
     expect(sql).toContain("parent_operation IS DISTINCT FROM 'workflow.approval.decide'")
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS initiating_authority_binding_id')

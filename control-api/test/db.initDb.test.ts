@@ -69,12 +69,12 @@ describe('db.initDb', () => {
     expect(sqls).not.toContain('ROLLBACK')
     // The committed password-admission rollout fence, one dev batch through
     // 0136_llm_catalog_dismissed_backfill (as in dev), then two PR1 versions,
-    // then the seven PR2 versions: 19 transactions, because a version with
+    // then the six PR2 versions: 18 transactions, because a version with
     // post-schema work commits its schema, then each constraint validation, then
-    // its receipt (0139: 1 + 4 + 1, 0140: 1 + 1 + 1, 0141-0143: 1 each,
-    // 0144: 1 + 1 + 1, 0145: 1 + 2 + 1).
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(23)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(23)
+    // its receipt (0139: 1 + 4 + 1, 0140: 1 + 1 + 1, 0141-0142: 1 each,
+    // 0143: 1 + 1 + 1, 0144: 1 + 2 + 1).
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(22)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(22)
     expect(sqls.filter(sql => /^ALTER TABLE \w+ VALIDATE CONSTRAINT \w+$/.test(sql))).toHaveLength(
       8
     )
