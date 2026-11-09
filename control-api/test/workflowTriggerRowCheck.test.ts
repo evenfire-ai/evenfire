@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DbClient } from '../src/db.js'
+import { WORKFLOW_APPROVAL_IDEMPOTENCY_LOCK_CLASS } from '../src/services/advisoryLockClasses.js'
 import { createRun } from '../src/services/workflowRunService.js'
 import {
   type WorkflowAuthorityBinding,
@@ -13,13 +14,15 @@ type QueryResult = { rows: unknown[]; rowCount: number }
 const state = vi.hoisted(() => ({
   log: [] as string[],
   rows: {} as Record<string, unknown[]>,
+  advisory: [] as Array<{ sql: string; values: unknown[] }>,
 }))
 
 // The fake transaction records BEGIN/COMMIT/ROLLBACK and classifies every
 // statement, so each test can assert which row-check reads ran inside the
 // insert transaction and that nothing was written after a rejection.
 const fakeClient = vi.hoisted(() => ({
-  query: async (sql: string): Promise<QueryResult> => {
+  query: async (sql: string, values: unknown[] = []): Promise<QueryResult> => {
+    if (sql.includes('pg_advisory_xact_lock')) state.advisory.push({ sql, values })
     const kind = (() => {
       if (sql.includes('pg_advisory_xact_lock')) return 'advisory-lock'
       if (sql.includes('FROM workflow_runs wr')) return 'existing-run'
@@ -134,6 +137,7 @@ function writes(): string[] {
 beforeEach(() => {
   state.log = []
   state.rows = currentRows()
+  state.advisory = []
 })
 
 describe('workflow trigger row check (T-W1)', () => {
@@ -296,6 +300,45 @@ describe('workflow trigger row check (T-W1)', () => {
       'ROLLBACK',
     ])
     expect(writes()).toEqual([])
+  })
+
+  // A11 M1 (C12): the approval idempotency key is a two-int4 key in its own
+  // class, apart from the single-bigint `hashtext` keys the run key uses.
+  it('takes the approval idempotency key in its two-int4 class', async () => {
+    state.rows['direct-grant'] = []
+    state.rows['existing-approval'] = []
+
+    await expect(
+      createWorkflowTriggerApprovalRequest({
+        recipeNamespace,
+        recipeName,
+        callerKey: `user:${userId}`,
+        targetUserId: userId,
+        payload: { kind: 'workflow_trigger' } as never,
+        idempotencyKey: 'row-check-approval-key',
+        runIntent: {
+          actorType: 'user',
+          actorId: userId,
+          teamId: null,
+          usageTeamId: null,
+          triggerSource: 'onDemand',
+        },
+        authority: authority('direct'),
+        validateCurrentInTransaction: rowCheck,
+      })
+    ).rejects.toMatchObject({ status: 409, code: 'access_path_stale' })
+
+    // Liveness: the key was taken first in the transaction, then the row check ran.
+    expect(state.log.slice(0, 3)).toEqual(['BEGIN', 'advisory-lock', 'existing-approval'])
+    expect(state.advisory).toEqual([
+      {
+        sql: 'SELECT pg_advisory_xact_lock($1::integer, hashtext($2))',
+        values: [
+          WORKFLOW_APPROVAL_IDEMPOTENCY_LOCK_CLASS,
+          `${recipeNamespace}:${recipeName}:row-check-approval-key`,
+        ],
+      },
+    ])
   })
 
   // §10 L2: a V2 authority without the row-check validator is a wiring defect.

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createMessageRetryHostWakeRequest } from '@clerum/action-context-contracts'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 
 const checkpoint = vi.hoisted(() => ({
   parseActionAuthorityCheckpointRequest: vi.fn(),
@@ -26,10 +27,21 @@ vi.mock('../src/middleware/actionCheckpointCaller.js', () => ({
     next()
   },
 }))
+const limiter = vi.hoisted(() => ({
+  options: [] as Array<Record<string, unknown>>,
+  deadlineSignals: [] as Array<AbortSignal | undefined>,
+}))
 vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
-  rateLimitMiddleware:
-    () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
-      next(),
+  rateLimitMiddleware: (options: Record<string, unknown>) => {
+    limiter.options.push(options)
+    return (req: express.Request, _res: express.Response, next: express.NextFunction) => {
+      const deadlineSignal = options.deadlineSignal as
+        | ((req: express.Request) => AbortSignal | undefined)
+        | undefined
+      limiter.deadlineSignals.push(deadlineSignal?.(req))
+      next()
+    }
+  },
 }))
 
 const { createInternalActionAuthorityHostWakeRouter } =
@@ -122,6 +134,44 @@ describe('v2 host wake adapter', () => {
     expect(accessPolicy.resolveEffectiveUserAccessPolicy).toHaveBeenCalledTimes(2)
     expect(checkpoint.checkpointActionAuthority).toHaveBeenCalledTimes(1)
     expect(wake.executeHostWake).toHaveBeenCalledOnce()
+  })
+
+  it('C12 P4: bounds the policy read, the limiter and the checkpoint by one request budget', async () => {
+    checkpoint.parseActionAuthorityCheckpointRequest.mockReturnValue(parsed('host.wake'))
+    checkpoint.checkpointActionAuthority.mockResolvedValue({
+      version: 2,
+      status: 'allowed',
+      destination: {
+        kind: 'host',
+        ref: 'mcp-host/chatllm',
+        url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+      },
+    })
+    wake.executeHostWake.mockResolvedValue({ kind: 'wake-requested', wakeGeneration: 12 })
+    limiter.options.length = 0
+    limiter.deadlineSignals.length = 0
+
+    await request(app())
+      .post('/internal/action-authority/hosts/chatllm/wake')
+      .send({ binding: {}, wakeReason: 'explicit' })
+      .expect(202)
+
+    // Witness: the request reached the wake, through the limiter.
+    expect(wake.executeHostWake).toHaveBeenCalledOnce()
+    expect(limiter.options).toHaveLength(1)
+    expect(limiter.options[0]).toMatchObject({
+      bucketType: 'host_wake',
+      onBackendUnavailable: 'process-memory',
+      deadlineSignal: expect.any(Function),
+    })
+    const [{ budget: policyBudget }] = accessPolicy.resolveEffectiveUserAccessPolicy.mock
+      .calls[0] as [{ budget: AccessExecutionBudget }]
+    const [{ budget: checkpointBudget }] = checkpoint.checkpointActionAuthority.mock.calls[0] as [
+      { budget: AccessExecutionBudget },
+    ]
+    expect(policyBudget).toBeInstanceOf(AccessExecutionBudget)
+    expect(checkpointBudget).toBe(policyBudget)
+    expect(limiter.deadlineSignals).toEqual([policyBudget.signal])
   })
 
   it('rejects a chat delegation without widening it into host.wake authority', async () => {

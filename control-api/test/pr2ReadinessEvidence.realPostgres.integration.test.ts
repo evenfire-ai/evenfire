@@ -15,6 +15,7 @@ import {
   requiredBuildEvidenceKinds,
   writePr2ReadinessEvidence,
 } from '../src/services/access/pr2ReadinessEvidence.js'
+import { READINESS_EVIDENCE_WRITE_LOCK_CLASS } from '../src/services/advisoryLockClasses.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -367,5 +368,108 @@ describeRealPostgres('PR2 readiness evidence on real PostgreSQL', () => {
         writePr2ReadinessEvidence(runtimeEvidence, transaction),
       ])
     ).resolves.toHaveLength(2)
+  })
+
+  // A11 M1 (C12): the writer key is a two-int4 lock in its own class, so a
+  // single-bigint `hashtext` key over the same text never blocks it.
+  it('takes the writer key as a two-int4 lock that a single-bigint key cannot block', async () => {
+    const environmentId = 'lock.cluster'
+    await activatePr2ReadinessSource(databasePool, {
+      environmentId,
+      sourceRevision: SHA,
+      acceptedBy: 'test:operator',
+      acceptedAt: new Date(Date.now() - 1_000),
+      maxRuntimeEvidenceAgeSeconds: 60,
+    })
+    const keyText = `${environmentId}:action_contracts:build:exact_head_ci`
+    const other = await databasePool.connect()
+    const writerClient = await databasePool.connect()
+    let releaseWriter: () => void = () => undefined
+    const writerHeld = new Promise<void>(resolve => (releaseWriter = resolve))
+    let keyTaken: () => void = () => undefined
+    const afterKey = new Promise<void>(resolve => (keyTaken = resolve))
+    let writing: Promise<unknown> | undefined
+    try {
+      await other.query('BEGIN')
+      await other.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [keyText])
+      const writerPid = Number(
+        (await writerClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      )
+      // Hold the writer's transaction open right after its advisory statement.
+      const hooked = Object.assign(Object.create(writerClient), {
+        query: async (text: string, values?: unknown[]) => {
+          const result = await writerClient.query(text, values)
+          if (text.includes('pg_advisory_xact_lock')) {
+            keyTaken()
+            await writerHeld
+          }
+          return result
+        },
+      }) as DbClient
+      const heldTransaction: Pr2ReadinessTransactionRunner = async work => {
+        await writerClient.query('BEGIN')
+        try {
+          const result = await work(hooked)
+          await writerClient.query('COMMIT')
+          return result
+        } catch (error) {
+          await writerClient.query('ROLLBACK')
+          throw error
+        }
+      }
+      writing = writePr2ReadinessEvidence(
+        {
+          environmentId,
+          sourceRevision: SHA,
+          hop: 'action_contracts',
+          evidenceClass: 'build',
+          evidenceKind: 'exact_head_ci',
+          writer: 'operator-build-importer',
+          evidenceReference: `exact_head_ci:action_contracts:${SHA}`,
+          outcome: 'passed',
+          serviceVersion: '1.2.3',
+          contractVersion: PR2_READINESS_CONTRACT_VERSION,
+          deploymentRevision: null,
+          imageRevision: SHA,
+          observedAt: new Date(),
+        },
+        heldTransaction
+      )
+      let blocked: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        afterKey,
+        new Promise((_resolve, reject) => {
+          blocked = setTimeout(
+            () => reject(new Error('the writer blocked on a single-bigint key with its text')),
+            5_000
+          )
+        }),
+      ]).finally(() => clearTimeout(blocked))
+
+      const locks = await databasePool.query(
+        `SELECT classid::text AS classid, objid::text AS objid, objsubid,
+                (hashtext($2)::bigint & 4294967295)::text AS expected_objid
+           FROM pg_locks
+          WHERE locktype = 'advisory' AND pid = $1 AND granted`,
+        [writerPid, keyText]
+      )
+      // Liveness: the writer holds exactly one advisory lock, in the class form.
+      expect(locks.rows).toHaveLength(1)
+      expect(locks.rows[0]).toEqual({
+        classid: String(READINESS_EVIDENCE_WRITE_LOCK_CLASS),
+        objid: locks.rows[0].expected_objid,
+        objsubid: 2,
+        expected_objid: locks.rows[0].expected_objid,
+      })
+
+      releaseWriter()
+      await expect(writing).resolves.toBe('inserted')
+    } finally {
+      releaseWriter()
+      await other.query('ROLLBACK')
+      if (writing) await Promise.allSettled([writing])
+      other.release()
+      writerClient.release()
+    }
   })
 })

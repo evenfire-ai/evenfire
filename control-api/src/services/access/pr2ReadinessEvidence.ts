@@ -1,4 +1,6 @@
 import { type DbClient, withTransaction } from '../../db.js'
+import { rootLogger } from '../../observability/logger.js'
+import { READINESS_EVIDENCE_WRITE_LOCK_CLASS } from '../advisoryLockClasses.js'
 import {
   PR2_READINESS_CONTRACT_VERSION,
   PR2_READINESS_HOPS,
@@ -312,10 +314,17 @@ async function writePr2ReadinessEvidenceInTransaction(
   // Always lock the activation row before the per-evidence advisory key.
   // The operator importer updates that row before writing its evidence batch;
   // keeping one lock order prevents a runtime writer and an activation import
-  // from deadlocking each other.
+  // from deadlocking each other. The key is two-int4, so its class keeps it
+  // out of the single-bigint `hashtext` space other services' keys share.
   await db.query(
-    `SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2 || ':' || $3 || ':' || $4))`,
-    [evidence.environmentId, evidence.hop, evidence.evidenceClass, evidence.evidenceKind]
+    `SELECT pg_advisory_xact_lock($1::integer, hashtext($2 || ':' || $3 || ':' || $4 || ':' || $5))`,
+    [
+      READINESS_EVIDENCE_WRITE_LOCK_CLASS,
+      evidence.environmentId,
+      evidence.hop,
+      evidence.evidenceClass,
+      evidence.evidenceKind,
+    ]
   )
   const effectiveObservedAt =
     evidence.evidenceClass === 'runtime'
@@ -558,46 +567,95 @@ export async function bootstrapConfiguredPr2Readiness(
   await importPr2BuildEvidence(activation, evidence, transactionRunner)
 }
 
-export function startControlApiPr2RuntimeEvidence(): () => void {
-  const activationRaw = process.env.CONTROL_API_PR2_READINESS_ACTIVATION_RECORD?.trim()
-  const sourceRevision = process.env.EVENFIRE_SOURCE_REVISION?.trim() ?? ''
-  const serviceVersion = process.env.EVENFIRE_SERVICE_VERSION?.trim() ?? ''
-  if (!activationRaw || !/^[0-9a-f]{40}$/.test(sourceRevision) || !serviceVersion) {
+/**
+ * Starts control-api's own runtime evidence writer.
+ *
+ * Without an activation record the feature is not configured: one info line,
+ * and nothing is written. With one, the operator asked for V2 evidence from
+ * this pod, so every condition that would keep the pod from producing it
+ * (revision, version, deployment or image identity, an unreadable record)
+ * throws and stops startup; otherwise readiness would age out and V2 fail
+ * closed with no trace of why. Each failed write is logged and the interval
+ * keeps reporting.
+ */
+export function startControlApiPr2RuntimeEvidence(
+  env: NodeJS.ProcessEnv = process.env,
+  transactionRunner: Pr2ReadinessTransactionRunner = withTransaction
+): () => void {
+  const activationRaw = env.CONTROL_API_PR2_READINESS_ACTIVATION_RECORD?.trim()
+  if (!activationRaw) {
+    rootLogger.info(
+      { event: 'pr2_runtime_evidence_not_configured' },
+      'PR2 runtime evidence is not configured'
+    )
     return () => undefined
   }
-  let activation: Pr2ReadinessActivation
-  try {
-    activation = parsePr2ReadinessActivationRecord(activationRaw)
-  } catch {
-    return () => undefined
+  const sourceRevision = env.EVENFIRE_SOURCE_REVISION?.trim() ?? ''
+  if (!/^[0-9a-f]{40}$/.test(sourceRevision)) {
+    throw new Error('pr2_runtime_evidence_source_revision_invalid')
   }
-  if (activation.sourceRevision !== sourceRevision) return () => undefined
-  const deploymentRevision = process.env.EVENFIRE_DEPLOYMENT_REVISION?.trim() ?? ''
-  const imageRevision = process.env.EVENFIRE_IMAGE_REVISION?.trim() ?? ''
-  if (!deploymentRevision || imageRevision !== sourceRevision) return () => undefined
+  const serviceVersion = env.EVENFIRE_SERVICE_VERSION?.trim() ?? ''
+  if (!serviceVersion) throw new Error('pr2_runtime_evidence_service_version_missing')
+  const activation = parsePr2ReadinessActivationRecord(activationRaw)
+  if (activation.sourceRevision !== sourceRevision) {
+    throw new Error('pr2_runtime_evidence_activation_revision_mismatch')
+  }
+  const deploymentRevision = env.EVENFIRE_DEPLOYMENT_REVISION?.trim() ?? ''
+  if (!deploymentRevision) throw new Error('pr2_runtime_evidence_deployment_revision_missing')
+  const imageRevision = env.EVENFIRE_IMAGE_REVISION?.trim() ?? ''
+  if (imageRevision !== sourceRevision) {
+    throw new Error('pr2_runtime_evidence_image_revision_mismatch')
+  }
   const intervalMs = Math.max(1_000, Math.floor(activation.maxRuntimeEvidenceAgeSeconds * 500))
   const report = async () => {
     const observedAt = new Date()
     for (const hop of PR2_RUNTIME_HOPS_BY_WRITER['control-api']) {
-      await writePr2ReadinessEvidence({
-        environmentId: activation.environmentId,
-        sourceRevision,
-        hop,
-        evidenceClass: 'runtime',
-        evidenceKind: PR2_RUNTIME_EVIDENCE_KIND,
-        writer: 'control-api',
-        evidenceReference: `runtime:control-api:${sourceRevision}`,
-        outcome: 'passed',
-        serviceVersion,
-        contractVersion: PR2_READINESS_CONTRACT_VERSION,
-        deploymentRevision,
-        imageRevision,
-        observedAt,
-      })
+      try {
+        await writePr2ReadinessEvidence(
+          {
+            environmentId: activation.environmentId,
+            sourceRevision,
+            hop,
+            evidenceClass: 'runtime',
+            evidenceKind: PR2_RUNTIME_EVIDENCE_KIND,
+            writer: 'control-api',
+            evidenceReference: `runtime:control-api:${sourceRevision}`,
+            outcome: 'passed',
+            serviceVersion,
+            contractVersion: PR2_READINESS_CONTRACT_VERSION,
+            deploymentRevision,
+            imageRevision,
+            observedAt,
+          },
+          transactionRunner
+        )
+      } catch (error) {
+        logRuntimeEvidenceWriteFailure(hop, error)
+      }
     }
   }
-  void report().catch(() => undefined)
-  const timer = setInterval(() => void report().catch(() => undefined), intervalMs)
+  void report()
+  const timer = setInterval(() => void report(), intervalMs)
   timer.unref()
   return () => clearInterval(timer)
+}
+
+/**
+ * Logs a failed runtime evidence write with no value-bearing text: the error
+ * name, a five-character SQLSTATE when there is one, and the module's own
+ * fixed `pr2_*` reason codes.
+ */
+function logRuntimeEvidenceWriteFailure(hop: Pr2ReadinessHop, error: unknown): void {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  const message = error instanceof Error ? error.message : ''
+  rootLogger.error(
+    {
+      event: 'pr2_runtime_evidence_write_failed',
+      hop,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      ...(typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? { errorCode: code } : {}),
+      ...(/^pr2_[a-z0-9_]+$/.test(message) ? { reason: message } : {}),
+    },
+    'PR2 runtime evidence write failed'
+  )
 }

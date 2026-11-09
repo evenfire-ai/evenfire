@@ -165,7 +165,12 @@ export function createExternalUserApprovalDecisionsRouter(gateway: K8sGateway): 
                 undefined,
                 authority,
                 {
-                  authorizeBeforeLock: () => requireWorkflowActionAuthority(authorityInput),
+                  // The checkpoint above is this decision's one network
+                  // authority check. A second one would derive the same
+                  // binding from the same delegation claims; the current
+                  // authority is re-proved in the transaction, under the
+                  // approval row lock, by validateCurrentInTransaction.
+                  authorizeBeforeLock: async () => authority,
                   validateCurrentInTransaction: async db => {
                     // The V2 decision owns one action budget for this
                     // in-transaction check; V1 decisions never allocate one.

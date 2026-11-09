@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AccessBudgetConfigurationError,
   AccessBudgetExceededError,
@@ -103,5 +103,87 @@ describe('AccessExecutionBudget', () => {
     expect(budget.statementTimeoutMs(now)).toBe(1_750)
     expect(() => budget.statementTimeoutMs(now + 1_751)).toThrow(AccessBudgetExceededError)
     budget.close()
+  })
+})
+
+describe('AccessExecutionBudget.untilDeadline (C12 P4)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  async function drainRejections(): Promise<void> {
+    // Node reports an unhandled rejection after the microtask queue drains.
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  it('settles with work that finishes before the deadline', async () => {
+    const budget = AccessExecutionBudget.create('action')
+    await expect(budget.untilDeadline(Promise.resolve('admitted'))).resolves.toBe('admitted')
+    const failure = new Error('admission failed')
+    await expect(budget.untilDeadline(Promise.reject(failure))).rejects.toBe(failure)
+    expect(budget.signal.aborted).toBe(false)
+    budget.close()
+  })
+
+  it('rejects with deadline when the deadline passes first and observes the late rejection', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const budget = AccessExecutionBudget.create('action')
+      let rejectWork!: (error: Error) => void
+      const work = new Promise<string>((_resolve, reject) => {
+        rejectWork = reject
+      })
+      let outcome: unknown = 'pending'
+      const bounded = budget.untilDeadline(work).then(
+        value => (outcome = value),
+        error => (outcome = error)
+      )
+
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(outcome).toBe('pending')
+      await vi.advanceTimersByTimeAsync(1)
+      await bounded
+      expect(outcome).toBeInstanceOf(AccessExecutionCancelledError)
+      expect((outcome as AccessExecutionCancelledError).reason).toBe('deadline')
+
+      rejectWork(new Error('late admission failure'))
+      await drainRejections()
+      expect(unhandled).toEqual([])
+      // Witness: the late rejection did happen.
+      await expect(work).rejects.toThrow('late admission failure')
+      budget.close()
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  it('rejects at once on a budget that is already cancelled and observes the late rejection', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const budget = AccessExecutionBudget.create('action')
+      budget.cancel()
+      let rejectWork!: (error: Error) => void
+      const work = new Promise<string>((_resolve, reject) => {
+        rejectWork = reject
+      })
+
+      const error = await budget.untilDeadline(work).catch((caught: unknown) => caught)
+
+      expect(error).toBeInstanceOf(AccessExecutionCancelledError)
+      expect((error as AccessExecutionCancelledError).reason).toBe('cancelled')
+      rejectWork(new Error('late admission failure'))
+      await drainRejections()
+      expect(unhandled).toEqual([])
+      await expect(work).rejects.toThrow('late admission failure')
+      budget.close()
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 })

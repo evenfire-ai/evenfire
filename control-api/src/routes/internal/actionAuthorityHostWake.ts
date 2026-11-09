@@ -5,10 +5,13 @@ import {
 } from '@clerum/action-context-contracts'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
+import {
+  attachAccessExecutionBudget,
+  requestAccessExecutionBudget,
+} from '../../middleware/accessExecutionBudget.js'
 import { requireActionCheckpointCaller } from '../../middleware/actionCheckpointCaller.js'
 import { requireActionContextEnabled } from '../../middleware/actionContextEnabled.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
-import { AccessExecutionBudget } from '../../services/access/accessExecutionBudget.js'
 import {
   checkpointActionAuthority,
   parseActionAuthorityCheckpointRequest,
@@ -35,11 +38,15 @@ export function createInternalActionAuthorityHostWakeRouter(gateway: K8sGateway)
   router.post(
     '/internal/action-authority/hosts/:hostRef/wake',
     requireActionCheckpointCaller,
+    // One action budget for the policy read, the limiter and the checkpoint;
+    // the wake itself runs after the authority check and outside it.
+    attachAccessExecutionBudget,
     requireActionContextEnabled,
     rateLimitMiddleware({
       bucketType: 'host_wake',
       maxPerMinute: config.hostWakeRlPerMin,
       onBackendUnavailable: 'process-memory',
+      deadlineSignal: req => requestAccessExecutionBudget(req).signal,
       getBucketKey: req => {
         const hostRef = String(req.params.hostRef || '').trim()
         return hostRef ? `host-wake:${hostRef}` : null
@@ -111,12 +118,11 @@ export function createInternalActionAuthorityHostWakeRouter(gateway: K8sGateway)
           return
         }
       }
-      const budget = AccessExecutionBudget.create('action')
       try {
         const checkpoint = await checkpointActionAuthority({
           request: binding,
           gateway,
-          budget,
+          budget: requestAccessExecutionBudget(req),
           correlationId: req.correlationId,
         })
         if (checkpoint.status !== 'allowed') {
@@ -147,8 +153,6 @@ export function createInternalActionAuthorityHostWakeRouter(gateway: K8sGateway)
         }
       } catch (error) {
         next(error)
-      } finally {
-        budget.close()
       }
     }
   )

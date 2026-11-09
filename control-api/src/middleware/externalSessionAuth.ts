@@ -2,7 +2,6 @@ import { NextFunction, Request, Response } from 'express'
 import { sendPublicApiError } from '../http/publicApiError.js'
 import { rootLogger } from '../observability/logger.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
-import type { AccessExecutionBudget } from '../services/access/accessExecutionBudget.js'
 import { getLiveTeamMembership } from '../services/access/liveTeamAuthorization.js'
 import { authenticateExternalUserSession } from '../services/auth/externalSessionAuthentication.js'
 import type {
@@ -62,7 +61,6 @@ export type ExternalAuthedRequest = Request & {
     ExternalSessionAuthentication,
     { status: 'authenticated' }
   >
-  accessExecutionBudget?: AccessExecutionBudget
   externalTeamAuth?: {
     teamId: string
     role: TeamRole

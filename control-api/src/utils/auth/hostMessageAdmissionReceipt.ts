@@ -66,6 +66,14 @@ function receiptClaims(
   }
 }
 
+/** The checkpoint binding cannot carry a receipt (operation, caller, trust plane or expiry). */
+export class HostMessageAdmissionReceiptBindingError extends Error {
+  constructor() {
+    super('host_message_admission_receipt_invalid_binding')
+    this.name = 'HostMessageAdmissionReceiptBindingError'
+  }
+}
+
 export function issueHostMessageAdmissionReceipt(
   request: ActionAuthorityCheckpointRequestV2,
   caller: ActionCheckpointCallerIdentity,
@@ -78,7 +86,7 @@ export function issueHostMessageAdmissionReceipt(
     caller.trustPlane !== 'internal_service_token' ||
     context.delegationExpiresAt <= nowSeconds
   ) {
-    throw new Error('host_message_admission_receipt_invalid_binding')
+    throw new HostMessageAdmissionReceiptBindingError()
   }
   const exp = Math.min(nowSeconds + RECEIPT_MAX_TTL_SECONDS, context.delegationExpiresAt)
   return jwt.sign(

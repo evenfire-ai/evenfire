@@ -62,6 +62,15 @@ export class AccessExecutionCancelledError extends Error {
   }
 }
 
+/** True for the errors a budgeted authority step raises when its budget ends first. */
+export function isAccessExecutionBudgetError(
+  error: unknown
+): error is AccessExecutionCancelledError | AccessBudgetExceededError {
+  return (
+    error instanceof AccessExecutionCancelledError || error instanceof AccessBudgetExceededError
+  )
+}
+
 class BudgetCounter {
   constructor(
     readonly capacity: number,
@@ -273,6 +282,41 @@ export class AccessExecutionBudget {
   async runProducer<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
     this.charge({ kind: 'producerCalls' })
     return this.runBoundedWork(work)
+  }
+
+  /**
+   * Bounds a step that cannot take this budget's signal itself, such as an
+   * admission statement on the rate-limit pool. Resolves or rejects with
+   * `work`, unless the budget aborts first (deadline, cancel or close): then it
+   * rejects with the error `assertActive` raises. The late result of `work` is
+   * dropped, and a late rejection is observed so it is never unhandled.
+   */
+  untilDeadline<T>(work: Promise<T>): Promise<T> {
+    work.then(undefined, () => undefined)
+    return new Promise<T>((resolve, reject) => {
+      const rejectAborted = () => {
+        try {
+          this.assertActive()
+        } catch (error) {
+          reject(error)
+        }
+      }
+      if (this.signal.aborted) {
+        rejectAborted()
+        return
+      }
+      this.signal.addEventListener('abort', rejectAborted, { once: true })
+      work.then(
+        value => {
+          this.signal.removeEventListener('abort', rejectAborted)
+          resolve(value)
+        },
+        error => {
+          this.signal.removeEventListener('abort', rejectAborted)
+          reject(error)
+        }
+      )
+    })
   }
 
   async runBoundedWork<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {

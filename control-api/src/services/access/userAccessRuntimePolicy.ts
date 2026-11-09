@@ -22,19 +22,37 @@ function needsPr2Readiness(intent: ConfiguredUserAccessIntent): boolean {
 }
 
 /**
- * PR 2 readiness is database evidence that changes at runtime, so it is read
- * for every call that needs it and never cached with the compiled policy.
+ * PR 2 readiness is database evidence that changes at runtime: a writer's new,
+ * failed or withdrawn evidence, an operator activation, and runtime evidence
+ * ageing past the activation's freshness bound. Each process keeps the last
+ * assembled readiness for at most this long, counted from the start of the
+ * read that produced it, so every replica sees a change within this bound.
+ * It equals the minimum runtime-evidence write interval (the control-api
+ * writer runs at least 1 s apart and the service reporters refuse a shorter
+ * interval), so the cache never hides more than one reporting interval.
  */
-async function pr2RuntimeReadiness(
-  budget: AccessExecutionBudget | undefined
+const PR2_READINESS_CACHE_TTL_MS = 1_000
+
+type CachedPr2Readiness = Readonly<{
+  key: string
+  expiresAt: number
+  readiness: DeploymentReadiness
+}>
+
+let cachedPr2Readiness: CachedPr2Readiness | undefined
+let pr2ReadinessInFlight: Readonly<{ key: string; read: Promise<DeploymentReadiness> }> | undefined
+
+async function readPr2RuntimeReadiness(
+  environmentId: string,
+  servingSourceRevision: string
 ): Promise<DeploymentReadiness> {
-  const ownedBudget = budget ? null : AccessExecutionBudget.create('action')
-  const activeBudget = budget ?? ownedBudget!
+  // The read is shared by every caller waiting on it, so it owns its budget:
+  // one caller's request budget must not cancel the others' read.
+  const budget = AccessExecutionBudget.create('action')
   try {
-    const servingSourceRevision = process.env.EVENFIRE_SOURCE_REVISION?.trim() ?? ''
     const pr2RuntimeHops = await withAccessDatabaseTransaction(
-      activeBudget,
-      db => assemblePr2Readiness(db, canonicalEnvironmentId(), undefined, servingSourceRevision),
+      budget,
+      db => assemblePr2Readiness(db, environmentId, undefined, servingSourceRevision),
       { mode: 'read_only' }
     )
     return Object.freeze({
@@ -43,8 +61,51 @@ async function pr2RuntimeReadiness(
       pr2RuntimeHops,
     })
   } finally {
-    ownedBudget?.close()
+    budget.close()
   }
+}
+
+/**
+ * The cached readiness while it is fresh; otherwise one read that concurrent
+ * misses share. A failed read is never cached: the next call reads again.
+ */
+function sharedPr2RuntimeReadiness(): Promise<DeploymentReadiness> {
+  const environmentId = canonicalEnvironmentId()
+  const servingSourceRevision = process.env.EVENFIRE_SOURCE_REVISION?.trim() ?? ''
+  const key = `${environmentId}\n${servingSourceRevision}`
+  const startedAt = Date.now()
+  if (cachedPr2Readiness?.key === key && startedAt < cachedPr2Readiness.expiresAt) {
+    return Promise.resolve(cachedPr2Readiness.readiness)
+  }
+  if (pr2ReadinessInFlight?.key === key) return pr2ReadinessInFlight.read
+  const read: Promise<DeploymentReadiness> = readPr2RuntimeReadiness(
+    environmentId,
+    servingSourceRevision
+  )
+    .then(readiness => {
+      cachedPr2Readiness = Object.freeze({
+        key,
+        expiresAt: startedAt + PR2_READINESS_CACHE_TTL_MS,
+        readiness,
+      })
+      return readiness
+    })
+    .finally(() => {
+      if (pr2ReadinessInFlight?.read === read) pr2ReadinessInFlight = undefined
+    })
+  pr2ReadinessInFlight = Object.freeze({ key, read })
+  return read
+}
+
+/**
+ * A caller with a request budget waits for the shared read only until its own
+ * deadline; the read itself keeps its own bound.
+ */
+async function pr2RuntimeReadiness(
+  budget: AccessExecutionBudget | undefined
+): Promise<DeploymentReadiness> {
+  const readiness = sharedPr2RuntimeReadiness()
+  return budget ? budget.untilDeadline(readiness) : readiness
 }
 
 // Valid only while the configured intent and readiness are process constants,

@@ -3,6 +3,7 @@ import { config } from '../../config.js'
 import { withTransaction } from '../../db.js'
 import { approvalsCreatedTotal } from '../../observability/metrics.js'
 import { stableStringify } from '../../utils/stableStringify.js'
+import { WORKFLOW_APPROVAL_IDEMPOTENCY_LOCK_CLASS } from '../advisoryLockClasses.js'
 import { emitNotification } from '../notificationEmitter.js'
 import { ApprovalPromptHistoryService } from '../tracing/approvalPromptHistoryService.js'
 import {
@@ -102,8 +103,11 @@ export async function createWorkflowTriggerApprovalRequest(params: {
   const result = await withTransaction(async db => {
     let existingBeforeFence = { rowCount: 0 as number | null }
     if (phaseOneAuthority) {
-      await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
-        `workflow_approval:${params.recipeNamespace}:${params.recipeName}:${params.idempotencyKey}`,
+      // Two-int4 form: the class keeps this key out of the single-bigint
+      // `hashtext` space the run, recipe and model keys share.
+      await db.query(`SELECT pg_advisory_xact_lock($1::integer, hashtext($2))`, [
+        WORKFLOW_APPROVAL_IDEMPOTENCY_LOCK_CLASS,
+        `${params.recipeNamespace}:${params.recipeName}:${params.idempotencyKey}`,
       ])
       existingBeforeFence = await db.query(
         `SELECT id FROM workflow_approval_requests

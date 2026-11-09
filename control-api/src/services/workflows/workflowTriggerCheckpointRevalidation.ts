@@ -6,10 +6,15 @@ import {
 import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ActionCheckpointCallerIdentity } from '../../middleware/actionCheckpointCaller.js'
+import { rootLogger } from '../../observability/logger.js'
 import { runAccessDatabaseQuery } from '../access/accessDatabaseQuery.js'
 import { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 import { type ActionAuthorizationV2Result, authorizeActionV2 } from '../access/actionAuthorizer.js'
 import { resolveActionDestination } from '../access/actionDestination.js'
+import {
+  authorityDatabaseFailure,
+  isAuthorityDependencyUnavailable,
+} from '../access/authorityDependency.js'
 import { type LogicalSessionCheckpointAuthority } from '../access/principalAuthoritySnapshot.js'
 
 type StoredWorkflowBinding = Readonly<{
@@ -47,6 +52,36 @@ function unavailable(): ActionAuthorityCheckpointResponseV2 {
     code: 'authority_unavailable',
     retryable: true,
   }
+}
+
+type RevalidationStage =
+  | 'stored_binding'
+  | 'path_resolution'
+  | 'selected_path_resolution'
+  | 'destination'
+  | 'binding_expiry'
+
+/**
+ * A step of the revalidation failed. A dependency failure (the request budget
+ * ended, the database is unavailable) is the retryable `authority_unavailable`
+ * and is logged as such; any other error is a defect and is rethrown, so the
+ * route's error handler logs it and answers 500 instead of pausing the run
+ * behind an endless retry. The log carries the stage and error name only.
+ */
+function unavailableOnDependencyFailure(
+  error: unknown,
+  stage: RevalidationStage
+): ActionAuthorityCheckpointResponseV2 {
+  if (!isAuthorityDependencyUnavailable(error)) throw error
+  rootLogger.warn(
+    {
+      event: 'workflow_checkpoint_dependency_unavailable',
+      stage,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+    },
+    'workflow checkpoint dependency unavailable'
+  )
+  return unavailable()
 }
 
 function sameStoredPath(
@@ -175,7 +210,8 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
             request.behaviorBindingHash,
             recipeNamespace,
             recipeName,
-          ]
+          ],
+          { onDatabaseFailure: authorityDatabaseFailure }
         )
       : await runAccessDatabaseQuery(
           input.db,
@@ -243,11 +279,12 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
             request.accessPathId,
             request.authorizationRevision,
             request.behaviorBindingHash,
-          ]
+          ],
+          { onDatabaseFailure: authorityDatabaseFailure }
         )
     storedRows = stored.rows as StoredWorkflowBinding[]
-  } catch {
-    return unavailable()
+  } catch (error) {
+    return unavailableOnDependencyFailure(error, 'stored_binding')
   }
   if (storedRows.length !== 1) return invalidBinding()
   const stored = storedRows[0]
@@ -290,16 +327,16 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
   let selected: ActionAuthorizationV2Result
   try {
     selected = await resolveSelectedPath()
-  } catch {
-    return unavailable()
+  } catch (error) {
+    return unavailableOnDependencyFailure(error, 'path_resolution')
   }
   if (selected?.status === 'access_path_required') {
     const matches = selected.paths.filter(path => sameStoredPath(path, stored))
     if (matches.length !== 1) return { version: 2, status: 'denied', code: 'forbidden' }
     try {
       selected = await resolveSelectedPath(matches[0].id)
-    } catch {
-      return unavailable()
+    } catch (error) {
+      return unavailableOnDependencyFailure(error, 'selected_path_resolution')
     }
   }
   if (selected?.status === 'authority_unavailable') return unavailable()
@@ -336,8 +373,8 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
       gateway: input.gateway,
       budget: input.budget,
     })
-  } catch {
-    return unavailable()
+  } catch (error) {
+    return unavailableOnDependencyFailure(error, 'destination')
   }
   if (destination.status === 'stale') return stale(context.authorizationRevision)
   if (destination.status !== 'resolved') {
@@ -353,13 +390,14 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
       `SELECT source_expires_at > clock_timestamp() AS current
          FROM workflow_authority_bindings
         WHERE id = $1`,
-      [stored.id]
+      [stored.id],
+      { onDatabaseFailure: authorityDatabaseFailure }
     )
     if ((stillCurrent.rows[0] as { current?: boolean } | undefined)?.current !== true) {
       return { version: 2, status: 'denied', code: 'forbidden' }
     }
-  } catch {
-    return unavailable()
+  } catch (error) {
+    return unavailableOnDependencyFailure(error, 'binding_expiry')
   }
 
   // Revalidation proves the current policy still allows this exact operation,

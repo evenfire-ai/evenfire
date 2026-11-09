@@ -152,6 +152,34 @@ describe('external approval decisions: action budget ownership (T-W2)', () => {
     expect(closeBudget.mock.contexts[0]).toBe(budget)
   })
 
+  it('C12 P8: makes one network checkpoint per V2 decision and reuses it before the lock', async () => {
+    mocks.sessionContract = 'v2'
+    mocks.requireWorkflowActionAuthority.mockResolvedValue(v2Authority)
+    mocks.requireCurrentWorkflowApprovalAuthority.mockResolvedValue(v2Authority)
+    let beforeLock: unknown
+    mocks.recordDecision.mockImplementation(async (...args: unknown[]) => {
+      const reauthorize = args[7] as {
+        authorizeBeforeLock: () => Promise<unknown>
+        validateCurrentInTransaction: (db: unknown) => Promise<unknown>
+      }
+      beforeLock = await reauthorize.authorizeBeforeLock()
+      await reauthorize.validateCurrentInTransaction({ query: vi.fn() })
+      return { ok: true }
+    })
+
+    const response = await request(makeApp())
+      .post(`/external/workflow-approvals/${approvalId}/decide`)
+      .send({ decision: 'approve' })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200)
+    expect(mocks.requireWorkflowActionAuthority).toHaveBeenCalledTimes(1)
+    // The pre-lock hook answers the route's own checkpoint result.
+    expect(beforeLock).toBe(v2Authority)
+    expect(mocks.recordDecision.mock.calls[0]![6]).toBe(v2Authority)
+    // Liveness: the in-transaction re-check still ran, once.
+    expect(mocks.requireCurrentWorkflowApprovalAuthority).toHaveBeenCalledTimes(1)
+  })
+
   it('allocates no budget for a V1 decision', async () => {
     mocks.sessionContract = 'v1'
     mocks.requireWorkflowActionAuthority.mockResolvedValue(null)

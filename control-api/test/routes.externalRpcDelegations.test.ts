@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { knownBehavior } from '../src/services/access/accessPath.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
@@ -183,6 +184,54 @@ describe('POST /external/rpc/delegations', () => {
     expect(mocks.authorize.mock.invocationCallOrder[0]).toBeLessThan(
       tokenIssuer.issueUserDelegationV2.mock.invocationCallOrder[0]!
     )
+  })
+
+  it('C12 P5a: reads the access policy once per request, through session authentication', async () => {
+    const response = await request(app())
+      .post('/external/rpc/delegations')
+      .set('x-user-session-token', 'session-v2')
+      .set('x-evenfire-access-path-id', accessPathId)
+      .set('x-evenfire-authorization-revision', authorizationRevision)
+      .send({
+        version: 2,
+        operationId: 'chat.message.invoke',
+        resource: { type: 'host', logicalId: 'default/chatllm' },
+        target: {
+          hostRef: 'default/chatllm',
+          channelType: 'rpc',
+          channelId: 'chat-1',
+        },
+      })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200)
+    expect(mocks.resolvePolicy).toHaveBeenCalledTimes(1)
+    // Witness: the route reached authorization with the request budget.
+    expect(mocks.authorize).toHaveBeenCalledTimes(1)
+    const [authorizeInput] = mocks.authorize.mock.calls[0] as [{ budget: unknown }]
+    expect(authorizeInput.budget).toBeInstanceOf(AccessExecutionBudget)
+  })
+
+  it('C12 P5a: answers 409 from the session policy when rpc delegation v2 is off', async () => {
+    mocks.resolvePolicy.mockResolvedValue({
+      ...(await mocks.resolvePolicy()),
+      rpcDelegationV2: false,
+    })
+    mocks.resolvePolicy.mockClear()
+
+    const response = await request(app())
+      .post('/external/rpc/delegations')
+      .set('x-user-session-token', 'session-v2')
+      .send({
+        version: 2,
+        operationId: 'chat.message.invoke',
+        resource: { type: 'host', logicalId: 'default/chatllm' },
+        target: { hostRef: 'default/chatllm', channelType: 'rpc', channelId: 'chat-1' },
+      })
+
+    expect(response.status, JSON.stringify(response.body)).toBe(409)
+    // Witness: session authentication read the policy once; nothing was authorized.
+    expect(mocks.resolvePolicy).toHaveBeenCalledTimes(1)
+    expect(mocks.authorize).not.toHaveBeenCalled()
   })
 
   it('excludes OAuth MCP destinations before v2 delegation signing', async () => {

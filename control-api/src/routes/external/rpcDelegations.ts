@@ -22,7 +22,6 @@ import {
 } from '../../services/access/actionOperationRegistry.js'
 import { canonicalEnvironmentId } from '../../services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../../services/access/resourceIdentity.js'
-import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
 import { issueUserDelegationV2 } from '../../utils/auth/userDelegationV2Token.js'
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -155,9 +154,9 @@ export function createExternalRpcDelegationsRouter(gateway: K8sGateway): Router 
     requireAuthenticatedExternalUserRateLimitContext,
     async (req: ExternalAuthedRequest, res, next) => {
       try {
-        const policy = await resolveEffectiveUserAccessPolicy({
-          budget: req.accessExecutionBudget,
-        })
+        // Session authentication read the policy for this request a moment
+        // ago; a second read would prove nothing the first one did not.
+        const policy = req.externalSessionAuthentication!.policy
         if (!policy.actionContextV2 || !policy.rpcDelegationV2) {
           sendPublicApiError(req, res, 409, 'conflict', 'RPC delegation v2 is not enabled.')
           return
