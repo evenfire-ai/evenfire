@@ -129,6 +129,93 @@ function makeRecipeWithAnnotation(
   return rec
 }
 
+/** RESERVE_PENDING_START: takes the one-minute start lease on a Pending row. */
+const RESERVE_SQL = /SET owner_instance_id = \$1,[\s\S]*AND phase = 'Pending'/
+
+/**
+ * Fake pool for processPending that tracks what is held. Every `connect` hands
+ * out a new client; the harness counts checked-out clients and open
+ * transactions, labels each statement, and `guard` records a violation when the
+ * wrapped call runs while any client is checked out or any transaction is open.
+ */
+function makeStartHarness(options: {
+  /** Rows returned by successive SELECT … FOR UPDATE reads; the last one repeats. */
+  lockedReads: Array<DbRunRow | undefined>
+  reserveRowCount?: number
+  claimRowCount?: number
+}) {
+  const trail: string[] = []
+  const statements: Array<{ label: string; sql: string; params?: unknown[] }> = []
+  const violations: string[] = []
+  const openTransactions = new Set<number>()
+  let checkouts = 0
+  let releases = 0
+  let checkedOut = 0
+  let peakCheckedOut = 0
+  let readIndex = 0
+
+  function label(sql: string): string {
+    const text = sql.trim()
+    if (/^(BEGIN|COMMIT|ROLLBACK)$/i.test(text)) return text.toUpperCase()
+    if (/pg_advisory_xact_lock/.test(text)) return 'advisory'
+    if (/FOR UPDATE$/i.test(text)) return 'lockedRead'
+    if (RESERVE_SQL.test(text)) return 'reserve'
+    if (/SET phase = 'Running'/.test(text)) return 'claim'
+    return `other:${text.slice(0, 40)}`
+  }
+
+  const connect = vi.fn(async () => {
+    checkouts += 1
+    const id = checkouts
+    checkedOut += 1
+    peakCheckedOut = Math.max(peakCheckedOut, checkedOut)
+    const client = makeClient(async (sql, params) => {
+      const name = label(sql)
+      trail.push(name)
+      statements.push({ label: name, sql, params })
+      if (name === 'BEGIN') openTransactions.add(id)
+      if (name === 'COMMIT' || name === 'ROLLBACK') openTransactions.delete(id)
+      if (name === 'lockedRead') {
+        const row = options.lockedReads[Math.min(readIndex, options.lockedReads.length - 1)]
+        readIndex += 1
+        return row ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 }
+      }
+      if (name === 'reserve') return { rows: [], rowCount: options.reserveRowCount ?? 1 }
+      if (name === 'claim') return { rows: [], rowCount: options.claimRowCount ?? 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    client.release = vi.fn(() => {
+      if (openTransactions.has(id)) violations.push(`client ${id} released inside a transaction`)
+      releases += 1
+      checkedOut -= 1
+    })
+    return client as unknown as PoolClient
+  })
+
+  function guard<A extends unknown[], R>(
+    fn: (...args: A) => Promise<R>,
+    name: string
+  ): (...args: A) => Promise<R> {
+    return async (...args: A) => {
+      if (checkedOut > 0) violations.push(`${name}: ${checkedOut} pooled client(s) checked out`)
+      if (openTransactions.size > 0) violations.push(`${name}: inside a transaction`)
+      trail.push(name)
+      return fn(...args)
+    }
+  }
+
+  return {
+    connect,
+    guard,
+    trail,
+    statements,
+    violations,
+    stats: () => ({ checkouts, releases, peakCheckedOut, openTransactions: openTransactions.size }),
+    sqlOf: (name: string) => statements.filter(s => s.label === name).map(s => s.sql),
+    paramsOf: (name: string) => statements.filter(s => s.label === name).map(s => s.params),
+  }
+}
+
 // ─── Suite ───────────────────────────────────────────────────────────────
 
 describe('createDbRunProcessor', () => {
@@ -156,50 +243,51 @@ describe('createDbRunProcessor', () => {
     return p
   }
 
-  // ─── 1) processPending happy path: creates child + claims Pending → Running
-  it('processPending creates child and transitions Pending → Running atomically', async () => {
+  // ─── 1) processPending happy path: reserve, create with nothing held, claim
+  it('reserves, creates the child with no transaction or pooled client held, then claims', async () => {
     const run = baseRun()
-    const client = makeClient(async sql => {
-      if (/^BEGIN$/i.test(sql)) return { rows: [], rowCount: 0 }
-      if (/pg_advisory_xact_lock/.test(sql)) return { rows: [], rowCount: 0 }
-      if (/FROM workflow_runs[\s\S]*FOR UPDATE/i.test(sql)) {
-        return { rows: [run], rowCount: 1 }
-      }
-      if (/UPDATE workflow_runs[\s\S]*SET phase = 'Running'/i.test(sql)) {
-        return { rows: [], rowCount: 1 }
-      }
-      if (/^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
-      return { rows: [], rowCount: 0 }
-    })
-    const pool = { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool
-
-    const createChildRecipe: ChildRecipeCreator = vi.fn(async () => ({
-      name: 'child-run-1',
-      namespace: 'sandbox-recipes',
-    }))
+    const h = makeStartHarness({ lockedReads: [run, { ...run, owner_instance_id: 'wrc-1' }] })
+    const createChildRecipe = vi.fn(
+      h.guard(async () => ({ name: 'child-run-1', namespace: 'sandbox-recipes' }), 'create')
+    )
+    const onRunStarted = vi.fn()
 
     const proc = spawn({
       instanceId: 'wrc-1',
-      pool,
+      pool: {} as Pool,
+      connect: h.connect,
       runPollMs: 30_000,
       createChildRecipe,
+      onRunStarted,
       logger: silentLogger(),
     })
 
     await proc.processPending(run.run_id)
 
+    // Negative: the create ran with nothing held.
+    expect(h.violations).toEqual([])
+    // Witnesses: the create ran once, between the reserve commit and the claim transaction.
+    expect(createChildRecipe).toHaveBeenCalledTimes(1)
     expect(createChildRecipe).toHaveBeenCalledWith(run)
-    expect(client.release).toHaveBeenCalledTimes(1)
-
-    const sqlTrail = client.calls.map(c => c.sql.trim().slice(0, 40))
-    expect(sqlTrail[0]).toBe('BEGIN')
-    expect(sqlTrail.some(s => /pg_advisory_xact_lock/.test(s))).toBe(true)
-    expect(sqlTrail[sqlTrail.length - 1]).toBe('COMMIT')
-
-    const claim = client.calls.find(c => /SET phase = 'Running'/.test(c.sql))
-    expect(claim).toBeDefined()
-    expect(claim?.sql).toContain('started_at = now()')
-    expect(claim?.params).toEqual(['wrc-1', 'child-run-1', 'sandbox-recipes', run.run_id])
+    expect(h.trail).toEqual([
+      'BEGIN',
+      'advisory',
+      'lockedRead',
+      'reserve',
+      'COMMIT',
+      'create',
+      'BEGIN',
+      'advisory',
+      'lockedRead',
+      'claim',
+      'COMMIT',
+    ])
+    expect(h.stats()).toEqual({ checkouts: 2, releases: 2, peakCheckedOut: 1, openTransactions: 0 })
+    expect(h.paramsOf('reserve')).toEqual([['wrc-1', run.run_id]])
+    expect(h.sqlOf('reserve')[0]).toMatch(/last_reconciled_at < now\(\) - interval '1 minute'/)
+    expect(h.sqlOf('claim')[0]).toContain('started_at = now()')
+    expect(h.paramsOf('claim')).toEqual([['wrc-1', 'child-run-1', 'sandbox-recipes', run.run_id]])
+    expect(onRunStarted).toHaveBeenCalledWith(run.run_id)
   })
 
   it('does not fail processPending when the post-commit run-start callback throws', async () => {
@@ -208,6 +296,7 @@ describe('createDbRunProcessor', () => {
       if (/^BEGIN$/i.test(sql)) return { rows: [], rowCount: 0 }
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [], rowCount: 0 }
       if (/FOR UPDATE/.test(sql)) return { rows: [run], rowCount: 1 }
+      if (RESERVE_SQL.test(sql)) return { rows: [], rowCount: 1 }
       if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
       if (/^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
       if (/^ROLLBACK$/i.test(sql)) return { rows: [], rowCount: 0 }
@@ -273,6 +362,7 @@ describe('createDbRunProcessor', () => {
     const run = baseRun({ run_id: 'aaaaaaaa-0000-0000-0000-000000000001' })
     const client = makeClient(async sql => {
       if (/FOR UPDATE/.test(sql)) return { rows: [run], rowCount: 1 }
+      if (RESERVE_SQL.test(sql)) return { rows: [], rowCount: 1 }
       if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
       return { rows: [], rowCount: 0 }
     })
@@ -299,6 +389,190 @@ describe('createDbRunProcessor', () => {
       'sandbox-recipes',
       run.run_id,
     ])
+  })
+
+  // ─── 3b) start reservation: concurrency, lost claims, failed creates
+  it('returns without creating when the start is already reserved', async () => {
+    const run = baseRun({ owner_instance_id: 'wrc-2' })
+    const h = makeStartHarness({ lockedReads: [run], reserveRowCount: 0 })
+    const createChildRecipe = vi.fn(async () => ({ name: 'c', namespace: 'sandbox-recipes' }))
+    const logger = silentLogger()
+
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: {} as Pool,
+      connect: h.connect,
+      runPollMs: 30_000,
+      createChildRecipe,
+      logger,
+    })
+    await proc.processPending(run.run_id)
+
+    expect(createChildRecipe).not.toHaveBeenCalled()
+    // Witness: the reservation was attempted with the lease predicate and found the lease held.
+    expect(h.trail).toEqual(['BEGIN', 'advisory', 'lockedRead', 'reserve', 'ROLLBACK'])
+    expect(h.sqlOf('reserve')[0]).toMatch(/last_reconciled_at < now\(\) - interval '1 minute'/)
+    expect(logger.info).toHaveBeenCalledWith(
+      'pending run start already reserved',
+      expect.objectContaining({ run_id: run.run_id, owner_instance_id: 'wrc-2' })
+    )
+  })
+
+  it('treats a Running row bound to the same child as already claimed (no duplicate)', async () => {
+    const run = baseRun()
+    const h = makeStartHarness({
+      lockedReads: [
+        run,
+        {
+          ...run,
+          phase: 'Running',
+          owner_instance_id: 'wrc-2',
+          child_recipe_name: 'child-same',
+          child_recipe_namespace: 'sandbox-recipes',
+        },
+      ],
+    })
+    const createChildRecipe = vi.fn(
+      h.guard(async () => ({ name: 'child-same', namespace: 'sandbox-recipes' }), 'create')
+    )
+    const logger = silentLogger()
+    const onRunStarted = vi.fn()
+
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: {} as Pool,
+      connect: h.connect,
+      runPollMs: 30_000,
+      createChildRecipe,
+      onRunStarted,
+      logger,
+    })
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+
+    expect(h.trail).not.toContain('claim')
+    expect(logger.error).not.toHaveBeenCalled()
+    expect(onRunStarted).not.toHaveBeenCalled()
+    // Witnesses: the create ran once and the claim transaction re-read the row.
+    expect(createChildRecipe).toHaveBeenCalledTimes(1)
+    expect(h.trail.slice(-5)).toEqual(['create', 'BEGIN', 'advisory', 'lockedRead', 'ROLLBACK'])
+    expect(logger.info).toHaveBeenCalledWith(
+      'pending run already claimed with the same child',
+      expect.objectContaining({ run_id: run.run_id, child_name: 'child-same' })
+    )
+  })
+
+  it('does not claim a run another instance reserved after our lease expired', async () => {
+    const run = baseRun()
+    const h = makeStartHarness({
+      lockedReads: [run, { ...run, owner_instance_id: 'wrc-2' }],
+      claimRowCount: 0,
+    })
+    const createChildRecipe = vi.fn(
+      h.guard(async () => ({ name: 'c', namespace: 'sandbox-recipes' }), 'create')
+    )
+    const logger = silentLogger()
+    const onRunStarted = vi.fn()
+
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: {} as Pool,
+      connect: h.connect,
+      runPollMs: 30_000,
+      createChildRecipe,
+      onRunStarted,
+      logger,
+    })
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+
+    expect(onRunStarted).not.toHaveBeenCalled()
+    // Witness: the claim ran against the other instance's reservation, matched
+    // nothing, and the claim transaction rolled back.
+    expect(createChildRecipe).toHaveBeenCalledTimes(1)
+    expect(h.trail.slice(-6)).toEqual([
+      'create',
+      'BEGIN',
+      'advisory',
+      'lockedRead',
+      'claim',
+      'ROLLBACK',
+    ])
+    expect(h.sqlOf('claim')[0]).toMatch(/owner_instance_id IS NULL OR owner_instance_id = \$1/)
+    expect(logger.warn).toHaveBeenCalledWith('pending claim lost race', { run_id: run.run_id })
+  })
+
+  it('keeps the reservation when the child create fails', async () => {
+    const run = baseRun()
+    const h = makeStartHarness({ lockedReads: [run] })
+    const createChildRecipe = vi.fn(
+      h.guard(async () => {
+        throw new Error('apiserver unavailable')
+      }, 'create')
+    )
+
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: {} as Pool,
+      connect: h.connect,
+      runPollMs: 30_000,
+      createChildRecipe,
+      logger: silentLogger(),
+    })
+    await expect(proc.processPending(run.run_id)).rejects.toThrow('apiserver unavailable')
+
+    // Witness: the reservation committed and the create was attempted with nothing held.
+    expect(h.trail).toEqual(['BEGIN', 'advisory', 'lockedRead', 'reserve', 'COMMIT', 'create'])
+    expect(h.violations).toEqual([])
+    // Nothing released the lease: no further transaction, no statement touching the owner.
+    expect(h.stats()).toEqual({ checkouts: 1, releases: 1, peakCheckedOut: 1, openTransactions: 0 })
+    expect(h.statements.filter(s => /owner_instance_id = NULL/i.test(s.sql))).toEqual([])
+  })
+
+  it.each([
+    ['the run moved to a terminal phase', { phase: 'Failed' as const }],
+    ['the run is Running with no child', { phase: 'Running' as const }],
+    [
+      'the run is Running with another child',
+      {
+        phase: 'Running' as const,
+        child_recipe_name: 'child-other',
+        child_recipe_namespace: 'sandbox-recipes',
+      },
+    ],
+    ['the run row is gone', null],
+  ])('throws and does not claim when %s while the child was created', async (_case, change) => {
+    const run = baseRun()
+    const h = makeStartHarness({
+      lockedReads: [run, change === null ? undefined : { ...run, ...change }],
+    })
+    const createChildRecipe = vi.fn(
+      h.guard(async () => ({ name: 'child-created', namespace: 'sandbox-recipes' }), 'create')
+    )
+    const logger = silentLogger()
+    const onRunStarted = vi.fn()
+
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: {} as Pool,
+      connect: h.connect,
+      runPollMs: 30_000,
+      createChildRecipe,
+      onRunStarted,
+      logger,
+    })
+    await expect(proc.processPending(run.run_id)).rejects.toThrow(
+      'workflow run start reservation lost before the claim'
+    )
+
+    expect(h.trail).not.toContain('claim')
+    expect(onRunStarted).not.toHaveBeenCalled()
+    // Witnesses: the create ran, the claim transaction re-read the row and rolled back.
+    expect(createChildRecipe).toHaveBeenCalledTimes(1)
+    expect(h.trail.slice(-5)).toEqual(['create', 'BEGIN', 'advisory', 'lockedRead', 'ROLLBACK'])
+    expect(logger.error).toHaveBeenCalledWith(
+      'pending run left Pending while its child was being created; child is unbound',
+      expect.objectContaining({ run_id: run.run_id, child_name: 'child-created' })
+    )
+    expect(h.stats()).toEqual({ checkouts: 2, releases: 2, peakCheckedOut: 1, openTransactions: 0 })
   })
 
   // ─── 4) syncFromRecipeExecution writes terminal phase + fires onRunTerminal
@@ -570,6 +844,37 @@ describe('createDbRunProcessor', () => {
     expect(onRunTerminal).not.toHaveBeenCalled()
   })
 
+  it('limits the non-terminal heartbeat to Running rows so it cannot renew a start reservation', async () => {
+    const client = makeClient(async sql => {
+      if (/^BEGIN$/i.test(sql) || /^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
+      if (/INSERT INTO workflow_run_steps/i.test(sql)) return { rows: [], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    const pool = {
+      connect: vi.fn(async () => client as unknown as PoolClient),
+    } as unknown as Pool
+
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool,
+      runPollMs: 30_000,
+      createChildRecipe: vi.fn(),
+      logger: silentLogger(),
+    })
+
+    const recipe = makeRecipeWithAnnotation('run-pending-child')
+    recipe.status = { phase: 'active', steps: [{ id: 'prepare', phase: 'pending' }] }
+    await proc.syncFromRecipeExecution(recipe)
+
+    // Witness: the non-terminal sync ran and wrote the step.
+    expect(client.calls.filter(c => /INSERT INTO workflow_run_steps/i.test(c.sql))).toHaveLength(1)
+    const heartbeats = client.calls.filter(c => /SET last_reconciled_at = now\(\)/i.test(c.sql))
+    expect(heartbeats).toHaveLength(1)
+    expect(heartbeats[0]?.params).toEqual(['run-pending-child'])
+    expect(heartbeats[0]?.sql).toMatch(/AND phase = 'Running'\s*$/)
+    expect(heartbeats[0]?.sql).not.toContain('Pending')
+  })
+
   // ─── 6) checkStuckRuns no-op when no rows match the timeout predicate
   it('checkStuckRuns is a no-op when no run exceeds max_duration_seconds', async () => {
     const client = makeClient(async sql => {
@@ -683,9 +988,9 @@ describe('createDbRunProcessor', () => {
     expect(sessionIdx).toBeGreaterThanOrEqual(2)
   })
 
-  // ─── 9) Advisory-lock split-brain: if another replica claims during SELECT
-  //    FOR UPDATE→UPDATE window, the lost claim ends in ROLLBACK and does NOT
-  //    stamp owner_instance_id.
+  // ─── 9) Lost lease: our reservation expired during the create and another
+  //    replica reserved the run, so CLAIM_PENDING matches zero rows. The claim
+  //    transaction ends in ROLLBACK; only the reservation committed.
   it('rolls back when another replica wins the claim (rowCount = 0 on CLAIM_PENDING)', async () => {
     const run = baseRun()
     let beginCount = 0
@@ -701,9 +1006,10 @@ describe('createDbRunProcessor', () => {
       if (/FOR UPDATE/.test(sql) && !/SKIP LOCKED/.test(sql)) {
         return { rows: [run], rowCount: 1 }
       }
+      if (RESERVE_SQL.test(sql)) return { rows: [], rowCount: 1 }
       if (/SET phase = 'Running'/.test(sql)) {
-        // Simulate a winning concurrent UPDATE that already flipped phase away
-        // from Pending, so our WHERE clause matches zero rows.
+        // Another replica holds the reservation now, so the owner predicate of
+        // CLAIM_PENDING matches zero rows.
         return { rows: [], rowCount: 0 }
       }
       if (/^ROLLBACK$/i.test(sql)) {
@@ -728,9 +1034,11 @@ describe('createDbRunProcessor', () => {
 
     await proc.processPending(run.run_id)
 
-    expect(beginCount).toBe(1)
+    // tx1 (reserve) committed; tx2 (claim) rolled back.
+    expect(beginCount).toBe(2)
     expect(rollbackCount).toBe(1)
-    expect(commitCount).toBe(0)
+    expect(commitCount).toBe(1)
+    expect(client.calls.filter(c => /SET phase = 'Running'/.test(c.sql))).toHaveLength(1)
   })
 
   // ─── 10) Poll fallback picks up runs that missed LISTEN
@@ -752,6 +1060,7 @@ describe('createDbRunProcessor', () => {
             expect(params).toEqual(['run-orphan-1'])
             return { rows: [orphanRow], rowCount: 1 }
           }
+          if (RESERVE_SQL.test(sql)) return { rows: [], rowCount: 1 }
           if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
           return { rows: [], rowCount: 0 }
         })

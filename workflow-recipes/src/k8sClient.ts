@@ -55,7 +55,10 @@ import {
   WorkflowRecipeSpec,
   type WorkloadStatus,
 } from './types'
-import { createDbRunChildRecipe } from './workflow/dbRunChildRecipeCreator'
+import {
+  DB_RUN_CHILD_CREATE_TIMEOUT_MS,
+  createDbRunChildRecipe,
+} from './workflow/dbRunChildRecipeCreator'
 import type { JwtTokenFactory } from './workflow/jwtTokenFactory'
 import {
   CODEX_CONNECTION_REF_ANNOTATION,
@@ -818,10 +821,17 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   /**
    * Builds the closure the DB run processor invokes when it needs to
    * materialize a child WorkflowRecipe for a Pending run. This is the ONLY
-   * bridge between the DB-driven run lifecycle and the K8s API.
+   * bridge between the DB-driven run lifecycle and the K8s API. The processor
+   * calls it with no database client or lock held; the deadline bounds the
+   * whole create.
    */
   private makeChildRecipeCreator(): ChildRecipeCreator {
-    return async (run: DbRunRow) => createDbRunChildRecipe(this.customApi, run)
+    return async (run: DbRunRow) =>
+      createDbRunChildRecipe(
+        this.customApi,
+        run,
+        AbortSignal.timeout(DB_RUN_CHILD_CREATE_TIMEOUT_MS)
+      )
   }
 
   private makeChildRecipeExists(): ChildRecipeExistenceChecker {

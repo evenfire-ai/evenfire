@@ -17,9 +17,12 @@ import {
   workflowRecipeFromWatchObject,
 } from './k8sClient'
 import { captureLogger } from './reconciler/__tests__/captureLogger'
+import type { ChildRecipeCreator } from './reconciler/dbRunProcessor'
 import { buildOAuthBrokerTokenSecret } from './reconciler/resourceBuilder'
 import type { SecretEventType, SecretLike } from './reconciler/secretWatcher'
 import type { WorkflowRecipeCRD } from './types'
+import { DB_RUN_CHILD_CREATE_TIMEOUT_MS } from './workflow/dbRunChildRecipeCreator'
+import { makeRun } from './workflow/dbRunChildRecipeCreator.testFixtures'
 
 // startSecretWatch builds one SecretWatcher per namespace and hands it to a
 // K8sSecretWatchLoop. Capturing that hand-off lets a test drive the REAL
@@ -3392,5 +3395,37 @@ describe('handleOAuthBrokerTokenAdded', () => {
     internal.handleOAuthBrokerTokenAdded('mcp-server', 'no-bg')
     expect(invalidate).toHaveBeenCalledTimes(1)
     expect(enqueue).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('DB run child creator wiring', () => {
+  it('bounds the child create with DB_RUN_CHILD_CREATE_TIMEOUT_MS', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      const getNamespacedCustomObject = vi.fn().mockRejectedValue(new Error('parent read stopped'))
+      const internal = Object.create(WorkflowRecipeWatcher.prototype) as {
+        customApi: unknown
+        makeChildRecipeCreator: () => ChildRecipeCreator
+      }
+      internal.customApi = { getNamespacedCustomObject }
+
+      await expect(internal.makeChildRecipeCreator()(makeRun())).rejects.toThrow(
+        'parent read stopped'
+      )
+
+      expect(DB_RUN_CHILD_CREATE_TIMEOUT_MS).toBe(30_000)
+      expect(timeoutSpy).toHaveBeenCalledTimes(1)
+      expect(timeoutSpy).toHaveBeenCalledWith(DB_RUN_CHILD_CREATE_TIMEOUT_MS)
+      // Witness: the request options carry that exact signal into the HTTP context.
+      const deadline = timeoutSpy.mock.results[0]?.value as AbortSignal
+      const options = getNamespacedCustomObject.mock.calls[0]?.[1] as {
+        middleware: Array<{ pre: (context: unknown) => { toPromise: () => Promise<unknown> } }>
+      }
+      const setSignal = vi.fn()
+      await options.middleware[0]!.pre({ setSignal }).toPromise()
+      expect(setSignal).toHaveBeenCalledWith(deadline)
+    } finally {
+      timeoutSpy.mockRestore()
+    }
   })
 })
