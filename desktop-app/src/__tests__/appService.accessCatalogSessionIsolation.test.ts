@@ -33,10 +33,19 @@ type App = {
   issueRpcTokenForHostRefs(scopes: string[], refs: string[]): Promise<unknown>
 }
 
-async function setup(options: { pauseTeamBGetMe?: boolean; pauseRestoreGetMe?: boolean } = {}) {
+async function setup(
+  options: {
+    pauseTeamBGetMe?: boolean
+    pauseRestoreGetMe?: boolean
+    homeWithoutTeam?: boolean
+  } = {}
+) {
   const { service } = await createNativeCommitTestHarness()
   const meA = testSessionMe()
   const meB = testSessionMe({ teamId: 'team-b', teamName: 'Team B' })
+  // With homeWithoutTeam the login session has no team. Its token is the only
+  // one that answers the no-team principal; the team tokens answer as before.
+  const home = testSessionMe({ teamId: null, teamName: null })
   const hopOperation = deferred<{ items: unknown[] }>()
   const hopStarted = deferred<void>()
   const teamBGetMe = deferred<void>()
@@ -44,6 +53,7 @@ async function setup(options: { pauseTeamBGetMe?: boolean; pauseRestoreGetMe?: b
   const restoreGetMe = deferred<void>()
   const restoreGetMeStarted = deferred<void>()
   const teamAgentsTokens: string[] = []
+  const userAgentsTokens: string[] = []
   const switchCalls: string[] = []
   const buildHolds: Array<{
     gate: ReturnType<typeof deferred<void>>
@@ -56,8 +66,20 @@ async function setup(options: { pauseTeamBGetMe?: boolean; pauseRestoreGetMe?: b
     hopStarted.resolve()
     return hopOperation.promise
   }
+  // Holds the build that consumes the next entry of buildHolds.
+  const waitForBuildHold = async () => {
+    const hold = buildHolds.shift()
+    if (hold) {
+      hold.started.resolve()
+      await hold.gate.promise
+    }
+  }
   app.authClient = {
-    googleLogin: vi.fn().mockResolvedValue(testLoginResult('synthetic-session-a', meA)),
+    googleLogin: vi
+      .fn()
+      .mockResolvedValue(
+        testLoginResult('synthetic-session-a', options.homeWithoutTeam ? home : meA)
+      ),
     switchTeam: vi.fn(async (_token: string, teamId: string) => {
       switchCalls.push(teamId)
       return testTeamSwitchResult(teamId, `synthetic-session-${teamId}`)
@@ -71,6 +93,7 @@ async function setup(options: { pauseTeamBGetMe?: boolean; pauseRestoreGetMe?: b
         restoreGetMeStarted.resolve()
         await restoreGetMe.promise
       }
+      if (options.homeWithoutTeam && token === 'synthetic-session-a') return home
       return teamOf(token) === 'team-a' ? meA : meB
     }),
     listTeams: vi.fn(async () => ({
@@ -83,15 +106,17 @@ async function setup(options: { pauseTeamBGetMe?: boolean; pauseRestoreGetMe?: b
     listPendingWorkflowApprovals: vi.fn(heldInTeamB),
     listWorkflows: vi.fn(heldInTeamB),
     getMyContexts: vi.fn(async () => ({ contextIds: [] })),
-    getMyAgents: vi.fn(async () => ({ agentNames: ['direct-agent'], agents: [] })),
+    getMyAgents: vi.fn(async (token: string) => {
+      userAgentsTokens.push(token)
+      // A session with no team issues no team-agents request, so its build is
+      // held here instead.
+      if (options.homeWithoutTeam) await waitForBuildHold()
+      return { agentNames: ['direct-agent'], agents: [] }
+    }),
     getTeamContexts: vi.fn(async (token: string) => ({ teamId: teamOf(token), contextIds: [] })),
     getTeamAgents: vi.fn(async (token: string) => {
       teamAgentsTokens.push(token)
-      const hold = buildHolds.shift()
-      if (hold) {
-        hold.started.resolve()
-        await hold.gate.promise
-      }
+      if (!options.homeWithoutTeam) await waitForBuildHold()
       return { teamId: teamOf(token), agentNames: [`${teamOf(token)}-agent`], agents: [] }
     }),
   }
@@ -111,6 +136,7 @@ async function setup(options: { pauseTeamBGetMe?: boolean; pauseRestoreGetMe?: b
     restoreGetMe,
     restoreGetMeStarted,
     teamAgentsTokens,
+    userAgentsTokens,
     switchCalls,
     holdNextBuild,
   }
@@ -328,6 +354,38 @@ describe('access catalog: a build in flight delays nothing else', () => {
     expect(app.sessionGeneration).toBeGreaterThan(generationBefore)
     gate.resolve()
     await pending // what the request answers after the logout is T-R7's subject
+  })
+
+  it('T-R10: hops from a session with no team move the team without a new generation, and the build is discarded', async () => {
+    const { app, hopOperation, hopStarted, userAgentsTokens, holdNextBuild } = await setup({
+      homeWithoutTeam: true,
+    })
+    expect({ team: app.me?.teamId ?? null, token: app.sessionToken }).toEqual({
+      team: null,
+      token: 'synthetic-session-a',
+    })
+    const generation = app.sessionGeneration
+    const { gate, started } = holdNextBuild()
+    const pending = app.refreshAccessCatalog()
+    await started.promise // the build for the session with no team is in flight
+    // The hops: into team-a with nothing to restore, then into team-b and back
+    // to team-a.
+    const approvals = app.listPendingWorkflowApprovals(20)
+    await hopStarted.promise
+    hopOperation.resolve({ items: [] })
+    await approvals
+    // Witness: the team moved and the generation did not, so only the team
+    // comparison can tell the build's session from the current one.
+    expect({
+      team: app.me?.teamId,
+      token: app.sessionToken,
+      generation: app.sessionGeneration,
+    }).toEqual({ team: 'team-a', token: 'synthetic-session-team-a', generation })
+    gate.resolve()
+    const catalog = await pending
+    expect(catalog.teamId).toBe('team-a')
+    expect(app.accessCatalog?.teamId).toBe('team-a')
+    expect(userAgentsTokens).toEqual(['synthetic-session-a', 'synthetic-session-team-a'])
   })
 })
 
