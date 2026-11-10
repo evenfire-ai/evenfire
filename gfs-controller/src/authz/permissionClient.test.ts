@@ -453,3 +453,77 @@ describe("PermissionClient.authorizeWithin (re-decision on a writer transaction'
     expect(tx.statements).toHaveLength(0);
   });
 });
+
+describe("PermissionClient.auditRefusedWithin (durable row after a rolled-back re-decision)", () => {
+  /** Records each event with whether a queryable (a transaction client) was passed. */
+  class QueryableAwareSink implements AuditSink {
+    calls: Array<{ event: AuditEvent; queryable: Queryable | undefined }> = [];
+    fail: "deny" | "error" | null = null;
+    async record(event: AuditEvent, queryable?: Queryable): Promise<void> {
+      this.calls.push({ event, queryable });
+      if (this.fail !== null && event.outcome === this.fail) throw new Error(`audit ${this.fail} insert failed`);
+    }
+  }
+  const R1 = { resourceId: "R", op: "write" as const };
+  const R2 = { resourceId: "S", op: "read" as const };
+
+  it("P-F1a: a refused deny writes the row a store deny writes, on the pool", async () => {
+    const db = new FakeDb();
+    db.ancestors = ["R", "ROOT"];
+    const viaAuthorize = new QueryableAwareSink();
+    await new PermissionClient(db, viaAuthorize).authorize(userCtx, R1.resourceId, R1.op);
+    const viaRefusal = new QueryableAwareSink();
+
+    await new PermissionClient(db, viaRefusal).auditRefusedWithin(userCtx, { denied: [R1] });
+
+    expect(viaAuthorize.calls).toHaveLength(1);
+    expect(viaAuthorize.calls[0].event).toMatchObject({ outcome: "deny" });
+    expect(viaRefusal.calls).toHaveLength(1);
+    expect(viaRefusal.calls[0].queryable).toBeUndefined();
+    expect(viaRefusal.calls[0].event).toEqual(viaAuthorize.calls[0].event);
+  });
+
+  it("P-F1b: a refused store error writes the rows authorizeMany writes for the same error, on the pool", async () => {
+    const db = new FakeDb();
+    db.failOn = "ancestors";
+    const viaAuthorize = new QueryableAwareSink();
+    await expect(
+      new PermissionClient(db, viaAuthorize).authorizeMany(userCtx, [R1, R2])
+    ).rejects.toMatchObject({ code: "not_mounted" });
+    const viaRefusal = new QueryableAwareSink();
+
+    await new PermissionClient(db, viaRefusal).auditRefusedWithin(userCtx, {
+      failed: [R1, R2],
+      error: new Error("permission store down"),
+    });
+
+    expect(viaAuthorize.calls.map(call => call.event.outcome)).toEqual(["error", "error"]);
+    expect(viaRefusal.calls.map(call => call.queryable)).toEqual([undefined, undefined]);
+    expect(viaRefusal.calls.map(call => call.event)).toEqual(viaAuthorize.calls.map(call => call.event));
+  });
+
+  it("P-F1c: a failed deny insert propagates; a failed error insert is logged", async () => {
+    const denySink = new QueryableAwareSink();
+    denySink.fail = "deny";
+    await expect(
+      new PermissionClient(new FakeDb(), denySink).auditRefusedWithin(userCtx, { denied: [R1] })
+    ).rejects.toThrow("audit deny insert failed");
+    expect(denySink.calls).toHaveLength(1);
+
+    const errorSink = new QueryableAwareSink();
+    errorSink.fail = "error";
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(
+        new PermissionClient(new FakeDb(), errorSink).auditRefusedWithin(userCtx, {
+          failed: [R1],
+          error: new Error("permission store down"),
+        })
+      ).resolves.toBeUndefined();
+      expect(errorSink.calls).toHaveLength(1);
+      expect(logged).toHaveBeenCalledTimes(1);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});

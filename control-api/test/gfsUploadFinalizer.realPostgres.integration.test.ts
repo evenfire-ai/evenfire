@@ -499,6 +499,17 @@ describeRealPostgres('GFS upload finalizer on real PostgreSQL + BlobStore', () =
     return rows.rows
   }
 
+  async function refusedDecisionEvidence(subject: string, resourceId: string) {
+    const rows = await pool.query(
+      `SELECT authorization_source, cached_authorization_source, mutation_outcome FROM gfs_audit
+        WHERE record_type = 'authorization_decision' AND outcome = 'deny'
+          AND subject = $1 AND gfs_uri = $2
+        ORDER BY sequence_no`,
+      [subject, `gfs://${drive}/${resourceId}`]
+    )
+    return rows.rows
+  }
+
   async function outcomes(subject: string, resourceId: string) {
     const rows = await pool.query(
       `SELECT op, outcome, mutation_outcome FROM gfs_audit
@@ -615,32 +626,51 @@ describeRealPostgres('GFS upload finalizer on real PostgreSQL + BlobStore', () =
     const { userId, teamId, principal } = await seedUser()
     await grantWrite(parentId, 'team', teamId)
     const { upload, uploadPart } = await seedUpload({ subject: userId })
-    const { finalize } = realFinalizer(pool)
+    // One client: a durable audit row written on the pool inside the
+    // publication transaction would wait for a second client and time out.
+    const singleClientPool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 3_000 })
+    try {
+      const { finalize } = realFinalizer(singleClientPool)
 
-    const result = await duringLockWait(
-      await holdStructureLock(),
-      ['advisory'],
-      () => finalize(upload, [uploadPart], undefined, undefined, principal),
-      async () => {
-        await pool.query(
-          `UPDATE team_members SET status = 'deleted' WHERE team_id = $1 AND user_id = $2`,
-          [teamId, userId]
-        )
-      }
-    )
+      const result = await duringLockWait(
+        await holdStructureLock(),
+        ['advisory'],
+        () => finalize(upload, [uploadPart], undefined, undefined, principal),
+        async () => {
+          await pool.query(
+            `UPDATE team_members SET status = 'deleted' WHERE team_id = $1 AND user_id = $2`,
+            [teamId, userId]
+          )
+        }
+      )
 
-    expect(result).toMatchObject({
-      ok: false,
-      error: { code: 'forbidden', message: 'upload authorization was revoked before publication' },
-    })
-    await expectNotPublished(upload.uploadId)
-    // The pre-BEGIN allow is durable; the in-transaction deny rolled back.
-    expect(await decisions(userId, parentId)).toEqual([
-      { outcome: 'allow', matched_subject: `team:${teamId}` },
-    ])
-    expect(await outcomes(userId, upload.uploadId)).toEqual([
-      { op: 'create', outcome: 'error', mutation_outcome: 'failed' },
-    ])
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: 'forbidden',
+          message: 'upload authorization was revoked before publication',
+        },
+      })
+      await expectNotPublished(upload.uploadId)
+      // The pre-BEGIN allow is durable; the in-transaction deny rolled back and
+      // was recorded again on the pool after the rollback.
+      expect(await decisions(userId, parentId)).toEqual([
+        { outcome: 'allow', matched_subject: `team:${teamId}` },
+        { outcome: 'deny', matched_subject: null },
+      ])
+      expect(await refusedDecisionEvidence(userId, parentId)).toEqual([
+        {
+          authorization_source: null,
+          cached_authorization_source: null,
+          mutation_outcome: null,
+        },
+      ])
+      expect(await outcomes(userId, upload.uploadId)).toEqual([
+        { op: 'create', outcome: 'error', mutation_outcome: 'failed' },
+      ])
+    } finally {
+      await endPoolAndWaitForClients(singleClientPool)
+    }
   }, 30_000)
 
   it('RP2b: a user generation moved during the structure-lock wait rejects with the subject denial', async () => {
@@ -820,8 +850,17 @@ describeRealPostgres('GFS upload finalizer on real PostgreSQL + BlobStore', () =
       error: { code: 'forbidden', message: 'upload authorization was revoked before publication' },
     })
     await expectNotPublished(upload.uploadId)
+    // The re-decision's deny is recorded on the pool after the rollback.
     expect(await decisions(userId, parentId)).toEqual([
       { outcome: 'allow', matched_subject: `user:${userId}` },
+      { outcome: 'deny', matched_subject: null },
+    ])
+    expect(await refusedDecisionEvidence(userId, parentId)).toEqual([
+      {
+        authorization_source: null,
+        cached_authorization_source: null,
+        mutation_outcome: null,
+      },
     ])
     expect(await outcomes(userId, upload.uploadId)).toEqual([
       { op: 'create', outcome: 'error', mutation_outcome: 'failed' },

@@ -7,7 +7,13 @@ import type { Pool } from 'pg'
 import { GfsError } from '../api/errors'
 import type { GfsResource } from '../api/read'
 import type { Decision } from '../authz/resolve'
-import type { DbAuditSink, PermissionClient, PermissionEpoch } from '../authz/permissionClient'
+import type {
+  AuthzContext,
+  DbAuditSink,
+  PermissionClient,
+  PermissionEpoch,
+  RefusedWithin,
+} from '../authz/permissionClient'
 import { permissionEpochMoved, stillAuthorized } from '../authz/reconfirm'
 import { resolveAuthzContext } from '../authz/subjectResolver'
 import { GfsWriteService, type TxClient } from '../db/writeStore'
@@ -97,7 +103,9 @@ type ReauthorizationOutcome =
  * subject set changed in a way that could change it; abort and deadline again.
  * The writer's own checks (missing target, tombstone, name conflict, stale
  * ifMatch) still take precedence, and the transactor's deadline handling still
- * applies to every error.
+ * applies to every error. A re-decision that denies or fails leaves its
+ * in-transaction row to the rollback, so after the publication transaction has
+ * ended the finalizer appends that decision's row on the pool.
  */
 export function createGfsUploadFinalizer(
   deps: GfsUploadFinalizerDeps
@@ -145,6 +153,7 @@ export function createGfsUploadFinalizer(
       }
     }
     let reauthorization: ReauthorizationOutcome | undefined
+    let refused: { context: AuthzContext; refusal: RefusedWithin } | undefined
     const beforePublication = async (hookSignal?: AbortSignal): Promise<void> => {
       try {
         rejectIfExpired(hookSignal)
@@ -188,7 +197,17 @@ export function createGfsUploadFinalizer(
         current,
         requests: [{ resourceId: targetRid, op: 'write' }],
         epochMoved: permissionEpochMoved(reauthorization.epoch, now),
-        authorizeWithin: (db, ctx, requests) => deps.permissions.authorizeWithin(db, ctx, requests),
+        authorizeWithin: async (db, ctx, requests) => {
+          try {
+            const decisions = await deps.permissions.authorizeWithin(db, ctx, requests)
+            const denied = requests.filter((_, index) => !decisions[index].allowed)
+            if (denied.length > 0) refused = { context: ctx, refusal: { denied } }
+            return decisions
+          } catch (error) {
+            refused = { context: ctx, refusal: { failed: requests, error } }
+            throw error
+          }
+        },
       })
       // The subject reads and a re-decision awaited on the client.
       rejectIfExpired(publicationSignal)
@@ -214,32 +233,40 @@ export function createGfsUploadFinalizer(
         throw new GfsError('upload_aborted', 'upload session changed before publication')
       }
     }
-    const resource =
-      session.operation === 'create'
-        ? await deps.writeService.create({
-            drive: session.drive,
-            parentId: session.parentRid!,
-            name: session.resourceName!,
-            kind: 'file',
-            resourceId: session.uploadId,
-            content: source,
-            mutation,
-            beforePublication,
-            onPublished,
-            signal,
-            deadlineAtMs,
-          })
-        : await deps.writeService.replace({
-            drive: session.drive,
-            resourceId: session.resourceRid!,
-            ifMatch: session.ifMatch ?? undefined,
-            content: source,
-            mutation,
-            beforePublication,
-            onPublished,
-            signal,
-            deadlineAtMs,
-          })
+    let resource: GfsResource
+    try {
+      resource =
+        session.operation === 'create'
+          ? await deps.writeService.create({
+              drive: session.drive,
+              parentId: session.parentRid!,
+              name: session.resourceName!,
+              kind: 'file',
+              resourceId: session.uploadId,
+              content: source,
+              mutation,
+              beforePublication,
+              onPublished,
+              signal,
+              deadlineAtMs,
+            })
+          : await deps.writeService.replace({
+              drive: session.drive,
+              resourceId: session.resourceRid!,
+              ifMatch: session.ifMatch ?? undefined,
+              content: source,
+              mutation,
+              beforePublication,
+              onPublished,
+              signal,
+              deadlineAtMs,
+            })
+    } catch (error) {
+      // The publication transaction has ended and its client is released. A
+      // re-decision refused inside it left no durable row: record it now, on the pool.
+      if (refused) await deps.permissions.auditRefusedWithin(refused.context, refused.refusal)
+      throw error
+    }
     if (!resource.contentSha256) throw new GfsError('internal', 'published upload has no checksum')
     return {
       resourceId: resource.resourceId,

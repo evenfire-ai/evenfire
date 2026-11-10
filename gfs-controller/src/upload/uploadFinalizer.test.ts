@@ -160,6 +160,8 @@ interface HarnessOptions {
   allowed?: boolean
   /** Result of every in-transaction re-decision. */
   withinAllowed?: boolean
+  /** Replaces the default in-transaction re-decision. */
+  authorizeWithin?: (requests: readonly unknown[]) => Promise<ReadonlyArray<{ allowed: boolean }>>
 }
 
 function finalizerHarness(
@@ -181,11 +183,16 @@ function finalizerHarness(
     }),
     authorizeWithin: vi.fn(async (_db: unknown, _ctx: unknown, requests: readonly unknown[]) => {
       events.push(`authorizeWithin:${where()}`)
+      if (options.authorizeWithin) return options.authorizeWithin(requests)
       return requests.map(() => ({ allowed: options.withinAllowed ?? true }))
+    }),
+    auditRefusedWithin: vi.fn(async () => {
+      events.push(`auditRefusedWithin:${where()}`)
     }),
   } as unknown as PermissionClient & {
     authorize: ReturnType<typeof vi.fn>
     authorizeWithin: ReturnType<typeof vi.fn>
+    auditRefusedWithin: ReturnType<typeof vi.fn>
   }
   const client = {
     query: vi.fn(async (sql: string) => {
@@ -273,6 +280,22 @@ function expectNothingOnThePoolInTx(harness: Harness): void {
   expect(harness.events).not.toContain('authorize:in-tx')
 }
 
+/**
+ * F1: the refused re-decision is recorded once, after the publication
+ * transaction ended, with the context the re-decision used.
+ */
+function expectRefusalAuditedAfterRollback(harness: Harness, refusal: unknown): void {
+  expect(harness.permissions.authorizeWithin).toHaveBeenCalledTimes(1)
+  expect(harness.permissions.auditRefusedWithin).toHaveBeenCalledTimes(1)
+  const [context, recorded] = harness.permissions.auditRefusedWithin.mock.calls[0]
+  expect(context).toBe(harness.permissions.authorizeWithin.mock.calls[0][1])
+  expect(recorded).toEqual(refusal)
+  expect(harness.events).toContain('auditRefusedWithin:no-tx')
+  expect(harness.events.indexOf('auditRefusedWithin:no-tx')).toBeGreaterThan(
+    harness.events.indexOf('authorizeWithin:in-tx')
+  )
+}
+
 const STABLE = () => ({ generation: 1, bypassed: false })
 
 afterEach(() => {
@@ -305,6 +328,9 @@ describe('production GFS upload finalizer seam', () => {
         expect.arrayContaining([UPLOAD_ID, UPLOAD_ID, 0, SHA256, 0])
       )
       expectNothingOnThePoolInTx(harness)
+      // U-F1e: a publication with no re-decision records no refusal.
+      expect(harness.permissions.authorize).toHaveBeenCalledTimes(1)
+      expect(harness.permissions.auditRefusedWithin).not.toHaveBeenCalled()
     })
   })
 
@@ -367,6 +393,8 @@ describe('production GFS upload finalizer seam', () => {
       expect(harness.permissions.authorize).toHaveBeenCalledTimes(1)
       expect(harness.events).toContain('transaction:begin')
       expect(harness.client.query).not.toHaveBeenCalled()
+      // U-F1e: the writer's own rejection records no refusal.
+      expect(harness.permissions.auditRefusedWithin).not.toHaveBeenCalled()
     })
   })
 
@@ -516,6 +544,8 @@ describe('upload finalizer: subject re-check on the transaction client', () => {
       expect(harness.events).toContain('authorizeWithin:in-tx')
       expect(harness.receiptRan()).toBe(true)
       expectNothingOnThePoolInTx(harness)
+      // U-F1e: an allowed re-decision records no refusal.
+      expect(harness.permissions.auditRefusedWithin).not.toHaveBeenCalled()
     })
   })
 
@@ -537,6 +567,10 @@ describe('upload finalizer: subject re-check on the transaction client', () => {
       expect(harness.clientRead('team_members')).toBe(true)
       expect(harness.receiptRan()).toBe(false)
       expectNothingOnThePoolInTx(harness)
+      // U-F1a: the denial is recorded durably after the rollback.
+      expectRefusalAuditedAfterRollback(harness, {
+        denied: [{ resourceId: PARENT_ID, op: 'write' }],
+      })
     })
   })
 
@@ -568,6 +602,11 @@ describe('upload finalizer: subject re-check on the transaction client', () => {
       expect(deny.events).toContain('authorizeWithin:in-tx')
       expect(deny.receiptRan()).toBe(false)
       expectNothingOnThePoolInTx(deny)
+      // U-F1c: the denial is recorded durably after the rollback; the allow is not.
+      expectRefusalAuditedAfterRollback(deny, {
+        denied: [{ resourceId: RESOURCE_ID, op: 'write' }],
+      })
+      expect(allow.permissions.auditRefusedWithin).not.toHaveBeenCalled()
     })
   })
 })
@@ -602,6 +641,8 @@ describe('upload finalizer: check order inside the transaction', () => {
       ).rejects.toBeInstanceOf(GfsSubjectResolutionDeniedError)
       expect(harness.permissions.authorize).toHaveBeenCalledTimes(1)
       expect(harness.clientRead('users')).toBe(true)
+      // U-F1e: a subject denied in the transaction records no refusal.
+      expect(harness.permissions.auditRefusedWithin).not.toHaveBeenCalled()
     })
   })
 
@@ -710,6 +751,8 @@ describe('upload finalizer: the hook skips re-authorization on abort or deadline
       expect(harness.pool.query).not.toHaveBeenCalled()
       // Abort and deadline are checked first inside the transaction: no subject read.
       expect(harness.client.query).not.toHaveBeenCalled()
+      // U-F1e: an abort before the hook records no refusal.
+      expect(harness.permissions.auditRefusedWithin).not.toHaveBeenCalled()
     })
   })
 
@@ -858,6 +901,9 @@ describe('upload finalizer: permission epoch and stored denials re-decide on the
       expect(harness.events).toContain('authorizeWithin:in-tx')
       expect(harness.receiptRan()).toBe(false)
       expectNothingOnThePoolInTx(harness)
+      expectRefusalAuditedAfterRollback(harness, {
+        denied: [{ resourceId: PARENT_ID, op: 'write' }],
+      })
     })
   })
 
@@ -915,6 +961,9 @@ describe('upload finalizer: permission epoch and stored denials re-decide on the
       expect(harness.clientRead('team_members')).toBe(true)
       expect(harness.permissions.authorizeWithin).not.toHaveBeenCalled()
       expect(harness.receiptRan()).toBe(false)
+      // U-F1e: a stored denial that stands was recorded before BEGIN; no refusal row.
+      expect(harness.permissions.authorize).toHaveBeenCalledTimes(1)
+      expect(harness.permissions.auditRefusedWithin).not.toHaveBeenCalled()
     })
   })
 
@@ -970,6 +1019,99 @@ describe('upload finalizer: permission epoch and stored denials re-decide on the
       expect(harness.clientRead('team_members')).toBe(true)
       expect(harness.permissions.authorizeWithin).toHaveBeenCalledTimes(1)
       expectNothingOnThePoolInTx(harness)
+    })
+  })
+})
+
+describe('upload finalizer: a refused re-decision leaves a durable audit row (F1)', () => {
+  it('U-F1b: a re-decision store error is recorded after the rollback and rethrown unchanged', async () => {
+    await withStagedPart('gfs-upload-finalizer-f1b-', async root => {
+      const storeError = new Error('permission store read failed')
+      const harness = finalizerHarness(root, STABLE, {
+        pool: { teams: [TEAM_1] },
+        client: { teams: [] },
+        authorizeWithin: async () => {
+          throw storeError
+        },
+      })
+
+      await expect(
+        harness.finalizer(session(), [part(root)], undefined, undefined, USER_PRINCIPAL)
+      ).rejects.toBe(storeError)
+      expect(harness.receiptRan()).toBe(false)
+      expectNothingOnThePoolInTx(harness)
+      expectRefusalAuditedAfterRollback(harness, {
+        failed: [{ resourceId: PARENT_ID, op: 'write' }],
+        error: storeError,
+      })
+    })
+  })
+
+  it('U-F1d: a failed durable deny insert replaces the forbidden error', async () => {
+    await withStagedPart('gfs-upload-finalizer-f1d-', async root => {
+      const auditError = new Error('audit insert failed')
+      const harness = finalizerHarness(root, STABLE, {
+        pool: { teams: [TEAM_1] },
+        client: { teams: [] },
+        withinAllowed: false,
+      })
+      harness.permissions.auditRefusedWithin.mockRejectedValue(auditError)
+
+      await expect(
+        harness.finalizer(session(), [part(root)], undefined, undefined, USER_PRINCIPAL)
+      ).rejects.toBe(auditError)
+      expect(harness.permissions.authorizeWithin).toHaveBeenCalledTimes(1)
+      expect(harness.permissions.auditRefusedWithin).toHaveBeenCalledTimes(1)
+      expect(harness.receiptRan()).toBe(false)
+    })
+  })
+
+  it('U-F1f: an allowed re-decision followed by a rollback records no refusal', async () => {
+    await withStagedPart('gfs-upload-finalizer-f1f-', async root => {
+      let generation = 1
+      const controller = new AbortController()
+      const harness = finalizerHarness(root, () => ({ generation, bypassed: false }), {
+        betweenHooks: () => {
+          generation = 2
+        },
+        withinAllowed: true,
+        onClientQuery: sql => {
+          if (sql.includes("SET state = 'completed'")) {
+            controller.abort(new Error('aborted at the receipt update'))
+          }
+        },
+      })
+
+      await expect(
+        harness.finalizer(session(), [part(root)], controller.signal, undefined, USER_PRINCIPAL)
+      ).rejects.toThrow('aborted at the receipt update')
+      // Liveness: the re-decision ran and allowed, and the receipt statement ran.
+      expect(harness.permissions.authorizeWithin).toHaveBeenCalledTimes(1)
+      expect(harness.events).toContain('authorizeWithin:in-tx')
+      expect(harness.receiptRan()).toBe(true)
+      expect(harness.permissions.auditRefusedWithin).not.toHaveBeenCalled()
+    })
+  })
+
+  it('U-F1g: a denial followed by an abort is still recorded, and the abort is what the caller gets', async () => {
+    await withStagedPart('gfs-upload-finalizer-f1g-', async root => {
+      const controller = new AbortController()
+      const harness = finalizerHarness(root, STABLE, {
+        pool: { teams: [TEAM_1] },
+        client: { teams: [] },
+        authorizeWithin: async requests => {
+          controller.abort(new Error('aborted after the re-decision'))
+          return requests.map(() => ({ allowed: false }))
+        },
+      })
+
+      await expect(
+        harness.finalizer(session(), [part(root)], controller.signal, undefined, USER_PRINCIPAL)
+      ).rejects.toThrow('aborted after the re-decision')
+      expect(harness.receiptRan()).toBe(false)
+      expectRefusalAuditedAfterRollback(harness, {
+        denied: [{ resourceId: PARENT_ID, op: 'write' }],
+      })
     })
   })
 })

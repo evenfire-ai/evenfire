@@ -8,6 +8,7 @@ import { DecisionCache, type PermissionEpoch } from "./cache";
 import { withDeadlineTransaction, type DeadlineBudget, type DeadlinePool } from "../db/deadlineQuery";
 import {
   Decision,
+  DENIED,
   GfsPermission,
   GrantRow,
   resolveDecision,
@@ -62,6 +63,11 @@ export interface AuthorizationRequest {
 
 export type AuthzQueryBudget = DeadlineBudget;
 
+/** A refused in-transaction decision, reported for durable audit after its transaction rolled back. */
+export type RefusedWithin =
+  | { denied: readonly AuthorizationRequest[] }
+  | { failed: readonly AuthorizationRequest[]; error: unknown };
+
 type PermissionDb = Queryable & DeadlinePool;
 
 function errMsg(err: unknown): string {
@@ -100,14 +106,17 @@ function resourceLookupKey(resourceId: string): string {
 /**
  * Permission-store authorization client (read path).
  *
- * FAIL CLOSED: any store error throws GfsError('not_mounted', 503) and is
- * audited as an error — gfsc NEVER falls back to the token's pathBindings (the
- * store is the source of truth). DENY BY DEFAULT: the absence of a matching
+ * FAIL CLOSED: in `authorize` / `authorizeMany` a store error throws
+ * GfsError('not_mounted', 503), or `precondition_failed` for a budgeted
+ * deadline or abort, and is audited as an error — gfsc NEVER falls back to the
+ * token's pathBindings (the store is the source of truth). `authorizeWithin`
+ * propagates a store error unchanged. DENY BY DEFAULT: the absence of a matching
  * grant or share denies. The cluster operator is the root of trust and is
  * allowed intrinsically (no stored grant). Every decision — allow, deny, or
  * error — emits an audit row; an audit-write failure propagates (no un-audited
  * op is served). `authorizeWithin` emits its rows in the caller's transaction;
- * they persist only if it commits.
+ * they persist only if it commits. A refused in-transaction decision (a deny or
+ * a store error) is recorded durably by `auditRefusedWithin` after the rollback.
  */
 export class PermissionClient {
   constructor(
@@ -190,32 +199,7 @@ export class PermissionClient {
     } catch (err) {
       // Fail closed. Try to audit the error, but the store failure is what we
       // surface — never a pathBindings fallback, never a silent allow.
-      try {
-        const append = async (queryable?: Queryable) => {
-          for (const request of requests) await this.audit.record({
-            subject: ctx.primarySubject,
-            ...auditAttribution(ctx),
-            op: request.op,
-            resourceId: request.resourceId,
-            drive: ctx.drive,
-            outcome: "error",
-            reason: errMsg(err),
-            requestId: ctx.requestId,
-            recordType: "authorization_decision",
-            matchedSubject: null,
-            authorizationSource: null,
-            cachedAuthorizationSource: null,
-            mutationOutcome: null,
-          }, queryable);
-        };
-        if (budget) await withDeadlineTransaction(this.db, budget, false, append);
-        else await append();
-      } catch (auditErr) {
-        console.error(
-          `[gfsc] failed to audit a store-error denial (subject=${ctx.primarySubject}, ` +
-            `request=${ctx.requestId ?? "unknown"}): ${errMsg(auditErr)}`
-        );
-      }
+      await this.auditStoreError(ctx, requests, err, budget);
       if ((err instanceof GfsError && err.code === "precondition_failed")
         || (budget && ((err as { code?: string }).code === "57014"
           || budget.signal?.aborted
@@ -258,6 +242,59 @@ export class PermissionClient {
     return decisions;
   }
 
+  /**
+   * Record durably a decision `authorizeWithin` refused inside a transaction that
+   * then rolled back, taking its in-transaction row with it. Call it after the
+   * transaction has ended, with no client held: it appends on the pool the rows
+   * `authorizeMany` would have written — one deny row per denied request, or one
+   * error row per request whose decision failed. A failed deny insert propagates;
+   * a failed error insert is logged, as in `authorizeMany`.
+   */
+  async auditRefusedWithin(ctx: AuthzContext, refusal: RefusedWithin): Promise<void> {
+    if ("error" in refusal) {
+      await this.auditStoreError(ctx, refusal.failed, refusal.error);
+      return;
+    }
+    for (const request of refusal.denied) {
+      await this.auditDecision(ctx, request.resourceId, request.op, DENIED);
+    }
+  }
+
+  /** Audit a store failure as one error row per request; an audit failure is logged. */
+  private async auditStoreError(
+    ctx: AuthzContext,
+    requests: readonly AuthorizationRequest[],
+    err: unknown,
+    budget?: AuthzQueryBudget
+  ): Promise<void> {
+    try {
+      const append = async (queryable?: Queryable) => {
+        for (const request of requests) await this.audit.record({
+          subject: ctx.primarySubject,
+          ...auditAttribution(ctx),
+          op: request.op,
+          resourceId: request.resourceId,
+          drive: ctx.drive,
+          outcome: "error",
+          reason: errMsg(err),
+          requestId: ctx.requestId,
+          recordType: "authorization_decision",
+          matchedSubject: null,
+          authorizationSource: null,
+          cachedAuthorizationSource: null,
+          mutationOutcome: null,
+        }, queryable);
+      };
+      if (budget) await withDeadlineTransaction(this.db, budget, false, append);
+      else await append();
+    } catch (auditErr) {
+      console.error(
+        `[gfsc] failed to audit a store-error denial (subject=${ctx.primarySubject}, ` +
+          `request=${ctx.requestId ?? "unknown"}): ${errMsg(auditErr)}`
+      );
+    }
+  }
+
   /** Decide `requests` from the permission store read on `db`, in request order. */
   private async decideFromStore(
     db: Queryable,
@@ -271,7 +308,7 @@ export class PermissionClient {
     return requests.map(request => {
       const ancestors = ancestorMap.get(resourceLookupKey(request.resourceId)) ?? [];
       return ancestors.length === 0
-        ? { allowed: false, via: null, matchedSubject: null, authorizationSource: null } as Decision
+        ? DENIED
         : resolveDecision({
             resourceId: ancestors[0],
             ancestors,
