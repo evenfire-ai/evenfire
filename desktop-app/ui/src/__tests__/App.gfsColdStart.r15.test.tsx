@@ -1712,7 +1712,7 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
         sessionGeneration: number
       }>
     }
-    const passwordLogin = vi.fn().mockResolvedValue({ token: 'session-b', me: userB })
+    const passwordLogin = vi.fn().mockResolvedValue({ token: 'test-token-session-b', me: userB })
     service.authClient.passwordLogin = passwordLogin
     let replacementSession: Awaited<ReturnType<typeof service.passwordLogin>> | null = null
     await act(async () => {
