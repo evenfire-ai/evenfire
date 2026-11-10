@@ -204,7 +204,6 @@ describe('createDbRunChildRecipe', () => {
     for (const call of [getCalls[0], createCalls[0], getCalls[1]]) {
       expect(await installedSignal(call?.[1])).toBe(signal)
     }
-    expect(getCalls[0]?.[1]).toMatchObject({ middlewareMergeStrategy: 'append' })
     expect(getCalls[1]?.[0]).toEqual(expect.objectContaining({ name: 'demo-parent-00000000' }))
   })
 

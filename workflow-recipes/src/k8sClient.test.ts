@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import * as k8s from '@kubernetes/client-node'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import {
   WorkflowRecipeWatcher,
   controllerErrorTelemetryProjection,
@@ -3399,29 +3402,101 @@ describe('handleOAuthBrokerTokenAdded', () => {
 })
 
 describe('DB run child creator wiring', () => {
-  const makeCreator = (getNamespacedCustomObject: unknown): ChildRecipeCreator => {
+  const makeCreator = (customApi: unknown): ChildRecipeCreator => {
     const internal = Object.create(WorkflowRecipeWatcher.prototype) as {
       customApi: unknown
       makeChildRecipeCreator: () => ChildRecipeCreator
     }
-    internal.customApi = { getNamespacedCustomObject }
+    internal.customApi = customApi
     return internal.makeChildRecipeCreator()
   }
 
-  it('reports a create cut by its deadline as a deadline and passes other errors through', async () => {
-    const aborted = Object.assign(new Error('The user aborted a request.'), { name: 'AbortError' })
-    const other = new Error('forbidden')
-    const getNamespacedCustomObject = vi
-      .fn()
-      .mockRejectedValueOnce(aborted)
-      .mockRejectedValueOnce(other)
-    const create = makeCreator(getNamespacedCustomObject)
-    await expect(create(makeRun())).rejects.toMatchObject({
-      message: `child WorkflowRecipe create exceeded its ${DB_RUN_CHILD_CREATE_TIMEOUT_MS} ms deadline`,
-      cause: aborted,
+  it('gives the DB run processor the bounded creator', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      const getNamespacedCustomObject = vi.fn().mockRejectedValue(new Error('parent read stopped'))
+      const kc = {
+        makeApiClient: vi.fn(() => ({ getNamespacedCustomObject })),
+      } as unknown as import('@kubernetes/client-node').KubeConfig
+      const client = {
+        calls: [] as string[],
+        query: vi.fn(async (sql: string) => {
+          client.calls.push(sql.trim())
+          return /FOR UPDATE/.test(sql)
+            ? { rows: [makeRun()], rowCount: 1 }
+            : { rows: [], rowCount: 0 }
+        }),
+        release: vi.fn(),
+      }
+      const pool = { connect: vi.fn(async () => client), query: vi.fn(), on: vi.fn() }
+      const watcher = new WorkflowRecipeWatcher(kc, pool as never)
+      const processor = (
+        watcher as unknown as {
+          dbRunProcessor: { processPending: (runId: string) => Promise<void> } | null
+        }
+      ).dbRunProcessor
+      expect(processor).not.toBeNull()
+
+      // The production start path, from the constructor's wiring down to the
+      // Kubernetes call: the parent read carries a fresh 30 s deadline.
+      await expect(processor!.processPending(makeRun().run_id)).rejects.toThrow(
+        'parent read stopped'
+      )
+      expect(timeoutSpy.mock.calls).toEqual([[DB_RUN_CHILD_CREATE_TIMEOUT_MS]])
+      expect(getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+      expect(await installedSignal(getNamespacedCustomObject.mock.calls[0]?.[1])).toBe(
+        timeoutSpy.mock.results[0]?.value
+      )
+      expect(client.calls.at(-1)).toBe('ROLLBACK')
+    } finally {
+      timeoutSpy.mockRestore()
+    }
+  })
+
+  it('reports a hung request cut by the deadline as a deadline and keeps the kubeconfig credentials', async () => {
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal)
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => realTimeout(50))
+    const requests: Array<{ url: string | undefined; authorization: string | undefined }> = []
+    // Accept each request and never answer, like a stalled apiserver.
+    const server = http.createServer(req => {
+      requests.push({ url: req.url, authorization: req.headers.authorization })
     })
-    await expect(create(makeRun())).rejects.toBe(other)
-    expect(getNamespacedCustomObject).toHaveBeenCalledTimes(2)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = server.address() as AddressInfo
+      const kc = new k8s.KubeConfig()
+      kc.loadFromOptions({
+        clusters: [{ name: 'hung', server: `http://127.0.0.1:${port}`, skipTLSVerify: true }],
+        users: [{ name: 'probe', token: 'probe-token' }],
+        contexts: [{ name: 'hung', cluster: 'hung', user: 'probe' }],
+        currentContext: 'hung',
+      })
+      const create = makeCreator(kc.makeApiClient(k8s.CustomObjectsApi))
+
+      await expect(create(makeRun())).rejects.toMatchObject({
+        message: `child WorkflowRecipe create exceeded its ${DB_RUN_CHILD_CREATE_TIMEOUT_MS} ms deadline`,
+        cause: expect.objectContaining({ name: 'AbortError' }),
+      })
+      expect(timeoutSpy.mock.calls).toEqual([[DB_RUN_CHILD_CREATE_TIMEOUT_MS]])
+      // Witness: the parent read reached the server with the kubeconfig's token.
+      expect(requests).toEqual([
+        {
+          url: '/apis/clerum.io/v1alpha1/namespaces/sandbox-recipes/workflowrecipes/demo-parent',
+          authorization: 'Bearer probe-token',
+        },
+      ])
+    } finally {
+      timeoutSpy.mockRestore()
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('passes create errors other than a cut request through unchanged', async () => {
+    const other = new Error('forbidden')
+    const getNamespacedCustomObject = vi.fn().mockRejectedValue(other)
+    await expect(makeCreator({ getNamespacedCustomObject })(makeRun())).rejects.toBe(other)
+    expect(getNamespacedCustomObject).toHaveBeenCalledTimes(1)
   })
 
   it('bounds the child create with DB_RUN_CHILD_CREATE_TIMEOUT_MS', async () => {
@@ -3429,7 +3504,7 @@ describe('DB run child creator wiring', () => {
     try {
       const getNamespacedCustomObject = vi.fn().mockRejectedValue(new Error('parent read stopped'))
       // One creator serves every start: each call gets its own deadline.
-      const create = makeCreator(getNamespacedCustomObject)
+      const create = makeCreator({ getNamespacedCustomObject })
       await expect(create(makeRun())).rejects.toThrow('parent read stopped')
       await expect(create(makeRun())).rejects.toThrow('parent read stopped')
 

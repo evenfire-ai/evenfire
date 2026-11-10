@@ -7,7 +7,9 @@
  *
  *   Pending → (create child recipe) → Running   [processPending]
  *   Pending|Running → Succeeded|Failed|Canceled [syncFromRecipeExecution]
+ *   Failed → Succeeded (recovered child)        [syncFromRecipeExecution]
  *   Running → Failed (timeout)                  [checkStuckRuns]
+ *   Running → Failed (child missing on reclaim) [reclaimRunning]
  *
  * Every UPDATE of `workflow_runs` names the phases it applies to. The start,
  * timeout and reclaim statements also check ownership or the one-minute lease.

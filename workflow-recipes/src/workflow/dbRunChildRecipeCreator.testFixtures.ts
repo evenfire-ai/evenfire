@@ -10,17 +10,22 @@ const defaultedStep: Record<string, unknown> = {
 }
 
 /**
- * Runs the request middleware of one Kubernetes call's options and returns the
- * signal it installs on the request context. Fails unless exactly one is.
+ * Runs every request middleware in one Kubernetes call's options and returns
+ * the signal they install on the request context. Fails unless the options
+ * carry middleware and exactly one signal is installed.
  */
 export async function installedSignal(options: unknown): Promise<AbortSignal> {
-  const { middleware } = options as {
-    middleware: Array<{ pre: (context: unknown) => { toPromise: () => Promise<unknown> } }>
+  const middleware = (options as { middleware?: unknown } | undefined)?.middleware
+  if (!Array.isArray(middleware) || middleware.length === 0) {
+    throw new Error(`call options carry no request middleware: ${JSON.stringify(options)}`)
   }
   const installed: AbortSignal[] = []
-  await middleware[0]!
-    .pre({ setSignal: (signal: AbortSignal) => installed.push(signal) })
-    .toPromise()
+  const context = { setSignal: (signal: AbortSignal) => installed.push(signal) }
+  for (const entry of middleware as Array<{
+    pre: (context: unknown) => { toPromise: () => Promise<unknown> }
+  }>) {
+    await entry.pre(context).toPromise()
+  }
   if (installed.length !== 1) throw new Error(`middleware installed ${installed.length} signals`)
   return installed[0]!
 }
