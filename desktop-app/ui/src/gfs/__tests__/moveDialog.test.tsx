@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import { GfsMoveDialog } from '../moveDialog'
 
 /**
@@ -82,6 +83,32 @@ function renderDialog(
 }
 
 describe('GfsMoveDialog cached root presentation', () => {
+  it('reuses the production shared root cache when the dialog is reopened', async () => {
+    const cachedFolder = folder('cached-destination', 'Cached destination')
+    const listAccessible = vi.fn(async () => ({ items: [cachedFolder], nextCursor: null }))
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    queryClient.setQueryData(
+      desktopQueryKeys.gfsAccessible('anonymous', 'main', SESSION_GENERATION),
+      {
+        pages: [{ items: [cachedFolder], nextCursor: null }],
+        pageParams: [undefined],
+      }
+    )
+
+    const first = renderDialog({ listAccessible }, {}, queryClient)
+    const firstDialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    expect(within(firstDialog).getByRole('button', { name: 'Cached destination' })).toBeTruthy()
+    first.unmount()
+
+    const reopened = renderDialog({ listAccessible }, {}, queryClient)
+    const reopenedDialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    expect(within(reopenedDialog).getByRole('button', { name: 'Cached destination' })).toBeTruthy()
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(listAccessible).not.toHaveBeenCalled()
+  })
+
   it('keeps same-scope destinations visible while the required refresh is pending', async () => {
     let resolveRefresh!: (page: { items: GfsBrowserChild[]; nextCursor: null }) => void
     const refresh = new Promise<{ items: GfsBrowserChild[]; nextCursor: null }>(resolve => {

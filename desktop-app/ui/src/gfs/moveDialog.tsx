@@ -397,7 +397,6 @@ export function GfsMoveDialog({
         : Promise.resolve({ items: [], nextCursor: null })
     },
     enabled: Boolean(sessionScope) && isGfsSessionGeneration(sessionGeneration),
-    refetchOnMount: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
     ...gfsInfiniteQueryPolicy(queryClient),
