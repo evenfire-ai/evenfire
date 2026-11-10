@@ -44,7 +44,10 @@ it back into bypass. Cache hits are still audited.
 **Audit** — every decision (allow, deny, error) is one INSERT-only row in
 `gfs_audit`, written under the least-privilege `gfs_controller` DB role
 (INSERT-only on the audit table; no write on grants/shares). An audit-write
-failure propagates — no un-audited op is served. `src/audit/chain.ts` provides
+failure propagates — no un-audited op is served. A decision re-made inside a
+writer transaction (upload finalization) records its allow row in that
+transaction, so the row is kept only if the write commits; a denial or a store
+error there is recorded after the rollback. `src/audit/chain.ts` provides
 the SHA-256 `prevHash → rowHash` chain hashing and verification: the log is
 tamper-**evident**, not WORM. Live rows currently carry a per-row content hash;
 full `prev_hash` chaining of inserted rows is not yet wired into the write path.
