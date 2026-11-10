@@ -576,6 +576,25 @@ interface MutableSheet {
   skippedFirst: number[]
 }
 
+/**
+ * The length `JSON.stringify(values)` would have, measured without building
+ * the string when the row is wider than `limit`: any total over `limit` is
+ * reported as `limit + 1`. A cell is only serialized when it can still fit, so
+ * a row that repeats one long shared string across 16,384 columns (a 50 KB
+ * file that serializes to 500 MB) costs one cell, not the whole row.
+ */
+function serializedRowLength(values: readonly XlsxCellValue[], limit: number): number {
+  // Brackets, plus one comma between each pair of cells.
+  let total = 2 + Math.max(0, values.length - 1)
+  for (const value of values) {
+    if (total > limit) return limit + 1
+    // A string serializes to at least its length plus two quotes.
+    if (typeof value === 'string' && total + value.length + 2 > limit) return limit + 1
+    total += JSON.stringify(value).length
+  }
+  return total > limit ? limit + 1 : total
+}
+
 class SheetWindow {
   rowCount = 0
   stoppedBy: StoppedBy | undefined
@@ -607,7 +626,7 @@ class SheetWindow {
       this.stop(sheet, sheetIndex, rowNumber, 'max_rows')
       return false
     }
-    const rowChars = JSON.stringify(values).length
+    const rowChars = serializedRowLength(values, this.limits.maxExtractedChars)
     if (rowChars > this.limits.maxExtractedChars) {
       sheet.rows.push([])
       this.rowCount += 1

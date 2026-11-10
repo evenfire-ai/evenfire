@@ -175,3 +175,39 @@ describe('XLSX stray far-column cell (R1-M6)', () => {
     expect(second.sheets[0]).toMatchObject({ startRow: 3, rows: [['three']] })
   }, 60_000)
 })
+
+describe('XLSX row width is measured without serializing the row', () => {
+  it('a 50 KB file that repeats one long shared string across a row reads, with that row skipped', async () => {
+    // One 32,767-character shared string in all 16,384 cells of row 2: the row
+    // serializes to about 537 MB. Measuring it with JSON.stringify exceeded
+    // V8's maximum string length and the child heap, so the whole call (rows 1
+    // and 3 included, on every continuation) failed as `heap`.
+    const bytes = await workbook(sheet => {
+      sheet.addRow(['head'])
+      sheet.addRow(Array.from({ length: 16_384 }, () => longCell(0)))
+      sheet.addRow(['after'])
+    })
+    expect(bytes.length).toBeLessThan(100_000)
+    const outcome = await runDocumentJob({
+      kind: 'xlsx',
+      bytes: new Uint8Array(bytes),
+      sheet: null,
+      start: null,
+      limits: documentLimits(),
+    })
+    expect(outcome).toEqual({
+      ok: true,
+      sheetNames: ['Data'],
+      sheets: [
+        {
+          name: 'Data',
+          startRow: 1,
+          rows: [['head'], [], ['after']],
+          truncated: false,
+          lastRow: 3,
+          skippedRows: { count: 1, first: [2] },
+        },
+      ],
+    })
+  }, 60_000)
+})
