@@ -28,6 +28,7 @@ import {
 import {
   assertTrustedSender,
   registerDeepLinkAcknowledgmentHandlers,
+  registerGfsDeepLinkListHandler,
   registerIpcHandlers,
 } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
@@ -289,10 +290,7 @@ ipcMain.handle('sandboxUi:clearPendingDeepLinks', event => {
   sandboxUiDeepLinkQueue.clear()
 })
 
-ipcMain.handle('gfs:listPendingDeepLinks', event => {
-  assertTrustedSender(event)
-  return { links: gfsResourceDeepLinkQueue.list() }
-})
+registerGfsDeepLinkListHandler(gfsResourceDeepLinkQueue)
 
 function isTrustedGfsNavigationSender(event: IpcMainEvent): boolean {
   try {

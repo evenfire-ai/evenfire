@@ -782,6 +782,22 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       }
     }
   )
+  const beginConfirmedGfsResourceNavigation = vi.fn(
+    (id: number, uri: string, principalGeneration: number): GfsResourceNavigationRequest => {
+      const intentSequence = beginUserNavigationIntent()
+      const userNavigationGenerationAtActivation = testUserNavigationGeneration
+      const owner = assignGfsResourceNavigationOwner(controller.workspaceTabs, uri)
+      return {
+        id,
+        uri,
+        ownerTabId: owner.createDestination ? nextWorkspaceTabId() : owner.ownerTabId,
+        createDestination: owner.createDestination,
+        intentSequence,
+        principalGeneration,
+        userNavigationGenerationAtActivation,
+      }
+    }
+  )
   const isGfsResourceNavigationCurrent = vi.fn(
     (request: GfsResourceNavigationRequest, principalGeneration: number) =>
       canCompleteGfsResourceNavigation(request, {
@@ -974,6 +990,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     captureWorkspaceNavigation,
     restoreWorkspaceNavigation,
     beginGfsResourceNavigation,
+    beginConfirmedGfsResourceNavigation,
     isGfsResourceNavigationCurrent,
     activateGfsResourceNavigation,
     completeGfsResourceNavigationPreview,
@@ -1178,6 +1195,15 @@ describe('App deep-link orchestration', () => {
   async function waitForMounted() {
     await waitFor(() => expect(embedPhase()).toBe('mounted'))
   }
+
+  async function confirmPendingGfsLink(): Promise<void> {
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+  }
+
   it('retains a cold resource link through authentication and bootstrap readiness', async () => {
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
     const link = produceGfsResourceDeepLink(uri)
@@ -1212,6 +1238,7 @@ describe('App deep-link orchestration', () => {
     } as Partial<AppController>)
     rerender(<App />)
 
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -1237,6 +1264,7 @@ describe('App deep-link orchestration', () => {
       emitGfsDeepLink?.(link)
     })
 
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -1247,7 +1275,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
   })
 
-  it('does not let a link activated before a Chat selection take over an inactive Files root', async () => {
+  it('requires fresh Open after a delayed event follows a Chat selection', async () => {
     const uri = 'gfs://main/abababababababababababababababab'
     const queue = new GfsResourceDeepLinkQueue()
     const link = produceGfsResourceDeepLink(uri, queue)
@@ -1277,26 +1305,34 @@ describe('App deep-link orchestration', () => {
     // happens before the renderer receives this delayed event.
     act(() => emitGfsDeepLink?.(link))
 
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(filesPageHarness.resolveRequests).toEqual([])
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(currentController.beginConfirmedGfsResourceNavigation).not.toHaveBeenCalled()
+    await confirmPendingGfsLink()
+    await waitFor(() =>
+      expect(currentController.beginConfirmedGfsResourceNavigation).toHaveBeenCalledOnce()
+    )
+
     const activeTabButton = screen
       .getByRole('toolbar', { name: 'Workspace tabs' })
       .querySelector('button[aria-pressed="true"]')
-    expect(activeTabButton?.getAttribute('aria-label')).toBe('New chat')
-    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(activeTabButton?.getAttribute('aria-label')).toBe('Files')
+    expect(currentController.workspaceTabs.activeTabId).not.toBe('chat-tab-1')
     expect(
       currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-root')?.files?.path
     ).toBeNull()
-    expect(screen.queryByTestId('files-page-surface')).toBeNull()
+    expect(screen.getByTestId('files-page-surface')).toBeTruthy()
     expect(filesPageHarness.resolveRequests).toEqual([])
-    expect(document.activeElement).toBe(chatButton)
-    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
-    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
-    expect(queue.list()).toEqual([])
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri })
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(queue.list()).toEqual([link])
     expect(currentController.pushToast).not.toHaveBeenCalled()
 
     act(() => emitGfsDeepLink?.(link))
     expect(filesPageHarness.resolveRequests).toEqual([])
-    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
-    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(currentController.workspaceTabs.activeTabId).not.toBe('chat-tab-1')
   })
 
   it('keeps newer explicit link navigation and reserves a separate Files destination', async () => {
@@ -1323,6 +1359,7 @@ describe('App deep-link orchestration', () => {
     expect(link.userNavigationGenerationAtActivation).toBe(testUserNavigationGeneration)
     act(() => emitGfsDeepLink?.(link))
 
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -1364,6 +1401,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(link))
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -1407,6 +1445,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(link))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     const ownerId = currentController.workspaceTabs.activeTabId
     expect(currentController.workspaceTabs.activeTabId).toBe(ownerId)
@@ -1431,12 +1470,15 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
   })
 
-  it('releases a retryable link when a newer valid link arrives', async () => {
+  it('keeps a later activation raw until the confirmed GFS read settles', async () => {
     const uriA = 'gfs://main/afafafafafafafafafafafafafafafaf'
     const uriB = 'gfs://main/bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf'
     const queue = new GfsResourceDeepLinkQueue()
     const linkA = produceGfsResourceDeepLink(uriA, queue)
-    const producerResource = await resolveResource(
+    const resourceA = await resolveResource(
+      resolvedFile('afafafafafafafafafafafafafafafaf', 'older.md')
+    )
+    const resourceB = await resolveResource(
       resolvedFile('bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf', 'newer.md')
     )
     const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
@@ -1444,11 +1486,11 @@ describe('App deep-link orchestration', () => {
       path: uriA,
       title: 'Files owner',
     })
-    let resolveB!: (resource: unknown) => void
+    const deferred = new Map<string, (resource: unknown) => void>()
     resolveGfsResource.mockImplementation(
-      () =>
+      (uri: string) =>
         new Promise(resolve => {
-          resolveB = resolve
+          deferred.set(uri, resolve)
         })
     )
     filesPageHarness.resolveOnDeepLink = true
@@ -1457,14 +1499,23 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
-    act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(linkA.id, 'retryable'))
-    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
-
     const linkB = produceGfsResourceDeepLink(uriB, queue)
     act(() => emitGfsDeepLink?.(linkB))
-    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
+    expect(filesPageHarness.resolveRequests).toHaveLength(1)
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: linkA.id, uri: uriA })
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(queue.list()).toEqual([linkA, linkB])
+
+    await act(async () => {
+      deferred.get(uriA)?.(resourceA)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkA.id))
+    await confirmPendingGfsLink()
+    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
     expect(filesPageHarness.resolveRequests[1]).toEqual({
       id: linkB.id,
       tabId: 'files-owner',
@@ -1474,7 +1525,7 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
 
     await act(async () => {
-      resolveB(producerResource)
+      deferred.get(uriB)?.(resourceB)
       await Promise.resolve()
       await Promise.resolve()
     })
@@ -1519,6 +1570,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     expect(filesPageHarness.resolveRequests[0]).toEqual({
       id: linkA.id,
@@ -1591,6 +1643,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(link))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri: link.uri })
     expect(filesPageHarness.pendingGfsUri).toBe(ownerUri)
@@ -1655,6 +1708,7 @@ describe('App deep-link orchestration', () => {
       await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
       act(() => emitGfsDeepLink?.(linkA))
+      await confirmPendingGfsLink()
       await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
       fireEvent.click(screen.getByRole('button', { name: 'Files B' }))
       await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1))
@@ -1722,6 +1776,7 @@ describe('App deep-link orchestration', () => {
       render(<App />)
       await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
       act(() => emitGfsDeepLink?.(linkA))
+      await confirmPendingGfsLink()
       await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
 
       let finalButton: HTMLElement | null = null
@@ -1786,6 +1841,7 @@ describe('App deep-link orchestration', () => {
     render(<App />)
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
 
     fireEvent.click(screen.getByRole('button', { name: 'Close Files A' }))
@@ -1813,7 +1869,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.pushToast).not.toHaveBeenCalled()
   })
 
-  it('settles newer resource links without letting an older out-of-order result take over', async () => {
+  it('admits a queued newer activation only after the current destination settles', async () => {
     const uriA = 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     const uriB = 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
     const queue = new GfsResourceDeepLinkQueue()
@@ -1842,10 +1898,21 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     act(() => emitGfsDeepLink?.(linkB))
-    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
+    expect(filesPageHarness.resolveRequests).toHaveLength(1)
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(queue.list()).toEqual([linkA, linkB])
+
+    await act(async () => {
+      deferred.get(uriA)?.(resourceA)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkA.id))
+    await confirmPendingGfsLink()
+    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
 
     await act(async () => {
       deferred.get(uriB)?.(resourceB)
@@ -1853,15 +1920,6 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkB.id))
-    const savedPathAfterB = currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-a')
-      ?.files?.path
-    expect(savedPathAfterB).toBe(uriB)
-
-    await act(async () => {
-      deferred.get(uriA)?.(resourceA)
-      await Promise.resolve()
-      await Promise.resolve()
-    })
 
     expect(currentController.workspaceTabs.activeTabId).toBe('files-a')
     expect(
@@ -1906,12 +1964,14 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     fireEvent.click(screen.getByRole('button', { name: 'Files B' }))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkA.id))
 
     linkB = produceGfsResourceDeepLink(uriB, queue)
     act(() => emitGfsDeepLink?.(linkB))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
     expect(filesPageHarness.resolveRequests[1]).toEqual({
       id: linkB.id,
@@ -1983,6 +2043,7 @@ describe('App deep-link orchestration', () => {
 
     const linkB = produceGfsResourceDeepLink('gfs://main/22222222222222222222222222222222', queue)
     act(() => emitGfsDeepLink?.(linkB))
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -2076,8 +2137,11 @@ describe('App deep-link orchestration', () => {
     const { rerender } = render(<App />)
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
     act(() => emitGfsDeepLink?.(linkA))
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(currentController.activateGfsResourceNavigation).not.toHaveBeenCalled()
+    await confirmPendingGfsLink()
     await waitFor(() =>
-      expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
+      expect(currentController.beginConfirmedGfsResourceNavigation).toHaveBeenCalledOnce()
     )
     const staleOutcome = filesPageHarness.props?.onPendingGfsDeepLinkOutcome
     expect(staleOutcome).toBeTypeOf('function')
@@ -2096,6 +2160,7 @@ describe('App deep-link orchestration', () => {
       emitGfsDeepLink?.(linkB)
       emitGfsDeepLink?.(linkB)
     })
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
