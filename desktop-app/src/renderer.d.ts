@@ -785,6 +785,8 @@ declare global {
         ) => Promise<ChatMessage[]>
         appendMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
         upsertMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
+        /** Removes local user turns the server never answered; throws for any other message. */
+        removeMessages: (agentRef: string, chatId: string, messageIds: string[]) => Promise<number>
         replaceMessages: (
           agentRef: string,
           chatId: string,

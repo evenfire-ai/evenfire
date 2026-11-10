@@ -15,8 +15,9 @@ import type {} from './mockClerumStoreRoot'
  * hook code path and keeps the suite consistent with the rest of the repo.
  *
  * R1-M11: the transcript writes and reads (`create`, `delete`, `loadMessages`,
- * `appendMessages`, `upsertMessages`) delegate to a real `ChatStore` on a
- * per-install directory under the run's temporary root, so suites observe the
+ * `appendMessages`, `upsertMessages`, `removeMessages`) delegate to a real
+ * `ChatStore` on a per-install directory under the run's temporary root, so
+ * suites observe the
  * merge, delete tombstone and paging behavior the IPC handlers run in
  * production. They stay `vi.fn` wrappers, so call assertions and per-test
  * overrides keep working. `uninstallMockClerum` removes the bridge; the global
@@ -41,6 +42,7 @@ interface ChatMock {
   loadMessages: Fn
   appendMessages: Fn
   upsertMessages: Fn
+  removeMessages: Fn
   replaceMessages: Fn
   markUnreadTerminal: Fn
   clearUnreadTerminal: Fn
@@ -120,6 +122,9 @@ export function installMockClerum(): MockClerum {
     ),
     upsertMessages: vi.fn((agentRef: string, chatId: string, messages: ChatMessage[]) =>
       store.upsertMessages(agentRef, chatId, messages)
+    ),
+    removeMessages: vi.fn((agentRef: string, chatId: string, messageIds: string[]) =>
+      store.removeMessages(agentRef, chatId, messageIds)
     ),
     replaceMessages: vi.fn(async () => undefined),
     markUnreadTerminal: vi.fn(async () => undefined),
