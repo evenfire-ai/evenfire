@@ -5,6 +5,8 @@ import {
   SignalPoller,
   StatusReporter,
   StepCoordinator,
+  WorkflowAuthorizationPausedError,
+  WorkflowRunStateUnavailableError,
   createStaticRuntimeTokenProvider,
 } from '@clerum/workflow-runtime-core'
 import { registry, workflowStepDurationSeconds, workflowStepTotal } from '../../../src/metrics'
@@ -669,5 +671,325 @@ describe('sdk workflow runtime', () => {
         previousOutputs: { seed: '{"value":"cached"}' },
       })
     )
+  })
+})
+
+// ─── Run-store wait at running boundaries (C13 spec §4.3) ───────────────────
+
+describe('sdk workflow runtime: run store unavailable at a running boundary', () => {
+  const STORE_MESSAGE = 'Failed to report step status after 3 attempts: HTTP 503'
+  const WAIT_LINE = 'Workflow run state unavailable at a running boundary; waiting before retry'
+  const BOUND_LINE = 'Workflow run state unavailable beyond the wait bound'
+
+  type Harness = {
+    status: StatusReporter
+    statusMock: {
+      getWorkflowStatus: ReturnType<typeof vi.fn>
+      reportWorkflowStatus: ReturnType<typeof vi.fn>
+      reportStepStatus: ReturnType<typeof vi.fn>
+    }
+    signals: SignalPoller
+    order: string[]
+    snippetRunner: ReturnType<typeof makeSnippetRunner>
+    state: { cancel: boolean }
+  }
+
+  function harness(snapshot = { workflowPhase: 'pending', steps: [] as unknown[] }): Harness {
+    const order: string[] = []
+    const state = { cancel: false }
+    const statusMock = {
+      getWorkflowStatus: vi.fn().mockResolvedValue(snapshot),
+      reportWorkflowStatus: vi.fn().mockImplementation(async (phase: string) => {
+        order.push(`workflow:${phase}`)
+      }),
+      reportStepStatus: vi.fn().mockImplementation(async (stepId: string, phase: string) => {
+        order.push(`step:${stepId}:${phase}`)
+      }),
+    }
+    const signals = {
+      pollSignals: vi.fn().mockReturnValue(vi.fn()),
+      hasSignal: vi.fn((signal: string) => signal === 'cancel' && state.cancel),
+    }
+    const snippetRunner = makeSnippetRunner(async () => {
+      order.push('snippet')
+      return { status: 'completed', output: { ok: true } }
+    })
+    return {
+      status: statusMock as unknown as StatusReporter,
+      statusMock,
+      signals: signals as unknown as SignalPoller,
+      order,
+      snippetRunner,
+      state,
+    }
+  }
+
+  function run(h: Harness, overrides: { signalPollIntervalMs?: number; runStateWaitMs?: number }) {
+    return runWorkflowRuntime({
+      config: { ...runtimeConfig(), signalPollIntervalMs: overrides.signalPollIntervalMs ?? 1 },
+      spec: {
+        name: 'runtime-test',
+        namespace: 'sandbox-recipes',
+        steps: [{ id: 'emit', run: snippetRun() }],
+      },
+      coordinator: new StepCoordinator(),
+      status: h.status,
+      signals: h.signals,
+      mcpHost: null,
+      snippetRunner: h.snippetRunner as never,
+      modelInjection: vi.fn(),
+      ...(overrides.runStateWaitMs === undefined
+        ? {}
+        : { runStateWaitMs: overrides.runStateWaitMs }),
+    })
+  }
+
+  async function withDeadline<T>(promise: Promise<T>, ms = 5_000): Promise<T | 'deadline'> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<'deadline'>(resolve => {
+          timer = setTimeout(() => resolve('deadline'), ms)
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  function runtimeLogLines(write: ReturnType<typeof vi.spyOn>, message: string): unknown[] {
+    return write.mock.calls
+      .map(call => String(call[0]))
+      .filter(line => line.includes(`"message":"${message}"`))
+      .map(line => JSON.parse(line))
+  }
+
+  function storeUnavailable(): WorkflowRunStateUnavailableError {
+    return new WorkflowRunStateUnavailableError(STORE_MESSAGE)
+  }
+
+  it('T-4f: waits and retries the step running report, then runs the step once', async () => {
+    const h = harness()
+    let runningCalls = 0
+    h.statusMock.reportStepStatus.mockImplementation(async (stepId: string, phase: string) => {
+      h.order.push(`step:${stepId}:${phase}`)
+      if (phase === 'running') {
+        runningCalls += 1
+        if (runningCalls <= 2) throw storeUnavailable()
+      }
+    })
+
+    const result = await run(h, {})
+
+    expect(result).toEqual({ exitCode: 0, workflowPhase: 'completed' })
+    expect(h.order).toEqual([
+      'workflow:running',
+      'step:emit:running',
+      'step:emit:running',
+      'step:emit:running',
+      'snippet',
+      'step:emit:completed',
+      'workflow:completed',
+    ])
+    expect(h.snippetRunner.execute).toHaveBeenCalledOnce()
+    expect(h.statusMock.reportWorkflowStatus).not.toHaveBeenCalledWith('failed', expect.anything())
+    // Only readCurrentStatus read the status: the store wait never consults it.
+    expect(h.statusMock.getWorkflowStatus).toHaveBeenCalledOnce()
+  })
+
+  it('T-4g: waits at the workflow-level boundary of a run still initializing', async () => {
+    const h = harness({ workflowPhase: 'initializing', steps: [] })
+    let workflowRunningCalls = 0
+    h.statusMock.reportWorkflowStatus.mockImplementation(async (phase: string) => {
+      h.order.push(`workflow:${phase}`)
+      if (phase === 'running') {
+        workflowRunningCalls += 1
+        if (workflowRunningCalls === 1) throw storeUnavailable()
+      }
+    })
+
+    const runtime = run(h, {})
+    try {
+      const outcome = await withDeadline(runtime)
+      expect(outcome).toEqual({ exitCode: 0, workflowPhase: 'completed' })
+      expect(workflowRunningCalls).toBe(2)
+    } finally {
+      h.state.cancel = true
+      await withDeadline(runtime)
+    }
+  })
+
+  it('T-4h: honours cancel while waiting for the run store', async () => {
+    const h = harness()
+    let runningCalls = 0
+    h.statusMock.reportStepStatus.mockImplementation(async (stepId: string, phase: string) => {
+      h.order.push(`step:${stepId}:${phase}`)
+      if (phase !== 'running') return
+      runningCalls += 1
+      if (h.state.cancel && runningCalls > 50) throw new Error('stop the mutated wait loop')
+      // The cancel arrives after the first wait.
+      if (runningCalls === 2) h.state.cancel = true
+      throw storeUnavailable()
+    })
+
+    const runtime = run(h, {})
+    try {
+      const outcome = await withDeadline(runtime)
+      expect(outcome).toEqual({ exitCode: 1, workflowPhase: 'cancelled' })
+      expect(runningCalls).toBeGreaterThanOrEqual(1)
+      expect(
+        h.statusMock.reportWorkflowStatus.mock.calls.filter(c => c[0] === 'cancelled')
+      ).toHaveLength(1)
+      expect(h.snippetRunner.execute).not.toHaveBeenCalled()
+    } finally {
+      runningCalls = 1_000
+      await withDeadline(runtime)
+    }
+  })
+
+  it('T-4i: fails the run on a plain Error from the step running report, as before', async () => {
+    const h = harness()
+    h.statusMock.reportStepStatus.mockImplementation(async (stepId: string, phase: string) => {
+      h.order.push(`step:${stepId}:${phase}`)
+      if (phase === 'running')
+        throw new Error('Failed to report step status after 3 attempts: HTTP 500')
+    })
+
+    const runtime = run(h, {})
+    try {
+      const outcome = await withDeadline(runtime)
+      expect(outcome).toMatchObject({ exitCode: 1, workflowPhase: 'failed' })
+      expect(h.statusMock.reportStepStatus.mock.calls.filter(c => c[1] === 'running')).toHaveLength(
+        1
+      )
+      expect(h.statusMock.reportWorkflowStatus).toHaveBeenCalledWith('failed', {
+        failureReason: 'Failed to report step status after 3 attempts: HTTP 500',
+      })
+      expect(h.snippetRunner.execute).not.toHaveBeenCalled()
+    } finally {
+      h.state.cancel = true
+      await withDeadline(runtime)
+    }
+  })
+
+  it('T-4k: fails the run once the consecutive wait passes runStateWaitMs', async () => {
+    const write = vi.spyOn(process.stdout, 'write')
+    const h = harness()
+    h.statusMock.reportStepStatus.mockImplementation(async (stepId: string, phase: string) => {
+      h.order.push(`step:${stepId}:${phase}`)
+      if (phase === 'running') throw storeUnavailable()
+    })
+
+    const runtime = run(h, { runStateWaitMs: 600 })
+    try {
+      const outcome = await withDeadline(runtime)
+      expect(outcome).toEqual({
+        exitCode: 1,
+        workflowPhase: 'failed',
+        failureReason: STORE_MESSAGE,
+      })
+      expect(
+        h.statusMock.reportStepStatus.mock.calls.filter(c => c[1] === 'running').length
+      ).toBeGreaterThanOrEqual(2)
+      expect(runtimeLogLines(write, BOUND_LINE)).toEqual([
+        expect.objectContaining({
+          level: 'error',
+          context: { boundary: 'emit', waitedMs: expect.any(Number) },
+        }),
+      ])
+      expect(runtimeLogLines(write, WAIT_LINE).length).toBeGreaterThanOrEqual(1)
+      expect(h.snippetRunner.execute).not.toHaveBeenCalled()
+    } finally {
+      h.state.cancel = true
+      await withDeadline(runtime)
+      write.mockRestore()
+    }
+  })
+
+  it('T-4l: a 423 between two store outages starts a new wait window', async () => {
+    const h = harness()
+    const startedAt = Date.now()
+    h.statusMock.getWorkflowStatus.mockImplementation(async () =>
+      h.statusMock.getWorkflowStatus.mock.calls.length === 1
+        ? { workflowPhase: 'pending', steps: [] }
+        : {
+            workflowPhase: Date.now() - startedAt < 800 ? 'authorization_paused' : 'running',
+            steps: [],
+          }
+    )
+    const answers: Array<() => void> = [
+      () => {
+        throw storeUnavailable()
+      },
+      () => {
+        throw new WorkflowAuthorizationPausedError()
+      },
+      () => {
+        throw storeUnavailable()
+      },
+      () => undefined,
+    ]
+    let runningCalls = 0
+    h.statusMock.reportStepStatus.mockImplementation(async (stepId: string, phase: string) => {
+      h.order.push(`step:${stepId}:${phase}`)
+      if (phase !== 'running') return
+      runningCalls += 1
+      const answer = answers[runningCalls - 1]
+      if (!answer) throw new Error(`unexpected running report ${runningCalls}`)
+      answer()
+    })
+
+    const runtime = run(h, { runStateWaitMs: 600 })
+    try {
+      const outcome = await withDeadline(runtime)
+      expect(outcome).toEqual({ exitCode: 0, workflowPhase: 'completed' })
+      expect(runningCalls).toBe(4)
+      expect(h.order.slice(h.order.lastIndexOf('step:emit:running'))).toEqual([
+        'step:emit:running',
+        'snippet',
+        'step:emit:completed',
+        'workflow:completed',
+      ])
+      expect(h.snippetRunner.execute).toHaveBeenCalledOnce()
+    } finally {
+      h.state.cancel = true
+      await withDeadline(runtime)
+    }
+  })
+
+  it('T-4m: the production bound is 150 000 ms of consecutive unavailability', async () => {
+    vi.useFakeTimers()
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const h = harness()
+    h.statusMock.reportStepStatus.mockImplementation(async (stepId: string, phase: string) => {
+      h.order.push(`step:${stepId}:${phase}`)
+      if (phase === 'running') throw storeUnavailable()
+    })
+    let settled: unknown = 'pending'
+    const runtime = run(h, { signalPollIntervalMs: 5_000 }).then(result => {
+      settled = result
+      return result
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(149_000)
+      expect(settled).toBe('pending')
+      expect(
+        h.statusMock.reportStepStatus.mock.calls.filter(c => c[1] === 'running').length
+      ).toBeGreaterThan(1)
+
+      await vi.advanceTimersByTimeAsync(1_500)
+      expect(settled).toEqual({
+        exitCode: 1,
+        workflowPhase: 'failed',
+        failureReason: STORE_MESSAGE,
+      })
+    } finally {
+      h.state.cancel = true
+      await vi.advanceTimersByTimeAsync(10_000)
+      await runtime
+      write.mockRestore()
+      vi.useRealTimers()
+    }
   })
 })

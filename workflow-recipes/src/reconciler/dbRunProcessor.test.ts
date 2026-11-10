@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Pool, PoolClient } from 'pg'
+import net from 'node:net'
+import { Pool as PgPool, type Pool, type PoolClient } from 'pg'
 import type { WorkflowRecipeCRD } from '../types.js'
 import {
   type ChildRecipeCreator,
@@ -1533,6 +1534,7 @@ describe('createDbRunProcessor', () => {
 
   it('durably pauses a Running V2 run on checkpoint outage before the next boundary', async () => {
     let phase: DbRunRow['phase'] = 'Running'
+    let failureReason: string | null = null
     const run = baseRun({
       phase,
       started_at: new Date(),
@@ -1553,10 +1555,11 @@ describe('createDbRunProcessor', () => {
     })
     const client = makeClient(async (sql, params) => {
       if (RUN_READ_SQL.test(sql)) {
-        return { rows: [{ ...run, phase }], rowCount: 1 }
+        return { rows: [{ ...run, phase, failure_reason: failureReason }], rowCount: 1 }
       }
       if (/SET phase = 'AuthorizationPaused'/.test(sql)) {
         phase = 'AuthorizationPaused'
+        failureReason = String(params?.[1])
         expect(params).toEqual([run.run_id, 'workflow_authority_unavailable'])
       }
       return { rows: [], rowCount: 1 }
@@ -1573,11 +1576,19 @@ describe('createDbRunProcessor', () => {
       logger: silentLogger(),
     })
 
-    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toBe('paused')
+    // Fresh pause: the reason is the string just written.
+    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toEqual({
+      outcome: 'paused',
+      failureReason: 'workflow_authority_unavailable',
+    })
     expect(phase).toBe('AuthorizationPaused')
     expect(checkpointAuthority).toHaveBeenCalledOnce()
     expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
-    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toBe('paused')
+    // Observed-paused exit: the reason is read back from the paused row.
+    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toEqual({
+      outcome: 'paused',
+      failureReason: 'workflow_authority_unavailable',
+    })
     expect(checkpointAuthority).toHaveBeenCalledOnce()
   })
 
@@ -1596,7 +1607,9 @@ describe('createDbRunProcessor', () => {
       logger: silentLogger(),
     })
 
-    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toBe('allowed')
+    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toEqual({
+      outcome: 'allowed',
+    })
     expect(checkpointAuthority).not.toHaveBeenCalled()
     expect(client.calls.some(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))).toBe(
       false
@@ -1695,8 +1708,11 @@ describe('createDbRunProcessor', () => {
   )
 
   it('T-R3: answers paused when the run is paused while the boundary checkpoint runs', async () => {
-    const observed = runWithBinding('binding-1', { phase: 'Running' })
-    const locked = runWithBinding('binding-1', { phase: 'AuthorizationPaused' })
+    const observed = runWithBinding('binding-1', { phase: 'Running', failure_reason: null })
+    const locked = runWithBinding('binding-1', {
+      phase: 'AuthorizationPaused',
+      failure_reason: 'workflow_authority_denied',
+    })
     const client = makeClient(async sql => {
       if (LOCKED_RUN_READ_SQL.test(sql)) return { rows: [locked], rowCount: 1 }
       if (RUN_READ_SQL.test(sql)) return { rows: [observed], rowCount: 1 }
@@ -1713,7 +1729,11 @@ describe('createDbRunProcessor', () => {
       logger: silentLogger(),
     })
 
-    await expect(proc.checkpointRunningBoundary(observed.run_id)).resolves.toBe('paused')
+    // The reason comes from the locked row, not from the observed one.
+    await expect(proc.checkpointRunningBoundary(observed.run_id)).resolves.toEqual({
+      outcome: 'paused',
+      failureReason: 'workflow_authority_denied',
+    })
 
     // Witness: the checkpoint answered allowed, and the locked re-read ran.
     expect(checkpointAuthority).toHaveBeenCalledOnce()
@@ -1777,7 +1797,181 @@ describe('createDbRunProcessor', () => {
       expect(tripwire.openTransactions).toBe(0)
     }
   )
+
+  // ─── Running boundary outcomes (C13 spec §3, §4) ─────────────────────────
+
+  it('answers paused with the reason stored on an already paused row, without a checkpoint', async () => {
+    const observed = runWithBinding('binding-1', {
+      phase: 'AuthorizationPaused',
+      failure_reason: 'workflow_authority_denied',
+    })
+    const client = makeClient(async sql =>
+      RUN_READ_SQL.test(sql) ? { rows: [observed], rowCount: 1 } : { rows: [], rowCount: 1 }
+    )
+    const checkpointAuthority = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe: vi.fn(),
+      logger: silentLogger(),
+    })
+
+    await expect(proc.checkpointRunningBoundary(observed.run_id)).resolves.toEqual({
+      outcome: 'paused',
+      failureReason: 'workflow_authority_denied',
+    })
+
+    // Witness: the unlocked read ran once and answered from its phase.
+    expect(client.calls.filter(call => RUN_READ_SQL.test(call.sql))).toHaveLength(1)
+    expect(client.calls.some(call => LOCKED_RUN_READ_SQL.test(call.sql))).toBe(false)
+    expect(checkpointAuthority).not.toHaveBeenCalled()
+  })
+
+  it('T-4b: answers run_state_unavailable when the read stage cannot reach the run store', async () => {
+    const refused = await captureConnectionRefused()
+    const logger = silentLogger()
+    const connect = vi.fn(async () => {
+      throw refused
+    })
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect } as unknown as Pool,
+      connect,
+      runPollMs: 30_000,
+      checkpointAuthority: vi.fn(),
+      createChildRecipe: vi.fn(),
+      logger,
+    })
+
+    await expect(proc.checkpointRunningBoundary('run-store-read')).resolves.toEqual({
+      outcome: 'run_state_unavailable',
+    })
+
+    expect(connect).toHaveBeenCalledOnce()
+    expect(logger.error).toHaveBeenCalledOnce()
+    // Exact field set: neither the message nor the address/port keys of the
+    // driver error are logged.
+    expect(logger.error).toHaveBeenCalledWith(
+      'workflow run store unreachable at running boundary',
+      {
+        run_id: 'run-store-read',
+        stage: 'read',
+        kind: 'network',
+        code: 'ECONNREFUSED',
+        name: 'Error',
+      }
+    )
+  })
+
+  it('T-4b: answers run_state_unavailable when the lock stage cannot reach the run store', async () => {
+    const refused = await captureConnectionRefused()
+    const logger = silentLogger()
+    const observed = runWithBinding('binding-1', { phase: 'Running' })
+    const client = makeClient(async sql =>
+      RUN_READ_SQL.test(sql) ? { rows: [observed], rowCount: 1 } : { rows: [], rowCount: 1 }
+    )
+    let connects = 0
+    const connect = vi.fn(async () => {
+      connects += 1
+      if (connects === 1) return client as unknown as PoolClient
+      throw refused
+    })
+    const checkpointAuthority = vi.fn(async () => {})
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect } as unknown as Pool,
+      connect,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe: vi.fn(),
+      logger,
+    })
+
+    await expect(proc.checkpointRunningBoundary(observed.run_id)).resolves.toEqual({
+      outcome: 'run_state_unavailable',
+    })
+
+    // Witness: the read stage ran and the checkpoint passed before the lock stage failed.
+    expect(connect).toHaveBeenCalledTimes(2)
+    expect(client.calls.filter(call => RUN_READ_SQL.test(call.sql))).toHaveLength(1)
+    expect(checkpointAuthority).toHaveBeenCalledOnce()
+    // No client was acquired for the lock stage, so nothing is rolled back.
+    expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(false)
+    expect(logger.error).toHaveBeenCalledOnce()
+    expect(logger.error).toHaveBeenCalledWith(
+      'workflow run store unreachable at running boundary',
+      {
+        run_id: observed.run_id,
+        stage: 'lock',
+        kind: 'network',
+        code: 'ECONNREFUSED',
+        name: 'Error',
+      }
+    )
+  })
+
+  it('T-4c: rethrows a run store error that is not an outage', async () => {
+    const missingTable = Object.assign(new Error('relation "workflow_runs" does not exist'), {
+      code: '42P01',
+    })
+    const logger = silentLogger()
+    const client = makeClient(async () => {
+      throw missingTable
+    })
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority: vi.fn(),
+      createChildRecipe: vi.fn(),
+      logger,
+    })
+
+    const failure = await proc.checkpointRunningBoundary('run-sql-defect').then(
+      () => null,
+      (error: unknown) => error
+    )
+
+    expect(failure).toBe(missingTable)
+    // Witness: the read query was issued and rejected.
+    expect(client.calls.filter(call => RUN_READ_SQL.test(call.sql))).toHaveLength(1)
+    expect(logger.error).not.toHaveBeenCalled()
+  })
 })
+
+/** The error the real `pg` driver raises for a closed loopback port. */
+async function captureConnectionRefused(): Promise<Error> {
+  const server = net.createServer()
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('no loopback port')
+  await new Promise<void>(resolve => server.close(() => resolve()))
+  const pool = new PgPool({
+    host: '127.0.0.1',
+    port: address.port,
+    user: 'x',
+    database: 'x',
+    connectionTimeoutMillis: 2_000,
+  })
+  pool.on('error', () => {})
+  try {
+    const failure = await pool.connect().then(
+      client => {
+        client.release()
+        return null
+      },
+      (error: unknown) => error
+    )
+    if (!(failure instanceof Error) || (failure as { code?: unknown }).code !== 'ECONNREFUSED') {
+      throw new Error(`expected ECONNREFUSED from a closed port, got ${String(failure)}`)
+    }
+    return failure
+  } finally {
+    await pool.end()
+  }
+}
 
 // ─── Pure helper tests ─────────────────────────────────────────────────────
 

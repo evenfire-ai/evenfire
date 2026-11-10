@@ -8,6 +8,8 @@ import {
   SignalPoller,
   StatusReporter,
   StepCoordinator,
+  WorkflowAuthorizationPausedError,
+  WorkflowRunStateUnavailableError,
   WorkflowSDKInitError,
   computeBackoff,
   createFileRuntimeTokenProvider,
@@ -50,6 +52,15 @@ describe('@clerum/workflow-sdk facade', () => {
     expect(CycleDetectedError).toBe(runtimeCore.CycleDetectedError)
     expect(WorkflowSDKInitError).toBe(runtimeCore.WorkflowSDKInitError)
     expect(McpHostNotConfiguredError).toBe(runtimeCore.McpHostNotConfiguredError)
+  })
+
+  it('reexports the running-boundary error classes from workflow-runtime-core', () => {
+    // Witness: core itself exports both classes, so an absent facade export
+    // cannot pass as `undefined === undefined`.
+    expect(typeof runtimeCore.WorkflowAuthorizationPausedError).toBe('function')
+    expect(typeof runtimeCore.WorkflowRunStateUnavailableError).toBe('function')
+    expect(WorkflowAuthorizationPausedError).toBe(runtimeCore.WorkflowAuthorizationPausedError)
+    expect(WorkflowRunStateUnavailableError).toBe(runtimeCore.WorkflowRunStateUnavailableError)
   })
 
   it('keeps internal compatibility shims wired to workflow-runtime-core', () => {

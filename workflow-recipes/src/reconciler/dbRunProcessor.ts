@@ -22,6 +22,10 @@ import type { Pool, PoolClient } from 'pg'
 import { type Logger, createLogger } from '../observability/logger.js'
 import type { WorkflowRecipeCRD } from '../types.js'
 import { WorkflowAuthorityCheckpointError } from './workflowActionCheckpointClient.js'
+import {
+  classifyWorkflowRunStoreError,
+  isWorkflowRunStoreUnreachable,
+} from './workflowRunStoreErrors.js'
 
 const AUTHORITY_FAILURE_REASON = Object.freeze({
   denied: 'workflow_authority_denied',
@@ -57,10 +61,16 @@ function sameAuthorityBinding(checked: DbRunRow, locked: DbRunRow): boolean {
   return (checked.authority_binding_id ?? null) === (locked.authority_binding_id ?? null)
 }
 
-/** Boundary answer decided by the phase alone; null when the run is Running. */
-function boundaryPhaseOutcome(phase: WorkflowRunPhase): 'paused' | 'not_running' | null {
-  if (phase === 'Running') return null
-  return phase === 'AuthorizationPaused' ? 'paused' : 'not_running'
+/**
+ * Boundary answer decided by the row's phase alone; null when the run is
+ * Running. A paused row answers with the reason stored on that row.
+ */
+function boundaryPhaseOutcome(row: DbRunRow): RunningBoundaryOutcome | null {
+  if (row.phase === 'Running') return null
+  if (row.phase === 'AuthorizationPaused') {
+    return { outcome: 'paused', failureReason: row.failure_reason ?? null }
+  }
+  return { outcome: 'not_running' }
 }
 
 // ─── Types ─────────────────────────────────────────────────────────────
@@ -97,6 +107,22 @@ export interface DbRunRow {
   /** Id of the binding row behind `authority_binding` (null for V1 runs). */
   authority_binding_id?: string | null
 }
+
+/**
+ * Answer of the durable running boundary:
+ *  - `allowed`: the run is Running (and, for a V2 run, its checkpoint passed);
+ *  - `paused`: the run is AuthorizationPaused, with the reason stored on the
+ *    row (or just written by this boundary);
+ *  - `not_running`: the run is missing, Pending or terminal;
+ *  - `run_state_unavailable`: the run store could not be reached, so the
+ *    boundary has no durable answer. A pause written in the same call may or
+ *    may not have committed (a failed `COMMIT`); the caller's retry reads it.
+ */
+export type RunningBoundaryOutcome =
+  | { outcome: 'allowed' }
+  | { outcome: 'paused'; failureReason: string | null }
+  | { outcome: 'not_running' }
+  | { outcome: 'run_state_unavailable' }
 
 export interface WorkflowRunAuthorityBinding {
   version: 2
@@ -158,7 +184,7 @@ export interface DbRunProcessor {
   processPending(runId: string): Promise<void>
   syncFromRecipeExecution(recipe: WorkflowRecipeCRD): Promise<void>
   checkStuckRuns(): Promise<number>
-  checkpointRunningBoundary(runId: string): Promise<'allowed' | 'paused' | 'not_running'>
+  checkpointRunningBoundary(runId: string): Promise<RunningBoundaryOutcome>
   getRunStatus(
     runId: string,
     recipeNamespace: string,
@@ -821,23 +847,32 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
   // The authority checkpoint (an HTTP call) runs outside any transaction and
   // while no pooled client is held:
   //   1. read the run without a transaction (client released after the read)
-  //      and answer from its phase;
+  //      and answer from its phase: `not_running` for a missing, Pending or
+  //      terminal run, `paused` with the row's reason for a paused run;
   //   2. checkpoint its binding;
   //   3. acquire a client and re-read the run under the row lock. A phase
   //      change answers from the new phase; a binding change (only resume
   //      writes one, under the same row lock) throws a retryable
   //      `authority_unavailable` with no retry here; otherwise pause on a
-  //      rejected checkpoint or answer `allowed`.
-  async function checkpointRunningBoundary(
-    runId: string
-  ): Promise<'allowed' | 'paused' | 'not_running'> {
-    const observed = await readRunWithoutTransaction(runId)
-    if (!observed) return 'not_running'
-    const observedPhaseOutcome = boundaryPhaseOutcome(observed.phase)
+  //      rejected checkpoint (`paused` with the reason written) or answer
+  //      `allowed`.
+  // When the run store cannot be reached in step 1 or 3 (closed allowlist in
+  // workflowRunStoreErrors.ts), the answer is `run_state_unavailable` and the
+  // caller retries; after a failed `COMMIT` of a pause the retry reads whether
+  // it committed. Every other error propagates.
+  async function checkpointRunningBoundary(runId: string): Promise<RunningBoundaryOutcome> {
+    let observed: DbRunRow | undefined
+    try {
+      observed = await readRunWithoutTransaction(runId)
+    } catch (error) {
+      return runStoreUnavailableOrThrow(runId, 'read', error)
+    }
+    if (!observed) return { outcome: 'not_running' }
+    const observedPhaseOutcome = boundaryPhaseOutcome(observed)
     if (observedPhaseOutcome) return observedPhaseOutcome
     // Legacy V1 runs have no initiating authority binding and retain their
     // existing lifecycle without the V2 continuation checkpoint.
-    if (!observed.authority_binding) return 'allowed'
+    if (!observed.authority_binding) return { outcome: 'allowed' }
 
     let failureReason: string | null = null
     try {
@@ -849,14 +884,37 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       failureReason = runningAuthorityFailureReason(error)
     }
 
-    return lockAndSettleBoundary(runId, observed, failureReason)
+    try {
+      return await lockAndSettleBoundary(runId, observed, failureReason)
+    } catch (error) {
+      return runStoreUnavailableOrThrow(runId, 'lock', error)
+    }
+  }
+
+  // Logs only structural fields: a connection error carries the database
+  // address in its message and in its own `address`/`port` keys.
+  function runStoreUnavailableOrThrow(
+    runId: string,
+    stage: 'read' | 'lock',
+    error: unknown
+  ): RunningBoundaryOutcome {
+    if (!isWorkflowRunStoreUnreachable(error)) throw error
+    const code = (error as { code?: unknown }).code
+    log.error('workflow run store unreachable at running boundary', {
+      run_id: runId,
+      stage,
+      kind: classifyWorkflowRunStoreError(error),
+      code: typeof code === 'string' ? code : undefined,
+      name: error instanceof Error ? error.name : typeof error,
+    })
+    return { outcome: 'run_state_unavailable' }
   }
 
   async function lockAndSettleBoundary(
     runId: string,
     observed: DbRunRow,
     failureReason: string | null
-  ): Promise<'allowed' | 'paused' | 'not_running'> {
+  ): Promise<RunningBoundaryOutcome> {
     const client = await connect()
     let inTransaction = false
     try {
@@ -867,9 +925,9 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       if (!run) {
         await client.query('ROLLBACK')
         inTransaction = false
-        return 'not_running'
+        return { outcome: 'not_running' }
       }
-      const lockedPhaseOutcome = boundaryPhaseOutcome(run.phase)
+      const lockedPhaseOutcome = boundaryPhaseOutcome(run)
       if (lockedPhaseOutcome) {
         await client.query('ROLLBACK')
         inTransaction = false
@@ -887,7 +945,7 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       if (!failureReason) {
         await client.query('COMMIT')
         inTransaction = false
-        return 'allowed'
+        return { outcome: 'allowed' }
       }
 
       await client.query(PAUSE_RUNNING_FOR_AUTHORITY, [runId, failureReason])
@@ -897,7 +955,7 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         run_id: runId,
         authority_failure: failureReason,
       })
-      return 'paused'
+      return { outcome: 'paused', failureReason }
     } catch (err) {
       if (inTransaction) {
         try {

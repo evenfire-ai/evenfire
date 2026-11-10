@@ -35,3 +35,15 @@ export class WorkflowAuthorizationPausedError extends Error {
     this.name = 'WorkflowAuthorizationPausedError'
   }
 }
+
+/**
+ * WRC answered the last attempt of a status report with 503
+ * `workflow_run_state_unavailable`: it could not reach its workflow run store
+ * to checkpoint a running boundary, so it answered neither allowed nor paused.
+ */
+export class WorkflowRunStateUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'WorkflowRunStateUnavailableError'
+  }
+}

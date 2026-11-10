@@ -24,6 +24,7 @@ export {
   WorkflowSDKInitError,
   McpHostNotConfiguredError,
   WorkflowAuthorizationPausedError,
+  WorkflowRunStateUnavailableError,
 } from './errors'
 export {
   OWNER_RECIPE_LABEL_KEY,
