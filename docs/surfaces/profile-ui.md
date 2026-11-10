@@ -30,12 +30,17 @@ Surfaces](README.md) for how the three consoles divide the platform.
    GET /api/v1/invitations/token/:token` before it renders.
 4. **They accept it**, then **set a password** on the same screen: the
    invitation token, email, invitation id, and new password all go to
-   `external-rest-api POST /api/v1/invitations/password`; the invitation
-   session token is never returned in the response body or exposed to page
-   JavaScript — external-rest-api sets it as an HttpOnly cookie.
-5. **Profile UI offers a Download Evenfire link** — not an automatic
-   handoff. The member installs the [Desktop App](desktop-app.md)
-   themselves.
+   `external-rest-api POST /api/v1/invitations/password`. Acceptance issues the
+   invitation session as an HttpOnly cookie; setting the password revokes that
+   session, clears the cookie and answers with `reauthenticationRequired: true`.
+   Profile UI then shows a password-updated screen with no session and a link to
+   the ordinary login. Password reset (`POST
+   /api/v1/invitations/password-reset`) follows the same post-password
+   contract.
+5. **The person signs in with the new password** and lands on the profile home.
+   Profile UI offers a Download Evenfire link — not an automatic handoff. The
+   member installs the [Desktop App](desktop-app.md) themselves and completes
+   step 6 from there.
 6. **The Desktop App completes the handoff later**, from its own sign-in
    screen: entering the invited email there makes the Desktop App look up
    the invitation profile and open Profile UI's `/desktop-setup?email=...`
@@ -66,6 +71,13 @@ for what breaks without it.
 - `/invitations/[token]` and `/forgot-password` — reachable without a
   session.
 - `/desktop-setup` — the Desktop App handoff, above.
+
+## Sign-out
+
+If the server does not confirm a sign-out (a 404 during a rollout window, a 503,
+or a network failure), Profile UI stops using the session cookie until the next
+successful sign-in, a confirmed sign-out, or an accepted password reset, and
+tells the member.
 
 ## Deploy
 

@@ -82,7 +82,8 @@ realPg('RP-1010-05 authenticated principal binding', () => {
   it('leaves existing retained security state unchanged on a mismatched binding', async () => {
     const engine = await import('../src/services/auth/passwordCredentialVerification.js')
     const capture = await engine.capturePasswordEvaluation('second@example.invalid', false)
-    await engine.completePasswordEvaluation(capture, false)
+    if (!capture) throw new Error('expected capture')
+    expect(await engine.cancelUnstartedPasswordEvaluation(capture)).toBe(true)
     const before = (await db.pool.query('SELECT * FROM password_identifier_state')).rows
     expect(
       await login.verifyUserPassword({
@@ -94,7 +95,7 @@ realPg('RP-1010-05 authenticated principal binding', () => {
     expect((await db.pool.query('SELECT * FROM password_identifier_state')).rows).toEqual(before)
     expect((await db.pool.query('SELECT * FROM password_verification_pace')).rows).toEqual([])
   })
-  it('preserves same-principal failure charging and successful canonical reverification', async () => {
+  it('preserves same-principal failure history across successful canonical reverification', async () => {
     expect(
       await login.verifyUserPassword({
         userId: firstId,
@@ -121,9 +122,17 @@ realPg('RP-1010-05 authenticated principal binding', () => {
     expect(
       (
         await db.pool.query(
-          'SELECT attempts,failures,locked_until_ms FROM password_identifier_state'
+          'SELECT attempts,failures,successes,locked_until_ms FROM password_identifier_state'
         )
       ).rows[0]
-    ).toMatchObject({ attempts: [], failures: [], locked_until_ms: '0' })
+    ).toMatchObject({
+      attempts: [],
+      failures: expect.any(Array),
+      successes: [],
+      locked_until_ms: '0',
+    })
+    expect(
+      (await db.pool.query('SELECT failures FROM password_identifier_state')).rows[0].failures
+    ).toHaveLength(1)
   })
 })

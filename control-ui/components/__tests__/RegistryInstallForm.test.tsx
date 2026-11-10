@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
+import type { InstallFromRegistryResponse } from '../../lib/api'
 import { RegistryInstallForm } from '../RegistryInstallForm'
 import { ToastProvider } from '../Toast'
 
@@ -15,12 +16,11 @@ vi.mock('../../lib/api', () => ({
   installFromRegistry: vi.fn().mockResolvedValue({
     serverName: 'brave-search',
     namespace: 'mcp-server',
-    contextRef: 'brave-search-00000',
-    contextUpdated: true,
     registryEntry: 'brave-search',
     registryVersion: '1.0.0',
     correlationId: 'test-corr-id',
-  }),
+    pendingCredentials: [],
+  } satisfies InstallFromRegistryResponse),
 }))
 
 const MOCK_ENTRY: api.RegistryEntry = {
@@ -170,7 +170,7 @@ describe('RegistryInstallForm -- server name default', () => {
 })
 
 describe('RegistryInstallForm -- install', () => {
-  it('installs into a generated private scope and passes it as the install contextRef', async () => {
+  it('installs without creating a Context or sending a contextRef', async () => {
     render(<RegistryInstallForm entry={MOCK_ENTRY} onCancel={vi.fn()} onInstalled={vi.fn()} />)
 
     await waitForContinue()
@@ -178,32 +178,19 @@ describe('RegistryInstallForm -- install', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Install' }))
 
-    // The private access scope is created before the install request.
-    await waitFor(() => {
-      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/contexts', expect.any(Object))
-    })
-    const scopeCall = vi
-      .mocked(api.apiSend)
-      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/contexts')
-    expect(scopeCall).toBeDefined()
-    const scopeBody = scopeCall![2] as {
-      metadata: { name: string }
-      spec: { contextId: string; description: string; mcpServers: string[] }
-    }
-    expect(scopeBody.metadata.name).toMatch(/^brave-search-[0-9]{5}$/)
-    expect(scopeBody.spec.contextId).toBe(scopeBody.metadata.name)
-    expect(scopeBody.spec.description).toBe('Connector access scope for brave-search')
-    expect(scopeBody.spec.mcpServers).toEqual([])
-
     await waitFor(() => {
       expect(api.installFromRegistry).toHaveBeenCalledTimes(1)
     })
     const installCall = vi.mocked(api.installFromRegistry).mock.calls[0][0]
+    expect(installCall).not.toHaveProperty('contextRef')
     expect(installCall.serverName).toBe('brave-search')
-    expect(installCall.contextRef).toBe(scopeBody.metadata.name)
-    expect(installCall.contextRef).toMatch(/^brave-search-[0-9]{5}$/)
     expect(installCall.registryEntryName).toBe('brave-search')
     expect(installCall.registryEntryVersion).toBe('1.0.0')
+    expect(api.apiSend).not.toHaveBeenCalledWith(
+      'POST',
+      '/api/v1/admin/contexts',
+      expect.anything()
+    )
   })
 
   it('shows a success card and lets the user open Connectors after installation', async () => {

@@ -93,8 +93,25 @@ export interface GfsTransport {
    * Binary fetch for downloads (resolves to the raw bytes). `opts.maxBytes`
    * bounds the download so an oversized payload is rejected before it fully
    * materializes; omitting it reads the whole body (the save-to-disk path).
+   * `opts.signal` cancels the producer-side fetch (folder-zip Stop).
    */
-  fetchBytes(url: string, token: string, opts?: { maxBytes?: number }): Promise<ArrayBuffer>
+  fetchBytes(
+    url: string,
+    token: string,
+    opts?: { maxBytes?: number; signal?: AbortSignal }
+  ): Promise<ArrayBuffer>
+  /**
+   * Streamed binary fetch for downloads (folder-zip). `onChunk` receives the
+   * body one chunk at a time, so a large payload never materializes as one
+   * buffer (R1-H2). OPTIONAL: a transport that does not implement it falls
+   * back to `fetchBytes`, which keeps the payload whole but still bounded.
+   */
+  fetchByteStream?(
+    url: string,
+    token: string,
+    opts: { maxBytes: number; signal?: AbortSignal },
+    onChunk: (chunk: Uint8Array) => Promise<void>
+  ): Promise<number>
 }
 
 /**
@@ -253,6 +270,8 @@ export interface GfsMoveInput {
   drive?: string
   destinationId: string
   ifMatch?: number
+  /** Optional combined rename+move; the server requires `write` on the resource for it. */
+  newName?: string
 }
 
 export interface GfsDeleteInput {
@@ -382,6 +401,7 @@ async function moveGfsResource(
   q.set('drive', input.drive ?? DEFAULT_DRIVE)
   const body: Record<string, unknown> = { newParentId: input.destinationId }
   if (input.ifMatch !== undefined) body.ifMatch = input.ifMatch
+  if (input.newName !== undefined) body.newName = input.newName
   const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.resourceId)}?${q.toString()}`
   const options = { body } as { token?: string; body?: unknown }
   options[TRANSPORT_TOKEN_FIELD] = session
@@ -419,13 +439,13 @@ export class GfsClient {
   constructor(private readonly transport: GfsTransport) {}
 
   /** Resolve a gfs:// URI to its current resource (validates the URI locally first). */
-  async resolveUri(uri: string, token: string): Promise<ResolvedGfsResource> {
+  async resolveUri(uri: string, token: string, signal?: AbortSignal): Promise<ResolvedGfsResource> {
     parseGfsUri(uri) // fail fast on a malformed URI before a round-trip
     try {
       const payload = await this.transport.requestJson<GfsEnvelope<ResolvedGfsResource>>(
         'GET',
         joinUrl(this.transport.baseUrl, `/api/v1/me/gfs/resolve?uri=${encodeURIComponent(uri)}`),
-        { token }
+        { token, signal }
       )
       return unwrap(payload)
     } catch (error) {
@@ -442,21 +462,63 @@ export class GfsClient {
   async download(
     uri: string,
     token: string,
-    opts?: { maxBytes?: number }
+    opts?: { maxBytes?: number; signal?: AbortSignal }
   ): Promise<{ resource: ResolvedGfsResource; bytes: ArrayBuffer }> {
     // resolveUri runs first and already surfaces its own verdict, so a 429 on the
     // resolve leg reaches the renderer with the resolve message, not this one.
-    const resource = await this.resolveUri(uri, token)
+    const resource = await this.resolveUri(uri, token, opts?.signal)
     const proxyUrl = joinUrl(
       this.transport.baseUrl,
       `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
     )
     try {
+      // The unbounded call keeps the exact 2-arg `fetchBytes` signature so
+      // existing callers stay byte-for-byte unchanged; any bound or
+      // cancellable call passes the opts object.
       const bytes =
-        opts?.maxBytes !== undefined
-          ? await this.transport.fetchBytes(proxyUrl, token, { maxBytes: opts.maxBytes })
+        opts?.maxBytes !== undefined || opts?.signal !== undefined
+          ? await this.transport.fetchBytes(proxyUrl, token, {
+              maxBytes: opts?.maxBytes,
+              signal: opts?.signal,
+            })
           : await this.transport.fetchBytes(proxyUrl, token)
       return { resource, bytes }
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+  }
+
+  /**
+   * Resolve then STREAM the resource bytes through the brokered proxy into
+   * `onChunk` (R1-H2). The payload never materializes as one buffer: the
+   * caller writes each chunk straight into the ZIP temp file, so the peak
+   * memory is one chunk regardless of the file's size.
+   *
+   * `opts.maxBytes` is a hard ceiling enforced producer-side, exactly as in
+   * `download`: an over-budget body is refused mid-stream, before the excess
+   * is written.
+   */
+  async downloadInto(
+    uri: string,
+    token: string,
+    opts: { maxBytes: number; signal?: AbortSignal },
+    onChunk: (chunk: Uint8Array) => Promise<void>
+  ): Promise<{ resource: ResolvedGfsResource; bytes: number }> {
+    const resource = await this.resolveUri(uri, token, opts.signal)
+    const proxyUrl = joinUrl(
+      this.transport.baseUrl,
+      `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
+    )
+    try {
+      if (this.transport.fetchByteStream) {
+        const bytes = await this.transport.fetchByteStream(proxyUrl, token, opts, onChunk)
+        return { resource, bytes }
+      }
+      // Fallback for a transport without a streaming fetch: the payload is
+      // whole, but the ceiling is still enforced before it is handed over.
+      const buffer = await this.transport.fetchBytes(proxyUrl, token, opts)
+      await onChunk(new Uint8Array(buffer))
+      return { resource, bytes: buffer.byteLength }
     } catch (error) {
       throw surfaceGfsGrantError(error)
     }
@@ -470,7 +532,7 @@ export class GfsClient {
   async listChildren(
     resourceId: string,
     token: string,
-    opts?: { drive?: string; cursor?: string }
+    opts?: { drive?: string; cursor?: string; signal?: AbortSignal }
   ): Promise<GfsChildrenPage> {
     const q = new URLSearchParams()
     q.set('drive', opts?.drive ?? DEFAULT_DRIVE)
@@ -482,7 +544,7 @@ export class GfsClient {
           this.transport.baseUrl,
           `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children?${q.toString()}`
         ),
-        { token }
+        { token, signal: opts?.signal }
       )
       return unwrap(payload)
     } catch (error) {
@@ -688,7 +750,11 @@ export class GfsClient {
     input: GfsMoveInput,
     session: string
   ): Promise<{ resourceId: string; version: number }> {
-    return moveGfsResource(this.transport, input, session)
+    try {
+      return await moveGfsResource(this.transport, input, session)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   async deleteResource(
@@ -800,7 +866,7 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
 }
 
 /**
- * Re-throw any GFS failure — grant, share, or read — with the server's
+ * Re-throw a GFS grant, share, read, or move failure with the server's
  * structured verdict fields embedded in the message.
  *
  * The transport (httpClient) throws an `ApiError` that stashes the raw response
@@ -862,7 +928,7 @@ function surfaceGfsGrantError(error: unknown): unknown {
   // Every `ApiError` now yields a `httpStatus=` part, so a wrapper is the norm
   // rather than the exception it used to be. The transport fields are not
   // copied onto it: `cause` keeps the original error object intact, and no
-  // main-process caller of these nine methods reads `.status`/`.bodyText` off
+  // main-process caller of these ten methods reads `.status`/`.bodyText` off
   // the rejection (the `ApiError` branches in `appService` belong to rpc-proxy
   // and stored-session paths; the upload retry path never imports this module).
   return new GfsUriError(`${baseMessage}${suffix}`, { cause: error })

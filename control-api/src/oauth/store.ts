@@ -706,6 +706,88 @@ export async function deleteOAuthGrantsForServer(
 }
 
 /**
+ * A database timestamp. Text as Postgres printed it keeps its microseconds; a JS
+ * `Date` truncates to milliseconds.
+ */
+export type DbTimestamp = Date | string
+
+/** A shared grant row removed by a purge, as the purge reports it. */
+export interface PurgedSharedGrant {
+  mcpServerName: string
+  contextName: string
+  bootstrappedBy: string
+}
+
+function purgedRows(rows: unknown[]): PurgedSharedGrant[] {
+  return (
+    rows as Array<{ recipe_name: string; context_id: string; bootstrapped_by_user_id: string }>
+  ).map(row => ({
+    mcpServerName: row.recipe_name,
+    contextName: row.context_id,
+    bootstrappedBy: row.bootstrapped_by_user_id,
+  }))
+}
+
+/**
+ * Delete the shared mcp-server grants of one Context whose server is not in
+ * `keep` (the Context's allowlist; empty to remove every shared grant of the
+ * Context). Returns the rows removed.
+ *
+ * `namespace` is the namespace the grant rows are keyed by (the McpServers'
+ * namespace), which a deployment may set apart from the Contexts' namespace.
+ * `updatedBefore` fences the periodic sweep to rows written before it read the
+ * database clock, so a consent that lands after its Context snapshot survives
+ * until a later snapshot can judge it; the admin route hooks pass none. Pass the
+ * clock as Postgres printed it (`now()::text`): a JS `Date` keeps milliseconds
+ * only, and a row written earlier in the same millisecond would escape the tick.
+ *
+ * Unfenced by `cr_uid` on purpose: the condition is "no Context enables this
+ * server here", which holds for every installation of it.
+ */
+export async function deleteSharedGrantsForContextExcept(
+  db: DbClient,
+  input: {
+    namespace: string
+    contextName: string
+    keep: readonly string[]
+    updatedBefore?: DbTimestamp
+  }
+): Promise<PurgedSharedGrant[]> {
+  const result = await db.query(
+    `DELETE FROM oauth_grants
+      WHERE owner_kind = 'mcpserver' AND grant_kind = 'shared'
+        AND recipe_namespace = $1 AND context_id = $2
+        AND NOT (recipe_name = ANY($3::text[]))
+        AND ($4::timestamptz IS NULL OR updated_at < $4::timestamptz)
+      RETURNING recipe_name, context_id, bootstrapped_by_user_id`,
+    [input.namespace, input.contextName, [...input.keep], input.updatedBefore ?? null]
+  )
+  return purgedRows(result.rows)
+}
+
+/**
+ * Delete the shared mcp-server grants whose Context is not among `existing`
+ * (the live Contexts the caller just listed), written before `updatedBefore`.
+ * An empty `existing` matches every shared row of the namespace: the caller
+ * must not call this with a list it cannot trust.
+ */
+export async function deleteSharedGrantsForMissingContexts(
+  db: DbClient,
+  input: { namespace: string; existing: readonly string[]; updatedBefore: DbTimestamp }
+): Promise<PurgedSharedGrant[]> {
+  const result = await db.query(
+    `DELETE FROM oauth_grants
+      WHERE owner_kind = 'mcpserver' AND grant_kind = 'shared'
+        AND recipe_namespace = $1
+        AND NOT (context_id = ANY($2::text[]))
+        AND updated_at < $3::timestamptz
+      RETURNING recipe_name, context_id, bootstrapped_by_user_id`,
+    [input.namespace, [...input.existing], input.updatedBefore]
+  )
+  return purgedRows(result.rows)
+}
+
+/**
  * Set (or clear) the background-consent flag on a user grant. Separate from
  * upsertOAuthGrant so the refresh-on-demand re-upsert never disturbs consent.
  */
@@ -1078,10 +1160,13 @@ export async function claimRemoteGrantForRefresh(
  *
  * One deliberate exception: the installation-identity fence (`cr_uid`,
  * {@link installIdentityFence}) lives ONLY in the two row readers. It is a read
- * fence. Deletes must still reach rows of a dead installation (a revoke or a
- * teardown has to be able to remove them), the locks only serialize — the engine
- * that runs under them re-reads through the fenced reader — and the refresh UPDATE
- * only ever follows that fenced read and never writes `cr_uid`.
+ * fence. Deletes must still reach rows of a dead installation (a revoke, a
+ * teardown, or a purge of rows no Context enables any more —
+ * {@link deleteSharedGrantsForContextExcept},
+ * {@link deleteSharedGrantsForMissingContexts} — has to be able to remove them),
+ * the locks only serialize — the engine that runs under them re-reads through the
+ * fenced reader — and the refresh UPDATE only ever follows that fenced read and
+ * never writes `cr_uid`.
  */
 export async function lockOAuthGrantForRefresh(
   txClient: DbClient,

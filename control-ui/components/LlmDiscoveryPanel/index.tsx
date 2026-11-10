@@ -9,13 +9,14 @@ import {
   TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
+import { LlmCatalogAutoEnableDialog } from '@components/LlmCatalogAutoEnableDialog'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { IconModels } from '@components/Sidebar/icons'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
-import { IconRefresh } from '@components/icons'
+import { IconRefresh, IconX } from '@components/icons'
 import {
   type LlmAllowedModel,
   type LlmDiscoveryStatus,
@@ -25,7 +26,15 @@ import {
   syncDiscovery,
   updateLlmModel,
 } from '@lib/api'
-import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
+import { cn } from '@lib/cn'
+import {
+  catalogGroupKey,
+  formatContextWindow,
+  formatLocalTimestamp,
+  getProviderDisplayLabel,
+} from '@lib/llm'
+import { describeDiscoverySync } from '@lib/llmDiscoverySync'
+import type { DiscoverySyncNotice } from '@lib/llmDiscoverySync.types'
 import type { LlmDiscoveryPanelProps } from './types'
 
 const CONFIGMAP_DEFERRED_WARNING =
@@ -35,12 +44,6 @@ type ReviewSortKey = 'provider' | 'model' | 'vendor' | 'contextWindow'
 
 function modelLabel(model: LlmAllowedModel): string {
   return `${getProviderDisplayLabel(model.provider)}/${model.model}`
-}
-
-function formatRunAt(value: string | null | undefined): string {
-  if (!value) return ''
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
 export function LlmDiscoveryPanel({
@@ -55,14 +58,17 @@ export function LlmDiscoveryPanel({
   const [statusLoading, setStatusLoading] = useState(false)
   const [error, setError] = useState('')
   const [syncing, setSyncing] = useState(false)
+  const [syncNotice, setSyncNotice] = useState<DiscoverySyncNotice | null>(null)
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [bulkEnabling, setBulkEnabling] = useState(false)
+  const [autoEnableOpen, setAutoEnableOpen] = useState(false)
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [enableConfirmation, setEnableConfirmation] = useState<
     { kind: 'single'; model: LlmAllowedModel } | { kind: 'bulk' } | null
   >(null)
   const statusRequestGeneration = useRef(0)
+  const syncButtonRef = useRef<HTMLButtonElement>(null)
 
   const isInitialLoad = loading && items.length === 0
   const reviewQueue = useMemo(
@@ -172,6 +178,7 @@ export function LlmDiscoveryPanel({
     const generation = ++statusRequestGeneration.current
     setSyncing(true)
     setError('')
+    setSyncNotice(null)
     try {
       const result = await syncDiscovery()
       await onRefresh()
@@ -184,10 +191,9 @@ export function LlmDiscoveryPanel({
           staled: result.staled,
         })
       }
-      showToast(
-        `Synced from ${result.source}: +${result.added} new, ${result.updated} updated, ${result.staled} marked stale`,
-        { tone: 'success' }
-      )
+      const feedback = describeDiscoverySync(result)
+      setSyncNotice(feedback.notice)
+      showToast(feedback.toast, { tone: 'success' })
     } catch (caught) {
       if (isSilentApiError(caught)) return
       const message = caught instanceof Error ? caught.message : 'Discovery sync failed'
@@ -197,6 +203,12 @@ export function LlmDiscoveryPanel({
       if (generation === statusRequestGeneration.current) setStatusLoading(false)
       setSyncing(false)
     }
+  }
+
+  // The dismissed button leaves the DOM; without this, focus falls to <body>.
+  function dismissSyncNotice() {
+    setSyncNotice(null)
+    syncButtonRef.current?.focus()
   }
 
   async function handleEnable(model: LlmAllowedModel) {
@@ -320,8 +332,29 @@ export function LlmDiscoveryPanel({
   return (
     <>
       {error ? (
-        <div className="cu-banner cu-banner--error cu-llm-models-error" role="alert">
+        <div className="cu-banner cu-banner--error cu-llm-models-banner" role="alert">
           {error}
+        </div>
+      ) : null}
+      {syncNotice ? (
+        <div
+          className={cn(
+            'cu-banner',
+            `cu-banner--${syncNotice.tone}`,
+            'cu-banner--dismissible',
+            'cu-llm-models-banner'
+          )}
+          role={syncNotice.tone === 'warn' ? 'alert' : 'status'}
+        >
+          <span>{syncNotice.message}</span>
+          <button
+            type="button"
+            className="cu-banner__dismiss"
+            aria-label="Dismiss sync notice"
+            onClick={dismissSyncNotice}
+          >
+            <IconX width={16} height={16} />
+          </button>
         </div>
       ) : null}
 
@@ -333,31 +366,41 @@ export function LlmDiscoveryPanel({
               LLM Models
             </>
           }
-          subtitle="Newly synced models land here disabled. Enable only the models you want available to agents and runtime."
+          subtitle="The catalog sync brings in newly released models. If a provider's auto-enable setting is on, qualifying models are added enabled and appear in the Catalog tab; a run can hold some back until you sync again. Every other new model is added disabled and waits here for review. Enable only the models you want available to agents and runtime."
           secondaryActions={
-            selectedCount > 0 ? (
-              <>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                  onClick={() => setSelectedIds(new Set())}
-                  disabled={bulkEnabling}
-                >
-                  Unselect all
-                </button>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => setEnableConfirmation({ kind: 'bulk' })}
-                  disabled={bulkEnabling}
-                >
-                  {bulkEnabling ? 'Enabling…' : `Enable ${selectedCount} selected`}
-                </button>
-              </>
-            ) : undefined
+            <>
+              <button
+                type="button"
+                className="cu-btn cu-btn--ghost cu-btn--sm"
+                onClick={() => setAutoEnableOpen(true)}
+              >
+                Auto-enable settings
+              </button>
+              {selectedCount > 0 ? (
+                <>
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--ghost cu-btn--sm"
+                    onClick={() => setSelectedIds(new Set())}
+                    disabled={bulkEnabling}
+                  >
+                    Unselect all
+                  </button>
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--primary cu-btn--sm"
+                    onClick={() => setEnableConfirmation({ kind: 'bulk' })}
+                    disabled={bulkEnabling}
+                  >
+                    {bulkEnabling ? 'Enabling…' : `Enable ${selectedCount} selected`}
+                  </button>
+                </>
+              ) : null}
+            </>
           }
           primaryAction={
             <button
+              ref={syncButtonRef}
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
               onClick={() => void handleSync()}
@@ -387,7 +430,7 @@ export function LlmDiscoveryPanel({
           <div className="cu-discovery-status" role="status">
             <span>
               {status
-                ? `Last synced ${formatRunAt(status.ranAt)}`
+                ? `Last synced ${formatLocalTimestamp(status.ranAt)}`
                 : 'Not synced yet. Run a sync to pull the latest catalog.'}
             </span>
             {status ? (
@@ -521,6 +564,10 @@ export function LlmDiscoveryPanel({
           </DataTable>
         </TableViewport>
       </div>
+      <LlmCatalogAutoEnableDialog
+        open={autoEnableOpen}
+        onDismiss={() => setAutoEnableOpen(false)}
+      />
       <ConfirmationDialog
         open={enableConfirmation !== null}
         onCancel={() => setEnableConfirmation(null)}

@@ -12,18 +12,26 @@ import {
   updateMemberRole,
 } from '../src/services/directory/index.js'
 
-const dbMocks = vi.hoisted(() => ({
-  poolQuery: vi.fn(),
-  txQuery: vi.fn(),
-  appendPermissionEvents: vi.fn(),
-}))
+const dbMocks = vi.hoisted(() => {
+  const txQuery = vi.fn()
+  return {
+    poolQuery: vi.fn(),
+    txQuery,
+    txQueryWithClock: vi.fn(async (sql: string, values?: unknown[]) =>
+      sql.includes('clock_timestamp()')
+        ? { rows: [{ db_now: new Date('2026-09-01T12:00:00.000Z') }], rowCount: 1 }
+        : txQuery(sql, values)
+    ),
+    appendPermissionEvents: vi.fn(),
+  }
+})
 
 vi.mock('../src/db.js', () => ({
   pool: {
     query: dbMocks.poolQuery,
   },
   withTransaction: async (work: (db: { query: typeof dbMocks.txQuery }) => Promise<unknown>) =>
-    work({ query: dbMocks.txQuery }),
+    work({ query: dbMocks.txQueryWithClock }),
 }))
 
 vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
@@ -34,6 +42,7 @@ describe('services/directory team management unit tests', () => {
   beforeEach(() => {
     dbMocks.poolQuery.mockReset()
     dbMocks.txQuery.mockReset()
+    dbMocks.txQueryWithClock.mockClear()
     dbMocks.appendPermissionEvents.mockReset()
     dbMocks.appendPermissionEvents.mockResolvedValue('operation-1')
   })
@@ -129,7 +138,7 @@ describe('services/directory team management unit tests', () => {
       ['team-1', 'user-1', 'member']
     )
     expect(dbMocks.appendPermissionEvents).toHaveBeenCalledWith(
-      expect.objectContaining({ query: dbMocks.txQuery }),
+      expect.objectContaining({ query: dbMocks.txQueryWithClock }),
       expect.objectContaining({
         operatorSub: 'admin-1',
         changes: [
@@ -154,7 +163,7 @@ describe('services/directory team management unit tests', () => {
     await updateMemberRole('team-1', 'user-1', 'admin', 'operator-1')
 
     expect(dbMocks.appendPermissionEvents).toHaveBeenCalledWith(
-      expect.objectContaining({ query: dbMocks.txQuery }),
+      expect.objectContaining({ query: dbMocks.txQueryWithClock }),
       expect.objectContaining({
         operatorSub: 'operator-1',
         changes: [
@@ -183,7 +192,7 @@ describe('services/directory team management unit tests', () => {
       expect.objectContaining({ status: 'deleted' })
     )
     expect(dbMocks.appendPermissionEvents).toHaveBeenCalledWith(
-      expect.objectContaining({ query: dbMocks.txQuery }),
+      expect.objectContaining({ query: dbMocks.txQueryWithClock }),
       expect.objectContaining({
         operatorSub: 'operator-1',
         changes: [

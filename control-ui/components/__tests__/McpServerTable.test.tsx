@@ -18,7 +18,6 @@ function makeItem(overrides: {
   name?: string
   namespace?: string
   image?: string
-  contextRef?: string
   description?: string
   authType?: string | null
   transportType?: 'sse' | 'streamableHttp' | 'stdio'
@@ -30,7 +29,6 @@ function makeItem(overrides: {
     metadata: { name: string; namespace: string }
     spec: {
       image: string
-      contextRef: string
       description?: string
       auth?: { type?: string | null } | null
       enabled?: boolean
@@ -44,7 +42,6 @@ function makeItem(overrides: {
     },
     spec: {
       image: overrides.image ?? 'ghcr.io/example/mcp:1.0',
-      contextRef: overrides.contextRef ?? 'context1',
       description: overrides.description,
       ...(overrides.authType === undefined
         ? {}
@@ -326,10 +323,7 @@ describe('McpServerTable — connector list', () => {
   })
 
   it('filters rows by agent access labels', () => {
-    const items = [
-      makeItem({ name: 'airtable-server' }),
-      makeItem({ name: 'search-server', contextRef: 'context2' }),
-    ]
+    const items = [makeItem({ name: 'airtable-server' }), makeItem({ name: 'search-server' })]
     render(
       <McpServerTable
         items={items}

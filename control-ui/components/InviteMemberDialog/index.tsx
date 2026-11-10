@@ -33,8 +33,8 @@ export function InviteMemberDialog({
 
   const content = (
     <>
-      {embedded ? null : (
-        <div style={{ display: 'grid', gap: '0.75rem' }}>
+      <div style={{ display: 'grid', gap: '0.75rem' }}>
+        {embedded ? null : (
           <div className="cu-modal-panel__head">
             <strong id="invite-member-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
               {title}
@@ -49,11 +49,11 @@ export function InviteMemberDialog({
               <IconX width={18} height={18} />
             </button>
           </div>
-          <p className="cu-muted" style={{ margin: 0, fontSize: '0.875rem' }}>
-            An invitation link will be sent and remain available for 48 hours.
-          </p>
-        </div>
-      )}
+        )}
+        <p className="cu-muted" style={{ margin: 0, fontSize: '0.875rem' }}>
+          An invitation link will be sent and remain available for 7 days.
+        </p>
+      </div>
 
       {lockedTeamId ? (
         <Field label="Team" htmlFor="invite-member-team">

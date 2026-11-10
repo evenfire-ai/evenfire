@@ -60,6 +60,16 @@ function isBranchScopedLocalContext(context: string): boolean {
   return /^clerum-(codex|detached)-/.test(context) || isBranchProfileContext(context)
 }
 
+/**
+ * For a lane that disrupts the cluster it runs against: admits only a branch-owned local
+ * profile, which excludes production and the shared `clerum-test` context.
+ */
+export function assertBranchOwnedContext(context: string): void {
+  if (isProductionContext(context) || !isBranchScopedLocalContext(context)) {
+    throw new Error(`[E2E-GUARD] "${context}" is not a branch-owned local profile.`)
+  }
+}
+
 function urlPort(url: string): string {
   try {
     return new URL(url).port
@@ -167,6 +177,73 @@ function readGlobalKubectlCurrentContext(expectedContext: string): string {
   }).trim()
 }
 
+/**
+ * The services the Desktop lane drives on a hosted dev cluster. Each must
+ * exist with a READY endpoint: a context that answers the API server but has
+ * no ready backend is refused here instead of turning into a confusing 503
+ * deep inside a journey.
+ */
+export const HOSTED_DEV_SERVICES: ReadonlyArray<readonly [string, string]> = [
+  ['control-plane', 'control-api'],
+  ['profiles', 'external-rest-api'],
+  ['rpc-proxy', 'rpc-proxy'],
+]
+
+/** Reads the ready endpoint targets of one service ('' when none is ready). */
+export type HostedDevEndpointReader = (
+  context: string,
+  namespace: string,
+  service: string
+) => string
+
+function kubectlEndpointTargets(context: string, namespace: string, service: string): string {
+  return execFileSync(
+    'kubectl',
+    [
+      '--context',
+      context,
+      '--request-timeout=15s',
+      '-n',
+      namespace,
+      'get',
+      'endpoints',
+      service,
+      '-o',
+      'jsonpath={range .subsets[*].addresses[*]}{.targetRef.name}{"\\n"}{end}',
+    ],
+    { encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] }
+  )
+}
+
+/**
+ * The hosted dev cluster must really host the services the Desktop lane
+ * drives, each with a ready endpoint.
+ */
+export function assertHostedDevServices(
+  context: string,
+  readEndpoints: HostedDevEndpointReader = kubectlEndpointTargets
+): void {
+  for (const [namespace, service] of HOSTED_DEV_SERVICES) {
+    let output: string
+    try {
+      output = readEndpoints(context, namespace, service)
+    } catch (err) {
+      throw new Error(
+        `[E2E-GUARD] hosted dev context=${context} has no readable endpoint for ${namespace}/${service}: ${(err as Error).message}`
+      )
+    }
+    const ready = output
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+    if (ready.length === 0) {
+      throw new Error(
+        `[E2E-GUARD] hosted dev context=${context} has no ready endpoint for ${namespace}/${service}.`
+      )
+    }
+  }
+}
+
 async function assertHealth(baseUrl: string, label: string, path = '/health'): Promise<void> {
   let response: Response
   try {
@@ -212,45 +289,69 @@ async function globalSetup(): Promise<void> {
   }
 
   const repoRoot = path.resolve(__dirname, '../../..')
-  const expectedHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], {
-    encoding: 'utf8',
-  }).trim()
-  const expectedWorktreeId = createHash('sha1').update(repoRoot).digest('hex')
-  const marker = JSON.parse(
-    execFileSync(
-      'kubectl',
-      [
-        '--context',
-        expected,
-        '-n',
-        'control-plane',
-        'get',
-        'configmap',
-        'clerum-pre-gate-sync-state',
-        '-o',
-        'json',
-      ],
-      { encoding: 'utf8', timeout: 15_000 }
-    )
-  ) as { data?: Record<string, string> }
-  const markerData = marker.data ?? {}
-  if (!markerData.gitHead || !markerData.worktreeId || !markerData.clusterFingerprint) {
+  const hostedDevContext = (process.env.E2E_HOSTED_DEV_CONTEXT || '').trim()
+  const isHostedDev = hostedDevContext !== '' && hostedDevContext === expected
+  if (hostedDevContext !== '' && !isHostedDev) {
     throw new Error(
-      `[E2E-GUARD] profile ${expected} has no complete pre-gate marker (gitHead/worktreeId/clusterFingerprint required).`
+      `[E2E-GUARD] E2E_HOSTED_DEV_CONTEXT="${hostedDevContext}" does not match the selected context "${expected}".`
     )
   }
-  if (markerData.gitHead !== expectedHead || markerData.worktreeId !== expectedWorktreeId) {
-    throw new Error(
-      `[E2E-GUARD] profile marker does not belong to this worktree/head: ` +
-        `marker head=${markerData.gitHead} worktree=${markerData.worktreeId}, ` +
-        `expected head=${expectedHead} worktree=${expectedWorktreeId}.`
-    )
-  }
-  const expectedClusterFingerprint = process.env.E2E_EXPECTED_CLUSTER_FINGERPRINT?.trim()
-  if (expectedClusterFingerprint && markerData.clusterFingerprint !== expectedClusterFingerprint) {
-    throw new Error(
-      `[E2E-GUARD] profile marker cluster fingerprint ${markerData.clusterFingerprint} does not match E2E_EXPECTED_CLUSTER_FINGERPRINT ${expectedClusterFingerprint}.`
-    )
+
+  if (isHostedDev) {
+    // HOSTED DEV LANE. The Minikube branch-profile marker below proves that
+    // a Minikube profile carries THIS worktree's HEAD. That marker only
+    // exists for a Minikube branch profile, so it cannot be the guard for a
+    // hosted cluster — and it must NOT be faked to make this lane green.
+    // A hosted dev cluster is validated explicitly instead: the operator
+    // names the context (E2E_HOSTED_DEV_CONTEXT), the context is on the
+    // allow-list, the cluster really hosts the services this lane drives
+    // with ready endpoints, and the lane reaches them through loopback
+    // forwards only. Production stays hard-blocked by the checks above.
+    assertHostedDevServices(expected)
+  } else {
+    const expectedHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim()
+    const expectedWorktreeId = createHash('sha1').update(repoRoot).digest('hex')
+    const marker = JSON.parse(
+      execFileSync(
+        'kubectl',
+        [
+          '--context',
+          expected,
+          '-n',
+          'control-plane',
+          'get',
+          'configmap',
+          'clerum-pre-gate-sync-state',
+          '-o',
+          'json',
+        ],
+        { encoding: 'utf8', timeout: 15_000 }
+      )
+    ) as { data?: Record<string, string> }
+    const markerData = marker.data ?? {}
+    if (!markerData.gitHead || !markerData.worktreeId || !markerData.clusterFingerprint) {
+      throw new Error(
+        `[E2E-GUARD] profile ${expected} has no complete pre-gate marker (gitHead/worktreeId/clusterFingerprint required).`
+      )
+    }
+    if (markerData.gitHead !== expectedHead || markerData.worktreeId !== expectedWorktreeId) {
+      throw new Error(
+        `[E2E-GUARD] profile marker does not belong to this worktree/head: ` +
+          `marker head=${markerData.gitHead} worktree=${markerData.worktreeId}, ` +
+          `expected head=${expectedHead} worktree=${expectedWorktreeId}.`
+      )
+    }
+    const expectedClusterFingerprint = process.env.E2E_EXPECTED_CLUSTER_FINGERPRINT?.trim()
+    if (
+      expectedClusterFingerprint &&
+      markerData.clusterFingerprint !== expectedClusterFingerprint
+    ) {
+      throw new Error(
+        `[E2E-GUARD] profile marker cluster fingerprint ${markerData.clusterFingerprint} does not match E2E_EXPECTED_CLUSTER_FINGERPRINT ${expectedClusterFingerprint}.`
+      )
+    }
   }
 
   const controlApi =
@@ -276,7 +377,10 @@ async function globalSetup(): Promise<void> {
         process.env.WORKFLOW_APPROVAL_READER_URL ||
         'http://127.0.0.1:8098'
       : undefined
-  const allowDevPortForward = parseBooleanEnv(process.env.E2E_ALLOW_DEV_PORT_FORWARD)
+  // A hosted dev cluster is reached through loopback forwards, so that lane
+  // REQUIRES localhost targets (never a public endpoint), the same rule the
+  // explicit E2E_ALLOW_DEV_PORT_FORWARD switch applies elsewhere.
+  const allowDevPortForward = parseBooleanEnv(process.env.E2E_ALLOW_DEV_PORT_FORWARD) || isHostedDev
 
   validateBaseUrls({
     expectedContext: expected,
@@ -301,7 +405,6 @@ async function globalSetup(): Promise<void> {
 
   let loginResp: Response
   const loginPath = '/api/v1/auth/password-login'
-  let loginBody: Record<string, string> = { email }
   try {
     if (authPreflight !== 'password') {
       throw new Error(
@@ -313,12 +416,11 @@ async function globalSetup(): Promise<void> {
       process.env.E2E_TEST_PASSWORD ||
       process.env.ADMIN_PASSWORD ||
       'changeme123!'
-    loginBody = { email, password }
 
     loginResp = await fetch(`${externalRest}${loginPath}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(loginBody),
+      body: JSON.stringify({ email, password }),
     })
   } catch (err) {
     throw new Error(

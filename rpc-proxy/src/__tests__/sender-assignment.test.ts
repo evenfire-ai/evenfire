@@ -150,6 +150,19 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
     const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
     expect(forwardedBody.metadata).toEqual({ accessScope: 'user' })
   })
+
+  it('does not forward a message when Host resolution fails', async () => {
+    serviceMock.resolveHostConnectionForUser.mockRejectedValue(new Error('Host resolution failed'))
+
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/messages')
+      .set('authorization', `Bearer ${crypto.randomUUID()}`)
+      .send({ content: 'hello' })
+      .expect(502)
+
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledOnce()
+    expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+  })
 })
 
 describe('POST /rpc/hosts/:hostRef/messages — structured file references (#666)', () => {

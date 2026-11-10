@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useAuthContext } from '@contexts/AuthContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import ReactMarkdown from 'react-markdown'
@@ -103,9 +104,10 @@ export const HeaderActions = React.memo(function HeaderActions({
     teamDirectory,
     loading: teamDirectoryLoading,
     teamDirectoryHydrated,
-    currentTeamId,
     ensureHydrated: onEnsureTeamDirectory,
   } = useTeamsDataController()
+  const { me } = useAuthContext()
+  const currentTeamId = String(me?.teamId ?? '').trim()
   const {
     plugins: searchPlugins,
     apps: searchApps,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Validate the backend-compat E2E harness keeps profile-scoped kubectl usage and
-# checks the Context selected by each delegated McpServer.
+# checks the allowlist of the Context WRC labels on each delegated McpServer.
 
 set -euo pipefail
 
@@ -38,7 +38,7 @@ hardcoded_context_matches="$(
   search_targets 'wf-\$\{(RECIPE_NAME|recipe_name)\}|wf-\$\('
 )"
 if [ -n "$hardcoded_context_matches" ]; then
-  echo "ERROR: backend-compat harness must read McpServer.spec.contextRef instead of assuming wf-<recipe>." >&2
+  echo "ERROR: backend-compat harness must read the McpServer clerum.io/context label instead of assuming wf-<recipe>." >&2
   echo "$hardcoded_context_matches" >&2
   exit 1
 fi
@@ -52,11 +52,22 @@ if [ -n "$primitive_array_jsonpath_matches" ]; then
   exit 1
 fi
 
+# A delegated McpServer has no spec.contextRef (the CRD no longer declares it),
+# so a probe that reads it resolves an empty Context and can never pass.
+mcp_context_field_matches="$(
+  search_targets "\\.spec\\.contextRef"
+)"
+if [ -n "$mcp_context_field_matches" ]; then
+  echo "ERROR: backend-compat harness must not read McpServer.spec.contextRef; use the clerum.io/context label." >&2
+  echo "$mcp_context_field_matches" >&2
+  exit 1
+fi
+
 for file in scripts/e2e/e2e-lib.sh scripts/e2e/workflow-backend-compat/http-mongodb-stack.sh; do
-  if ! grep -Fq "jsonpath='{.spec.contextRef}'" "$file"; then
-    echo "ERROR: expected $file to verify the delegated McpServer contextRef." >&2
+  if ! grep -Fq "jsonpath='{.metadata.labels.clerum\\.io/context}'" "$file"; then
+    echo "ERROR: expected $file to resolve the delegated McpServer Context from its clerum.io/context label." >&2
     exit 1
   fi
 done
 
-echo "OK -- workflow backend-compat harness honors KUBECONTEXT and delegated contextRef"
+echo "OK -- workflow backend-compat harness honors KUBECONTEXT and the delegated Context label"

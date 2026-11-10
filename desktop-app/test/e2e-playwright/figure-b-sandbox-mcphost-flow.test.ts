@@ -18,6 +18,7 @@ import type { WorkflowRunArtifact, WorkflowRunListItem } from '../../src/types'
 import {
   adminCreateTeamForUser,
   allowTeamApprovalThroughAdminRoute,
+  cleanupTeam,
   grantTeamThroughAdminRoute,
   setUserWorkflowGrantsThroughAdminRoute,
 } from './workflow-approval-quadrants/recipes'
@@ -847,35 +848,6 @@ function cleanupRecipe(name: string): void {
     )
   } catch {
     // Rows are test-named; a later cleanup pass can remove leftovers if needed.
-  }
-}
-
-function cleanupTeam(teamId: string | undefined): void {
-  if (!teamId) return
-  if (!/^[0-9a-f-]{36}$/i.test(teamId)) {
-    throw new Error(`refusing to clean non-E2E team id ${teamId}`)
-  }
-  try {
-    const team = sqlLiteral(teamId)
-    runProfilesSql(
-      `
-      DELETE FROM team_workflow_grants_audit
-       WHERE target_team_id = ${team};
-      DELETE FROM workflow_recipe_allowed_teams_audit
-       WHERE target_team_id = ${team};
-      DELETE FROM team_workflow_triggers
-       WHERE team_id = ${team};
-      DELETE FROM workflow_recipe_allowed_teams
-       WHERE team_id = ${team};
-      DELETE FROM team_members
-       WHERE team_id = ${team};
-      DELETE FROM teams
-       WHERE id = ${team};
-      `,
-      20_000
-    )
-  } catch {
-    // Preserve the original test failure; all team rows are scoped to this E2E.
   }
 }
 

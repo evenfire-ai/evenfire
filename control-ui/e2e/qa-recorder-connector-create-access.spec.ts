@@ -1,13 +1,12 @@
 // control-ui/e2e/qa-recorder-connector-create-access.spec.ts
 //
 // Optional QA recorder journey (MUTATING). Requires QA_RECORDER_CONFIRM_MUTATIONS=1.
-// Records the create-connector wizard's Access step twice: once with a seeded
-// agent selected (agent picker + "Access preview" + the post-create Agents
-// group binding on /connectors) and once with no agents ("No agents have
-// access yet."). A no-agent connector silently provisions a private scope
-// (<name>-#####); that scope is discovered through GET /api/v1/admin/contexts
-// and deleted in the finally along with both connectors, the seeded agent
-// host, and its context (hosts before contexts).
+// Records creating a connector and then giving an agent access to it. The
+// create wizard has no access step: a new connector is enabled in no Context
+// and no agent reaches it. Access is granted afterwards from the connector
+// row's "Add to agents" action on /connectors, which writes the seeded agent's
+// Context allowlist. The finally deletes the connector, the
+// seeded agent host, and its context (hosts before contexts).
 //
 // Contract: docs/testing/control-ui-headful-journeys.md.
 import { type Page, type TestInfo, expect, test } from '@playwright/test'
@@ -24,7 +23,11 @@ import {
   uniqueE2EName,
 } from './qa-recorder-helpers'
 
-type ContextListItem = { metadata?: { name?: string }; name?: string }
+type ContextListItem = {
+  metadata?: { name?: string }
+  name?: string
+  spec?: { mcpServers?: string[] }
+}
 
 async function continueWizard(page: Page): Promise<void> {
   const next = page.getByRole('button', { name: 'Continue', exact: true })
@@ -35,23 +38,19 @@ async function continueWizard(page: Page): Promise<void> {
 async function openCreateConnectorWizard(page: Page): Promise<void> {
   await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
-  // Creation is a header button next to "Add remote server" and the Marketplace CTA.
-  await page.getByRole('button', { name: 'Create connector', exact: true }).click()
+  // Creation lives in the header's "Connector actions" menu, next to "Add remote server".
+  await page.getByRole('button', { name: 'Connector actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Create connector', exact: true }).click()
   await expect(page).toHaveURL(/\/connectors\/new$/, { timeout: 20_000 })
 }
 
-// Mirrors the proven port (tests/e2e/playwright/control-ui/
-// connector-create-access-step.spec.ts): identity placeholders → optional
-// Access step → Secrets keyless radio. With agentToSelect the agent picker is
-// opened (the trigger is matched by its placeholder, not a label) and that
-// agent chosen; without it the Access step is skipped, which is exactly the
-// branch that silently provisions a private scope.
+// Identity placeholders → Secrets keyless radio. The wizard goes straight from
+// the connector identity to its secrets.
 async function createConnectorThroughWizard(
   page: Page,
   testInfo: TestInfo,
   journey: string,
-  connectorName: string,
-  agentToSelect?: string
+  connectorName: string
 ): Promise<void> {
   await page.getByPlaceholder('my-mcp-server').fill(connectorName)
   await page
@@ -59,35 +58,12 @@ async function createConnectorThroughWizard(
     .fill('qa-recorder/example:dev')
   await page
     .getByPlaceholder('Optional description of this connector')
-    .fill(`QA recorder access-step connector (${agentToSelect ? 'with agent' : 'no agents'})`)
+    .fill('QA recorder connector created without agent access')
   await screenshotAndLog(page, testInfo, `${journey}-wizard-identity`)
 
   await continueWizard(page)
 
-  await expect(page.getByRole('heading', { name: 'Agent access', exact: true })).toBeVisible({
-    timeout: 20_000,
-  })
-  if (agentToSelect) {
-    await page.getByRole('button', { name: 'Select agents...' }).click()
-    await page.getByRole('option', { name: agentToSelect, exact: true }).click()
-    await expect(page.getByText('Access preview', { exact: true })).toBeVisible()
-    await expect(
-      page
-        .getByRole('region', { name: 'Agent access preview' })
-        .getByText(agentToSelect, { exact: true })
-    ).toBeVisible()
-    await screenshotAndLog(page, testInfo, `${journey}-wizard-access-preview`)
-  } else {
-    await expect(
-      page.getByText(
-        'No agents selected: the connector is created but cannot be used by any agent until you grant access.',
-        { exact: true }
-      )
-    ).toBeVisible()
-    await screenshotAndLog(page, testInfo, `${journey}-wizard-access-empty`)
-  }
-  await continueWizard(page)
-
+  await expect(page.getByRole('heading', { name: 'Agent access', exact: true })).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Secrets and environment' })).toBeVisible({
     timeout: 20_000,
   })
@@ -96,27 +72,39 @@ async function createConnectorThroughWizard(
 
   await page.getByRole('button', { name: 'Create connector', exact: true }).click()
   await expect(
-    page.getByText('Connector created successfully.', { exact: true }).last()
+    page
+      .getByText(
+        'Connector created. Give agents access from the Installed Connectors list whenever you’re ready.',
+        { exact: true }
+      )
+      .last()
   ).toBeVisible({
     timeout: 20_000,
   })
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
 }
 
-async function expandConnector(page: Page, connectorName: string) {
-  const row = page.getByRole('button', { name: new RegExp(`Expand connector ${connectorName}`) })
-  await expect(row).toBeVisible({ timeout: 20_000 })
-  await row.click()
-  await expect(
-    page.getByRole('button', { name: new RegExp(`Collapse connector ${connectorName}`) })
-  ).toBeVisible({ timeout: 10_000 })
-  const detail = page.locator('.cu-connector-detail')
-  await expect(detail).toBeVisible({ timeout: 10_000 })
-  return detail
+// The connector list has no expandable rows; its search also matches the agent labels
+// bound to each connector, so filtering by the agent shows whether the row is bound.
+async function searchConnectors(page: Page, query: string): Promise<void> {
+  const search = page.getByLabel('Search connectors', { exact: true })
+  await search.fill(query)
 }
 
-test.describe('optional QA recorder: Control UI connector create Access step', () => {
-  test('records creating a connector with an agent and one without any', async ({
+async function contextsListing(page: Page, connectorName: string): Promise<string[]> {
+  const res = await api<{ items?: ContextListItem[] }>(
+    page.request,
+    'GET',
+    '/api/v1/admin/contexts'
+  )
+  expect(res.status, `list contexts: ${JSON.stringify(res.data)}`).toBe(200)
+  return (res.data.items ?? [])
+    .filter(item => item.spec?.mcpServers?.includes(connectorName))
+    .map(item => resourceName(item))
+}
+
+test.describe('optional QA recorder: Control UI connector create then Add to agents', () => {
+  test('records creating a connector and then giving an agent access to it', async ({
     page,
   }, testInfo) => {
     requireRecorderConfirm(
@@ -130,16 +118,14 @@ test.describe('optional QA recorder: Control UI connector create Access step', (
     const journey = 'control-ui-connector-create-access'
     const contextName = uniqueE2EName('qa-recorder-context')
     const agentName = uniqueE2EName('qa-recorder-agent')
-    const connectorWithAgent = uniqueE2EName('qa-recorder-conn-a')
-    const connectorWithoutAgent = uniqueE2EName('qa-recorder-conn-b')
-    let privateScopeName = ''
+    const connectorName = uniqueE2EName('qa-recorder-conn')
 
     try {
       await loginThroughUi(page, credentials)
 
-      // Seed an agent (context + host) so the wizard's agent picker has a
-      // target. The host display name equals the resource name so the picker
-      // option, preview, and Agents group all show the same label.
+      // Seed an agent (context + host) to give access to. The host display
+      // name equals the resource name so the picker option and the Agents
+      // group show the same label.
       const ctxRes = await api(page.request, 'POST', '/api/v1/admin/contexts', {
         metadata: { name: contextName },
         spec: {
@@ -161,58 +147,43 @@ test.describe('optional QA recorder: Control UI connector create Access step', (
       })
       expect(hostRes.status, `create host: ${JSON.stringify(hostRes.data)}`).toBeLessThan(300)
 
-      // Connector #1 — WITH an agent selected on the Access step.
       await openCreateConnectorWizard(page)
-      await createConnectorThroughWizard(page, testInfo, journey, connectorWithAgent, agentName)
+      await createConnectorThroughWizard(page, testInfo, journey, connectorName)
 
-      const withAgentDetail = await expandConnector(page, connectorWithAgent)
-      await expect(
-        withAgentDetail.getByRole('heading', { name: 'Agents', exact: true })
-      ).toBeVisible()
-      await expect(withAgentDetail.getByText(agentName, { exact: true })).toBeVisible()
-      await screenshotAndLog(page, testInfo, `${journey}-with-agent`)
-
-      // Connector #2 — Access step skipped (no agents).
-      await openCreateConnectorWizard(page)
-      await createConnectorThroughWizard(page, testInfo, journey, connectorWithoutAgent)
-
-      const withoutAgentDetail = await expandConnector(page, connectorWithoutAgent)
-      await expect(
-        withoutAgentDetail.getByText('No agents have access yet.', { exact: true })
-      ).toBeVisible()
+      // Creating the connector enabled it in no Context, so no agent reaches it.
+      expect(await contextsListing(page, connectorName)).toEqual([])
+      await searchConnectors(page, agentName)
+      await expect(page.getByRole('row', { name: new RegExp(connectorName) })).toHaveCount(0)
+      await searchConnectors(page, connectorName)
+      const row = page.getByRole('row', { name: new RegExp(connectorName) })
+      await expect(row).toBeVisible({ timeout: 20_000 })
       await screenshotAndLog(page, testInfo, `${journey}-without-agents`)
 
-      // The wizard never surfaces the private scope; discover it through the
-      // Control API so the finally can tear it down too.
-      const scopesRes = await api<{ items?: ContextListItem[] }>(
-        page.request,
-        'GET',
-        '/api/v1/admin/contexts'
-      )
-      expect(scopesRes.status, `list contexts: ${JSON.stringify(scopesRes.data)}`).toBe(200)
-      privateScopeName =
-        (scopesRes.data.items ?? [])
-          .map(item => resourceName(item))
-          .find(name => new RegExp(`^${connectorWithoutAgent}-[0-9]{5}$`).test(name)) ?? ''
-      expect(privateScopeName, 'private scope context for the no-agent connector').toBeTruthy()
+      await row.getByRole('button', { name: `Actions for connector ${connectorName}` }).click()
+      await page.getByRole('menuitem', { name: 'Add to agents', exact: true }).click()
+      const grantDialog = page.getByRole('dialog', {
+        name: 'Give agents access to this connector',
+      })
+      await expect(grantDialog).toBeVisible({ timeout: 20_000 })
+      await grantDialog.getByRole('checkbox', { name: new RegExp(agentName) }).check()
+      await grantDialog.getByRole('button', { name: 'Add to agent', exact: true }).click()
+      await expect(
+        page.getByText(`Connector ${connectorName} added to agent ${agentName}.`)
+      ).toBeVisible({ timeout: 20_000 })
+
+      expect(await contextsListing(page, connectorName)).toEqual([contextName])
+      await page.reload()
+      await searchConnectors(page, agentName)
+      await expect(page.getByRole('row', { name: new RegExp(connectorName) })).toBeVisible({
+        timeout: 20_000,
+      })
+      await screenshotAndLog(page, testInfo, `${journey}-with-agent`)
     } finally {
       await api(
         page.request,
         'DELETE',
-        `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorWithoutAgent)}`
+        `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
       )
-      await api(
-        page.request,
-        'DELETE',
-        `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorWithAgent)}`
-      )
-      if (privateScopeName) {
-        await api(
-          page.request,
-          'DELETE',
-          `/api/v1/admin/contexts/${encodeURIComponent(privateScopeName)}`
-        )
-      }
       await api(page.request, 'DELETE', `/api/v1/admin/hosts/${encodeURIComponent(agentName)}`)
       await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
     }

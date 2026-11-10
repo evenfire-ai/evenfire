@@ -16,6 +16,8 @@ for await (const chunk of process.stdin) {
 }
 const input = JSON.parse(Buffer.concat(inputChunks, inputBytes).toString('utf8'))
 if (!['create', 'cleanup'].includes(input.action)) throw new Error('Invalid identity action')
+const { createFixtureIdentities, cleanupFixtureIdentities, describeFixtureError } =
+  await import('/app/approved-tools-setup/identity-lifecycle.mjs')
 const { pool, withTransaction } = await import('/app/control-api/dist/db.js')
 try {
   const { default: bcrypt } = await import('/app/control-api/node_modules/bcryptjs/index.js')
@@ -25,8 +27,6 @@ try {
     await import('/app/control-api/dist/services/codexSubscriptionConnection.js')
   const { rebuildLiveCodexUnionAllowlist } =
     await import('/app/control-api/dist/services/codexSubscriptionCatalog.js')
-  const { createFixtureIdentities, cleanupFixtureIdentities } =
-    await import('/app/approved-tools-setup/identity-lifecycle.mjs')
   const publish = journal => process.stdout.write(JSON.stringify({ e2eIdentity: journal }) + '\n')
   const adapters = {
     env: process.env,
@@ -56,8 +56,14 @@ try {
   } else {
     await cleanupFixtureIdentities(input, input.initialJournal, adapters)
   }
-} catch {
-  process.stderr.write('Fixture identity operation failed; retain the host journal for recovery\n')
+} catch (error) {
+  process.stderr.write(
+    JSON.stringify({
+      event: 'fixture_identity_operation_failed',
+      operation: input.action,
+      failure: describeFixtureError(error),
+    }) + '\n'
+  )
   process.exitCode = 1
 } finally {
   await pool.end()

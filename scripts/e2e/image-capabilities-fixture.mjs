@@ -27,6 +27,8 @@ export const fixtureConfigKeys = [
  * The Playwright journeys this runner can drive against the swapped Host. The
  * lane is chosen by `IMAGE_CAPABILITIES_LANE` and only from this closed set, so
  * an environment value can never name an arbitrary config path.
+ * `minimumExpected` is the floor `playwrightVerdict` requires. The save lane
+ * is three journeys; the older lanes stay at one.
  */
 export const playwrightLanes = {
   // `grep` selects the lane's fixture journey. The image spec also holds the
@@ -36,11 +38,19 @@ export const playwrightLanes = {
     config: 'desktop-app/test/e2e-playwright/playwright.image-capabilities.config.ts',
     label: 'image-capabilities-playwright',
     grep: 'image-capabilities fixture: ',
+    minimumExpected: 1,
   },
   'document-upload': {
     config: 'desktop-app/test/e2e-playwright/playwright.document-upload.config.ts',
     label: 'document-upload-playwright',
     grep: 'document-upload fixture: ',
+    minimumExpected: 1,
+  },
+  'attachment-gfs-save': {
+    config: 'desktop-app/test/e2e-playwright/playwright.attachment-gfs-save.config.ts',
+    label: 'attachment-gfs-save-playwright',
+    grep: 'attachment-gfs-save fixture: ',
+    minimumExpected: 3,
   },
 }
 
@@ -69,17 +79,23 @@ const isCount = value => Number.isSafeInteger(value) && value >= 0
 /**
  * A zero exit from the Playwright CLI is not a verdict on its own: a run that
  * collected nothing, skipped everything or retried into a pass also exits 0.
- * PASS needs the JSON report of this lane's config with at least one expected
- * test and no unexpected, skipped or flaky outcome.
+ * PASS needs the JSON report of this lane's config, at least that lane's
+ * `minimumExpected` tests, and no unexpected, skipped or flaky outcome.
  */
 export function playwrightVerdict(report, { lane, configFile }) {
-  const { grep } = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane })
+  const { grep, minimumExpected } = playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane })
   const reported = report?.config?.configFile
   if (typeof reported !== 'string' || fs.realpathSync(reported) !== fs.realpathSync(configFile))
     throw new Error('Playwright report config mismatch')
   const stats = report.stats ?? {}
   if (!isCount(stats.expected) || stats.expected < 1)
     throw new Error('Playwright ran no expected tests')
+  if (!isCount(minimumExpected) || minimumExpected < 1)
+    throw new Error(`Playwright lane ${lane} has no expected-test minimum`)
+  if (stats.expected < minimumExpected)
+    throw new Error(
+      `Playwright report is below the ${lane} minimum of ${minimumExpected} expected tests`
+    )
   for (const outcome of ['unexpected', 'skipped', 'flaky'])
     if (stats[outcome] !== 0)
       throw new Error(`Playwright report is not clean: ${outcome}=${String(stats[outcome])}`)
@@ -158,6 +174,25 @@ export function modelInputs(runId) {
   }))
 }
 
+// Restoring a row the fixture created means deleting it, and every delete
+// leaves a permanent catalog tombstone. For a real provider model that
+// tombstone would stop the catalog sync from ever enabling it, so only the
+// run-scoped model, which no catalog lists, may be created here.
+export function requireDiscoveredCatalogModels(models, catalog, runId) {
+  const runScoped = `image-fixture-unknown-${runId.slice(-12)}`
+  const missing = models.filter(
+    model =>
+      model.model !== runScoped &&
+      !catalog.some(row => row.provider === model.provider && row.model === model.model)
+  )
+  if (missing.length > 0)
+    throw new Error(
+      `Catalog has not discovered ${missing
+        .map(model => `${model.provider}/${model.model}`)
+        .join(', ')}; wait for a live catalog sync before running the fixture`
+    )
+}
+
 export function requireOwnedResource(resource, uid, runId) {
   if (resource?.metadata?.uid !== uid || resource.metadata.annotations?.[runAnnotation] !== runId)
     throw new Error('Fixture resource owner changed; refusing mutation')
@@ -202,6 +237,20 @@ export function installSignalRestore(target, restore, write = text => process.st
     target.off('SIGINT', onSignal)
     target.off('SIGTERM', onSignal)
   }
+}
+
+/**
+ * A control-api request on its own connection. The runner blocks its event loop
+ * in spawnSync for the whole Playwright run, and control-api closes idle
+ * keep-alive sockets after a few seconds, so a pooled socket is dead when
+ * restoration resumes and reusing it fails the restore with `fetch failed`
+ * (ECONNRESET). No idle socket is kept across a blocking call.
+ */
+export function controlApiFetch(url, init = {}) {
+  // Headers accepts a plain object, a Headers instance or tuples alike.
+  const headers = new Headers(init.headers)
+  headers.set('connection', 'close')
+  return fetch(url, { ...init, headers })
 }
 
 function command(binary, args, { input, timeout = 60_000, env = process.env } = {}) {
@@ -277,6 +326,8 @@ async function main() {
     return `http://127.0.0.1:${port}`
   }
   command('make', ['-f', branchMake, 'branch-profile-health'])
+  if (action === 'run')
+    command('npm', ['--prefix', 'desktop-app', 'run', 'verify:electron', '--', '--check-only'])
   const api = `${urlFor('control-api')}/api/v1`
   const kc = (args, input) =>
     command(
@@ -390,7 +441,7 @@ async function main() {
   ]).trim()
   if (!authValue) throw new Error('Owned lane admin login is not configured')
   const ADMIN_PASSWORD = authValue
-  const auth = await fetch(`${api}/admin/auth/login`, {
+  const auth = await controlApiFetch(`${api}/admin/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -415,7 +466,7 @@ async function main() {
     }
   }
   const admin = async (method, route, body) => {
-    const response = await fetch(`${api}/admin/${route}`, {
+    const response = await controlApiFetch(`${api}/admin/${route}`, {
       method,
       headers: { Cookie: cookie, 'content-type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -666,6 +717,7 @@ async function main() {
     save()
     const models = modelInputs(state.runId)
     const catalog = (await admin('GET', 'llm-models')).rows
+    requireDiscoveredCatalogModels(models, catalog, state.runId)
     for (const model of models) {
       const prior = catalog.find(
         row => row.provider === model.provider && row.model === model.model
@@ -804,6 +856,9 @@ async function main() {
       E2E_HOST_REF: 'chatllm',
       E2E_DEV_LOGIN_EMAIL: 'admin@evenfire.local',
       E2E_DESKTOP_PASSWORD: ADMIN_PASSWORD,
+      // SQL fixtures read this name. The shell context is shared across sessions,
+      // so the owned profile has to win over anything `process.env` already set.
+      E2E_K8S_CONTEXT: profile,
       EXTERNAL_REST_API_BASE_URL: urlFor('external-rest-api'),
       RPC_PROXY_BASE_URL: urlFor('rpc-proxy'),
       QA_RECORDER_CONFIRM_CHAT: '1',
@@ -812,7 +867,8 @@ async function main() {
       QA_RECORDER_IMAGE_MODEL_UNKNOWN: models[2].model,
       QA_RECORDER_ROOT: evidence,
     }
-    command('npm', ['run', 'verify:electron', '--prefix', 'desktop-app'])
+    // Bounded pre-flight: never pay the Electron runtime download here.
+    command('npm', ['--prefix', 'desktop-app', 'run', 'verify:electron', '--', '--check-only'])
     process.stdout.write(`Image capability fixture ready: ${state.runId} (lane ${lane})\n`)
     // Playwright's JSON reporter writes this reserved inode with writeFile. Keep
     // the descriptor until the verdict; a replacement path cannot supply proof.

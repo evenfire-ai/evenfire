@@ -1,7 +1,8 @@
 import { type DbClient, pool } from '../../db.js'
 import { type InviteRole, normalizeTeamRoleInput } from './types.js'
 
-export const INVITATION_TTL_HOURS = 48
+export const INVITATION_TTL_HOURS = 7 * 24
+const PASSWORD_RESET_INVITATION_TTL_HOURS = 48
 
 export type InvitationRow = {
   id: string
@@ -63,7 +64,8 @@ export function normalizeInvitationPurpose(purpose?: InvitationPurpose): Invitat
 
 export async function getInvitationRecordByToken(
   db: Pick<DbClient, 'query'>,
-  token: string
+  token: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const result = await db.query(
     `SELECT i.id, i.team_id, i.invitee_name, i.email, i.role, i.token, i.status, i.purpose, i.created_at, i.expires_at, i.accepted_at,
@@ -72,7 +74,8 @@ export async function getInvitationRecordByToken(
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
       WHERE i.token = $1
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [token]
   )
   return (result.rows[0] as InvitationRow | undefined) || null
@@ -81,7 +84,8 @@ export async function getInvitationRecordByToken(
 export async function getInvitationRecordByTokenOrId(
   db: Pick<DbClient, 'query'>,
   token: string,
-  invitationId: string
+  invitationId: string,
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const normalizedToken = token.trim()
   const normalizedInvitationId = invitationId.trim()
@@ -95,10 +99,12 @@ export async function getInvitationRecordByTokenOrId(
             t.name AS team_name
        FROM invitations i
   LEFT JOIN teams t ON t.id = i.team_id
-      WHERE ($1 <> '' AND i.token = $1)
-         OR ($2 <> '' AND i.id::text = $2)
+      WHERE ($1 <> '' AND $2 = '' AND i.token = $1)
+         OR ($1 = '' AND $2 <> '' AND i.id::text = $2)
+         OR ($1 <> '' AND $2 <> '' AND i.token = $1 AND i.id::text = $2)
       ORDER BY i.created_at DESC
-      LIMIT 1`,
+      LIMIT 1
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [normalizedToken, normalizedInvitationId]
   )
 
@@ -108,7 +114,7 @@ export async function getInvitationRecordByTokenOrId(
 export async function getInvitationRecordById(
   db: Pick<DbClient, 'query'>,
   invitationId: string,
-  lockForUpdate = false
+  options: { lock?: boolean } = {}
 ): Promise<InvitationRow | null> {
   const normalizedInvitationId = invitationId.trim()
   if (!normalizedInvitationId) return null
@@ -121,7 +127,7 @@ export async function getInvitationRecordById(
   LEFT JOIN teams t ON t.id = i.team_id
       WHERE i.id::text = $1
       LIMIT 1
-      ${lockForUpdate ? 'FOR UPDATE OF i' : ''}`,
+      ${options.lock ? 'FOR UPDATE OF i' : ''}`,
     [normalizedInvitationId]
   )
   return (result.rows[0] as InvitationRow | undefined) || null
@@ -142,6 +148,41 @@ export async function lockPasswordResetUser(
   return (result.rows[0] as InvitationUserRow | undefined) ?? null
 }
 
+/**
+ * Locks the authoritative user row inside the transaction that is about to
+ * write the password. A passwordless invited user is represented by
+ * `users.password_hash IS NULL`: the column is nullable and
+ * `ensureInvitationUser` inserts only email and name.
+ */
+export async function lockInvitationUserForPasswordSetup(
+  db: Pick<DbClient, 'query'>,
+  userId: string
+): Promise<InvitationUserRow | null> {
+  const result = await db.query(
+    `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
+       FROM users
+      WHERE id = $1
+      LIMIT 1
+      FOR NO KEY UPDATE`,
+    [userId]
+  )
+  return (result.rows[0] as InvitationUserRow | undefined) ?? null
+}
+
+/**
+ * Returns the invitation user for `email`, locked for the rest of the
+ * caller's transaction, and makes sure it has a profile row.
+ *
+ * The existing user is read `FOR NO KEY UPDATE`; a user this call inserts is
+ * already held by the inserting transaction. The profile insert therefore runs
+ * with the user lock held, in the same users -> profiles order as Google login
+ * (`login.ts`). The reverse order deadlocks: login holds the user row lock and
+ * its `INSERT INTO profiles ... ON CONFLICT (user_id)` waits on this
+ * transaction's uncommitted `profiles(user_id)` key, while this transaction
+ * waits on the user row lock that login holds. The profile insert's foreign-key
+ * KEY SHARE lock on the user is not the conflict: it does not conflict with
+ * the NO KEY UPDATE lock that login's `UPDATE users` takes.
+ */
 export async function ensureInvitationUser(
   db: Pick<DbClient, 'query'>,
   email: string,
@@ -153,35 +194,34 @@ export async function ensureInvitationUser(
     `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
        FROM users
       WHERE email = $1
-      LIMIT 1`,
+      LIMIT 1
+      FOR NO KEY UPDATE`,
     [normalizedEmail]
   )
 
   let user = (existing.rows[0] as InvitationUserRow | undefined) || null
   if (!user) {
-    user = (
-      await db.query(
-        `INSERT INTO users(email, name)
+    const inserted = await db.query(
+      `INSERT INTO users(email, name)
        VALUES($1, $2)
-       ON CONFLICT (email) DO UPDATE
-           SET name = COALESCE(users.name, EXCLUDED.name),
-               updated_at = NOW()
+       ON CONFLICT (email) DO NOTHING
        RETURNING id, email, name, picture, password_hash, lifecycle_state, lifecycle_version`,
-        [normalizedEmail, normalizedInviteeName]
+      [normalizedEmail, normalizedInviteeName]
+    )
+    user = (inserted.rows[0] as InvitationUserRow | undefined) || null
+    if (!user) {
+      const racedExisting = await db.query(
+        `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
+           FROM users
+          WHERE email = $1
+          LIMIT 1
+          FOR NO KEY UPDATE`,
+        [normalizedEmail]
       )
-    ).rows[0] as InvitationUserRow
-  } else if (normalizedInviteeName && user.name !== normalizedInviteeName) {
-    user = (
-      await db.query(
-        `UPDATE users
-            SET name = $2,
-                updated_at = NOW()
-          WHERE id = $1
-       RETURNING id, email, name, picture, password_hash, lifecycle_state, lifecycle_version`,
-        [user.id, normalizedInviteeName]
-      )
-    ).rows[0] as InvitationUserRow
+      user = (racedExisting.rows[0] as InvitationUserRow | undefined) || null
+    }
   }
+  if (!user) throw new Error('Failed to resolve invitation user')
 
   await db.query(
     `INSERT INTO profiles(user_id, display_name)
@@ -189,15 +229,6 @@ export async function ensureInvitationUser(
      ON CONFLICT (user_id) DO NOTHING`,
     [user.id, user.name || null]
   )
-  if (normalizedInviteeName) {
-    await db.query(
-      `UPDATE profiles
-          SET display_name = $2,
-              updated_at = NOW()
-        WHERE user_id = $1`,
-      [user.id, normalizedInviteeName]
-    )
-  }
 
   return user
 }
@@ -320,6 +351,8 @@ export async function insertInvitationForTeams(
   const fallbackRole =
     normalizeTeamRoleInput(input.fallbackRole) || primaryAssignment?.role || 'member'
   const purpose = normalizeInvitationPurpose(input.purpose)
+  const ttlHours =
+    purpose === 'password_reset' ? PASSWORD_RESET_INVITATION_TTL_HOURS : INVITATION_TTL_HOURS
   const invited = await db.query(
     `WITH inserted AS (
        INSERT INTO invitations(team_id, invitee_name, email, role, token, status, purpose, expires_at)
@@ -348,7 +381,7 @@ export async function insertInvitationForTeams(
       primaryAssignment?.role || fallbackRole,
       input.status,
       purpose,
-      String(INVITATION_TTL_HOURS),
+      String(ttlHours),
     ]
   )
   const invitation = invited.rows[0] as InvitationRow

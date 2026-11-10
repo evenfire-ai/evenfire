@@ -1,5 +1,6 @@
 import {
   BrowserWindow,
+  IpcMainEvent,
   IpcMainInvokeEvent,
   Notification,
   app,
@@ -18,7 +19,15 @@ import {
   requireChatStore,
   requireChatStoreForBindingGeneration,
 } from './chatStoreBinding.js'
+import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import {
+  abortZipJob,
+  appendZipEntry,
+  appendZipEntryStreaming,
+  finishZipJob,
+  startZipJob,
+} from './gfs/zipStream.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   PLUGIN_SDK_CAPABILITIES_CHANNEL,
@@ -30,6 +39,7 @@ import {
 import {
   type ChatAuthorityScope,
   type ChatDeleteFence,
+  type DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfig,
   EntityChangeStreamEvent,
   HostActivityStreamEvent,
@@ -39,6 +49,73 @@ import {
   TaskProgressStreamEvent,
   WorkflowNotificationStreamEvent,
 } from './types.js'
+
+type DeepLinkQueue = {
+  list(): Array<{ id: number }>
+  acknowledge(id: number): void
+}
+
+type DeepLinkAcknowledgmentQueues = {
+  appQueue: DeepLinkQueue
+  gfsQueue: DeepLinkQueue
+  navigation: { current(): number }
+}
+
+function parseDeepLinkAcknowledgmentAuthority(input: unknown): DeepLinkAcknowledgmentAuthority {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid deep-link acknowledgment authority')
+  }
+  const value = input as Record<string, unknown>
+  for (const generation of [value.sessionGeneration, value.userNavigationGeneration]) {
+    if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0) {
+      throw new Error('Invalid deep-link acknowledgment authority')
+    }
+  }
+  return {
+    sessionGeneration: value.sessionGeneration as number,
+    userNavigationGeneration: value.userNavigationGeneration as number,
+  }
+}
+
+export function registerDeepLinkAcknowledgmentHandlers(
+  service: AppService,
+  getMainWindow: () => BrowserWindow | null,
+  queues: DeepLinkAcknowledgmentQueues
+): void {
+  const register = (channel: string, queue: DeepLinkQueue, message: string) => {
+    ipcMain.handle(channel, (event, payload: { id?: unknown; authority?: unknown }) => {
+      assertTrustedSender(event)
+      if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'authority')) {
+        const id = Number(payload?.id)
+        if (!Number.isInteger(id) || id <= 0) throw new Error(message)
+        queue.acknowledge(id)
+        return
+      }
+
+      const id = payload.id
+      if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
+        throw new Error(message)
+      }
+      const authority = parseDeepLinkAcknowledgmentAuthority(payload.authority)
+      const mainWindow = getMainWindow()
+      if (!mainWindow || event.sender !== mainWindow.webContents) {
+        throw new Error('Deep-link acknowledgment requires the owning window')
+      }
+      if (
+        authority.sessionGeneration !== service.getSessionGeneration() ||
+        authority.userNavigationGeneration !== queues.navigation.current()
+      ) {
+        return false
+      }
+      if (!queue.list().some(item => item.id === id)) return false
+      queue.acknowledge(id)
+      return true
+    })
+  }
+
+  register('sandboxUi:acknowledgeDeepLink', queues.appQueue, 'Invalid app deep-link id')
+  register('gfs:acknowledgeDeepLink', queues.gfsQueue, 'Invalid EvenDrive deep-link id')
+}
 
 function sanitizeString(input: unknown): string {
   return String(input || '').trim()
@@ -313,7 +390,7 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   return parsed
 }
 
-export function assertTrustedSender(event: IpcMainInvokeEvent): void {
+export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {
   const senderUrl = String(event.senderFrame?.url || '')
   const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
   const isFileSender = senderUrl.startsWith('file://')
@@ -321,6 +398,16 @@ export function assertTrustedSender(event: IpcMainInvokeEvent): void {
   if (!isFileSender && !isDevSender) {
     throw new Error('Untrusted IPC sender')
   }
+}
+
+/**
+ * The identity of the window that owns a ZIP job (R3-M2). A job is opened by
+ * one window and may only be driven by that window: without this, any renderer
+ * that got hold of a job id could append to, finish or abort another
+ * window's archive.
+ */
+function zipJobOwnerId(event: IpcMainInvokeEvent): string {
+  return String(event.sender?.id ?? 'unknown')
 }
 
 type DesktopNotificationActionInput = {
@@ -353,10 +440,36 @@ function sanitizeDesktopNotificationActions(
     .slice(0, 3)
 }
 
-export function registerIpcHandlers(service: AppService): void {
+export function registerIpcHandlers(service: AppService, logout: () => Promise<number>): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
+
+  // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
+  // R1-M1): the renderer attaches a requestId to an invoke and fires
+  // 'gfs:abort' on Stop; the in-flight request's AbortController ends the
+  // producer fetch instead of leaving it to burn the read budget.
+  const gfsRequestAborters = new Map<string, AbortController>()
+  ipcMain.on('gfs:abort', (event, payload: { requestId?: string }) => {
+    try {
+      assertTrustedSender(event)
+    } catch {
+      return
+    }
+    const requestId = payload?.requestId ? sanitizeString(payload.requestId) : ''
+    if (requestId) gfsRequestAborters.get(requestId)?.abort()
+  })
+  function runWithGfsAbortSignal<T>(
+    requestId: string | undefined,
+    run: (signal?: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    if (!requestId) return run(undefined)
+    const controller = new AbortController()
+    gfsRequestAborters.set(requestId, controller)
+    return run(controller.signal).finally(() => {
+      gfsRequestAborters.delete(requestId)
+    })
+  }
 
   ipcMain.handle('auth:getSessionState', async event => {
     assertTrustedSender(event)
@@ -506,7 +619,7 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
-    const sessionGeneration = await service.logout()
+    const sessionGeneration = await logout()
     return { ok: true, sessionGeneration }
   })
 
@@ -585,10 +698,30 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
   })
-  ipcMain.handle('gfs:download', async (event, payload: { uri: string }) => {
+  ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
-    return service.downloadGfsUri(sanitizeString(payload?.uri))
+    const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
+    await clipboard.writeText(result.url)
+    return result
   })
+  ipcMain.handle(
+    'gfs:download',
+    async (event, payload: { uri: string; maxBytes?: number; requestId?: string }) => {
+      assertTrustedSender(event)
+      // Optional producer-side bound (folder-zip walk): when present it is
+      // validated here in main so an over-large body is rejected before it
+      // materializes in either process. Absent keeps the single-file
+      // save-to-disk path uncapped.
+      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+      if (maxBytes !== undefined && maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('download limit exceeds the allowed maximum')
+      }
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      return runWithGfsAbortSignal(requestId, signal =>
+        service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes, signal)
+      )
+    }
+  )
   ipcMain.handle(
     'gfs:downloadPreview',
     async (event, payload: { uri: string; maxBytes: number }) => {
@@ -621,11 +754,17 @@ export function registerIpcHandlers(service: AppService): void {
   )
   ipcMain.handle(
     'gfs:listChildren',
-    async (event, payload: { resourceId: string; drive?: string; cursor?: string }) => {
+    async (
+      event,
+      payload: { resourceId: string; drive?: string; cursor?: string; requestId?: string }
+    ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
       const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
-      return service.listGfsChildren(sanitizeString(payload?.resourceId), drive, cursor)
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      return runWithGfsAbortSignal(requestId, signal =>
+        service.listGfsChildren(sanitizeString(payload?.resourceId), drive, cursor, signal)
+      )
     }
   )
   ipcMain.handle(
@@ -636,6 +775,99 @@ export function registerIpcHandlers(service: AppService): void {
       return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
     }
   )
+  // Streamed, file-backed folder-zip assembly (R1-H2): entries append to a
+  // main-process temp file, finish saves through a native dialog. All five
+  // channels trust-check.
+  //
+  // The MAIN process owns the guarantees here (the renderer is untrusted):
+  //   - every entry name is validated as a canonical relative path BEFORE a
+  //     byte of entry data is written (R3-M1);
+  //   - the aggregate byte/entry budget, the ZIP32 bounds, the job's owner and
+  //     the concurrency bounds are enforced here, not only in the renderer
+  //     (R3-M2);
+  //   - the job owns its handle and its temp file until the save completes
+  //     (R3-M3).
+  //
+  // The job is bound to the window that opened it: another window cannot
+  // append to, finish or abort it.
+  ipcMain.handle('gfs:zipStream:start', async event => {
+    assertTrustedSender(event)
+    return { jobId: await startZipJob(zipJobOwnerId(event)) }
+  })
+  ipcMain.handle(
+    'gfs:zipStream:append',
+    async (event, payload: { jobId: string; name: string; bytes: ArrayBuffer }) => {
+      assertTrustedSender(event)
+      const name = sanitizeString(payload?.name)
+      if (!name) throw new Error('zipStream append requires an entry name')
+      if (!(payload?.bytes instanceof ArrayBuffer)) {
+        throw new Error('zipStream append requires entry bytes')
+      }
+      if (payload.bytes.byteLength > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('zip entry exceeds the allowed maximum')
+      }
+      const writtenName = await appendZipEntry(
+        sanitizeString(payload.jobId),
+        zipJobOwnerId(event),
+        name,
+        payload.bytes
+      )
+      return { name: writtenName }
+    }
+  )
+  // The folder-zip transfer (R1-H2): the main process fetches the resource and
+  // writes it straight into the temp file, chunk by chunk. The payload never
+  // crosses the IPC boundary and never materializes as one buffer in either
+  // process — the renderer only learns the entry's name and size.
+  ipcMain.handle(
+    'gfs:zipStream:appendFromUri',
+    async (
+      event,
+      payload: { jobId: string; name: string; uri: string; maxBytes: number; requestId?: string }
+    ) => {
+      assertTrustedSender(event)
+      const name = sanitizeString(payload?.name)
+      if (!name) throw new Error('zipStream appendFromUri requires an entry name')
+      const uri = sanitizeString(payload?.uri)
+      if (!uri) throw new Error('zipStream appendFromUri requires a resource URI')
+      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+      if (maxBytes === undefined) {
+        throw new Error('zipStream appendFromUri requires a positive maxBytes')
+      }
+      if (maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('zip entry exceeds the allowed maximum')
+      }
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      const result = await runWithGfsAbortSignal(requestId, signal =>
+        appendZipEntryStreaming(
+          sanitizeString(payload.jobId),
+          zipJobOwnerId(event),
+          name,
+          async sink => {
+            await service.downloadGfsUriInto(uri, maxBytes, signal, chunk => sink.write(chunk))
+          },
+          {}
+        )
+      )
+      return { name: result.name, bytes: result.bytes }
+    }
+  )
+  ipcMain.handle(
+    'gfs:zipStream:finish',
+    async (event, payload: { jobId: string; suggestedName: string }) => {
+      assertTrustedSender(event)
+      return finishZipJob(
+        sanitizeString(payload.jobId),
+        zipJobOwnerId(event),
+        sanitizeString(payload.suggestedName)
+      )
+    }
+  )
+  ipcMain.handle('gfs:zipStream:abort', async (event, payload: { jobId: string }) => {
+    assertTrustedSender(event)
+    await abortZipJob(sanitizeString(payload.jobId), zipJobOwnerId(event))
+    return { aborted: true }
+  })
   ipcMain.handle(
     'gfs:createFolder',
     async (event, payload: { parentResourceId: string; name: string; drive?: string }) => {
@@ -829,15 +1061,32 @@ export function registerIpcHandlers(service: AppService): void {
     'gfs:moveResource',
     async (
       event,
-      payload: { resourceId: string; destinationId: string; drive?: string; ifMatch?: number }
+      payload: {
+        resourceId: string
+        destinationId: string
+        expectedSessionGeneration: number
+        drive?: string
+        ifMatch?: number
+        newName?: string
+      }
     ) => {
       assertTrustedSender(event)
+      const requestedGeneration = payload?.expectedSessionGeneration
+      if (
+        typeof requestedGeneration !== 'number' ||
+        !Number.isSafeInteger(requestedGeneration) ||
+        requestedGeneration < 0
+      ) {
+        throw new Error('invalid_session_generation')
+      }
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
       return service.moveGfsResource(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.destinationId),
+        requestedGeneration,
         drive,
-        sanitizeOptionalInteger(payload?.ifMatch)
+        sanitizeOptionalInteger(payload?.ifMatch),
+        payload?.newName !== undefined ? sanitizeString(payload.newName) : undefined
       )
     }
   )
@@ -2164,7 +2413,7 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     const teamId = sanitizeString(payload?.teamId)
     const result = await service.createSandboxUiDeepLink(teamId || undefined)
-    clipboard.writeText(result.url)
+    await clipboard.writeText(result.url)
     return result
   })
 

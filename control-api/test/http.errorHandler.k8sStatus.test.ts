@@ -4,6 +4,7 @@ import type { Request } from 'express'
 import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
+import { ExternalSessionIssuanceUnavailableError } from '../src/services/auth/externalSessionIssuanceError.js'
 import { K8sNotFoundError } from '../src/services/resourceService.js'
 
 /**
@@ -17,6 +18,13 @@ import { K8sNotFoundError } from '../src/services/resourceService.js'
 function appThrowing(err: unknown) {
   const app = express()
   app.get('/boom', (_req, _res, next) => next(err))
+  app.use(clerumErrorHandler)
+  return app
+}
+
+function externalAppThrowing(err: unknown) {
+  const app = express()
+  app.get('/api/v1/external/boom', (_req, _res, next) => next(err))
   app.use(clerumErrorHandler)
   return app
 }
@@ -60,6 +68,27 @@ describe('clerumErrorHandler — K8s status forwarding (UT-2a)', () => {
   it('preserves the legacy `.status` path (404)', async () => {
     const res = await request(appThrowing({ status: 404, message: 'not found' })).get('/boom')
     expect(res.status).toBe(404)
+  })
+
+  it("forwards a thrown 4xx on /api/v1/external as dev's flat body", async () => {
+    const res = await request(
+      externalAppThrowing(Object.assign(new Error('upstream detail'), { status: 401 }))
+    ).get('/api/v1/external/boom')
+
+    expect(res.status).toBe(401)
+    expect(res.body.error).toBe('upstream detail')
+    expect(typeof res.body.correlationId).toBe('string')
+    expect(res.body.error.code).toBeUndefined()
+  })
+
+  it('keeps the typed 503 envelope and Retry-After for session issuance', async () => {
+    const res = await request(
+      externalAppThrowing(new ExternalSessionIssuanceUnavailableError())
+    ).get('/api/v1/external/boom')
+
+    expect(res.status).toBe(503)
+    expect(res.headers['retry-after']).toBe('2')
+    expect(res.body.error.code).toBe('session_issuance_temporarily_unavailable')
   })
 
   /**

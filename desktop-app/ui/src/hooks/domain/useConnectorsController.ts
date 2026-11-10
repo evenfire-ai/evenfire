@@ -82,9 +82,9 @@ export function useConnectorsController() {
   const authorize = useCallback(
     async ({ agentName, contextRef, connector }: ConnectorActionInput) => {
       const shared = isSharedConnector(connector)
-      // For `oauth-context`, control-api resolves the authoritative Context from
-      // the server CR; passing the agent's contextRef only helps main pick the
-      // right host binding / confirm copy. `oauth-user` grants carry no Context.
+      // For `oauth-context`, the McpServer names no Context: the grant belongs to
+      // the agent Host's Context (`Host.spec.contextRef`), and control-api rejects
+      // the authorize request without it. `oauth-user` grants carry no Context.
       const contextId = shared ? (contextRef ?? undefined) : undefined
       // Anchor the busy state to the VISIBLE (context, server) row, not to the
       // representative agent, so the spinner tracks the row the user clicked.

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatComposerStateContextValue } from '@contexts/ChatComposerStateContext'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
@@ -13,6 +13,7 @@ import {
   GROK_COMPOSER_MAX_IMAGE_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
+import type { ComposerDraftWriteResult } from '@hooks/useComposerDraft'
 import { readComposerFile } from '@lib/composerFileAdmission'
 import {
   type ImageInputDecision,
@@ -22,6 +23,7 @@ import type { WorkflowRecipeListResult } from '../../../../../src/types'
 import type {
   ComposerFileAttachment,
   ComposerImageAttachment,
+  ComposerReferenceAttachment,
   FailedAgentSend,
 } from '../../../uiTypes'
 import { ComposerPanel } from '../ComposerPanel'
@@ -41,12 +43,16 @@ const composerState: ChatComposerStateContextValue = {
   agentError: null,
   failedAgentSend: null,
   activeChatId: null,
+  workspaceChatTabId: null,
   activeMessageCount: 0,
   composerFocusRequestId: 0,
   requestComposerFocus: vi.fn(),
 }
 
-const draftState = { value: '', set: vi.fn() }
+const draftState = {
+  value: '',
+  set: vi.fn<(value: string) => ComposerDraftWriteResult>(() => ({ accepted: true })),
+}
 
 /** Stable action spies so guard tests can assert what did (not) reach the controller. */
 const actionsMock = {
@@ -58,6 +64,7 @@ const actionsMock = {
   handleRemoveComposerFileAttachment: vi.fn(),
   handleAddComposerReferenceAttachments: vi.fn(),
   handleRemoveComposerReferenceAttachment: vi.fn(),
+  handleClearComposerAttachments: vi.fn(),
   handleSendAgentMessage: vi.fn(),
   handleRetryFailedAgentSend: vi.fn(),
   handleRecoverFailedAgentSend: vi.fn(),
@@ -76,8 +83,21 @@ vi.mock('@contexts/McpRuntimeContext', () => ({
   useMcpRuntimeContext: () => ({ hostRuntimeStatus: null, activeLlmProvider: null }),
 }))
 
+vi.mock('@contexts/AuthContext', () => ({
+  useAuthContext: () => ({ me: { id: 'user-1', teamId: 'team-1' } }),
+}))
+
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({ selectedAgent: 'agent-1' }),
+}))
+
+vi.mock('@hooks/domain/useAgentsDataController', () => ({
+  useAgentsDataController: () => ({
+    accessCatalog: { userId: 'user-1', teamId: 'team-1' },
+    agentNames: ['agent-1'],
+    loading: false,
+    error: null,
+  }),
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
@@ -93,7 +113,7 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
 }))
 
 vi.mock('@hooks/useComposerDraft', () => ({
-  useComposerDraft: () => [draftState.value, draftState.set],
+  useComposerDraft: () => [draftState.value, draftState.set, null],
 }))
 
 /**
@@ -191,6 +211,7 @@ afterEach(() => {
     agentError: null,
     failedAgentSend: null,
     activeChatId: null,
+    workspaceChatTabId: null,
     activeMessageCount: 0,
     composerFocusRequestId: 0,
   })
@@ -303,6 +324,42 @@ describe.each([
     expect(textarea.selectionStart).toBe(4)
     expect(textarea.selectionEnd).toBe(8)
     otherInput.remove()
+  })
+
+  it('defers automatic RAF focus to compact navigation but preserves desktop and explicit focus', () => {
+    let frame: FrameRequestCallback | undefined
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+      frame = callback
+      return 17
+    })
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+    composerState.activeChatId = 'chat-1'
+
+    const first = render(<ComposerPanel inline />)
+    const trigger = document.createElement('button')
+    trigger.className = 'compact-navigation-toggle'
+    document.body.append(trigger)
+    trigger.focus()
+    act(() => frame?.(0))
+    expect(document.activeElement).toBe(trigger)
+    first.unmount()
+    trigger.remove()
+
+    composerState.composerFocusRequestId = 1
+    frame = undefined
+    const explicit = render(<ComposerPanel inline />)
+    const textarea = screen.getByTestId('chat-input')
+    expect(document.activeElement).toBe(textarea)
+    act(() => frame?.(0))
+    expect(document.activeElement).toBe(textarea)
+    explicit.unmount()
+
+    composerState.composerFocusRequestId = 0
+    frame = undefined
+    render(<ComposerPanel inline />)
+    const desktopTextarea = screen.getByTestId('chat-input')
+    act(() => frame?.(0))
+    expect(document.activeElement).toBe(desktopTextarea)
   })
 })
 
@@ -1205,12 +1262,89 @@ describe('ComposerPanel with a pending image after a model switch', () => {
     expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledTimes(2)
   })
 
+  it('sends the exact workspace chat-tab owner with its draft', () => {
+    composerState.workspaceChatTabId = 'chat-owner-a'
+    draftState.value = 'gfs://main/0123456789abcdef0123456789abcdef'
+    render(<ComposerPanel inline />)
+
+    fireEvent.click(screen.getByTestId('send-button'))
+
+    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledWith(
+      'gfs://main/0123456789abcdef0123456789abcdef',
+      'chat-owner-a'
+    )
+  })
+
   it('renders the pending image chip and dispatches removal with its id', () => {
     render(<ComposerPanel inline />)
 
     expect(screen.getByText('pending.png')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Remove pending.png' }))
     expect(actionsMock.handleRemoveComposerImageAttachment).toHaveBeenCalledWith('pending-image-1')
+  })
+})
+
+describe('ComposerPanel attachments chip row (STORY-38)', () => {
+  const firstImage: ComposerImageAttachment = {
+    id: 'kept-image-1',
+    name: 'kept-a.png',
+    mimeType: 'image/png',
+    dataBase64: 'iVBORw0KGgo=',
+    sizeBytes: 8,
+    previewDataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+  }
+  const secondImage: ComposerImageAttachment = {
+    id: 'kept-image-2',
+    name: 'kept-b.png',
+    mimeType: 'image/png',
+    dataBase64: 'iVBORw0KGgoB',
+    sizeBytes: 9,
+    previewDataUrl: 'data:image/png;base64,iVBORw0KGgoB',
+  }
+  const pluginReference: ComposerReferenceAttachment = {
+    id: 'kept-ref-1',
+    type: 'plugin',
+    namespace: 'ns',
+    name: 'helper',
+    label: 'helper plugin',
+  }
+
+  it('shows no count or clear control while the composer has no attachments', () => {
+    render(<ComposerPanel inline />)
+    expect(screen.queryByTestId('composer-attachments-count')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Clear all attachments' })).toBeNull()
+  })
+
+  it('counts every pending attachment, singular and plural, with per-file remove buttons', () => {
+    composerState.composerImageAttachments = [firstImage]
+    const { rerender } = render(<ComposerPanel inline />)
+    expect(screen.getByTestId('composer-attachments-count').textContent).toBe('1 attachment')
+    expect(screen.getByRole('button', { name: 'Remove kept-a.png' })).toBeTruthy()
+
+    composerState.composerImageAttachments = [firstImage, secondImage]
+    composerState.composerReferenceAttachments = [pluginReference]
+    rerender(<ComposerPanel inline />)
+    expect(screen.getByTestId('composer-attachments-count').textContent).toBe('3 attachments')
+    expect(screen.getByRole('button', { name: 'Remove kept-b.png' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Remove helper plugin' })).toBeTruthy()
+  })
+
+  it('clears every pending attachment through the explicit clear control', () => {
+    composerState.composerImageAttachments = [firstImage, secondImage]
+    composerState.composerReferenceAttachments = [pluginReference]
+    render(<ComposerPanel inline />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all attachments' }))
+    expect(actionsMock.handleClearComposerAttachments).toHaveBeenCalledTimes(1)
+    expect(actionsMock.handleRemoveComposerImageAttachment).not.toHaveBeenCalled()
+    expect(actionsMock.handleRemoveComposerReferenceAttachment).not.toHaveBeenCalled()
+  })
+
+  it('styles the clear control and the count as part of the inline chip row', () => {
+    composerState.composerImageAttachments = [firstImage]
+    render(<ComposerPanel inline />)
+    expect(cssRule('.composer-attachments-count')).toContain('white-space: nowrap')
+    expect(cssRule('.composer-attachments-clear')).toContain('cursor: pointer')
   })
 })
 
@@ -1230,6 +1364,7 @@ describe('ComposerPanel failed-send recovery actions', () => {
   it('offers explicit recovery and dispatch and routes each action to the controller', () => {
     composerState.failedAgentSend = failedSend
     composerState.agentError = 'Sending failed'
+    composerState.workspaceChatTabId = 'owner-tab'
     render(<ComposerPanel inline />)
 
     expect(screen.getByText('Sending failed')).toBeTruthy()
@@ -1237,6 +1372,7 @@ describe('ComposerPanel failed-send recovery actions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Recover input' }))
     expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledTimes(1)
+    expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledWith('owner-tab')
     expect(actionsMock.handleDiscardFailedAgentSend).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Discard failed input' }))

@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
+import { passwordAdmissionMigrationFixtureResult } from './helpers/passwordAdmissionMigrationFixture.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -13,7 +15,10 @@ describe('Plugin Workload SDK runtime-contract reconciliation migration', () => 
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
-    mockConnect.mockResolvedValue({ query: clientQuery, release: clientRelease })
+    mockConnect.mockResolvedValue({
+      query: onlineIndexAwareQuery(clientQuery),
+      release: clientRelease,
+    })
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
@@ -39,9 +44,11 @@ describe('Plugin Workload SDK runtime-contract reconciliation migration', () => 
     )
 
     clientQuery.mockImplementation(async (sql: string) => {
+      const admissionFixtureResult = passwordAdmissionMigrationFixtureResult(sql)
+      if (admissionFixtureResult) return admissionFixtureResult
       if (sql.includes('SELECT version FROM schema_migrations')) {
         const appliedVersions = CONTROL_API_MIGRATIONS.filter(
-          candidate => candidate.version !== migration?.version
+          candidate => candidate.version < (migration?.version ?? '')
         ).map(candidate => ({ version: candidate.version }))
         return { rows: appliedVersions, rowCount: appliedVersions.length }
       }
