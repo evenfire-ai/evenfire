@@ -28,6 +28,7 @@ function runtimeConfig() {
     snippetRunnerUrl: 'http://snippet-runner.test',
     snippetRunnerTokenFile: '/var/run/clerum/workflow-tokens/snippet-runner-token',
     correlationId: 'corr-1',
+    traceContext: { origin: 'workflow_runtime' as const, runId: null, correlationId: 'corr-1' },
     signalPollIntervalMs: 5000,
     restPort: 8090,
   }
@@ -758,7 +759,7 @@ describe('sdk workflow runtime: run store unavailable at a running boundary', ()
     }
   }
 
-  function runtimeLogLines(write: ReturnType<typeof vi.spyOn>, message: string): unknown[] {
+  function runtimeLogLines(write: { mock: { calls: unknown[][] } }, message: string): unknown[] {
     return write.mock.calls
       .map(call => String(call[0]))
       .filter(line => line.includes(`"message":"${message}"`))
