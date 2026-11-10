@@ -297,7 +297,6 @@ test('the supported overlap is the largest one the gate does not refuse', () => 
           kind: 'ok',
           fqdn: 'bound.example.test',
           port: 443,
-          protocol: 'TCP',
           ips: ['192.0.2.10'],
           ttlMs: DNS_FIXTURE_TTL_SECONDS * 1000,
         },

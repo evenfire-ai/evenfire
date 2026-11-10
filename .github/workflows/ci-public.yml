@@ -986,6 +986,7 @@ jobs:
 
       - name: Test NP enforcement preflight namespace inventory (HCC env defaults, cluster-free)
         run: bash scripts/tests/test-np-preflight-inventory.sh
+
       - name: Test E2E credentials stay out of argv (RPC gateway journey)
         run: bash scripts/tests/test-e2e-credential-argv.sh
 
