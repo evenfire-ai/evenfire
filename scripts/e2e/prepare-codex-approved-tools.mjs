@@ -668,6 +668,14 @@ function command(
     case 'lease':
       result = spawnSync('bash', ['scripts/minikube/require-t2-mutation-lock.sh'], options)
       break
+    case 'electron-check':
+      if (args.length !== 0) throw new Error('Unexpected Electron check arguments')
+      result = spawnSync('npm', ['run', 'verify:electron', '--', '--check-only'], {
+        ...options,
+        cwd: path.join(repo, 'desktop-app'),
+        stdio: 'inherit',
+      })
+      break
     case 'head':
       result = spawnSync('git', ['rev-parse', 'HEAD'], options)
       break
@@ -966,6 +974,8 @@ async function main() {
   )
     throw new Error('Owned branch Minikube context required')
   command('lease', [])
+  if (action !== 'restore')
+    command('electron-check', [], { timeout: APPROVED_TOOLS_ELECTRON_CHECK_TIMEOUT_MS })
   const evidence = validateRunDirectory(
     required('APPROVED_TOOLS_CANONICAL_ROOT'),
     required('APPROVED_TOOLS_EVIDENCE_DIR')

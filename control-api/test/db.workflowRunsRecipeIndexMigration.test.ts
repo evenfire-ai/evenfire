@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
 import { passwordAdmissionMigrationFixtureResult } from './helpers/passwordAdmissionMigrationFixture.js'
 
 const clientQuery = vi.fn()
@@ -20,7 +21,7 @@ describe('db.initDb workflow_runs recipe ordering index migration', () => {
     vi.resetModules()
     vi.clearAllMocks()
     mockConnect.mockResolvedValue({
-      query: clientQuery,
+      query: onlineIndexAwareQuery(clientQuery),
       release: clientRelease,
     })
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })

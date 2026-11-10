@@ -5,6 +5,16 @@ import {
   ControlApiUnexpectedResponseError,
 } from '../controlApiClient.js'
 
+const SESSION_ISSUANCE_UNAVAILABLE_CODE = 'session_issuance_temporarily_unavailable'
+
+function isSessionIssuanceUnavailable(error: ControlApiError): boolean {
+  if (!error.body || typeof error.body !== 'object') return false
+  const rawError = (error.body as Record<string, unknown>).error
+  if (rawError === SESSION_ISSUANCE_UNAVAILABLE_CODE) return true
+  if (!rawError || typeof rawError !== 'object') return false
+  return (rawError as Record<string, unknown>).code === SESSION_ISSUANCE_UNAVAILABLE_CODE
+}
+
 function sendPublicPasswordAuthorityError(
   res: Response,
   status: 429 | 503,
@@ -50,6 +60,7 @@ export function sendPasswordAuthorityError(error: unknown, res: Response): boole
     return true
   }
   if (error.status === 503) {
+    if (isSessionIssuanceUnavailable(error)) return false
     const recoveryOutcomeUnknown = error.code === 'recovery_outcome_unknown'
     sendPublicPasswordAuthorityError(
       res,
@@ -92,6 +103,10 @@ export function sendPasswordAuthorityError(error: unknown, res: Response): boole
 export const invitationPasswordErrorHandler: ErrorRequestHandler = (error, _req, res, next) => {
   if (sendPasswordAuthorityError(error, res)) return
   if (error instanceof ControlApiError) {
+    if (isSessionIssuanceUnavailable(error)) {
+      next(error)
+      return
+    }
     res.status(error.status).json({ error: 'Invitation is invalid or unavailable' })
     return
   }

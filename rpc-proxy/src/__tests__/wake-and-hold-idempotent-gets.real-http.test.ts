@@ -92,11 +92,12 @@ async function startUpstream(handler: Handler): Promise<void> {
     server!.listen(0, '127.0.0.1', resolve)
   })
   const { port } = server.address() as AddressInfo
-  serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+  const connection = {
     name: 'chatllm',
     url: `http://127.0.0.1:${port}`,
     headers: {},
-  })
+  }
+  serviceMock.resolveHostConnectionForUser.mockResolvedValue(connection)
 }
 
 /** Ends the TCP connection without a response: undici reports it as `fetch failed`. */

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -19,13 +20,13 @@ describe('0044_llm_model_prices migration', () => {
     vi.resetModules()
     vi.clearAllMocks()
     mockConnect.mockResolvedValue({
-      query: clientQuery,
+      query: onlineIndexAwareQuery(clientQuery),
       release: clientRelease,
     })
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('creates the table, the active partial unique index, and seeds example prices', async () => {
+  it('creates the table and the active partial unique index, and seeds no prices', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
@@ -38,12 +39,7 @@ describe('0044_llm_model_prices migration', () => {
     )
     // partial index — one active row per (provider, model)
     expect(sqls.some(sql => /idx_llm_model_prices_active[\s\S]*WHERE enabled/.test(sql))).toBe(true)
-    // idempotent seed
-    expect(
-      sqls.some(
-        sql =>
-          sql.includes('INSERT INTO llm_model_prices') && sql.includes('ON CONFLICT DO NOTHING')
-      )
-    ).toBe(true)
+    // The placeholder seed is retired: the catalog sync prices models on insert.
+    expect(sqls.filter(sql => /INSERT INTO llm_model_prices\b/.test(sql))).toEqual([])
   })
 })

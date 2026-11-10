@@ -1,19 +1,7 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { ControlApiError, controlApiStreamRequest } from '../controlApiClient.js'
+import { controlApiStreamRequest } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
-
-const PROPAGATED_STATUSES = new Set([400, 401, 403, 404, 409, 410, 422])
-
-function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  if (error instanceof ControlApiError && PROPAGATED_STATUSES.has(error.status)) {
-    const body =
-      error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
-    res.status(error.status).json(body)
-    return
-  }
-  next(error)
-}
 
 function setStreamHeaders(res: Response): void {
   res.status(200)
@@ -66,7 +54,7 @@ export function createNotificationsRouter(): Router {
         res.end()
         return
       }
-      forwardControlApiError(error, res, next)
+      next(error)
     } finally {
       req.off('close', onClose)
       req.off('aborted', onClose)
@@ -85,7 +73,7 @@ export function createNotificationsRouter(): Router {
       )
       res.status(200).json(result)
     } catch (error) {
-      forwardControlApiError(error, res, next)
+      next(error)
     }
   })
 
@@ -98,7 +86,7 @@ export function createNotificationsRouter(): Router {
       })
       res.status(200).json(result)
     } catch (error) {
-      forwardControlApiError(error, res, next)
+      next(error)
     }
   })
 
@@ -112,7 +100,7 @@ export function createNotificationsRouter(): Router {
       })
       res.status(200).json(result)
     } catch (error) {
-      forwardControlApiError(error, res, next)
+      next(error)
     }
   })
 

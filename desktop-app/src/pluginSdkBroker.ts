@@ -166,6 +166,7 @@ export class PluginSdkBroker {
       userId,
       pluginId: surface.pluginId,
       pluginTitle: surface.pluginTitle,
+      mount: surface,
       capabilities: ids,
     })
 
@@ -235,6 +236,7 @@ export class PluginSdkBroker {
     const outcome = await this.deps.gate.ensure({
       ...grantKey,
       pluginTitle: surface.pluginTitle,
+      mount: surface,
       capabilities: [capability],
     })
     if (outcome.granted[capability] !== true) {

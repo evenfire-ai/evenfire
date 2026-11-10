@@ -61,6 +61,26 @@ const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => 
     consumedRefreshJtis.add(jti)
     return { rows: [{ jti }], rowCount: 1 }
   }
+  if (/clock_timestamp\(\)/i.test(text)) {
+    return { rows: [{ db_now: new Date('2026-09-01T12:00:00.000Z') }], rowCount: 1 }
+  }
+  if (
+    /external_user_session_security_epochs/i.test(text) &&
+    /external_v1_session_revocations/i.test(text)
+  ) {
+    return {
+      rows: [
+        {
+          id: String(params?.[0] ?? ''),
+          lifecycle_state: 'active',
+          lifecycle_version: 1,
+          valid_after: null,
+          token_revoked: false,
+        },
+      ],
+      rowCount: 1,
+    }
+  }
   if (/lifecycle_state/i.test(text)) {
     return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }], rowCount: 1 }
   }
@@ -69,7 +89,11 @@ const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => 
 vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQueryDispatch(args[0], args[1] as unknown[] | undefined),
-    connect: vi.fn(),
+    connect: vi.fn(async () => ({
+      query: (...args: unknown[]) =>
+        mockPoolQueryDispatch(args[0], args[1] as unknown[] | undefined),
+      release: vi.fn(),
+    })),
   },
   rateLimitPool: {
     query: (...args: unknown[]) => mockPoolQueryDispatch(args[0], args[1] as unknown[] | undefined),
