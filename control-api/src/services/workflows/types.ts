@@ -1,8 +1,13 @@
 import type { AuthClaims } from '../../profileTypes.js'
 import type { McpHostControlClaims } from '../../utils/auth/mcpHostJwtToken.js'
+import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
 
 export type WorkflowCaller =
-  | { kind: 'user-session'; claims: AuthClaims }
+  | {
+      kind: 'user-session'
+      claims: AuthClaims
+      session: ExternalSessionAuthorityContext
+    }
   | { kind: 'admin-ui'; userId: string }
   | { kind: 'mcp-host-control'; claims: McpHostControlClaims }
 

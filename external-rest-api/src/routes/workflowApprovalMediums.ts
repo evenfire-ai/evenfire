@@ -1,6 +1,5 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { ControlApiError } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   confirmWorkflowApprovalMediumChallenge,
@@ -13,20 +12,9 @@ import {
   updateWorkflowApprovalMediumDisplayName,
 } from '../services/workflowApprovalMediumsService.js'
 
-const PROPAGATED_STATUSES = new Set([400, 401, 403, 404, 409, 422])
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const CODE_RE = /^\d{6}$/
 const DISPLAY_NAME_MAX_LENGTH = 120
-
-function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  if (error instanceof ControlApiError && PROPAGATED_STATUSES.has(error.status)) {
-    const body =
-      error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
-    res.status(error.status).json(body)
-    return
-  }
-  next(error)
-}
 
 function optionalString(value: unknown): string | null {
   if (value === undefined || value === null) return null
@@ -69,7 +57,7 @@ export function createWorkflowApprovalMediumsRouter(): Router {
         })
         res.status(202).json(result)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -119,7 +107,7 @@ export function createWorkflowApprovalMediumsRouter(): Router {
         })
         res.status(202).json(result)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -146,7 +134,7 @@ export function createWorkflowApprovalMediumsRouter(): Router {
           .status(200)
           .json(await confirmWorkflowApprovalMediumChallenge(sessionToken, challengeId, code))
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -158,7 +146,7 @@ export function createWorkflowApprovalMediumsRouter(): Router {
         .status(200)
         .json(await listWorkflowApprovalMediums(extractAuthToken(req), { includeDisabled }))
     } catch (error) {
-      forwardControlApiError(error, res, next)
+      next(error)
     }
   })
 
@@ -169,7 +157,7 @@ export function createWorkflowApprovalMediumsRouter(): Router {
       try {
         res.status(200).json(await listApprovalChannelTargets(extractAuthToken(req)))
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -186,7 +174,7 @@ export function createWorkflowApprovalMediumsRouter(): Router {
         }
         res.status(200).json(await preferWorkflowApprovalMedium(extractAuthToken(req), accountId))
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -221,7 +209,7 @@ export function createWorkflowApprovalMediumsRouter(): Router {
           res.status(400).json({ error: error.message })
           return
         }
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -239,7 +227,7 @@ export function createWorkflowApprovalMediumsRouter(): Router {
         await disableWorkflowApprovalMedium(extractAuthToken(req), accountId)
         res.status(204).send()
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )

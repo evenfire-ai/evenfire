@@ -1341,8 +1341,12 @@ describe('App deep-link orchestration', () => {
   }
 
   async function cleanupAppDeepLinkSuite(): Promise<void> {
-    retireRealControllerSession()
-    cleanup()
+    try {
+      retireRealControllerSession()
+    } finally {
+      // Unmount even when retirement throws, so its error is the one reported.
+      cleanup()
+    }
     unmountRealApp = null
     const bodyChildElementCount = document.body.childElementCount
     vi.useRealTimers()

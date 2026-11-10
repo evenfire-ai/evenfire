@@ -3,6 +3,7 @@ import { TeamRole } from '../types.js'
 
 export type GoogleLoginInput = {
   idToken: string
+  sessionContract?: 'v2'
 }
 
 type LoginResult = {
@@ -28,13 +29,14 @@ export async function loginWithGoogle(google: GoogleLoginInput): Promise<LoginRe
 
 export async function loginWithPassword(
   email: string,
-  password: string
+  password: string,
+  sessionContract?: 'v2'
 ): Promise<Omit<LoginResult, 'isNewUser'>> {
   const payload = await controlApiRequest<Omit<LoginResult, 'isNewUser'>>(
     'POST',
     '/external/auth/password-login',
     {
-      body: { email, password },
+      body: { email, password, ...(sessionContract ? { sessionContract } : {}) },
     }
   )
   return payload
@@ -43,5 +45,21 @@ export async function loginWithPassword(
 export async function requestPasswordReset(email: string): Promise<{ requested: true }> {
   return controlApiRequest<{ requested: true }>('POST', '/external/auth/password-reset/request', {
     body: { email },
+  })
+}
+
+export async function renewUserSession(sessionToken: string): Promise<{
+  token: string
+  expiresInSeconds: number
+  absoluteExpiresAt: string
+}> {
+  return controlApiRequest('POST', '/external/auth/session/renew', {
+    userSessionToken: sessionToken,
+  })
+}
+
+export async function logoutUserSession(sessionToken: string): Promise<{ revoked: boolean }> {
+  return controlApiRequest('POST', '/external/auth/session/logout', {
+    userSessionToken: sessionToken,
   })
 }

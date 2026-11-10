@@ -406,6 +406,59 @@ describe('POST /rpc/hosts/:hostRef/approvals/deny', () => {
 // Artifact Routes
 // =====================================================================
 describe('GET /rpc/hosts/:hostRef/artifacts', () => {
+  it('forwards more than 30 mixed artifact reads', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(mockFetchResponse(200, '[]'))
+    const app = makeApp()
+
+    for (let requestNumber = 0; requestNumber < 35; requestNumber += 1) {
+      const path =
+        requestNumber % 2 === 0
+          ? '/rpc/hosts/chatllm/artifacts'
+          : `/rpc/hosts/chatllm/artifacts/report-${requestNumber}.txt/download`
+      await request(app).get(path).set('authorization', 'Bearer token').expect(200)
+    }
+
+    await request(app)
+      .get('/rpc/hosts/chatllm/artifacts/final.txt/download')
+      .set('authorization', 'Bearer token')
+      .expect(200)
+
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(36)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(36)
+  })
+
+  it('preserves access for different users, Hosts, and filenames', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(mockFetchResponse(200, '[]'))
+    authTokenMock.verifyRpcToken.mockImplementation(token =>
+      token === 'other-user-token' ? { ...VALID_CLAIMS, sub: 'other-user' } : { ...VALID_CLAIMS }
+    )
+    serviceMock.resolveHostConnectionForUser.mockImplementation(
+      async (_userId: string, hostRef: string) => ({ ...HOST_CONNECTION, name: hostRef })
+    )
+    const app = makeApp()
+
+    for (let requestNumber = 0; requestNumber < 30; requestNumber += 1) {
+      await request(app)
+        .get(`/rpc/hosts/chatllm/artifacts/variant-${requestNumber}.txt/download`)
+        .set('authorization', 'Bearer token')
+        .expect(200)
+    }
+
+    await request(app)
+      .get('/rpc/hosts/chatllm/artifacts/different-filename.txt/download')
+      .set('authorization', 'Bearer token')
+      .expect(200)
+
+    await request(app)
+      .get('/rpc/hosts/otherhost/artifacts')
+      .set('authorization', 'Bearer token')
+      .expect(200)
+    await request(app)
+      .get('/rpc/hosts/chatllm/artifacts')
+      .set('authorization', 'Bearer other-user-token')
+      .expect(200)
+  })
+
   it('forwards to mcp-host /v1/runtime/artifacts and returns JSON', async () => {
     const artifacts = [
       { filename: 'report.pdf', size: 12345, createdAt: '2026-03-27T10:00:00Z' },
@@ -465,6 +518,21 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
       .get('/rpc/hosts/chatllm/artifacts')
       .set('authorization', 'Bearer token')
       .expect(403)
+  })
+
+  it('does not forward an artifact read when Host resolution fails', async () => {
+    globalThis.fetch = vi.fn()
+    serviceMock.resolveHostConnectionForUser.mockRejectedValue(
+      new Error('Host resolution unavailable')
+    )
+    const app = makeApp()
+
+    await request(app)
+      .get('/rpc/hosts/chatllm/artifacts')
+      .set('authorization', 'Bearer token')
+      .expect(500)
+
+    expect(globalThis.fetch).not.toHaveBeenCalled()
   })
 
   it('rejects invalid hostRef before resolving host access', async () => {

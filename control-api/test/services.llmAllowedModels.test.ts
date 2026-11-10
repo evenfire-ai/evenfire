@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { DbTransactionClient } from '../src/db.js'
 import {
   LlmAllowedModelConflictError,
   createAllowedModel,
@@ -15,7 +16,7 @@ import {
 } from '../src/services/llmAllowedModels.js'
 
 function fakeDb(query: ReturnType<typeof vi.fn>) {
-  return { query } as unknown as Parameters<typeof createAllowedModel>[2]
+  return { query } as unknown as DbTransactionClient
 }
 
 const ROW = {
@@ -315,7 +316,7 @@ describe('llmAllowedModels service', () => {
     it('writes a disable audit row when enabling→false transition', async () => {
       const query = vi
         .fn()
-        .mockResolvedValueOnce({ rows: [ROW], rowCount: 1 }) // getAllowedModel (enabled)
+        .mockResolvedValueOnce({ rows: [ROW], rowCount: 1 }) // locked read (enabled)
         .mockResolvedValueOnce({ rows: [{ ...ROW, enabled: false }], rowCount: 1 }) // UPDATE
         .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
       await updateAllowedModel('id', { enabled: false }, 'admin-2', fakeDb(query))
@@ -326,7 +327,7 @@ describe('llmAllowedModels service', () => {
     })
 
     it('returns null (no update) when the row is missing', async () => {
-      const query = vi.fn().mockResolvedValueOnce({ rows: [], rowCount: 0 }) // getAllowedModel
+      const query = vi.fn().mockResolvedValueOnce({ rows: [], rowCount: 0 }) // locked read
       const res = await updateAllowedModel('id', { enabled: false }, 'admin-2', fakeDb(query))
       expect(res).toBeNull()
       expect(query).toHaveBeenCalledTimes(1)
@@ -335,7 +336,7 @@ describe('llmAllowedModels service', () => {
     it('only sets provided columns', async () => {
       const query = vi
         .fn()
-        .mockResolvedValueOnce({ rows: [ROW], rowCount: 1 }) // getAllowedModel
+        .mockResolvedValueOnce({ rows: [ROW], rowCount: 1 }) // locked read
         .mockResolvedValueOnce({ rows: [{ ...ROW, display_name: 'Haiku' }], rowCount: 1 }) // UPDATE
         .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
       await updateAllowedModel('id', { display_name: 'Haiku' }, 'admin-2', fakeDb(query))
@@ -353,7 +354,8 @@ describe('llmAllowedModels service', () => {
           rows: [{ ...ROW, model: 'glm-5.2', image_input: null }],
           rowCount: 1,
         })
-        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // tombstone
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
       await updateAllowedModel('id', { model: 'glm-5.2' }, 'admin-2', fakeDb(query))
       const [sql, params] = query.mock.calls[1]
       // Old evidence belonged to the OLD model: it must not carry over.
@@ -367,7 +369,8 @@ describe('llmAllowedModels service', () => {
         .fn()
         .mockResolvedValueOnce({ rows: [{ ...ROW, image_input: CURATED_SUPPORTED }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [ROW], rowCount: 1 })
-        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // tombstone
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
       const fresh = {
         state: 'unsupported',
         evidence: {
@@ -417,21 +420,28 @@ describe('llmAllowedModels service', () => {
   })
 
   describe('deleteAllowedModel', () => {
-    it('records a delete audit row after a successful delete', async () => {
+    it('tombstones and audits the pair the DELETE returned', async () => {
       const query = vi
         .fn()
-        .mockResolvedValueOnce({ rows: [ROW], rowCount: 1 }) // getAllowedModel
-        .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // DELETE
+        .mockResolvedValueOnce({ rows: [{ provider: 'claude', model: 'm2' }], rowCount: 1 }) // DELETE … RETURNING
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // tombstone
         .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
       const ok = await deleteAllowedModel('id', 'admin-3', fakeDb(query))
       expect(ok).toBe(true)
+      expect(String(query.mock.calls[0][0])).toMatch(
+        /DELETE FROM llm_allowed_models[\s\S]*RETURNING provider, model/
+      )
+      const tombstone = query.mock.calls.find(c =>
+        /INSERT INTO llm_catalog_dismissed/.test(String(c[0]))
+      )
+      expect(tombstone![1]).toEqual(['claude', 'm2'])
       const auditCall = query.mock.calls.find(c =>
         /INSERT INTO llm_allowed_models_audit/.test(String(c[0]))
       )
-      expect(auditCall![1][1]).toBe('delete')
+      expect(auditCall![1].slice(1, 4)).toEqual(['delete', 'claude', 'm2'])
     })
 
-    it('returns false and writes no audit when the row is missing', async () => {
+    it('returns false and writes neither tombstone nor audit when the row is missing', async () => {
       const query = vi.fn().mockResolvedValueOnce({ rows: [], rowCount: 0 })
       const ok = await deleteAllowedModel('id', 'admin-3', fakeDb(query))
       expect(ok).toBe(false)

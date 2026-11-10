@@ -1,20 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { PROFILE_ROUTES } from '@constants/routes'
 import type { InvitationPreview } from '@/app/types/api'
 import { InvitationClient } from '../../invitations/[token]/InvitationClient'
 
 const mocks = vi.hoisted(() => ({
-  checkAuth: vi.fn(),
-  routerReplace: vi.fn(),
   setupInvitationPasswordWithToken: vi.fn(),
-}))
-
-vi.mock('next/navigation', () => ({
-  useRouter: () => ({ replace: mocks.routerReplace }),
-}))
-
-vi.mock('@components/AuthContext', () => ({
-  useAuth: () => ({ checkAuth: mocks.checkAuth }),
 }))
 
 vi.mock('@lib/api', async () => {
@@ -22,7 +13,6 @@ vi.mock('@lib/api', async () => {
   return {
     ...actual,
     acceptInvitation: vi.fn(),
-    getEvenfireDownloadUrl: () => 'https://downloads.example.invalid/evenfire',
     setupInvitationPasswordWithToken: mocks.setupInvitationPasswordWithToken,
   }
 })
@@ -42,8 +32,6 @@ const invitation: InvitationPreview = {
 }
 
 beforeEach(() => {
-  mocks.checkAuth.mockReset()
-  mocks.routerReplace.mockReset()
   mocks.setupInvitationPasswordWithToken.mockReset().mockResolvedValue({
     ...invitation,
     status: 'accepted',
@@ -54,8 +42,8 @@ beforeEach(() => {
 
 afterEach(cleanup)
 
-describe('R6 reset response identity fence', () => {
-  it('does not hydrate or navigate when the committed reset response names another user', async () => {
+describe('R6 reset response session boundary', () => {
+  it('shows the password-updated screen from the reset response without navigating', async () => {
     render(
       <InvitationClient
         invitationToken="r6-one-use-reset-proof"
@@ -71,14 +59,18 @@ describe('R6 reset response identity fence', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
 
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Password updated' })).toBeInTheDocument()
+    )
     expect(
-      await screen.findByText(
-        'Your password was updated, but the signed-in account does not match this recovery link.'
+      screen.getByText(
+        'Your password has been updated. Sign in with your new password to continue.'
       )
-    ).toBeTruthy()
-    expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
-    expect(mocks.checkAuth).not.toHaveBeenCalled()
-    expect(mocks.routerReplace).not.toHaveBeenCalled()
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe(
+      PROFILE_ROUTES.login({ email: invitation.email })
+    )
     expect(screen.queryByLabelText('Password')).toBeNull()
+    expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
   })
 })
