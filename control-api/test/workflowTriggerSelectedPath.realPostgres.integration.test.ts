@@ -625,6 +625,19 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
     await processor.processPending(result.row.run_id)
 
     const effects = { first: 0, second: 0 }
+    // The handler publishes the pause to the recipe status before it answers
+    // 423, so the runtime receiving the 423 is the point after which the
+    // projection must already say `authorization_paused`. The durable row
+    // commits earlier and cannot order that check.
+    const pauseResponses: string[] = []
+    let resolvePauseObserved!: () => void
+    const pauseObserved = new Promise<void>(resolve => {
+      resolvePauseObserved = resolve
+    })
+    const recordPause = (source: string): void => {
+      pauseResponses.push(source)
+      resolvePauseObserved()
+    }
     const status = {
       getWorkflowStatus: async () => {
         const current = await handlers.getWorkflowStatus(childName, claims)
@@ -637,6 +650,7 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
           ...details,
         } as never)
         if (current.status === 423 && current.body.code === 'workflow_authorization_paused') {
+          recordPause(`workflow:${workflowPhase}`)
           throw new WorkflowAuthorizationPausedError()
         }
         if (current.status >= 400) throw new Error(`WRC status write failed: ${current.status}`)
@@ -652,6 +666,7 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
           ...details,
         } as never)
         if (current.status === 423 && current.body.code === 'workflow_authorization_paused') {
+          recordPause(`step:${stepId}:${phase}`)
           throw new WorkflowAuthorizationPausedError()
         }
         if (current.status >= 400)
@@ -704,34 +719,35 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
     await processor.processPending(result.row.run_id)
     const runtime = runRuntime()
     const waitForPaused = async () => {
-      const deadline = Date.now() + 15_000
-      while (Date.now() < deadline) {
-        const state = await databasePool.query(
-          `SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1`,
-          [result.row.run_id]
-        )
-        if (
-          state.rows[0]?.phase === 'AuthorizationPaused' ||
-          state.rows[0]?.phase === 'Failed' ||
-          state.rows[0]?.phase === 'Succeeded' ||
-          state.rows[0]?.phase === 'Canceled'
-        ) {
-          if (state.rows[0]?.phase === 'AuthorizationPaused') return state.rows[0]
-          break
-        }
-        await new Promise(resolve => setTimeout(resolve, 25))
-      }
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+      const outcome = await Promise.race([
+        pauseObserved.then(() => 'paused'),
+        runtime.then(
+          settled => `runtime settled before any pause: ${JSON.stringify(settled)}`,
+          (error: unknown) =>
+            `runtime threw before any pause: ${error instanceof Error ? error.message : String(error)}`
+        ),
+        new Promise<string>(resolve => {
+          deadlineTimer = setTimeout(
+            () => resolve('no 423 workflow_authorization_paused within 15 s'),
+            15_000
+          )
+        }),
+      ]).finally(() => clearTimeout(deadlineTimer))
+      // One read after the 423: the pause committed before the handler answered.
       const state = await databasePool.query(
         `SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1`,
         [result.row.run_id]
       )
+      if (outcome === 'paused') return state.rows[0]
       const steps = await databasePool.query(
         `SELECT step_id, phase, output FROM workflow_run_steps
           WHERE run_id = $1 ORDER BY step_id`,
         [result.row.run_id]
       )
       throw new Error(
-        `workflow did not durably pause; state=${JSON.stringify(state.rows)} ` +
+        `workflow did not pause: ${outcome}; state=${JSON.stringify(state.rows)} ` +
+          `pauses=${JSON.stringify(pauseResponses)} ` +
           `steps=${JSON.stringify(steps.rows)} effects=${JSON.stringify(effects)} ` +
           `checkpoints=${JSON.stringify(checkpointResponses)} ` +
           `boundRevision=${produced.authority.binding.authorizationRevision} ` +
@@ -742,6 +758,9 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
     let resumed = false
     try {
       const paused = await waitForPaused()
+      // Liveness witness for `second: 0`: exactly one pause, answered to the
+      // running report of the step that must be blocked.
+      expect(pauseResponses).toEqual(['step:effect-two:running'])
       expect(paused).toEqual({
         phase: 'AuthorizationPaused',
         failure_reason: 'workflow_authority_access_path_stale',
@@ -949,6 +968,7 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       }
       expect(runtimeResult.workflowPhase).toBe('completed')
       expect(effects).toEqual({ first: 1, second: 1 })
+      expect(pauseResponses).toEqual(['step:effect-two:running'])
       const succeeded = await databasePool.query(
         `SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1`,
         [result.row.run_id]
