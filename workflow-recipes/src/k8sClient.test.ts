@@ -3467,7 +3467,7 @@ describe('DB run child creator wiring', () => {
       const kc = new k8s.KubeConfig()
       kc.loadFromOptions({
         clusters: [{ name: 'hung', server: `http://127.0.0.1:${port}`, skipTLSVerify: true }],
-        users: [{ name: 'probe', token: 'probe-token' }],
+        users: [{ name: 'probe', token: 'synthetic-probe-token' }],
         contexts: [{ name: 'hung', cluster: 'hung', user: 'probe' }],
         currentContext: 'hung',
       })
@@ -3482,7 +3482,7 @@ describe('DB run child creator wiring', () => {
       expect(requests).toEqual([
         {
           url: '/apis/clerum.io/v1alpha1/namespaces/sandbox-recipes/workflowrecipes/demo-parent',
-          authorization: 'Bearer probe-token',
+          authorization: 'Bearer synthetic-probe-token',
         },
       ])
     } finally {
