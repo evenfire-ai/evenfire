@@ -6,6 +6,7 @@ import { Readable } from 'node:stream'
 import type { Pool } from 'pg'
 import { GfsError } from '../api/errors'
 import type { GfsResource } from '../api/read'
+import type { Decision } from '../authz/resolve'
 import type { DbAuditSink, PermissionClient } from '../authz/permissionClient'
 import { resolveAuthzContext } from '../authz/subjectResolver'
 import { GfsWriteService, type TxClient } from '../db/writeStore'
@@ -70,11 +71,24 @@ export interface GfsUploadFinalizerDeps {
   audit: DbAuditSink
 }
 
+/** Settled result of the pre-publication re-authorization. */
+type ReauthorizationOutcome = { ok: true; decision: Decision } | { ok: false; error: unknown }
+
 /**
  * Production upload finalizer seam. Keeping this closure in a small module
  * makes the writer's stream, permission-epoch recheck, and same-transaction
  * receipt update executable in focused tests instead of hiding them behind
  * the process bootstrap.
+ *
+ * The re-authorization reads the subject and permission stores and appends its
+ * decision audit row on the pool, so it runs in `beforePublication`, before the
+ * writer opens the publication transaction. Running it inside that transaction
+ * would hold one client plus the drive structure (or row) lock while waiting for
+ * a second client from the same pool (issue #1398). `beforePublication` only
+ * stores the settled outcome; `onPublished` applies it inside the transaction
+ * in the same order as before, so the writer's own checks (missing target,
+ * tombstone, name conflict, stale ifMatch) still take precedence and the
+ * transactor's deadline handling still applies to every error.
  */
 export function createGfsUploadFinalizer(
   deps: GfsUploadFinalizerDeps
@@ -97,6 +111,39 @@ export function createGfsUploadFinalizer(
       requestId: session.uploadId,
       audit: deps.audit,
     }
+    const targetRid = session.operation === 'create' ? session.parentRid : session.resourceRid
+    let reauthorization: ReauthorizationOutcome | undefined
+    const beforePublication = async (): Promise<void> => {
+      try {
+        if (!targetRid) throw new GfsError('path_invalid', 'upload target is required')
+        const reauthorizationPrincipal = principal ?? {
+          drive: session.drive,
+          ownerSubject: session.ownerSubject,
+          primarySubject: session.primarySubject,
+        }
+        const targetContext = await resolveAuthzContext(deps.pool, {
+          sub: reauthorizationPrincipal.ownerSubject,
+          drive: reauthorizationPrincipal.drive,
+          ...(reauthorizationPrincipal.authGeneration === undefined
+            ? {}
+            : { authGeneration: reauthorizationPrincipal.authGeneration }),
+          ...(reauthorizationPrincipal.principalType
+            ? { principalType: reauthorizationPrincipal.principalType }
+            : {}),
+          ...(reauthorizationPrincipal.brokeredAuthority
+            ? { brokeredAuthority: reauthorizationPrincipal.brokeredAuthority }
+            : {}),
+        })
+        reauthorization = {
+          ok: true,
+          decision: await deps.permissions.authorize(targetContext, targetRid, 'write'),
+        }
+      } catch (error) {
+        // Not a fallback: onPublished rethrows this error unchanged, after the
+        // writer's own checks, exactly where it surfaced before #1398.
+        reauthorization = { ok: false, error }
+      }
+    }
     const onPublished = async (
       client: TxClient,
       published: GfsResource,
@@ -117,27 +164,12 @@ export function createGfsUploadFinalizer(
           'authorization changed during upload finalization'
         )
       }
-      const targetRid = session.operation === 'create' ? session.parentRid : session.resourceRid
       if (!targetRid) throw new GfsError('path_invalid', 'upload target is required')
-      const reauthorizationPrincipal = principal ?? {
-        drive: session.drive,
-        ownerSubject: session.ownerSubject,
-        primarySubject: session.primarySubject,
+      if (!reauthorization) {
+        throw new GfsError('internal', 'upload was not re-authorized before publication')
       }
-      const targetContext = await resolveAuthzContext(deps.pool, {
-        sub: reauthorizationPrincipal.ownerSubject,
-        drive: reauthorizationPrincipal.drive,
-        ...(reauthorizationPrincipal.authGeneration === undefined
-          ? {}
-          : { authGeneration: reauthorizationPrincipal.authGeneration }),
-        ...(reauthorizationPrincipal.principalType
-          ? { principalType: reauthorizationPrincipal.principalType }
-          : {}),
-        ...(reauthorizationPrincipal.brokeredAuthority
-          ? { brokeredAuthority: reauthorizationPrincipal.brokeredAuthority }
-          : {}),
-      })
-      const decision = await deps.permissions.authorize(targetContext, targetRid, 'write')
+      if (!reauthorization.ok) throw reauthorization.error
+      const decision = reauthorization.decision
       publicationSignal?.throwIfAborted()
       if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
         throw new GfsError('precondition_failed', 'upload finalization timed out')
@@ -184,6 +216,7 @@ export function createGfsUploadFinalizer(
             resourceId: session.uploadId,
             content: source,
             mutation,
+            beforePublication,
             onPublished,
             signal,
             deadlineAtMs,
@@ -194,6 +227,7 @@ export function createGfsUploadFinalizer(
             ifMatch: session.ifMatch ?? undefined,
             content: source,
             mutation,
+            beforePublication,
             onPublished,
             signal,
             deadlineAtMs,

@@ -364,3 +364,73 @@ describe("PgTransactor legacy contract", () => {
     expect(pool.releaseError).toBeInstanceOf(Error);
   });
 });
+
+describe("GfsWriteService publication hooks", () => {
+  // beforePublication may use the pool, so it must run after staging and before
+  // the publication transaction checks out its client (issue #1398).
+  function orderedService(client: FakeClient, order: string[]) {
+    const blobs = new RecordingBlobs();
+    const writeImmutable = blobs.writeImmutable.bind(blobs);
+    blobs.writeImmutable = async (resourceId, generation, data) => {
+      order.push("blob:write");
+      return writeImmutable(resourceId, generation, data);
+    };
+    const tx: Transactor = {
+      transaction: fn => {
+        order.push("transaction:begin");
+        return fn(client);
+      },
+    };
+    const writes = new GfsWriteService(tx, blobs, new PgBlobStagingStore(new ManifestDb()), {
+      resourceId: () => RESOURCE,
+      generation: () => GENERATION,
+      requestId: () => REQUEST,
+    });
+    return { writes, blobs };
+  }
+  const STAGED_KEY = `${RESOURCE.replaceAll("-", "")}/${GENERATION}`;
+
+  const cases = [
+    {
+      op: "create",
+      client: () => new FakeClient({
+        ancestors: () => parentChain(),
+        insert: values => [row({ name: values[3], path_cache: values[5], bytes: values[6], blob_key: values[7], content_sha256: values[8], version: 0 })],
+      }),
+      write: (writes: GfsWriteService, hooks: Record<string, unknown>) =>
+        writes.create({ drive: "main", parentId: PARENT, name: "new.txt", content: Buffer.from("hello"), ...hooks }),
+    },
+    {
+      op: "replace",
+      client: () => new FakeClient({
+        lock: () => [row({ version: 3 })],
+        update: values => [row({ version: 4, bytes: values[2], blob_key: values[3], content_sha256: values[4] })],
+      }),
+      write: (writes: GfsWriteService, hooks: Record<string, unknown>) =>
+        writes.replace({ drive: "main", resourceId: RESOURCE, ifMatch: 3, content: Buffer.from("howdy"), ...hooks }),
+    },
+  ] as const;
+
+  it.each(cases)("$op runs beforePublication after staging and before the transaction", async ({ client, write }) => {
+    const order: string[] = [];
+    const { writes } = orderedService(client(), order);
+    await write(writes, {
+      beforePublication: async () => { order.push("beforePublication"); },
+      onPublished: async () => { order.push("onPublished"); },
+    });
+    expect(order).toEqual(["blob:write", "beforePublication", "transaction:begin", "onPublished"]);
+  });
+
+  it.each(cases)("$op discards the staged blob and opens no transaction when beforePublication rejects", async ({ client, write }) => {
+    const order: string[] = [];
+    const { writes, blobs } = orderedService(client(), order);
+    const rejection = new Error("re-authorization failed");
+    const beforePublication = async () => {
+      order.push("beforePublication");
+      throw rejection;
+    };
+    await expect(write(writes, { beforePublication })).rejects.toBe(rejection);
+    expect(order).toEqual(["blob:write", "beforePublication"]);
+    expect(blobs.deletes).toEqual([STAGED_KEY]);
+  });
+});

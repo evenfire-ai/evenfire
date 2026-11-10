@@ -4,8 +4,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Pool } from 'pg'
-import { DbAuditSink } from '../../gfs-controller/src/authz/permissionClient.js'
-import type { PermissionClient } from '../../gfs-controller/src/authz/permissionClient.js'
+import { DecisionCache } from '../../gfs-controller/src/authz/cache.js'
+import { DbAuditSink, PermissionClient } from '../../gfs-controller/src/authz/permissionClient.js'
 import { PgBlobStagingStore } from '../../gfs-controller/src/db/blobStaging.js'
 import { GfsWriteService, PgTransactor } from '../../gfs-controller/src/db/writeStore.js'
 import { BlobStore } from '../../gfs-controller/src/storage/blobStore.js'
@@ -225,6 +225,71 @@ describeRealPostgres('GFS upload finalizer on real PostgreSQL + BlobStore', () =
       [result.resourceId]
     )
     expect(manifests.rows[0]?.count).toBe(0)
+  }, 30_000)
+
+  it('finalizes on a one-client pool: no second client is checked out during publication', async () => {
+    // Issue #1398: the re-authorization reads and audits on the pool. Inside the
+    // publication transaction that needs a second client; with one client the
+    // checkout times out and the finalization fails as not_mounted.
+    const { upload, uploadPart } = await seedUpload()
+    await pool.query(
+      `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions)
+       VALUES ($1, $2, 'host', $3, ARRAY['write'])`,
+      [drive, parentId, HOST_SUBJECT.slice('host:'.length)]
+    )
+    const singleClientPool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 3_000 })
+    try {
+      const audit = new DbAuditSink(singleClientPool)
+      const realPermissions = new PermissionClient(
+        singleClientPool,
+        audit,
+        new DecisionCache({ ttlMs: 60_000 })
+      )
+      const writes = new GfsWriteService(
+        new PgTransactor(singleClientPool),
+        new BlobStore(blobRoot, 'writer'),
+        new PgBlobStagingStore(singleClientPool)
+      )
+      const finalize = createGfsUploadFinalizer({
+        pool: singleClientPool,
+        storageMountPath: storageRoot,
+        permissions: realPermissions,
+        writeService: writes,
+        audit,
+      })
+
+      const result = await finalize(upload, [uploadPart])
+
+      expect(result).toMatchObject({ resourceId: upload.uploadId, sha256: BODY_SHA256 })
+      const receipt = await pool.query(
+        `SELECT state, result_resource_id FROM gfs_upload_sessions WHERE upload_id = $1`,
+        [upload.uploadId]
+      )
+      expect(receipt.rows[0]).toEqual({ state: 'completed', result_resource_id: upload.uploadId })
+      const resource = await pool.query(
+        `SELECT count(*)::int AS count FROM gfs_resources WHERE resource_id = $1`,
+        [upload.uploadId]
+      )
+      expect(resource.rows[0]?.count).toBe(1)
+      // Liveness: the re-authorization ran against the real permission store.
+      const decisions = await pool.query(
+        `SELECT outcome, authorization_source, matched_subject, cached_authorization_source
+           FROM gfs_audit
+          WHERE record_type = 'authorization_decision' AND gfs_uri = $1 AND subject = $2`,
+        [`gfs://${drive}/${parentId}`, HOST_SUBJECT]
+      )
+      expect(decisions.rows).toEqual([
+        {
+          outcome: 'allow',
+          authorization_source: 'direct_grant',
+          matched_subject: HOST_SUBJECT,
+          cached_authorization_source: null,
+        },
+      ])
+    } finally {
+      await endPoolAndWaitForClients(singleClientPool)
+      await pool.query(`DELETE FROM gfs_grants WHERE drive = $1`, [drive])
+    }
   }, 30_000)
 
   it('fences an old finalizer after reclaim so it cannot publish a resource or receipt', async () => {
