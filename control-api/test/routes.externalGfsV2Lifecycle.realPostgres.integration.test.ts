@@ -393,7 +393,6 @@ describeRealPostgres('external GFS session generation on real PostgreSQL', () =>
           requested: {
             version: 2,
             requestedAccessPathId: path.id,
-            expectedAuthorizationRevision: path.authorizationRevision,
           },
           operationId: 'gfs.read',
           resource,

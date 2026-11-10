@@ -305,7 +305,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         requested: {
           version: 2,
           requestedAccessPathId: candidate.id,
-          expectedAuthorizationRevision: candidate.authorizationRevision,
         },
         operationId: 'workflow.trigger',
         resource,
@@ -449,7 +448,6 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         requested: {
           version: 2,
           requestedAccessPathId: candidate.id,
-          expectedAuthorizationRevision: candidate.authorizationRevision,
         },
         operationId: 'workflow.run.manage',
         resource,

@@ -238,3 +238,58 @@ describe('action authorizer v2', () => {
     })
   })
 })
+
+describe('expected authorization revision pin', () => {
+  const olderRevision = `ar1_${'z'.repeat(43)}`
+
+  function allowedResolver() {
+    const selected = path(selectedPathId, ['chat.message.invoke'])
+    return vi.fn().mockResolvedValue({
+      status: 'allowed',
+      effectiveCapabilities: ['chat.message.invoke'],
+      paths: [selected],
+      selectedPath: selected,
+      operationalBindings: [],
+      authorizationRevision: revision,
+      validUntil: null,
+    })
+  }
+
+  function pinned(resolve: ReturnType<typeof vi.fn>, expectedAuthorizationRevision: string) {
+    return authorizeActionV2(
+      {
+        session,
+        requested: {
+          version: 2,
+          requestedAccessPathId: selectedPathId,
+          expectedAuthorizationRevision,
+        },
+        operationId: 'chat.message.invoke',
+        resource,
+        operationTarget: { hostRef: 'default/chatllm', channelType: 'rpc', channelId: 'chat-1' },
+        allocateChatMessageId: true,
+      },
+      { resolve: resolve as never, messageId: () => '50000000-0000-4000-8000-000000000005' }
+    )
+  }
+
+  it('allows a selection pinned to the current authorization revision', async () => {
+    const resolve = allowedResolver()
+    const result = await pinned(resolve, revision)
+    expect(result.status).toBe('allowed')
+    if (result.status !== 'allowed') throw new Error('expected allow')
+    expect(result.context.authorizationRevision).toBe(revision)
+    expect(resolve).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a selection pinned to an older authorization revision as stale', async () => {
+    const resolve = allowedResolver()
+    await expect(pinned(resolve, olderRevision)).resolves.toEqual({
+      status: 'access_path_stale',
+      code: 'access_path_stale',
+      currentAuthorizationRevision: revision,
+    })
+    // Witness: the live resolver ran and allowed; only the pin can produce the stale verdict.
+    expect(resolve).toHaveBeenCalledOnce()
+  })
+})

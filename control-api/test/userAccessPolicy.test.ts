@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  PR2_RUNTIME_HOPS,
+  type Pr2RuntimeHop,
+  type Pr2RuntimeHopReadiness,
+} from '../src/services/access/pr2RuntimeReadiness.js'
+import {
   type ConfiguredUserAccessIntent,
   type DeploymentReadiness,
   UserAccessPolicyConfigurationError,
@@ -26,6 +31,10 @@ function intent(overrides: Partial<ConfiguredUserAccessIntent> = {}): Configured
   return configured
 }
 
+const allPr2RuntimeHopsReady: Pr2RuntimeHopReadiness = Object.fromEntries(
+  PR2_RUNTIME_HOPS.map(hop => [hop, 'ready'])
+) as Record<Pr2RuntimeHop, 'ready'>
+
 function readiness(overrides: Partial<DeploymentReadiness> = {}): DeploymentReadiness {
   return {
     revision: 'test-ready-v1',
@@ -35,6 +44,10 @@ function readiness(overrides: Partial<DeploymentReadiness> = {}): DeploymentRead
     legacyDrainAccepted: true,
     sessionV2Acceptance: 'ready',
     sessionV2Issuance: 'ready',
+    accessBudget: 'ready',
+    actionContext: 'ready',
+    rpcDelegationAllHops: 'ready',
+    pr2RuntimeHops: allPr2RuntimeHopsReady,
     minimumClientEnforcement: 'ready',
     ...overrides,
   }
@@ -122,10 +135,35 @@ describe('central user-access rollout compiler', () => {
       }),
       readiness({ minimumClientEnforcement: 'unavailable' }),
     ],
+    [
+      'action_context_budget_unavailable',
+      intent({ actionContextV2: true }),
+      readiness({ accessBudget: 'unavailable' }),
+    ],
+    [
+      'action_context_pr2_hops_unavailable',
+      intent({ actionContextV2: true }),
+      readiness({
+        pr2RuntimeHops: { ...allPr2RuntimeHopsReady, [PR2_RUNTIME_HOPS[0]]: 'unavailable' },
+      }),
+    ],
+    [
+      'rpc_v2_all_hops_unavailable',
+      intent({ actionContextV2: true, rpcDelegationV2: true }),
+      readiness({ rpcDelegationAllHops: 'unavailable' }),
+    ],
   ])('rejects impossible state %s', (code, configured, deployed = readiness()) => {
     expect(() => compileUserAccessPolicy(configured, deployed)).toThrowError(
       new UserAccessPolicyConfigurationError(code)
     )
+  })
+
+  it('compiles action context v2 and RPC delegation v2 when every PR2 readiness is ready', () => {
+    // Positive control for the three readiness rows above: with the completed fixture each of
+    // them throws only because of its own override.
+    expect(
+      compileUserAccessPolicy(intent({ actionContextV2: true, rpcDelegationV2: true }), readiness())
+    ).toMatchObject({ actionContextV2: true, rpcDelegationV2: true })
   })
 
   it('derives renewal and the minimum-client gate only from ready dependencies', () => {
