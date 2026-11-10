@@ -13,6 +13,7 @@ const {
   deriveFileReferenceId,
   parseFileReferenceV1,
   quotePromptValue,
+  resourceNameProblem,
 } = require('./fileReference.cjs')
 
 const EXPECTED_VECTOR_COUNT = 53
@@ -286,6 +287,37 @@ describe('builders', () => {
       assert.equal(built.ok, false, JSON.stringify(name))
       assert.equal(built.code, 'FILE_REFERENCE_INVALID')
       assert.equal(built.message, 'name must not contain "/" or control characters')
+    }
+  })
+})
+
+describe('resourceNameProblem', () => {
+  it('accepts the names the GFS controller accepts', () => {
+    for (const name of [
+      'logo.png',
+      'Informe Q3.md',
+      'a\\b.txt',
+      '   ',
+      '.hidden',
+      'x'.repeat(255),
+    ]) {
+      assert.equal(resourceNameProblem(name), null, JSON.stringify(name))
+    }
+  })
+
+  it('names the problem for every name the GFS controller rejects', () => {
+    for (const name of [
+      '',
+      '.',
+      '..',
+      'shots/a.png',
+      'a\u0000b',
+      'line\nbreak',
+      'del\u007f',
+      'x'.repeat(256),
+      'e\u0301',
+    ]) {
+      assert.equal(typeof resourceNameProblem(name), 'string', JSON.stringify(name))
     }
   })
 })

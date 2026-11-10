@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { reportViolations, verifySuiteManifest } from '../ci/password-recovery-suite-contract.mjs'
@@ -29,6 +29,44 @@ const green = () => ({
 test('exact checked-in census and full reporter pass', () => {
   assert.equal(verifySuiteManifest(root, manifest), manifest)
   assert.deepEqual(reportViolations(root, manifest, 'publicPostgres', green()), [])
+})
+test('new unclassified physical PostgreSQL suite fails closed', () => {
+  const scratchRoot = process.env.CODEX_SCRATCH_ROOT
+  assert.ok(scratchRoot, 'CODEX_SCRATCH_ROOT is required for census fixtures')
+  const repositoryScratch = join(scratchRoot, 'evenfire')
+  mkdirSync(repositoryScratch, { recursive: true })
+  const fixture = mkdtempSync(join(repositoryScratch, 'recovery-census-'))
+  const selection = {
+    version: 1,
+    publicPostgres: ['control-api/test/public.realPostgres.test.ts'],
+    privatePostgres: {
+      local: 'control-api/test/local.realPostgres.test.ts',
+      configured: 'control-api/test/configured.realPostgres.test.ts',
+    },
+    composedContract: ['control-api/test/contract.test.ts'],
+    consumer: ['external-rest-api/test/consumer.test.ts'],
+  }
+  try {
+    for (const directory of ['control-api/test', 'external-rest-api/test'])
+      mkdirSync(join(fixture, directory), { recursive: true })
+    for (const entry of [
+      ...selection.publicPostgres,
+      ...Object.values(selection.privatePostgres),
+      ...selection.composedContract,
+      ...selection.consumer,
+    ])
+      writeFileSync(join(fixture, entry), '// fixture\n')
+    writeFileSync(
+      join(fixture, 'control-api/test/unclassified.realPostgres.test.ts'),
+      '// newly discovered physical suite\n'
+    )
+    assert.throws(
+      () => verifySuiteManifest(fixture, selection),
+      /PostgreSQL suite census differs from exact manifest/
+    )
+  } finally {
+    rmSync(fixture, { recursive: true, force: true })
+  }
 })
 test('pathname replacement cannot substitute nonempty contents after a suite is opened', () => {
   const scratchRoot = process.env.CODEX_SCRATCH_ROOT
@@ -176,6 +214,112 @@ for (const [label, mutate] of [
 test('unknown report lane rejects', () =>
   assert.notDeepEqual(reportViolations(root, manifest, 'unknown', green()), []))
 
+function withMinikubeSelectionFixture(run) {
+  const scratchRoot = process.env.CODEX_SCRATCH_ROOT
+  assert.ok(scratchRoot, 'CODEX_SCRATCH_ROOT is required for selection fixtures')
+  mkdirSync(scratchRoot, { recursive: true })
+  const fixture = mkdtempSync(join(scratchRoot, 'minikube-pg-selection-'))
+  try {
+    for (const directory of ['scripts/ci', 'tests/contracts', 'gfs-controller/test'])
+      mkdirSync(join(fixture, directory), { recursive: true })
+    for (const file of [
+      'scripts/ci/password-recovery-suite-contract.mjs',
+      'scripts/ci/assert-pinned-vitest-suites.mjs',
+      'tests/contracts/password-recovery-suites.json',
+    ])
+      copyFileSync(join(root, file), join(fixture, file))
+    // Only inventory discovery runs here; these synthetic files are never executed.
+    for (const file of [
+      ...manifest.publicPostgres,
+      ...Object.values(manifest.privatePostgres),
+      ...manifest.composedContract,
+      ...manifest.consumer,
+      'gfs-controller/test/public.realPostgres.test.ts',
+    ]) {
+      mkdirSync(dirname(join(fixture, file)), { recursive: true })
+      writeFileSync(join(fixture, file), '// synthetic suite inventory entry\n')
+    }
+    run(fixture)
+  } finally {
+    rmSync(fixture, { recursive: true, force: true })
+  }
+}
+
+function minikubeSelection(fixture, packageName = 'control-api', runSuite = false) {
+  return spawnSync(
+    '/bin/bash',
+    [
+      '-c',
+      `source "$TASK_T1_SOURCE"
+trap - EXIT INT TERM
+PROJECT_DIR="$TASK_SELECTION_ROOT"
+if [ "$TASK_RUN_SUITE" = true ]; then
+  t2_evidence_write() { :; }
+  npm() { printf launched > "$TASK_SELECTION_ROOT/npm-launched"; return 97; }
+  T1_TMP_DIR="$TASK_SELECTION_ROOT"
+  run_suite control-api isolated synthetic-inventory-only
+else
+  list_real_pg_files "$TASK_SELECTION_PACKAGE"
+fi`,
+    ],
+    {
+      encoding: 'utf8',
+      timeout: 5000,
+      env: {
+        ...process.env,
+        TASK_T1_SOURCE: join(root, 'scripts/e2e/minikube-real-postgres.sh'),
+        TASK_SELECTION_ROOT: fixture,
+        TASK_SELECTION_PACKAGE: packageName,
+        TASK_RUN_SUITE: String(runSuite),
+      },
+    }
+  )
+}
+
+test('Minikube T1 selects the exact public inventory and preserves GFS discovery', () => {
+  withMinikubeSelectionFixture(fixture => {
+    const control = minikubeSelection(fixture)
+    assert.equal(control.status, 0, control.stderr)
+    assert.deepEqual(
+      control.stdout.trim().split('\n').sort(),
+      manifest.publicPostgres.map(file => join(fixture, file)).sort()
+    )
+    const gfs = minikubeSelection(fixture, 'gfs-controller')
+    assert.equal(gfs.status, 0, gfs.stderr)
+    assert.equal(gfs.stdout.trim(), join(fixture, 'gfs-controller/test/public.realPostgres.test.ts'))
+  })
+})
+
+test('suite CLI validates the census through a symlinked entry point', () => {
+  withMinikubeSelectionFixture(fixture => {
+    const alias = join(fixture, 'suite-cli.mjs')
+    symlinkSync(join(fixture, 'scripts/ci/password-recovery-suite-contract.mjs'), alias)
+    const selected = spawnSync(process.execPath, [alias, 'public'], { encoding: 'utf8' })
+    assert.equal(selected.status, 0, selected.stderr)
+    assert.deepEqual(selected.stdout.trim().split('\n'), manifest.publicPostgres)
+
+    rmSync(join(fixture, manifest.privatePostgres.local))
+    const rejected = spawnSync(process.execPath, [alias, 'verify'], { encoding: 'utf8' })
+    assert.notEqual(rejected.status, 0, 'a symlinked CLI must still validate every declared suite')
+    assert.match(rejected.stderr, /ENOENT|Missing or empty recovery suite/)
+  })
+})
+
+for (const fault of ['missing-private-suite', 'unregistered-suite']) {
+  test(`Minikube T1 rejects ${fault} before launching npm`, () => {
+    withMinikubeSelectionFixture(fixture => {
+      if (fault === 'missing-private-suite') rmSync(join(fixture, manifest.privatePostgres.local))
+      else writeFileSync(join(fixture, 'control-api/test/unregistered.realPostgres.test.ts'), '// fixture\n')
+      const selection = minikubeSelection(fixture)
+      assert.notEqual(selection.status, 0, 'invalid census must fail selection')
+      const execution = minikubeSelection(fixture, 'control-api', true)
+      assert.notEqual(execution.status, 0)
+      assert.match(execution.stderr, /REAL_PG_REPORT_INCOMPLETE/)
+      assert.equal(fs.existsSync(join(fixture, 'npm-launched')), false)
+    })
+  })
+}
+
 // Exercise shell selection with fake node/npm only; never execute a private producer suite.
 for (const mode of ['local', 'configured']) {
   for (const selector of ['failure', 'empty', 'directory', 'multiple', 'valid']) {
@@ -250,3 +394,48 @@ for (const mode of ['local', 'configured']) {
     })
   }
 }
+
+
+test('hosted real-PostgreSQL job enforces the same public inventory as Minikube', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/ci-public.yml'), 'utf8')
+  const job = workflow.split(/^  control-api-migration:\s*$/m)[1]?.split(/^  [a-zA-Z0-9_-]+:\s*$/m)[0]
+  assert.ok(job, 'control-api-migration job must exist')
+  const step = job.split(/^      - name: Run control-api real Postgres suites \(migration \+ GFS\)\s*$/m)[1]?.split(/^      - /m)[0]
+  assert.ok(step, 'real PostgreSQL step must exist')
+  const commands = step.split('\n').filter(line => !/^\s*#/.test(line)).join('\n')
+  const verify = commands.indexOf('node ../scripts/ci/password-recovery-suite-contract.mjs verify')
+  const privateSelection = commands.indexOf('node ../scripts/ci/password-recovery-suite-contract.mjs private all')
+  const run = commands.indexOf('npm test -- --run realPostgres')
+  const report = commands.indexOf('node ../scripts/ci/password-recovery-suite-contract.mjs report publicPostgres "$report"')
+  assert.ok(verify >= 0 && verify < privateSelection && privateSelection < run && run < report,
+    'CI must validate the inventory, exclude the declared private suites, run PostgreSQL, and verify the exact public report')
+  assert.match(commands, /"\$\{exclude_args\[@\]\}"/)
+  const pinBlock = commands.split('node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report"')[1]
+  assert.ok(pinBlock, 'pinned security suites must still be checked')
+  const pins = pinBlock.match(/[A-Za-z0-9_.-]+realPostgres[A-Za-z0-9_.-]*\.test\.ts/g) || []
+  const publicNames = new Set(manifest.publicPostgres.map(path => path.split('/').pop()))
+  assert.ok(pins.length > 0, 'the pinned suite list must not be empty')
+  assert.equal(new Set(pins).size, pins.length, 'pinned suites must be unique')
+  assert.deepEqual(pins.filter(pin => !publicNames.has(pin)), [], 'every pinned suite must be in the public inventory')
+})
+
+test('hosted contract step runs its node test files through the zero-test-refusing runner', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/ci-public.yml'), 'utf8')
+  const job = workflow.split(/^  control-api-migration:\s*$/m)[1]?.split(/^  [a-zA-Z0-9_-]+:\s*$/m)[0]
+  assert.ok(job, 'control-api-migration job must exist')
+  const step = job
+    .split(/^      - name: Validate recovery suite selection, certification input and T1 evidence contracts\s*$/m)[1]
+    ?.split(/^      - /m)[0]
+  assert.ok(step, 'contract validation step must exist')
+  const files = [
+    'scripts/tests/password-recovery-suite-contract.test.mjs',
+    'scripts/tests/certification-inputs.test.mjs',
+    'scripts/tests/t1-reporter-projection.test.mjs',
+  ]
+  for (const file of files) assert.ok(step.includes(file), `contract step must list ${file}`)
+  const run = step.split(/^\s+run: >-\s*$/m)[1]
+  assert.ok(run, 'contract step must use a folded run command')
+  const command = run.trim().split(/\s+/).join(' ')
+  assert.equal(command, ['node scripts/tests/run-node-test-files.mjs', ...files].join(' '))
+  assert.doesNotMatch(step, /node --test/)
+})

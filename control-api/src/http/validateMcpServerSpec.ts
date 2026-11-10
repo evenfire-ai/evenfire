@@ -398,6 +398,19 @@ export function validateMcpServerSpec(
   return errors
 }
 
+/**
+ * Drop the McpServer spec fields control-api no longer writes. `contextRef` named an
+ * owning Context; access now comes only from Context allowlists, so a value a client
+ * still sends, or one a full-spec replace carries forward from an older CR, is removed
+ * instead of persisted. Removing it is the intent, so no write checks that it survived.
+ */
+export function stripLegacyMcpServerSpecFields(
+  spec: Record<string, unknown>
+): Record<string, unknown> {
+  const { contextRef: _contextRef, ...rest } = spec
+  return rest
+}
+
 export async function validateMcpServerSpecPreflight(
   spec: Record<string, unknown>,
   options: { resolveDns?: DnsResolver } & ImageAllowlistOptions = {}

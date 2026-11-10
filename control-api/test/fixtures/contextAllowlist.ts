@@ -78,6 +78,14 @@ export function membershipResult(
 ): QueryResult | null {
   const text = typeof sql === 'string' ? sql : ''
   const userId = Array.isArray(values) ? String(values[0]) : ''
+  // The broker's Host-entry read (`hostAccessForUser`) also names user_agents in
+  // a subquery, so it is matched first. Unit stand-in: direct agent rows only;
+  // lifecycle_state and team membership are covered against real Postgres.
+  if (text.includes('lifecycle_state') && text.includes('team_agents')) {
+    const hostName = Array.isArray(values) ? String(values[1]) : ''
+    const allowed = (membership.agents?.[userId] ?? []).includes(hostName)
+    return allowed ? { rows: [{ allowed: 1 }], rowCount: 1 } : { rows: [], rowCount: 0 }
+  }
   if (text.includes('FROM user_contexts')) {
     const ids = membership.contexts?.[userId] ?? []
     return { rows: ids.map(context_id => ({ context_id })), rowCount: ids.length }

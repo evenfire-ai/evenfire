@@ -60,6 +60,13 @@ export declare function parseFileReferenceV1(input: unknown): FileReferenceParse
  */
 export declare function quotePromptValue(value: string): string
 
+/**
+ * Why `name` is not a valid GFS resource name, or `null` when it is: the rule
+ * FileReference names and the GFS controller share (NFC, 1-255 code points,
+ * not `.` or `..`, no `/` or ASCII control characters).
+ */
+export declare function resourceNameProblem(name: string): string | null
+
 export declare function deriveFileReferenceId(
   source: FileReferenceSource,
   digest?: FileReferenceDigest

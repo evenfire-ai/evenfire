@@ -22,7 +22,7 @@ import {
   canonicalizeDesktopRestEndpoint,
   sameDesktopRestEndpoint,
 } from './desktopEnvironmentUrl.js'
-import { fetchBoundedBytes } from './gfs/boundedDownload.js'
+import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
   DesktopGfsUploadJob,
@@ -36,6 +36,7 @@ import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandl
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
+import { type PinnedPluginSurface, resolvePluginSurface } from './pluginSurfaceRegistry.js'
 import { RpcProxyClient } from './rpcProxyClient.js'
 import { RpcTokenManager } from './rpcTokenManager.js'
 import {
@@ -878,6 +879,8 @@ export function migrateDesktopGfsUploadState(value: unknown): {
 
 export interface AppServiceOptions {
   tokenStore?: TokenStore
+  onSandboxUiSessionInvalidated?: () => void
+  onSessionCleared?: () => void
 }
 
 export class AppService {
@@ -891,8 +894,11 @@ export class AppService {
     },
     requestJson,
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
+    fetchByteStream: (url, token, opts, onChunk) => streamBoundedBytes(url, token, opts, onChunk),
   })
   private readonly tokenStore: TokenStore
+  private readonly onSandboxUiSessionInvalidated?: () => void
+  private readonly onSessionCleared?: () => void
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -908,6 +914,9 @@ export class AppService {
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
   private interactiveLoginAttempts = 0
+  // A session that /me rejected while a login was in progress. It is ended
+  // when the last login settles, unless that login replaced it.
+  private sessionRejectedDuringLogin: string | null = null
   private nativeAuthEnvironmentCommitQueue: Promise<void> = Promise.resolve()
   private gfsAuthEpoch = 0
   private gfsDispatchBlocked = true
@@ -995,6 +1004,8 @@ export class AppService {
 
   constructor(options: AppServiceOptions = {}) {
     this.tokenStore = options.tokenStore ?? new TokenStore()
+    this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
+    this.onSessionCleared = options.onSessionCleared
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1022,7 +1033,14 @@ export class AppService {
     )
   }
 
-  private static isRejectedStoredSessionError(error: unknown): boolean {
+  /**
+   * True when `/me` answered 401, 403 or 410: the session has ended. The current
+   * edge answers `/me` 401 only with its `invalid_session` envelope; an earlier
+   * edge answers an invalid or expired session token with a bare
+   * `401 {"error":"Unauthorized"}`. Both mean the session ended, so the body is
+   * not read. Any other failure (an outage, a 5xx) is no verdict on the session.
+   */
+  private static isSessionEndedByMe(error: unknown): boolean {
     return (
       error instanceof ApiError &&
       (error.status === 401 || error.status === 403 || error.status === 410)
@@ -1271,17 +1289,7 @@ export class AppService {
               fenceError
             )
           }
-          this.clearAuthenticatedSessionState()
-          try {
-            await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
-              legacyEnvKeys: getActiveLegacyEnvKeys(),
-            })
-          } catch (clearError) {
-            console.warn(
-              '[AppService] Failed to clear a partially switched team session:',
-              clearError
-            )
-          }
+          await this.endCommittedSession()
         }
         throw error
       }
@@ -1359,7 +1367,17 @@ export class AppService {
 
       let context = session
       if (!context.teamId) {
-        const me = await this.authClient.getMe(session.sessionToken)
+        let me: SessionMe
+        try {
+          me = await this.authClient.getMe(session.sessionToken)
+        } catch (error) {
+          if (AppService.isSessionEndedByMe(error)) {
+            await this.withNativeAuthEnvironmentCommit(() =>
+              this.endSessionRejectedByMe(session.sessionToken)
+            )
+          }
+          throw error
+        }
         context = await this.withNativeAuthEnvironmentCommit(async () => {
           this.assertSessionGeneration(session.sessionGeneration)
           if (this.sessionToken !== session.sessionToken) {
@@ -1534,6 +1552,7 @@ export class AppService {
    * first and drops its effects if it moved. `sessionGeneration` cannot serve:
    * every token commit bumps it, including the two of each transient team hop
    * that unrelated concurrent work performs while a mint is in flight.
+   * `listWorkflows` captures it too, so a listing never mixes two sessions.
    */
   private sandboxUiSessionEpoch = 0
 
@@ -1585,13 +1604,88 @@ export class AppService {
     this.invalidateSandboxUiSession()
   }
 
+  /**
+   * Ends the committed session: clears in-memory state, removes the saved token
+   * and tells the window so it returns to sign-in. The window is told even when
+   * the saved token could not be removed, because the in-memory session is gone.
+   */
+  private async endCommittedSession(): Promise<void> {
+    this.clearAuthenticatedSessionState()
+    try {
+      await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
+        legacyEnvKeys: getActiveLegacyEnvKeys(),
+      })
+    } catch (clearError) {
+      console.warn('[AppService] Failed to clear the saved session token:', clearError)
+    } finally {
+      this.onSessionCleared?.()
+    }
+  }
+
+  /**
+   * Ends a session that `/me` declared ended (`isSessionEndedByMe`).
+   * A token that is no longer the committed one belongs to a session that was
+   * already replaced, so it is left alone.
+   */
+  private async endSessionRejectedByMe(rejectedToken: string): Promise<void> {
+    if (this.sessionToken !== rejectedToken) return
+    // A login in progress has reserved the next session generation and replaces
+    // this session itself (installAuthenticatedLogin fences its GFS uploads).
+    // Ending it here would advance the generation and cancel that login, so the
+    // rejection is kept until the last login settles.
+    if (this.interactiveLoginAttempts > 0) {
+      this.sessionRejectedDuringLogin = rejectedToken
+      return
+    }
+    const identity =
+      this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
+    try {
+      await this.suspendDesktopGfsUploadsForAuthBoundary(identity)
+    } catch (fenceError) {
+      console.warn('[AppService] Failed to fence GFS uploads for a rejected session:', fenceError)
+    }
+    await this.endCommittedSession()
+  }
+
+  /**
+   * Called inside the commit owner when the last interactive login settles.
+   * Ends a session that `/me` rejected during the login if it is still the
+   * committed one; a login that installed a new session leaves nothing to end.
+   */
+  private async endSessionRejectedDuringLogin(): Promise<void> {
+    const rejectedToken = this.sessionRejectedDuringLogin
+    this.sessionRejectedDuringLogin = null
+    if (rejectedToken) await this.endSessionRejectedByMe(rejectedToken)
+  }
+
+  /**
+   * Asks `/me` whether the committed session is still valid after another call
+   * answered 401. A 401, 403 or 410 from `/me` ends the session (any 401 body:
+   * see `isSessionEndedByMe`); any other failure gives no verdict and leaves it
+   * in place.
+   */
+  private async confirmCommittedSessionWithMe(): Promise<void> {
+    const token = this.sessionToken
+    if (!token) return
+    try {
+      await this.authClient.getMe(token)
+    } catch (error) {
+      if (!AppService.isSessionEndedByMe(error)) {
+        console.warn('[AppService] Session check returned no verdict:', error)
+        return
+      }
+      await this.withNativeAuthEnvironmentCommit(() => this.endSessionRejectedByMe(token))
+    }
+  }
+
   /** Retires the sandbox-ui work of a session that is being cleared or replaced. */
   private invalidateSandboxUiSession(): void {
     this.sandboxUiSessionEpoch += 1
+    this.onSandboxUiSessionInvalidated?.()
     // The embed and its refresh loop run on the outgoing session. Queued rather
     // than awaited: callers must not wait on a pending open's mint; the serial
     // queue still tears down whatever that open mounts.
-    void this.closeSandboxUi().catch(error => {
+    void this.closeSandboxUi({ reason: 'session' }).catch(error => {
       console.error('[SandboxUI] Could not close the embed on session change:', error)
     })
   }
@@ -1758,6 +1852,7 @@ export class AppService {
       return this.withNativeAuthEnvironmentCommit(async () => ({
         authenticated: Boolean(this.sessionToken && this.me),
         me: this.me,
+        sessionGeneration: this.sessionGeneration,
       }))
     }
 
@@ -1775,13 +1870,14 @@ export class AppService {
     const currentSession = () => ({
       authenticated: Boolean(this.sessionToken && this.me),
       me: this.me,
+      sessionGeneration: this.sessionGeneration,
     })
 
     if (reservation.tokenReadFailed) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
 
@@ -1790,7 +1886,7 @@ export class AppService {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
 
@@ -1840,7 +1936,7 @@ export class AppService {
         // setup and other work prepared against the signed-out generation only
         // after the restored session and its GFS scope are coherent.
         this.sessionGeneration += 1
-        return { authenticated: true, me: restoredMe }
+        return { authenticated: true, me: restoredMe, sessionGeneration: this.sessionGeneration }
       })
       if (session.authenticated && options.runLaunchMaintenance) {
         // Launch-time sandbox-ui partition GC is best-effort and must not delay
@@ -1852,12 +1948,15 @@ export class AppService {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
-        if (AppService.isRejectedStoredSessionError(error)) {
+        // A 401, 403 or 410 from `/me` ended the session and removes the saved token;
+        // any other restore failure signs this process out and keeps the token for
+        // the next start.
+        if (AppService.isSessionEndedByMe(error)) {
           await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
             legacyEnvKeys: getActiveLegacyEnvKeys(),
           })
         }
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
   }
@@ -1941,7 +2040,7 @@ export class AppService {
           getActiveLegacyEnvKeys()
         ).catch(() => undefined)
       }
-      return { authenticated: true, me: result.me }
+      return { authenticated: true, me: result.me, sessionGeneration: this.sessionGeneration }
     } finally {
       releasePrewarm()
     }
@@ -2223,6 +2322,7 @@ export class AppService {
           if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
             await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
           }
+          if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
         })
       }
     }
@@ -2417,6 +2517,7 @@ export class AppService {
           if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
             await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
           }
+          if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
         })
       }
     }
@@ -2716,17 +2817,43 @@ export class AppService {
    * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
    * reads the full body.
    */
-  async downloadGfsUri(uri: string, maxBytes?: number) {
+  async downloadGfsUri(uri: string, maxBytes?: number, signal?: AbortSignal) {
     return this.gfsClient.download(
       uri,
       this.requireSessionToken(),
-      maxBytes !== undefined ? { maxBytes } : undefined
+      maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
+    )
+  }
+
+  /**
+   * Resolve then STREAM a gfs:// resource's bytes into `onChunk` (R1-H2).
+   *
+   * The folder-zip walk uses this instead of `downloadGfsUri`: the payload is
+   * written straight into the ZIP temp file chunk by chunk, so neither the
+   * main process nor the renderer ever holds a whole file in memory. The
+   * ceiling is enforced producer-side, mid-stream.
+   */
+  async downloadGfsUriInto(
+    uri: string,
+    maxBytes: number,
+    signal: AbortSignal | undefined,
+    onChunk: (chunk: Uint8Array) => Promise<void>
+  ) {
+    return this.gfsClient.downloadInto(
+      uri,
+      this.requireSessionToken(),
+      signal ? { maxBytes, signal } : { maxBytes },
+      onChunk
     )
   }
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */
-  async listGfsChildren(resourceId: string, drive?: string, cursor?: string) {
-    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), { drive, cursor })
+  async listGfsChildren(resourceId: string, drive?: string, cursor?: string, signal?: AbortSignal) {
+    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), {
+      drive,
+      cursor,
+      signal,
+    })
   }
 
   /** List explicit gfs resources the current user can read through grants or shares. */
@@ -3423,17 +3550,37 @@ export class AppService {
    * Move a resource into a destination folder (PATCH newParentId). Move
    * authority is parent-relative (write+delete on the old parent, write on the
    * destination) and is enforced server-side; ifMatch pins the resource version.
+   * An optional newName performs a combined rename+move in the same PATCH.
    */
   async moveGfsResource(
     resourceId: string,
     destinationId: string,
+    expectedSessionGeneration: number,
     drive?: string,
-    ifMatch?: number
+    ifMatch?: number,
+    newName?: string
   ) {
-    return this.gfsClient.moveResource(
-      { resourceId, drive, destinationId, ifMatch },
-      this.requireSessionToken()
-    )
+    if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+      throw new Error('invalid_session_generation')
+    }
+    this.assertSessionGeneration(expectedSessionGeneration)
+    try {
+      const receipt = await this.gfsClient.moveResource(
+        {
+          resourceId,
+          drive,
+          destinationId,
+          ifMatch,
+          ...(newName !== undefined ? { newName } : {}),
+        },
+        this.requireSessionToken()
+      )
+      this.assertSessionGeneration(expectedSessionGeneration)
+      return receipt
+    } catch (error) {
+      this.assertSessionGeneration(expectedSessionGeneration)
+      throw error
+    }
   }
 
   async deleteGfsResource(resourceId: string, drive?: string, ifMatch?: number) {
@@ -3449,7 +3596,10 @@ export class AppService {
 
   async getSessionState(): Promise<SessionState> {
     if (!this.sessionToken || !this.me) {
-      if (this.restoreSavedSessionInFlight) return this.restoreSavedSession()
+      if (this.restoreSavedSessionInFlight) {
+        const restored = await this.restoreSavedSession()
+        return { ...restored, sessionGeneration: this.sessionGeneration }
+      }
       // createWindow() already performs the saved-token restore before showing
       // the renderer. Do not immediately repeat a failed 60-second network
       // attempt from the renderer bootstrap; a new app launch or environment
@@ -3458,11 +3608,12 @@ export class AppService {
         this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
         Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
       ) {
-        return { authenticated: false, me: null }
+        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       }
-      return this.restoreSavedSession()
+      const restored = await this.restoreSavedSession()
+      return { ...restored, sessionGeneration: this.sessionGeneration }
     }
-    return { authenticated: true, me: this.me }
+    return { authenticated: true, me: this.me, sessionGeneration: this.sessionGeneration }
   }
 
   /**
@@ -3637,6 +3788,16 @@ export class AppService {
     // can rebind the stream without requiring a renderer remount. The expired
     // connection itself is already stopped; logout and renderer teardown remove
     // these owners through stopAllStreams/stopEntityChangeStreamsForOwner.
+    //
+    // The stream ending says the token expired; /me decides whether the session
+    // really ended. Not awaited: when this runs inside the commit owner (a hop
+    // release), the check waits in the queue instead of blocking it.
+    void this.confirmCommittedSessionWithMe().catch(error => {
+      console.warn(
+        '[AppService] Could not check the session after the live-update stream expired:',
+        error
+      )
+    })
   }
 
   private ensureEntityChangeConnection(): void {
@@ -3963,54 +4124,84 @@ export class AppService {
 
   async listWorkflows(): Promise<WorkflowRecipeListResult> {
     const token = this.requireSessionToken()
-    try {
-      const listed = await this.authClient.listTeams(token)
-      const teams = Array.isArray(listed.items) ? listed.items : []
-      if (!teams.length) {
-        this.workflowTeamByKey.clear()
-        return this.authClient.listWorkflows(token)
-      }
-
-      const orderedTeams = [
-        ...teams.filter(team => team.id === listed.currentTeamId),
-        ...teams.filter(team => team.id !== listed.currentTeamId),
-      ]
-      const items: WorkflowRecipeListResult['items'] = []
-      const seen = new Set<string>()
-      const nextWorkflowTeamByKey = new Map<string, string>()
-
-      for (const team of orderedTeams) {
-        const teamId = String(team.id || '').trim()
-        if (!teamId) continue
-        try {
-          const result = await this.runWithTeamContext(teamId, teamToken =>
-            this.authClient.listWorkflows(teamToken)
-          )
-          const teamItems = Array.isArray(result.items) ? result.items : []
-          for (const item of teamItems) {
-            const namespace = String(item.metadata?.namespace || '').trim()
-            const name = String(item.metadata?.name || '').trim()
-            if (!namespace || !name) continue
-            const key = this.workflowKey(namespace, name)
-            if (seen.has(key)) continue
-            seen.add(key)
-            nextWorkflowTeamByKey.set(key, teamId)
-            items.push(item)
-          }
-        } catch (error) {
-          console.warn(`[AppService] Failed loading workflows for team ${teamId}:`, error)
-        }
-      }
-
-      this.workflowTeamByKey.clear()
-      for (const [key, teamId] of nextWorkflowTeamByKey) {
-        this.workflowTeamByKey.set(key, teamId)
-      }
-      return { items, count: items.length }
-    } catch {
-      this.workflowTeamByKey.clear()
-      return this.authClient.listWorkflows(token)
+    // The listing belongs to the signed-in session that started it. If that
+    // session ends (or a login replaces it) while teams are being listed, no
+    // list is returned and no team map is published.
+    const sessionEpoch = this.sandboxUiSessionEpoch
+    const sessionChanged = () => this.sandboxUiSessionEpoch !== sessionEpoch
+    const assertSameSession = () => {
+      if (sessionChanged())
+        throw new Error('stale_auth_epoch: the session changed during the workflow listing')
     }
+    // A rejected workflow call (401) leaves the listing incomplete. If the session
+    // that started the listing is still the current one, /me decides whether it
+    // ended. The error is rethrown either way, so no list is returned. Callers keep
+    // their own handling of every other error.
+    const rethrowAfterSessionCheck = async (error: unknown): Promise<never> => {
+      if (!sessionChanged() && error instanceof ApiError && error.status === 401) {
+        await this.confirmCommittedSessionWithMe()
+      }
+      throw error
+    }
+    // Without a team list, only the session's current team is listed.
+    const listWithoutTeams = async () => {
+      assertSameSession()
+      this.workflowTeamByKey.clear()
+      const result = await this.authClient.listWorkflows(token).catch(rethrowAfterSessionCheck)
+      assertSameSession()
+      return result
+    }
+    let listed: { currentTeamId: string; items: TeamSummary[] }
+    try {
+      listed = await this.authClient.listTeams(token)
+    } catch {
+      return listWithoutTeams()
+    }
+    const teams = Array.isArray(listed.items) ? listed.items : []
+    if (!teams.length) return listWithoutTeams()
+
+    const orderedTeams = [
+      ...teams.filter(team => team.id === listed.currentTeamId),
+      ...teams.filter(team => team.id !== listed.currentTeamId),
+    ]
+    const items: WorkflowRecipeListResult['items'] = []
+    const seen = new Set<string>()
+    const nextWorkflowTeamByKey = new Map<string, string>()
+
+    for (const team of orderedTeams) {
+      const teamId = String(team.id || '').trim()
+      if (!teamId) continue
+      try {
+        const result = await this.runWithTeamContext(teamId, teamToken =>
+          this.authClient.listWorkflows(teamToken)
+        )
+        const teamItems = Array.isArray(result.items) ? result.items : []
+        for (const item of teamItems) {
+          const namespace = String(item.metadata?.namespace || '').trim()
+          const name = String(item.metadata?.name || '').trim()
+          if (!namespace || !name) continue
+          const key = this.workflowKey(namespace, name)
+          if (seen.has(key)) continue
+          seen.add(key)
+          nextWorkflowTeamByKey.set(key, teamId)
+          items.push(item)
+        }
+      } catch (error) {
+        // The session ended while this listing ran, or a team call was rejected:
+        // no list is returned. Any other team failure skips that team.
+        if (sessionChanged() || (error instanceof ApiError && error.status === 401)) {
+          await rethrowAfterSessionCheck(error)
+        }
+        console.warn(`[AppService] Failed loading workflows for team ${teamId}:`, error)
+      }
+    }
+    assertSameSession()
+
+    this.workflowTeamByKey.clear()
+    for (const [key, teamId] of nextWorkflowTeamByKey) {
+      this.workflowTeamByKey.set(key, teamId)
+    }
+    return { items, count: items.length }
   }
 
   async readWorkflow(ns: string, name: string): Promise<unknown> {
@@ -4121,14 +4312,8 @@ export class AppService {
           // auth-boundary state write fails, do not leave that token/me paired
           // with a blocked or stale GFS scope. Cleanup remains inside the outer
           // transient-hop gate, and the original persistence error is preserved.
-          this.clearAuthenticatedSessionState()
-          try {
-            await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
-              legacyEnvKeys: getActiveLegacyEnvKeys(),
-            })
-          } catch {
-            // Preserve the original team-transition error when cleanup also fails.
-          }
+          // The window is told the session ended so it does not keep showing it.
+          await this.endCommittedSession()
           throw error
         }
         this.activateGfsAuthScope()
@@ -4138,7 +4323,7 @@ export class AppService {
         // cached org/agents/contexts answer is now about the wrong team. Drop the
         // cache and tell mounted plugins to refetch.
         tryGetPluginSdkRuntime()?.notifySessionChanged(true)
-        return { authenticated: true, me: this.me }
+        return { authenticated: true, me: this.me, sessionGeneration: this.sessionGeneration }
       })
     } finally {
       releasePrewarm()
@@ -5908,6 +6093,8 @@ export class AppService {
    * mixups.
    */
   openSandboxUi(args: {
+    /** Names the view this open mounts in every event about it. */
+    launchId: string
     recipeNs: string
     recipeName: string
     title?: string
@@ -5915,13 +6102,17 @@ export class AppService {
     routePath?: string
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
     parentWindow: import('electron').BrowserWindow
-    onClosed?: () => void
+    /** Exactly once per view this open mounts, even if the open then rejects. */
+    onReleased?: (event: import('./sandboxUiDriver.js').SandboxUiReleasedEvent) => void
     onRefreshError?: (message: string) => void
+    /** A refresh succeeded after `onRefreshError` reported that it had given up. */
+    onRefreshRecovered?: () => void
     onOauthError?: (message: string) => void
     onTitleChanged?: (title: string) => void
   }): Promise<void> {
     // Captured at request time, not when the queue reaches it: an open asked for
-    // under one session must not run under the next one.
+    // under one session must not run under the next one. Enqueued synchronously:
+    // a close for this launch sent right after it must find it ahead in the queue.
     const sessionEpoch = this.sandboxUiSessionEpoch
     return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args, sessionEpoch))
   }
@@ -5937,15 +6128,17 @@ export class AppService {
     // An open replaces the current view whatever its outcome, so the outgoing
     // view goes BEFORE the network mint: a failed mint must not leave it
     // painted (with its refresh loop still minting) after the renderer has been
-    // told the open failed. Deliberately silent — no `onClosed`: the renderer
-    // drops its owner of the embed on `sandboxUi:closed`, which here would
-    // orphan the view this open is about to mount. Failure is reported only by
-    // the rejection.
-    await this.teardownSandboxUiView()
+    // told the open failed. Failure is reported only by the rejection.
+    await this.teardownSandboxUiView('replaced')
     try {
       await this.mintAndMountSandboxUiView(args, recipeNs, recipeName, sessionEpoch)
     } catch (error) {
-      await this.teardownSandboxUiView()
+      // Only this open's own view, never one another launch owns; its release
+      // goes out before the rejection. `open_failed` tells the renderer that
+      // rejection is on its way, so it reports the failure instead of an
+      // abandoned launch; a session that ended meanwhile is the real cause.
+      const reason = this.sandboxUiSessionEpoch === sessionEpoch ? 'open_failed' : 'session'
+      await this.teardownSandboxUiView(reason, args.launchId)
       throw error
     }
   }
@@ -5960,6 +6153,7 @@ export class AppService {
     // the open itself must refuse to install the cleared session's cookie or
     // attach a view for it.
     this.assertSandboxUiSessionEpoch(sessionEpoch)
+    const mintedAt = Date.now()
     const { setCookie } = await this.mintSandboxUiSession(recipeNs, recipeName)
     this.assertSandboxUiSessionEpoch(sessionEpoch)
     const driver = await import('./sandboxUiDriver.js')
@@ -5974,6 +6168,10 @@ export class AppService {
       routePath: args.routePath,
       parentWindow: args.parentWindow,
       bounds: args.bounds,
+      launchId: args.launchId,
+      onReleased: args.onReleased,
+      // A teardown main did not ask for (crash, parent window closed) skips
+      // `teardownSandboxUiView`, so its cleanup runs here.
       onClosed: () => {
         // Cancel refresh first so the timer doesn't keep firing against a
         // partition we're about to evict on the next mount.
@@ -5982,7 +6180,6 @@ export class AppService {
         // per-mount SDK state (session denials, prompt budget, rate budget)
         // dies with the mount.
         tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
-        args.onClosed?.()
       },
       onGfsOpen: uri => {
         const active = tryGetPluginSdkRuntime()
@@ -5991,6 +6188,9 @@ export class AppService {
         void active.openGfsResourceFromNavigation(surface.webContentsId, uri)
       },
       onTitleChanged: args.onTitleChanged,
+      onUnauthorizedNavigation: webContentsId => {
+        refreshModule.handleSandboxUiUnauthorizedNavigation(webContentsId)
+      },
       onOauthAuthorize: (oauthClientId, background) => {
         void this.requestSandboxUiOauthAuthorize(
           recipeNs,
@@ -6007,11 +6207,11 @@ export class AppService {
     })
     this.assertSandboxUiSessionEpoch(sessionEpoch)
     const activeView = driver.getActiveSandboxUi()
-    if (!activeView || activeView.appRef !== `${recipeNs}/${recipeName}`) {
-      // A queued close or newer mount can invalidate this operation while an
-      // async cookie write is in flight. Do not cross-wire its refresh loop
-      // to whichever recipe is active now.
-      return
+    if (!activeView || activeView.launchId !== args.launchId) {
+      // The view died before the open finished (its renderer crashed, its
+      // window closed). An open resolves only when it leaves its view mounted,
+      // and its refresh loop must not attach to whatever is active now.
+      throw new Error('The app view closed before it finished opening')
     }
     // Pin the surface so the SDK broker can derive this plugin's identity from
     // `webContents.id` — the plugin never asserts who it is.
@@ -6026,49 +6226,89 @@ export class AppService {
       recipeName,
       webContentsId: activeView.webContentsId,
       parentWindow: args.parentWindow,
-      refresh: (ns, name) => this.mintSandboxUiSession(ns, name),
+      mintedAt,
       // A refresh minted before a session clear can land before the queued
-      // close cancels this loop. Rejecting stops the loop without writing the
-      // cleared session's cookie; the user has nothing to act on, so it is not
+      // close cancels this loop. Rejecting fails the attempt without writing
+      // the cleared session's cookie, and any retry before the close runs is
+      // refused before it reaches rpc-proxy, so the next session's token never
+      // mints for this view. The user has nothing to act on, so it is not
       // reported.
+      refresh: async (ns, name) => {
+        this.assertSandboxUiSessionEpoch(sessionEpoch)
+        return this.mintSandboxUiSession(ns, name)
+      },
       installCookie: async setCookieValue => {
         this.assertSandboxUiSessionEpoch(sessionEpoch)
         await driver.installSandboxUiCookie(setCookieValue)
+      },
+      reload: () => {
+        if (driver.getActiveSandboxUi()?.webContentsId !== activeView.webContentsId) return
+        driver.reloadActiveSandboxUiView()
       },
       onError: err => {
         if (this.sandboxUiSessionEpoch !== sessionEpoch) return
         args.onRefreshError?.(err instanceof Error ? err.message : String(err))
       },
+      onRecovered: () => {
+        if (this.sandboxUiSessionEpoch !== sessionEpoch) return
+        args.onRefreshRecovered?.()
+      },
     })
   }
 
-  closeSandboxUi(): Promise<void> {
-    return this.enqueueSandboxUiLifecycle(() => this.teardownSandboxUiView())
+  /**
+   * With a `launchId`, closes the view only if that launch still owns it: a
+   * close that arrives after its view was replaced must not take down the
+   * replacement. Without one, closes whatever is live; only main's own callers
+   * (session change, renderer replaced) do that, the renderer must always name
+   * its launch. Enqueued synchronously, like `openSandboxUi`.
+   */
+  closeSandboxUi(
+    options: {
+      launchId?: string
+      reason?: import('./sandboxUiDriver.js').SandboxUiReleaseReason
+    } = {}
+  ): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(() =>
+      this.teardownSandboxUiView(options.reason ?? 'closed', options.launchId)
+    )
   }
 
-  private async teardownSandboxUiView(): Promise<void> {
+  /**
+   * Reloads the document of the view `launchId` owns, in place: same view, same
+   * session cookie, same refresh loop, so nothing is minted. Enqueued
+   * synchronously like `openSandboxUi`, so it acts on the view the queue holds
+   * when it gets there; a launch that no longer owns the view reloads nothing.
+   */
+  reloadSandboxUi(options: { launchId: string }): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(async () => {
+      const driver = await import('./sandboxUiDriver.js')
+      if (driver.getActiveSandboxUi()?.launchId !== options.launchId) return
+      driver.reloadActiveSandboxUiView()
+    })
+  }
+
+  private async teardownSandboxUiView(
+    reason: import('./sandboxUiDriver.js').SandboxUiReleaseReason,
+    onlyLaunchId?: string
+  ): Promise<void> {
     const driver = await import('./sandboxUiDriver.js')
     const refreshModule = await import('./sandboxUiSessionRefresh.js')
-    refreshModule.cancelSandboxUiRefresh()
-    tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
-    await driver.unmountSandboxUiView()
-  }
-
-  // Read the active embed's current in-app route for the renderer's tab store
-  // (mini-spec 05 §1). Mirrors `createSandboxUiDeepLink`'s read: it wraps
-  // `driver.getActiveSandboxUiLocation()` and reshapes to the renderer contract.
-  // Returns null when no embed is mounted or its webContents is destroyed.
-  // An out-of-prefix current URL makes `getActiveSandboxUiLocation` THROW
-  // ('Cannot read the current app route'); that propagates so the renderer can
-  // fall back to the default route instead of persisting a stale one.
-  async getSandboxUiLocation(): Promise<{ appRef: string; routePath?: string } | null> {
-    const driver = await import('./sandboxUiDriver.js')
-    const location = driver.getActiveSandboxUiLocation()
-    if (!location) return null
-    return {
-      appRef: `${location.recipeNs}/${location.recipeName}`,
-      ...(location.path ? { routePath: location.path } : {}),
+    if (onlyLaunchId !== undefined && driver.getActiveSandboxUi()?.launchId !== onlyLaunchId) {
+      return
     }
+    // Neither must keep the view from being unmounted and released.
+    try {
+      refreshModule.cancelSandboxUiRefresh()
+    } catch (error) {
+      console.error('[SandboxUI] Could not cancel the session refresh of a closing view:', error)
+    }
+    try {
+      tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
+    } catch (error) {
+      console.error('[SandboxUI] Could not unpin the surfaces of a closing view:', error)
+    }
+    await driver.unmountSandboxUiView(reason)
   }
 
   async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
@@ -6087,13 +6327,14 @@ export class AppService {
     }
   }
 
-  // In-place hard-reload of the active embed (user-initiated "Refresh"). The
-  // session cookie is still valid, so this only reloads page content — it does
-  // NOT re-mint the session or cancel the refresh timer. No-op when nothing is
-  // mounted.
-  async reloadSandboxUi(): Promise<void> {
-    const driver = await import('./sandboxUiDriver.js')
-    driver.reloadActiveSandboxUiView()
+  async createGfsResourceDeepLink(uri: string): Promise<{ url: string }> {
+    const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
+    const canonicalUri = normalizeGfsResourceUri(uri)
+    if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
   }
 
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {
@@ -6104,6 +6345,14 @@ export class AppService {
   async setSandboxUiVisible(visible: boolean): Promise<void> {
     const { setSandboxUiVisible } = await import('./sandboxUiDriver.js')
     setSandboxUiVisible(visible)
+  }
+
+  /** Hide only the sandbox view that still belongs to the requesting plugin mount. */
+  async hideSandboxUiForPluginMount(mount: PinnedPluginSurface): Promise<boolean> {
+    if (mount.surface !== 'sandbox-ui-embed') return false
+    const { setSandboxUiVisibleForWebContents } = await import('./sandboxUiDriver.js')
+    if (resolvePluginSurface(mount.webContentsId) !== mount) return false
+    return setSandboxUiVisibleForWebContents(mount.webContentsId, false)
   }
 
   async captureSandboxUiPreview(): Promise<string | null> {

@@ -160,6 +160,7 @@ type MountSandboxUiViewOverrides = Omit<Partial<MountSandboxUiViewArgs>, 'parent
 
 function mountArgs(overrides: MountSandboxUiViewOverrides): MountSandboxUiViewArgs {
   return {
+    launchId: crypto.randomUUID(),
     recipeNs: 'sandbox-recipes',
     recipeName: 'task-board',
     setCookie:
@@ -343,6 +344,33 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     })
   })
 
+  it('reports a 401 document navigation inside the app prefix, for as long as the view lives', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onUnauthorizedNavigation = vi.fn()
+    await mountSandboxUiView(mountArgs({ parentWindow, onUnauthorizedNavigation }))
+    const webContents = electronMocks.views[0]!.webContents
+    const inPrefix = 'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/'
+
+    webContents.emit('did-navigate', {} as Electron.Event, inPrefix, 200, 'OK')
+    webContents.emit('did-navigate', {} as Electron.Event, 'https://elsewhere.example/', 401, '')
+    webContents.emit(
+      'did-navigate',
+      {} as Electron.Event,
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/other-app/view/',
+      401,
+      ''
+    )
+    expect(onUnauthorizedNavigation).not.toHaveBeenCalled()
+
+    webContents.emit('did-navigate', {} as Electron.Event, `${inPrefix}inbox`, 401, 'Unauthorized')
+    webContents.emit('did-navigate', {} as Electron.Event, `${inPrefix}inbox`, 401, 'Unauthorized')
+    expect(onUnauthorizedNavigation).toHaveBeenCalledTimes(2)
+    expect(onUnauthorizedNavigation).toHaveBeenCalledWith(webContents.id)
+
+    await unmountSandboxUiView()
+    expect(webContents.listenerCount('did-navigate')).toBe(0)
+  })
+
   it('keeps the current document searchable after same-document navigation', async () => {
     const parentWindow = new FakeParentWindow()
     await mountSandboxUiView(mountArgs({ parentWindow }))
@@ -368,6 +396,45 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     )
 
     expect(findInActiveSandboxUi('invoice', 'start', 2, onResult).status).toBe('started')
+  })
+
+  it('a mount over a live view releases that view as replaced', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onReleased = vi.fn()
+    const first = mountArgs({ parentWindow, onReleased })
+    await mountSandboxUiView(first)
+
+    await mountSandboxUiView(mountArgs({ parentWindow, recipeName: 'second-app' }))
+
+    expect(onReleased).toHaveBeenCalledOnce()
+    expect(onReleased).toHaveBeenCalledWith({
+      launchId: first.launchId,
+      reason: 'replaced',
+      location: {},
+    })
+  })
+
+  it('reports a view released only once it is detached and its webContents closed', async () => {
+    const parentWindow = new FakeParentWindow()
+    const seenAtRelease: Array<{ detached: boolean; closed: boolean }> = []
+    await mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        onReleased: () => {
+          const view = electronMocks.views[0]!
+          seenAtRelease.push({
+            detached: parentWindow.contentView.removeChildView.mock.calls.some(
+              ([removed]) => removed === view
+            ),
+            closed: view.webContents.isDestroyed(),
+          })
+        },
+      })
+    )
+
+    await unmountSandboxUiView()
+
+    expect(seenAtRelease).toEqual([{ detached: true, closed: true }])
   })
 
   it('keeps only the newest view when cookie writes complete out of order', async () => {

@@ -249,7 +249,16 @@ async function startPgWireStub(
     }
     const closeDelayMs = options.closeDelayMsByConnection[index]
     if (closeDelayMs === undefined) {
-      socket.destroy(new Error(`pg wire stub: no close delay for connection ${index}`))
+      // A connection the test did not plan for. Destroying it with an Error
+      // emits 'error' on a socket nobody listens to, which Vitest reports as an
+      // unhandled error and fails the whole run although every test passed
+      // (issue #1212). Close it without an Error and name the caller for
+      // diagnosis; each test's own assertions on its pool still decide the test.
+      console.warn(
+        `pg wire stub: closing unplanned connection ${index} from ` +
+          `${socket.remoteAddress}:${socket.remotePort}`
+      )
+      socket.destroy()
       return
     }
     let pending = Buffer.alloc(0)
@@ -443,6 +452,38 @@ describe('endPoolAndWaitForClients against a real pg Pool and a PG wire stub', (
       expect(events).toEqual(['b-closed', 'helper'])
       expect(stub.terminates()).toBe(2)
     } finally {
+      await stub.close()
+    }
+  })
+
+  it('closes an unplanned connection without an unhandled socket error', async () => {
+    const stub = await startPgWireStub({ closeDelayMsByConnection: [] })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const foreign = net.connect(stub.port, '127.0.0.1')
+      let localPort: number | undefined
+      foreign.once('connect', () => {
+        localPort = foreign.localPort
+      })
+      foreign.on('error', () => {})
+      await new Promise<void>(resolve => foreign.once('close', () => resolve()))
+
+      // Witness that the unplanned-connection path ran. Before the fix that path
+      // destroyed the socket with an Error and Vitest failed the run with an
+      // unhandled error, so this test passing is also the negative check.
+      expect(localPort).toEqual(expect.any(Number))
+      expect(
+        warn.mock.calls.some(([message]) => {
+          const match =
+            /^pg wire stub: closing unplanned connection \d+ from 127\.0\.0\.1:(\d+)$/.exec(
+              String(message)
+            )
+          return match?.[1] === String(localPort)
+        })
+      ).toBe(true)
+      expect(stub.terminates()).toBe(0)
+    } finally {
+      warn.mockRestore()
       await stub.close()
     }
   })

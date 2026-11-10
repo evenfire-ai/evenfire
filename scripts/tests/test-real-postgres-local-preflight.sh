@@ -19,6 +19,10 @@ done
 
 printf '%s\n' '#!/usr/bin/env bash' \
   'if [[ "${1:-}" == -p ]]; then printf "%s\n" "${FAKE_NODE_MAJOR:-24}"; exit 0; fi' \
+  'if [[ "${1:-}" == --version ]]; then printf "v%s\n" "${FAKE_NODE_VERSION:-24.22.1}"; exit 0; fi' \
+  'if [[ "${1:-}" == */check-node-version.cjs ]]; then' \
+  '  exec "$REAL_NODE" --input-type=module -e '\''const {assertNodeVersion}=await import(process.argv[1]); assertNodeVersion(process.env.FAKE_NODE_VERSION || "24.22.1", {major:24})'\'' "$1"' \
+  'fi' \
   'if [[ "${1:-}" == -e ]]; then exit 0; fi' \
   'exec "$REAL_NODE" "$@"' >"$fake_bin/node"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fake_bin/npm"
@@ -55,14 +59,26 @@ if real_pg_local_preflight "$project" true >"$tmp/workers.out" 2>&1; then
 fi
 [[ "$REAL_PG_PREFLIGHT_ERROR_CODE" == UNSUPPORTED_T1_CONCURRENCY ]]
 
-VITEST_MAX_WORKERS=1 FAKE_NODE_MAJOR=23
-export VITEST_MAX_WORKERS FAKE_NODE_MAJOR
+VITEST_MAX_WORKERS=1 FAKE_NODE_MAJOR=23 FAKE_NODE_VERSION=23.11.0
+export VITEST_MAX_WORKERS FAKE_NODE_MAJOR FAKE_NODE_VERSION
 if real_pg_local_preflight "$project" true >"$tmp/node.out" 2>&1; then
   echo 'FAIL: preflight accepted Node.js below the package contract' >&2
   exit 1
 fi
 [[ "$REAL_PG_PREFLIGHT_ERROR_CODE" == LOCAL_DEPENDENCY_MISSING ]]
-unset FAKE_NODE_MAJOR
+[[ "$REAL_PG_PREFLIGHT_ERROR_MESSAGE" == *'found v23.11.0'* ]]
+unset FAKE_NODE_MAJOR FAKE_NODE_VERSION
+
+FAKE_NODE_VERSION=24.22.0
+export FAKE_NODE_VERSION
+if real_pg_local_preflight "$project" true >"$tmp/node-patch.out" 2>&1; then
+  echo 'FAIL: preflight accepted an unpatched Node.js 24 runtime' >&2
+  exit 1
+fi
+[[ "$REAL_PG_PREFLIGHT_ERROR_CODE" == LOCAL_DEPENDENCY_MISSING ]]
+[[ "$REAL_PG_PREFLIGHT_ERROR_MESSAGE" == *'found v24.22.0'* ]]
+unset FAKE_NODE_VERSION
+real_pg_local_preflight "$project" true >/dev/null
 
 chmod -x "$project/gfs-controller/node_modules/.bin/vitest"
 if real_pg_local_preflight "$project" true >"$tmp/deps.out" 2>&1; then

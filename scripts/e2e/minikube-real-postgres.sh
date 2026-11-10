@@ -223,6 +223,10 @@ require_t1_commands() {
     T1_NEXT_COMMAND='repair the reported local prerequisite, then re-run the standalone Real PostgreSQL lane'
     die_t1 "$REAL_PG_PREFLIGHT_ERROR_CODE" "$REAL_PG_PREFLIGHT_ERROR_MESSAGE"
   fi
+  if ! node "$SCRIPT_DIR/../ci/certification-inputs.mjs" check --root "$PROJECT_DIR" --scope t1; then
+    T1_NEXT_COMMAND='prepare the reported local inputs explicitly (pinned producers: docs/testing/minikube-t2-runbook.md "Pinned producer inputs"), then re-run the standalone Real PostgreSQL lane'
+    die_t1 LOCAL_DEPENDENCY_MISSING 'certification input preflight failed before T1'
+  fi
 }
 
 secret_field() {
@@ -318,7 +322,16 @@ PY
 }
 
 list_real_pg_files() {
-  local package="$1"
+  local package="$1" file
+  if [ "$package" = control-api ]; then
+    # Reuse CI's validated census. Private producer suites require a separate
+    # authorized service/database lane, documented in the private PG runbook.
+    node "$PROJECT_DIR/scripts/ci/password-recovery-suite-contract.mjs" public |
+      while IFS= read -r file; do
+        printf '%s/%s\n' "$PROJECT_DIR" "$file"
+      done
+    return
+  fi
   find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
     ! -name 'realPostgres.requirement.ts' -print | sort
 }
@@ -337,46 +350,6 @@ is_isolated_control_api_file() {
       return 1
       ;;
   esac
-}
-
-# The two cross-service password-recovery suites need the private Member
-# Registration producer, which T1 does not provide. Without it they skip, and a
-# skipped test fails T1. Exclude exactly the files the suite contract names, as
-# the public CI lane does (.github/workflows/ci-public.yml).
-PRIVATE_PRODUCER_FILES=()
-
-load_private_producer_files() {
-  local selection suite
-  PRIVATE_PRODUCER_FILES=()
-  if ! selection="$(cd "$PROJECT_DIR/control-api" &&
-    node ../scripts/ci/password-recovery-suite-contract.mjs verify >/dev/null &&
-    node ../scripts/ci/password-recovery-suite-contract.mjs private all)"; then
-    T1_NEXT_COMMAND='repair scripts/ci/password-recovery-suite-contract.mjs, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED 'the password-recovery suite contract did not name its private producer suites'
-    return 1
-  fi
-  while IFS= read -r suite; do
-    [ -n "$suite" ] || continue
-    if [ ! -s "$PROJECT_DIR/control-api/$suite" ]; then
-      T1_NEXT_COMMAND='restore the private password-recovery suite files, then re-run T1'
-      die_t1 ZERO_TESTS_EXECUTED "private producer suite named by the contract is missing: control-api/$suite"
-      return 1
-    fi
-    PRIVATE_PRODUCER_FILES+=("$PROJECT_DIR/control-api/$suite")
-  done <<< "$selection"
-  if [ "${#PRIVATE_PRODUCER_FILES[@]}" -ne 2 ]; then
-    T1_NEXT_COMMAND='repair scripts/ci/password-recovery-suite-contract.mjs, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED "expected 2 private producer suites, the contract named ${#PRIVATE_PRODUCER_FILES[@]}"
-    return 1
-  fi
-}
-
-is_private_producer_file() {
-  local path="$1" private_file
-  for private_file in "${PRIVATE_PRODUCER_FILES[@]}"; do
-    [ "$path" = "$private_file" ] && return 0
-  done
-  return 1
 }
 
 require_isolated_control_api_files() {
@@ -483,17 +456,18 @@ PY
 
 run_suite() {
   local package="$1" lane="$2" admin_url="$3"
-  local expected_files=0 reported_files=0 file log_file json_file stats
+  local expected_files=0 reported_files=0 file log_file json_file stats selection
   local suite_started_seconds="$SECONDS" suite_duration_seconds=0
   local -a files=() vitest_filters=()
 
-  if [ "$package" = control-api ]; then
-    load_private_producer_files || return 1
+  if ! selection="$(list_real_pg_files "$package")"; then
+    T1_NEXT_COMMAND='restore the exact PostgreSQL suite manifest and its files, then re-run T1'
+    die_t1 REAL_PG_REPORT_INCOMPLETE "PostgreSQL suite inventory could not be validated for $package"
+    return 1
   fi
   while IFS= read -r file; do
     [ -z "$file" ] && continue
     if [ "$package" = control-api ]; then
-      is_private_producer_file "$file" && continue
       if [ "$lane" = isolated ]; then
         is_isolated_control_api_file "$file" || continue
       else
@@ -504,7 +478,7 @@ run_suite() {
     fi
     files+=("$file")
     vitest_filters+=("${file#"$PROJECT_DIR/$package/"}")
-  done < <(list_real_pg_files "$package")
+  done <<< "$selection"
 
   expected_files="${#files[@]}"
   if ! [[ "$expected_files" =~ ^[1-9][0-9]*$ ]]; then
@@ -516,6 +490,10 @@ run_suite() {
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE "Real PostgreSQL $lane DSN is empty for $package"
   fi
 
+  if [ "$package" = control-api ]; then
+    printf '[minikube-t1] private producer PostgreSQL lanes: NOT_RUN; see docs/testing/password-recovery-private-postgres.md\n'
+    t2_evidence_write private-producer NOT_RUN 'Member Registration producer suites require the separate private PostgreSQL lane'
+  fi
   log_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).log"
   json_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).json"
   printf '[minikube-t1] running %s %s Real PostgreSQL suites (%s files)\n' \
@@ -591,6 +569,15 @@ PY
   fi
   read -r total_suites passed_suites failed_suites passed_tests failed_tests \
     pending_files pending_tests total_tests success expected_files reported_files <<< "$stats"
+  # Durable evidence: the structure and results of this reporter, without its
+  # free-text messages. Written before the verdict so a failing lane keeps it
+  # too; a lane whose evidence cannot be kept does not pass.
+  if [ -z "${T2_EVIDENCE_DIR:-}" ] || ! python3 "$SCRIPT_DIR/t1-reporter-projection.py" \
+    "$json_file" "$PROJECT_DIR/$package" "$package" "$lane" \
+    "$T2_EVIDENCE_DIR/logs/t1-$(printf '%s' "$package-$lane" | tr / _).results.json"; then
+    T1_NEXT_COMMAND='restore a writable evidence directory, then re-run T1'
+    die_t1 REAL_PG_REPORT_INCOMPLETE "T1 reporter evidence could not be persisted for $package ($lane)"
+  fi
   T1_EXPECTED_FILES=$((T1_EXPECTED_FILES + expected_files))
   T1_REPORTED_FILES=$((T1_REPORTED_FILES + reported_files))
   T1_TOTAL_TESTS=$((T1_TOTAL_TESTS + total_tests))

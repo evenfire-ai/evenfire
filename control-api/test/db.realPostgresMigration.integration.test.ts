@@ -2,7 +2,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express, { type Request as ExpressRequest } from 'express'
 import { execFileSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
@@ -40,11 +42,6 @@ type PrivilegeExpectation = Record<string, Set<string>>
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
-const runtimeRoles = [
-  'control_api_runtime',
-  'trace_maintenance_runtime',
-  'workflow_recipes_runtime',
-] as const
 
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
@@ -149,11 +146,139 @@ verify_trace_maintenance_access_contract`,
   return queries
 }
 
+type WorkflowRecipesVerifierResult = { passed: true } | { passed: false; stderr: string }
+
+function runWorkflowRecipesRuntimeVerifier(
+  databaseConnectionString: string,
+  columnProfilePath?: string,
+  relationProfilePath?: string
+): WorkflowRecipesVerifierResult {
+  const script = readFileSync(
+    new URL('../../deploy/scripts/run-control-api-db-migration.sh', import.meta.url),
+    'utf8'
+  )
+  const start = script.indexOf('\nworkflow_recipes_access_contract_values() {')
+  const end = script.indexOf('\nverify_db_migration_state() {', start)
+  if (start < 0 || end < 0) throw new Error('Workflow Recipes deployment verifier is missing')
+
+  // Execute the exact production parser and verifier function. Only its database
+  // assertion adapter is replaced so each emitted production query runs against
+  // this test's real PostgreSQL database without entering Kubernetes operations.
+  const productionFunctions = script.slice(start, end)
+  try {
+    execFileSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+WORKFLOW_RECIPES_ACCESS_PROFILES_FILE="$1"
+WORKFLOW_RECIPES_COLUMN_ACCESS_PROFILES_FILE="$2"
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+assert_db_query_equals() {
+  local description="$1" expected="$2" sql="$3" actual
+  actual="$(psql "$CONTROL_API_REAL_PG_ADMIN_URL" -v ON_ERROR_STOP=1 -At -c "$sql")" \\
+    || die "\${description} (production verifier query failed)"
+  if [[ "$actual" != "$expected" ]]; then
+    die "\${description} (expected \${expected}, got '\${actual:-<empty>}')"
+  fi
+}
+${productionFunctions}
+verify_workflow_recipes_runtime_boundary`,
+        'workflow-recipes-production-verifier',
+        relationProfilePath ??
+          fileURLToPath(
+            new URL(
+              '../../deploy/scripts/workflow-recipes-runtime-access-profiles.tsv',
+              import.meta.url
+            )
+          ),
+        columnProfilePath ??
+          fileURLToPath(
+            new URL(
+              '../../deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv',
+              import.meta.url
+            )
+          ),
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 20_000,
+        env: { ...process.env, CONTROL_API_REAL_PG_ADMIN_URL: databaseConnectionString },
+      }
+    )
+    return { passed: true }
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException & {
+      status?: number | null
+      stderr?: Buffer | string
+    }
+    if (failure.code === 'ETIMEDOUT' || failure.status === null || failure.status === undefined) {
+      throw new Error('Workflow Recipes production verifier did not complete', { cause: error })
+    }
+    return {
+      passed: false,
+      stderr: Buffer.isBuffer(failure.stderr)
+        ? failure.stderr.toString('utf8')
+        : String(failure.stderr ?? ''),
+    }
+  }
+}
+
+function expectWorkflowRecipesVerifierRejects(
+  databaseConnectionString: string,
+  message: string,
+  columnProfilePath?: string,
+  relationProfilePath?: string
+): void {
+  const result = runWorkflowRecipesRuntimeVerifier(
+    databaseConnectionString,
+    columnProfilePath,
+    relationProfilePath
+  )
+  expect(result.passed).toBe(false)
+  if (!result.passed) expect(result.stderr).toContain(message)
+}
+
+const workflowRecipesCleanupRelations = [
+  'team_workflow_triggers',
+  'user_workflow_triggers',
+  'workflow_recipe_allowed_teams',
+] as const
+const workflowRecipesCleanupColumns = workflowRecipesCleanupRelations.flatMap(relation =>
+  (['recipe_namespace', 'recipe_name'] as const).map(column => ({ relation, column }))
+)
+const workflowRecipesColumnPrincipals = ['direct', 'inherited', 'public'] as const
+const workflowRecipesUnexpectedSelectFixtures = workflowRecipesCleanupRelations.flatMap(relation =>
+  workflowRecipesColumnPrincipals.map(principal => ({
+    relation,
+    column: relation === 'user_workflow_triggers' ? 'user_id' : 'team_id',
+    principal,
+  }))
+)
+const workflowRecipesUnexpectedPrivilegeFixtures = (
+  ['INSERT', 'UPDATE', 'REFERENCES'] as const
+).flatMap(privilege =>
+  workflowRecipesColumnPrincipals.map(principal => ({
+    relation: 'team_workflow_triggers',
+    column: 'team_id',
+    privilege,
+    principal,
+  }))
+)
+
 const deniedRuntimeColumnPrivileges = [
   { privilege: 'SELECT', relation: 'gfs_blob_manifests', column: 'blob_key' },
   { privilege: 'INSERT', relation: 'gfs_blob_manifests', column: 'blob_key' },
-  { privilege: 'UPDATE', relation: 'password_verification_work', column: 'owner_instance' },
-  { privilege: 'REFERENCES', relation: 'gfs_blob_manifests', column: 'blob_key' },
+  {
+    privilege: 'UPDATE',
+    relation: 'password_verification_work',
+    column: 'owner_instance',
+  },
+  {
+    privilege: 'REFERENCES',
+    relation: 'gfs_blob_manifests',
+    column: 'blob_key',
+  },
 ] as const
 
 const columnPrivilegeFixtures = deniedRuntimeColumnPrivileges.flatMap(grant => [
@@ -236,6 +361,37 @@ describeRealPostgres('control-api real Postgres migrations', () => {
   let adminPool: Pool
   let dbPool: Pool
 
+  async function finishDisposableMigrationFixture(
+    pool: Pool | undefined,
+    database: string,
+    databaseCreated: boolean,
+    testFailure?: { error: unknown }
+  ): Promise<void> {
+    let cleanupFailure: { error: unknown } | undefined
+    try {
+      await endPoolAndWaitForClients(pool)
+      if (databaseCreated) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname=$1 AND pid<>pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    } catch (error) {
+      cleanupFailure = { error }
+    }
+
+    if (testFailure && cleanupFailure) {
+      throw new AggregateError(
+        [testFailure.error, cleanupFailure.error],
+        'migration fixture failed and its disposable database cleanup also failed'
+      )
+    }
+    if (testFailure) throw testFailure.error
+    if (cleanupFailure) throw cleanupFailure.error
+  }
+
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
     // Roles are cluster-global in PostgreSQL and may own objects in the
@@ -264,21 +420,389 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     }
   })
 
+  const workflowRecipesColumnVerifierMessage =
+    'workflow_recipes_runtime effective column privileges differ from the explicit access contract'
+
+  async function ensureMigratedSchema(): Promise<void> {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+  }
+
+  it('executes the production Workflow Recipes verifier on the clean migrated schema', async () => {
+    await ensureMigratedSchema()
+
+    const tableAccess = await dbPool.query<{ select_allowed: boolean; column_select: boolean }>(`
+      SELECT has_table_privilege(
+               'workflow_recipes_runtime', 'public.workflow_runs', 'SELECT'
+             ) AS select_allowed,
+             has_column_privilege(
+               'workflow_recipes_runtime', 'public.workflow_runs', 'run_id', 'SELECT'
+             ) AS column_select
+    `)
+    expect(tableAccess.rows).toEqual([{ select_allowed: true, column_select: true }])
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  }, 60_000)
+
+  it.each(workflowRecipesCleanupColumns)(
+    'rejects missing required SELECT on $relation column $column',
+    async ({ relation, column }) => {
+      await ensureMigratedSchema()
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const revoke = `REVOKE SELECT (${columnName}) ON TABLE ${relationName} FROM workflow_recipes_runtime`
+      const grant = `GRANT SELECT (${columnName}) ON TABLE ${relationName} TO workflow_recipes_runtime`
+
+      await dbPool.query(revoke)
+      try {
+        const effective = await dbPool.query<{ allowed: boolean }>(
+          `SELECT has_column_privilege('workflow_recipes_runtime', $1, $2, 'SELECT') AS allowed`,
+          [relation, column]
+        )
+        expect(effective.rows).toEqual([{ allowed: false }])
+        expectWorkflowRecipesVerifierRejects(connectionString, workflowRecipesColumnVerifierMessage)
+      } finally {
+        await dbPool.query(grant)
+      }
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it.each(workflowRecipesUnexpectedSelectFixtures)(
+    'rejects effective $principal SELECT($column) on $relation',
+    async ({ relation, column, principal }) => {
+      await ensureMigratedSchema()
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `wrc_column_acl_probe_${randomBytes(6).toString('hex')}`
+      const inherited = principal === 'inherited'
+      const grantee = principal === 'public' ? 'PUBLIC' : 'workflow_recipes_runtime'
+      let roleCreated = false
+      let privilegeGranted = false
+      let membershipGranted = false
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+          roleCreated = true
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT SELECT (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        privilegeGranted = true
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO workflow_recipes_runtime`)
+          membershipGranted = true
+        }
+
+        const effective = await dbPool.query<{
+          table_access: boolean
+          column_access: boolean
+        }>(
+          `SELECT has_table_privilege('workflow_recipes_runtime', $1, 'SELECT') AS table_access,
+                  has_column_privilege('workflow_recipes_runtime', $1, $2, 'SELECT') AS column_access`,
+          [relation, column]
+        )
+        expect(effective.rows).toEqual([{ table_access: false, column_access: true }])
+        expectWorkflowRecipesVerifierRejects(connectionString, workflowRecipesColumnVerifierMessage)
+      } finally {
+        if (membershipGranted) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM workflow_recipes_runtime`)
+        }
+        if (privilegeGranted) {
+          const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+          await dbPool.query(
+            `REVOKE SELECT (${columnName}) ON TABLE ${relationName} FROM ${grantTarget}`
+          )
+        }
+        if (roleCreated) await dbPool.query(`DROP ROLE ${quoteIdent(inheritedRole)}`)
+      }
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it.each(workflowRecipesUnexpectedPrivilegeFixtures)(
+    'rejects effective $principal column-level $privilege on $relation column $column',
+    async ({ relation, column, privilege, principal }) => {
+      await ensureMigratedSchema()
+      const relationName = quoteIdent(relation)
+      const columnName = quoteIdent(column)
+      const inheritedRole = `wrc_column_acl_probe_${randomBytes(6).toString('hex')}`
+      const inherited = principal === 'inherited'
+      const grantee = principal === 'public' ? 'PUBLIC' : 'workflow_recipes_runtime'
+      let roleCreated = false
+      let privilegeGranted = false
+      let membershipGranted = false
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+          roleCreated = true
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(
+          `GRANT ${privilege} (${columnName}) ON TABLE ${relationName} TO ${grantTarget}`
+        )
+        privilegeGranted = true
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO workflow_recipes_runtime`)
+          membershipGranted = true
+        }
+
+        const effective = await dbPool.query<{ allowed: boolean }>(
+          `SELECT has_column_privilege('workflow_recipes_runtime', $1, $2, $3) AS allowed`,
+          [relation, column, privilege]
+        )
+        expect(effective.rows).toEqual([{ allowed: true }])
+        expectWorkflowRecipesVerifierRejects(connectionString, workflowRecipesColumnVerifierMessage)
+      } finally {
+        if (membershipGranted) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM workflow_recipes_runtime`)
+        }
+        if (privilegeGranted) {
+          const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+          await dbPool.query(
+            `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM ${grantTarget}`
+          )
+        }
+        if (roleCreated) await dbPool.query(`DROP ROLE ${quoteIdent(inheritedRole)}`)
+      }
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it.each(workflowRecipesColumnPrincipals)(
+    'rejects unexpected $principal whole-table access and retains approved table profiles',
+    async principal => {
+      await ensureMigratedSchema()
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+
+      const inheritedRole = `wrc_table_acl_probe_${randomBytes(6).toString('hex')}`
+      const inherited = principal === 'inherited'
+      const grantee = principal === 'public' ? 'PUBLIC' : 'workflow_recipes_runtime'
+      let roleCreated = false
+      let privilegeGranted = false
+      let membershipGranted = false
+
+      try {
+        if (inherited) {
+          await dbPool.query(`CREATE ROLE ${quoteIdent(inheritedRole)} NOLOGIN INHERIT`)
+          roleCreated = true
+        }
+        const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+        await dbPool.query(`GRANT SELECT ON team_workflow_triggers TO ${grantTarget}`)
+        privilegeGranted = true
+        if (inherited) {
+          await dbPool.query(`GRANT ${quoteIdent(inheritedRole)} TO workflow_recipes_runtime`)
+          membershipGranted = true
+        }
+        expectWorkflowRecipesVerifierRejects(
+          connectionString,
+          'workflow_recipes_runtime relation privileges differ from the explicit access contract'
+        )
+      } finally {
+        if (membershipGranted) {
+          await dbPool.query(`REVOKE ${quoteIdent(inheritedRole)} FROM workflow_recipes_runtime`)
+        }
+        if (privilegeGranted) {
+          const grantTarget = inherited ? quoteIdent(inheritedRole) : grantee
+          await dbPool.query(`REVOKE SELECT ON team_workflow_triggers FROM ${grantTarget}`)
+        }
+        if (roleCreated) await dbPool.query(`DROP ROLE ${quoteIdent(inheritedRole)}`)
+        await dbPool.query(
+          'GRANT SELECT (recipe_namespace, recipe_name) ON team_workflow_triggers TO workflow_recipes_runtime'
+        )
+      }
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it('rejects a newly created public relation absent from the explicit access inventory', async () => {
+    await ensureMigratedSchema()
+    const relation = `wrc_unclassified_probe_${randomBytes(6).toString('hex')}`
+    const relationName = quoteIdent(relation)
+    await dbPool.query(`CREATE TABLE ${relationName} (probe_id integer)`)
+    try {
+      expectWorkflowRecipesVerifierRejects(
+        connectionString,
+        'workflow_recipes_runtime relation privileges differ from the explicit access contract'
+      )
+    } finally {
+      await dbPool.query(`DROP TABLE ${relationName}`)
+    }
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  })
+
+  it('rejects access to a newly added column absent from the exception manifest', async () => {
+    await ensureMigratedSchema()
+    const column = `wrc_unclassified_probe_${randomBytes(6).toString('hex')}`
+    const columnName = quoteIdent(column)
+    await dbPool.query(`ALTER TABLE team_workflow_triggers ADD COLUMN ${columnName} text`)
+    try {
+      await dbPool.query(
+        `GRANT SELECT (${columnName}) ON team_workflow_triggers TO workflow_recipes_runtime`
+      )
+      try {
+        expectWorkflowRecipesVerifierRejects(connectionString, workflowRecipesColumnVerifierMessage)
+      } finally {
+        await dbPool.query(
+          `REVOKE SELECT (${columnName}) ON team_workflow_triggers FROM workflow_recipes_runtime`
+        )
+      }
+    } finally {
+      await dbPool.query(`ALTER TABLE team_workflow_triggers DROP COLUMN ${columnName}`)
+    }
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  })
+
+  it.each([
+    {
+      label: 'unknown relation',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nunknown_relation\tteam_id\tSELECT\n',
+      expected: workflowRecipesColumnVerifierMessage,
+    },
+    {
+      label: 'unknown column',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nteam_workflow_triggers\tunknown_column\tSELECT\n',
+      expected: workflowRecipesColumnVerifierMessage,
+    },
+    {
+      label: 'table-wide privilege exception',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nworkflow_runs\trun_id\tSELECT\n',
+      expected: workflowRecipesColumnVerifierMessage,
+    },
+    {
+      label: 'malformed privilege',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nteam_workflow_triggers\tteam_id\tALL\n',
+      expected: 'workflow-recipes column access profile file is malformed',
+    },
+    {
+      label: 'duplicate policy row',
+      contents:
+        '# relation<TAB>column<TAB>effective column privilege\nteam_workflow_triggers\trecipe_name\tSELECT\nteam_workflow_triggers\trecipe_name\tSELECT\n',
+      expected: 'workflow-recipes column access profile file is malformed',
+    },
+  ])('fails closed for $label in the column policy manifest', async ({ contents, expected }) => {
+    await ensureMigratedSchema()
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), 'workflow-recipes-column-policy-'))
+    const temporaryManifest = join(temporaryDirectory, 'column-access.tsv')
+    try {
+      writeFileSync(temporaryManifest, contents, 'utf8')
+      expectWorkflowRecipesVerifierRejects(connectionString, expected, temporaryManifest)
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true })
+    }
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  })
+
+  it.each(['INSERT', 'UPDATE', 'REFERENCES'] as const)(
+    'rejects an unapproved %s column exception even when PostgreSQL grants it',
+    async privilege => {
+      await ensureMigratedSchema()
+      const temporaryDirectory = mkdtempSync(join(tmpdir(), 'workflow-recipes-column-policy-'))
+      const temporaryManifest = join(temporaryDirectory, 'column-access.tsv')
+      const relationName = quoteIdent('team_workflow_triggers')
+      const columnName = quoteIdent('team_id')
+      const productionManifest = readFileSync(
+        new URL(
+          '../../deploy/scripts/workflow-recipes-runtime-column-access-profiles.tsv',
+          import.meta.url
+        ),
+        'utf8'
+      )
+
+      try {
+        writeFileSync(
+          temporaryManifest,
+          `${productionManifest}team_workflow_triggers\tteam_id\t${privilege}\n`,
+          'utf8'
+        )
+        await dbPool.query(
+          `GRANT ${privilege} (${columnName}) ON TABLE ${relationName} TO workflow_recipes_runtime`
+        )
+        expectWorkflowRecipesVerifierRejects(
+          connectionString,
+          'workflow-recipes column access profile file is malformed',
+          temporaryManifest
+        )
+      } finally {
+        await dbPool.query(
+          `REVOKE ${privilege} (${columnName}) ON TABLE ${relationName} FROM workflow_recipes_runtime`
+        )
+        rmSync(temporaryDirectory, { recursive: true, force: true })
+      }
+
+      expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+    }
+  )
+
+  it.each([
+    {
+      label: 'malformed relation profile',
+      contents: '# public relation<TAB>access profile\nnot-a-valid-profile\n',
+    },
+    {
+      label: 'duplicate relation profile',
+      contents:
+        '# public relation<TAB>access profile\nteam_workflow_triggers\tdelete\nteam_workflow_triggers\tnone\n',
+    },
+  ])('fails closed for $label declarations', async ({ contents }) => {
+    await ensureMigratedSchema()
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), 'workflow-recipes-relation-policy-'))
+    const temporaryManifest = join(temporaryDirectory, 'relation-access.tsv')
+    try {
+      writeFileSync(temporaryManifest, contents, 'utf8')
+      expectWorkflowRecipesVerifierRejects(
+        connectionString,
+        'workflow-recipes access profile file is malformed',
+        undefined,
+        temporaryManifest
+      )
+    } finally {
+      rmSync(temporaryDirectory, { recursive: true, force: true })
+    }
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
+  })
+
   it('verifies the deployment access contract against migrated schema and rejects drift', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb({ connect: () => dbPool.connect() })
     const [relationQuery, sequenceQuery] = deploymentRuntimeAccessQueries()
+    const traceMaintenanceQueries = traceMaintenanceRuntimeAccessQueries()
     const violations = async (sql: string) =>
       Number((await dbPool.query({ text: sql, rowMode: 'array' })).rows[0][0])
 
     expect(await violations(relationQuery)).toBe(0)
     expect(await violations(sequenceQuery)).toBe(0)
+    for (const query of traceMaintenanceQueries) expect(await violations(query)).toBe(0)
+    expect(runWorkflowRecipesRuntimeVerifier(connectionString)).toEqual({ passed: true })
     const privileges = await relationPrivileges(dbPool, 'control_api_runtime')
     for (const relation of ['password_identifier_state', 'password_verification_pace']) {
       expectPrivileges([...privileges[relation]], ['SELECT', 'INSERT', 'UPDATE', 'DELETE'])
     }
+    expectPrivileges([...privileges.password_admission_rollout_state], [])
     expectPrivileges([...privileges.password_verification_work], ['SELECT', 'INSERT', 'DELETE'])
-
+    // P-14: the GFS subject bump function had no trigger and no caller.
+    const obsoleteGfsSubjectRevision = await dbPool.query<{ function_name: string | null }>(
+      `SELECT to_regprocedure('public.authorization_bump_gfs_subject_revision()')::text
+         AS function_name`
+    )
+    expect(obsoleteGfsSubjectRevision.rows).toEqual([{ function_name: null }])
+    // RP-12: the session-revocation ledger is append-only for the runtime.
+    expectPrivileges([...privileges.external_v1_session_revocations], ['SELECT', 'INSERT'])
+    // The runtime never deletes an epoch: the user-deletion cascade runs as the owner.
+    expectPrivileges(
+      [...privileges.external_user_session_security_epochs],
+      ['SELECT', 'INSERT', 'UPDATE']
+    )
+    expectPrivileges(
+      [...privileges.external_user_sessions],
+      ['SELECT', 'INSERT', 'UPDATE', 'DELETE']
+    )
     try {
       await dbPool.query('GRANT UPDATE ON password_verification_work TO control_api_runtime')
       expect(await violations(relationQuery)).toBe(1)
@@ -300,6 +824,766 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(await violations(relationQuery)).toBe(0)
   }, 60_000)
 
+  it('lets the runtime append session revocations but never rewrite them', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+    const user = randomUUID()
+    const tokenHash = randomBytes(32).toString('hex')
+    await dbPool.query('INSERT INTO users(id, email) VALUES ($1, $2)', [
+      user,
+      `session-revocation-${user}@example.test`,
+    ])
+    const runtime = await dbPool.connect()
+    try {
+      await runtime.query('BEGIN')
+      await runtime.query('SET LOCAL ROLE control_api_runtime')
+      // Liveness witness: the runtime's only writer is this append
+      // (userSessionService), and it needs INSERT plus SELECT.
+      const appended = await runtime.query(
+        `INSERT INTO external_v1_session_revocations(
+           token_hash, user_id, expires_at, revoked_at, reason
+         )
+         VALUES ($1, $2, NOW() + INTERVAL '1 hour', NOW(), 'access_contract_witness')
+         ON CONFLICT (token_hash) DO NOTHING
+         RETURNING token_hash`,
+        [tokenHash, user]
+      )
+      expect(appended.rows).toEqual([{ token_hash: tokenHash }])
+      // Each refusal aborts the transaction, so fence them with savepoints.
+      await runtime.query('SAVEPOINT rp12_update')
+      await expect(
+        runtime.query(
+          `UPDATE external_v1_session_revocations SET reason = 'rewritten' WHERE token_hash = $1`,
+          [tokenHash]
+        )
+      ).rejects.toMatchObject({ code: '42501' })
+      await runtime.query('ROLLBACK TO SAVEPOINT rp12_update')
+      await runtime.query('SAVEPOINT rp12_delete')
+      await expect(
+        runtime.query('DELETE FROM external_v1_session_revocations WHERE token_hash = $1', [
+          tokenHash,
+        ])
+      ).rejects.toMatchObject({ code: '42501' })
+      await runtime.query('ROLLBACK TO SAVEPOINT rp12_delete')
+      await runtime.query('ROLLBACK')
+    } finally {
+      runtime.release()
+    }
+  }, 60_000)
+
+  it('requires the owner stage and preserves history through a staged legacy admission upgrade', async () => {
+    const db = await import('../src/db.js')
+    const legacyDatabase = `control_api_legacy_admission_${randomBytes(6).toString('hex')}`
+    let legacyPool: Pool | undefined
+    let databaseCreated = false
+    await db.initDb({ connect: () => dbPool.connect() })
+    let testFailure: { error: unknown } | undefined
+    try {
+      await adminPool.query(`CREATE DATABASE ${quoteIdent(legacyDatabase)}`)
+      databaseCreated = true
+      legacyPool = new Pool({ connectionString: databaseUrl(adminUrl ?? '', legacyDatabase) })
+
+      const admissionMigrationIndex = db.CONTROL_API_MIGRATIONS.findIndex(
+        migration => migration.version === '0126_bug192_password_admission'
+      )
+      const ownerMigrationIndex = db.CONTROL_API_MIGRATIONS.findIndex(
+        migration => migration.version === '0128_password_work_ownership'
+      )
+      const ownerMigration = db.CONTROL_API_MIGRATIONS[ownerMigrationIndex]
+      const beforeAdmissionMigrations = db.CONTROL_API_MIGRATIONS.slice(0, admissionMigrationIndex)
+      const beforeOwnerMigrations = db.CONTROL_API_MIGRATIONS.slice(0, ownerMigrationIndex)
+      expect(admissionMigrationIndex).toBeGreaterThan(0)
+      expect(ownerMigrationIndex).toBeGreaterThan(0)
+      expect(ownerMigration?.version).toBe('0128_password_work_ownership')
+      expect(beforeOwnerMigrations.at(-2)?.version).toBe('0126_bug192_password_admission')
+      expect(beforeOwnerMigrations.at(-1)?.version).toBe('0127_password_evaluation_retention')
+      if (!ownerMigration) throw new Error('durable owner migration missing')
+
+      await legacyPool.query(
+        `CREATE TABLE schema_migrations (
+           version TEXT PRIMARY KEY,
+           applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         )`
+      )
+      await legacyPool.query('BEGIN')
+      await legacyPool.query('SET LOCAL synchronous_commit = on')
+      for (const migration of beforeAdmissionMigrations) {
+        await migration.apply(legacyPool)
+        await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          migration.version,
+        ])
+      }
+      await legacyPool.query('COMMIT')
+
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).rejects.toThrow(
+        'password admission upgrade is blocked: pre-existing application schema or migration history has no identifier admission state'
+      )
+      const preAdmissionTables = await legacyPool.query(
+        `SELECT to_regclass('public.password_identifier_state') AS identifier_state,
+                to_regclass('public.password_verification_work') AS work_owner`
+      )
+      expect(preAdmissionTables.rows[0]).toEqual({ identifier_state: null, work_owner: null })
+      const preAdmissionVersions = await legacyPool.query(
+        'SELECT version FROM schema_migrations ORDER BY version'
+      )
+      expect(preAdmissionVersions.rows.map(row => row.version)).toEqual(
+        beforeAdmissionMigrations.map(migration => migration.version)
+      )
+
+      await legacyPool.query('DELETE FROM schema_migrations')
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).rejects.toThrow(
+        'password admission upgrade is blocked: pre-existing application schema or migration history has no identifier admission state'
+      )
+      const missingReceiptState = await legacyPool.query(
+        `SELECT to_regclass('public.users') AS users,
+                to_regclass('public.password_identifier_state') AS identifier_state,
+                count(*)::integer AS receipt_count
+           FROM schema_migrations`
+      )
+      expect(missingReceiptState.rows[0]).toEqual({
+        users: 'users',
+        identifier_state: null,
+        receipt_count: 0,
+      })
+      await legacyPool.query('BEGIN')
+      await legacyPool.query('SET LOCAL synchronous_commit = on')
+      for (const migration of beforeAdmissionMigrations) {
+        await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          migration.version,
+        ])
+      }
+      await legacyPool.query('COMMIT')
+
+      // The already-approved owner-aware release stages the legacy admission schema and owner.
+      await legacyPool.query('BEGIN')
+      await legacyPool.query('SET LOCAL synchronous_commit = on')
+      for (const migration of beforeOwnerMigrations.slice(admissionMigrationIndex)) {
+        await migration.apply(legacyPool)
+        await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          migration.version,
+        ])
+      }
+      await legacyPool.query('COMMIT')
+
+      const key = 'c'.repeat(64)
+      const attemptAt = Date.now() - 5_000
+      await legacyPool.query(
+        'INSERT INTO password_identifier_state(identifier_key, attempts) VALUES ($1, $2)',
+        [key, [String(attemptAt)]]
+      )
+      const stateBefore = await legacyPool.query(
+        'SELECT attempts, failures, locked_until_ms FROM password_identifier_state WHERE identifier_key=$1',
+        [key]
+      )
+
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).rejects.toThrow(
+        'password admission upgrade is blocked: existing identifier state has no durable verifier owner'
+      )
+
+      const appliedVersions = await legacyPool.query(
+        'SELECT version FROM schema_migrations ORDER BY version'
+      )
+      expect(appliedVersions.rows.map(row => row.version)).toEqual([
+        ...beforeOwnerMigrations.map(migration => migration.version),
+      ])
+      const ownerTable = await legacyPool.query(
+        "SELECT to_regclass('public.password_verification_work') AS relation"
+      )
+      expect(ownerTable.rows[0].relation).toBeNull()
+      const stateAfter = await legacyPool.query(
+        'SELECT attempts, failures, locked_until_ms FROM password_identifier_state WHERE identifier_key=$1',
+        [key]
+      )
+      expect(stateAfter.rows).toEqual(stateBefore.rows)
+      const outcomeColumns = await legacyPool.query(
+        `SELECT count(*)::integer AS count FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='password_identifier_state'
+            AND column_name IN ('successes', 'uncertain', 'provisional_operation')`
+      )
+      expect(outcomeColumns.rows[0].count).toBe(0)
+
+      // The staged owner-aware release has installed 0126/0127/0128. The next current-version
+      // startup can now fence, drain and apply the Spec 092 outcome schema.
+      await legacyPool.query('BEGIN')
+      await legacyPool.query('SET LOCAL synchronous_commit = on')
+      await ownerMigration.apply(legacyPool)
+      await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+        ownerMigration.version,
+      ])
+      await legacyPool.query('COMMIT')
+
+      // Existing objects without the owner migration receipt are not proof that the
+      // owner-aware release completed its schema transaction. Fail before fencing or
+      // applying outcome-accounting migrations until the receipt is restored.
+      await legacyPool.query('DELETE FROM schema_migrations WHERE version=$1', [
+        ownerMigration.version,
+      ])
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).rejects.toThrow(
+        'password admission upgrade is blocked: existing admission tables lack required migration receipts 0128_password_work_ownership'
+      )
+      const missingOwnerReceiptVersions = await legacyPool.query(
+        'SELECT version FROM schema_migrations ORDER BY version'
+      )
+      expect(missingOwnerReceiptVersions.rows.map(row => row.version)).not.toContain(
+        ownerMigration.version
+      )
+      expect(missingOwnerReceiptVersions.rows.map(row => row.version)).not.toContain(
+        '0130_password_login_success_admission'
+      )
+      const missingOwnerReceiptState = await legacyPool.query(
+        `SELECT attempts, failures, locked_until_ms
+           FROM password_identifier_state WHERE identifier_key=$1`,
+        [key]
+      )
+      expect(missingOwnerReceiptState.rows).toEqual(stateBefore.rows)
+      const missingOwnerReceiptSchema = await legacyPool.query(
+        `SELECT to_regclass('public.password_admission_rollout_state') AS rollout_state,
+                count(*) FILTER (WHERE column_name IN ('successes', 'uncertain'))::integer AS outcome_columns
+           FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='password_identifier_state'`
+      )
+      expect(missingOwnerReceiptSchema.rows[0]).toEqual({
+        rollout_state: null,
+        outcome_columns: 0,
+      })
+
+      await legacyPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+        ownerMigration.version,
+      ])
+      await expect(db.initDb({ connect: () => legacyPool!.connect() })).resolves.toBeUndefined()
+
+      const readiness = await legacyPool.query(
+        'SELECT password_admission_rollout_is_ready() AS ready'
+      )
+      expect(readiness.rows[0].ready).toBe(true)
+      const stagedVersions = await legacyPool.query(
+        `SELECT version FROM schema_migrations
+          WHERE version IN ('0128_password_work_ownership', '0129_workflow_schedules_concurrency_policy',
+                            '0130_password_login_success_admission')
+          ORDER BY version`
+      )
+      expect(stagedVersions.rows.map(row => row.version)).toEqual([
+        '0128_password_work_ownership',
+        '0129_workflow_schedules_concurrency_policy',
+        '0130_password_login_success_admission',
+      ])
+      const upgradedState = await legacyPool.query(
+        `SELECT attempts, failures, locked_until_ms, successes, uncertain,
+                legacy_hold_until_ms::text
+           FROM password_identifier_state WHERE identifier_key=$1`,
+        [key]
+      )
+      expect(upgradedState.rows[0].attempts).toEqual([String(attemptAt)])
+      expect(upgradedState.rows[0].failures).toEqual([])
+      expect(upgradedState.rows[0].successes).toEqual([])
+      expect(upgradedState.rows[0].uncertain).toEqual([])
+      expect(Number(upgradedState.rows[0].legacy_hold_until_ms)).toBeGreaterThan(Date.now())
+    } catch (error) {
+      testFailure = { error }
+    }
+
+    await finishDisposableMigrationFixture(legacyPool, legacyDatabase, databaseCreated, testFailure)
+  }, 60_000)
+
+  it('blocks an owner schema with a missing migration receipt before changing admission state', async () => {
+    const db = await import('../src/db.js')
+    const database = `control_api_missing_owner_receipt_${randomBytes(6).toString('hex')}`
+    let isolatedPool: Pool | undefined
+    let databaseCreated = false
+    await db.initDb({ connect: () => dbPool.connect() })
+    let testFailure: { error: unknown } | undefined
+    try {
+      await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
+      databaseCreated = true
+      isolatedPool = new Pool({ connectionString: databaseUrl(adminUrl ?? '', database) })
+
+      const ownerMigrationIndex = db.CONTROL_API_MIGRATIONS.findIndex(
+        migration => migration.version === '0128_password_work_ownership'
+      )
+      const ownerMigration = db.CONTROL_API_MIGRATIONS[ownerMigrationIndex]
+      expect(ownerMigrationIndex).toBeGreaterThan(0)
+      expect(ownerMigration?.version).toBe('0128_password_work_ownership')
+      if (!ownerMigration) throw new Error('durable owner migration missing')
+
+      await isolatedPool.query(
+        `CREATE TABLE schema_migrations (
+           version TEXT PRIMARY KEY,
+           applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         )`
+      )
+      await isolatedPool.query('BEGIN')
+      await isolatedPool.query('SET LOCAL synchronous_commit = on')
+      for (const migration of db.CONTROL_API_MIGRATIONS.slice(0, ownerMigrationIndex + 1)) {
+        await migration.apply(isolatedPool)
+        await isolatedPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          migration.version,
+        ])
+      }
+      await isolatedPool.query('COMMIT')
+
+      const key = 'd'.repeat(64)
+      const attempts = [String(Date.now() - 3_000)]
+      await isolatedPool.query(
+        'INSERT INTO password_identifier_state(identifier_key, attempts) VALUES ($1, $2)',
+        [key, attempts]
+      )
+      for (const missingReceipt of [
+        '0128_password_work_ownership',
+        '0127_password_evaluation_retention',
+        '0126_bug192_password_admission',
+      ]) {
+        await isolatedPool.query('DELETE FROM schema_migrations WHERE version=$1', [missingReceipt])
+        if (missingReceipt === '0126_bug192_password_admission') {
+          await isolatedPool.query('DELETE FROM schema_migrations WHERE version=$1', [
+            '0125_bug192_password_admission',
+          ])
+        }
+
+        await expect(db.initDb({ connect: () => isolatedPool!.connect() })).rejects.toThrow(
+          `password admission upgrade is blocked: existing admission tables lack required migration receipts ${missingReceipt}`
+        )
+
+        const state = await isolatedPool.query(
+          'SELECT attempts, failures, locked_until_ms FROM password_identifier_state WHERE identifier_key=$1',
+          [key]
+        )
+        expect(state.rows).toEqual([{ attempts, failures: [], locked_until_ms: '0' }])
+        const rolloutAndOutcomeSchema = await isolatedPool.query(
+          `SELECT to_regclass('public.password_admission_rollout_state') AS rollout_state,
+                  count(*) FILTER (WHERE column_name IN ('successes', 'uncertain'))::integer AS outcome_columns
+             FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='password_identifier_state'`
+        )
+        expect(rolloutAndOutcomeSchema.rows[0]).toEqual({ rollout_state: null, outcome_columns: 0 })
+        const pendingReceipts = await isolatedPool.query(
+          `SELECT version FROM schema_migrations
+            WHERE version = '0130_password_login_success_admission'
+            ORDER BY version`
+        )
+        expect(pendingReceipts.rows).toEqual([])
+
+        await isolatedPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+          missingReceipt,
+        ])
+      }
+
+      await isolatedPool.query('DELETE FROM schema_migrations WHERE version=$1', [
+        '0126_bug192_password_admission',
+      ])
+      await isolatedPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+        '0125_bug192_password_admission',
+      ])
+      await expect(db.initDb({ connect: () => isolatedPool!.connect() })).resolves.toBeUndefined()
+      const readiness = await isolatedPool.query(
+        'SELECT password_admission_rollout_is_ready() AS ready'
+      )
+      expect(readiness.rows[0].ready).toBe(true)
+      const canonicalizedLegacyReceipt = await isolatedPool.query(
+        `SELECT version FROM schema_migrations
+          WHERE version IN ('0125_bug192_password_admission', '0126_bug192_password_admission')
+          ORDER BY version`
+      )
+      expect(canonicalizedLegacyReceipt.rows.map(row => row.version)).toEqual([
+        '0125_bug192_password_admission',
+        '0126_bug192_password_admission',
+      ])
+    } catch (error) {
+      testFailure = { error }
+    }
+
+    await finishDisposableMigrationFixture(isolatedPool, database, databaseCreated, testFailure)
+  }, 60_000)
+
+  it('fences and drains legacy verifiers before migration, then fails closed on rollback', async () => {
+    const db = await import('../src/db.js')
+    const admissionSchema = await import('../src/services/auth/passwordAdmissionSchema.js')
+    const workOwnershipSchema = await import('../src/services/auth/passwordWorkOwnershipSchema.js')
+    const migrationVersion = '0130_password_login_success_admission'
+    const key = 'b'.repeat(64)
+    const attemptAt = Date.now() - 1_000
+    const heldOperation = randomUUID()
+    const heldOwner = randomUUID()
+    const heldHost = 'legacy-verifier-test'
+    const heldPid = process.pid
+    let legacyCompletionClient: PoolClient | null = null
+    let legacyCompletionFenceLowerBoundMs: number | null = null
+    let migrationSettled = false
+    let migrationError: unknown
+    let migrationPromise: Promise<void> | undefined
+    let fence: { phase: string; fenced_at_ms: string } | undefined
+    let legacyOwnerReleased = false
+    const releaseLegacyOwner = async () => {
+      const releaseClient = await dbPool.connect()
+      try {
+        await releaseClient.query('SET ROLE control_api_runtime')
+        await releaseClient.query(
+          'DELETE FROM password_verification_work WHERE singleton AND operation_id=$1 AND owner_instance=$2',
+          [heldOperation, heldOwner]
+        )
+        await releaseClient.query('RESET ROLE')
+      } finally {
+        releaseClient.release()
+      }
+      legacyOwnerReleased = true
+    }
+    const expectLegacyWriteRejected = async (sql: string, values: unknown[] = []) => {
+      const runtime = await dbPool.connect()
+      try {
+        await runtime.query('SET ROLE control_api_runtime')
+        await expect(runtime.query(sql, values)).rejects.toMatchObject({
+          code: '55000',
+        })
+        await runtime.query('RESET ROLE')
+      } finally {
+        runtime.release()
+      }
+    }
+
+    // Reconstruct the supported 0128 owner-aware pre-0130 schema in this throwaway
+    // database after the ordinary migration test has initialized all migrations.
+    await dbPool.query(`
+      DROP TRIGGER IF EXISTS password_admission_protocol_fence ON password_identifier_state;
+      DROP TRIGGER IF EXISTS password_admission_rollout_state_guard ON password_identifier_state;
+      DROP TRIGGER IF EXISTS password_admission_rollout_owner_guard ON password_verification_work;
+      DROP FUNCTION IF EXISTS password_admission_protocol_fence();
+      DROP FUNCTION IF EXISTS password_admission_rollout_state_guard();
+      DROP FUNCTION IF EXISTS password_admission_rollout_owner_guard();
+      DROP FUNCTION IF EXISTS password_admission_rollout_is_ready();
+      DROP FUNCTION IF EXISTS password_reconcile_running_admission(
+        text, uuid, bigint, uuid, bigint, uuid, text, integer, text
+      );
+      ALTER TABLE password_identifier_state
+        DROP COLUMN IF EXISTS successes,
+        DROP COLUMN IF EXISTS uncertain,
+        DROP COLUMN IF EXISTS legacy_hold_until_ms,
+        DROP COLUMN IF EXISTS provisional_operation,
+        DROP COLUMN IF EXISTS provisional_phase,
+        DROP COLUMN IF EXISTS provisional_scope,
+        DROP COLUMN IF EXISTS provisional_epoch,
+        DROP COLUMN IF EXISTS provisional_expires_at_ms,
+        DROP COLUMN IF EXISTS provisional_quota_masked,
+        DROP COLUMN IF EXISTS provisional_started_at_ms,
+        DROP COLUMN IF EXISTS provisional_owner_instance,
+        DROP COLUMN IF EXISTS provisional_owner_host,
+        DROP COLUMN IF EXISTS provisional_owner_pid,
+        DROP COLUMN IF EXISTS provisional_user_id,
+        DROP COLUMN IF EXISTS provisional_generation,
+        DROP COLUMN IF EXISTS terminal_operation,
+        DROP COLUMN IF EXISTS terminal_disposition,
+        DROP COLUMN IF EXISTS terminal_at_ms,
+        DROP COLUMN IF EXISTS terminal_epoch;
+      DROP TABLE IF EXISTS password_admission_rollout_state;
+      DELETE FROM schema_migrations WHERE version = '${migrationVersion}';
+    `)
+    await admissionSchema.applyPasswordAdmissionSchema(dbPool)
+    await admissionSchema.applyPasswordEvaluationRetentionSchema(dbPool)
+    await workOwnershipSchema.applyPasswordWorkOwnershipSchema(dbPool)
+    await dbPool.query(
+      `INSERT INTO password_identifier_state(identifier_key, attempts)
+       VALUES ($1, ARRAY[$2::bigint])`,
+      [key, String(attemptAt)]
+    )
+
+    const legacyClient = await dbPool.connect()
+    try {
+      await legacyClient.query('SET ROLE control_api_runtime')
+      await legacyClient.query('BEGIN')
+      await legacyClient.query(
+        `INSERT INTO password_verification_work
+          (singleton, operation_id, owner_instance, owner_host, owner_pid)
+         VALUES (TRUE, $1, $2, $3, $4)`,
+        [heldOperation, heldOwner, heldHost, heldPid]
+      )
+      await legacyClient.query('COMMIT')
+      await legacyClient.query('RESET ROLE')
+    } finally {
+      legacyClient.release()
+    }
+
+    // Model a legacy completion transaction that released its durable work owner but still
+    // holds the identifier row while writing its outcome. Trigger installation must wait for
+    // this transaction, then timestamp the fence after it commits.
+    try {
+      legacyCompletionClient = await dbPool.connect()
+      await legacyCompletionClient.query('SET ROLE control_api_runtime')
+      await legacyCompletionClient.query('BEGIN')
+      await legacyCompletionClient.query(
+        'UPDATE password_identifier_state SET revision = revision + 1 WHERE identifier_key = $1',
+        [key]
+      )
+      const legacyCompletionBackendPid = Number(
+        (await legacyCompletionClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      )
+
+      migrationPromise = db
+        .initDb({ connect: () => dbPool.connect() })
+        .then(() => {
+          migrationSettled = true
+        })
+        .catch(error => {
+          migrationError = error
+          migrationSettled = true
+        })
+
+      let guardInstallWaiting = false
+      const guardDeadline = Date.now() + 10_000
+      while (Date.now() < guardDeadline) {
+        const waiting = await dbPool.query(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM pg_stat_activity AS activity
+               JOIN pg_locks AS waiting_lock
+                 ON waiting_lock.pid = activity.pid
+                AND waiting_lock.granted = FALSE
+                AND waiting_lock.relation = 'public.password_identifier_state'::regclass
+              WHERE activity.datname = current_database()
+                AND activity.pid <> pg_backend_pid()
+                AND activity.wait_event_type = 'Lock'
+                AND activity.query LIKE '%password_admission_rollout_state%'
+                AND $1 = ANY(pg_blocking_pids(activity.pid))
+           ) AS waiting`,
+          [legacyCompletionBackendPid]
+        )
+        if (waiting.rows[0].waiting) {
+          guardInstallWaiting = true
+          break
+        }
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      expect(guardInstallWaiting).toBe(true)
+      expect(migrationSettled).toBe(false)
+      legacyCompletionFenceLowerBoundMs = Number(
+        (
+          await dbPool.query(
+            'SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now'
+          )
+        ).rows[0].now
+      )
+      expect(Number.isFinite(legacyCompletionFenceLowerBoundMs)).toBe(true)
+      await legacyCompletionClient.query('COMMIT')
+      await legacyCompletionClient.query('RESET ROLE')
+      legacyCompletionClient.release()
+      legacyCompletionClient = null
+
+      const deadline = Date.now() + 10_000
+      while (Date.now() < deadline) {
+        if (migrationSettled) {
+          throw new Error(`migration stopped before drain fence: ${String(migrationError)}`)
+        }
+        const rolloutTable = await dbPool.query(
+          "SELECT to_regclass('public.password_admission_rollout_state') AS relation"
+        )
+        if (!rolloutTable.rows[0].relation) {
+          await new Promise(resolve => setTimeout(resolve, 20))
+          continue
+        }
+        const result = await dbPool.query(
+          `SELECT phase, fenced_at_ms::text FROM password_admission_rollout_state WHERE singleton`
+        )
+        fence = result.rows[0] as typeof fence
+        if (fence?.phase === 'draining') break
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      expect(fence?.phase).toBe('draining')
+      expect(migrationSettled).toBe(false)
+      await dbPool.query(`
+        CREATE OR REPLACE FUNCTION reject_password_admission_upgrade() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'forced password admission migration failure';
+        END $$;
+        CREATE TRIGGER z_reject_password_admission_upgrade
+          BEFORE UPDATE ON password_identifier_state
+          FOR EACH ROW EXECUTE FUNCTION reject_password_admission_upgrade();
+      `)
+      expect(
+        Number(
+          (
+            await dbPool.query(
+              `SELECT count(*)::integer AS count FROM information_schema.columns
+              WHERE table_schema='public' AND table_name='password_identifier_state'
+                AND column_name='successes'`
+            )
+          ).rows[0].count
+        )
+      ).toBe(0)
+      expect(
+        Number(
+          (
+            await dbPool.query(
+              `SELECT count(*)::integer AS count FROM schema_migrations WHERE version=$1`,
+              [migrationVersion]
+            )
+          ).rows[0].count
+        )
+      ).toBe(0)
+
+      await expectLegacyWriteRejected(
+        `INSERT INTO password_verification_work
+        (singleton, operation_id, owner_instance, owner_host, owner_pid)
+       VALUES (TRUE, $1, $2, $3, $4)`,
+        [randomUUID(), randomUUID(), heldHost, heldPid]
+      )
+      await expectLegacyWriteRejected(
+        'UPDATE password_identifier_state SET attempts = attempts || ARRAY[123::bigint] WHERE identifier_key=$1',
+        [key]
+      )
+
+      const ownerBeforeRelease = await dbPool.query(
+        'SELECT operation_id FROM password_verification_work WHERE singleton'
+      )
+      expect(ownerBeforeRelease.rows[0]).toEqual({
+        operation_id: heldOperation,
+      })
+      await releaseLegacyOwner()
+
+      await migrationPromise
+    } finally {
+      if (legacyCompletionClient) {
+        let cleanupFailed = false
+        try {
+          await legacyCompletionClient.query('ROLLBACK')
+        } catch {
+          cleanupFailed = true
+          // Preserve the original failure while releasing the lock held for this fixture.
+        }
+        try {
+          await legacyCompletionClient.query('RESET ROLE')
+        } catch {
+          cleanupFailed = true
+          // Do not return a session with an unknown role state to the shared test pool.
+        }
+        legacyCompletionClient.release(
+          cleanupFailed ? new Error('legacy completion fixture cleanup failed') : undefined
+        )
+        legacyCompletionClient = null
+      }
+      if (!legacyOwnerReleased) await releaseLegacyOwner()
+      await migrationPromise
+    }
+    expect(migrationSettled).toBe(true)
+    expect(String(migrationError)).toContain('forced password admission migration failure')
+    expect(Number(fence?.fenced_at_ms)).toBeGreaterThanOrEqual(
+      legacyCompletionFenceLowerBoundMs ?? 0
+    )
+    await expectLegacyWriteRejected(
+      'UPDATE password_identifier_state SET revision = revision + 1 WHERE identifier_key=$1',
+      [key]
+    )
+    const stateAfterFailedUpgrade = await dbPool.query(
+      'SELECT attempts FROM password_identifier_state WHERE identifier_key=$1',
+      [key]
+    )
+    expect(stateAfterFailedUpgrade.rows[0].attempts).toEqual([String(attemptAt)])
+    const retainedFence = await dbPool.query(
+      `SELECT phase, fenced_at_ms::text FROM password_admission_rollout_state WHERE singleton`
+    )
+    expect(retainedFence.rows[0].phase).toBe('draining')
+    expect(Number(retainedFence.rows[0].fenced_at_ms)).toBeGreaterThanOrEqual(
+      Number(fence?.fenced_at_ms)
+    )
+
+    await dbPool.query(
+      `DROP TRIGGER z_reject_password_admission_upgrade ON password_identifier_state`
+    )
+    await dbPool.query(`DROP FUNCTION reject_password_admission_upgrade()`)
+    await db.initDb({ connect: () => dbPool.connect() })
+
+    const rolloutReady = await dbPool.query('SELECT password_admission_rollout_is_ready() AS ready')
+    expect(rolloutReady.rows[0].ready).toBe(true)
+    const upgradedState = await dbPool.query(
+      `SELECT attempts, legacy_hold_until_ms::text, failures, successes, uncertain
+         FROM password_identifier_state WHERE identifier_key=$1`,
+      [key]
+    )
+    expect(upgradedState.rows[0].attempts).toEqual([String(attemptAt)])
+    expect(Number(upgradedState.rows[0].legacy_hold_until_ms)).toBeGreaterThanOrEqual(
+      Number(fence?.fenced_at_ms) + 900_000
+    )
+
+    const operation = randomUUID()
+    const ownerInstance = randomUUID()
+    const now = Number(
+      (
+        await dbPool.query(
+          `SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now`
+        )
+      ).rows[0].now
+    )
+    const v2Client = await dbPool.connect()
+    try {
+      await v2Client.query('BEGIN')
+      await v2Client.query('SET LOCAL synchronous_commit = on')
+      await v2Client.query("SET LOCAL app.password_admission_protocol = 'v2'")
+      await v2Client.query(
+        `UPDATE password_identifier_state
+            SET failures=ARRAY[$2::bigint], successes=ARRAY[$3::bigint], uncertain=ARRAY[$4::bigint],
+                locked_until_ms=$5, provisional_operation=$6, provisional_phase='running',
+                provisional_scope='public_login', provisional_epoch=revision,
+                provisional_expires_at_ms=$7, provisional_quota_masked=FALSE,
+                provisional_started_at_ms=$8, provisional_owner_instance=$9,
+                provisional_owner_host=$10, provisional_owner_pid=$11
+          WHERE identifier_key=$1`,
+        [
+          key,
+          now - 3,
+          now - 2,
+          now - 1,
+          now + 900_000,
+          operation,
+          now + 60_000,
+          now,
+          ownerInstance,
+          heldHost,
+          heldPid,
+        ]
+      )
+      await v2Client.query(
+        `INSERT INTO password_verification_work
+          (singleton, operation_id, owner_instance, owner_host, owner_pid)
+         VALUES (TRUE, $1, $2, $3, $4)`,
+        [operation, ownerInstance, heldHost, heldPid]
+      )
+      await v2Client.query('COMMIT')
+    } finally {
+      v2Client.release()
+    }
+
+    await expectLegacyWriteRejected(
+      `UPDATE password_identifier_state SET failures='{}', locked_until_ms=0
+        WHERE identifier_key=$1`,
+      [key]
+    )
+    await expectLegacyWriteRejected(
+      'DELETE FROM password_verification_work WHERE singleton AND operation_id=$1',
+      [operation]
+    )
+    const stateAfterLegacyRollbackAttempt = await dbPool.query(
+      `SELECT failures, successes, uncertain, locked_until_ms::text,
+              provisional_operation, provisional_phase
+         FROM password_identifier_state WHERE identifier_key=$1`,
+      [key]
+    )
+    expect(stateAfterLegacyRollbackAttempt.rows[0]).toMatchObject({
+      failures: [String(now - 3)],
+      successes: [String(now - 2)],
+      uncertain: [String(now - 1)],
+      locked_until_ms: String(now + 900_000),
+      provisional_operation: operation,
+      provisional_phase: 'running',
+    })
+    expect(
+      Number(
+        (
+          await dbPool.query(
+            'SELECT count(*)::integer AS count FROM password_verification_work WHERE singleton AND operation_id=$1',
+            [operation]
+          )
+        ).rows[0].count
+      )
+    ).toBe(1)
+  }, 60_000)
+
   it.each(columnPrivilegeFixtures)(
     'rejects $principal column-level $privilege on $relation',
     async ({ privilege, relation, column, principal }) => {
@@ -312,12 +1596,18 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       const grantee = principal === 'public' ? 'PUBLIC' : quoteIdent('control_api_runtime')
       const inherited = principal === 'inherited'
       const assertClean = async () => {
-        const result = await dbPool.query<{ table_access: boolean; column_access: boolean }>(
+        const result = await dbPool.query<{
+          table_access: boolean
+          column_access: boolean
+        }>(
           `SELECT has_table_privilege('control_api_runtime', $1, $2) AS table_access,
                   has_any_column_privilege('control_api_runtime', $1, $2) AS column_access`,
           [relation, privilege]
         )
-        expect(result.rows[0]).toEqual({ table_access: false, column_access: true })
+        expect(result.rows[0]).toEqual({
+          table_access: false,
+          column_access: true,
+        })
         const violationCount = Number(
           (await dbPool.query({ text: relationQuery, rowMode: 'array' })).rows[0][0]
         )
@@ -393,7 +1683,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
                   has_any_column_privilege('trace_maintenance_runtime', $1, 'UPDATE') AS column_access`,
           [relation]
         )
-        expect(privileges.rows[0]).toEqual({ table_access: false, column_access: true })
+        expect(privileges.rows[0]).toEqual({
+          table_access: false,
+          column_access: true,
+        })
         expect(await violationCount(relationQuery)).toBe(1)
         expect(await violationCount(sequenceQuery)).toBe(0)
         expect(await violationCount(functionQuery)).toBe(0)
@@ -418,6 +1711,12 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const connector = { connect: () => dbPool.connect() }
 
     await initDb(connector)
+    const obsoleteCatalogRevision = await dbPool.query<{ function_name: string | null }>(
+      `SELECT to_regprocedure('public.authorization_bump_catalog_revision()')::text
+         AS function_name`
+    )
+    expect(obsoleteCatalogRevision.rows).toEqual([{ function_name: null }])
+
     const firstVersions = await dbPool.query<{ version: string }>(
       'SELECT version FROM schema_migrations ORDER BY version'
     )
@@ -814,7 +2113,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
          VALUES (gen_random_uuid(), gen_random_uuid(), 1, $1, $2, 'active', 'initial_setup', $2, 1)`,
         [linkUserId, linkAdminId]
       )
-      const linked = await linkRuntimeClient.query<{ user_id: string; control_admin_id: string }>(
+      const linked = await linkRuntimeClient.query<{
+        user_id: string
+        control_admin_id: string
+      }>(
         `SELECT user_id::text, control_admin_id::text
            FROM gfs_desktop_operator_links
           WHERE user_id = $1`,
@@ -1009,7 +2311,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       const deleted = await promptCleanupClient.query(
         'SELECT approval_request_id FROM governed_trace_prune_expired_prompts(250)'
       )
-      expect(deleted.rows).toContainEqual({ approval_request_id: expiredPromptId })
+      expect(deleted.rows).toContainEqual({
+        approval_request_id: expiredPromptId,
+      })
       await promptCleanupClient.query('COMMIT')
     } catch (error) {
       await promptCleanupClient.query('ROLLBACK')
@@ -1224,7 +2528,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       forcedIndexNames: string[]
       forcedNodeTypes: string[]
     }> = []
-    type ExplainNode = { 'Index Name'?: string; 'Node Type'?: string; Plans?: ExplainNode[] }
+    type ExplainNode = {
+      'Index Name'?: string
+      'Node Type'?: string
+      Plans?: ExplainNode[]
+    }
     const collectIndexNames = (
       node: ExplainNode | undefined,
       names = new Set<string>()
@@ -1454,7 +2762,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           netAmount: price.unitPrice,
         })),
       })
-      expect(persistedCost).toMatchObject({ rollupVersion: 1, predecessorVersion: null })
+      expect(persistedCost).toMatchObject({
+        rollupVersion: 1,
+        predecessorVersion: null,
+      })
       persistedCostId = persistedCost.id
       await costClient.query('COMMIT')
     } catch (error) {
@@ -1505,8 +2816,16 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       [['team_workflow_triggers', 'user_workflow_triggers', 'workflow_recipe_allowed_teams']]
     )
     expect(cleanupPredicateColumns.rows).toEqual([
-      { table_name: 'team_workflow_triggers', recipe_namespace: true, recipe_name: true },
-      { table_name: 'user_workflow_triggers', recipe_namespace: true, recipe_name: true },
+      {
+        table_name: 'team_workflow_triggers',
+        recipe_namespace: true,
+        recipe_name: true,
+      },
+      {
+        table_name: 'user_workflow_triggers',
+        recipe_namespace: true,
+        recipe_name: true,
+      },
       {
         table_name: 'workflow_recipe_allowed_teams',
         recipe_namespace: true,
@@ -1696,7 +3015,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     `,
       [expiredEventIds]
     )
-    expect(retainedAfterFirstBatch.rows[0]).toEqual({ family_count: '1', stream_count: '1' })
+    expect(retainedAfterFirstBatch.rows[0]).toEqual({
+      family_count: '1',
+      stream_count: '1',
+    })
     await expect(runRetentionWake()).resolves.toEqual({
       eventsDeleted: 1,
       costsDeleted: 0,
@@ -1719,7 +3041,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     `,
       [expiredEventIds]
     )
-    expect(retainedAfterSecondBatch.rows[0]).toEqual({ family_count: '0', stream_count: '0' })
+    expect(retainedAfterSecondBatch.rows[0]).toEqual({
+      family_count: '0',
+      stream_count: '0',
+    })
 
     // Recent = well inside every retention window and not after ingestion
     // (occurred_at <= ingested_at + 5 minutes), relative to the wall clock.
@@ -1767,10 +3092,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       )
       await recentClient.query('COMMIT')
 
-      const persistedApproval = await dbPool.query<{ decision_source_kind: string }>(
-        'SELECT decision_source_kind FROM agent_run_events WHERE event_id = $1',
-        [approval.eventId]
-      )
+      const persistedApproval = await dbPool.query<{
+        decision_source_kind: string
+      }>('SELECT decision_source_kind FROM agent_run_events WHERE event_id = $1', [
+        approval.eventId,
+      ])
       expect(persistedApproval.rows[0]?.decision_source_kind).toBe('legacy_gate')
     } catch (error) {
       await recentClient.query('ROLLBACK')
@@ -1812,7 +3138,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       }
     }
 
-    const appendOnlyIntegrity = await dbPool.query<{ family_count: string; stream_count: string }>(
+    const appendOnlyIntegrity = await dbPool.query<{
+      family_count: string
+      stream_count: string
+    }>(
       `SELECT
          (SELECT COUNT(*)::text FROM agent_run_events WHERE event_id = $1) AS family_count,
          (SELECT COUNT(*)::text
@@ -1820,7 +3149,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
            WHERE event_family = 'agent_run' AND event_id = $1) AS stream_count`,
       [recentEventId]
     )
-    expect(appendOnlyIntegrity.rows[0]).toEqual({ family_count: '1', stream_count: '1' })
+    expect(appendOnlyIntegrity.rows[0]).toEqual({
+      family_count: '1',
+      stream_count: '1',
+    })
 
     const approvalRequestId = randomUUID()
     const workflowRunId = randomUUID()
@@ -2108,7 +3440,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           AND column_name = 'concurrency_policy'`
     )
     expect(column.rows).toEqual([
-      { column_default: "'Forbid'::text", is_nullable: 'NO', data_type: 'text' },
+      {
+        column_default: "'Forbid'::text",
+        is_nullable: 'NO',
+        data_type: 'text',
+      },
     ])
 
     const checks = await dbPool.query<{ conname: string }>(
@@ -2357,7 +3693,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       const attackerUrl = new URL(connectionString)
       attackerUrl.username = attackerRole
       attackerUrl.password = attackerPassword
-      attackerPool = new Pool({ connectionString: attackerUrl.toString(), max: 1 })
+      attackerPool = new Pool({
+        connectionString: attackerUrl.toString(),
+        max: 1,
+      })
 
       const attacker = await attackerPool.connect()
       try {
@@ -2397,7 +3736,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       )
       expect(migrationVersions.rows).toHaveLength(1)
 
-      const functionPaths = await dbPool.query<{ function_name: string; config: string[] | null }>(`
+      const functionPaths = await dbPool.query<{
+        function_name: string
+        config: string[] | null
+      }>(`
         SELECT procedure.proname AS function_name, procedure.proconfig AS config
           FROM pg_proc procedure
           JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
@@ -2411,7 +3753,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       `)
       expect(functionPaths.rows).toHaveLength(4)
       for (const { config } of functionPaths.rows) {
-        expect(config).toContain('search_path=pg_catalog, public, pg_temp')
+        expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
       }
     } finally {
       await endPoolAndWaitForClients(attackerPool)
@@ -2534,7 +3876,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       resourceId: string,
       requestId: string
     ): Promise<{ mutations: string; audits: string; events: string }> => {
-      const result = await dbPool.query<{ mutations: string; audits: string; events: string }>(
+      const result = await dbPool.query<{
+        mutations: string
+        audits: string
+        events: string
+      }>(
         `SELECT
            (SELECT COUNT(*)::text FROM ${batchCase.table}
              WHERE resource_id = $1::uuid) AS mutations,
@@ -3004,7 +4350,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     } finally {
       hostChange.release()
     }
-    const hostTarget = await dbPool.query<{ payload_metadata: Record<string, unknown> }>(
+    const hostTarget = await dbPool.query<{
+      payload_metadata: Record<string, unknown>
+    }>(
       `SELECT payload_metadata
          FROM administrative_events
         WHERE operation_id = $1`,
@@ -3561,7 +4909,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         })
       })
     ).rejects.toBeInstanceOf(DirectRunBindingConflictError)
-    const rolledBack = await dbPool.query<{ usage_count: string; trace_count: string }>(
+    const rolledBack = await dbPool.query<{
+      usage_count: string
+      trace_count: string
+    }>(
       `SELECT
          (SELECT COUNT(*)::text FROM usage_events WHERE request_id = $1::uuid) AS usage_count,
          (SELECT COUNT(*)::text FROM agent_run_events WHERE source_event_id = $1::text) AS trace_count`,
@@ -3611,7 +4962,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         'integration-test',
         db
       )
-      expect(renamed).toMatchObject({ enabled: true, image_input: { state: 'unknown' } })
+      expect(renamed).toMatchObject({
+        enabled: true,
+        image_input: { state: 'unknown' },
+      })
       expect((await listEnabledGroupedByProvider(db))[provider]).toEqual([{ model: 'renamed' }])
       await updateAllowedModel(created.id, { image_input: capability }, 'integration-test', db)
       const cleared = await updateAllowedModel(
@@ -3620,7 +4974,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         'integration-test',
         db
       )
-      expect(cleared).toMatchObject({ enabled: true, image_input: { state: 'unknown' } })
+      expect(cleared).toMatchObject({
+        enabled: true,
+        image_input: { state: 'unknown' },
+      })
       expect((await listEnabledGroupedByProvider(db))[provider]).toEqual([{ model: 'renamed' }])
     } finally {
       await db.query('ROLLBACK')
@@ -3662,7 +5019,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         '"supported"',
         'null',
       ]) {
-        await expect(setImageInput(malformed)).rejects.toMatchObject({ code: '23514' })
+        await expect(setImageInput(malformed)).rejects.toMatchObject({
+          code: '23514',
+        })
       }
 
       // The legacy NULL and every canonical state stay accepted.

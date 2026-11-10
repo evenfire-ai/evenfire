@@ -12,13 +12,17 @@ McpServer defines an MCP (Model Context Protocol) server that provides tools to
 the LLM. The context-mapper watches these CRDs, manages runtime resources for
 HCC-owned servers, and exposes discovery/status for WRC-owned servers.
 
+An McpServer does not belong to a Context. A Context exposes a server by listing
+its name in [`Context.spec.mcpServers`](context.md), and several Contexts can list
+the same server. Installing a server writes no Context allowlist; enabling it for
+an agent is a separate edit of that agent's Context.
+
 ## Spec Fields
 
 ### Core
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `spec.contextRef` | string | yes | -- | Reference to the Context this server belongs to. |
 | `spec.description` | string | no | -- | Human-readable description of what this MCP server does. |
 | `spec.image` | string | yes | -- | Docker image for the MCP server container (e.g. `mongodb/mongodb-mcp-server:latest`). |
 | `spec.imagePullPolicy` | string | no | _(none)_ | Image pull policy. One of: `Always`, `IfNotPresent`, `Never`. The schema sets no default; if omitted, HCC applies `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` (default `IfNotPresent`). |
@@ -75,12 +79,13 @@ after creation:
 | `oauth.clientIdRef` / `oauth.clientSecretRef` | all | `{name, key}` of Secrets in the `mcp-server` namespace (control-api's `CONTROL_API_MCP_SERVERS_NAMESPACE`) holding the client id / secret. |
 | `oauth.scopes[]` | all | Scopes to request. Include the provider's offline/refresh scope when `backgroundAccess` is true. |
 | `oauth.backgroundAccess` | all | Allow use by a workload with no live human session. |
-| `oauth.grantScope` | all | `user` (default): every user authorizes their own grant. `context`: one shared identity per Context, which one member bootstraps and others inherit. Immutable. |
+| `oauth.grantScope` | all | `user` (default): every user authorizes their own grant. `context`: one shared identity per Context that enables the server in its `spec.mcpServers`, which one member bootstraps and others inherit. Immutable. |
 | `oauth.source` | — | absent (built-in), `remote`, or `generic`. Immutable. |
 | `oauth.clientMode` | remote | `public` (PKCE, no secret) or `confidential`. |
 | `oauth.authorizationEndpoint`, `tokenEndpoint`, `resource` | remote, generic | Pinned endpoints; `resource` is the RFC 8707 resource indicator. |
 | `oauth.registrationEndpoint`, `issuer`, `issForCallback` | remote | Dynamic client registration URL, issuer, and the RFC 9207 `iss` validated on callback. |
 | `oauth.bearerInBody`, `supportsRefresh` | remote (`supportsRefresh` also generic) | Pinned at install. `bearerInBody` must be `false`. |
+| `oauth.asProfile` | remote | Optional. Closed authorization-server profile, set at install when the pinned issuer is recognised. Only value: `entra-v2` (Microsoft Entra ID v2, tenant authority): the RFC 8707 `resource` is not sent, `offline_access` is always requested, and the scopes are sent on the code exchange and on refresh. Requires a Microsoft Entra tenant issuer (see the AS-PROFILE-ISSUER rule below). With `entra-v2`, control-api also checks `oauth.scopes` against the host of `spec.remote.baseUrl` at install and at runtime; see [Scopes and audience](../how-to/connect-oauth-connector.md#scopes-and-audience). Immutable. |
 | `oauth.tokenRequestFormat`, `tokenAuthMethod`, `scopeSeparator`, `sendScope`, `usePkce`, `includeResponseType`, `refreshEndpoint`, `extraAuthorizeParams` | generic | Wire options for non-standard authorization servers. |
 
 **Redirect URI to register** with the provider:
@@ -237,16 +242,28 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 
 ## Additional Printer Columns
 
-`kubectl get mcpservers` displays: Context, Image, Transport, URL, Enabled, Managed, Ready.
+`kubectl get mcpservers` displays: Image, Transport, URL, Enabled, Managed, Ready. To see which Contexts expose a server, read `spec.mcpServers` with `kubectl get contexts`.
 
 ## CRD Validation Rules
 
-- WRC-owned servers (`managed: false`) still require `transport` and `contextRef`.
+- WRC-owned servers (`managed: false`) still require `transport`.
 - For `managed: false`, WRC owns runtime isolation, including runtime NetworkPolicies; HCC exposes discovery/status and does not create or delete WRC-owned runtime policies.
 - `spec.managed` is immutable after creation; omit is treated as the default `true`.
 - Each egress binding must have exactly one of `dns` or `cidr` (not both, not neither).
 - A `cidr` must be a canonical public IPv4 range; ranges overlapping private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges (including `0.0.0.0/0` and RFC1918 ranges such as `10.0.0.0/8`) are rejected.
 - An McpServer with `spec.remote` must declare at least one `egressBinding`.
+- `spec.oauth.asProfile` is remote-only: built-in (no `source`) and `generic` servers must not set it.
+- On a `remote` server, `spec.oauth.asProfile` is immutable like the other pinned fields: it cannot be added, removed, or changed after creation. Delete and recreate the server to change it.
+- **AS-PROFILE-ISSUER:** when `spec.oauth.asProfile` is set, `spec.oauth.issuer` must be a Microsoft Entra ID tenant authority, matching `^https://login[.]microsoftonline[.]com/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/v2[.]0$` (lower-case tenant GUID, no trailing slash). Otherwise the write is rejected with `spec.oauth.asProfile entra-v2 requires spec.oauth.issuer to be a Microsoft Entra ID tenant authority`. A profile stops sending the RFC 8707 `resource`, so it must stay on the issuer it was recognised from. control-api applies the same check at runtime and refuses an object written before the rule was in the cluster (`409 remote_oauth_spec_incoherent`, reason `as_profile_issuer_mismatch`).
+
+> **Apply the CRD before control-api.** An apiserver whose McpServer CRD does not
+> declare `asProfile` drops the field on write and still answers 200. The install
+> route detects this, removes what it created and answers `409 mcpserver_crd_outdated`.
+> An object written another way (`kubectl`, GitOps) keeps the Entra issuer without
+> the profile; control-api refuses it at runtime (`409 remote_oauth_spec_incoherent`,
+> reason `as_profile_issuer_mismatch`), and because the profile cannot be added after
+> creation it must be deleted and recreated once the CRD is applied. See
+> [Deploy order for additive schema fields](../../charts/clerum-crds/README.md#deploy-order-for-additive-schema-fields).
 
 ## Example
 
@@ -256,7 +273,6 @@ kind: McpServer
 metadata:
   name: github-server
 spec:
-  contextRef: context1
   description: Provides GitHub repository management tools
   image: mcp/github:latest
   transport:
@@ -293,7 +309,7 @@ spec:
 
 ## Related
 
-- [Context CRD](context.md) -- referenced via `spec.contextRef`
+- [Context CRD](context.md) -- lists this server's name in `spec.mcpServers` to expose it
 - [Host CRD](host.md) -- indirectly connected through Context
 - [CRD Index](README.md)
 - Examples: [github](../../charts/clerum-crds/examples/mcpserver-github.yaml), [postgres](../../charts/clerum-crds/examples/mcpserver-postgres.yaml), [filesystem](../../charts/clerum-crds/examples/mcpserver-filesystem.yaml)

@@ -48,7 +48,7 @@ Ready before E2E results are interpreted.
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl** (`brew install kubectl`)
 - **python3** (for JWT key sync)
-- **Node.js** 24+ (for building services and desktop app)
+- **Node.js** 24.22.1 or later (Node 24 is required for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration overlay)
 - `.env` file at project root with LLM API keys (optional — uses placeholders if missing)
 
@@ -563,6 +563,15 @@ recorded in `deploy/minikube/.image-manifest.json`, not decided by your shell:
 scripts/minikube/image-mode.sh --image-source   # ghcr | local
 scripts/minikube/image-mode.sh --image-tag      # the ghcr tag (empty in local mode)
 ```
+
+**Minikube redeploys do not roll out External REST before control-api**, which
+a production upgrade with External REST user sessions requires (see the [user
+access foundation upgrade note](user-access-foundation-upgrade.md)). Do not
+drive clients (Desktop App, Profile UI) during a redeploy. Moving a profile back
+to an older branch, or running
+`make minikube-deploy-service SVC=control-api NS=control-plane` on a profile
+whose External REST is older, pairs an old External REST with a new control-api
+until External REST is redeployed.
 
 ### The one-command path (both modes)
 

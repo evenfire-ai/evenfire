@@ -19,7 +19,7 @@ import { MockGateway } from './mockGateway.js'
  *     `spec.mcpServers` allowlist names the server — directly (user_contexts)
  *     or through an assigned agent's Host (user_agents → Host.contextRef);
  *     `spec.contextRef` is irrelevant and the body `contextId` is ignored.
- *   - `context` → membership in the server's `spec.contextRef` (unchanged).
+ *   - `context` → covered by routes.internal.mcpOauth.contextGate.test.ts.
  */
 
 const mockPoolQuery = vi.fn()
@@ -177,69 +177,6 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
       .send({ mcpServerName: 'plain', userId: 'user-1' })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('not_oauth_server')
-  })
-
-  it('context server: rejects a cross-context body contextId with 400 context_mismatch', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    const res = await post(app)
-      .set('Authorization', 'Bearer dev-rpc-proxy-token')
-      .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-2', contextId: 'ctx-B' })
-    expect(res.status).toBe(400)
-    expect(res.body.error).toBe('context_mismatch')
-  })
-
-  it('context server: accepts a matching body contextId from a MEMBER and mints the URL', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    // Membership check (getUserContexts → user_contexts): user-2 is a member of ctx-A.
-    membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-A'] } })
-    const res = await post(app)
-      .set('Authorization', 'Bearer dev-rpc-proxy-token')
-      .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-2', contextId: 'ctx-A' })
-    expect(res.status).toBe(200)
-    expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
-  })
-
-  // T5 (DEC-U5-1): a NON-member of a context-identity server's Context must be
-  // rejected at the MINT boundary — fail early, never sent to the provider.
-  it('context server: a NON-member is rejected 403 at mint, with NO authorizeUrl', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    // The user's Contexts do NOT include ctx-A.
-    membership(mockPoolQuery, { contexts: { 'user-nomember': ['ctx-other', 'ctx-else'] } })
-    const res = await post(app)
-      .set('Authorization', 'Bearer dev-rpc-proxy-token')
-      .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-nomember' })
-    expect(res.status).toBe(403)
-    expect(res.body.error).toBe('context_membership_denied')
-    // Observable: no authorize URL was minted.
-    expect(res.body.authorizeUrl).toBeUndefined()
-  })
-
-  // The `context` flavor keeps its contextRef-membership gate: an allowlist in
-  // another of the user's Contexts does not open it, and its own Context needs
-  // no allowlist entry.
-  it('context server: membership in an allowlisting Context other than contextRef → still 403', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    await seedAllowlistedContext(gateway, 'ctx-B', ['gdrive'])
-    membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-B'] } })
-    const res = await post(app)
-      .set('Authorization', 'Bearer dev-rpc-proxy-token')
-      .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-2' })
-    expect(res.status).toBe(403)
-    expect(res.body.error).toBe('context_membership_denied')
-  })
-
-  it('context server: a contextRef member mints even when no allowlist names the server', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-A'] } })
-    const res = await post(app)
-      .set('Authorization', 'Bearer dev-rpc-proxy-token')
-      .set('x-service-token', 'rpc-proxy')
-      .send({ mcpServerName: 'gdrive', userId: 'user-2' })
-    expect(res.status).toBe(200)
   })
 
   // ── user flavor: membership by allowlist ────────────────────────────────

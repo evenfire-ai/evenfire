@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import {
   ALLOWED_CONTEXTS,
   assertAllowedKubeContext,
+  assertBranchOwnedContext,
+  assertHostedDevServices,
   isLocalPortForwardContext,
   isProductionContext,
   validateBaseUrls,
@@ -147,4 +152,129 @@ describe('assertAllowedKubeContext', () => {
       /CHAT_OPEN_AB_KUBE_CONTEXT=.* is not in the allow-list/
     )
   })
+})
+
+describe('assertHostedDevServices', () => {
+  it('checks exactly the services the Desktop lane drives', () => {
+    const asked: string[] = []
+    assertHostedDevServices('dev', (_context, namespace, service) => {
+      asked.push(`${namespace}/${service}`)
+      return 'pod-1\n'
+    })
+    expect(asked).toEqual([
+      'control-plane/control-api',
+      'profiles/external-rest-api',
+      'rpc-proxy/rpc-proxy',
+    ])
+  })
+
+  it('accepts a hosted dev context whose services have a ready endpoint', () => {
+    expect(() => assertHostedDevServices('dev', () => 'pod-1\n')).not.toThrow()
+  })
+
+  it('refuses a service without a ready endpoint', () => {
+    expect(() => assertHostedDevServices('dev', () => '\n')).toThrow(
+      /hosted dev context=dev has no ready endpoint for control-plane\/control-api/
+    )
+  })
+
+  it('refuses an unreadable service instead of starting a journey against it', () => {
+    expect(() =>
+      assertHostedDevServices('dev', () => {
+        throw new Error('connection refused')
+      })
+    ).toThrow(/has no readable endpoint for control-plane\/control-api: connection refused/)
+  })
+})
+
+describe('assertBranchOwnedContext', () => {
+  it.each(['clerum-test', 'clerum-prod-abc12345', 'clerum-dev', DEV_CONTEXT])(
+    'refuses %s',
+    context => {
+      expect(() => assertBranchOwnedContext(context)).toThrow(/not a branch-owned local profile/)
+    }
+  )
+
+  it.each([
+    'clerum-feat-plugin-workload-sdk-3de2a246',
+    'clerum-codex-figure-b-sandbox-mcphost-mitigation-5bd8cfa5',
+  ])('accepts %s', context => {
+    expect(() => assertBranchOwnedContext(context)).not.toThrow()
+  })
+})
+
+describe('session team UX lane admission', () => {
+  const CONFIG = './e2e-playwright/playwright.session-team-ux.config'
+  const BRANCH_CONTEXT = 'clerum-feat-plugin-workload-sdk-3de2a246'
+  const VALID_ENV = {
+    E2E_SESSION_TEAM_UX: '1',
+    E2E_K8S_CONTEXT: BRANCH_CONTEXT,
+    EXTERNAL_REST_API_BASE_URL: 'http://127.0.0.1:38091',
+  }
+  const originalEnv = { ...process.env }
+
+  afterEach(() => {
+    process.env = { ...originalEnv }
+    vi.resetModules()
+  })
+
+  async function loadConfig(env: Record<string, string>) {
+    vi.resetModules()
+    // An empty value counts as present, so the developer's canonical .env cannot fill it.
+    Object.assign(process.env, env)
+    const [{ default: config }, { default: base }] = await Promise.all([
+      import(CONFIG),
+      import('./e2e-playwright/playwright.config'),
+    ])
+    return { config, base }
+  }
+
+  it.each([
+    ['the opt-in', { E2E_SESSION_TEAM_UX: '' }, /requires E2E_SESSION_TEAM_UX=1/],
+    ['the context', { E2E_K8S_CONTEXT: '' }, /requires explicit E2E_K8S_CONTEXT/],
+    [
+      'the base URL',
+      { EXTERNAL_REST_API_BASE_URL: '' },
+      /requires explicit EXTERNAL_REST_API_BASE_URL/,
+    ],
+    ['a branch context', { E2E_K8S_CONTEXT: 'clerum-test' }, /not a branch-owned local profile/],
+  ])('rejects a config without %s', async (_label, override, message) => {
+    await expect(loadConfig({ ...VALID_ENV, ...override })).rejects.toThrow(message)
+  })
+
+  it('inherits the base global setup and runs only this lane under a valid env', async () => {
+    const { config, base } = await loadConfig(VALID_ENV)
+
+    expect(base.globalSetup).toBeTruthy()
+    expect(config.globalSetup).toBe(base.globalSetup)
+    expect(config.projects).toEqual([
+      { name: 'session-team-ux', testMatch: '**/session-team-ux.test.ts' },
+    ])
+  })
+
+  it('imports the base config before global-setup, which reads the canonical env at load', () => {
+    const source = readFileSync(path.resolve(__dirname, `${CONFIG}.ts`), 'utf8')
+    const baseImport = source.indexOf("from './playwright.config'")
+    expect(baseImport).toBeGreaterThan(-1)
+    expect(baseImport).toBeLessThan(source.indexOf("from './global-setup'"))
+  })
+
+  it('lists exactly the lane tests through the Playwright CLI', () => {
+    const desktopApp = path.resolve(__dirname, '..')
+    const list = (env: Record<string, string>) =>
+      spawnSync(
+        path.join(desktopApp, 'node_modules/.bin/playwright'),
+        ['test', '--list', '--config', 'test/e2e-playwright/playwright.session-team-ux.config.ts'],
+        { cwd: desktopApp, encoding: 'utf8', env: { ...originalEnv, ...env }, timeout: 120_000 }
+      )
+
+    const listed = list(VALID_ENV)
+    expect(listed.status, listed.stderr).toBe(0)
+    const tests = listed.stdout.split('\n').filter(line => line.includes('.test.ts:'))
+    expect(tests.length).toBeGreaterThan(0)
+    for (const line of tests) expect(line).toContain('session-team-ux.test.ts')
+    expect(listed.stdout).toMatch(/Total: \d+ tests? in 1 file/)
+
+    expect(list({ ...VALID_ENV, E2E_SESSION_TEAM_UX: '' }).status).not.toBe(0)
+  }, 240_000)
 })

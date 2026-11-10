@@ -177,7 +177,9 @@ function main() {
       APPROVED_TOOLS_ARTIFACTS: artifacts,
     }
     // Run the repository invariant; a dependency install exit code is insufficient.
-    const electronCheck = spawnSync('npm', ['run', 'verify:electron'], {
+    // --check-only: this phase is time-bounded and must never pay the Electron
+    // runtime download; the Make entry targets materialize it before the lease.
+    const electronCheck = spawnSync('npm', ['run', 'verify:electron', '--', '--check-only'], {
       cwd: path.join(repo, 'desktop-app'),
       env,
       stdio: 'inherit',

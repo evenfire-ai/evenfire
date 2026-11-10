@@ -837,10 +837,7 @@ describe('PersistQueue progress bound: slow vs wedged, in service and at close()
     const closing = q.close()
     await vi.waitFor(() => expect(worker.sent.map(m => m.op.kind)).toContain('shutdown'))
     await sleep(90)
-    ack(
-      worker,
-      worker.sent.find(m => m.op.kind === 'shutdown')!
-    )
+    ack(worker, worker.sent.find(m => m.op.kind === 'shutdown')!)
     // Liveness witness: close() resolves after the late shutdown ACK.
     await expect(closing).resolves.toBeUndefined()
     expect(failures).toHaveLength(0)

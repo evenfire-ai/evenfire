@@ -133,6 +133,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(200)
 
     expect(response.body).toEqual({ success: true, taskId: 't-1' })
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledWith('chatllm', 'token')
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
@@ -177,6 +178,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
 
     await postMessage(makeApp()).expect(200)
 
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
     const firstBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1] as {
       messageId?: unknown
@@ -211,6 +213,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     await send()
     await send()
 
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(2)
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
     const firstId = (
       serviceMock.forwardHostMessageToHost.mock.calls[0][1] as { messageId?: string }

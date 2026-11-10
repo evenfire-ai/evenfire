@@ -1,42 +1,48 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useState } from 'react'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
-import { Button, Field, SelectInput, TextInput } from '@components/ui'
-import { getContexts, isSilentApiError } from '@lib/api'
-import type { ContextResource } from '@lib/api'
+import { Button, CheckboxField, Field, SelectInput, TextInput } from '@components/ui'
+import { isSilentApiError } from '@lib/api'
 import { copyTextToClipboard } from '@lib/clipboard'
-import { contextResourceName } from '@lib/contextIdentity'
 import {
   buildRemoteInstallRequest,
   describeTransportProbe,
   discoverRemoteServer,
   displayClientMode,
+  getEntraTenantIdError,
   getRemoteBaseUrlError,
   getRemoteServerNameError,
   installModeForRegistration,
   installRemoteServer,
   mapRemoteDiscoverError,
   mapRemoteInstallError,
+  parseRemoteScopesInput,
   remoteCallbackBlocker,
   remotePreRegisteredRedirectUri,
+  remoteScopesOverride,
   requiresPreRegisteredCredentials,
   shouldWarnNoRefresh,
+  tenantAuthority,
+  tenantRequiredDetail,
   transportBlocksContinue,
+  unverifiedScopesFromInstallError,
 } from '@lib/remoteMcp'
 import type {
   RemoteCallbackPreview,
   RemoteDetected,
   RemoteGrantScope,
+  RemoteTenantRequiredDetail,
   RemoteTransportProbe,
 } from '@lib/remoteMcp.types'
 import {
   GRANT_SCOPE_OPTIONS,
   REGISTRATION_MODE_HINT,
   REGISTRATION_MODE_LABEL,
+  REMOTE_SCOPES_MAX,
   REMOTE_WIZARD_STEPS,
   REMOTE_WIZARD_STEP_DETAILS,
 } from './constants'
@@ -61,9 +67,6 @@ export function AddRemoteServerWizard({
   // Step 0 — identity
   const [baseUrl, setBaseUrl] = useState('')
   const [serverName, setServerName] = useState('')
-  const [contextRef, setContextRef] = useState('')
-  const [contexts, setContexts] = useState<ContextResource[]>([])
-  const [contextsError, setContextsError] = useState('')
 
   // Detection. Editing the URL clears `detected` (see the baseUrl onChange), so
   // a present `detected` always corresponds to the current URL (D-4: the pinned
@@ -76,11 +79,22 @@ export function AddRemoteServerWizard({
   const [transport, setTransport] = useState<RemoteTransportProbe | null>(null)
   // Callback preview for the current detection; undefined on an older control-api.
   const [callback, setCallback] = useState<RemoteCallbackPreview | undefined>(undefined)
+  // Set when the server signs in through Entra's multi-tenant authority: the operator
+  // must name the tenant before discovery can pin an issuer. Survives a failed
+  // re-detect so a wrong tenant can be corrected in place.
+  const [tenantPrompt, setTenantPrompt] = useState<RemoteTenantRequiredDetail | null>(null)
+  const [tenantId, setTenantId] = useState('')
+  // Authorization server used by the discover that produced `detected`; sent again at
+  // install so control-api re-discovers against the same tenant.
+  const [detectedAuthorizationServer, setDetectedAuthorizationServer] = useState<
+    string | undefined
+  >(undefined)
 
   // Step 1 — configuration
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
   const [grantScope, setGrantScope] = useState<RemoteGrantScope>('user')
+  const [scopesInput, setScopesInput] = useState('')
 
   // Step 2 — install
   const [installing, setInstalling] = useState(false)
@@ -88,32 +102,18 @@ export function AddRemoteServerWizard({
   // A pre-registered install holds here so the operator can copy the redirect URI
   // the AS must hold before leaving the wizard.
   const [installed, setInstalled] = useState<InstalledRedirectUri | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const res = await getContexts()
-        if (!cancelled) setContexts(res.items ?? [])
-      } catch (e) {
-        if (isSilentApiError(e)) return
-        if (!cancelled) {
-          setContextsError(e instanceof Error ? e.message : 'Failed to load contexts')
-        }
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // Scopes whose API control-api cannot tie to this server. The confirmation covers
+  // exactly this list: replacing the list always clears it.
+  const [unverifiedToConfirm, setUnverifiedToConfirm] = useState<string[]>([])
+  const [unverifiedConfirmed, setUnverifiedConfirmed] = useState(false)
 
   const serverNameError = serverName.length > 0 ? getRemoteServerNameError(serverName) : ''
   const trimmedBaseUrl = baseUrl.trim()
   const baseUrlError = baseUrl.length > 0 ? getRemoteBaseUrlError(trimmedBaseUrl) : ''
   const identifiersValid =
-    getRemoteBaseUrlError(trimmedBaseUrl) === '' &&
-    getRemoteServerNameError(serverName) === '' &&
-    contextRef !== ''
+    getRemoteBaseUrlError(trimmedBaseUrl) === '' && getRemoteServerNameError(serverName) === ''
+  const tenantIdError = getEntraTenantIdError(tenantId)
+  const tenantReady = !tenantPrompt || tenantIdError === ''
 
   const installMode = detected ? installModeForRegistration(detected.registrationMode) : null
   const needsCredentials = installMode ? requiresPreRegisteredCredentials(installMode) : false
@@ -130,10 +130,38 @@ export function AddRemoteServerWizard({
     : null
   const asEndpointHosts = detected?.asEndpointHosts
 
+  // control-api requires the scopes for any authorization-server profile, not only
+  // Entra's; `entraProfile` only picks Entra-specific copy.
+  const hasAsProfile = Boolean(detected?.asProfile)
+  const entraProfile = detected?.asProfile === 'entra-v2'
+  // Without a profile, the advertised list is accepted as typed even when it breaks
+  // RFC 6749, so a server with non-conforming scopes is not blocked here. With a profile
+  // the list is always sent and control-api enforces the charset, so validate it.
+  const scopeTokens = scopesInput.trim().split(/\s+/).filter(Boolean)
+  const scopesAsAdvertised =
+    detected !== null &&
+    !hasAsProfile &&
+    scopeTokens.length === detected.scopes.length &&
+    scopeTokens.every((scope, i) => scope === detected.scopes[i])
+  const parsedScopes = scopesAsAdvertised
+    ? { scopes: scopeTokens }
+    : parseRemoteScopesInput(scopesInput, REMOTE_SCOPES_MAX)
+  const scopesError = 'error' in parsedScopes ? parsedScopes.error : ''
+  const scopesOverride =
+    detected && 'scopes' in parsedScopes
+      ? remoteScopesOverride(parsedScopes.scopes, detected.scopes)
+      : undefined
+  const effectiveScopes = scopesOverride ?? detected?.scopes ?? []
+
   const credentialsComplete =
     !needsCredentials || (clientId.trim().length > 0 && clientSecret.length > 0)
   const step1Valid =
-    Boolean(detected) && identifiersValid && credentialsComplete && callbackBlocker === ''
+    Boolean(detected) &&
+    identifiersValid &&
+    credentialsComplete &&
+    callbackBlocker === '' &&
+    scopesError === ''
+  const confirmationPending = unverifiedToConfirm.length > 0 && !unverifiedConfirmed
 
   function canSelectStep(target: number): boolean {
     // Once installed, going back would offer a second install of the same server.
@@ -143,20 +171,40 @@ export function AddRemoteServerWizard({
     return step1Valid
   }
 
-  const contextOptions = useMemo(
-    () =>
-      contexts
-        .map(context => contextResourceName(context))
-        .filter(name => name.length > 0)
-        .sort((left, right) => left.localeCompare(right)),
-    [contexts]
-  )
+  function clearUnverifiedConfirmation() {
+    setUnverifiedToConfirm([])
+    setUnverifiedConfirmed(false)
+  }
 
   function resetDetection() {
     setDetected(null)
     setTransport(null)
     setCallback(undefined)
     setDiscoverError('')
+    setDetectedAuthorizationServer(undefined)
+    setScopesInput('')
+    clearUnverifiedConfirmation()
+  }
+
+  // A new URL may be a different server, so the tenant asked for the old one is dropped.
+  function changeBaseUrl(value: string) {
+    setBaseUrl(value)
+    // Editing the URL invalidates a prior detection or transport probe.
+    if (detected || transport) resetDetection()
+    setTenantPrompt(null)
+    setTenantId('')
+  }
+
+  function goToStep(target: number) {
+    if (target === 2 && step !== 2) {
+      // The backend's discover-time list only holds for the scopes it advertised; for
+      // edited scopes the install answers with the list to confirm.
+      setUnverifiedToConfirm(scopesOverride === undefined ? (detected?.unverifiedScopes ?? []) : [])
+      setUnverifiedConfirmed(false)
+    } else if (target < 2) {
+      clearUnverifiedConfirmation()
+    }
+    setStep(target)
   }
 
   async function copyRedirectUri(uri: string) {
@@ -167,6 +215,10 @@ export function AddRemoteServerWizard({
   }
 
   async function runDetect() {
+    const authorizationServer =
+      tenantPrompt && tenantIdError === ''
+        ? tenantAuthority(tenantPrompt.tenantAuthorityTemplate, tenantId)
+        : undefined
     setDetecting(true)
     setDiscoverError('')
     setTransport(null)
@@ -176,7 +228,9 @@ export function AddRemoteServerWizard({
         detected: nextDetected,
         transport: nextTransport,
         callback: nextCallback,
-      } = await discoverRemoteServer(trimmedBaseUrl)
+      } = await (authorizationServer === undefined
+        ? discoverRemoteServer(trimmedBaseUrl)
+        : discoverRemoteServer(trimmedBaseUrl, authorizationServer))
       if (transportBlocksContinue(nextTransport)) {
         // Dead MCP transport: never install a URL the probe proved dead. Hold on
         // step 0, surface the reason (and any canonical URL suggestion), and keep
@@ -188,10 +242,19 @@ export function AddRemoteServerWizard({
       setDetected(nextDetected)
       setTransport(nextTransport ?? null)
       setCallback(nextCallback)
+      setDetectedAuthorizationServer(authorizationServer)
+      setScopesInput(nextDetected.scopes.join(' '))
       setStep(1)
     } catch (e) {
       if (isSilentApiError(e)) return
       setDetected(null)
+      const tenantRequired = tenantRequiredDetail(e)
+      if (tenantRequired) {
+        // The tenant prompt replaces the error banner: this is a question, not a failure.
+        setTenantPrompt(tenantRequired)
+        setDiscoverError('')
+        return
+      }
       setDiscoverError(mapRemoteDiscoverError(e))
     } finally {
       setDetecting(false)
@@ -199,21 +262,28 @@ export function AddRemoteServerWizard({
   }
 
   async function runInstall() {
-    if (!detected || !installMode) return
+    if (!detected || !installMode || confirmationPending) return
     setInstalling(true)
     setInstallError('')
     try {
       const body = buildRemoteInstallRequest({
         serverName,
-        contextRef,
         baseUrl: trimmedBaseUrl,
         mode: installMode,
         grantScope,
         clientId: needsCredentials ? clientId : undefined,
         clientSecret: needsCredentials ? clientSecret : undefined,
+        // With a profile control-api requires the list, so the one on screen is always
+        // sent rather than letting a re-discovery decide what gets installed.
+        scopes: hasAsProfile ? effectiveScopes : scopesOverride,
+        authorizationServer: detectedAuthorizationServer,
+        confirmedUnverifiedScopes: unverifiedConfirmed ? unverifiedToConfirm : undefined,
       })
       const res = await installRemoteServer(body)
-      showToast(`Remote server ${res.serverName} installed.`, { tone: 'success' })
+      showToast(
+        `Remote server ${res.serverName} installed. Give agents access from the Installed Connectors list whenever you’re ready.`,
+        { tone: 'success' }
+      )
       if (res.registrationMode === 'pre-registered' && res.redirectUri) {
         setInstalled({
           redirectUri: res.redirectUri,
@@ -225,6 +295,12 @@ export function AddRemoteServerWizard({
       onInstalled()
     } catch (e) {
       if (isSilentApiError(e)) return
+      const toConfirm = unverifiedScopesFromInstallError(e)
+      if (toConfirm) {
+        setUnverifiedToConfirm(toConfirm)
+        setUnverifiedConfirmed(false)
+        return
+      }
       setInstallError(mapRemoteInstallError(e, { callbackVariant: callback?.variant }))
     } finally {
       setInstalling(false)
@@ -246,7 +322,7 @@ export function AddRemoteServerWizard({
           className="cu-create-step-flow--3"
           currentStep={step}
           onStepChange={target => {
-            if (canSelectStep(target)) setStep(target)
+            if (canSelectStep(target)) goToStep(target)
           }}
           canSelectStep={canSelectStep}
           steps={REMOTE_WIZARD_STEP_DETAILS}
@@ -266,17 +342,37 @@ export function AddRemoteServerWizard({
                   id="remote-base-url"
                   invalid={Boolean(baseUrlError)}
                   monospace
-                  onChange={event => {
-                    setBaseUrl(event.target.value)
-                    // Editing the URL invalidates a prior detection or transport probe.
-                    if (detected || transport) resetDetection()
-                  }}
+                  onChange={event => changeBaseUrl(event.target.value)}
                   placeholder="https://mcp.example.com/mcp"
                   disabled={detecting}
                   autoFocus
                   value={baseUrl}
                 />
               </Field>
+
+              {tenantPrompt ? (
+                <Field
+                  label="Microsoft Entra tenant ID"
+                  description="This server signs in with Microsoft Entra ID. Enter your organization's Directory (tenant) ID — a GUID shown on the Microsoft Entra admin center overview."
+                  error={tenantId.length > 0 ? tenantIdError || undefined : undefined}
+                  htmlFor="remote-entra-tenant-id"
+                  required
+                >
+                  <TextInput
+                    id="remote-entra-tenant-id"
+                    monospace
+                    autoFocus
+                    value={tenantId}
+                    placeholder="00000000-0000-0000-0000-000000000000"
+                    disabled={detecting}
+                    invalid={tenantId.length > 0 && tenantIdError !== ''}
+                    onChange={event => {
+                      setTenantId(event.target.value)
+                      if (detected || transport) resetDetection()
+                    }}
+                  />
+                </Field>
+              ) : null}
 
               <Field
                 description="Kubernetes resource name: lowercase alphanumeric and hyphens, max 63 chars."
@@ -298,28 +394,6 @@ export function AddRemoteServerWizard({
                 />
               </Field>
 
-              <Field
-                description="The context this connector is attached to. Agents using this context can call it."
-                error={contextsError || undefined}
-                label="Context"
-                htmlFor="remote-context-ref"
-                required
-              >
-                <SelectInput
-                  id="remote-context-ref"
-                  onChange={event => setContextRef(event.target.value)}
-                  disabled={detecting || contextOptions.length === 0}
-                  value={contextRef}
-                >
-                  <option value="">Select a context…</option>
-                  {contextOptions.map(name => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </SelectInput>
-              </Field>
-
               {discoverError ? (
                 <div className="cu-banner cu-banner--error" role="alert">
                   {discoverError}
@@ -332,10 +406,7 @@ export function AddRemoteServerWizard({
                   {suggestedBaseUrl ? (
                     <div className="cu-transport-suggestion">
                       <Button
-                        onClick={() => {
-                          setBaseUrl(suggestedBaseUrl)
-                          resetDetection()
-                        }}
+                        onClick={() => changeBaseUrl(suggestedBaseUrl)}
                         size="sm"
                         variant="ghost"
                       >
@@ -376,9 +447,19 @@ export function AddRemoteServerWizard({
                   <span>Issuer</span>
                   <strong>{detected.issuer}</strong>
                 </div>
+                {entraProfile ? (
+                  <div className="cu-summary-list__row">
+                    <span>Authorization server</span>
+                    <strong>Microsoft Entra ID</strong>
+                  </div>
+                ) : null}
                 <div className="cu-summary-list__row">
                   <span>Resource</span>
-                  <strong>{detected.resource}</strong>
+                  <strong>
+                    {entraProfile
+                      ? `${detected.resource} (not sent to Microsoft Entra ID)`
+                      : detected.resource}
+                  </strong>
                 </div>
                 {aliveTransport ? (
                   <div className="cu-summary-list__row">
@@ -402,10 +483,6 @@ export function AddRemoteServerWizard({
                     <strong>{detected.endpoints.registration}</strong>
                   </div>
                 ) : null}
-                <div className="cu-summary-list__row">
-                  <span>Scopes</span>
-                  <strong>{detected.scopes.join(' ') || '—'}</strong>
-                </div>
                 {detected.quirks.bearerInBody ? (
                   <div className="cu-summary-list__row">
                     <span>Token transport</span>
@@ -413,6 +490,41 @@ export function AddRemoteServerWizard({
                   </div>
                 ) : null}
               </section>
+
+              {detected.scopeAudienceMissing ? (
+                <div className="cu-banner cu-banner--warning" role="status">
+                  This server doesn’t advertise its own scope. Enter it before installing; sign-in
+                  scopes alone would send a Microsoft Graph token to the server.
+                </div>
+              ) : null}
+
+              {/* An empty advertised scope is itself the violation and arrives as `''`. */}
+              {detected.scopeAudienceViolation !== undefined ? (
+                <div className="cu-banner cu-banner--warning" role="status">
+                  {detected.scopeAudienceViolation
+                    ? `The server suggests the scope "${detected.scopeAudienceViolation}", which would mint a token for another API. Replace it with this server's own scope before installing.`
+                    : "The server advertises an empty scope, which OAuth does not allow. It is left out of the scopes below; check they include this server's own scope before installing."}
+                </div>
+              ) : null}
+
+              <Field
+                label="Scopes"
+                htmlFor="remote-scopes"
+                error={scopesError || undefined}
+                description={
+                  entraProfile
+                    ? 'Space-separated. offline_access is always added so connections can refresh. Leave empty to use the scopes the server advertises.'
+                    : 'Space-separated scopes requested at sign-in. Leave empty to use the scopes the server advertises.'
+                }
+              >
+                <TextInput
+                  id="remote-scopes"
+                  monospace
+                  invalid={scopesError !== ''}
+                  value={scopesInput}
+                  onChange={event => setScopesInput(event.target.value)}
+                />
+              </Field>
 
               <p className="cu-field__hint">{REGISTRATION_MODE_HINT[detected.registrationMode]}</p>
 
@@ -492,8 +604,8 @@ export function AddRemoteServerWizard({
           {step === 2 && installed ? (
             <div className="cu-form-stack cu-agent-form-stack">
               <p className="cu-field__hint">
-                {serverName} is installed. Users can connect once this redirect URI is registered in
-                the provider’s OAuth client.
+                {serverName} is installed. Register this redirect URI in the provider’s OAuth
+                client, then give agents access from the Installed Connectors list.
               </p>
               {installed.changedSincePreview ? (
                 <div className="cu-banner cu-banner--warning" role="status">
@@ -513,10 +625,6 @@ export function AddRemoteServerWizard({
                 <div className="cu-summary-list__row">
                   <span>Server name</span>
                   <strong>{serverName}</strong>
-                </div>
-                <div className="cu-summary-list__row">
-                  <span>Context</span>
-                  <strong>{contextRef}</strong>
                 </div>
                 <div className="cu-summary-list__row">
                   <span>Remote URL</span>
@@ -542,6 +650,10 @@ export function AddRemoteServerWizard({
                   <span>Token endpoint</span>
                   <strong>{detected.endpoints.token}</strong>
                 </div>
+                <div className="cu-summary-list__row">
+                  <span>Scopes</span>
+                  <strong>{effectiveScopes.join(' ') || '—'}</strong>
+                </div>
                 {preRegisteredRedirectUri ? (
                   <div className="cu-summary-list__row">
                     <span>Redirect URI</span>
@@ -565,6 +677,26 @@ export function AddRemoteServerWizard({
                 </div>
               ) : null}
 
+              {unverifiedToConfirm.length > 0 ? (
+                <div className="cu-banner cu-banner--warning" role="status">
+                  <div>
+                    These scopes name a Microsoft Entra API that this platform cannot tie to this
+                    server. A token for that API will be sent to the server.
+                  </div>
+                  <ul className="cu-unverified-scopes">
+                    {unverifiedToConfirm.map(scope => (
+                      <li key={scope}>{scope}</li>
+                    ))}
+                  </ul>
+                  <CheckboxField
+                    checked={unverifiedConfirmed}
+                    disabled={installing}
+                    label="I confirm these scopes belong to this server’s own API."
+                    onChange={event => setUnverifiedConfirmed(event.target.checked)}
+                  />
+                </div>
+              ) : null}
+
               {installError ? (
                 <div className="cu-banner cu-banner--error" role="alert">
                   {installError}
@@ -582,7 +714,7 @@ export function AddRemoteServerWizard({
             {installed ? null : (
               <Button
                 disabled={detecting || installing}
-                onClick={() => (step === 0 ? onCancel() : setStep(current => current - 1))}
+                onClick={() => (step === 0 ? onCancel() : goToStep(step - 1))}
                 size="sm"
                 variant="ghost"
               >
@@ -594,7 +726,7 @@ export function AddRemoteServerWizard({
               detected ? (
                 <Button
                   disabled={!identifiersValid}
-                  onClick={() => setStep(1)}
+                  onClick={() => goToStep(1)}
                   size="sm"
                   variant="primary"
                 >
@@ -602,7 +734,7 @@ export function AddRemoteServerWizard({
                 </Button>
               ) : (
                 <Button
-                  disabled={!identifiersValid || detecting}
+                  disabled={!identifiersValid || !tenantReady || detecting}
                   loading={detecting}
                   onClick={() => void runDetect()}
                   size="sm"
@@ -614,14 +746,19 @@ export function AddRemoteServerWizard({
             ) : null}
 
             {step === 1 ? (
-              <Button disabled={!step1Valid} onClick={() => setStep(2)} size="sm" variant="primary">
+              <Button
+                disabled={!step1Valid}
+                onClick={() => goToStep(2)}
+                size="sm"
+                variant="primary"
+              >
                 Continue
               </Button>
             ) : null}
 
             {step === 2 && !installed ? (
               <Button
-                disabled={!step1Valid || installing}
+                disabled={!step1Valid || installing || confirmationPending}
                 loading={installing}
                 size="sm"
                 type="submit"

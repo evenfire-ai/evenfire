@@ -61,7 +61,11 @@ describe('GfsMoveDialog', () => {
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
-    await waitFor(() => expect(onMove).toHaveBeenCalledWith('archive-1', 'Archive'))
+    await waitFor(() =>
+      expect(onMove).toHaveBeenCalledWith(
+        expect.objectContaining({ resourceId: 'archive-1', name: 'Archive' })
+      )
+    )
   })
 
   it('moves a file to the main root', async () => {
@@ -85,7 +89,11 @@ describe('GfsMoveDialog', () => {
     fireEvent.click(await within(dialog).findByRole('button', { name: 'main' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (main)' }))
 
-    await waitFor(() => expect(onMove).toHaveBeenCalledWith('root-1', 'main'))
+    await waitFor(() =>
+      expect(onMove).toHaveBeenCalledWith(
+        expect.objectContaining({ resourceId: 'root-1', name: 'main' })
+      )
+    )
   })
 
   it('refuses a no-op move into the folder that already contains the target', async () => {
@@ -127,7 +135,63 @@ describe('GfsMoveDialog', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
-    await waitFor(() => expect(onMove).toHaveBeenCalledWith('archive-1', 'Archive'))
+    await waitFor(() =>
+      expect(onMove).toHaveBeenCalledWith(
+        expect.objectContaining({ resourceId: 'archive-1', name: 'Archive' })
+      )
+    )
     expect(onMove).toHaveBeenCalledTimes(1)
+  })
+
+  // RP-003 residual: the names the destination already holds are the ones the
+  // browser's move ladder must skip. The dialog loads them while it shows the
+  // destination tree, so they travel with the commit — a destination the
+  // browser's own children cache never saw would otherwise cost three blind
+  // attempts on names that are already taken.
+  it('commits with the names the destination already holds', async () => {
+    mockApiGet.mockImplementation(async path => {
+      if (path === '/api/v1/gfs/tree') {
+        return {
+          rootResourceId: 'root-1',
+          items: [{ resourceId: 'archive-1', name: 'Archive', kind: 'directory' }],
+          nextCursor: null,
+        }
+      }
+      if (path === '/api/v1/gfs/resources/archive-1/children') {
+        return {
+          items: [
+            { resourceId: 'file-1', name: 'name', kind: 'file' },
+            { resourceId: 'file-2', name: 'name (1)', kind: 'file' },
+            { resourceId: 'file-3', name: 'name (2)', kind: 'file' },
+          ],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    const onMove = vi.fn(async () => undefined)
+
+    render(
+      <GfsMoveDialog
+        initialCrumbs={[{ id: 'product-1', name: 'Product' }]}
+        onClose={vi.fn()}
+        onMove={onMove}
+        target={{ resourceId: 'file-9', name: 'name', kind: 'file' }}
+      />
+    )
+
+    const dialog = screen.getByRole('dialog', { name: 'Move file name' })
+    // Selecting the destination expands it, so its children load.
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await within(dialog).findByText('No subfolders.')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+
+    await waitFor(() =>
+      expect(onMove).toHaveBeenCalledWith({
+        resourceId: 'archive-1',
+        name: 'Archive',
+        occupiedNames: ['name', 'name (1)', 'name (2)'],
+      })
+    )
   })
 })

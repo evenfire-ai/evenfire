@@ -27,7 +27,7 @@ There is no `example.secret.yaml` in this directory yet; supply `SEARCH_API_KEY`
 docker build -t web-search-mcp:latest .
 ```
 
-Multi-stage `node:24-alpine` build: compiles TypeScript, then runs `node dist/index.js`.
+Multi-stage `node:24.22.1-alpine` build: compiles TypeScript, then runs `node dist/index.js`.
 
 - Minikube setup neither builds nor pulls it. The evenfire registry distributes this connector and installs it on demand, writing the catalog entry's image reference straight into the `McpServer` resource, so no locally loaded `clerum/*` alias is involved. It is `deployed_to_minikube: false` in `deploy/images.json`.
 - `.github/workflows/build-publish.yml` publishes it to `ghcr.io/evenfire-ai/web-search-mcp` on changes under `mcp-servers/web-search/`.
@@ -77,6 +77,6 @@ syntax, a trailing slash does not close them.
 Use Node 24. `npm test` builds and executes the unit suite. `npm run test:network`
 uses the real MCP server and an isolated HTTP fixture inside Docker, with no
 external network or published ports. It requires a locally available
-`node:24-alpine` image and never pulls implicitly. Run Docker tests on the host,
+`node:24.22.1-alpine` image and never pulls implicitly. Run Docker tests on the host,
 outside the native Codex sandbox. Only compiled code, dependencies and test files
 are mounted read-only. These protocol tests do not replace the Desktop journey.

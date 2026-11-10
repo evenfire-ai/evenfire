@@ -59,7 +59,6 @@ vi.mock('../../core/net/ssrf', () => ({
 function remoteOauthUserServer(name = 'calendar'): McpServerInfo {
   return {
     name,
-    contextRef: 'ctx-1',
     transport: { type: 'streamableHttp', url: `https://${name}.example.com/mcp` },
     authKind: 'oauth-user',
     remote: true,

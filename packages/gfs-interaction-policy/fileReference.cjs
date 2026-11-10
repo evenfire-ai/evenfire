@@ -366,6 +366,7 @@ function buildGfsFileReference(fields) {
 }
 
 module.exports = {
+  resourceNameProblem: nameProblem,
   FILE_REFERENCE_SCHEMA_VERSION,
   FILE_REFERENCE_MAX_COUNT,
   buildAttachmentFileReference,

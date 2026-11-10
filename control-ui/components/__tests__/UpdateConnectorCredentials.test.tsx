@@ -15,6 +15,7 @@ import {
   updateMcpSecret,
 } from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
+import { buildDirectCrdMcpServerReference } from '../../test/fixtures/mcpServer'
 
 vi.mock('@lib/api', () => ({
   getMcpServer: vi.fn(),
@@ -257,6 +258,27 @@ describe('UpdateConnectorCredentials — masked inputs', () => {
 })
 
 describe('UpdateConnectorCredentials — partial payload', () => {
+  it('previews only connectors with the exact Secret reference', async () => {
+    mockGetMcpServers.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({ name: SERVER_NAME, secretName: ENV_SECRET.name }),
+        buildDirectCrdMcpServerReference({
+          name: 'stale-connector',
+          secretName: `  ${ENV_SECRET.name}  `,
+        }),
+      ],
+    })
+    await renderPanel(ENV_SECRET)
+
+    fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'new-key-value' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
+
+    const dialog = screen.getByRole('alertdialog')
+    expect(dialog).toHaveTextContent(`restarts: ${SERVER_NAME}.`)
+    expect(dialog).not.toHaveTextContent('stale-connector')
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  })
+
   it('sends only the filled keys, never the untouched ones', async () => {
     mockUpdateMcpSecret.mockResolvedValue({
       name: ENV_SECRET.name,
@@ -1430,5 +1452,50 @@ describe('UpdateConnectorCredentials — set mode submit', () => {
     const banner = screen.getByText(/did not finish within/i)
     expect(banner).toHaveTextContent('You can also try setting the credentials again.')
     expect(banner.textContent).not.toMatch(/rotation/i)
+  })
+})
+
+// ─── Busy interlock during the confirmation ─────────────────────────────────
+//
+// The page drives its navigation lock from `onBusyChange`, and a pending
+// confirmation is a mutation-in-waiting: the submit must be guarded against
+// double activation and the page must be able to block tab/back navigation
+// from the moment the dialog opens, not only from the PUT.
+describe('UpdateConnectorCredentials — busy interlock', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('reports busy while the rotation confirmation is pending and clears it on cancel', async () => {
+    const onBusyChange = vi.fn()
+    render(
+      <ToastProvider>
+        <UpdateConnectorCredentials
+          serverName={SERVER_NAME}
+          envSecret={ENV_SECRET}
+          surface="rotate"
+          onBusyChange={onBusyChange}
+        />
+      </ToastProvider>
+    )
+    await flush(2)
+    expect(onBusyChange).toHaveBeenLastCalledWith(false)
+
+    fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'next-value' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
+    await flush(2)
+
+    // Dialog open: busy is reported, the submit is disabled, and a second
+    // activation is inert.
+    expect(onBusyChange).toHaveBeenLastCalledWith(true)
+    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    await flush(2)
+    expect(onBusyChange).toHaveBeenLastCalledWith(false)
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   })
 })

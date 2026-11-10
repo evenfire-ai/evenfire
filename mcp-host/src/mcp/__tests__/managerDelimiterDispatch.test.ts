@@ -37,7 +37,6 @@ async function connectedManager() {
   remote.calls.mockResolvedValue({ content: [{ type: 'text', text: 'receipt-observed' }] })
   await manager.addServer({
     name: 'approved-service',
-    contextRef: 'fixture-context',
     enabled: true,
     transport: { type: 'streamableHttp', url: 'http://approved-service.test/mcp' },
     status: { deployed: true, ready: true },

@@ -1,6 +1,6 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
+import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
 /**
@@ -21,7 +21,6 @@ export type ContextSharedFilesystemSummary = {
   message: string | null
 }
 
-const PROPAGATED_STATUSES = new Set([400, 403, 404, 409, 410, 422])
 const PASSTHROUGH_HEADERS = [
   'retry-after',
   'ratelimit',
@@ -31,16 +30,6 @@ const PASSTHROUGH_HEADERS = [
   'x-ratelimit-reset',
   'x-request-id',
 ] as const
-
-function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  if (error instanceof ControlApiError && PROPAGATED_STATUSES.has(error.status)) {
-    const body =
-      error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
-    res.status(error.status).json(body)
-    return
-  }
-  next(error)
-}
 
 export function createContextSharedFilesystemsRouter(): Router {
   const router = Router()
@@ -70,7 +59,7 @@ export function createContextSharedFilesystemsRouter(): Router {
         )
         res.status(200).json(data)
       } catch (error) {
-        forwardControlApiError(error, res, next)
+        next(error)
       }
     }
   )
@@ -80,7 +69,15 @@ export function createContextSharedFilesystemsRouter(): Router {
     async (req: AuthedRequest, res, next) => {
       try {
         const sessionToken = extractAuthToken(req)
-        const subPath = req.params[0] ? `/${req.params[0]}` : '/'
+        // Express decodes the wildcard once. Re-encode each segment so a
+        // caller-supplied `?` or `#` stays data inside one segment instead of
+        // changing the pathname, while a real `/` keeps its hierarchy.
+        const wildcard = req.params[0] ?? ''
+        const encodedSubPath = wildcard
+          .split('/')
+          .map(segment => encodeURIComponent(segment))
+          .join('/')
+        const subPath = wildcard ? `/${encodedSubPath}` : '/'
         const queryString = (() => {
           const idx = req.originalUrl.indexOf('?')
           return idx === -1 ? '' : req.originalUrl.slice(idx)
@@ -88,8 +85,9 @@ export function createContextSharedFilesystemsRouter(): Router {
         const upstreamRes = await controlApiStreamRequest(
           req.method === 'HEAD' ? 'HEAD' : 'GET',
           `/external/contexts/${encodeURIComponent(req.params.contextId)}` +
-            `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}${queryString}`,
+            `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}`,
           {
+            rawQueryString: queryString,
             userSessionToken: sessionToken,
             throwOnHttpError: false,
           }
@@ -99,6 +97,14 @@ export function createContextSharedFilesystemsRouter(): Router {
         for (const name of PASSTHROUGH_HEADERS) {
           const value = upstreamRes.headers.get(name)
           if (value) res.setHeader(name, value)
+        }
+        // throwOnHttpError is off, so the generic relay of an outage's no-store
+        // (app.ts) never sees this response.
+        if (
+          upstreamRes.status === 503 &&
+          upstreamRes.headers.get('cache-control')?.trim().toLowerCase() === 'no-store'
+        ) {
+          res.setHeader('cache-control', 'no-store')
         }
         const ct = upstreamRes.headers.get('content-type')
         if (ct) res.setHeader('content-type', ct)

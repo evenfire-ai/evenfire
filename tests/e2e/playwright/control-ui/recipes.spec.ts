@@ -24,7 +24,7 @@ const VALID_RECIPE_JSON = JSON.stringify(
     kind: 'WorkflowRecipe',
     metadata: { name: TEST_RECIPE_NAME },
     spec: {
-      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
     },
   },
   null,
@@ -380,7 +380,7 @@ test.describe('Control UI — Workflow Recipes — install and uninstall', () =>
         kind: 'WorkflowRecipe',
         metadata: { name: TEST_RECIPE_NAME },
         spec: {
-          workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+          workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
         },
       },
       null,
@@ -529,7 +529,7 @@ test.describe('Control UI — Workflow Recipes — status modal structure', () =
           metadata: { name: MODAL_RECIPE },
           spec: {
             contextRef: 'context1',
-            workloads: [{ id: 'srv', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 80 }],
+            workloads: [{ id: 'srv', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 80 }],
           },
         },
         null,

@@ -932,7 +932,6 @@ metadata:
   labels:
     clerum.io/mcpserver: ${PRIVATE_EGRESS_MCP_SERVER_NAME}
 spec:
-  contextRef: default
   image: test:latest
   managed: false
   transport:

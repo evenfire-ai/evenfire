@@ -41,10 +41,10 @@ describe('connector access management', () => {
     vi.clearAllMocks()
   })
 
-  it('groups agents by their authoritative context and excludes unowned contexts', () => {
+  it('groups agents by the Context they name and excludes unowned contexts', () => {
     const targets = connectorAgentTargetsFromHosts([
-      makeHost('agent-b', 'Beta', 'shared-id'),
-      makeHost('agent-a', 'Alpha', 'shared-id'),
+      makeHost('agent-b', 'Beta', 'shared-resource'),
+      makeHost('agent-a', 'Alpha', 'shared-resource'),
       { metadata: {}, spec: { contextRef: 'missing-name' } },
       makeHost('agent-no-context', 'No Context', ''),
     ])
@@ -163,16 +163,15 @@ describe('connector access management', () => {
     expect(state.warning).toBe('')
   })
 
-  it('adds through the resolved context using its resource version and keeps unrelated fields', async () => {
+  it('adds through the named context using its resource version and keeps its alias as stored', async () => {
     const context = makeContext('context-resource', 'context-alias', ['other-connector'])
     await addConnectorToAgentContexts(
       { name: 'search', namespace: 'mcp-server' },
       [
-        { name: 'agent-a', contextRef: 'context-alias' },
+        { name: 'agent-a', contextRef: 'context-resource' },
         { name: 'agent-b', contextRef: 'context-resource' },
       ],
-      [context],
-      {}
+      [context]
     )
 
     expect(api.updateContext).toHaveBeenCalledTimes(1)
@@ -186,22 +185,21 @@ describe('connector access management', () => {
     })
   })
 
-  it('preserves the existing context/OAuth restriction and does not write on mismatch', async () => {
+  it('refuses to write when an agent references a Context that is not loaded', async () => {
     await expect(
       addConnectorToAgentContexts(
         { name: 'search', namespace: 'mcp-server' },
-        [{ name: 'agent-b', contextRef: 'context-b' }],
-        [makeContext('context-a', 'context-a', [])],
-        { contextRef: 'context-a', oauth: { grantScope: 'context' } }
+        [{ name: 'agent-b', contextRef: 'context-alias' }],
+        [makeContext('context-resource', 'context-alias', [])]
       )
-    ).rejects.toThrow(/shared OAuth identity/)
+    ).rejects.toThrow(/could not be resolved/)
     expect(api.updateContext).not.toHaveBeenCalled()
   })
 
   it('removes only the connector from the existing agent context binding', async () => {
     await removeConnectorFromAgentContext(
       'search',
-      { contextRef: 'context-alias', agents: [{ id: 'agent-a', label: 'Alpha' }] },
+      { contextRef: 'context-resource', agents: [{ id: 'agent-a', label: 'Alpha' }] },
       [makeContext('context-resource', 'context-alias', ['search', 'other-connector'])]
     )
 
@@ -213,5 +211,57 @@ describe('connector access management', () => {
         sharedFileSystems: [],
       },
     })
+  })
+
+  describe('when another Context carries the agent Context name as its alias', () => {
+    // B is listed first so a lookup that also accepts spec.contextId would hit it before A.
+    const collidingAlias = makeContext('ctx-b', 'ctx-a', ['search'], 'rv-b')
+    const target = makeContext('ctx-a', 'ctx-a', [], 'rv-a')
+    const contexts = [collidingAlias, target]
+
+    it('binds the agent only to the Context whose name it references', () => {
+      const targets = connectorAgentTargetsFromHosts([makeHost('agent-a', 'Alpha', 'ctx-a')])
+
+      expect(connectorAgentBindingsFromContexts(contexts, targets)).toEqual({})
+    })
+
+    it('adds the connector to the named Context, never to the aliased one', async () => {
+      await addConnectorToAgentContexts(
+        { name: 'search', namespace: 'mcp-server' },
+        [{ name: 'agent-a', contextRef: 'ctx-a' }],
+        contexts
+      )
+
+      expect(api.updateContext).toHaveBeenCalledTimes(1)
+      expect(api.updateContext).toHaveBeenCalledWith('ctx-a', {
+        metadata: { resourceVersion: 'rv-a' },
+        spec: { contextId: 'ctx-a', mcpServers: ['search'], sharedFileSystems: [] },
+      })
+    })
+
+    it('removes the connector from the named Context, never from the aliased one', async () => {
+      const named = makeContext('ctx-a', 'ctx-a', ['search', 'other'], 'rv-a')
+      await removeConnectorFromAgentContext(
+        'search',
+        { contextRef: 'ctx-a', agents: [{ id: 'agent-a', label: 'Alpha' }] },
+        [collidingAlias, named]
+      )
+
+      expect(api.updateContext).toHaveBeenCalledTimes(1)
+      expect(api.updateContext).toHaveBeenCalledWith('ctx-a', {
+        metadata: { resourceVersion: 'rv-a' },
+        spec: { contextId: 'ctx-a', mcpServers: ['other'], sharedFileSystems: [] },
+      })
+    })
+  })
+
+  it('does not bind a Host whose contextRef only matches after trimming', () => {
+    const targets = connectorAgentTargetsFromHosts([makeHost('agent-a', 'Alpha', 'ctx-a ')])
+    const bindings = connectorAgentBindingsFromContexts(
+      [makeContext('ctx-a', 'ctx-a', ['search'])],
+      targets
+    )
+
+    expect(bindings.search).toBeUndefined()
   })
 })

@@ -6,9 +6,9 @@ export class PasswordAdmissionError extends Error {
     readonly retryAfterSeconds: number,
     readonly reason: PasswordAdmissionDenialReason,
     readonly publicError:
-      'rate_limited' | 'authority_unavailable' | 'recovery_outcome_unknown' = status === 429
-      ? 'rate_limited'
-      : 'authority_unavailable'
+      | 'rate_limited'
+      | 'authority_unavailable'
+      | 'recovery_outcome_unknown' = status === 429 ? 'rate_limited' : 'authority_unavailable'
   ) {
     super(status === 429 ? 'rate_limited' : 'authority_unavailable')
   }
@@ -27,7 +27,12 @@ export class PasswordMutationInternalError extends Error {
 }
 
 export type PasswordMutationCauseKind =
-  'type_error' | 'reference_error' | 'range_error' | 'syntax_error' | 'error' | 'non_error'
+  | 'type_error'
+  | 'reference_error'
+  | 'range_error'
+  | 'syntax_error'
+  | 'error'
+  | 'non_error'
 
 export function passwordMutationCauseKind(cause: unknown): PasswordMutationCauseKind {
   try {

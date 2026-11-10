@@ -10,7 +10,6 @@ function makeMockServer(name: string, url = 'http://mock-server:3000/mcp'): McpS
   return {
     name,
     description: `Mock ${name}`,
-    contextRef: 'test-context',
     transport: { type: 'streamableHttp', url },
     enabled: true,
     status: { deployed: true, ready: true },

@@ -99,11 +99,11 @@ spec:
   workloads:
     - id: web
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
       port: 80
     - id: api
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
       port: 8080
   security:
     isolationLevel: minimal

@@ -30,6 +30,29 @@ describe('GfsDelegationPanel', () => {
     expect(screen.queryByRole('button', { name: 'Grant' })).toBeNull()
   })
 
+  it('does not present failed permission validation as settled read-only access', () => {
+    const onGrant = vi.fn()
+    const { container } = render(
+      <GfsDelegationPanel
+        affordances={{ canDelegate: false, grantableBits: [], canCreateShare: false }}
+        permissionCheckFailed
+        subjectOptions={[{ type: 'user', id: 'user-u', label: 'User U' }]}
+        isDirectory={false}
+        onGrant={onGrant}
+      />
+    )
+
+    const picker = screen.getByRole('combobox', { name: PICKER_LABEL })
+    fireEvent.focus(picker)
+    fireEvent.click(screen.getByRole('option', { name: /User U/ }))
+    expect(screen.queryByRole('note')).toBeNull()
+    expect(screen.queryByText(/Your sharing permission changed/)).toBeNull()
+    expect(screen.getByText('User U')).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: 'Add people, teams, or agents' })).toBeTruthy()
+    expect(container.firstChild).not.toBeNull()
+    expect(onGrant).not.toHaveBeenCalled()
+  })
+
   it('a folder owner offers ONLY the bits it holds (no escalation) and grants them', async () => {
     const onGrant = vi.fn().mockResolvedValue(undefined)
     render(
@@ -57,7 +80,12 @@ describe('GfsDelegationPanel', () => {
 
     // Files never send inherit.
     await waitFor(() =>
-      expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read', 'manage_acl'], false)
+      expect(onGrant).toHaveBeenCalledWith(
+        ['user:u2'],
+        ['read', 'manage_acl'],
+        false,
+        expect.any(Function)
+      )
     )
   })
 
@@ -144,7 +172,12 @@ describe('GfsDelegationPanel', () => {
 
     await screen.findByText('Some selected subjects are invalid and were rejected.')
     expect(onGrant).toHaveBeenCalledTimes(1)
-    expect(onGrant).toHaveBeenCalledWith(['user:successful', 'team:blocked'], ['read'], false)
+    expect(onGrant).toHaveBeenCalledWith(
+      ['user:successful', 'team:blocked'],
+      ['read'],
+      false,
+      expect.any(Function)
+    )
     expect(screen.getByRole('button', { name: 'Remove Successful User' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Remove Blocked Team' })).toBeTruthy()
   })
@@ -176,7 +209,12 @@ describe('GfsDelegationPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
     await waitFor(() =>
-      expect(onGrant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read', 'write'], false)
+      expect(onGrant).toHaveBeenCalledWith(
+        ['host:1st:mcp-host/chatllm'],
+        ['read', 'write'],
+        false,
+        expect.any(Function)
+      )
     )
   })
 
@@ -197,7 +235,9 @@ describe('GfsDelegationPanel', () => {
     const toggle = screen.getByRole('checkbox', { name: 'Include contents of this folder' })
     expect(toggle).toHaveProperty('checked', true)
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
-    await waitFor(() => expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read'], true))
+    await waitFor(() =>
+      expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read'], true, expect.any(Function))
+    )
 
     // The panel clears the selection after a successful grant, so re-pick before
     // proving the unchecked toggle sends inherit=false.
@@ -207,7 +247,9 @@ describe('GfsDelegationPanel', () => {
     fireEvent.click(secondToggle)
     expect(secondToggle).toHaveProperty('checked', false)
     fireEvent.click(screen.getByRole('button', { name: 'Share' }))
-    await waitFor(() => expect(onGrant).toHaveBeenNthCalledWith(2, ['user:u2'], ['read'], false))
+    await waitFor(() =>
+      expect(onGrant).toHaveBeenNthCalledWith(2, ['user:u2'], ['read'], false, expect.any(Function))
+    )
   })
 
   it('never shows the Include contents toggle for files', () => {

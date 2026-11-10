@@ -39,7 +39,7 @@
 - Connect Microsoft Teams (Teams CLI registration, derived endpoint, single-tenant requirement, verify flow): how-to/connect-teams.md
 - Use the Desktop App (chat, attachments, EvenDrive, shortcuts, deep links): how-to/use-the-desktop-app.md
 - Configure guardrails (rules, installed hooks, built-ins): how-to/configure-guardrails.md
-- Connect an OAuth connector (remote MCP servers, user authorization, connector credentials): how-to/connect-oauth-connector.md
+- Connect an OAuth connector (remote MCP servers, Microsoft 365 / Entra ID, user authorization, connector credentials): how-to/connect-oauth-connector.md
 - Configure approvals: how-to/configure-approvals.md
 - Add MCP server: how-to/add-mcp-server.md
 - Desktop setup & updates (environments, invitation, updates): how-to/desktop-setup-and-updates.md

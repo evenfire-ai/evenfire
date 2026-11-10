@@ -76,7 +76,6 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 function client(): McpClient {
   return new McpClient({
     name: 'svc',
-    contextRef: 'ctx',
     transport: { type: 'streamableHttp', url: 'http://svc/mcp' },
     enabled: true,
     status: { deployed: true, ready: true },

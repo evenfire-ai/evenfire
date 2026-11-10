@@ -132,7 +132,7 @@ describe('buildMcpServerManifest', () => {
     expect(spec.managed).toBe(false)
   })
 
-  it('uses private wf-<recipeName> context when contextRef is omitted', () => {
+  it('labels with private wf-<recipeName> context when contextRef is omitted', () => {
     const recipe = makeRecipe({
       spec: {
         workloads: [
@@ -150,7 +150,7 @@ describe('buildMcpServerManifest', () => {
     const spec = manifest.spec as Record<string, unknown>
     const meta = manifest.metadata as { labels: Record<string, string> }
 
-    expect(spec.contextRef).toBe('wf-test-recipe')
+    expect(spec).not.toHaveProperty('contextRef')
     expect(meta.labels['clerum.io/context']).toBe('wf-test-recipe')
   })
 
@@ -167,7 +167,7 @@ describe('buildMcpServerManifest', () => {
 
     expect(expectedContext.length).toBeLessThanOrEqual(63)
     expect(expectedContext).toMatch(/^wf-[a-z0-9-]+-[0-9a-f]{8}$/)
-    expect(spec.contextRef).toBe(expectedContext)
+    expect(spec).not.toHaveProperty('contextRef')
     expect(meta.labels['clerum.io/context']).toBe(expectedContext)
   })
 
@@ -223,7 +223,7 @@ describe('buildMcpServerManifest', () => {
   it('6.3a — returns null for non-transport workload', () => {
     const recipe = makeRecipe({
       spec: {
-        workloads: [{ id: 'nginx', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 80 }],
+        workloads: [{ id: 'nginx', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 80 }],
       },
     })
     const manifest = buildMcpServerManifest(recipe.spec.workloads![0], recipe, 'mcp-server')
@@ -577,7 +577,7 @@ describe('buildTransportService', () => {
   it('6.3b — returns null for non-transport workload', () => {
     const recipe = makeRecipe({
       spec: {
-        workloads: [{ id: 'nginx', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 80 }],
+        workloads: [{ id: 'nginx', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 80 }],
       },
     })
     const svc = buildTransportService(recipe.spec.workloads![0], recipe, 'mcp-server')
@@ -2200,6 +2200,17 @@ describe('delegateTransportWorkloads', () => {
         }),
       })
     )
+    // The Context allowlist above is the only server-context relation; the
+    // McpServer itself names no context.
+    const mcpServerCreates = mockCustomApi.createNamespacedCustomObject.mock.calls.filter(
+      ([args]) => (args as { plural: string }).plural === 'mcpservers'
+    )
+    expect(mcpServerCreates).toHaveLength(1)
+    const mcpServerBody = (
+      mcpServerCreates[0][0] as { body: { metadata: { name: string }; spec: object } }
+    ).body
+    expect(mcpServerBody.metadata.name).toBe('test-recipe-redis-mcp')
+    expect(mcpServerBody.spec).not.toHaveProperty('contextRef')
   })
 
   it('does NOT replace an unchanged McpServer even when the apiserver defaulted extra spec fields', async () => {

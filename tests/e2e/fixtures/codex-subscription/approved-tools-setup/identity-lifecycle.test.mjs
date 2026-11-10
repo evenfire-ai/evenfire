@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   cleanupFixtureIdentities,
   createFixtureIdentityJournal,
   createFixtureIdentities as createRecordedFixtureIdentities,
+  describeFixtureError,
   recordFixtureConnection,
 } from './identity-lifecycle.mjs'
 
@@ -37,6 +39,18 @@ const env = {
   MINIKUBE_PROFILE: input.profile,
   CONTROL_API_REAL_PG_CONTEXT: input.context,
 }
+
+test('seed keeps bounded fixture diagnostics in catch scope', () => {
+  const source = readFileSync(new URL('./seed.mjs', import.meta.url), 'utf8')
+  const binding = source.indexOf(
+    'const { createFixtureIdentities, cleanupFixtureIdentities, describeFixtureError }'
+  )
+  const tryBlock = source.indexOf('\ntry {')
+  const diagnosticUse = source.indexOf('failure: describeFixtureError(error)')
+  assert.ok(binding >= 0)
+  assert.ok(binding < tryBlock)
+  assert.ok(diagnosticUse > tryBlock)
+})
 
 function harness() {
   const state = {
@@ -234,12 +248,31 @@ test('duplicate/query and audit failures roll back without discarding the intent
     const { state, adapters } = harness()
     if (kind === 'query') state.failQuery = sql => sql.includes('INSERT INTO teams')
     else state.auditFailure = true
-    await assert.rejects(createFixtureIdentities(input, adapters), /recover using/)
+    await assert.rejects(createFixtureIdentities(input, adapters), error => {
+      assert.match(error.message, /recover using/)
+      assert.deepEqual(error.cause, { name: 'Error' })
+      return true
+    })
     assert.equal(state.committed.length, 0)
     assert.equal(state.rollbacks, 1)
     assert.equal(state.journal.at(-1).status, 'recovery-required')
     assert.deepEqual(state.journal[0].users, state.journal.at(-1).users)
   }
+})
+
+test('failure diagnostics expose bounded class/code fields and redact messages', () => {
+  const error = Object.assign(new Error('token=secret sql=SELECT password'), {
+    code: '23505',
+    cause: new Error('nested credential=secret'),
+  })
+  assert.deepEqual(describeFixtureError(error), {
+    name: 'Error',
+    code: '23505',
+    cause: { name: 'Error' },
+  })
+  assert.deepEqual(describeFixtureError({ name: 'Error', code: 'not-safe', message: 'secret' }), {
+    name: 'Error',
+  })
 })
 
 test('lost commit acknowledgement retains exact IDs rather than retrying insertion', async () => {

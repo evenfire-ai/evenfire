@@ -205,7 +205,8 @@ realCrossService(
           password: 'Synthetic-Issue1055-new-password',
         })
         .expect(200)
-      expect(reset.body.token).toEqual(expect.any(String))
+      expect(reset.body.reauthenticationRequired).toBe(true)
+      expect(reset.body).not.toHaveProperty('token')
       expect(reset.body).not.toHaveProperty('sessionContext')
       expect(
         (
@@ -215,12 +216,6 @@ realCrossService(
           )
         ).rows[0].attempts
       ).toEqual(attemptsBeforeRecovery)
-
-      const authenticated = await request(app)
-        .post('/external/auth/verify')
-        .send({ token: reset.body.token })
-        .expect(200)
-      expect(authenticated.body.claims).toMatchObject({ userId, email })
 
       await holder.pool.query(
         "UPDATE password_verification_pace SET next_permit = clock_timestamp() - interval '1 second'"

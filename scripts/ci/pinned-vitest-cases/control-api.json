@@ -4,6 +4,10 @@
     "fullName": "endPoolAndWaitForClients against a real pg Pool and a PG wire stub resolves when a client still connecting at end() fails to connect"
   },
   {
+    "suite": "helpers.realPostgresTeardown.test.ts",
+    "fullName": "endPoolAndWaitForClients against a real pg Pool and a PG wire stub closes an unplanned connection without an unhandled socket error"
+  },
+  {
     "suite": "routes.mcp-host.llmProviderAttempts.test.ts",
     "fullName": "authorize raw-body scan before JSON.parse preserves the module logger binding and request correlation on body refusals"
   },

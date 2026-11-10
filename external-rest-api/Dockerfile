@@ -1,4 +1,4 @@
-FROM node:24-alpine AS builder
+FROM node:24.22.1-alpine AS builder
 WORKDIR /app
 
 COPY packages/jwt-key-policy/package.json packages/jwt-key-policy/index.cjs packages/jwt-key-policy/index.d.ts packages/jwt-key-policy/dev-store.cjs packages/jwt-key-policy/dev-store.d.ts ./packages/jwt-key-policy/
@@ -11,7 +11,7 @@ COPY external-rest-api/src ./src
 RUN npm run build
 RUN npm prune --production
 
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 

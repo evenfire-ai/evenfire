@@ -6,6 +6,7 @@ import {
   parseTaskKey,
   useAgentTaskTracker,
 } from '@contexts/AgentTaskTrackerContext'
+import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import {
   COMPOSER_MAX_ATTACHMENTS,
   COMPOSER_MAX_NON_IMAGE_BODY_BYTES,
@@ -114,6 +115,7 @@ import {
 import { type ActiveChatVisibility, useChatNotifications } from './useChatNotifications'
 import { useChatScroll } from './useChatScroll'
 import { useComposerAttachments } from './useComposerAttachments'
+import type { PushToastOptions } from './useToastController'
 
 // Re-exported from `useChatListController` (§4.4) so external importers
 // (useWorkspaceController, useActivityController) keep their import site.
@@ -377,7 +379,7 @@ interface UseAgentChatControllerParams {
   isAuthenticated: boolean
   loadMenuData: boolean
   navItem: NavItem
-  pushToast: (msg: string, tone: Tone) => void
+  pushToast: (msg: string, tone: Tone, options?: PushToastOptions) => void
   pushNotification: (n: PushNotificationInput) => void
   /**
    * Human-visible name for an agent identifier (catalog `spec.host` display
@@ -655,12 +657,20 @@ export function useAgentChatController({
     releaseRetainedFailuresForChat,
     releaseSucceededRetainedSend,
     releaseSucceededRetainedSendsForTask,
+    getRetainedSendsForTask,
     markRetainedSendReason,
     failRetainedSend,
   } = retainedSends
   const sendScopeGeneration = useRef(0)
   const currentAuthScopeRef = useRef(`${isAuthenticated}:${authenticatedScope}`)
   currentAuthScopeRef.current = `${isAuthenticated}:${authenticatedScope}`
+  const composerOwnerScope = `${isAuthenticated}:${currentEnvironmentKey}:${userScopeKey}`
+  const lastComposerOwnerScope = useRef(composerOwnerScope)
+  useEffect(() => {
+    if (lastComposerOwnerScope.current === composerOwnerScope) return
+    lastComposerOwnerScope.current = composerOwnerScope
+    clearAllComposerDrafts()
+  }, [composerOwnerScope])
   // #654 M5 — the userMessageId of the most recent send that retained its
   // payload. A retry compares it before and after to learn whether it retained
   // a snapshot of its own; `sendAgentMessage` has several early returns (image
@@ -671,7 +681,6 @@ export function useAgentChatController({
     const scope = `${isAuthenticated}:${authenticatedScope}`
     if (lastRetentionScope.current === scope) return
     lastRetentionScope.current = scope
-    clearAllComposerDrafts()
     // The memo key already carries the scope; this frees the previous scope's entries.
     transcriptMemoRef.current?.clear()
     sendScopeGeneration.current += 1
@@ -679,6 +688,7 @@ export function useAgentChatController({
     agentSendInFlightRef.current = false
     setAgentSending(false)
     retainedSends.resetRetainedSendStore()
+    parkedRestorationsRef.current.clear()
     setFailedAgentSend(null)
     setAgentError(null)
   }, [authenticatedScope, isAuthenticated, retainedSends])
@@ -686,6 +696,7 @@ export function useAgentChatController({
   const activityUnsubByAgentRef = useRef<Record<string, () => Promise<void>>>({})
   const activityInFlightByAgentRef = useRef<Record<string, string[]>>({})
   const activityTaskToMessageByAgentRef = useRef<Record<string, Record<string, string>>>({})
+  const activityStreamGenerationRef = useRef(0)
   const agentSendInFlightRef = useRef(false)
   const agentSendSetupOwnerRef = useRef<{ id: symbol; agentRef: string } | null>(null)
   // (Phase-2 AbortController + `recoveringTaskIdByKeyRef` removed in Fase 5b: the
@@ -881,9 +892,89 @@ export function useAgentChatController({
     handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    restoreComposerImageAttachments,
+    restoreComposerReferenceAttachments,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
 
-  // Only a fully read and hashed document can travel with a message (#678).
+  // R2-M1 — cancel-restorations parked while their originating chat is not the
+  // active one, keyed `${agentRef}::${chatId}`. Memory-only, same lifetime as
+  // composer state (cleared on session/agent-scope reset, never persisted): a
+  // cancel settling while another chat is viewed PRESERVES the kept
+  // attachments and applies them when the originating chat is active again.
+  //
+  // R3-M4 — the parked value is a QUEUE of restoration batches, not a single
+  // batch: two cancellations settling for the SAME originating chat while the
+  // user views another chat must not overwrite one another. Each batch keeps
+  // its own attachments, its own caps and its own toast.
+  const parkedRestorationsRef = useRef(
+    new Map<
+      string,
+      {
+        agentRef: string
+        chatId: string | null
+        batches: Array<{
+          images: ComposerImageAttachment[]
+          references: ComposerReferenceAttachment[]
+        }>
+      }
+    >()
+  )
+
+  /**
+   * Applies one kept-attachment restoration to the composer the user is
+   * currently viewing, with the atomic merge, honest drop reporting, and a
+   * Discard-all action bound to the originating agent AND chat. Shared by the
+   * settle-now path and the parked path (spec: round-2 extensions).
+   */
+  const applyKeptAttachments = useCallback(
+    (
+      agentRef: string,
+      chatId: string | null,
+      images: ComposerImageAttachment[],
+      references: ComposerReferenceAttachment[]
+    ) => {
+      const stillViewingOrigin = () =>
+        activeChatVisibilityRef.current.selectedAgent === agentRef &&
+        activeChatVisibilityRef.current.activeChatId === chatId
+      if (!stillViewingOrigin()) return
+      // One merge per kind against the live composer snapshot — the counts and
+      // the committed state can never disagree (R1-M4), and the reference cap
+      // is enforced while restoring so the composer stays sendable (R1-M5).
+      const imageOutcome = restoreComposerImageAttachments(images)
+      const referenceOutcome = restoreComposerReferenceAttachments(references)
+      const droppedParts: string[] = []
+      if (imageOutcome.dropped > 0) {
+        droppedParts.push(
+          `${imageOutcome.dropped} of ${images.length} ${imageOutcome.dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_ATTACHMENTS}-attachment limit`
+        )
+      }
+      if (referenceOutcome.dropped > 0) {
+        droppedParts.push(
+          `${referenceOutcome.dropped} of ${references.length} ${referenceOutcome.dropped === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
+        )
+      }
+      const totalDropped = imageOutcome.dropped + referenceOutcome.dropped
+      const message = droppedParts.length
+        ? `Attachments kept — ${droppedParts.join('; ')} and ${totalDropped === 1 ? 'was' : 'were'} dropped.`
+        : 'Attachments kept'
+      pushToast(message, 'info', {
+        action: {
+          label: 'Discard all',
+          onAction: () => {
+            if (!stillViewingOrigin()) return
+            resetComposerAttachments()
+          },
+        },
+      })
+    },
+    [
+      pushToast,
+      resetComposerAttachments,
+      restoreComposerImageAttachments,
+      restoreComposerReferenceAttachments,
+    ]
+  )
+
   const readyComposerFiles = useMemo(
     () =>
       composerFileAttachments.filter(
@@ -1034,6 +1125,24 @@ export function useAgentChatController({
     }
   }, [activeChatId, currentTeamId, navItem, selectedAgent])
 
+  // R2-M1 — a parked cancel-restoration applies when its originating chat
+  // becomes active again (runs after the visibility sync above, so the ref it
+  // guards through is current).
+  //
+  // R3-M4 — EVERY parked batch is applied, in the order the cancellations
+  // settled. A single batch would let a later cancellation overwrite an
+  // earlier one's attachments, losing them for good.
+  useEffect(() => {
+    if (!selectedAgent) return
+    const key = `${selectedAgent}::${activeChatId}`
+    const parked = parkedRestorationsRef.current.get(key)
+    if (!parked) return
+    parkedRestorationsRef.current.delete(key)
+    for (const batch of parked.batches) {
+      applyKeptAttachments(parked.agentRef, parked.chatId, batch.images, batch.references)
+    }
+  }, [activeChatId, selectedAgent, applyKeptAttachments])
+
   // Cleanup activity streams on unmount
   useEffect(() => {
     return () => {
@@ -1056,11 +1165,33 @@ export function useAgentChatController({
 
   const stopAllActivityStreams = useCallback(async () => {
     const streams = Object.values(activityUnsubByAgentRef.current)
-    await Promise.all(streams.map(stop => stop().catch(() => undefined)))
+    activityStreamGenerationRef.current += 1
     activityUnsubByAgentRef.current = {}
     activityInFlightByAgentRef.current = {}
     activityTaskToMessageByAgentRef.current = {}
+    await Promise.all(streams.map(stop => stop().catch(() => undefined)))
   }, [])
+
+  const teardownTeamActivity = useCallback(async () => {
+    // Fence async sends, task terminals, and reconciliation before stopping any
+    // native subscriptions. Same-principal navigation and composer drafts remain
+    // owned by their workspace tabs across the switch.
+    sendScopeGeneration.current += 1
+    agentSendSetupOwnerRef.current = null
+    agentSendInFlightRef.current = false
+    setAgentSending(false)
+    tracker.releaseAll()
+    fsm.reset()
+    reconcileChatRef.current?.reset()
+    resetReplyNotificationDedupe()
+    retainedSends.resetRetainedSendStore()
+    parkedRestorationsRef.current.clear()
+    setActivityByAgentMessage({})
+    setProgressByAgentMessage({})
+    setAgentError(null)
+    setFailedAgentSend(null)
+    await stopAllActivityStreams()
+  }, [fsm, resetReplyNotificationDedupe, retainedSends, stopAllActivityStreams, tracker])
 
   const resetChat = useCallback(() => {
     beginSelectionIntent()
@@ -1086,6 +1217,7 @@ export function useAgentChatController({
     agentSendSetupOwnerRef.current = null
     agentSendInFlightRef.current = false
     retainedSends.resetRetainedSendStore()
+    parkedRestorationsRef.current.clear()
     // Abort any in-flight reconcile so a run mid-backoff can't resurrect a
     // just-cleared tracker/FSM entry after this teardown (security review).
     reconcileChatRef.current?.reset()
@@ -1912,10 +2044,12 @@ export function useAgentChatController({
   const ensureAgentActivityStream = useCallback(
     async (agentName: string) => {
       if (activityUnsubByAgentRef.current[agentName]) return
+      const streamGeneration = activityStreamGenerationRef.current
       const unsubscribe = await window.clerum.rpc.subscribeHostActivity(
         agentName,
         [agentName],
         event => {
+          if (activityStreamGenerationRef.current !== streamGeneration) return
           const typed = event as HostActivityStreamEvent
           const inFlight = activityInFlightByAgentRef.current[agentName] || []
           if (typed.type === 'open') {
@@ -1953,6 +2087,10 @@ export function useAgentChatController({
           }
         }
       )
+      if (activityStreamGenerationRef.current !== streamGeneration) {
+        await unsubscribe().catch(() => undefined)
+        return
+      }
       activityUnsubByAgentRef.current[agentName] = unsubscribe
     },
     [resolveActivityMessageId, updateMessageActivity]
@@ -3164,7 +3302,8 @@ export function useAgentChatController({
       attachments: ComposerImageAttachment[] = composerImageAttachments,
       files: ReadyComposerFileAttachment[] = readyComposerFiles,
       references: ComposerReferenceAttachment[] = composerReferenceAttachments,
-      preserveComposer = false
+      preserveComposer = false,
+      originWorkspaceTabId?: string | null
     ) => {
       const sendScope = sendScopeGeneration.current
       const sendScopeIdentity = currentAuthScopeRef.current
@@ -3172,7 +3311,8 @@ export function useAgentChatController({
       const originalDraftAgent = selectedAgent
       const originalDraftRevision = getComposerDraftRevision(
         originalDraftChat,
-        originalDraftAgent ?? undefined
+        originalDraftAgent ?? undefined,
+        originWorkspaceTabId
       )
       const originalAttachmentRevision = composerAttachmentRevisionRef.current
       const trimmedContent = content.trim()
@@ -3506,12 +3646,15 @@ export function useAgentChatController({
       const canConsumeComposer = !preserveComposer && sendStillAuthorized()
       const shouldClearOriginDraft =
         canConsumeComposer &&
-        getComposerDraftRevision(originalDraftChat, originalDraftAgent ?? undefined) ===
-          originalDraftRevision
+        getComposerDraftRevision(
+          originalDraftChat,
+          originalDraftAgent ?? undefined,
+          originWorkspaceTabId
+        ) === originalDraftRevision
       const shouldResetAttachments =
         canConsumeComposer && composerAttachmentRevisionRef.current === originalAttachmentRevision
       if (shouldClearOriginDraft) {
-        clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined)
+        clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined, originWorkspaceTabId)
       }
       if (shouldResetAttachments) resetComposerAttachments()
       setAgentError(null)
@@ -3649,7 +3792,8 @@ export function useAgentChatController({
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
           const errorRecord = responseRecord.error as
-            { message?: string; code?: string; provider?: string } | undefined
+            | { message?: string; code?: string; provider?: string }
+            | undefined
           // Issue #654: a synchronous failure can arrive as `{error: …}` OR as
           // `{success: false}` without an error object. Both are failures — HTTP
           // 200 or a missing `success` boolean never imply success.
@@ -3953,7 +4097,7 @@ export function useAgentChatController({
   )
 
   const handleSendAgentMessage = useCallback(
-    async (text: string) => {
+    async (text: string, workspaceTabId?: string | null) => {
       // A document still being read is not part of the message yet: sending
       // now would silently leave it out.
       if (composerFilesBlockSend) return
@@ -3961,7 +4105,9 @@ export function useAgentChatController({
         text,
         composerImageAttachments,
         readyComposerFiles,
-        composerReferenceAttachments
+        composerReferenceAttachments,
+        false,
+        workspaceTabId
       )
     },
     [
@@ -4045,61 +4191,130 @@ export function useAgentChatController({
     setAgentError(null)
   }, [visibleFailure, releaseRetainedSend, releaseRetainedFailuresForChat])
 
-  const handleRecoverFailedAgentSend = useCallback(() => {
-    if (
-      !visibleFailure ||
-      visibleFailure.agentRef !== activeChatVisibilityRef.current.selectedAgent ||
-      visibleFailure.chatId !== activeChatVisibilityRef.current.activeChatId
-    )
-      return
-    if (visibleFailure.answeredWithoutFiles) {
-      // The text and the other attachments were answered: bring back only the
-      // documents the Host never received, and send nothing. Restoring replaces
-      // the composer's documents, so only documents already there block it; a
-      // new draft or other attachments stay as they are.
-      if (composerFileAttachments.length) {
+  const handleRecoverFailedAgentSend = useCallback(
+    (workspaceTabId?: string | null) => {
+      if (
+        !visibleFailure ||
+        visibleFailure.agentRef !== activeChatVisibilityRef.current.selectedAgent ||
+        visibleFailure.chatId !== activeChatVisibilityRef.current.activeChatId
+      )
+        return
+      if (visibleFailure.answeredWithoutFiles) {
+        // The text and the other attachments were answered: bring back only the
+        // documents the Host never received, and send nothing. Restoring replaces
+        // the composer's documents, so only documents already there block it; a
+        // new draft or other attachments stay as they are.
+        if (composerFileAttachments.length) {
+          pushToast(
+            'Remove the documents in the composer before recovering the earlier files.',
+            'error'
+          )
+          return
+        }
+        const undelivered = new Set(visibleFailure.undeliveredFileIds ?? [])
+        handleRestoreComposerFiles(visibleFailure.files.filter(file => undelivered.has(file.id)))
+        handleDiscardFailedAgentSend()
+        return
+      }
+      if (
+        getComposerDraft(activeChatId, selectedAgent ?? undefined, workspaceTabId) ||
+        composerImageAttachments.length ||
+        composerFileAttachments.length ||
+        composerReferenceAttachments.length
+      ) {
+        pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
+        return
+      }
+      if (
+        !setComposerDraft(
+          activeChatId,
+          visibleFailure.content,
+          selectedAgent ?? undefined,
+          workspaceTabId
+        )
+      ) {
         pushToast(
-          'Remove the documents in the composer before recovering the earlier files.',
+          'This composer no longer owns the draft. Select its chat tab and try again.',
           'error'
         )
         return
       }
-      const undelivered = new Set(visibleFailure.undeliveredFileIds ?? [])
-      handleRestoreComposerFiles(visibleFailure.files.filter(file => undelivered.has(file.id)))
+      handleAddComposerImageAttachments(
+        visibleFailure.attachments.map(attachment => ({
+          ...attachment,
+          previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
+        }))
+      )
+      handleRestoreComposerFiles(visibleFailure.files)
+      handleAddComposerReferenceAttachments(visibleFailure.references)
       handleDiscardFailedAgentSend()
-      return
-    }
-    if (
-      getComposerDraft(activeChatId, selectedAgent ?? undefined) ||
-      composerImageAttachments.length ||
-      composerFileAttachments.length ||
-      composerReferenceAttachments.length
-    ) {
-      pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
-      return
-    }
-    setComposerDraft(activeChatId, visibleFailure.content, selectedAgent ?? undefined)
-    handleAddComposerImageAttachments(
-      visibleFailure.attachments.map(attachment => ({
+    },
+    [
+      visibleFailure,
+      activeChatId,
+      composerImageAttachments,
+      composerFileAttachments,
+      composerReferenceAttachments,
+      pushToast,
+      handleRestoreComposerFiles,
+      handleAddComposerImageAttachments,
+      handleAddComposerReferenceAttachments,
+      handleDiscardFailedAgentSend,
+    ]
+  )
+
+  /**
+   * STORY-38 — a cancel is terminal for DELIVERY (the snapshot below is still
+   * released), but the attachments of the canceled message return to the
+   * composer so the user can reuse them. In-memory only: the composer state,
+   * not GFS or any persisted store, owns the kept attachments.
+   *
+   * The restore and its Discard-all action are bound to BOTH the originating
+   * agent and the originating chat (the retained snapshot's chatId). When the
+   * cancel settles while a different agent or chat is viewed, the restoration
+   * is PARKED under that identity instead of dropped, and applies when the
+   * originating chat is active again (R2-M1 — preservation, not loss; see
+   * work-tracker/specs/folder-zip-and-cancel-restore-budget.md).
+   */
+  const restoreComposerAttachmentsAfterCancel = useCallback(
+    (taskId: string, agentRef: string) => {
+      const snapshots = getRetainedSendsForTask(taskId)
+      const images = snapshots.flatMap(snapshot => snapshot.attachments)
+      const references = snapshots.flatMap(snapshot => snapshot.references)
+      if (!images.length && !references.length) return
+      const originChatId = snapshots[0]?.chatId ?? null
+      const stillViewingOrigin =
+        activeChatVisibilityRef.current.selectedAgent === agentRef &&
+        activeChatVisibilityRef.current.activeChatId === originChatId
+      const preparedImages = images.map(attachment => ({
         ...attachment,
         previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
       }))
-    )
-    handleRestoreComposerFiles(visibleFailure.files)
-    handleAddComposerReferenceAttachments(visibleFailure.references)
-    handleDiscardFailedAgentSend()
-  }, [
-    visibleFailure,
-    activeChatId,
-    composerImageAttachments,
-    composerFileAttachments,
-    composerReferenceAttachments,
-    pushToast,
-    handleRestoreComposerFiles,
-    handleAddComposerImageAttachments,
-    handleAddComposerReferenceAttachments,
-    handleDiscardFailedAgentSend,
-  ])
+      if (!stillViewingOrigin) {
+        // Preserve: the task snapshot is released by the caller, but the kept
+        // payload survives here until its chat is viewed again.
+        //
+        // R3-M4: the batch is APPENDED to the chat's queue. Two
+        // cancellations settling for the same originating chat while another
+        // chat is viewed must both survive — the later one does not replace
+        // the earlier one's attachments.
+        const key = `${agentRef}::${originChatId}`
+        const parked = parkedRestorationsRef.current.get(key)
+        if (parked) {
+          parked.batches.push({ images: preparedImages, references })
+        } else {
+          parkedRestorationsRef.current.set(key, {
+            agentRef,
+            chatId: originChatId,
+            batches: [{ images: preparedImages, references }],
+          })
+        }
+        return
+      }
+      applyKeptAttachments(agentRef, originChatId, preparedImages, references)
+    },
+    [getRetainedSendsForTask, applyKeptAttachments]
+  )
 
   const cancelTask = useCallback(
     async (taskId: string) => {
@@ -4149,9 +4364,12 @@ export function useAgentChatController({
         await window.clerum.rpc.cancelTask(hostRef, taskId)
         markCancelled('Cancelled by user.')
         // #654 M6 — a cancel is terminal by intent: the user does not want this
-        // payload resent, so nothing will read the retained snapshot again. A
-        // snapshot holding documents the Host never received stays for Recover
-        // files (see releaseRetainedSendsForTask).
+        // payload resent, so nothing will read the retained snapshot again. The
+        // attachments themselves return to the composer (STORY-38) before the
+        // snapshot that carried them is released. A snapshot holding documents
+        // the Host never received stays for Recover files (see
+        // releaseRetainedSendsForTask).
+        restoreComposerAttachmentsAfterCancel(taskId, hostRef)
         releaseRetainedSendsForTask(taskId)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -4159,6 +4377,7 @@ export function useAgentChatController({
           markCancelled('Task already finished or is no longer active.')
           // The task is gone upstream, so it can no longer produce a terminal
           // event — same reasoning as the successful cancel above.
+          restoreComposerAttachmentsAfterCancel(taskId, hostRef)
           releaseRetainedSendsForTask(taskId)
           pushToast('That task is no longer active.', 'info')
           return
@@ -4167,7 +4386,7 @@ export function useAgentChatController({
         pushToast(`Failed to cancel task: ${message}`, 'error')
       }
     },
-    [pushToast, selectedAgent, releaseRetainedSendsForTask]
+    [pushToast, selectedAgent, releaseRetainedSendsForTask, restoreComposerAttachmentsAfterCancel]
   )
 
   const setPendingChatSelection = useCallback(
@@ -4347,6 +4566,7 @@ export function useAgentChatController({
     switchToChat,
     reconcileChat,
     stopAllActivityStreams,
+    teardownTeamActivity,
     resetChat,
     setPendingChatSelection,
     clearActiveChat,
@@ -4373,6 +4593,7 @@ export function useAgentChatController({
     handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    handleClearComposerAttachments: resetComposerAttachments,
     cancelTask,
   }
 }

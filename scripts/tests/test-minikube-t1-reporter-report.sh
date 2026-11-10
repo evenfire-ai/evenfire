@@ -284,35 +284,19 @@ PY
   #    stderr, sanitized. run_suite runs under set -e, as in production.
   run_project="$TEST_DIR/run-project"
   run_file="$run_project/control-api/early.realPostgres.test.ts"
-  mkdir -p "$run_project/control-api/test" "$run_project/scripts/ci"
+  mkdir -p "$run_project/control-api"
   printf 'fixture\n' >"$run_file"
-  # The private password-recovery producer suites match the real-Postgres glob
-  # but need a producer T1 does not have; run_suite must leave them out.
-  private_a='test/privateProducerA.realPostgres.integration.test.ts'
-  private_b='test/privateProducerB.realPostgres.integration.test.ts'
-  printf 'fixture\n' >"$run_project/control-api/$private_a"
-  printf 'fixture\n' >"$run_project/control-api/$private_b"
-  cat >"$run_project/scripts/ci/password-recovery-suite-contract.mjs" <<EOF
-if (process.argv[2] === 'verify') process.exit(0)
-if (process.argv[2] === 'private' && process.argv[3] === 'all') {
-  console.log('$private_a\n$private_b')
-  process.exit(0)
-}
-process.exit(2)
-EOF
   run_password='RunPlain9Secret'
   run_bearer='FixtureRunBearer8'
   npm_marker="$TEST_DIR/npm-ran"
-  npm_args="$TEST_DIR/npm-args"
   PROJECT_DIR="$run_project"
   T1_TMP_DIR="$TEST_DIR/run-tmp"
   mkdir -p "$T1_TMP_DIR"
   RUN_FILE="$run_file" RUN_DSN_SCHEME="$dsn_scheme" RUN_BEARER="$run_bearer" NPM_MARKER="$npm_marker"
-  RUN_PASSWORD="$run_password" NPM_ARGS="$npm_args"
-  export RUN_FILE RUN_DSN_SCHEME RUN_BEARER NPM_MARKER RUN_PASSWORD NPM_ARGS
+  RUN_PASSWORD="$run_password"
+  export RUN_FILE RUN_DSN_SCHEME RUN_BEARER NPM_MARKER RUN_PASSWORD
   npm() {
     local output_file=''
-    printf '%s\n' "$@" >"$NPM_ARGS"
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --outputFile=*) output_file="${1#--outputFile=}" ;;
@@ -352,6 +336,7 @@ PY
   }
   export -f npm
   export RUN_PROJECT="$run_project" RUN_SCRIPT="$ROOT/scripts/e2e/minikube-real-postgres.sh" RUN_TMP="$T1_TMP_DIR"
+  export RUN_EVIDENCE="$TEST_DIR/evidence"
   run_err="$TEST_DIR/run-suite.err"
   # A child bash, so that set -e is really in force: this subshell is itself the
   # left side of a || list, where set -e is ignored and die_t1 would not stop
@@ -363,12 +348,33 @@ PY
     PROJECT_DIR="$RUN_PROJECT"
     T1_TMP_DIR="$RUN_TMP"
     T1_REDACT_PASSWORD="$RUN_PASSWORD"
+    # Production T1 always calls t2_evidence_init before any suite runs.
+    T2_EVIDENCE_DIR="$RUN_EVIDENCE"
+    # This fixture tests reporter failures; inventory validation has its own
+    # real-selector contract in password-recovery-suite-contract.test.mjs.
+    list_real_pg_files() { printf "%s\n" "$RUN_FILE"; }
     run_suite control-api isolated "$1"
   ' bash "$dsn_scheme://isolated" >"$TEST_DIR/run-suite.out" 2>"$run_err"
   run_status=$?
   [ -s "$npm_marker" ] || fail 'the npm stand-in never ran (liveness witness missing)'
-  grep -Fxq 'early.realPostgres.test.ts' "$npm_args" || fail 'run_suite did not pass the public suite to Vitest'
-  grep -Fq 'privateProducer' "$npm_args" && fail 'run_suite passed a private producer suite to Vitest'
+  # The failing lane keeps its durable projection, and the projection carries
+  # no secret from the reporter's free-text message.
+  projection="$RUN_EVIDENCE/logs/t1-control-api-isolated.results.json"
+  [ -s "$projection" ] || fail 'run_suite did not persist the T1 reporter projection'
+  grep -Fq '"fileMessageOmitted": true' "$projection" || fail 'the projection lost the failing file record'
+  # The file name expands $lane by itself, so the recorded fields are checked
+  # directly: run_suite must pass the package and the lane in that order.
+  python3 - "$projection" <<'PY' || fail 'the projection does not record package control-api and lane isolated'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    projection = json.load(handle)
+assert projection["package"] == "control-api", projection.get("package")
+assert projection["lane"] == "isolated", projection.get("lane")
+PY
+  grep -Fq "$run_password" "$projection" && fail 'the password reached the T1 evidence projection'
+  grep -Fq "$run_bearer" "$projection" && fail 'the bearer token reached the T1 evidence projection'
   grep -Fq 'REAL_PG_SUITE_FAILED' "$run_err" || fail 'run_suite did not fail on the failing reporter'
   [ "$run_status" -ne 0 ] || fail 'run_suite returned success on a failing reporter'
   grep -Fq "FAILED FILE: $run_file" "$run_err" \

@@ -13,7 +13,6 @@ import { expect, test } from '../helpers/auth-fixture'
 const RUN = Date.now()
 const TEAM_NAME = `e2e-wizard-team-${RUN}`
 const CONTEXT_NAME = `e2e-wizard-ctx-${RUN}`
-const CONTEXT_ID = `e2e-wizard-scope-${RUN}`
 const HOST_NAME = `e2e-wizard-host-${RUN}`
 const HOST_DISPLAY_NAME = `e2e-wizard-agent-${RUN}`
 
@@ -34,13 +33,13 @@ test.describe('Control UI — Team create wizard', () => {
   test.beforeAll(async () => {
     await controlApi.createContext({
       metadata: { name: CONTEXT_NAME },
-      spec: { contextId: CONTEXT_ID, description: 'E2E team wizard access scope' },
+      spec: { contextId: CONTEXT_NAME, description: 'E2E team wizard access scope' },
     })
     await controlApi.createHost({
       metadata: { name: HOST_NAME },
       spec: {
         host: HOST_DISPLAY_NAME,
-        contextRef: CONTEXT_ID,
+        contextRef: CONTEXT_NAME,
         secretRef: '',
         channels: [],
       },
@@ -90,7 +89,7 @@ test.describe('Control UI — Team create wizard', () => {
       exact: true,
     })
     await expect(seededOption).toBeVisible({ timeout: 15_000 })
-    await expect(authedPage.getByRole('option', { name: CONTEXT_ID, exact: true })).toHaveCount(0)
+    await expect(authedPage.getByRole('option', { name: CONTEXT_NAME, exact: true })).toHaveCount(0)
     await seededOption.click()
     await expect(authedPage.locator('#new-team-agent-picker')).toContainText(HOST_DISPLAY_NAME)
     await authedPage.keyboard.press('Escape')
@@ -102,7 +101,7 @@ test.describe('Control UI — Team create wizard', () => {
     const teamId = await waitForTeamIdByName(TEAM_NAME)
     expect(teamId).not.toBe('')
     const { contextIds } = await controlApi.getTeamContexts(teamId)
-    expect(contextIds ?? []).toContain(CONTEXT_ID)
+    expect(contextIds ?? []).toContain(CONTEXT_NAME)
 
     // D8 composite write: the wizard also persists the team↔agent mapping.
     const { agentNames } = await controlApi.getTeamAgents(teamId)
@@ -114,6 +113,6 @@ test.describe('Control UI — Team create wizard', () => {
       .getByRole('row')
       .filter({ has: authedPage.getByRole('cell', { name: HOST_DISPLAY_NAME, exact: true }) })
     await expect(row).toBeVisible({ timeout: 15_000 })
-    await expect(row).not.toContainText(CONTEXT_ID)
+    await expect(row).not.toContainText(CONTEXT_NAME)
   })
 })

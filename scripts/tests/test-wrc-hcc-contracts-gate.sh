@@ -214,6 +214,20 @@ else
   fail "WRC-HCC runtime gate pre-creates/bypasses Context or invents the assigned workload identity"
 fi
 
+# The McpServer CRD no longer declares spec.contextRef: a probe that requires it
+# can never converge, and a fixture that writes it is rejected by strict apply.
+phase_three_fixture="$(sed -n '/^header "Phase 3 - HCC remote proxy path contract"$/,/^YAML$/p' "$GATE")"
+if [[ "$phase_three_fixture" == *'kind: McpServer'* ]] &&
+   [[ "$phase_three_fixture" != *'contextRef'* ]] &&
+   grep -Fq '.metadata.labels["clerum.io/context"] == $context and' "$RUNTIME_GATE" &&
+   grep -Fq '(.spec | has("contextRef") | not)' "$RUNTIME_GATE" &&
+   [ "$(grep -cF '"$DELEGATED_MCP_CONTEXT_FILTER"' "$RUNTIME_GATE")" -eq 3 ] &&
+   ! grep -Fq ".spec.contextRef == \$context" "$RUNTIME_GATE"; then
+  pass "WRC-HCC gates bind delegated McpServers to their Context by label and allowlist only"
+else
+  fail "WRC-HCC gates still write or require McpServer.spec.contextRef"
+fi
+
 if grep -Fq 'kind:"Host"' "$RUNTIME_GATE" &&
    grep -Fq 'SOURCE_HOST_NAME="${E2E_WRC_HCC_SOURCE_HOST:-chatllm}"' "$RUNTIME_GATE" &&
    grep -Fq 'second_workload_patch=' "$RUNTIME_GATE" &&

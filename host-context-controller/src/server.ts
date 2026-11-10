@@ -674,7 +674,6 @@ export class ContextMapperServer {
 
     const servers = this.provider.getAllServerInfos().map(server => ({
       name: server.name,
-      contextRef: server.contextRef,
       transport: toPublicMcpTransport(server.transport),
       enabled: server.enabled,
       status: {

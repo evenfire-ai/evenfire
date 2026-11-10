@@ -4,7 +4,7 @@
   "description": "Normalizes third-party approval callbacks and submits decisions to workflow runtime mcp-hosts",
   "main": "dist/main.js",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.22.1"
   },
   "scripts": {
     "build": "tsc",

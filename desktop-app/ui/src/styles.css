@@ -164,6 +164,20 @@ h3 {
   flex: 0 0 auto;
 }
 
+@media (max-width: 759px) {
+  .window-titlebar__actions {
+    left: calc(
+      (var(--window-titlebar-control-size) * 3) + (var(--space-1) * 2) + var(--space-4) + 74px
+    );
+  }
+
+  .window-titlebar--platform-mac .window-titlebar__actions {
+    left: calc(
+      (var(--window-titlebar-mac-control-size) * 3) + (var(--space-1) * 2) + var(--space-4) + 74px
+    );
+  }
+}
+
 .window-titlebar__actions .global-search {
   --global-search-expanded: clamp(160px, 20vw, 280px);
   --global-search-expanded-min: 0;
@@ -426,11 +440,9 @@ h3 {
   );
 }
 
-/* Narrow/mobile layout: the sidebar collapses into a full-width top bar, so
-   there is no left content column to track. Zero the tracked width so the
-   leading actions fall back to just clearing the window controls (the max()
-   clamp above), instead of anchoring to the now-irrelevant 328/74 px. */
-@media (max-width: 900px) {
+/* Compact navigation overlays the workspace, so there is no left content
+   column for title-bar actions to track. */
+@media (max-width: 759px) {
   .app-frame,
   .app-frame[data-sidebar-collapsed] {
     --sidebar-width: 0px;
@@ -448,6 +460,14 @@ h3 {
   display: inline-flex;
 }
 
+.window-titlebar__leading .titlebar-leading-action--disabled {
+  cursor: not-allowed;
+}
+
+.window-titlebar__leading .titlebar-leading-action--disabled .titlebar-leading-action__btn {
+  pointer-events: none;
+}
+
 /* Ghost affordance matching the title-bar bell / chat-drawer IconButtons:
    no border or fill at rest, accent border + neutral fill on hover or when
    the toggle is pressed. */
@@ -463,6 +483,19 @@ h3 {
      no-drag and propagates, so this is idempotent — kept for clarity next to the
      interactive control, and harmless because it never widens a drag region. */
   -webkit-app-region: no-drag;
+}
+
+.window-titlebar__leading .compact-navigation-toggle.ui-icon-button {
+  display: none;
+}
+
+.compact-navigation-toggle svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
 }
 
 .window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button svg {
@@ -1510,9 +1543,9 @@ h3 {
      and apps are also expanded on a short window; below this the panel would
      collapse to 0 and the nav-column scroll fallback could never reach it. */
   --sidebar-file-explorer-min-height: 160px;
-  width: 328px;
-  min-width: 328px;
-  max-width: 328px;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  max-width: var(--sidebar-width);
   padding: 0 var(--space-2) var(--space-2);
   display: flex;
   flex-direction: column;
@@ -1601,6 +1634,56 @@ h3 {
 .sidebar-collapse-toggle.ui-icon-button:focus-visible .sidebar-collapse-icon {
   width: 16px;
   height: 16px;
+}
+
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  z-index: 2;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resize-handle::after {
+  position: absolute;
+  top: 0;
+  right: 3px;
+  bottom: 0;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  content: '';
+}
+
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle:focus-visible::after {
+  background: rgba(var(--focus-rgb), 0.72);
+}
+
+.sidebar-resize-handle:focus-visible {
+  outline: none;
+}
+
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.sidebar-compact-close.ui-icon-button {
+  display: none;
+  margin-left: auto;
+}
+
+.sidebar-compact-close svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
 }
 
 .sidebar-logo {
@@ -1976,6 +2059,57 @@ h3 {
 
 .da-file-explorer__no-access-badge {
   flex: 0 0 auto;
+}
+
+/* ── Drag-and-drop states (rev-2 D1; refusal UX matrix §5) ────────────────
+   Tone-keyed by REASON, existing tokens only, no motion. Only `allowed`
+   paints the accent (blue); `checking` is neutral; a deny paints the error
+   inset unless its reason re-maps the tone — `same-parent` is the no-op
+   (info, edge tokens) and the unknown family is a warning, never a deny
+   look. Labels stay readable: the tint + inset carry the verdict, not label
+   dimming (the old dim-only treatment was the invisible one). The Files
+   grid's own tone rules live with the grid block further down the sheet,
+   where they out-rank its row and hover backgrounds. */
+.da-file-explorer__row[data-drop-state='checking'] {
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-file-explorer__row[data-drop-state='allowed'] {
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.da-file-explorer__row[data-drop-state='allowed'] .da-file-explorer__label.ui-button {
+  background: transparent;
+}
+
+/* Deny = error inset + tint (UX matrix A1–A8). */
+.da-file-explorer__row[data-drop-state='denied'] {
+  background: rgba(var(--danger-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--danger-rgb), 0.72);
+}
+
+/* A4 no-op: informational, never error-red. */
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='same-parent'] {
+  background: rgba(var(--edge-rgb), 0.12);
+  box-shadow: inset 2px 0 0 rgba(var(--edge-rgb), 0.6);
+}
+
+/* A10 unknown/unverifiable: warning, must not look denied. */
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-file-explorer__row[data-drop-state='unavailable'] {
+  background: rgba(var(--warning-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--warning-rgb), 0.72);
+}
+
+/* Draggable tree labels and grid rows show the grab affordance. */
+.da-file-explorer__label.ui-button[draggable='true'] {
+  cursor: grab;
+}
+
+.da-grid__row--compact[draggable='true'] {
+  cursor: grab;
 }
 
 .da-file-explorer__icon {
@@ -8023,6 +8157,42 @@ h3 {
   scrollbar-width: thin;
 }
 
+.composer-attachments-count {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.composer-attachments-clear {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: 0 var(--space-1);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.composer-attachments-clear:hover {
+  color: var(--danger);
+  background: rgba(var(--danger-rgb), 0.08);
+}
+
+.composer-attachments-clear:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
 .composer-attachment-chip {
   display: inline-flex;
   align-items: center;
@@ -10475,6 +10645,11 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   color: var(--text);
 }
 
+/* TASK-172 — an interactive pill acts as a button, so it must read as one. */
+.ui-pill--interactive {
+  cursor: pointer;
+}
+
 .ui-pill--interactive:hover {
   background: var(--surface-hover);
   border-color: rgba(var(--accent-rgb), 0.42);
@@ -10617,12 +10792,53 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   margin-top: 1px;
 }
 
+.toast-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toast-action {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: var(--space-1) var(--space-1-5);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toast-action:hover {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  color: var(--danger);
+}
+
+.toast-action:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
 .toast.tone-success {
   border-color: rgba(var(--success-rgb), 0.5);
 }
 
+.toast.tone-warn {
+  border-color: rgba(var(--warning-rgb), 0.5);
+}
+
 .toast.tone-error {
   border-color: rgba(var(--danger-rgb), 0.52);
+}
+
+/* Unverifiable-but-not-forbidden outcomes (refusal UX matrix A10): the
+   warning border pairs with the warn toast tone. */
+.toast.tone-warn {
+  border-color: rgba(var(--warning-rgb), 0.52);
 }
 
 .auth-page {
@@ -11453,184 +11669,127 @@ pre {
   /* `.has-details` split-view was removed (unused in JSX). */
 }
 
-@media (max-width: 900px) {
-  body.mobile-sidebar-open::before {
+@media (max-width: 759px) {
+  body.compact-sidebar-open::before {
     content: '';
     position: fixed;
-    inset: 0;
+    inset: var(--window-titlebar-height) 0 0;
     background: rgba(var(--overlay-rgb), 0.72);
     pointer-events: none;
     z-index: calc(var(--layer-dropdown) + 20);
   }
 
   .app-shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
+    position: relative;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .workspace-layout {
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
-  /* Sidebar is gone and the aside spans the full top, so the extra top
-     breathing room (space-2 * 5) is no longer needed — drop it to space-2. */
   .content-panel.content-panel--agent-chat {
     padding-top: var(--space-2);
   }
 
   .left-nav {
-    position: sticky;
-    top: 0;
-    width: 100%;
+    position: fixed;
+    top: var(--window-titlebar-height);
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: calc(var(--layer-dropdown) + 1000);
+    width: auto;
     min-width: 0;
     max-width: none;
-    height: auto;
+    height: calc(100vh - var(--window-titlebar-height));
     min-height: 0;
     max-height: none;
-    padding-top: var(--space-2);
-    border-right: 0;
-    border-bottom: 1px solid rgba(var(--edge-rgb), 0.38);
-    overflow: visible;
+    padding: var(--space-2) var(--space-2) var(--space-3);
+    overflow: hidden;
+    visibility: hidden;
+    transform: translateY(-6px);
+    transition:
+      transform var(--motion-fast),
+      visibility var(--motion-fast);
+    border: 0;
+    background: var(--sidebar-gradient);
+    box-shadow: none;
   }
 
-  .left-nav.mobile-open {
-    z-index: calc(var(--layer-dropdown) + 30);
+  .left-nav.compact-open {
+    visibility: visible;
+    transform: translateY(0);
   }
 
-  .left-nav.collapsed {
-    width: 100%;
-    min-width: 0;
-    max-width: none;
-    padding-left: var(--space-2);
-    padding-right: var(--space-2);
+  .app-frame:has(.left-nav.compact-open) > .window-titlebar {
+    z-index: calc(var(--layer-dropdown) + 1010);
   }
 
-  .sidebar-logo {
-    position: relative;
-    z-index: 2;
-    margin-bottom: 0;
-    padding-left: var(--space-2);
-    padding-right: var(--space-2);
+  .window-titlebar__leading .compact-navigation-toggle.ui-icon-button {
+    display: inline-flex;
   }
 
   .sidebar-mobile-backdrop {
-    position: fixed;
+    position: absolute;
     inset: 0;
+    z-index: 1;
     display: none;
-    padding: 0;
     border: 0;
     border-radius: 0;
     background: rgba(var(--overlay-rgb), 0.72);
-    z-index: 1;
   }
 
-  /* Bare <button>: the global button:hover:enabled accent fill (--accent-strong)
-     outranks the overlay background above by specificity and would flash the whole
-     backdrop accent-blue on hover. It is a dismiss target, not an affordance; hold
-     the overlay tint. Same leak class already guarded on .nav-latest-session__main. */
   .sidebar-mobile-backdrop:hover:enabled {
     background: rgba(var(--overlay-rgb), 0.72);
   }
 
-  .left-nav.mobile-open .sidebar-mobile-backdrop {
+  .left-nav.compact-open .sidebar-mobile-backdrop {
     display: block;
   }
 
-  .sidebar-logo-link {
-    width: 100%;
+  .sidebar-logo,
+  .sidebar-menu-surface {
+    position: relative;
+    z-index: 2;
+    margin-right: 32px;
   }
 
-  .sidebar-mobile-menu-indicator {
+  .sidebar-logo {
+    padding-left: var(--space-2);
+    padding-right: var(--space-2);
+  }
+
+  .sidebar-logo-link {
+    width: auto;
+  }
+
+  .sidebar-compact-close.ui-icon-button {
     display: inline-flex;
   }
 
-  .left-nav.mobile-open .sidebar-mobile-menu-indicator svg {
-    transform: rotate(180deg);
-  }
-
-  /* Match the base rule's `.sidebar-collapse-toggle.ui-icon-button` specificity:
-     media queries don't add specificity, so a bare `.sidebar-collapse-toggle`
-     loses to it and the toggle would stay visible. In this viewport the sidebar
-     is an overlay menu with no persistent rail, so collapsing it is meaningless. */
-  .sidebar-collapse-toggle.ui-icon-button {
+  .sidebar-collapse-toggle.ui-icon-button,
+  .sidebar-resize-handle {
     display: none;
   }
 
   .sidebar-menu-surface {
-    display: none;
-    position: absolute;
-    top: calc(100% + var(--space-1));
-    left: var(--space-2);
-    right: var(--space-2);
-    max-height: calc(100vh - 88px);
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
     overflow: auto;
-    border: 1px solid rgba(var(--edge-rgb), 0.4);
-    border-radius: var(--radius-lg);
-    background: var(--panel);
-    box-shadow: 0 16px 28px rgba(var(--overlay-rgb), 0.4);
-    padding: var(--space-1-5);
-    z-index: 3;
-  }
-
-  .left-nav.mobile-open .sidebar-menu-surface {
-    display: flex;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    padding: var(--space-1-5) var(--space-1-5) 0;
   }
 
   .nav-links {
     flex: 0 0 auto;
     overflow: visible;
-  }
-
-  .left-nav.collapsed .sidebar-logo {
-    justify-content: flex-start;
-    padding-left: var(--space-2);
-    padding-right: var(--space-2);
-  }
-
-  .left-nav.collapsed .sidebar-logo-mark {
-    width: 28px;
-    height: 28px;
-    display: none;
-  }
-
-  /* Reveal the wordmark in the collapsed mobile bar, but keep the light/dark
-     toggle. Targeting the shared `.sidebar-logo-lockup` (0,3,0) would outrank
-     `.sidebar-logo-lockup--dark { display: none }` (0,1,0) and paint both
-     variants at once (double logo), so drive the variants directly. */
-  .left-nav.collapsed .sidebar-logo-lockup--light {
-    display: block;
-  }
-
-  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--light {
-    display: none;
-  }
-
-  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--dark {
-    display: block;
-  }
-
-  .left-nav.collapsed .nav-link {
-    justify-content: flex-start;
-    padding: 0 var(--space-2) 0 var(--space-3);
-  }
-
-  .left-nav.collapsed .nav-link-label,
-  .left-nav.collapsed .nav-link .ui-nav-item__label {
-    display: inline;
-  }
-
-  .left-nav.collapsed .nav-link.active::before {
-    display: block;
-  }
-
-  .left-nav.collapsed .sidebar-settings-chevron {
-    display: inline-flex;
-  }
-
-  .sidebar-footer {
-    margin-top: var(--space-1-5);
-    padding-top: var(--space-1-5);
-    border-top: 1px solid rgba(var(--edge-rgb), 0.32);
   }
 
   .sidebar-settings-menu {
@@ -11641,18 +11800,12 @@ pre {
     box-shadow: none;
   }
 
-  .left-nav.collapsed .sidebar-settings-menu {
-    position: static;
-    width: auto;
-    min-width: 0;
-    margin-top: var(--space-1);
-    box-shadow: none;
-  }
-
   .nav-tooltip {
     display: none;
   }
+}
 
+@media (max-width: 900px) {
   .top-bar {
     position: static;
     top: auto;
@@ -13155,6 +13308,12 @@ pre {
   height: 100%;
   object-fit: fill;
   pointer-events: none;
+}
+
+/* Recovery action (Reopen / Retry) at the trailing end of an app status banner. */
+.sandbox-ui-status-action {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .sandbox-ui-loading {
@@ -14681,6 +14840,7 @@ pre {
   display: flex;
   align-items: center;
   flex: 1 1 auto;
+  gap: var(--space-1);
   min-width: 0;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
@@ -14689,7 +14849,7 @@ pre {
 
 .da-gfs-file-picker__input:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: none;
 }
 
 .da-gfs-file-picker__scheme {
@@ -14704,7 +14864,14 @@ pre {
   flex: 1 1 auto;
   min-width: 0;
   border: 0;
+  border-radius: 0;
+  outline: 0;
   background: transparent;
+  box-shadow: none;
+}
+
+.da-gfs-file-picker__input input:focus-visible {
+  outline: 0;
   box-shadow: none;
 }
 
@@ -15234,18 +15401,55 @@ pre {
   white-space: nowrap;
 }
 
-.da-gfs-drive__breadcrumb.ui-button:disabled {
+.da-gfs-drive__breadcrumb.ui-button[aria-current='page'] {
   color: var(--text);
   opacity: 1;
+  background: rgba(var(--accent-rgb), 0.1);
+  cursor: default;
 }
 
-.da-gfs-drive__header-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  flex: 0 0 auto;
+/* Breadcrumb drop-move verdict tints (drop-move parity, refusal UX matrix):
+   identical treatment to Control UI's cu-gfs-breadcrumb verdicts — the
+   target gets a crisp 2px accent ring, checking dashes neutrally, ordinary
+   denials read as error, the unknown family warns, and the same-parent
+   no-op stays neutral. The active crumb remains a drop target with an inert
+   click, so these can render on ancestor and current breadcrumbs. */
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='checking'] {
+  outline: 2px dashed rgba(var(--accent-rgb), 0.4);
+  outline-offset: -2px;
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='allowed'],
+.da-gfs-drive__breadcrumb.ui-button.da-gfs-drive__breadcrumb--allowed {
+  outline: 2px solid rgba(var(--accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'] {
+  outline: 2px solid rgba(var(--danger-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--danger-rgb), 0.12);
+}
+
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='same-parent'] {
+  outline: 2px solid rgba(var(--accent-rgb), 0.35);
+  outline-offset: -2px;
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-gfs-drive__breadcrumb.ui-button[data-drop-state='unavailable'] {
+  outline: 2px solid rgba(var(--warning-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--warning-rgb), 0.12);
+}
+
+.da-gfs-drive__upload-input {
+  display: none;
 }
 
 .da-gfs-upload-status {
@@ -15299,6 +15503,66 @@ pre {
   gap: var(--space-2);
   color: var(--text-muted);
   font-size: var(--font-size-sm);
+}
+
+/* BUG-175 — folder-zip assembly progress strip. */
+.da-gfs-zip-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: var(--radius-control);
+  background: rgba(var(--panel-rgb), 0.72);
+  color: var(--text);
+  padding: var(--space-1-5) var(--space-2);
+  font-size: var(--font-size-sm);
+  line-height: 1.35;
+}
+
+.da-gfs-zip-progress__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.da-gfs-zip-progress__stop {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: var(--space-1) var(--space-1-5);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.da-gfs-zip-progress__stop:hover {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  color: var(--danger);
+}
+
+.da-gfs-zip-progress__stop:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
+.da-gfs-zip-progress__label::before {
+  content: '';
+  flex: 0 0 auto;
+  width: var(--space-1);
+  height: var(--space-1);
+  border-radius: 999px;
+  background: var(--accent);
+  margin-right: var(--space-1-5);
+  display: inline-block;
+  animation: da-gfs-loading-dot 1.2s ease-in-out infinite;
 }
 
 .da-gfs-loading__dots {
@@ -15399,6 +15663,39 @@ pre {
 .da-gfs-drive__grid .da-grid__row--clickable:hover:enabled {
   background: var(--grid-card-bg-hover);
   border-color: var(--grid-card-border);
+}
+
+/* ── Files-grid drop-verdict tints (refusal UX matrix §5) ──────────────────
+   Grid- AND clickable-scoped so every tone out-ranks BOTH the base row
+   background above (`background: transparent`) and the clickable-hover
+   background: the verdict must stay readable on the hovered row too. Only
+   `allowed` stays blue — through the data-drop-target highlight above,
+   unchanged. Tone keys on the reason: deny=error, same-parent=info (the
+   no-op), unknown/unavailable=warning. */
+.da-gfs-drive__grid .da-grid__row--clickable.da-grid__row--compact[data-drop-state='checking'] {
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-drive__grid .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'] {
+  background: rgba(var(--danger-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--danger-rgb), 0.72);
+}
+
+.da-gfs-drive__grid
+  .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='same-parent'] {
+  background: rgba(var(--edge-rgb), 0.12);
+  box-shadow: inset 2px 0 0 rgba(var(--edge-rgb), 0.6);
+}
+
+.da-gfs-drive__grid
+  .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-gfs-drive__grid
+  .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-gfs-drive__grid
+  .da-grid__row--clickable.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-gfs-drive__grid .da-grid__row--clickable.da-grid__row--compact[data-drop-state='unavailable'] {
+  background: rgba(var(--warning-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--warning-rgb), 0.72);
 }
 
 .da-gfs-current-file {
@@ -15734,6 +16031,22 @@ pre {
   gap: var(--space-2);
 }
 
+.da-gfs-preview-title-row {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.da-gfs-preview-title-row > .da-gfs-preview-title {
+  flex: 0 1 auto;
+}
+
+.da-gfs-preview-title-row > .da-gfs-resource-menu {
+  flex: 0 0 auto;
+}
+
 .da-gfs-image-preview-dialog__header-main {
   display: flex;
   align-items: center;
@@ -15814,19 +16127,32 @@ pre {
   white-space: nowrap;
 }
 
-/* File preview in a workspace tab (spec 18 §3.B.3). Reuses the shared
- * Gfs*PreviewBody inner classes; this container gives the header + body the same
- * two-row layout the dialog frame provided, without any modal chrome. */
+/* File preview in a workspace tab (spec 18 §3.B.3). Its actions live in the
+ * title bar; this frame contains only the preview body, without modal chrome. */
 .da-gfs-preview-page {
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--table-frame-border);
   border-radius: var(--table-radius);
   background: var(--table-frame-bg);
+}
+
+.da-gfs-preview-content {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.da-gfs-preview-unavailable-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-1) var(--space-2);
 }
 
 .da-gfs-image-preview-dialog__body,
@@ -16068,6 +16394,41 @@ pre {
   gap: var(--space-3);
   overflow: visible;
   padding: 0 var(--space-5) var(--space-5);
+}
+
+/* GfsMoveConfirmDialog — the compact folder-move confirmation (rev-2 §1).
+   Scoped restyling of the share-dialog shell to match the Control UI
+   treatment: ~30rem panel, plain h3 header without icon chrome, muted
+   impact copy, tight right-aligned actions. */
+.da-gfs-move-confirm-dialog.da-gfs-manage-dialog {
+  width: min(30rem, 96vw);
+  max-height: none;
+  grid-template-rows: auto auto auto;
+}
+
+.da-gfs-move-confirm-dialog .da-gfs-manage-dialog__header {
+  grid-template-columns: minmax(0, 1fr);
+  padding: var(--space-5) var(--space-5) var(--space-2);
+}
+
+.da-gfs-move-confirm-dialog .da-gfs-manage-dialog__heading h3 {
+  font-size: var(--font-size-lg);
+}
+
+.da-gfs-move-confirm-dialog .da-gfs-manage-dialog__body {
+  padding: 0 var(--space-5);
+}
+
+.da-gfs-move-confirm-dialog__impact {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.da-gfs-move-confirm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-5) var(--space-5);
 }
 
 .da-gfs-manage-section {
@@ -16810,6 +17171,14 @@ pre {
   color: var(--text);
 }
 
+/* R1-M5: the confirmation states the surviving Editor shares BEFORE the
+   user approves, not only in the post-change toast. */
+.da-gfs-parent-update-dialog__residual {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
 .da-gfs-parent-update-dialog__help {
   display: grid;
   gap: var(--space-2);
@@ -16873,10 +17242,6 @@ pre {
   .da-gfs-drive__header.page-card__header {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .da-gfs-drive__header-actions {
-    justify-content: flex-end;
   }
 
   .da-gfs-drive__grid {
@@ -17084,11 +17449,40 @@ pre {
 }
 
 .chat-view-tabs__scroller {
+  flex: 1 1 0;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  transform: rotateX(180deg);
-  width: 100%;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.chat-view-tabs__scroller::-webkit-scrollbar {
+  display: none;
+  height: 0;
+  width: 0;
+}
+
+.chat-view-tabs__scroll-button {
+  align-self: center;
+  flex: 0 0 auto;
+  margin-bottom: var(--space-0-5);
+}
+
+.chat-view-tabs__scroll-button[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.chat-view-tabs__scroll-button[aria-disabled='true']:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.chat-view-tabs__scroll-button svg {
+  height: 14px;
+  width: 14px;
 }
 
 .chat-view-tabs__list {
@@ -17096,7 +17490,6 @@ pre {
   gap: var(--space-1);
   min-width: 100%;
   position: relative;
-  transform: rotateX(180deg);
   width: 100%;
 }
 
