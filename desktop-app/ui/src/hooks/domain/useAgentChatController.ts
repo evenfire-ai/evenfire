@@ -3243,6 +3243,7 @@ export function useAgentChatController({
             // generic Approve/Deny prompt. Absent on ordinary approval suspensions.
             reason: state.pendingApproval.reason,
             mcpServerName: state.pendingApproval.mcpServerName,
+            alwaysApproveAllowed: state.pendingApproval.alwaysApproveAllowed,
             inputPreview: readApprovalInputPreview(state.pendingApproval.inputPreview),
           }
         : activeFsmApproval
@@ -3256,6 +3257,7 @@ export function useAgentChatController({
               // branch above and InFlightAssistantPlaceholder's fallback.
               reason: activeFsmApproval.reason,
               mcpServerName: activeFsmApproval.mcpServerName,
+              alwaysApproveAllowed: activeFsmApproval.alwaysApproveAllowed,
               inputPreview: readApprovalInputPreview(activeFsmApproval.inputPreview),
             }
           : undefined

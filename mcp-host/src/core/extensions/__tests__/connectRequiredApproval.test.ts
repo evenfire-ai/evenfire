@@ -51,7 +51,7 @@ describe('buildConnectRequiredApproval', () => {
   })
 
   it('uses the authoritative server name for a server whose own name contains "__" (R3-L3)', () => {
-    // getMcpServerPrefix splits on the FIRST '__' → 'my' for this tool, but the
+    // Splitting on the FIRST '__' would give 'my' for this tool, but the
     // authoritative server name is 'my__srv'. tool_source_ref must match the HITL
     // gate's sourceRef (the whole server name), not the truncated prefix.
     const approval = buildConnectRequiredApproval(

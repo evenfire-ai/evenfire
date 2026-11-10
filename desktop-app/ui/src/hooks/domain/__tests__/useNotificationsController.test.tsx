@@ -83,7 +83,7 @@ function renderNotificationsController(
       notificationSoundVolume,
       canDeliverChatResponseNotification: channel => canDeliver(channel),
       showDesktopNotification,
-      decideApproval: vi.fn(async () => undefined),
+      decideApproval: vi.fn(async () => 'ok' as const),
       pushToast: vi.fn(),
       setStatus: vi.fn(),
     })

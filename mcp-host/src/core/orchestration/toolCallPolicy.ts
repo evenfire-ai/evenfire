@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { isDeepStrictEqual } from 'node:util'
+import { isDenied } from '../conversation/denialPolicy'
+import { oneShotMatches } from '../extensions/approvalMatch'
 import {
   type ToolIdentity,
   recordAndCheck,
@@ -15,10 +16,15 @@ export type ToolCallAdmission =
   | { kind: 'suspend'; approval: PendingApproval }
   | { kind: 'execute'; call: ToolCall; toolIdentity?: ToolIdentity }
 
+/**
+ * A guardrail `ask` card authorizes only the call it shows. For a tool the
+ * user denied it is also a denial re-ask, so it never offers Always approve.
+ */
 function guardrailSuspension(
   call: ToolCall,
   config: LoopConfig,
-  reasonCode: string
+  reasonCode: string,
+  denied: boolean
 ): { type: 'suspend'; approval: PendingApproval } {
   const descriptor = config.toolRegistry.get(call.name)?.traceDescriptor?.(call.arguments) ?? {
     kind: 'internal_tool' as const,
@@ -36,6 +42,7 @@ function guardrailSuspension(
       description: `Guardrail requires approval (${reasonCode})`,
       tool_call_id: call.id,
       context_snapshot: [],
+      ...(denied ? { reask: 'denied' as const } : {}),
     },
   }
 }
@@ -133,15 +140,12 @@ export async function admitToolCall(
       call = { ...call, arguments: decision.effectiveInput }
     }
     if (decision.decision === 'ask') {
+      // Resume-safe one-shot: only an exact approve-once grant for this very
+      // call (name, call id and arguments) satisfies the ask, and never for a
+      // tool the user denied. Allowlists do not.
       const pending = config.conversation.pending_approval
-      const exactInvocationMatches =
-        pending?.authorization_scope !== 'turn_tools' &&
-        pending?.tool_call_id === call.id &&
-        isDeepStrictEqual(pending?.parameters, call.arguments)
-      const pendingMatches =
-        pending?.tool_name === call.name &&
-        (pending.authorization_scope === 'turn_tools' || exactInvocationMatches)
-      if (pending && pendingMatches) {
+      const denied = isDenied(config.conversation, call.name)
+      if (!denied && pending && oneShotMatches(pending, call.name, call.arguments, call.id)) {
         config.conversation.pending_approval = undefined
         recordDecision('tool', 'ask', decision.source, 'executed', decision.reasonCode, mode)
         gate = 'proceed'
@@ -159,7 +163,7 @@ export async function admitToolCall(
         }
       } else {
         recordDecision('tool', 'ask', decision.source, 'ask', decision.reasonCode, mode)
-        gate = guardrailSuspension(call, config, decision.reasonCode)
+        gate = guardrailSuspension(call, config, decision.reasonCode, denied)
       }
     } else {
       recordDecision(
@@ -170,10 +174,10 @@ export async function admitToolCall(
         decision.reasonCode,
         mode
       )
-      gate = config.loopController.beforeTool(call.name, call.arguments)
+      gate = config.loopController.beforeTool(call.name, call.arguments, call.id)
     }
   } else {
-    gate = config.loopController.beforeTool(call.name, call.arguments)
+    gate = config.loopController.beforeTool(call.name, call.arguments, call.id)
   }
 
   if (gate === 'skip') {

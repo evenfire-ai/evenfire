@@ -76,6 +76,12 @@ function createTestTask(sender: string = 'user-1'): Task {
   }
 }
 
+const SESSION_KEY = serializeSessionKey({
+  userId: 'user-1',
+  channelType: 'telegram',
+  channelId: 'test-channel',
+})
+
 describe('AgentStateMachine -- approval handling', () => {
   let agent: AgentStateMachine
   let queue: MessageQueue
@@ -315,6 +321,39 @@ describe('AgentStateMachine -- approval handling', () => {
     )
   })
 
+  it('reports a denial that could not be saved instead of acknowledging it', async () => {
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: 'need_approval',
+      approval: {
+        request_id: 'req-1',
+        tool_name: 'shell_exec',
+        parameters: { command: 'rm -rf /' },
+        description: 'Dangerous command',
+        tool_call_id: 'tc_1',
+        context_snapshot: [],
+      },
+    })
+    vi.spyOn(agent.getConversationManager(), 'deny').mockRejectedValueOnce(
+      new Error('database is locked')
+    )
+
+    const task = createTestTask('user-1')
+    await agent.executeTask(task)
+    expect(agent.getState()).toBe('waiting_approval')
+
+    const result = await agent.handleDenial('user-1', 'req-1')
+
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('denial_not_saved')
+    expect(result.error).toMatch(/could not be saved/i)
+    // The call is still cancelled and the task completes: deny fails safe.
+    expect(agent.getState()).toBe('idle')
+    expect(runToolUseLoop).toHaveBeenCalledTimes(1)
+    expect(task.responseCallback).toHaveBeenCalledWith(
+      expect.objectContaining({ response: expect.stringContaining('denied') })
+    )
+  })
+
   it('preserves attachments when resuming after approval', async () => {
     const priorAttachment = {
       id: 'att_prior',
@@ -415,6 +454,57 @@ describe('AgentStateMachine -- approval handling', () => {
         })
       )
     })
+  })
+
+  it('drops the one-shot grant once the approved call ran, before the loop continues', async () => {
+    const sessionKey = serializeSessionKey({
+      userId: 'user-1',
+      channelType: 'telegram',
+      channelId: 'test-channel',
+    })
+    let pendingWhenLoopResumed: unknown = 'not-called'
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-oneshot',
+          tool_name: 'shell_exec',
+          parameters: { command: 'ls' },
+          description: 'Shell command',
+          tool_call_id: 'tc_1',
+          context_snapshot: [
+            { role: 'user', content: 'Do something' },
+            {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ id: 'tc_1', name: 'shell_exec', arguments: { command: 'ls' } }],
+            },
+          ],
+        },
+      })
+      .mockImplementationOnce(async () => {
+        const conv = await agent.getConversationManager().getOrCreate(sessionKey)
+        pendingWhenLoopResumed = conv.pending_approval
+        return {
+          type: 'response',
+          content: 'Done',
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        }
+      })
+    ;(executeSingleTool as ReturnType<typeof vi.fn>).mockResolvedValue({
+      tool_call_id: 'tc_1',
+      name: 'shell_exec',
+      content: 'ok',
+      is_error: false,
+    })
+
+    const task = createTestTask('user-1')
+    await agent.executeTask(task)
+    expect((await agent.handleApproval('user-1', 'req-oneshot', false)).success).toBe(true)
+
+    await vi.waitFor(() => expect(pendingWhenLoopResumed).not.toBe('not-called'))
+    expect(executeSingleTool).toHaveBeenCalledTimes(1)
+    expect(pendingWhenLoopResumed).toBeUndefined()
   })
 
   it('emits tool progress events when resuming after approval', async () => {
@@ -530,6 +620,79 @@ describe('AgentStateMachine -- approval handling', () => {
           response: expect.stringContaining('denied'),
         })
       )
+    })
+    // A timeout is not the user's decision: it records no denial.
+    const conv = await shortTimeoutAgent.getConversationManager().getOrCreate(SESSION_KEY)
+    expect(conv.denials?.has('shell_exec') ?? false).toBe(false)
+  })
+
+  describe('denials through the executor', () => {
+    const needApproval = (requestId: string, toolCallId: string) => ({
+      type: 'need_approval',
+      approval: {
+        request_id: requestId,
+        tool_name: 'shell_exec',
+        parameters: { command: 'ls' },
+        description: 'Shell command',
+        tool_call_id: toolCallId,
+        context_snapshot: [],
+      },
+    })
+
+    it("the executor's loop controller keeps a denied tool suspended over an allowlist", async () => {
+      ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        needApproval('req-deny', 'tc_1')
+      )
+      await agent.executeTask(createTestTask('user-1'))
+      expect((await agent.handleDenial('user-1', 'req-deny')).success).toBe(true)
+
+      const conv = await agent.getConversationManager().getOrCreate(SESSION_KEY)
+      conv.auto_approved_tools.add('shell_exec')
+      let gate: unknown
+      ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (loopConfig: { loopController: { beforeTool: (...args: unknown[]) => unknown } }) => {
+          gate = loopConfig.loopController.beforeTool('shell_exec', { command: 'ls' }, 'tc_2')
+          return {
+            type: 'response',
+            content: 'ok',
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          }
+        }
+      )
+      await agent.executeTask(createTestTask('user-1'))
+
+      expect(gate).toEqual(expect.objectContaining({ type: 'suspend' }))
+      expect(executeSingleTool).not.toHaveBeenCalled()
+    })
+
+    it("another user's approval of a re-ask does not lift the denial", async () => {
+      ;(runToolUseLoop as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(needApproval('req-deny', 'tc_1'))
+        .mockResolvedValueOnce(needApproval('req-reask', 'tc_2'))
+        .mockResolvedValue({
+          type: 'response',
+          content: 'ok',
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        })
+      ;(executeSingleTool as ReturnType<typeof vi.fn>).mockResolvedValue({
+        tool_call_id: 'tc_2',
+        name: 'shell_exec',
+        content: 'ok',
+        is_error: false,
+      })
+      await agent.executeTask(createTestTask('user-1'))
+      expect((await agent.handleDenial('user-1', 'req-deny')).success).toBe(true)
+      await agent.executeTask(createTestTask('user-1'))
+
+      // The decision binding requires the original sender, so approve as that
+      // sender but through the executor path that carries the approver id.
+      const conv = await agent.getConversationManager().getOrCreate(SESSION_KEY)
+      conv.denials?.set('shell_exec', 'user-other')
+      expect((await agent.handleApproval('user-1', 'req-reask', true)).success).toBe(true)
+
+      await vi.waitFor(() => expect(agent.getState()).toBe('idle'))
+      expect(conv.denials?.has('shell_exec')).toBe(true)
+      expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
     })
   })
 })

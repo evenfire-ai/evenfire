@@ -1622,7 +1622,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
 
   ipcMain.handle(
     'rpc:approveToolCall',
-    async (event, { hostRef, taskId, toolCallId, hostRefs, teamId }) => {
+    async (event, { hostRef, taskId, toolCallId, hostRefs, teamId, alwaysApprove }) => {
       assertTrustedSender(event)
       const targetHostRef = sanitizeString(hostRef)
       const targetTaskId = sanitizeString(taskId)
@@ -1635,7 +1635,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
         targetTaskId,
         targetToolCallId,
         targetHostRefs,
-        { teamId: sanitizeString(teamId) || undefined }
+        {
+          teamId: sanitizeString(teamId) || undefined,
+          alwaysApprove: alwaysApprove === true,
+        }
       )
     }
   )
