@@ -3605,7 +3605,7 @@ describe('App deep-link orchestration', () => {
       .toBe('draft owned by B')
   })
 
-  it('keeps the selected agent sendable through catalog refresh failures and surfaces the server send denial', async () => {
+  it('keeps the selected agent sendable through catalog refresh failures and returns the text and the document to the composer after a send 403', async () => {
     composerPanelHarness.useRealComposerPanel = true
     composerPanelHarness.renderSendButton = true
     const existingBridge = window.clerum
@@ -3763,13 +3763,17 @@ describe('App deep-link orchestration', () => {
     await vi.waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce(), {
       timeout: 2_000,
     })
-    const recoverInput = await screen.findByRole('button', { name: 'Recover input' })
-    await waitFor(() => expect((recoverInput as HTMLButtonElement).disabled).toBe(false))
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce()
     expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
       content: draft,
       attachments: [expect.objectContaining({ filename: 'notes.txt' })],
     })
+    // The rejected send returns its text and document to the composer.
+    await waitFor(() => expect((composer as HTMLTextAreaElement).value).toBe(draft))
+    await waitFor(() =>
+      expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
+    )
+    expect(screen.queryByRole('button', { name: 'Recover input' })).toBeNull()
   })
 
   it('keeps actual ComposerPanel drafts on their App-created workspace tabs', async () => {

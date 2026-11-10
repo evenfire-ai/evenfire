@@ -1,0 +1,1130 @@
+// @vitest-environment jsdom
+/**
+ * A send the server rejects, on the real coordinator and the real IPC error
+ * producers. A generic rejection (a 401, or a 403 whose follow-up read does not
+ * deny the agent) returns the input to the composer with no message, keeps the
+ * agent selected and withdraws the rejected turn. A loss of access holds or
+ * revokes the agent as before; the input waits for the user in the composer, or
+ * behind Recover input when the send carried attachments.
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, waitFor } from '@testing-library/react'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
+import {
+  installAppControllerClerum,
+  renderAppController,
+} from '../domain/__tests__/__fixtures__/appControllerHarness'
+import {
+  ipcGenericForbidden,
+  ipcHostAccessDenied,
+  ipcHostAccessRevoked,
+  ipcHttpError,
+} from '../domain/__tests__/__fixtures__/ipcErrors'
+import { type MockClerum, uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
+
+const AGENT = 'agent-x'
+const REFERENCE = {
+  id: 'plugin-ref',
+  type: 'plugin',
+  namespace: 'ns',
+  name: 'helper',
+  label: 'helper plugin',
+} as const
+
+type App = ReturnType<typeof renderAppController>
+type SendError = () => Promise<Error>
+
+const networkError: SendError = async () => new Error('network down')
+const http401: SendError = () =>
+  ipcHttpError('rpc:invokeHostMessage', 401, 'Unauthorized', { error: 'expired' })
+
+function deferred<T = void>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+// The follow-up read the send makes after a 403 asks for one session.
+const isFollowUpRead = (query: unknown) => (query as { limit?: number } | undefined)?.limit === 1
+
+function serverTurn(number: number, userInput: string, response: string) {
+  return {
+    number,
+    user_input: userInput,
+    response,
+    started_at: new Date(Date.UTC(2026, 0, 1, 0, number)).toISOString(),
+    completed_at: new Date(Date.UTC(2026, 0, 1, 0, number, 30)).toISOString(),
+  }
+}
+
+describe('useAppController: a send the server rejects', () => {
+  let unmount: (() => void) | undefined
+
+  afterEach(() => {
+    cleanup()
+    unmount?.()
+    unmount = undefined
+    vi.restoreAllMocks()
+    uninstallMockClerum()
+    resetComposerDraftStore()
+  })
+
+  async function boot() {
+    const { clerum, handle } = installAppControllerClerum({ agentNames: [AGENT, 'agent-y'] })
+    // The harness default answers a fixed empty index; read the real store's.
+    clerum.chat.getIndex.mockImplementation((agentRef: string) => clerum.readIndex(agentRef))
+    const app = renderAppController()
+    unmount = app.unmount
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+    act(() => {
+      app.result.current.handleSelectChatAgent(AGENT, { selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(AGENT))
+    return { app, clerum, handle }
+  }
+
+  async function createChat(app: App): Promise<string> {
+    await act(async () => {
+      await app.result.current.handleCreateChat()
+    })
+    await waitFor(() => expect(app.result.current.activeChatId).not.toBeNull())
+    return app.result.current.activeChatId as string
+  }
+
+  /** A chat whose transcript already holds server turn 1, visible and stored. */
+  async function createChatWithServerTurn(app: App, clerum: MockClerum): Promise<string> {
+    const chatId = await createChat(app)
+    const first = serverTurn(1, 'first question', 'first answer')
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: AGENT,
+      chatId,
+      state: 'idle',
+      totalTurns: 1,
+      turns: [first],
+    })
+    await act(async () => {
+      await app.result.current.handleSelectChat(chatId)
+    })
+    await waitFor(() =>
+      expect(app.result.current.chatMessages.map(message => message.content)).toEqual([
+        'first question',
+        'first answer',
+      ])
+    )
+    return chatId
+  }
+
+  async function addReference(app: App) {
+    act(() => app.result.current.handleAddComposerReferenceAttachments([REFERENCE] as never))
+    await waitFor(() => expect(app.result.current.composerReferenceAttachments).toHaveLength(1))
+  }
+
+  async function addDocument(app: App, text: string) {
+    const note = new File(['rejected send attachment'], 'notes.txt', { type: 'text/plain' })
+    act(() => app.result.current.handleAddComposerFiles([note], text))
+    await waitFor(() =>
+      expect(app.result.current.composerFileAttachments.map(file => file.status)).toEqual(['ready'])
+    )
+  }
+
+  async function send(app: App, text: string) {
+    await act(async () => {
+      await app.result.current.handleSendAgentMessage(text)
+    })
+  }
+
+  const visibleUserTurns = (app: App, text: string) =>
+    app.result.current.chatMessages.filter(
+      message => message.role === 'user' && message.content === text
+    )
+
+  const storedUserTurns = async (clerum: MockClerum, chatId: string, text: string) =>
+    (await clerum.persistedMessages(AGENT, chatId)).filter(
+      message => message.role === 'user' && message.content === text
+    )
+
+  /** The id of the optimistic user turn the send wrote for `text`. */
+  function writtenTurnId(clerum: MockClerum, chatId: string, text: string): string {
+    const call = clerum.chat.upsertMessages.mock.calls.find(
+      ([agentRef, callChatId, messages]) =>
+        agentRef === AGENT &&
+        callChatId === chatId &&
+        (messages as Array<{ role: string; content: string }>).some(
+          message => message.role === 'user' && message.content === text
+        )
+    )
+    const message = (
+      call?.[2] as Array<{ id: string; role: string; content: string }> | undefined
+    )?.find(candidate => candidate.role === 'user' && candidate.content === text)
+    if (!message) throw new Error(`No user turn with "${text}" was written to chat ${chatId}`)
+    return message.id
+  }
+
+  async function reselect(app: App, clerum: MockClerum, chatId: string) {
+    clerum.rpc.listSessions.mockReset()
+    clerum.rpc.listSessions.mockResolvedValue({ items: [] })
+    clerum.rpc.loadSessionMessages.mockReset()
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: AGENT,
+      chatId,
+      state: 'idle',
+      totalTurns: 0,
+      turns: [],
+    })
+    act(() => {
+      app.result.current.handleSelectChatAgent(AGENT, { selectLatest: true })
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(AGENT))
+    await waitFor(() => expect(app.result.current.activeChatId).toBe(chatId))
+  }
+
+  describe('T-A1: a generic rejection returns the input and keeps the agent', () => {
+    const rows: Array<{
+      label: string
+      sendError: SendError
+      readError: SendError | null
+      chat: 'existing' | 'created by the send'
+      document: boolean
+    }> = [
+      { label: '401', sendError: http401, readError: null, chat: 'existing', document: false },
+      {
+        label: '401',
+        sendError: http401,
+        readError: null,
+        chat: 'created by the send',
+        document: false,
+      },
+      {
+        label: 'generic 403 with a readable read',
+        sendError: () => ipcGenericForbidden('rpc:invokeHostMessage'),
+        readError: null,
+        chat: 'existing',
+        document: true,
+      },
+      {
+        label: 'generic 403 with a readable read',
+        sendError: () => ipcGenericForbidden('rpc:invokeHostMessage'),
+        readError: null,
+        chat: 'created by the send',
+        document: false,
+      },
+      {
+        label: 'generic 403 with a read that fails 503',
+        sendError: () => ipcGenericForbidden('rpc:invokeHostMessage'),
+        readError: () =>
+          ipcHttpError('rpc:listSessions', 503, 'Service Unavailable', { error: 'unavailable' }),
+        chat: 'existing',
+        document: false,
+      },
+      {
+        label: 'generic 403 with a read that fails 503',
+        sendError: () => ipcGenericForbidden('rpc:invokeHostMessage'),
+        readError: () =>
+          ipcHttpError('rpc:listSessions', 503, 'Service Unavailable', { error: 'unavailable' }),
+        chat: 'created by the send',
+        document: false,
+      },
+    ]
+
+    it.each(rows)(
+      '$label, chat $chat, document $document',
+      async ({ sendError, readError, chat, document }) => {
+        const { app, clerum } = await boot()
+        if (chat === 'existing') await createChat(app)
+        const text = 'text the server rejects'
+        await addReference(app)
+        if (document) await addDocument(app, text)
+        const sendFailure = await sendError()
+        const readFailure = readError ? await readError() : null
+        clerum.rpc.invokeHostMessage.mockImplementationOnce(async () => {
+          if (readFailure) {
+            clerum.rpc.listSessions.mockImplementation(async (_hostRef, _hostRefs, query) => {
+              if (isFollowUpRead(query)) throw readFailure
+              return { items: [] }
+            })
+          }
+          throw sendFailure
+        })
+        const toastsBefore = app.result.current.toasts.length
+
+        await send(app, text)
+
+        // Step 1, the liveness witness for every step below.
+        expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+        const chatId = app.result.current.activeChatId as string
+        expect(chatId).not.toBeNull()
+        // Step 2.
+        expect.soft(app.result.current.selectedAgent, 'step 2: selected agent').toBe(AGENT)
+        expect.soft(app.result.current.isHostAccessBlocked(AGENT), 'step 2: blocked').toBe(false)
+        // Step 3.
+        expect.soft(getComposerDraft(chatId, AGENT), 'step 3: draft').toBe(text)
+        expect
+          .soft(
+            app.result.current.composerReferenceAttachments.map(reference => reference.id),
+            'step 3: references'
+          )
+          .toEqual([REFERENCE.id])
+        if (document) {
+          expect
+            .soft(
+              app.result.current.composerFileAttachments.map(file => file.filename),
+              'step 3: documents'
+            )
+            .toEqual(['notes.txt'])
+        }
+        // Step 4. Witnesses for these negatives: steps 1 and 3.
+        expect.soft(app.result.current.agentError, 'step 4: agent error').toBeNull()
+        expect.soft(app.result.current.failedAgentSend, 'step 4: failed send').toBeNull()
+        expect.soft(app.result.current.toasts.slice(toastsBefore), 'step 4: toasts').toEqual([])
+        // Step 5. Witness: the turn was written before the POST.
+        expect(() => writtenTurnId(clerum, chatId, text)).not.toThrow()
+        await waitFor(async () => {
+          expect.soft(visibleUserTurns(app, text), 'step 5: visible turn').toHaveLength(0)
+          expect
+            .soft(await storedUserTurns(clerum, chatId, text), 'step 5: stored turn')
+            .toHaveLength(0)
+        })
+
+        // Step 6: a second send is accepted.
+        clerum.rpc.listSessions.mockReset()
+        clerum.rpc.listSessions.mockResolvedValue({ items: [] })
+        await send(app, text)
+        expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
+        await waitFor(async () =>
+          expect(await storedUserTurns(clerum, chatId, text)).not.toHaveLength(0)
+        )
+        expect.soft(visibleUserTurns(app, text), 'step 6: visible turns').toHaveLength(1)
+        expect
+          .soft(await storedUserTurns(clerum, chatId, text), 'step 6: stored turns')
+          .toHaveLength(1)
+      }
+    )
+  })
+
+  describe('T-A2: a loss of access holds the agent and keeps the input', () => {
+    const rows: Array<{ label: string; sendError: SendError; readError: SendError | null }> = [
+      {
+        label: 'host_access_revoked on the send',
+        sendError: () => ipcHostAccessRevoked('rpc:invokeHostMessage'),
+        readError: null,
+      },
+      {
+        label: 'generic 403 with the read answering host_access_revoked',
+        sendError: () => ipcGenericForbidden('rpc:invokeHostMessage'),
+        readError: () => ipcHostAccessRevoked('rpc:listSessions'),
+      },
+      {
+        label: 'host_access_denied with a denied read',
+        sendError: () => ipcHostAccessDenied('rpc:invokeHostMessage'),
+        readError: () => ipcHostAccessDenied('rpc:listSessions'),
+      },
+    ]
+    const payloads = [
+      { payload: 'text only', withReference: false },
+      { payload: 'text and a reference', withReference: true },
+    ] as const
+
+    it.each(rows.flatMap(row => payloads.map(payload => ({ ...row, ...payload }))))(
+      '$label, $payload',
+      async ({ sendError, readError, withReference }) => {
+        const { app, clerum } = await boot()
+        const chatId = await createChat(app)
+        const text = 'text sent as access is lost'
+        if (withReference) await addReference(app)
+        const sendFailure = await sendError()
+        const readFailure = readError ? await readError() : null
+        clerum.rpc.invokeHostMessage.mockImplementationOnce(async () => {
+          if (readFailure) clerum.rpc.listSessions.mockRejectedValue(readFailure)
+          throw sendFailure
+        })
+        const toastsBefore = app.result.current.toasts.length
+
+        await send(app, text)
+
+        // Step 1.
+        expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+        // Step 2: the hold is as today.
+        await waitFor(() => expect(app.result.current.selectedAgent).toBeNull())
+        expect.soft(app.result.current.isHostAccessBlocked(AGENT), 'step 2: blocked').toBe(true)
+        expect.soft(app.result.current.toasts.slice(toastsBefore), 'step 2: toasts').toEqual([])
+
+        // Step 3: the read answers again and the agent is reselected.
+        await reselect(app, clerum, chatId)
+        expect
+          .soft(await storedUserTurns(clerum, chatId, text), 'step 3: stored turn')
+          .toHaveLength(0)
+        expect.soft(visibleUserTurns(app, text), 'step 3: visible turn').toHaveLength(0)
+        if (!withReference) {
+          expect.soft(getComposerDraft(chatId, AGENT), 'step 3: draft').toBe(text)
+          expect.soft(app.result.current.failedAgentSend, 'step 3: failed send').toBeNull()
+          return
+        }
+        // Step 4: text and reference wait together behind Recover input.
+        expect.soft(getComposerDraft(chatId, AGENT), 'step 4: draft').toBe('')
+        await waitFor(() => expect(app.result.current.failedAgentSend).not.toBeNull())
+        expect.soft(app.result.current.failedAgentSend?.content, 'step 4: retained text').toBe(text)
+        expect
+          .soft(
+            app.result.current.failedAgentSend?.references.map(reference => reference.id),
+            'step 4: retained reference'
+          )
+          .toEqual([REFERENCE.id])
+        act(() => {
+          app.result.current.handleRecoverFailedAgentSend()
+        })
+        expect.soft(getComposerDraft(chatId, AGENT), 'step 4: recovered draft').toBe(text)
+        expect
+          .soft(
+            app.result.current.composerReferenceAttachments.map(reference => reference.id),
+            'step 4: recovered reference'
+          )
+          .toEqual([REFERENCE.id])
+      }
+    )
+  })
+
+  describe("T-A3: a failure that is not a rejection keeps today's error (control)", () => {
+    it.each([
+      { label: 'a network error', sendError: networkError },
+      {
+        label: 'a 503',
+        sendError: () =>
+          ipcHttpError('rpc:invokeHostMessage', 503, 'Service Unavailable', { error: 'down' }),
+      },
+      {
+        label: 'a 404',
+        sendError: () => ipcHttpError('rpc:invokeHostMessage', 404, 'Not Found', { error: 'gone' }),
+      },
+      {
+        label: 'a 413',
+        sendError: () =>
+          ipcHttpError('rpc:invokeHostMessage', 413, 'Payload Too Large', {
+            error: 'request entity too large',
+          }),
+      },
+    ])('$label', async ({ sendError }) => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text that fails to send'
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(await sendError())
+      const toastsBefore = app.result.current.toasts.length
+
+      await send(app, text)
+
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(app.result.current.failedAgentSend).not.toBeNull())
+      expect(app.result.current.agentError).not.toBeNull()
+      expect(app.result.current.failedAgentSend?.content).toBe(text)
+      const kind = app.result.current.failedAgentSend?.kind
+      expect(app.result.current.toasts.slice(toastsBefore).map(toast => toast.text)).toContain(
+        kind === 'waking'
+          ? 'Agent is waking up — message not sent yet.'
+          : `Message failed (${kind}).`
+      )
+      expect(getComposerDraft(chatId, AGENT)).toBe('')
+      await waitFor(async () =>
+        expect(await storedUserTurns(clerum, chatId, text)).toEqual([
+          expect.objectContaining({ preserveLocal: true }),
+        ])
+      )
+      // Witness for this negative: the send ran and recorded its failure above.
+      expect(clerum.chat.removeMessages).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('T-A5: an agent held by another path (D-4)', () => {
+    it('held by a denied transcript read while the POST is pending, then the POST is denied', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text for the held agent'
+      const post = deferred<never>()
+      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+      clerum.rpc.loadSessionMessages.mockRejectedValue(
+        await ipcHostAccessRevoked('rpc:loadSessionMessages')
+      )
+      await act(async () => {
+        await app.result.current.handleSelectChat(chatId)
+      })
+      await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
+      const denial = await ipcHostAccessRevoked('rpc:invokeHostMessage')
+      await act(async () => {
+        post.reject(denial)
+        await pendingSend
+      })
+
+      await reselect(app, clerum, chatId)
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+      expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
+      expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+    })
+
+    it('held while the send waits for the activity stream, before the POST', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text held before the POST'
+      const activity = deferred<() => Promise<void>>()
+      const activityCallsBefore = clerum.rpc.subscribeHostActivity.mock.calls.length
+      clerum.rpc.subscribeHostActivity.mockImplementationOnce(() => activity.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() =>
+        expect(clerum.rpc.subscribeHostActivity.mock.calls.length).toBeGreaterThan(
+          activityCallsBefore
+        )
+      )
+      clerum.rpc.loadSessionMessages.mockRejectedValue(
+        await ipcHostAccessRevoked('rpc:loadSessionMessages')
+      )
+      await act(async () => {
+        await app.result.current.handleSelectChat(chatId)
+      })
+      await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
+      await act(async () => {
+        activity.resolve(async () => undefined)
+        await pendingSend
+      })
+      // Witness: the send stopped before its POST.
+      expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+
+      await reselect(app, clerum, chatId)
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+      expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
+      expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+    })
+
+    it('held while the POST is pending, then the POST fails with a network error', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text for a held agent with a network failure'
+      const post = deferred<never>()
+      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+      clerum.rpc.loadSessionMessages.mockRejectedValue(
+        await ipcHostAccessRevoked('rpc:loadSessionMessages')
+      )
+      await act(async () => {
+        await app.result.current.handleSelectChat(chatId)
+      })
+      await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
+      await act(async () => {
+        post.reject(await networkError())
+        await pendingSend
+      })
+
+      await reselect(app, clerum, chatId)
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+      expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
+      expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+    })
+  })
+
+  describe('T-A6: the composer changed while the POST was pending', () => {
+    it("a new draft in the send's chat stays, and the rejected input is retained", async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text rejected after a new draft'
+      const post = deferred<never>()
+      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+      act(() => {
+        setComposerDraft(chatId, 'a newer draft', AGENT)
+      })
+      const rejection = await ipcGenericForbidden('rpc:invokeHostMessage')
+      await act(async () => {
+        post.reject(rejection)
+        await pendingSend
+      })
+
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe('a newer draft')
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      const toastsBefore = app.result.current.toasts.length
+      act(() => {
+        app.result.current.handleRecoverFailedAgentSend()
+      })
+      expect(app.result.current.toasts.slice(toastsBefore).map(toast => toast.text)).toEqual([
+        'Keep or clear the current draft before recovering the earlier input.',
+      ])
+    })
+
+    it.each([
+      { payload: 'text and a reference', withReference: true },
+      { payload: 'text only', withReference: false },
+    ])(
+      'a send from chat A rejected while chat B of the same agent is shown: $payload',
+      async ({ withReference }) => {
+        const { app, clerum } = await boot()
+        const chatB = await createChat(app)
+        const chatA = await createChat(app)
+        expect(chatA).not.toBe(chatB)
+        const text = 'text from chat A'
+        if (withReference) await addReference(app)
+        const post = deferred<never>()
+        clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+        let pendingSend!: Promise<void>
+        act(() => {
+          pendingSend = app.result.current.handleSendAgentMessage(text)
+        })
+        await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+        await act(async () => {
+          await app.result.current.handleSelectChat(chatB)
+        })
+        await waitFor(() => expect(app.result.current.activeChatId).toBe(chatB))
+        const referencesOnB = app.result.current.composerReferenceAttachments.map(
+          reference => reference.id
+        )
+        const rejection = await ipcGenericForbidden('rpc:invokeHostMessage')
+        await act(async () => {
+          post.reject(rejection)
+          await pendingSend
+        })
+
+        expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+        expect
+          .soft(
+            app.result.current.composerReferenceAttachments.map(reference => reference.id),
+            'composer on chat B'
+          )
+          .toEqual(referencesOnB)
+        if (!withReference) {
+          expect.soft(getComposerDraft(chatA, AGENT), 'draft of chat A').toBe(text)
+          await act(async () => {
+            await app.result.current.handleSelectChat(chatA)
+          })
+          await waitFor(() => expect(app.result.current.activeChatId).toBe(chatA))
+          expect.soft(app.result.current.failedAgentSend, 'nothing retained').toBeNull()
+          return
+        }
+        expect.soft(getComposerDraft(chatA, AGENT), 'draft of chat A').toBe('')
+        await act(async () => {
+          await app.result.current.handleSelectChat(chatA)
+        })
+        await waitFor(() => expect(app.result.current.activeChatId).toBe(chatA))
+        // Witness: the reference is in the retained failure.
+        await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+        expect(
+          app.result.current.failedAgentSend?.references.map(reference => reference.id)
+        ).toEqual([REFERENCE.id])
+      }
+    )
+  })
+
+  describe('T-A7: a Retry answered with a 401', () => {
+    it.each([
+      { composer: 'empty', draft: '' },
+      { composer: 'with a draft', draft: 'a draft typed after the failure' },
+    ])('composer $composer', async ({ draft }) => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text retried after a network failure'
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(await networkError())
+      await send(app, text)
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      if (draft) {
+        act(() => {
+          setComposerDraft(chatId, draft, AGENT)
+        })
+      }
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(await http401())
+      await act(async () => {
+        await app.result.current.handleRetryFailedAgentSend()
+      })
+
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
+      expect.soft(app.result.current.selectedAgent, 'selected agent').toBe(AGENT)
+      if (!draft) {
+        expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+        expect.soft(app.result.current.failedAgentSend, 'failed send').toBeNull()
+        return
+      }
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(draft)
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+    })
+  })
+
+  it('T-A8: a removal the store refuses fails loud and keeps the turn, also through a later reconcile', async () => {
+    const { app, clerum } = await boot()
+    const chatId = await createChatWithServerTurn(app, clerum)
+    const text = 'text whose withdrawal is refused'
+    const warn = vi.spyOn(console, 'warn')
+    const storeFault = new Error('local chat store unavailable')
+    clerum.chat.removeMessages.mockRejectedValueOnce(storeFault)
+    let streamOpenAtPost = false
+    clerum.rpc.invokeHostMessage.mockImplementationOnce(async () => {
+      streamOpenAtPost = clerum.hasActivityHandler(AGENT)
+      throw await ipcGenericForbidden('rpc:invokeHostMessage')
+    })
+    const toastsBefore = app.result.current.toasts.length
+
+    await send(app, text)
+
+    // Witness: the removal was asked for.
+    expect(clerum.chat.removeMessages).toHaveBeenCalledTimes(1)
+    const turnId = writtenTurnId(clerum, chatId, text)
+    expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+    expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(1)
+    expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(1)
+    const activity = app.result.current.activityByMessageId as Record<string, { status: string }>
+    expect.soft(activity[turnId]?.status, 'activity entry').toBe('error')
+    expect.soft(streamOpenAtPost, 'stream open during the send').toBe(true)
+    await waitFor(() => expect(clerum.hasActivityHandler(AGENT)).toBe(false))
+    const added = app.result.current.toasts.slice(toastsBefore)
+    expect.soft(added, 'toasts').toHaveLength(1)
+    expect.soft(added[0]?.tone, 'toast tone').toBe('error')
+    const warning = warn.mock.calls.find(
+      ([label]) => label === '[chat-history] failed to withdraw a rejected message'
+    )
+    expect.soft(warning?.[1], 'warning').toEqual({ agentRef: AGENT, chatId, error: storeFault })
+    expect.soft(JSON.stringify(warning?.[1] ?? null), 'warning text').not.toContain(text)
+
+    // A later reconcile with new server turns keeps the refused turn visible.
+    const replaceCallsBefore = clerum.chat.replaceMessages.mock.calls.length
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: AGENT,
+      chatId,
+      state: 'idle',
+      totalTurns: 2,
+      turns: [
+        serverTurn(1, 'first question', 'first answer'),
+        serverTurn(2, 'second question', 'second answer'),
+      ],
+    })
+    await act(async () => {
+      await app.result.current.handleSelectChat(chatId)
+    })
+    await waitFor(() =>
+      expect(app.result.current.chatMessages.map(message => message.content)).toContain(
+        'second answer'
+      )
+    )
+    // Witness: the reconcile wrote its list.
+    expect(clerum.chat.replaceMessages.mock.calls.length).toBeGreaterThan(replaceCallsBefore)
+    expect.soft(visibleUserTurns(app, text), 'visible turn after the reconcile').toHaveLength(1)
+  })
+
+  it('T-A9: a loss of access answered after the chat was deleted', async () => {
+    const { app, clerum } = await boot()
+    const chatId = await createChat(app)
+    const text = 'text for a chat deleted during the send'
+    const post = deferred<never>()
+    clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+    let pendingSend!: Promise<void>
+    act(() => {
+      pendingSend = app.result.current.handleSendAgentMessage(text)
+    })
+    await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+    const deletion = await app.result.current.captureChatDeleteFence(AGENT)
+    await act(async () => {
+      await app.result.current.handleDeleteChatForAgent(AGENT, chatId, deletion)
+    })
+    expect(clerum.chat.delete).toHaveBeenCalledTimes(1)
+    const denial = await ipcHostAccessRevoked('rpc:invokeHostMessage')
+    await act(async () => {
+      post.reject(denial)
+      await pendingSend
+    })
+
+    // Witness: the revoke ran.
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
+    expect.soft(getComposerDraft(chatId, AGENT), 'draft of the deleted chat').toBe('')
+    expect.soft(clerum.chat.removeMessages, 'removal').not.toHaveBeenCalled()
+  })
+
+  it('T-A10: a rejection that persists returns the text on every send', async () => {
+    const { app, clerum } = await boot()
+    const chatId = await createChat(app)
+    const text = 'text the server keeps rejecting'
+    const toastsBefore = app.result.current.toasts.length
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(
+        await ipcGenericForbidden('rpc:invokeHostMessage')
+      )
+      await send(app, text)
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(attempt)
+      expect.soft(getComposerDraft(chatId, AGENT), `attempt ${attempt}: draft`).toBe(text)
+      await waitFor(async () =>
+        expect
+          .soft(await storedUserTurns(clerum, chatId, text), `attempt ${attempt}: stored turn`)
+          .toHaveLength(0)
+      )
+      expect.soft(visibleUserTurns(app, text), `attempt ${attempt}: visible turn`).toHaveLength(0)
+      expect.soft(app.result.current.selectedAgent, `attempt ${attempt}: agent`).toBe(AGENT)
+      expect.soft(app.result.current.failedAgentSend, `attempt ${attempt}: failed`).toBeNull()
+      expect.soft(app.result.current.agentError, `attempt ${attempt}: error`).toBeNull()
+    }
+    expect.soft(app.result.current.toasts.slice(toastsBefore), 'toasts').toEqual([])
+  })
+
+  describe('T-A11: the scope changes while the removal is pending', () => {
+    it('a 401 followed by a logout', async () => {
+      const { app, clerum, handle } = await boot()
+      const signedInState = handle.getSessionState.getMockImplementation() as
+        | (() => Promise<unknown>)
+        | undefined
+      if (!signedInState) throw new Error('The harness session state producer is unavailable')
+      let signedIn = true
+      handle.getSessionState.mockImplementation(async () =>
+        signedIn ? signedInState() : { authenticated: false, me: null }
+      )
+      handle.logout.mockImplementation(async () => {
+        signedIn = false
+        return { ok: true, sessionGeneration: 2 }
+      })
+      const chatId = await createChat(app)
+      const text = 'text rejected before a logout'
+      const removal = deferred<number>()
+      clerum.chat.removeMessages.mockImplementationOnce(() => removal.promise)
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(await http401())
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() => expect(clerum.chat.removeMessages).toHaveBeenCalledTimes(1))
+      await act(async () => app.result.current.handleLogout())
+      await waitFor(() => expect(app.result.current.isAuthenticated).toBe(false))
+      const toastsBefore = app.result.current.toasts.length
+      const messagesBefore = app.result.current.chatMessages
+      await act(async () => {
+        removal.resolve(1)
+        await pendingSend
+      })
+
+      // Witness: the removal was asked for and has settled.
+      expect(clerum.chat.removeMessages).toHaveBeenCalledTimes(1)
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe('')
+      expect.soft(app.result.current.isHostAccessBlocked(AGENT), 'blocked').toBe(false)
+      expect.soft(app.result.current.toasts.slice(toastsBefore), 'toasts').toEqual([])
+      expect.soft(app.result.current.chatMessages, 'messages').toBe(messagesBefore)
+    })
+
+    it('host_access_revoked followed by a team switch', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text revoked before a team switch'
+      const removal = deferred<number>()
+      clerum.chat.removeMessages.mockImplementationOnce(() => removal.promise)
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(
+        await ipcHostAccessRevoked('rpc:invokeHostMessage')
+      )
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() => expect(clerum.chat.removeMessages).toHaveBeenCalledTimes(1))
+      const draftBeforeSwitch = getComposerDraft(chatId, AGENT)
+      await act(async () => {
+        await app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+      })
+      await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(false))
+      const toastsBefore = app.result.current.toasts.length
+      const messagesBefore = app.result.current.chatMessages
+      await act(async () => {
+        removal.resolve(1)
+        await pendingSend
+      })
+
+      // Witness: the removal was asked for and has settled.
+      expect(clerum.chat.removeMessages).toHaveBeenCalledTimes(1)
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(draftBeforeSwitch)
+      expect.soft(app.result.current.isHostAccessBlocked(AGENT), 'blocked').toBe(false)
+      expect.soft(app.result.current.toasts.slice(toastsBefore), 'toasts').toEqual([])
+      expect.soft(app.result.current.chatMessages, 'messages').toBe(messagesBefore)
+    })
+  })
+
+  describe('T-A12: a reconcile in flight at the rejection (D-13)', () => {
+    const secondWindow = {
+      agent: AGENT,
+      state: 'idle',
+      totalTurns: 2,
+      turns: [
+        serverTurn(1, 'first question', 'first answer'),
+        serverTurn(2, 'second question', 'second answer'),
+      ],
+    }
+
+    it.each([
+      { order: 'the reconcile writes after the rejection', writeFirst: false },
+      { order: 'the reconcile writes before the rejection', writeFirst: true },
+    ])('$order', async ({ writeFirst }) => {
+      const { app, clerum } = await boot()
+      const chatId = await createChatWithServerTurn(app, clerum)
+      clerum.chat.replaceMessages.mockImplementation(clerum.replaceStoredMessages)
+      const text = 'text rejected during a reconcile'
+      const post = deferred<never>()
+      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+
+      // The reconcile response is delivered while the POST is pending, and the
+      // hydrate is held where it creates the chat before writing.
+      const create = deferred<void>()
+      const createChat = clerum.chat.create.getMockImplementation()!
+      clerum.chat.create.mockImplementationOnce(async (agentRef: string, id: string) => {
+        await create.promise
+        return createChat(agentRef, id)
+      })
+      clerum.rpc.loadSessionMessages.mockResolvedValue({ ...secondWindow, chatId })
+      const createCallsBefore = clerum.chat.create.mock.calls.length
+      let reconcile!: Promise<void>
+      act(() => {
+        reconcile = app.result.current.handleSelectChat(chatId) as Promise<void>
+      })
+      await waitFor(() =>
+        expect(clerum.chat.create.mock.calls.length).toBeGreaterThan(createCallsBefore)
+      )
+      const replaceCallsBefore = clerum.chat.replaceMessages.mock.calls.length
+      if (writeFirst) {
+        await act(async () => {
+          create.resolve()
+          await reconcile
+        })
+        // The reconcile stored the pending turn before numbered server turns.
+        expect(
+          (await clerum.persistedMessages(AGENT, chatId)).map(message =>
+            message.role === 'user' && message.content === text ? 'pending' : message.id
+          )
+        ).toEqual(['turn-1-user', 'turn-1-assistant', 'pending', 'turn-2-user', 'turn-2-assistant'])
+      }
+      const rejection = await ipcGenericForbidden('rpc:invokeHostMessage')
+      await act(async () => {
+        post.reject(rejection)
+        await pendingSend
+      })
+      if (!writeFirst) {
+        await act(async () => {
+          create.resolve()
+          await reconcile
+        })
+      }
+
+      // Witness: the reconcile wrote a list holding the server turns.
+      const replaceCalls = clerum.chat.replaceMessages.mock.calls.slice(
+        writeFirst ? replaceCallsBefore - 1 : replaceCallsBefore
+      )
+      expect(
+        replaceCalls.some(([, , messages]) =>
+          (messages as Array<{ id: string }>).some(message => message.id === 'turn-2-assistant')
+        )
+      ).toBe(true)
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+      await waitFor(async () =>
+        expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
+      )
+      expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+      expect
+        .soft(
+          (await clerum.persistedMessages(AGENT, chatId)).map(message => message.id),
+          'stored server turns'
+        )
+        .toEqual(['turn-1-user', 'turn-1-assistant', 'turn-2-user', 'turn-2-assistant'])
+      expect
+        .soft(
+          app.result.current.chatMessages.map(message => message.content),
+          'visible server turns'
+        )
+        .toEqual(['first question', 'first answer', 'second question', 'second answer'])
+    })
+
+    async function expectTurnWithdrawnAndServerTurnsKept(
+      app: App,
+      clerum: MockClerum,
+      chatId: string,
+      text: string
+    ) {
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+      await waitFor(() =>
+        expect(app.result.current.chatMessages.map(message => message.content)).toContain(
+          'second answer'
+        )
+      )
+      expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+      expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
+      expect
+        .soft(
+          (await clerum.persistedMessages(AGENT, chatId)).map(message => message.id),
+          'stored server turns'
+        )
+        .toEqual(['turn-1-user', 'turn-1-assistant', 'turn-2-user', 'turn-2-assistant'])
+    }
+
+    it('the rejection lands after the hydrate read the local page and before it merged', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChatWithServerTurn(app, clerum)
+      clerum.chat.replaceMessages.mockImplementation(clerum.replaceStoredMessages)
+      const text = 'text rejected while the hydrate reads'
+      const post = deferred<never>()
+      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+
+      // The hydrate's own read of the local page (the first one after the
+      // server window arrives) returns what the store held when it was read,
+      // which still includes the pending turn, but only once the gate opens.
+      const localRead = deferred<void>()
+      let localPageRead = false
+      let serverWindowSent = false
+      const loadLocal = clerum.chat.loadMessages.getMockImplementation()!
+      clerum.chat.loadMessages.mockImplementation(async (...args: unknown[]) => {
+        const page = await loadLocal(...args)
+        if (!serverWindowSent || localPageRead) return page
+        localPageRead = true
+        await localRead.promise
+        return page
+      })
+      clerum.rpc.loadSessionMessages.mockImplementation(async () => {
+        serverWindowSent = true
+        return { ...secondWindow, chatId }
+      })
+      let reconcile!: Promise<void>
+      act(() => {
+        reconcile = app.result.current.handleSelectChat(chatId) as Promise<void>
+      })
+      await waitFor(() => expect(localPageRead).toBe(true))
+      const rejection = await ipcGenericForbidden('rpc:invokeHostMessage')
+      await act(async () => {
+        post.reject(rejection)
+        await pendingSend
+      })
+      // Witness: the withdrawal finished before the hydrate merged.
+      expect(await storedUserTurns(clerum, chatId, text)).toHaveLength(0)
+      const replaceCallsBefore = clerum.chat.replaceMessages.mock.calls.length
+      await act(async () => {
+        localRead.resolve()
+        await reconcile
+      })
+
+      // Witness: the hydrate wrote its merged list.
+      expect(clerum.chat.replaceMessages.mock.calls.length).toBeGreaterThan(replaceCallsBefore)
+      await expectTurnWithdrawnAndServerTurnsKept(app, clerum, chatId, text)
+    })
+
+    it('the hydrate writes while the removal is still pending in the renderer', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChatWithServerTurn(app, clerum)
+      clerum.chat.replaceMessages.mockImplementation(clerum.replaceStoredMessages)
+      const text = 'text rejected while its removal is pending'
+      const post = deferred<never>()
+      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+
+      // The server window is requested first and held, so the switch has read
+      // its local page before the rejection.
+      const serverWindow = deferred<void>()
+      clerum.rpc.loadSessionMessages.mockImplementation(async () => {
+        await serverWindow.promise
+        return { ...secondWindow, chatId }
+      })
+      const windowCallsBefore = clerum.rpc.loadSessionMessages.mock.calls.length
+      let reconcile!: Promise<void>
+      act(() => {
+        reconcile = app.result.current.handleSelectChat(chatId) as Promise<void>
+      })
+      await waitFor(() =>
+        expect(clerum.rpc.loadSessionMessages.mock.calls.length).toBeGreaterThan(windowCallsBefore)
+      )
+
+      // Main applies the removal, but its reply has not reached the renderer.
+      const removalReply = deferred<void>()
+      const removeStored = clerum.chat.removeMessages.getMockImplementation()!
+      clerum.chat.removeMessages.mockImplementationOnce(async (...args: unknown[]) => {
+        const removed = await removeStored(...args)
+        await removalReply.promise
+        return removed
+      })
+      const rejection = await ipcGenericForbidden('rpc:invokeHostMessage')
+      let rejectionHandled!: Promise<void>
+      act(() => {
+        post.reject(rejection)
+        rejectionHandled = pendingSend
+      })
+      await waitFor(() => expect(clerum.chat.removeMessages).toHaveBeenCalledTimes(1))
+      await waitFor(async () => expect(await storedUserTurns(clerum, chatId, text)).toHaveLength(0))
+      const replaceCallsBefore = clerum.chat.replaceMessages.mock.calls.length
+      await act(async () => {
+        serverWindow.resolve()
+        await reconcile
+      })
+      // Witness: the hydrate wrote while the removal reply was still pending.
+      expect(clerum.chat.replaceMessages.mock.calls.length).toBeGreaterThan(replaceCallsBefore)
+      await act(async () => {
+        removalReply.resolve()
+        await rejectionHandled
+      })
+
+      await expectTurnWithdrawnAndServerTurnsKept(app, clerum, chatId, text)
+    })
+  })
+
+  it('T-A13: held by another path during the follow-up read', async () => {
+    const { app, clerum } = await boot()
+    const chatId = await createChat(app)
+    const text = 'text whose follow-up read is overtaken'
+    const followUp = deferred<{ items: never[] }>()
+    clerum.rpc.listSessions.mockImplementation(async (_hostRef, _hostRefs, query) =>
+      isFollowUpRead(query) ? followUp.promise : { items: [] }
+    )
+    clerum.rpc.invokeHostMessage.mockRejectedValueOnce(
+      await ipcGenericForbidden('rpc:invokeHostMessage')
+    )
+    let pendingSend!: Promise<void>
+    act(() => {
+      pendingSend = app.result.current.handleSendAgentMessage(text)
+    })
+    await waitFor(() =>
+      expect(clerum.rpc.listSessions.mock.calls.some(([, , query]) => isFollowUpRead(query))).toBe(
+        true
+      )
+    )
+    clerum.rpc.loadSessionMessages.mockRejectedValue(
+      await ipcHostAccessDenied('rpc:loadSessionMessages')
+    )
+    await act(async () => {
+      await app.result.current.handleSelectChat(chatId)
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
+    await act(async () => {
+      followUp.resolve({ items: [] })
+      await pendingSend
+    })
+
+    // Witness: the send was answered once and made its follow-up read.
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    await reselect(app, clerum, chatId)
+    expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+    expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
+    expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+  })
+})

@@ -565,7 +565,7 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
         ipcHttpError('rpc:invokeHostMessage', 401, 'Unauthorized', { error: 'expired' }),
       readError: null,
       revoked: false,
-      uncertain: true,
+      uncertain: false,
     },
     {
       label: 'exact Host-wide 403',

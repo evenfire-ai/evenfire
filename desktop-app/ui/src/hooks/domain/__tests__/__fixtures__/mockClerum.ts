@@ -2,7 +2,12 @@ import { type Mock, inject, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { ChatStore } from '../../../../../../src/chatStore'
-import type { ChatDeleteFence, ChatIndex, ChatMessage } from '../../../../../../src/types'
+import type {
+  ChatDeleteFence,
+  ChatIndex,
+  ChatMessage,
+  ReplaceChatMessagesOptions,
+} from '../../../../../../src/types'
 import type {} from './mockClerumStoreRoot'
 
 /**
@@ -83,6 +88,16 @@ export interface MockClerum {
   readIndex: (agentRef: string) => Promise<ChatIndex>
   /** Persist selection through the same producer used by chat:setLastActive. */
   persistLastActive: (agentRef: string, chatId: string) => Promise<void>
+  /**
+   * The real store's replaceMessages. The bridge's own `chat.replaceMessages`
+   * is a no-op; a test that needs a reconcile's write points it here.
+   */
+  replaceStoredMessages: (
+    agentRef: string,
+    chatId: string,
+    messages: ChatMessage[],
+    options?: ReplaceChatMessagesOptions
+  ) => Promise<void>
 }
 
 export function installMockClerum(): MockClerum {
@@ -190,6 +205,12 @@ export function installMockClerum(): MockClerum {
     readIndex: (agentRef: string) => store.getIndex(agentRef),
     persistLastActive: (agentRef: string, chatId: string) =>
       store.setLastActiveChatId(agentRef, chatId),
+    replaceStoredMessages: (
+      agentRef: string,
+      chatId: string,
+      messages: ChatMessage[],
+      options?: ReplaceChatMessagesOptions
+    ) => store.replaceMessages(agentRef, chatId, messages, options),
   }
 
   Object.defineProperty(window, 'clerum', {
