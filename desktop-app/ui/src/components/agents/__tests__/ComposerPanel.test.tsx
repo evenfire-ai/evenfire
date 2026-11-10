@@ -87,6 +87,30 @@ vi.mock('@contexts/AuthContext', () => ({
   useAuthContext: () => ({ me: { id: 'user-1', teamId: 'team-1' } }),
 }))
 
+// Most ComposerPanel tests cover unrelated composer behavior and intentionally
+// do not mount the app's QueryClient. Root discovery itself is exercised by
+// the producer-backed integration suite, which mounts the real controller.
+vi.mock('@hooks/domain/useGfsBrowserController', () => ({
+  useGfsBrowserController: () => ({
+    current: null,
+    sessionScope: 'test:user-1:team-1',
+    sessionGeneration: 1,
+    accessState: 'active',
+    accessibleResources: [],
+    loadingAccessible: false,
+    accessibleError: null,
+    accessibleNotice: null,
+    discoveryFailure: null,
+    hasMoreAccessible: false,
+    isFetchingMoreAccessible: false,
+    retryChildren: vi.fn(),
+    retryDiscovery: vi.fn(),
+    loadMoreAccessible: vi.fn(),
+    handleAuthorityFailure: vi.fn(() => false),
+    isSessionAuthorityActive: vi.fn(() => true),
+  }),
+}))
+
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({ selectedAgent: 'agent-1' }),
 }))

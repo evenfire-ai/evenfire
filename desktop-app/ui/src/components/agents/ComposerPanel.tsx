@@ -1,4 +1,12 @@
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import React, {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useAuthContext } from '@contexts/AuthContext'
@@ -31,6 +39,7 @@ import {
 } from '@constants/attachments'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
+import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
@@ -90,6 +99,16 @@ type GfsCaretReceipt = {
   selectionStart: number
   selectionEnd: number
   intentGeneration: number
+}
+
+type GfsSelectionSnapshot = {
+  chatId: string | null
+  agent: string | null
+  workspaceTabId: string | null
+  draft: string
+  revision: number
+  selectionStart: number
+  selectionEnd: number
 }
 
 function gfsComposerOwnerKey(owner: {
@@ -194,6 +213,10 @@ function getComposerFileNotice(file: ComposerFileAttachment): string | null {
 export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelProps) {
   const { selectedAgent } = useNavigationContext()
   const { isAuthenticated, me } = useAuthContext()
+  // Root discovery belongs to the authenticated composer lifetime so it can
+  // share the sidebar's existing session-scoped QueryClient entry before the
+  // user opens the EvenDrive menu. The visible picker owns private read checks.
+  const gfsBrowserController = useGfsBrowserController({ pickerAuthorityManaged: true })
   const {
     composerImageAttachments,
     composerFileAttachments,
@@ -207,6 +230,15 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     activeMessageCount,
     composerFocusRequestId,
   } = useChatComposerStateContext()
+  const currentGfsComposerOwnerKey = JSON.stringify([
+    gfsComposerOwnerKey({
+      chatId: activeChatId,
+      agent: selectedAgent ?? null,
+      workspaceTabId: workspaceChatTabId,
+    }),
+    gfsBrowserController.sessionScope,
+    gfsBrowserController.sessionGeneration,
+  ])
   const {
     clearComposerSendError,
     handleAddComposerImageAttachments: onAddComposerImageAttachments,
@@ -238,6 +270,45 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const [composerSubmenu, setComposerSubmenu] = useState<
     'plugins' | 'connectors' | 'agent-files' | 'gfs' | null
   >(null)
+  // Synchronous admission state for retained picker callbacks. React state is
+  // only the visible projection; this ref is retired before close writers
+  // schedule their render so a stale committed Load more cannot enter a query.
+  const composerGfsAdmissionRef = useRef({
+    rootOpen: false,
+    activeSubmenu: null as typeof composerSubmenu,
+    sessionId: 0,
+    ownerKey: '',
+    nextBindingId: 0,
+  })
+  const publishComposerMenuOpen = useCallback((open: boolean) => {
+    composerGfsAdmissionRef.current.rootOpen = open
+    if (!open) {
+      composerGfsAdmissionRef.current.activeSubmenu = null
+      composerGfsAdmissionRef.current.sessionId = 0
+    }
+    setComposerMenuOpen(open)
+  }, [])
+  const publishComposerSubmenu = useCallback((submenu: typeof composerSubmenu) => {
+    composerGfsAdmissionRef.current.activeSubmenu = submenu
+    if (submenu !== 'gfs') composerGfsAdmissionRef.current.sessionId = 0
+    setComposerSubmenu(submenu)
+  }, [])
+  const allocateComposerGfsPanelBindingId = useCallback(
+    () => ++composerGfsAdmissionRef.current.nextBindingId,
+    []
+  )
+  const isComposerGfsAdmissionCurrent = useCallback(
+    (pickerSessionId: number) => {
+      const owner = composerGfsAdmissionRef.current
+      return (
+        owner.rootOpen &&
+        owner.activeSubmenu === 'gfs' &&
+        owner.sessionId === pickerSessionId &&
+        owner.ownerKey === currentGfsComposerOwnerKey
+      )
+    },
+    [currentGfsComposerOwnerKey]
+  )
   const [pluginOptions, setPluginOptions] = useState<
     Array<{ id: string; label: string; namespace: string; name: string }>
   >([])
@@ -270,16 +341,44 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const gfsInsertionLocksRef = useRef(new Map<string, number>())
   const gfsInsertionOperationCounterRef = useRef(0)
   const gfsCaretReceiptRef = useRef<GfsCaretReceipt | null>(null)
+  const gfsSelectionSnapshotRef = useRef<GfsSelectionSnapshot | null>(null)
   const composerIdentityRef = useRef({
     chatId: activeChatId,
     agent: selectedAgent,
     workspaceTabId: workspaceChatTabId,
   })
-  composerIdentityRef.current = {
-    chatId: activeChatId,
-    agent: selectedAgent,
-    workspaceTabId: workspaceChatTabId,
-  }
+  const currentGfsComposerOwnerKeyRef = useRef(currentGfsComposerOwnerKey)
+  useLayoutEffect(() => {
+    const renderedComposerIdentity = {
+      chatId: activeChatId,
+      agent: selectedAgent,
+      workspaceTabId: workspaceChatTabId,
+    }
+    const previous = composerIdentityRef.current
+    composerIdentityRef.current = renderedComposerIdentity
+    const owner = composerGfsAdmissionRef.current
+    if (owner.ownerKey !== currentGfsComposerOwnerKey) {
+      currentGfsComposerOwnerKeyRef.current = currentGfsComposerOwnerKey
+      owner.ownerKey = currentGfsComposerOwnerKey
+      gfsInsertionSessionRef.current = null
+      gfsSelectionSnapshotRef.current = null
+      gfsCaretReceiptRef.current = null
+      if (owner.activeSubmenu === 'gfs') {
+        owner.activeSubmenu = null
+        owner.sessionId = 0
+        setComposerSubmenu(null)
+      }
+    }
+    if (
+      previous.chatId !== renderedComposerIdentity.chatId ||
+      previous.agent !== renderedComposerIdentity.agent ||
+      previous.workspaceTabId !== renderedComposerIdentity.workspaceTabId
+    ) {
+      gfsInsertionSessionRef.current = null
+      gfsSelectionSnapshotRef.current = null
+      if (composerGfsAdmissionRef.current.activeSubmenu === 'gfs') publishComposerSubmenu(null)
+    }
+  }, [activeChatId, currentGfsComposerOwnerKey, selectedAgent, workspaceChatTabId])
   const pluginsItemRef = useRef<HTMLButtonElement | null>(null)
   const connectorsItemRef = useRef<HTMLButtonElement | null>(null)
   const agentFilesItemRef = useRef<HTMLButtonElement | null>(null)
@@ -328,23 +427,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // submenu item is outside `composerMenuRef` and would close the menu before
   // the item's click fires.
   useClickOutside([composerInputShellRef, composerSubmenuRef], composerMenuOpen, () => {
-    setComposerMenuOpen(false)
-    setComposerSubmenu(null)
+    publishComposerMenuOpen(false)
+    publishComposerSubmenu(null)
     gfsInsertionSessionRef.current = null
   })
-
-  useEffect(() => {
-    const session = gfsInsertionSessionRef.current
-    if (!session) return
-    if (
-      session.chatId !== activeChatId ||
-      session.agent !== selectedAgent ||
-      session.workspaceTabId !== workspaceChatTabId
-    ) {
-      gfsInsertionSessionRef.current = null
-      setComposerSubmenu(current => (current === 'gfs' ? null : current))
-    }
-  }, [activeChatId, selectedAgent, workspaceChatTabId])
 
   const resizeComposerInput = useCallback(() => {
     const textarea = composerInputRef.current
@@ -381,8 +467,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Clear attachment error when agent changes
   useEffect(() => {
     setComposerAttachmentError(null)
-    setComposerMenuOpen(false)
-    setComposerSubmenu(null)
+    publishComposerMenuOpen(false)
+    publishComposerSubmenu(null)
     setPluginsLoaded(false)
     setPluginsLoading(false)
     setPluginOptions([])
@@ -510,28 +596,45 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const rememberGfsInsertionAnchor = useCallback(() => {
     const session = gfsInsertionSessionRef.current
     const textarea = composerInputRef.current
-    if (
-      !session ||
-      !textarea ||
-      session.chatId !== activeChatId ||
-      session.agent !== selectedAgent ||
-      session.workspaceTabId !== workspaceChatTabId
-    ) {
-      return
-    }
+    if (!textarea) return
     const currentDraft = getComposerDraft(
+      activeChatId,
+      selectedAgent ?? undefined,
+      workspaceChatTabId
+    )
+    const currentRevision = getComposerDraftRevision(
       activeChatId,
       selectedAgent ?? undefined,
       workspaceChatTabId
     )
     const nextStart = textarea.selectionStart
     const nextEnd = textarea.selectionEnd
-    session.expectedDraft = currentDraft
-    session.expectedRevision = getComposerDraftRevision(
-      activeChatId,
-      selectedAgent ?? undefined,
-      workspaceChatTabId
+    const previousSnapshot = gfsSelectionSnapshotRef.current
+    const sameSelectionOwner =
+      previousSnapshot?.chatId === activeChatId &&
+      previousSnapshot.agent === selectedAgent &&
+      previousSnapshot.workspaceTabId === workspaceChatTabId &&
+      previousSnapshot.draft === currentDraft &&
+      previousSnapshot.revision === currentRevision
+    if (document.activeElement !== textarea && sameSelectionOwner) return
+    gfsSelectionSnapshotRef.current = {
+      chatId: activeChatId,
+      agent: selectedAgent,
+      workspaceTabId: workspaceChatTabId,
+      draft: currentDraft,
+      revision: currentRevision,
+      selectionStart: nextStart,
+      selectionEnd: nextEnd,
+    }
+    if (
+      !session ||
+      session.chatId !== activeChatId ||
+      session.agent !== selectedAgent ||
+      session.workspaceTabId !== workspaceChatTabId
     )
+      return
+    session.expectedDraft = currentDraft
+    session.expectedRevision = currentRevision
     if (session.selectionStart !== nextStart || session.selectionEnd !== nextEnd) {
       session.intentGeneration += 1
     }
@@ -621,8 +724,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const addComposerReference = useCallback(
     (attachment: ComposerReferenceAttachment) => {
       onAddComposerReferenceAttachments([attachment])
-      setComposerMenuOpen(false)
-      setComposerSubmenu(null)
+      publishComposerMenuOpen(false)
+      publishComposerSubmenu(null)
       gfsInsertionSessionRef.current = null
       setComposerAttachmentError(null)
     },
@@ -630,8 +733,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   )
 
   const openUploadPicker = useCallback(() => {
-    setComposerMenuOpen(false)
-    setComposerSubmenu(null)
+    publishComposerMenuOpen(false)
+    publishComposerSubmenu(null)
     gfsInsertionSessionRef.current = null
     composerFileInputRef.current?.click()
   }, [])
@@ -643,53 +746,78 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     }
     if (!selectedAgentContext || !agentFilesAvailable) {
       setComposerAttachmentError('No Agent Files Available')
-      setComposerMenuOpen(false)
-      setComposerSubmenu(null)
+      publishComposerMenuOpen(false)
+      publishComposerSubmenu(null)
       return
     }
-    setComposerMenuOpen(false)
-    setComposerSubmenu(null)
+    publishComposerMenuOpen(false)
+    publishComposerSubmenu(null)
     gfsInsertionSessionRef.current = null
     setAgentFilesModalOpen(true)
   }, [agentFilesAvailable, agentFilesLoading, selectedAgentContext])
 
   const openGlobalFilesModal = useCallback(() => {
-    setComposerMenuOpen(false)
-    setComposerSubmenu(null)
+    publishComposerMenuOpen(false)
+    publishComposerSubmenu(null)
     gfsInsertionSessionRef.current = null
     setComposerAttachmentError(null)
     setGlobalFilesModalOpen(true)
   }, [])
 
   const openGfsLinkPicker = useCallback(() => {
+    const existingSession = gfsInsertionSessionRef.current
+    if (
+      composerSubmenu === 'gfs' &&
+      existingSession?.chatId === activeChatId &&
+      existingSession.agent === selectedAgent &&
+      existingSession.workspaceTabId === workspaceChatTabId
+    ) {
+      return
+    }
     const textarea = composerInputRef.current
     const currentDraft = getComposerDraft(
       activeChatId,
       selectedAgent ?? undefined,
       workspaceChatTabId
     )
+    const currentRevision = getComposerDraftRevision(
+      activeChatId,
+      selectedAgent ?? undefined,
+      workspaceChatTabId
+    )
+    const selectionSnapshot = gfsSelectionSnapshotRef.current
+    const hasCurrentSelection =
+      selectionSnapshot?.chatId === activeChatId &&
+      selectionSnapshot.agent === selectedAgent &&
+      selectionSnapshot.workspaceTabId === workspaceChatTabId &&
+      selectionSnapshot.draft === currentDraft &&
+      selectionSnapshot.revision === currentRevision
+    const selectionStart = hasCurrentSelection
+      ? selectionSnapshot.selectionStart
+      : (textarea?.selectionStart ?? currentDraft.length)
+    const selectionEnd = hasCurrentSelection
+      ? selectionSnapshot.selectionEnd
+      : (textarea?.selectionEnd ?? currentDraft.length)
     gfsInsertionSessionRef.current = {
       id: ++gfsInsertionSessionCounterRef.current,
       chatId: activeChatId,
       agent: selectedAgent,
       workspaceTabId: workspaceChatTabId,
       expectedDraft: currentDraft,
-      expectedRevision: getComposerDraftRevision(
-        activeChatId,
-        selectedAgent ?? undefined,
-        workspaceChatTabId
-      ),
-      anchor: textarea?.selectionEnd ?? currentDraft.length,
-      selectionStart: textarea?.selectionStart ?? currentDraft.length,
-      selectionEnd: textarea?.selectionEnd ?? currentDraft.length,
+      expectedRevision: currentRevision,
+      anchor: selectionEnd,
+      selectionStart,
+      selectionEnd,
       intentGeneration: 0,
       controllerGeneration: null,
       controllerScope: null,
     }
-    setComposerMenuOpen(true)
-    setComposerSubmenu('gfs')
+    publishComposerMenuOpen(true)
+    composerGfsAdmissionRef.current.sessionId = gfsInsertionSessionRef.current.id
+    composerGfsAdmissionRef.current.ownerKey = currentGfsComposerOwnerKey
+    publishComposerSubmenu('gfs')
     setComposerAttachmentError(null)
-  }, [activeChatId, selectedAgent, workspaceChatTabId])
+  }, [activeChatId, composerSubmenu, currentGfsComposerOwnerKey, selectedAgent, workspaceChatTabId])
 
   const captureGfsControllerScope = useCallback(
     (sessionId: number, scope: string, generation: number | null) => {
@@ -707,10 +835,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       if (composerSubmenu !== null) {
-        setComposerSubmenu(null)
+        publishComposerSubmenu(null)
         gfsInsertionSessionRef.current = null
       } else {
-        setComposerMenuOpen(false)
+        publishComposerMenuOpen(false)
       }
     }
     window.addEventListener('keydown', onKeyDown)
@@ -723,8 +851,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       controllerScope: string,
       sessionId: number,
       controllerGeneration: number | null,
-      handleAuthorityFailure: ComposerGfsAuthorityFailureHandler
+      handleAuthorityFailure: ComposerGfsAuthorityFailureHandler,
+      isEntryCurrent: () => boolean
     ) => {
+      if (!isEntryCurrent()) return
       const session = gfsInsertionSessionRef.current
       if (!session) return
       const ownerKey = gfsComposerOwnerKey(session)
@@ -742,7 +872,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         controllerGeneration === null
       ) {
         gfsInsertionSessionRef.current = null
-        setComposerSubmenu(null)
+        publishComposerSubmenu(null)
         return
       }
       const currentDraft = getComposerDraft(
@@ -757,7 +887,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       )
       if (currentDraft !== session.expectedDraft || currentRevision !== session.expectedRevision) {
         gfsInsertionSessionRef.current = null
-        setComposerSubmenu(null)
+        publishComposerSubmenu(null)
         return
       }
       const canonicalUri = normalizeGfsResourceUri(uri)
@@ -765,6 +895,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       const operationId = ++gfsInsertionOperationCounterRef.current
       const captured = {
         sessionId: session.id,
+        composerOwnerKey: currentGfsComposerOwnerKey,
         ownerKey,
         chatId: session.chatId,
         agent: session.agent,
@@ -785,8 +916,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         // is the authorization point for this insertion.
         const decision = await window.clerum.gfs.affordances(resourceId, 'main')
         if (!hasExactGfsReadAuthority(decision)) return
+        if (!isEntryCurrent()) return
         if ((await window.clerum.auth.getSessionGeneration()) !== captured.controllerGeneration)
           return
+        if (!isEntryCurrent()) return
         const liveSession = gfsInsertionSessionRef.current
         if (
           !liveSession ||
@@ -800,12 +933,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           liveSession.selectionEnd !== captured.selectionEnd ||
           liveSession.expectedDraft !== captured.draft ||
           liveSession.expectedRevision !== captured.revision ||
+          currentGfsComposerOwnerKeyRef.current !== captured.composerOwnerKey ||
           composerIdentityRef.current.chatId !== captured.chatId ||
           composerIdentityRef.current.agent !== captured.agent ||
           composerIdentityRef.current.workspaceTabId !== captured.workspaceTabId ||
           activeChatId !== captured.chatId ||
           selectedAgent !== captured.agent ||
           workspaceChatTabId !== captured.workspaceTabId ||
+          !isEntryCurrent() ||
           getComposerDraft(activeChatId, selectedAgent ?? undefined, workspaceChatTabId) !==
             captured.draft ||
           getComposerDraftRevision(activeChatId, selectedAgent ?? undefined, workspaceChatTabId) !==
@@ -1329,12 +1464,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 variant="ghost"
                 aria-haspopup="menu"
                 aria-expanded={composerMenuOpen}
+                onMouseDown={rememberGfsInsertionAnchor}
                 onClick={() => {
-                  setComposerMenuOpen(open => {
-                    if (open) gfsInsertionSessionRef.current = null
-                    return !open
-                  })
-                  setComposerSubmenu(null)
+                  const nextOpen = !composerGfsAdmissionRef.current.rootOpen
+                  if (!nextOpen) gfsInsertionSessionRef.current = null
+                  publishComposerMenuOpen(nextOpen)
+                  publishComposerSubmenu(null)
                 }}
               >
                 <IconPlus />
@@ -1347,8 +1482,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       aria-haspopup="menu"
                       aria-expanded={composerSubmenu === 'plugins'}
                       leadingIcon={<IconWorkflows />}
-                      onMouseEnter={() => setComposerSubmenu('plugins')}
-                      onFocus={() => setComposerSubmenu('plugins')}
+                      onMouseEnter={() => publishComposerSubmenu('plugins')}
+                      onFocus={() => publishComposerSubmenu('plugins')}
                       role="menuitem"
                       trailingIcon={<span aria-hidden="true">&gt;</span>}
                     >
@@ -1359,8 +1494,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       aria-haspopup="menu"
                       aria-expanded={composerSubmenu === 'connectors'}
                       leadingIcon={<IconConnectors />}
-                      onMouseEnter={() => setComposerSubmenu('connectors')}
-                      onFocus={() => setComposerSubmenu('connectors')}
+                      onMouseEnter={() => publishComposerSubmenu('connectors')}
+                      onFocus={() => publishComposerSubmenu('connectors')}
                       role="menuitem"
                       trailingIcon={<span aria-hidden="true">&gt;</span>}
                     >
@@ -1380,10 +1515,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                         leadingIcon={<IconContexts />}
                         onClick={agentFilesDisabled ? undefined : openAgentFilesModal}
                         onFocus={() =>
-                          setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
+                          publishComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
                         }
                         onMouseEnter={() =>
-                          setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
+                          publishComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
                         }
                         role="menuitem"
                         trailingIcon={
@@ -1409,10 +1544,27 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                         aria-expanded={composerSubmenu === 'gfs'}
                         leadingIcon={<IconContexts />}
                         onClick={openGfsLinkPicker}
+                        onMouseEnter={openGfsLinkPicker}
+                        onFocus={openGfsLinkPicker}
+                        onKeyDown={event => {
+                          if (event.key === 'ArrowRight') {
+                            event.preventDefault()
+                            openGfsLinkPicker()
+                            window.requestAnimationFrame(() => {
+                              composerSubmenuRef.current
+                                ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+                                ?.focus()
+                            })
+                          } else if (event.key === 'ArrowLeft' && composerSubmenu === 'gfs') {
+                            event.preventDefault()
+                            publishComposerSubmenu(null)
+                            gfsInsertionSessionRef.current = null
+                          }
+                        }}
                         role="menuitem"
                         trailingIcon={<span aria-hidden="true">&gt;</span>}
                       >
-                        Insert EvenDrive link
+                        EvenDrive
                       </MenuItem>
                     ) : null}
                     <MenuItem
@@ -1432,7 +1584,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               {composerMenuOpen && composerSubmenu !== null
                 ? createPortal(
                     <span
-                      className="composer-reference-submenu"
+                      className={`composer-reference-submenu${composerSubmenu === 'gfs' ? ' composer-reference-submenu--evendrive' : ''}`}
                       ref={composerSubmenuRef}
                       role="menu"
                       style={{
@@ -1445,13 +1597,17 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     >
                       {composerSubmenu === 'gfs' ? (
                         <ComposerGfsLinkPicker
+                          controller={gfsBrowserController}
+                          rootAnchorRef={evenDriveLinkItemRef}
                           sessionId={gfsInsertionSessionRef.current?.id ?? 0}
+                          isAdmissionCurrent={isComposerGfsAdmissionCurrent}
+                          allocatePanelBindingId={allocateComposerGfsPanelBindingId}
                           onInsert={insertGfsLink}
                           onSessionScope={captureGfsControllerScope}
                           onEscapeRoot={() => {
                             gfsInsertionSessionRef.current = null
                             evenDriveLinkItemRef.current?.focus()
-                            setComposerSubmenu(null)
+                            publishComposerSubmenu(null)
                           }}
                         />
                       ) : composerSubmenu === 'plugins' ? (

@@ -2712,10 +2712,14 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     // The sentence appears on BOTH refusal surfaces: the gated
     // callback-local banner AND the revoked tree surface, which owns it
     // unconditionally and outlives the dead gesture's ownership (A11).
-    const sessionEnded = await screen.findAllByText(
+    await waitFor(() =>
+      expect(
+        screen.getAllByText('Your session ended. Sign in again to continue moving files.').length
+      ).toBeGreaterThanOrEqual(2)
+    )
+    const sessionEnded = screen.getAllByText(
       'Your session ended. Sign in again to continue moving files.'
     )
-    expect(sessionEnded.length).toBeGreaterThanOrEqual(2)
     expect(
       sessionEnded.some(element => element.closest('.da-file-explorer__revoked') !== null)
     ).toBe(true)

@@ -2,7 +2,7 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
-import fc, { type AsyncCommand } from 'fast-check'
+import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { rendererEntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { useComposerGfsAuthority } from '../useComposerGfsAuthority'
@@ -199,7 +199,7 @@ describe('useComposerGfsAuthority', () => {
     }
     type Real = {
       view: ReturnType<typeof render>
-      scheduler: ReturnType<typeof fc.scheduler>
+      scheduler: Scheduler
       requests: Request[]
       currentOwner: number
       eventVersion: number
@@ -460,8 +460,14 @@ describe('useComposerGfsAuthority', () => {
 
   it('keeps an old same-owner allow fenced until the current trailing request settles', async () => {
     const { requests, affordances } = installDeferredAffordances()
-    let authority: AuthorityApi | null = null
-    render(<Harness sessionId={27} ids={['resource']} capture={current => (authority = current)} />)
+    const authorityRef: { current: AuthorityApi | null } = { current: null }
+    render(
+      <Harness
+        sessionId={27}
+        ids={['resource']}
+        capture={current => (authorityRef.current = current)}
+      />
+    )
     await waitFor(() => expect(requests).toHaveLength(1))
 
     act(() =>
@@ -472,7 +478,7 @@ describe('useComposerGfsAuthority', () => {
         scopes: ['gfs', 'authorization'],
       })
     )
-    expect(authority?.isCurrentlyAllowed('resource')).toBe(false)
+    expect(authorityRef.current?.isCurrentlyAllowed('resource')).toBe(false)
 
     await act(async () => {
       requests[0]!.resolve(readAffordance)
@@ -480,16 +486,16 @@ describe('useComposerGfsAuthority', () => {
       // before its later finally cleanup can enqueue the current trailing request.
       await Promise.resolve()
       await Promise.resolve()
-      expect(authority?.isCurrentlyAllowed('resource')).toBe(false)
+      expect(authorityRef.current?.isCurrentlyAllowed('resource')).toBe(false)
     })
     await act(async () => new Promise(resolve => setTimeout(resolve, 0)))
     expect(affordances).toHaveBeenCalledTimes(2)
-    expect(authority?.isCurrentlyAllowed('resource')).toBe(false)
+    expect(authorityRef.current?.isCurrentlyAllowed('resource')).toBe(false)
     expect(screen.getByTestId('status-resource').textContent).not.toBe('allowed')
 
     await act(async () => requests[1]!.resolve(readAffordance))
     await waitFor(() => expect(screen.getByTestId('status-resource').textContent).toBe('allowed'))
-    expect(authority?.isCurrentlyAllowed('resource')).toBe(true)
+    expect(authorityRef.current?.isCurrentlyAllowed('resource')).toBe(true)
   })
 
   it('rechecks a cached resource when navigation returns after a received event', async () => {

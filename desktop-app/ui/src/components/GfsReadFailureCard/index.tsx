@@ -26,7 +26,12 @@ function secondsUntil(deadline: number | null): number {
  * listing, the composer's picker for the same two. A second copy would be a
  * second countdown to keep correct.
  */
-export function GfsReadFailureCard({ failure, onRetry }: GfsReadFailureCardProps) {
+export function GfsReadFailureCard({
+  failure,
+  onRetry,
+  retrying = false,
+  onRetryFocus,
+}: GfsReadFailureCardProps) {
   const countdownId = useId()
   const { retryAvailableAt } = failure
   const [remainingSeconds, setRemainingSeconds] = useState(() => secondsUntil(retryAvailableAt))
@@ -78,7 +83,8 @@ export function GfsReadFailureCard({ failure, onRetry }: GfsReadFailureCardProps
         ) : null}
         <Button
           aria-describedby={remainingSeconds > 0 ? countdownId : undefined}
-          disabled={remainingSeconds > 0}
+          disabled={remainingSeconds > 0 || retrying}
+          onFocus={onRetryFocus}
           onClick={onRetry}
           size="sm"
           variant="outline"

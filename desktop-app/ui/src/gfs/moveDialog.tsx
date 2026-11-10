@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, IconButton, StatusBanner } from '@components/Common'
+import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { IconCheck, IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import {
@@ -9,8 +10,19 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
+import type { GfsDiscoveryFailure } from '@hooks/domain/useGfsBrowserController'
+import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
+import { isRateLimited, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from './deniedChildren'
+import {
+  gfsInfiniteQueryPolicy,
+  isGfsFullQueryFailure,
+  requestGfsForwardPage,
+  retireGfsForwardOwner,
+  useGfsForwardPending,
+  useGfsQueryBinding,
+} from './gfsQueryOperationCoordinator'
 import type { GfsMoveDialogProps, GfsNumberedNameConsent } from './moveDialog.types'
 
 type SelectedDestination = Pick<GfsBrowserChild, 'resourceId' | 'name'>
@@ -62,12 +74,11 @@ function GfsMoveTreeFolder({
   onAuthorityFailure,
 }: GfsMoveTreeFolderProps) {
   const queryClient = useQueryClient()
+  const forwardOwnerId = useId()
   const isExpanded = expandedFolderIds.has(folder.resourceId)
-  const childQueryKey = desktopQueryKeys.gfsChildren(
-    scope,
-    folder.resourceId,
-    GFS_DRIVE_MAIN,
-    sessionGeneration
+  const childQueryKey = useMemo(
+    () => desktopQueryKeys.gfsChildren(scope, folder.resourceId, GFS_DRIVE_MAIN, sessionGeneration),
+    [folder.resourceId, scope, sessionGeneration]
   )
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
@@ -76,8 +87,29 @@ function GfsMoveTreeFolder({
     enabled: Boolean(scope) && isExpanded && isGfsSessionGeneration(sessionGeneration),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
+    ...gfsInfiniteQueryPolicy(queryClient),
   })
+  const forwardPending = useGfsForwardPending(queryClient, childQueryKey, forwardOwnerId)
+  useEffect(
+    () => () => retireGfsForwardOwner(queryClient, childQueryKey, forwardOwnerId),
+    [childQueryKey, forwardOwnerId, queryClient]
+  )
   const childDenied = isGfsChildrenDenied(childQuery.error, childQuery.data)
+  const childFailure = useMemo<GfsDiscoveryFailure | null>(() => {
+    if (!childQuery.error || childDenied) return null
+    const message =
+      childQuery.error instanceof Error ? childQuery.error.message : String(childQuery.error)
+    if (!isRateLimited(message)) return { kind: 'failed', message, retryAvailableAt: null }
+    const retryAfterSeconds = parseRetryAfterSeconds(message)
+    return {
+      kind: 'rate-limited',
+      message,
+      retryAvailableAt:
+        retryAfterSeconds === null
+          ? childQuery.errorUpdatedAt + 60_000
+          : childQuery.errorUpdatedAt + retryAfterSeconds * 1_000,
+    }
+  }, [childDenied, childQuery.error, childQuery.errorUpdatedAt])
   const childError = childDenied
     ? 'This folder is no longer available.'
     : errorMessage(childQuery.error)
@@ -175,7 +207,17 @@ function GfsMoveTreeFolder({
               Loading subfolders…
             </p>
           ) : null}
-          {childError ? <StatusBanner tone="error" text={childError} /> : null}
+          {childDenied ? <StatusBanner tone="error" text={childError ?? ''} /> : null}
+          {childFailure ? (
+            <GfsReadFailureCard
+              failure={childFailure}
+              onRetry={() => {
+                assertGfsAuthorityRetryAllowed(queryClient, childQueryKey)
+                void childQuery.refetch()
+              }}
+              retrying={childQuery.isFetching}
+            />
+          ) : null}
           {childFolders.map(child => (
             <GfsMoveTreeFolder
               ancestors={nextAncestors}
@@ -195,8 +237,13 @@ function GfsMoveTreeFolder({
           {hasMoreChildren ? (
             <div className="da-gfs-move-dialog__tree-more">
               <Button
-                loading={childQuery.isFetchingNextPage}
-                onClick={() => void childQuery.fetchNextPage()}
+                disabled={isGfsFullQueryFailure(queryClient, childQueryKey)}
+                loading={childQuery.isFetchingNextPage || forwardPending}
+                onClick={() =>
+                  requestGfsForwardPage(queryClient, childQueryKey, forwardOwnerId, () =>
+                    childQuery.fetchNextPage({ cancelRefetch: false })
+                  )
+                }
                 size="sm"
                 variant="outline"
               >
@@ -238,6 +285,8 @@ export function GfsMoveDialog({
   permissionStatus = null,
   onAuthorityFailure,
 }: GfsMoveDialogProps) {
+  const queryClient = useQueryClient()
+  const rootForwardOwnerId = useId()
   const initialDestination = initialCrumbs[initialCrumbs.length - 1]
   // The folder that already contains the target. Row moves carry the real
   // parent id; for the current resource the sliced crumbs end at its parent.
@@ -335,8 +384,12 @@ export function GfsMoveDialog({
     target.resourceId,
     settleNumberedNameConsent,
   ])
+  const accessibleQueryKey = useMemo(
+    () => desktopQueryKeys.gfsAccessible(scope, GFS_DRIVE_MAIN, sessionGeneration),
+    [scope, sessionGeneration]
+  )
   const accessibleQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsAccessible(scope, GFS_DRIVE_MAIN, sessionGeneration),
+    queryKey: accessibleQueryKey,
     queryFn: ({ pageParam }) => {
       const listAccessible = window.clerum?.gfs?.listAccessible
       return typeof listAccessible === 'function'
@@ -344,9 +397,26 @@ export function GfsMoveDialog({
         : Promise.resolve({ items: [], nextCursor: null })
     },
     enabled: Boolean(sessionScope) && isGfsSessionGeneration(sessionGeneration),
+    refetchOnMount: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
+    ...gfsInfiniteQueryPolicy(queryClient),
   })
+  const accessibleBinding = useGfsQueryBinding(
+    queryClient,
+    accessibleQueryKey,
+    'root',
+    Boolean(sessionScope) && isGfsSessionGeneration(sessionGeneration)
+  )
+  const rootForwardPending = useGfsForwardPending(
+    queryClient,
+    accessibleQueryKey,
+    rootForwardOwnerId
+  )
+  useEffect(
+    () => () => retireGfsForwardOwner(queryClient, accessibleQueryKey, rootForwardOwnerId),
+    [accessibleQueryKey, queryClient, rootForwardOwnerId]
+  )
   const rootFolders = useMemo(() => {
     const accessibleFolders = (accessibleQuery.data?.pages ?? [])
       .flatMap(page => page.items)
@@ -376,8 +446,23 @@ export function GfsMoveDialog({
     return folderItems(roots, new Set([target.resourceId]))
   }, [accessibleQuery.data, initialCrumbs, target.resourceId])
 
-  const listError = errorMessage(accessibleQuery.error)
+  const listFailure = useMemo<GfsDiscoveryFailure | null>(() => {
+    const error = accessibleQuery.error ?? accessibleBinding.error
+    if (!error) return null
+    const message = errorMessage(error) ?? ''
+    if (!isRateLimited(message)) return { kind: 'failed', message, retryAvailableAt: null }
+    const retryAfterSeconds = parseRetryAfterSeconds(message)
+    return {
+      kind: 'rate-limited',
+      message,
+      retryAvailableAt:
+        accessibleQuery.errorUpdatedAt +
+        (retryAfterSeconds === null ? 60_000 : retryAfterSeconds * 1_000),
+    }
+  }, [accessibleBinding.error, accessibleQuery.error, accessibleQuery.errorUpdatedAt])
+  const listError = listFailure?.message ?? null
   const loadingRoots = accessibleQuery.isFetching && rootFolders.length === 0
+  const hasMoreRootFolders = Boolean(accessibleQuery.hasNextPage)
   const pathPassesThroughTarget =
     initialCrumbs.some(crumb => crumb.resourceId === target.resourceId) ||
     selectedDestination?.resourceId === target.resourceId
@@ -565,7 +650,13 @@ export function GfsMoveDialog({
               </div>
             </div>
           ) : null}
-          {listError ? <StatusBanner tone="error" text={listError} /> : null}
+          {listFailure ? (
+            <GfsReadFailureCard
+              failure={listFailure}
+              onRetry={accessibleBinding.retry}
+              retrying={accessibleBinding.busy}
+            />
+          ) : null}
           <div className="da-gfs-move-dialog__current-location">
             <span>Current location:</span>
             <span className="da-gfs-move-dialog__location-pill">
@@ -590,7 +681,7 @@ export function GfsMoveDialog({
               <p className="muted" role="status">
                 Loading folders…
               </p>
-            ) : rootFolders.length === 0 && !accessibleQuery.hasNextPage ? (
+            ) : rootFolders.length === 0 && !hasMoreRootFolders ? (
               // A refused listing is not an absence of folders. The banner
               // above already states the failure, so this only has to stop
               // contradicting it — asserting "no folders" next to an error the
@@ -617,11 +708,19 @@ export function GfsMoveDialog({
                     targetResourceId={target.resourceId}
                   />
                 ))}
-                {accessibleQuery.hasNextPage ? (
+                {hasMoreRootFolders ? (
                   <div className="da-gfs-move-dialog__tree-more">
                     <Button
-                      loading={accessibleQuery.isFetchingNextPage}
-                      onClick={() => void accessibleQuery.fetchNextPage()}
+                      disabled={isGfsFullQueryFailure(queryClient, accessibleQueryKey)}
+                      loading={accessibleQuery.isFetchingNextPage || rootForwardPending}
+                      onClick={() =>
+                        requestGfsForwardPage(
+                          queryClient,
+                          accessibleQueryKey,
+                          rootForwardOwnerId,
+                          () => accessibleQuery.fetchNextPage({ cancelRefetch: false })
+                        )
+                      }
                       size="sm"
                       variant="outline"
                     >

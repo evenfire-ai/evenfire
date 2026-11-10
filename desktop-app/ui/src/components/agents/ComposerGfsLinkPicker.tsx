@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { RefObject } from 'react'
 import { Button, MenuItem } from '@components/Common'
-import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
-import { IconChevronRight, IconContexts } from '@components/SidebarNav/icons'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
+import { ComposerGfsCascadeLevel } from './ComposerGfsCascade'
+import type { BoundGfsFolder } from './ComposerGfsCascade'
 import type {
   ComposerGfsAuthorityFailureHandler,
   ComposerGfsLinkSelection,
@@ -14,18 +15,25 @@ import type {
 import { useComposerGfsAuthority } from './useComposerGfsAuthority'
 
 export function ComposerGfsLinkPicker({
+  controller,
+  rootAnchorRef,
   sessionId,
   onInsert,
   onSessionScope,
   onEscapeRoot,
+  isAdmissionCurrent,
+  allocatePanelBindingId,
 }: {
+  controller: ReturnType<typeof useGfsBrowserController>
+  rootAnchorRef: RefObject<HTMLElement | null>
   sessionId: number
   onInsert: (
     selection: ComposerGfsLinkSelection,
     sessionScope: string,
     sessionId: number,
     sessionGeneration: number | null,
-    handleAuthorityFailure: ComposerGfsAuthorityFailureHandler
+    handleAuthorityFailure: ComposerGfsAuthorityFailureHandler,
+    isEntryCurrent: () => boolean
   ) => void | Promise<void>
   onSessionScope: (
     sessionId: number,
@@ -33,11 +41,63 @@ export function ComposerGfsLinkPicker({
     sessionGeneration: number | null
   ) => void
   onEscapeRoot: () => void
+  isAdmissionCurrent?: (sessionId: number) => boolean
+  allocatePanelBindingId?: () => number
 }) {
-  const ctrl = useGfsBrowserController({ pickerAuthorityManaged: true })
+  const ctrl = controller
   const menuRef = useRef<HTMLDivElement | null>(null)
-  const backRef = useRef<HTMLButtonElement | null>(null)
-  const entries = ctrl.current ? ctrl.items : ctrl.accessibleResources
+  const [folderPath, setFolderPathState] = useState<BoundGfsFolder[]>([])
+  const folderPathRef = useRef<BoundGfsFolder[]>([])
+  const localBindingCounterRef = useRef(0)
+  const allocateBinding = useCallback(
+    () => allocatePanelBindingId?.() ?? ++localBindingCounterRef.current,
+    [allocatePanelBindingId]
+  )
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>())
+  const suppressedFolderFocusOpenRef = useRef(new Set<string>())
+  const [childEntriesByBinding, setChildEntriesByBinding] = useState(
+    () => new Map<number, GfsBrowserChild[]>()
+  )
+  const pointerInsideRef = useRef(false)
+  const focusInsideRef = useRef(false)
+  const closeTokenRef = useRef<object | null>(null)
+  const closeTimersRef = useRef(new Set<number>())
+  const suppressNextFolderFocusOpen = useCallback((resourceId: string) => {
+    suppressedFolderFocusOpenRef.current.add(resourceId)
+  }, [])
+  const setFolderPath = useCallback(
+    (next: GfsBrowserChild[]) => {
+      const previous = folderPathRef.current
+      let common = 0
+      while (
+        common < previous.length &&
+        common < next.length &&
+        previous[common]?.resourceId === next[common]?.resourceId
+      ) {
+        common += 1
+      }
+      if (common === previous.length && common === next.length) {
+        const unchanged = next.every((folder, index) => folder === previous[index])
+        if (unchanged) return
+      }
+      const bound = next.map((folder, index) => ({
+        ...folder,
+        bindingId:
+          index < common ? (previous[index]?.bindingId ?? allocateBinding()) : allocateBinding(),
+      }))
+      folderPathRef.current = bound
+      setFolderPathState(bound)
+    },
+    [allocateBinding]
+  )
+  const childEntries = useMemo(
+    () => [...childEntriesByBinding.values()].flat(),
+    [childEntriesByBinding]
+  )
+  const entries = useMemo(
+    () => [...ctrl.accessibleResources, ...childEntries],
+    [childEntries, ctrl.accessibleResources]
+  )
   const handlePassiveAuthorityFailure = useCallback(
     (message: string) =>
       ctrl.handleAuthorityFailure(message, 'operation', ctrl.sessionScope, ctrl.sessionGeneration),
@@ -80,50 +140,120 @@ export function ComposerGfsLinkPicker({
         .map(entry => entry.resourceId),
     [authority.authorityByResourceId, entries]
   )
-  const currentResourceId = ctrl.current?.resourceId ?? null
-  const previousCurrentResourceIdRef = useRef(currentResourceId)
-  const loading = ctrl.current ? ctrl.loading : ctrl.loadingAccessible
-  const error = ctrl.current ? ctrl.error : ctrl.accessibleError
-  const failure = ctrl.current ? null : ctrl.discoveryFailure
-  const hasMore = ctrl.current ? ctrl.hasMore : ctrl.hasMoreAccessible
-  const loadingMore = ctrl.current ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
+  const loading = ctrl.loadingAccessible
+  const error = ctrl.accessibleError
+  const failure = ctrl.discoveryFailure
+  const hasMore = ctrl.hasMoreAccessible
+  const loadingMore = ctrl.isFetchingMoreAccessible
 
   useEffect(() => {
     onSessionScope(sessionId, ctrl.sessionScope, ctrl.sessionGeneration)
   }, [ctrl.sessionGeneration, ctrl.sessionScope, onSessionScope, sessionId])
+
+  useEffect(
+    () => () => {
+      closeTimersRef.current.forEach(timer => window.clearTimeout(timer))
+      closeTimersRef.current.clear()
+    },
+    []
+  )
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
       event.stopPropagation()
-      if (ctrl.crumbs.length > 1) ctrl.goToCrumb(ctrl.crumbs.length - 2)
-      else if (ctrl.crumbs.length === 1) ctrl.reset()
-      else onEscapeRoot()
+      const path = folderPathRef.current
+      if (path.length > 0) {
+        const focusId = path[path.length - 1]?.resourceId
+        if (focusId) suppressNextFolderFocusOpen(focusId)
+        setFolderPath(path.slice(0, -1))
+        if (focusId) window.requestAnimationFrame(() => rowRefs.current.get(focusId)?.focus())
+      } else onEscapeRoot()
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [ctrl.crumbs.length, ctrl.goToCrumb, ctrl.reset, onEscapeRoot])
+  }, [onEscapeRoot, rootAnchorRef, setFolderPath, suppressNextFolderFocusOpen])
 
-  useEffect(() => {
-    const previousResourceId = previousCurrentResourceIdRef.current
-    previousCurrentResourceIdRef.current = currentResourceId
-    if (currentResourceId) {
-      backRef.current?.focus()
-      return
-    }
-    if (
-      previousResourceId !== null ||
-      document.activeElement?.closest('.composer-reference-menu-panel')
-    ) {
-      menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()
-    }
-  }, [currentResourceId, visibleEntries[0]?.resourceId])
+  const isCurrentPanel = useCallback(
+    (parentPath: BoundGfsFolder[]) =>
+      parentPath.every(
+        (folder, index) =>
+          folderPathRef.current[index]?.resourceId === folder.resourceId &&
+          folderPathRef.current[index]?.bindingId === folder.bindingId
+      ),
+    []
+  )
+  const handleChildEntries = useCallback(
+    (resourceId: string, bindingId: number, nextEntries: GfsBrowserChild[]) => {
+      if (
+        nextEntries.length > 0 &&
+        !folderPathRef.current.some(
+          folder => folder.resourceId === resourceId && folder.bindingId === bindingId
+        )
+      ) {
+        return
+      }
+      setChildEntriesByBinding(previous => {
+        const currentEntries = previous.get(bindingId)
+        if (nextEntries.length === 0 && currentEntries === undefined) return previous
+        if (
+          currentEntries &&
+          currentEntries.length === nextEntries.length &&
+          currentEntries.every(
+            (entry, index) =>
+              entry.kind === nextEntries[index]?.kind &&
+              entry.resourceId === nextEntries[index]?.resourceId &&
+              entry.name === nextEntries[index]?.name &&
+              entry.gfsUri === nextEntries[index]?.gfsUri
+          )
+        )
+          return previous
+        const next = new Map(previous)
+        if (nextEntries.length > 0) next.set(bindingId, nextEntries)
+        else next.delete(bindingId)
+        return next
+      })
+    },
+    []
+  )
+  const consumeSuppressedFolderFocusOpen = useCallback((resourceId: string) => {
+    if (!suppressedFolderFocusOpenRef.current.has(resourceId)) return false
+    suppressedFolderFocusOpenRef.current.delete(resourceId)
+    return true
+  }, [])
+  const handlePassivePanelFailure = useCallback(
+    (message: string) => {
+      const handled = handlePassiveAuthorityFailure(message)
+      if (handled) authority.invalidate()
+    },
+    [authority.invalidate, handlePassiveAuthorityFailure]
+  )
+  const scheduleClose = useCallback(() => {
+    const token = {}
+    closeTokenRef.current = token
+    const timer = window.setTimeout(() => {
+      closeTimersRef.current.delete(timer)
+      const rootAnchor = rootAnchorRef.current
+      const rootOwnsHoverOrFocus =
+        rootAnchor?.matches(':hover') || rootAnchor === document.activeElement
+      if (
+        closeTokenRef.current !== token ||
+        pointerInsideRef.current ||
+        focusInsideRef.current ||
+        rootOwnsHoverOrFocus
+      )
+        return
+      setFolderPath([])
+      onEscapeRoot()
+    }, 240)
+    closeTimersRef.current.add(timer)
+  }, [onEscapeRoot, setFolderPath])
 
-  const insert = (entry: GfsBrowserChild) => {
+  const insert = (entry: GfsBrowserChild, isEntryCurrent: () => boolean) => {
     // This ref-backed check is synchronous, so an event-fenced stale committed
     // row cannot activate before React publishes the next disabled/hidden view.
-    if (!authority.isCurrentlyAllowed(entry.resourceId)) return
+    if (!isEntryCurrent() || !authority.isCurrentlyAllowed(entry.resourceId)) return
     onInsert(
       {
         label: sanitizeAppTabTitle(entry.name) || 'Unnamed',
@@ -133,13 +263,18 @@ export function ComposerGfsLinkPicker({
       ctrl.sessionScope,
       sessionId,
       ctrl.sessionGeneration,
-      handleDirectAuthorityFailure
+      handleDirectAuthorityFailure,
+      isEntryCurrent
     )
   }
 
   const retry = () => {
-    if (ctrl.current) void ctrl.retryChildren()
-    else void ctrl.retryDiscovery()
+    if (ctrl.current) {
+      if (!authority.isCurrentlyAllowed(ctrl.current.resourceId)) return
+      void ctrl.retryChildren()
+    } else {
+      void ctrl.retryDiscovery()
+    }
   }
 
   return (
@@ -148,13 +283,29 @@ export function ComposerGfsLinkPicker({
       className="composer-gfs-picker"
       role="menu"
       aria-label="EvenDrive links"
+      onMouseEnter={() => {
+        pointerInsideRef.current = true
+      }}
+      onMouseLeave={() => {
+        pointerInsideRef.current = false
+        scheduleClose()
+      }}
+      onFocusCapture={() => {
+        focusInsideRef.current = true
+      }}
+      onBlurCapture={event => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          focusInsideRef.current = false
+          scheduleClose()
+        }
+      }}
       onKeyDown={event => {
         if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+        const menu = event.target instanceof Element ? event.target.closest('[role="menu"]') : null
         const menuItems = Array.from(
-          event.currentTarget.querySelectorAll<HTMLButtonElement>(
-            '[role="menuitem"]:not(:disabled)'
-          )
-        )
+          menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"], button:not([disabled])') ??
+            []
+        ).filter(item => item.closest('[role="menu"]') === menu && !item.disabled)
         if (menuItems.length === 0) return
         event.preventDefault()
         const currentIndex = menuItems.indexOf(document.activeElement as HTMLButtonElement)
@@ -170,35 +321,16 @@ export function ComposerGfsLinkPicker({
       }}
     >
       <div className="composer-gfs-picker-path">
-        {ctrl.current ? (
-          <>
-            <MenuItem
-              ref={backRef}
-              aria-label="Back to shared files"
-              leadingIcon={<span aria-hidden="true">‹</span>}
-              onClick={() =>
-                ctrl.crumbs.length > 1 ? ctrl.goToCrumb(ctrl.crumbs.length - 2) : ctrl.reset()
-              }
-              role="menuitem"
-            >
-              Back
-            </MenuItem>
-            <span
-              className="composer-gfs-picker-current"
-              title={sanitizeAppTabTitle(ctrl.current.name) || 'Unnamed'}
-            >
-              {sanitizeAppTabTitle(ctrl.current.name) || 'Unnamed'}
-            </span>
-          </>
-        ) : (
-          <span className="composer-gfs-picker-current">Shared files</span>
-        )}
+        <span className="composer-gfs-picker-current">Shared files</span>
       </div>
 
       {ctrl.accessibleNotice ? (
         <p className="composer-reference-menu-empty">{ctrl.accessibleNotice}</p>
       ) : null}
-      {error && visibleEntries.length > 0 ? (
+      {error &&
+      ctrl.accessibleResources.some(
+        item => authority.authorityByResourceId.get(item.resourceId) === 'allowed'
+      ) ? (
         <p className="composer-reference-menu-empty composer-gfs-picker-error">
           {describeGfsReadError(error).message}
         </p>
@@ -208,58 +340,65 @@ export function ComposerGfsLinkPicker({
         <div className="composer-reference-menu-empty" role="status">
           Loading EvenDrive…
         </div>
-      ) : entries.length > 0 && visibleEntries.length === 0 && permissionRetryIds.length === 0 ? (
+      ) : ctrl.accessibleResources.length > 0 &&
+        visibleEntries.length === 0 &&
+        permissionRetryIds.length === 0 ? (
         <div className="composer-reference-menu-empty" role="status">
           Checking exact read permission…
         </div>
       ) : visibleEntries.length > 0 ? (
-        <div className="composer-gfs-picker-list">
-          {visibleEntries.map(entry => {
-            const displayName = sanitizeAppTabTitle(entry.name) || 'Unnamed'
-            return (
-              <div className="composer-gfs-picker-row" key={`${entry.drive}:${entry.resourceId}`}>
-                {entry.kind === 'directory' ? (
-                  <MenuItem
-                    aria-label={`Open folder ${displayName}`}
-                    className="composer-gfs-picker-open"
-                    leadingIcon={<IconContexts />}
-                    onClick={() =>
-                      ctrl.current ? ctrl.openChild(entry) : ctrl.openResource(entry)
-                    }
-                    role="menuitem"
-                    trailingIcon={<IconChevronRight aria-hidden="true" />}
-                  >
-                    {displayName}
-                  </MenuItem>
-                ) : null}
-                <MenuItem
-                  aria-label={`Insert link to ${displayName}`}
-                  className="composer-gfs-picker-insert"
-                  leadingIcon={
-                    entry.kind === 'file' ? <GfsFileIcon name={displayName} /> : undefined
-                  }
-                  onClick={() => insert(entry)}
-                  role="menuitem"
-                >
-                  {entry.kind === 'directory' ? 'Insert link' : displayName}
-                </MenuItem>
-              </div>
+        <ComposerGfsCascadeLevel
+          items={ctrl.accessibleResources}
+          path={folderPath}
+          parentPath={[]}
+          parentSnapshot={{
+            revision: ctrl.accessibleSnapshotRevision,
+            data: ctrl.accessibleSnapshotData,
+            isCurrent: ctrl.isAccessibleSnapshotCurrent,
+          }}
+          authorityByResourceId={authority.authorityByResourceId}
+          controller={ctrl}
+          queryFailure={null}
+          queryLoading={false}
+          queryHasMore={hasMore}
+          queryLoadingMore={loadingMore}
+          queryLoadMoreDisabled={
+            !ctrl.isAccessibleSnapshotCurrent(
+              ctrl.accessibleSnapshotRevision,
+              ctrl.accessibleSnapshotData
             )
-          })}
-          {hasMore ? (
-            <Button
-              block
-              className="composer-gfs-picker-more"
-              color="neutral"
-              disabled={loadingMore}
-              onClick={() => (ctrl.current ? ctrl.loadMore() : ctrl.loadMoreAccessible())}
-              size="xs"
-              variant="text"
-            >
-              {loadingMore ? 'Loading…' : 'Load more'}
-            </Button>
-          ) : null}
-        </div>
+          }
+          queryLoadMore={() => {
+            if (isAdmissionCurrent?.(sessionId) === false) return
+            ctrl.loadMoreAccessibleNow()
+          }}
+          rootAnchorRef={rootAnchorRef}
+          registerRow={(resourceId, element) => {
+            if (element) rowRefs.current.set(resourceId, element)
+            else rowRefs.current.delete(resourceId)
+          }}
+          isCurrentPanel={isCurrentPanel}
+          onActivateFolder={setFolderPath}
+          onInsert={insert}
+          onChildEntries={handleChildEntries}
+          onAuthorityFailure={handlePassivePanelFailure}
+          isCurrentlyAllowed={authority.isCurrentlyAllowed}
+          isAdmissionCurrent={() => isAdmissionCurrent?.(sessionId) ?? true}
+          onKeyboardClose={next => {
+            const focusId = folderPathRef.current[next.length]?.resourceId
+            setFolderPath(next)
+            if (focusId)
+              window.requestAnimationFrame(() => {
+                const row = rowRefs.current.get(focusId)
+                if (!row) return
+                suppressNextFolderFocusOpen(focusId)
+                row.focus()
+              })
+          }}
+          onKeyboardCloseRoot={onEscapeRoot}
+          suppressNextFolderFocusOpen={suppressNextFolderFocusOpen}
+          consumeSuppressedFolderFocusOpen={consumeSuppressedFolderFocusOpen}
+        />
       ) : failure && failure.kind !== 'unsupported' ? (
         <GfsReadFailureCard failure={failure} onRetry={retry} />
       ) : error ? (

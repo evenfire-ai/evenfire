@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
+import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
   GFS_DRIVE_MAIN,
@@ -19,6 +20,7 @@ import {
 } from '@hooks/domain/useGfsBrowserController'
 import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
+import { isRateLimited, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
@@ -35,6 +37,13 @@ import {
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
+import {
+  gfsInfiniteQueryPolicy,
+  isGfsFullQueryFailure,
+  requestGfsForwardPage,
+  retireGfsForwardOwner,
+  useGfsForwardPending,
+} from '@/gfs/gfsQueryOperationCoordinator'
 import { toastMoveOutcome } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
@@ -108,6 +117,7 @@ function FileExplorerNode({
   onRequestMove,
 }: FileExplorerNodeProps) {
   const queryClient = useQueryClient()
+  const forwardOwnerId = useId()
   const isDirectory = node.kind === 'directory'
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
@@ -119,11 +129,9 @@ function FileExplorerNode({
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
 
-  const childQueryKey = desktopQueryKeys.gfsChildren(
-    scope,
-    node.resourceId,
-    GFS_DRIVE_MAIN,
-    sessionGeneration
+  const childQueryKey = useMemo(
+    () => desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN, sessionGeneration),
+    [node.resourceId, scope, sessionGeneration]
   )
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
@@ -143,8 +151,29 @@ function FileExplorerNode({
     refetchOnWindowFocus: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
+    ...gfsInfiniteQueryPolicy(queryClient),
   })
+  const forwardPending = useGfsForwardPending(queryClient, childQueryKey, forwardOwnerId)
+  useEffect(
+    () => () => retireGfsForwardOwner(queryClient, childQueryKey, forwardOwnerId),
+    [childQueryKey, forwardOwnerId, queryClient]
+  )
   const childDenied = isGfsChildrenDenied(childQuery.error, childQuery.data)
+  const childFailure = useMemo(() => {
+    if (!childQuery.error || childDenied) return null
+    const message =
+      childQuery.error instanceof Error ? childQuery.error.message : String(childQuery.error)
+    if (!isRateLimited(message)) return { kind: 'failed' as const, message, retryAvailableAt: null }
+    const retryAfterSeconds = parseRetryAfterSeconds(message)
+    return {
+      kind: 'rate-limited' as const,
+      message,
+      retryAvailableAt:
+        retryAfterSeconds === null
+          ? childQuery.errorUpdatedAt + 60_000
+          : childQuery.errorUpdatedAt + retryAfterSeconds * 1_000,
+    }
+  }, [childDenied, childQuery.error, childQuery.errorUpdatedAt])
   const childError = childDenied
     ? 'This folder is no longer available.'
     : errorMessage(childQuery.error)
@@ -408,7 +437,17 @@ function FileExplorerNode({
               Loading…
             </p>
           ) : null}
-          {childError ? <StatusBanner tone="error" text={childError} compact /> : null}
+          {childDenied ? <StatusBanner tone="error" text={childError ?? ''} compact /> : null}
+          {childFailure ? (
+            <GfsReadFailureCard
+              failure={childFailure}
+              onRetry={() => {
+                assertGfsAuthorityRetryAllowed(queryClient, childQueryKey)
+                void childQuery.refetch()
+              }}
+              retrying={childQuery.isFetching}
+            />
+          ) : null}
           {childItems.map(child => (
             <FileExplorerNode
               accessActive={accessActive}
@@ -440,8 +479,13 @@ function FileExplorerNode({
           {hasMoreChildren ? (
             <div className="da-file-explorer__more">
               <Button
-                loading={childQuery.isFetchingNextPage}
-                onClick={() => void childQuery.fetchNextPage()}
+                disabled={isGfsFullQueryFailure(queryClient, childQueryKey)}
+                loading={childQuery.isFetchingNextPage || forwardPending}
+                onClick={() =>
+                  requestGfsForwardPage(queryClient, childQueryKey, forwardOwnerId, () =>
+                    childQuery.fetchNextPage({ cancelRefetch: false })
+                  )
+                }
                 size="xs"
                 variant="text"
               >

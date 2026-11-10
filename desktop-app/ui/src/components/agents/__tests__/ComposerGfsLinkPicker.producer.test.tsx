@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
+import { useRef } from 'react'
+import type { ComponentProps } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import {
   accessibleResource,
   childView,
@@ -34,6 +37,17 @@ const laterResource = accessibleResource(
   'file'
 )
 
+function ProducerPicker(props: {
+  sessionId: number
+  onInsert: ComponentProps<typeof ComposerGfsLinkPicker>['onInsert']
+  onSessionScope: ComponentProps<typeof ComposerGfsLinkPicker>['onSessionScope']
+  onEscapeRoot: () => void
+}) {
+  const controller = useGfsBrowserController({ pickerAuthorityManaged: true })
+  const rootAnchorRef = useRef<HTMLElement | null>(null)
+  return <ComposerGfsLinkPicker {...props} controller={controller} rootAnchorRef={rootAnchorRef} />
+}
+
 function installProducers() {
   const listAccessible = vi.fn(async () => listAccessiblePage([folderA]))
   const listChildren = vi.fn(async (resourceId: string) =>
@@ -62,7 +76,7 @@ describe('ComposerGfsLinkPicker producer integration', () => {
     render(
       <AuthContext.Provider value={auth}>
         <QueryClientProvider client={queryClient}>
-          <ComposerGfsLinkPicker
+          <ProducerPicker
             sessionId={41}
             onInsert={onInsert}
             onSessionScope={onSessionScope}
@@ -72,8 +86,10 @@ describe('ComposerGfsLinkPicker producer integration', () => {
       </AuthContext.Provider>
     )
 
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Folder A' }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Nested B' }))
+    const folder = await screen.findByRole('menuitem', { name: 'Insert folder Folder A' })
+    fireEvent.mouseEnter(folder)
+    const nested = await screen.findByRole('menuitem', { name: 'Insert folder Nested B' })
+    fireEvent.mouseEnter(nested)
     fireEvent.click(
       await screen.findByRole('menuitem', { name: 'Insert link to Release notes.md' })
     )
@@ -87,10 +103,11 @@ describe('ComposerGfsLinkPicker producer integration', () => {
         'test:user-1:team-1',
         41,
         1,
+        expect.any(Function),
         expect.any(Function)
       )
     )
-    expect(screen.getByRole('menu')).toBeTruthy()
+    expect(screen.getByRole('menu', { name: 'EvenDrive links' })).toBeTruthy()
     expect(screen.getByText('Nested B')).toBeTruthy()
     expect(onEscapeRoot).not.toHaveBeenCalled()
     expect(onSessionScope).toHaveBeenCalledWith(41, 'test:user-1:team-1', 1)
@@ -120,7 +137,7 @@ describe('ComposerGfsLinkPicker producer integration', () => {
     render(
       <AuthContext.Provider value={auth}>
         <QueryClientProvider client={queryClient}>
-          <ComposerGfsLinkPicker
+          <ProducerPicker
             sessionId={42}
             onInsert={onInsert}
             onSessionScope={vi.fn()}
@@ -132,10 +149,7 @@ describe('ComposerGfsLinkPicker producer integration', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
     await screen.findByRole('menuitem', { name: 'Insert link to Later report.md' })
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Folder A' }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Back to shared files' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
-    await screen.findByRole('menuitem', { name: 'Insert link to Later report.md' })
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Insert link to Later report.md' }))
 
     expect(listAccessible).toHaveBeenNthCalledWith(1, 'main', undefined)
@@ -151,10 +165,11 @@ describe('ComposerGfsLinkPicker producer integration', () => {
         'test:user-1:team-1',
         42,
         1,
+        expect.any(Function),
         expect.any(Function)
       )
     )
-    expect(screen.getByRole('menu')).toBeTruthy()
+    expect(screen.getByRole('menu', { name: 'EvenDrive links' })).toBeTruthy()
     expect(screen.getByText('Shared files')).toBeTruthy()
   })
 })

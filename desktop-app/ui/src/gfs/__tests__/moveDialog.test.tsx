@@ -48,9 +48,9 @@ function renderDialog(
     listAccessible?: () => Promise<unknown>
     listChildren?: (resourceId: string) => Promise<unknown>
   },
-  props: Partial<Parameters<typeof GfsMoveDialog>[0]> = {}
+  props: Partial<Parameters<typeof GfsMoveDialog>[0]> = {},
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 ) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
@@ -80,6 +80,44 @@ function renderDialog(
   )
   return { ...rendered, queryClient }
 }
+
+describe('GfsMoveDialog cached root presentation', () => {
+  it('keeps same-scope destinations visible while the required refresh is pending', async () => {
+    let resolveRefresh!: (page: { items: GfsBrowserChild[]; nextCursor: null }) => void
+    const refresh = new Promise<{ items: GfsBrowserChild[]; nextCursor: null }>(resolve => {
+      resolveRefresh = resolve
+    })
+    const listAccessible = vi.fn(() => refresh)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(
+      desktopQueryKeys.gfsAccessible('anonymous', 'main', SESSION_GENERATION),
+      {
+        pages: [{ items: [folder('cached-destination', 'Cached destination')], nextCursor: null }],
+        pageParams: [undefined],
+      }
+    )
+
+    const { unmount } = renderDialog({ listAccessible }, {}, queryClient)
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+
+    expect(listAccessible).toHaveBeenCalledTimes(1)
+    expect(within(dialog).getByRole('button', { name: 'Cached destination' })).toBeTruthy()
+
+    await act(async () => {
+      resolveRefresh({
+        items: [folder('fresh-destination', 'Fresh destination')],
+        nextCursor: null,
+      })
+      await refresh
+    })
+    expect(await within(dialog).findByRole('button', { name: 'Fresh destination' })).toBeTruthy()
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+    expect(listAccessible).toHaveBeenCalledTimes(1)
+    unmount()
+  })
+})
 
 describe('GfsMoveDialog unknown session generation', () => {
   it('does not read destinations or enable Move without a published generation', async () => {

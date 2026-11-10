@@ -1107,6 +1107,15 @@ describe('FilesPage Move permission generation fencing', () => {
       pageParams: [undefined],
     })
     queryClient.setQueryData(accessibleA, { pages: [rows], pageParams: [undefined] })
+    // Keep the new team's cache populated independently of the old team's
+    // open FilesPage location; this test isolates whether the old Move result
+    // invalidates the captured team's keys after the session scope switches.
+    queryClient.setQueryData(sourceChildrenB, { pages: [children], pageParams: [undefined] })
+    queryClient.setQueryData(destinationChildrenB, {
+      pages: [emptyChildren],
+      pageParams: [undefined],
+    })
+    queryClient.setQueryData(accessibleB, { pages: [rows], pageParams: [undefined] })
     const renderPage = (teamId: string) => (
       <AuthContext.Provider value={authFor(teamId, 'user-a')}>
         <QueryClientProvider client={queryClient}>

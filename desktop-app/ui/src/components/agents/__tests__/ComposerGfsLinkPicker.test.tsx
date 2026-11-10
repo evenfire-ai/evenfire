@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
+import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { cleanup, fireEvent, render as rtlRender, screen } from '@testing-library/react'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import type {
+  GfsBrowserChild,
+  useGfsBrowserController,
+} from '@hooks/domain/useGfsBrowserController'
 import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
 import { ComposerGfsLinkPicker } from '../ComposerGfsLinkPicker'
 
@@ -10,6 +16,19 @@ const hookMock = vi.hoisted(() => ({
 }))
 
 vi.mock('@hooks/domain/useGfsBrowserController', () => hookMock)
+
+function render(ui: ReactNode, controller?: ReturnType<typeof useGfsBrowserController>) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  if (controller?.sessionScope && controller.sessionGeneration !== null)
+    queryClient.setQueryData(
+      desktopQueryKeys.gfsAccessible(controller.sessionScope, 'main', controller.sessionGeneration),
+      {
+        pages: [{ items: controller.accessibleResources, nextCursor: null }],
+        pageParams: [undefined],
+      }
+    )
+  return rtlRender(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
+}
 
 function resource(
   resourceId: string,
@@ -32,7 +51,9 @@ function resource(
   }
 }
 
-function baseController(overrides: Record<string, unknown> = {}) {
+function baseController(
+  overrides: Record<string, unknown> = {}
+): ReturnType<typeof useGfsBrowserController> {
   return {
     crumbs: [],
     current: null,
@@ -43,6 +64,9 @@ function baseController(overrides: Record<string, unknown> = {}) {
     handleAuthorityFailure: vi.fn(() => false),
     items: [],
     accessibleResources: [],
+    accessibleSnapshotRevision: 1,
+    accessibleSnapshotData: undefined,
+    isAccessibleSnapshotCurrent: vi.fn(() => true),
     loading: false,
     loadingAccessible: false,
     error: null,
@@ -62,7 +86,7 @@ function baseController(overrides: Record<string, unknown> = {}) {
     goToCrumb: vi.fn(),
     reset: vi.fn(),
     ...overrides,
-  }
+  } as unknown as ReturnType<typeof useGfsBrowserController>
 }
 
 describe('ComposerGfsLinkPicker', () => {
@@ -71,6 +95,7 @@ describe('ComposerGfsLinkPicker', () => {
       configurable: true,
       value: {
         gfs: {
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async (resourceId: string) => ({
             ...delegationAffordances(new Set(resourceId === 'secret-file' ? [] : ['read']), false),
           })),
@@ -84,7 +109,7 @@ describe('ComposerGfsLinkPicker', () => {
     delete (window as Partial<typeof window>).clerum
   })
 
-  it('lists only exact-authorized rows and separates folder navigation from insertion', async () => {
+  it('lists only exact-authorized rows and inserts a folder from its main row', async () => {
     const folder = resource('folder-a', 'Folder A', 'directory')
     const secret = resource('secret-file', 'Secret file', 'file', false)
     const controller = baseController({ accessibleResources: [folder, secret] })
@@ -93,21 +118,32 @@ describe('ComposerGfsLinkPicker', () => {
     const onSessionScope = vi.fn()
     render(
       <ComposerGfsLinkPicker
+        controller={controller}
+        rootAnchorRef={{ current: null }}
         sessionId={7}
         onInsert={onInsert}
         onSessionScope={onSessionScope}
         onEscapeRoot={vi.fn()}
-      />
+      />,
+      controller
     )
 
-    expect(await screen.findByRole('menuitem', { name: 'Open folder Folder A' })).toBeTruthy()
-    expect(await screen.findByRole('menuitem', { name: 'Insert link to Folder A' })).toBeTruthy()
+    const folderRow = await screen.findByRole('menuitem', { name: 'Insert folder Folder A' })
+    expect(screen.queryByRole('menuitem', { name: 'Insert link to Folder A' })).toBeNull()
+    expect(screen.getByRole('menuitem', { name: 'Expand folder Folder A' })).toBeTruthy()
     expect(screen.queryByText('Secret file')).toBeNull()
     expect(onSessionScope).toHaveBeenCalledWith(7, 'env:user:team', 1)
 
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder Folder A' }))
-    expect(controller.openResource).toHaveBeenCalledWith(folder)
-    expect(onInsert).not.toHaveBeenCalled()
+    fireEvent.click(folderRow)
+    expect(onInsert).toHaveBeenCalledWith(
+      { label: 'Folder A', uri: folder.gfsUri, resourceId: folder.resourceId },
+      'env:user:team',
+      7,
+      1,
+      expect.any(Function),
+      expect.any(Function)
+    )
+    expect(controller.openResource).not.toHaveBeenCalled()
   })
 
   it('supports arrow and Home/End menu navigation', async () => {
@@ -120,51 +156,43 @@ describe('ComposerGfsLinkPicker', () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller)
     render(
       <ComposerGfsLinkPicker
+        controller={controller}
+        rootAnchorRef={{ current: null }}
         sessionId={8}
         onInsert={vi.fn()}
         onSessionScope={vi.fn()}
         onEscapeRoot={vi.fn()}
-      />
+      />,
+      controller
     )
 
-    const openFolder = await screen.findByRole('menuitem', { name: 'Open folder Folder A' })
-    const insertFolder = await screen.findByRole('menuitem', { name: 'Insert link to Folder A' })
+    const folderRow = await screen.findByRole('menuitem', { name: 'Insert folder Folder A' })
     const insertFile = await screen.findByRole('menuitem', { name: 'Insert link to File A' })
-    openFolder.focus()
-    fireEvent.keyDown(openFolder, { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(insertFolder)
-    fireEvent.keyDown(insertFolder, { key: 'End' })
+    folderRow.focus()
+    fireEvent.keyDown(folderRow, { key: 'End' })
     expect(document.activeElement).toBe(insertFile)
     fireEvent.keyDown(insertFile, { key: 'Home' })
-    expect(document.activeElement).toBe(openFolder)
+    expect(document.activeElement).toBe(folderRow)
   })
 
-  it('inserts an exact file URI and keeps the current folder hierarchy mounted', async () => {
+  it('inserts an exact file URI from the root list', async () => {
     const file = resource('exact-file', 'Notes.md', 'file')
     const controller = baseController({
-      crumbs: [
-        {
-          resourceId: 'folder-a',
-          gfsUri: 'gfs://main/folder-a',
-          name: 'Folder A',
-          kind: 'directory',
-          version: 1,
-          bytes: 0,
-        },
-      ],
-      current: { ...resource('folder-a', 'Folder A', 'directory') },
-      items: [file],
+      accessibleResources: [file],
     })
     hookMock.useGfsBrowserController.mockReturnValue(controller)
     const onInsert = vi.fn()
     const onEscapeRoot = vi.fn()
     const { container } = render(
       <ComposerGfsLinkPicker
+        controller={controller}
+        rootAnchorRef={{ current: null }}
         sessionId={9}
         onInsert={onInsert}
         onSessionScope={vi.fn()}
         onEscapeRoot={onEscapeRoot}
-      />
+      />,
+      controller
     )
 
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Insert link to Notes.md' }))
@@ -173,6 +201,7 @@ describe('ComposerGfsLinkPicker', () => {
       'env:user:team',
       9,
       1,
+      expect.any(Function),
       expect.any(Function)
     )
     expect(container.querySelector('[role="menu"]')).toBeTruthy()
@@ -184,20 +213,23 @@ describe('ComposerGfsLinkPicker', () => {
     const resourceId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
     const uri = `gfs://main/${resourceId}`
     const file = resource(resourceId, maliciousName, 'file')
-    hookMock.useGfsBrowserController.mockReturnValue(
-      baseController({ accessibleResources: [file] })
-    )
+    const controller = baseController({ accessibleResources: [file] })
+    hookMock.useGfsBrowserController.mockReturnValue(controller)
     const onInsert = vi.fn()
     render(
       <ComposerGfsLinkPicker
+        controller={controller}
+        rootAnchorRef={{ current: null }}
         sessionId={13}
         onInsert={onInsert}
         onSessionScope={vi.fn()}
         onEscapeRoot={vi.fn()}
-      />
+      />,
+      controller
     )
 
-    const insert = await screen.findByRole('menuitem', { name: 'Insert link to invoice.pdfexe' })
+    const safeName = 'invoice.pdfexe'
+    const insert = await screen.findByRole('menuitem', { name: `Insert link to ${safeName}` })
     expect(screen.queryByText(maliciousName)).toBeNull()
     fireEvent.click(insert)
 
@@ -206,24 +238,21 @@ describe('ComposerGfsLinkPicker', () => {
       'env:user:team',
       13,
       1,
+      expect.any(Function),
       expect.any(Function)
     )
   })
 
-  it('uses Escape to navigate back one level, then closes the root picker', () => {
-    const goToCrumb = vi.fn()
+  it('uses Escape to close the root picker when no folder is active', () => {
     const onEscapeRoot = vi.fn()
     const controller = baseController({
-      crumbs: [
-        { resourceId: 'root', gfsUri: 'gfs://main/root', name: 'Root', kind: 'directory' },
-        { resourceId: 'child', gfsUri: 'gfs://main/child', name: 'Child', kind: 'directory' },
-      ],
-      current: resource('child', 'Child', 'directory'),
-      goToCrumb,
+      accessibleResources: [resource('child', 'Child', 'directory')],
     })
     hookMock.useGfsBrowserController.mockReturnValue(controller)
     const { unmount } = render(
       <ComposerGfsLinkPicker
+        controller={controller}
+        rootAnchorRef={{ current: null }}
         sessionId={11}
         onInsert={vi.fn()}
         onSessionScope={vi.fn()}
@@ -234,36 +263,15 @@ describe('ComposerGfsLinkPicker', () => {
     const escape = () =>
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     escape()
-    expect(goToCrumb).toHaveBeenCalledWith(0)
-    expect(onEscapeRoot).not.toHaveBeenCalled()
+    expect(onEscapeRoot).toHaveBeenCalledOnce()
     unmount()
 
-    const reset = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      baseController({
-        crumbs: [
-          { resourceId: 'root', gfsUri: 'gfs://main/root', name: 'Root', kind: 'directory' },
-        ],
-        current: resource('root', 'Root', 'directory'),
-        reset,
-      })
-    )
-    const { unmount: unmountAtRoot } = render(
-      <ComposerGfsLinkPicker
-        sessionId={11}
-        onInsert={vi.fn()}
-        onSessionScope={vi.fn()}
-        onEscapeRoot={onEscapeRoot}
-      />
-    )
-    escape()
-    expect(reset).toHaveBeenCalledOnce()
-    expect(onEscapeRoot).not.toHaveBeenCalled()
-    unmountAtRoot()
-
-    hookMock.useGfsBrowserController.mockReturnValue(baseController())
+    const rootController = baseController()
+    hookMock.useGfsBrowserController.mockReturnValue(rootController)
     render(
       <ComposerGfsLinkPicker
+        controller={rootController}
+        rootAnchorRef={{ current: null }}
         sessionId={11}
         onInsert={vi.fn()}
         onSessionScope={vi.fn()}
@@ -271,6 +279,6 @@ describe('ComposerGfsLinkPicker', () => {
       />
     )
     escape()
-    expect(onEscapeRoot).toHaveBeenCalledOnce()
+    expect(onEscapeRoot).toHaveBeenCalledTimes(2)
   })
 })

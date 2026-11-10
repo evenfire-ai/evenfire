@@ -14178,6 +14178,19 @@ pre {
   background: rgba(var(--edge-rgb), 0.6);
 }
 
+.composer-reference-submenu--evendrive {
+  width: min(320px, calc(100vw - (var(--space-4) * 2)));
+  min-width: min(320px, calc(100vw - (var(--space-4) * 2)));
+  overflow-x: hidden;
+  overflow: visible;
+}
+
+.composer-reference-submenu--evendrive::-webkit-scrollbar,
+.composer-gfs-picker-list::-webkit-scrollbar,
+.composer-reference-submenu--nested::-webkit-scrollbar {
+  display: none;
+}
+
 .composer-gfs-picker {
   display: flex;
   min-height: 0;
@@ -14205,6 +14218,10 @@ pre {
 .composer-gfs-picker-list {
   display: grid;
   gap: var(--space-0-5);
+  max-height: min(420px, 58vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
 }
 
 .composer-gfs-picker-row {
@@ -14214,18 +14231,58 @@ pre {
   gap: var(--space-0-5);
 }
 
-.composer-gfs-picker-open {
-  min-width: 0;
+.composer-gfs-picker-disclose {
+  min-width: 28px;
+  width: 28px;
+  min-height: 30px;
+  padding: 0;
 }
 
-.composer-gfs-picker-open .ui-menu-item__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.composer-gfs-picker-disclose svg {
+  width: 14px;
+  height: 14px;
 }
 
 .composer-gfs-picker-insert {
+  min-width: 0;
+  width: 100%;
+}
+
+.composer-gfs-picker-name {
+  display: inline-block;
+  min-width: max-content;
   white-space: nowrap;
+}
+
+.composer-gfs-picker-insert .ui-menu-item__label.is-overflowing .composer-gfs-picker-name {
+  animation: composer-gfs-name-pan 3.4s ease-in-out infinite;
+}
+
+@keyframes composer-gfs-name-pan {
+  0%,
+  10%,
+  90%,
+  100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(var(--composer-gfs-name-distance));
+  }
+}
+
+.composer-reference-submenu--nested {
+  position: fixed;
+  z-index: calc(var(--layer-dropdown) + 1102);
+  max-height: min(420px, 65vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-gfs-picker-insert .ui-menu-item__label.is-overflowing .composer-gfs-picker-name {
+    animation: none;
+  }
 }
 
 .composer-gfs-picker-more {

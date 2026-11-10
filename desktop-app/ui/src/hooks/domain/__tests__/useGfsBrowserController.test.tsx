@@ -2972,6 +2972,9 @@ describe('useGfsBrowserController', () => {
       ],
       pageParams: [undefined],
     }
+    // A completed cache and the new observer share this exact clock value.
+    // Freshness must come from the committed Query update count, not wall time.
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000)
     client.setQueryData(desktopQueryKeys.gfsAccessible(scope, 'main', 1), accessiblePage)
     client.setQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main', 1), accessiblePage)
     client.setQueryData(desktopQueryKeys.gfsGrants(scope, 'folder-x', 'main', 1), [
@@ -2997,11 +3000,6 @@ describe('useGfsBrowserController', () => {
     expect(
       client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main', 1))
     ).toBeTruthy()
-    // The authority window compares cache timestamps against the controller
-    // mount clock; sleep past millisecond granularity so the seeded data is
-    // strictly older than the mount (a same-ms seed would read as fresh).
-    await new Promise(resolve => setTimeout(resolve, 5))
-
     // Deferred discovery: authority is being rechecked but the server has
     // not answered yet.
     let failDiscovery: ((error: Error) => void) | undefined
@@ -4299,6 +4297,86 @@ describe('captured GFS authority callbacks', () => {
     expect(resolve).not.toHaveBeenCalled()
     expect(current.affordances).toBeNull()
     expect(current.accessState).toBe('revoked')
+    client.clear()
+  })
+})
+
+describe('R52 A6 mounted revoke/remove/retry replacement freshness', () => {
+  it('releases root rows after the first success on the replacement same-key Query', async () => {
+    const rootPage = await listAccessiblePage([accessibleResource('root-a', 'Root A', 'directory')])
+    let resolveReplacement!: (page: typeof rootPage) => void
+    const replacementPage = new Promise<typeof rootPage>(resolve => {
+      resolveReplacement = resolve
+    })
+    const listAccessible = vi
+      .fn()
+      .mockResolvedValueOnce(rootPage)
+      .mockImplementationOnce(() => replacementPage)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listAccessible } },
+    })
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const key = desktopQueryKeys.gfsAccessible(':user-a:team-a', 'main', 1)
+    client.setQueryData(key, { pages: [rootPage], pageParams: [undefined] })
+    let current!: ReturnType<typeof useGfsBrowserController>
+    function ReplacementProbe() {
+      current = useGfsBrowserController()
+      return (
+        <>
+          <output data-testid="r52-replacement-access-state">{current.accessState}</output>
+          <output data-testid="r52-replacement-root-count">
+            {current.accessibleResources.length}
+          </output>
+          {current.accessibleResources.map(resource => (
+            <span key={resource.resourceId}>{resource.resourceId}</span>
+          ))}
+        </>
+      )
+    }
+    render(
+      <AuthContext.Provider value={authValue(userA)}>
+        <QueryClientProvider client={client}>
+          <ReplacementProbe />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
+    const q1 = client.getQueryCache().find({ queryKey: key })
+    expect(q1).toBeDefined()
+    await waitFor(() => {
+      expect(q1?.state.dataUpdateCount).toBe(2)
+      expect(q1?.state.fetchStatus).toBe('idle')
+    })
+
+    await act(async () => {
+      expect(
+        current.handleAuthorityFailure('401 Unauthorized: session rejected', 'discovery')
+      ).toBe(true)
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('r52-replacement-access-state').textContent).toBe('revoked')
+    )
+    expect(screen.getByTestId('r52-replacement-root-count').textContent).toBe('0')
+    const q2 = client.getQueryCache().find({ queryKey: key })
+    expect(q2).toBeDefined()
+    expect(q2).not.toBe(q1)
+    expect(q2?.state.data).toBeUndefined()
+
+    await act(async () => current.retryAccess())
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(2))
+    expect(client.getQueryCache().find({ queryKey: key })).toBe(q2)
+    expect(screen.getByTestId('r52-replacement-root-count').textContent).toBe('0')
+
+    await act(async () => {
+      resolveReplacement(rootPage)
+      await replacementPage
+    })
+    expect(screen.getByTestId('r52-replacement-root-count').textContent).toBe('1')
+    expect(screen.getByText('root-a')).toBeTruthy()
+    expect(listAccessible).toHaveBeenCalledTimes(2)
     client.clear()
   })
 })

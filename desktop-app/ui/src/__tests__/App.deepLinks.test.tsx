@@ -928,6 +928,7 @@ describe('App deep-link orchestration', () => {
     const allowed = delegationAffordances(new Set(['read']), false)
     const pendingPassive: Array<(value: typeof allowed) => void> = []
     let resourceReads = 0
+    const listAccessible = vi.fn(async () => listAccessiblePage([resource]))
     const affordances = vi.fn((resourceId: string) => {
       if (resourceId !== resource.resourceId) return Promise.resolve(allowed)
       resourceReads += 1
@@ -951,7 +952,7 @@ describe('App deep-link orchestration', () => {
       rpc: { getHostModels: vi.fn(async () => ({ models: [] })) },
       gfs: {
         ...window.clerum.gfs,
-        listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+        listAccessible,
         listChildren: vi.fn(async () => listChildrenPage([])),
         affordances,
       },
@@ -989,21 +990,24 @@ describe('App deep-link orchestration', () => {
     commonHarness.draftProbe = { chatId: 'chat-1', agentRef: 'agent-1', tabId: 'chat-tab-1' }
     setComposerDraft('chat-1', 'preserve me', 'agent-1', 'chat-tab-1')
 
-    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
-    queryClient.setQueryData(
+    desktopQueryClient.setQueryData(
       desktopQueryKeys.accessCatalog,
       await accessCatalogFromWire([{ name: 'agent-1', contextRef: null }])
     )
-    renderApp(<App />, queryClient)
+    const invalidateSpy = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    renderApp(<App />, desktopQueryClient)
     await waitFor(() => expect(subscribe).toHaveBeenCalledOnce())
-    const composerTextarea = screen.getByRole('textbox', { name: 'Agent message composer' })
+    const composerTextarea = screen.getByRole('textbox', {
+      name: 'Agent message composer',
+    }) as HTMLTextAreaElement
     composerTextarea.setSelectionRange('preserve me'.length, 'preserve me'.length)
     fireEvent.select(composerTextarea)
     fireEvent.click(await screen.findByRole('button', { name: 'Add context' }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Insert EvenDrive link' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
     const staleControl = await screen.findByRole('menuitem', {
       name: 'Insert link to Bridge note.md',
     })
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(affordances).toHaveBeenCalledTimes(1))
     expect(getComposerDraft('chat-1', 'agent-1', 'chat-tab-1')).toBe('preserve me')
     const initialRevision = getComposerDraftRevision('chat-1', 'agent-1', 'chat-tab-1')
@@ -1016,6 +1020,8 @@ describe('App deep-link orchestration', () => {
       fireEvent.click(staleControl)
       expect(affordances).toHaveBeenCalledTimes(1)
     })
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(2))
+    expect(invalidateSpy).toHaveBeenCalledOnce()
     expect(getComposerDraft('chat-1', 'agent-1', 'chat-tab-1')).toBe('preserve me')
     expect(getComposerDraftRevision('chat-1', 'agent-1', 'chat-tab-1')).toBe(initialRevision)
     await waitFor(() => expect(pendingPassive).toHaveLength(1))
@@ -1039,7 +1045,6 @@ describe('App deep-link orchestration', () => {
     expect(affordances).toHaveBeenCalledTimes(4)
     expect(pendingPassive).toHaveLength(2)
     expect(publishEntityChange).toBeTypeOf('function')
-    queryClient.clear()
     desktopQueryClient.clear()
   })
 
@@ -6645,10 +6650,9 @@ describe('App deep-link orchestration', () => {
       markDirectoryReadStarted()
       return directoryResponse
     })
-    handle.teamDirectory.mockImplementation(async () => ({
-      items: [],
-      currentTeamId: 'team-a',
-    }))
+    handle.teamDirectory.mockImplementation(async () => {
+      return { items: [], currentTeamId: 'team-a' }
+    })
     const appTarget = parseSandboxUiDeepLink(
       buildSandboxUiDeepLink({
         recipeNs: 'ns',

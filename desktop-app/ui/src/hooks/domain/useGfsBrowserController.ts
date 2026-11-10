@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import type { Query } from '@tanstack/react-query'
@@ -35,6 +35,14 @@ import type {
   GfsInheritedAccessResult,
   GfsShareListItem,
 } from '@/gfs/delegation.types'
+import {
+  captureGfsQueryOperationBaseline,
+  gfsInfiniteQueryPolicy,
+  requestGfsForwardPage,
+  retireGfsForwardOwner,
+  useGfsForwardPending,
+  useGfsQueryBinding,
+} from '@/gfs/gfsQueryOperationCoordinator'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
 import {
   desktopQueryKeys,
@@ -297,6 +305,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const pickerAuthorityManaged = options.pickerAuthorityManaged === true
   const { grantsListEnabled = false } = options
   const queryClient = useQueryClient()
+  const forwardOwnerId = useId()
   const {
     isAuthenticated,
     me,
@@ -335,12 +344,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     scope: string | null
     generation: number | null
   } | null>(null)
-  // Per controller-mount timestamp: discovery (`refetchOnMount: 'always'`) must
-  // land a response newer than this before cached GFS state may render again.
-  // Between mount and that fresh response the browser withholds cached rows
-  // (authority revalidation window — R4 spec §1).
-  const authorityEpochRef = useRef(Date.now())
-
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
   const currentCrumbRef = useRef<GfsCrumb | null>(current)
   currentCrumbRef.current = current
@@ -356,6 +359,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const sessionScope = useMemo(
     () => (isAuthenticated && me ? `${envKey}:${me.id}:${me.teamId ?? ''}` : null),
     [envKey, isAuthenticated, me]
+  )
+  const authorityOperationBaseline = useMemo(
+    () => captureGfsQueryOperationBaseline(queryClient),
+    [queryClient, sessionGeneration, sessionScope]
   )
   const liveSessionScopeRef = useRef(sessionScope)
   liveSessionScopeRef.current = sessionScope
@@ -496,8 +503,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     []
   )
 
+  const accessibleQueryKey = useMemo(
+    () => desktopQueryKeys.gfsAccessible(sessionScope ?? 'anonymous', DRIVE, sessionGeneration),
+    [sessionGeneration, sessionScope]
+  )
   const accessibleQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsAccessible(sessionScope ?? 'anonymous', DRIVE, sessionGeneration),
+    queryKey: accessibleQueryKey,
     queryFn: async ({ pageParam }): Promise<GfsAccessibleWirePage> => {
       const listAccessible = window.clerum?.gfs?.listAccessible
       if (typeof listAccessible !== 'function') {
@@ -520,7 +531,25 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     refetchOnWindowFocus: refetchOnFocusUnlessPaused,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
+    ...gfsInfiniteQueryPolicy(queryClient),
   })
+  const accessibleBinding = useGfsQueryBinding(
+    queryClient,
+    accessibleQueryKey,
+    'root',
+    accessibleQueryEnabled,
+    undefined,
+    authorityOperationBaseline
+  )
+  const accessibleForwardPending = useGfsForwardPending(
+    queryClient,
+    accessibleQueryKey,
+    `${forwardOwnerId}:root`
+  )
+  useEffect(
+    () => () => retireGfsForwardOwner(queryClient, accessibleQueryKey, `${forwardOwnerId}:root`),
+    [forwardOwnerId, queryClient, sessionGeneration, sessionScope]
+  )
 
   // Authority revalidation window (R4 spec §1): true from mount/session-return
   // until discovery lands a response NEWER than this mount. While true, every
@@ -535,7 +564,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     sessionGeneration !== null &&
     canListAccessibleResources &&
     accessState === 'active' &&
-    accessibleQuery.dataUpdatedAt < authorityEpochRef.current
+    accessibleBinding.phase !== 'validated'
   const accessibleInitialRequestPending =
     accessibleQueryEnabled && !accessibleQuery.isError && accessibleQuery.data === undefined
   const childrenQueryEnabled =
@@ -545,13 +574,18 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     currentIsDirectory &&
     accessState === 'active'
 
+  const childrenQueryKey = useMemo(
+    () =>
+      desktopQueryKeys.gfsChildren(
+        sessionScope ?? 'anonymous',
+        current?.resourceId ?? '',
+        DRIVE,
+        sessionGeneration
+      ),
+    [current?.resourceId, sessionGeneration, sessionScope]
+  )
   const childrenQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsChildren(
-      sessionScope ?? 'anonymous',
-      current?.resourceId ?? '',
-      DRIVE,
-      sessionGeneration
-    ),
+    queryKey: childrenQueryKey,
     queryFn: ({ pageParam }) =>
       window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam),
     enabled: childrenQueryEnabled,
@@ -563,7 +597,30 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     refetchOnWindowFocus: refetchOnFocusUnlessPaused,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
+    ...gfsInfiniteQueryPolicy(queryClient),
   })
+  const childrenBinding = useGfsQueryBinding(
+    queryClient,
+    childrenQueryKey,
+    'controller-child',
+    childrenQueryEnabled,
+    undefined,
+    authorityOperationBaseline
+  )
+  const childrenForwardPending = useGfsForwardPending(
+    queryClient,
+    childrenQueryKey,
+    `${forwardOwnerId}:child:${current?.resourceId ?? ''}`
+  )
+  useEffect(
+    () => () =>
+      retireGfsForwardOwner(
+        queryClient,
+        childrenQueryKey,
+        `${forwardOwnerId}:child:${current?.resourceId ?? ''}`
+      ),
+    [current?.resourceId, forwardOwnerId, queryClient, sessionGeneration, sessionScope]
+  )
 
   const affordancesQuery = useQuery({
     queryKey: desktopQueryKeys.gfsAffordances(
@@ -963,7 +1020,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // this controller stopped making about a refused discovery. Row affordances
   // stay behind `authorityPending` regardless, so the rows arrive without
   // per-row actions until discovery lands.
-  const childrenFetchedThisEpoch = childrenQuery.dataUpdatedAt >= authorityEpochRef.current
+  const childrenFetchedThisEpoch = childrenBinding.phase === 'validated'
   const items = useMemo<GfsBrowserChild[]>(
     () =>
       accessState === 'revoked' || (authorityPending && !childrenFetchedThisEpoch)
@@ -1815,6 +1872,31 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [current]
   )
 
+  const loadAccessibleMore = (queueWhenBusy: boolean) => {
+    if (
+      !ownsPublishedAuthority() ||
+      !canListAccessibleResources ||
+      accessibleBinding.phase !== 'validated'
+    )
+      return
+    if (!queueWhenBusy) {
+      const exactQuery = queryClient.getQueryCache().find({
+        queryKey: accessibleQueryKey,
+        exact: true,
+      })
+      if (
+        !exactQuery ||
+        exactQuery.state.fetchStatus !== 'idle' ||
+        exactQuery.state.isInvalidated ||
+        !accessibleBinding.isCurrentSnapshot(accessibleQuery.dataUpdatedAt, accessibleQuery.data)
+      )
+        return
+    }
+    requestGfsForwardPage(queryClient, accessibleQueryKey, `${forwardOwnerId}:root`, () =>
+      accessibleQuery.fetchNextPage({ cancelRefetch: false })
+    )
+  }
+
   return {
     crumbs,
     current,
@@ -1834,6 +1916,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     handleAuthorityFailure,
     isSessionAuthorityActive,
     accessibleResources,
+    accessibleSnapshotRevision: accessibleQuery.dataUpdatedAt,
+    accessibleSnapshotData: accessibleQuery.data,
+    isAccessibleSnapshotCurrent: accessibleBinding.isCurrentSnapshot,
     items,
     affordances:
       authorityPending || accessState === 'revoked'
@@ -1886,17 +1971,25 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     openError,
     resolving,
     hasMore: Boolean(childrenQuery.hasNextPage),
-    isFetchingMore: childrenQuery.isFetchingNextPage,
-    hasMoreAccessible: canListAccessibleResources && Boolean(accessibleQuery.hasNextPage),
-    isFetchingMoreAccessible: canListAccessibleResources && accessibleQuery.isFetchingNextPage,
+    isFetchingMore: childrenQuery.isFetchingNextPage || childrenForwardPending,
+    hasMoreAccessible:
+      canListAccessibleResources &&
+      accessibleBinding.phase === 'validated' &&
+      Boolean(accessibleQuery.hasNextPage),
+    isFetchingMoreAccessible:
+      canListAccessibleResources &&
+      (accessibleQuery.isFetchingNextPage || accessibleForwardPending),
     loadMore: () => {
-      if (!ownsPublishedAuthority()) return
-      void childrenQuery.fetchNextPage()
+      if (!ownsPublishedAuthority() || !childrenQueryEnabled) return
+      requestGfsForwardPage(
+        queryClient,
+        childrenQueryKey,
+        `${forwardOwnerId}:child:${current?.resourceId ?? ''}`,
+        () => childrenQuery.fetchNextPage({ cancelRefetch: false })
+      )
     },
-    loadMoreAccessible: () => {
-      if (!ownsPublishedAuthority() || !canListAccessibleResources) return
-      void accessibleQuery.fetchNextPage()
-    },
+    loadMoreAccessible: () => loadAccessibleMore(true),
+    loadMoreAccessibleNow: () => loadAccessibleMore(false),
     openUri,
     refreshCurrentLocation,
     openResource,

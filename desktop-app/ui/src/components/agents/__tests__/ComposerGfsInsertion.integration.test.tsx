@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import fc, { type AsyncCommand } from 'fast-check'
+import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { HostModelsResult } from '@hooks/useChatStore'
 import * as composerDraftStore from '@lib/composerDraftStore'
@@ -23,6 +23,7 @@ import {
   listAccessiblePage,
   listChildrenPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import * as gfsQueryOperationCoordinator from '@/gfs/gfsQueryOperationCoordinator'
 import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
 import type { WorkflowRecipeListResult } from '../../../../../src/types'
 import { ComposerPanel } from '../ComposerPanel'
@@ -128,19 +129,16 @@ const note = childView('cccccccccccccccccccccccccccccccc', 'Release notes.md', '
 const exactReadAffordance = (held: string[]) => delegationAffordances(new Set(held), false)
 
 function installProducers() {
-  const listAccessible = vi.fn(async () => listAccessiblePage([folderA]))
-  const listChildren = vi.fn(async (resourceId: string) =>
+  const listAccessible = vi.fn(async (_drive: string = 'main', _cursor?: string) =>
+    listAccessiblePage([folderA])
+  )
+  const listChildren = vi.fn(async (resourceId: string, _drive = 'main', _cursor?: string) =>
     listChildrenPage(resourceId === folderA.resourceId ? [folderB] : [note])
   )
-  const affordances = vi.fn(async () => ({
-    held: ['read'],
-    isOperator: false,
-    resourceId: folderA.resourceId,
-    drive: 'main',
-    canDelegate: false,
-    grantableBits: [],
-    canCreateShare: false,
-  }))
+  const affordances = vi.fn<
+    (resourceId: string) => Promise<ReturnType<typeof exactReadAffordance>>
+  >(async () => exactReadAffordance(['read']))
+  const getSessionGeneration = vi.fn(async () => 1)
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
@@ -148,10 +146,10 @@ function installProducers() {
         list: vi.fn(async (): Promise<WorkflowRecipeListResult> => ({ items: [], count: 0 })),
       },
       gfs: { listAccessible, listChildren, affordances },
-      auth: { getSessionGeneration: vi.fn(async () => 1) },
+      auth: { getSessionGeneration },
     } as unknown as Window['clerum'],
   })
-  return { listAccessible, listChildren, affordances }
+  return { listAccessible, listChildren, affordances, getSessionGeneration }
 }
 
 async function renderComposer(
@@ -183,15 +181,22 @@ async function renderComposer(
     )
   }
   const view = render(<Harness />)
-  return { queryClient, rerenderComposer: () => view.rerender(<Harness />) }
+  return {
+    queryClient,
+    rerenderComposer: () => view.rerender(<Harness />),
+    setEnvironment: (envKey: string) => {
+      auth.runtimeConfigState = { envKey }
+      view.rerender(<Harness />)
+    },
+  }
 }
 
 async function openNestedResource() {
   const trigger = screen.getByRole('button', { name: 'Add context' })
   if (trigger.getAttribute('aria-expanded') !== 'true') fireEvent.click(trigger)
-  fireEvent.click(await screen.findByRole('menuitem', { name: 'Insert EvenDrive link' }))
-  fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Folder A' }))
-  fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Nested B' }))
+  fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+  fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+  fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Nested B' }))
   return screen.findByRole('menuitem', { name: 'Insert link to Release notes.md' })
 }
 
@@ -214,12 +219,600 @@ afterEach(() => {
 })
 
 describe('ComposerPanel producer-backed EvenDrive insertion', () => {
-  it('shows Insert EvenDrive link in the authenticated composer plus menu', async () => {
+  it('rejects a committed row activation while its exact parent is fetching a later page', async () => {
+    const producers = installProducers()
+    const rootFile = accessibleResource(
+      '12121212121212121212121212121212',
+      'Root page one.md',
+      'file'
+    )
+    const rootPageTwoFile = accessibleResource(
+      '13131313131313131313131313131313',
+      'Root page two.md',
+      'file'
+    )
+    type AccessiblePage = Awaited<ReturnType<typeof listAccessiblePage>>
+    let releaseForward!: (value: AccessiblePage) => void
+    const forwardPage = new Promise<AccessiblePage>(resolve => {
+      releaseForward = resolve
+    })
+    producers.listAccessible.mockImplementation(async (_drive, cursor) =>
+      cursor ? forwardPage : listAccessiblePage([rootFile], 'root-page-two')
+    )
+    const { queryClient } = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    const row = await screen.findByRole('menuitem', { name: 'Insert link to Root page one.md' })
+    await waitFor(() => expect(producers.affordances).toHaveBeenCalled())
+    const exactReadsBefore = producers.affordances.mock.calls.filter(
+      ([resourceId]) => resourceId === rootFile.resourceId
+    ).length
+    const generationChecksBefore = producers.getSessionGeneration.mock.calls.length
+    const draftBefore = getComposerDraft('chat-1')
+    const rootKey = desktopQueryKeys.gfsAccessible('test:user-1:', 'main', 1)
+
+    try {
+      fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
+      await waitFor(() => expect(producers.listAccessible).toHaveBeenCalledTimes(2))
+      expect(
+        queryClient.getQueryCache().find({ queryKey: rootKey, exact: true })?.state.fetchStatus
+      ).toBe('fetching')
+      expect(row.isConnected).toBe(true)
+
+      fireEvent.click(row)
+
+      expect(
+        producers.affordances.mock.calls.filter(
+          ([resourceId]) => resourceId === rootFile.resourceId
+        )
+      ).toHaveLength(exactReadsBefore)
+      expect(producers.getSessionGeneration).toHaveBeenCalledTimes(generationChecksBefore)
+      expect(getComposerDraft('chat-1')).toBe(draftBefore)
+    } finally {
+      await act(async () => {
+        releaseForward(await listAccessiblePage([rootPageTwoFile]))
+        await forwardPage
+      })
+    }
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryCache().find({ queryKey: rootKey, exact: true })?.state.fetchStatus
+      ).toBe('idle')
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Insert link to Root page one.md' }))
+    await waitFor(() => expect(getComposerDraft('chat-1')).toBe(`${rootFile.gfsUri} `))
+  })
+
+  it('rejects an old committed file row after its current parent removes it', async () => {
+    const producers = installProducers()
+    const rootFile = accessibleResource(
+      '14141414141414141414141414141414',
+      'Current root file.md',
+      'file'
+    )
+    producers.listAccessible.mockResolvedValue(await listAccessiblePage([rootFile]))
+    const { queryClient } = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    const row = await screen.findByRole('menuitem', { name: 'Insert link to Current root file.md' })
+    await waitFor(() =>
+      expect(
+        producers.affordances.mock.calls.filter(
+          ([resourceId]) => resourceId === rootFile.resourceId
+        )
+      ).toHaveLength(1)
+    )
+    const exactReadsBefore = producers.affordances.mock.calls.filter(
+      ([resourceId]) => resourceId === rootFile.resourceId
+    ).length
+    const generationChecksBefore = producers.getSessionGeneration.mock.calls.length
+    const draftBefore = getComposerDraft('chat-1')
+    const rootKey = desktopQueryKeys.gfsAccessible('test:user-1:', 'main', 1)
+
+    act(() => {
+      const root = queryClient.getQueryData<{
+        pages: Array<{ items: Array<{ resourceId: string }> }>
+      }>(rootKey)!
+      queryClient.setQueryData(rootKey, {
+        ...root,
+        pages: root.pages.map(page => ({
+          ...page,
+          items: page.items.filter(item => item.resourceId !== rootFile.resourceId),
+        })),
+      })
+      // The old callback is still connected until React commits the Query update.
+      fireEvent.click(row)
+    })
+
+    expect(
+      producers.affordances.mock.calls.filter(([resourceId]) => resourceId === rootFile.resourceId)
+    ).toHaveLength(exactReadsBefore)
+    expect(producers.getSessionGeneration).toHaveBeenCalledTimes(generationChecksBefore)
+    expect(getComposerDraft('chat-1')).toBe(draftBefore)
+  })
+
+  it('rechecks parent membership when direct authorization settles', async () => {
+    const producers = installProducers()
+    const rootFile = accessibleResource(
+      '15151515151515151515151515151515',
+      'Held authorization file.md',
+      'file'
+    )
+    let releaseDirect!: (value: ReturnType<typeof exactReadAffordance>) => void
+    const directResult = new Promise<ReturnType<typeof exactReadAffordance>>(resolve => {
+      releaseDirect = resolve
+    })
+    let exactReadCalls = 0
+    producers.affordances.mockImplementation(async resourceId => {
+      if (resourceId !== rootFile.resourceId) return exactReadAffordance(['read'])
+      exactReadCalls += 1
+      return exactReadCalls === 1 ? exactReadAffordance(['read']) : directResult
+    })
+    producers.listAccessible.mockResolvedValue(await listAccessiblePage([rootFile]))
+    const { queryClient } = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    const row = await screen.findByRole('menuitem', {
+      name: 'Insert link to Held authorization file.md',
+    })
+    await waitFor(() => expect(exactReadCalls).toBe(1))
+    const generationChecksBefore = producers.getSessionGeneration.mock.calls.length
+    const draftBefore = getComposerDraft('chat-1')
+    const rootKey = desktopQueryKeys.gfsAccessible('test:user-1:', 'main', 1)
+
+    try {
+      fireEvent.click(row)
+      await waitFor(() => expect(exactReadCalls).toBe(2))
+      act(() => {
+        const root = queryClient.getQueryData<{
+          pages: Array<{ items: Array<{ resourceId: string }> }>
+        }>(rootKey)!
+        queryClient.setQueryData(rootKey, {
+          ...root,
+          pages: root.pages.map(page => ({
+            ...page,
+            items: page.items.filter(item => item.resourceId !== rootFile.resourceId),
+          })),
+        })
+      })
+      await act(async () => {
+        releaseDirect(exactReadAffordance(['read']))
+        await directResult
+      })
+
+      expect(getComposerDraft('chat-1')).toBe(draftBefore)
+      expect(producers.getSessionGeneration).toHaveBeenCalledTimes(generationChecksBefore)
+    } finally {
+      // Avoid leaving a held permission promise if an earlier assertion fails.
+      releaseDirect(exactReadAffordance(['read']))
+    }
+  })
+
+  it('withholds cached descendants when an ancestor listing is invalidated', async () => {
+    const producers = installProducers()
+    producers.listAccessible.mockResolvedValue(await listAccessiblePage([folderA]))
+    producers.listChildren.mockResolvedValue(await listChildrenPage([folderB]))
+    const { queryClient } = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+
+    const nestedRow = await screen.findByRole('menuitem', { name: 'Insert folder Nested B' })
+    expect(nestedRow).toBeTruthy()
+    expect(producers.listChildren).toHaveBeenCalledTimes(1)
+    const rootKey = desktopQueryKeys.gfsAccessible('test:user-1:', 'main', 1)
+    const childrenKey = desktopQueryKeys.gfsChildren('test:user-1:', folderA.resourceId, 'main', 1)
+    expect(queryClient.getQueryData(childrenKey)).toBeTruthy()
+
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: rootKey,
+        exact: true,
+        refetchType: 'none',
+      })
+    })
+
+    expect(
+      queryClient.getQueryCache().find({ queryKey: rootKey, exact: true })?.state.isInvalidated
+    ).toBe(true)
+    expect(queryClient.getQueryData(childrenKey)).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: 'Insert folder Nested B' })).toBeNull()
+    expect(nestedRow.isConnected).toBe(false)
+  })
+
+  it('rejects a retained descendant row when its ancestor removes the folder', async () => {
+    const producers = installProducers()
+    producers.listAccessible.mockResolvedValue(await listAccessiblePage([folderA]))
+    producers.listChildren.mockResolvedValue(await listChildrenPage([note]))
+    const { queryClient } = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+    const row = await screen.findByRole('menuitem', { name: 'Insert link to Release notes.md' })
+    await waitFor(() =>
+      expect(
+        producers.affordances.mock.calls.filter(([resourceId]) => resourceId === note.resourceId)
+      ).toHaveLength(1)
+    )
+    const exactReadsBefore = producers.affordances.mock.calls.filter(
+      ([resourceId]) => resourceId === note.resourceId
+    ).length
+    const draftBefore = getComposerDraft('chat-1')
+    const rootKey = desktopQueryKeys.gfsAccessible('test:user-1:', 'main', 1)
+
+    act(() => {
+      const root = queryClient.getQueryData<{
+        pages: Array<{ items: Array<{ resourceId: string }> }>
+      }>(rootKey)!
+      queryClient.setQueryData(rootKey, {
+        ...root,
+        pages: root.pages.map(page => ({
+          ...page,
+          items: page.items.filter(item => item.resourceId !== folderA.resourceId),
+        })),
+      })
+      fireEvent.click(row)
+    })
+
+    expect(
+      producers.affordances.mock.calls.filter(([resourceId]) => resourceId === note.resourceId)
+    ).toHaveLength(exactReadsBefore)
+    expect(getComposerDraft('chat-1')).toBe(draftBefore)
+  })
+
+  it('blocks nested folder fetch and retry while their parent is fetching another page', async () => {
+    const producers = installProducers()
+    const folderC = childView('16161616161616161616161616161616', 'Nested C', 'directory', {
+      parentResourceId: folderA.resourceId,
+      path: '/Folder A/Nested C',
+    })
+    let releaseParentPage!: (value: ReturnType<typeof listChildrenPage>) => void
+    const parentPage = new Promise<ReturnType<typeof listChildrenPage>>(resolve => {
+      releaseParentPage = resolve
+    })
+    const folderACursors: Array<string | undefined> = []
+    producers.listChildren.mockImplementation(async (resourceId, _drive, cursor) => {
+      if (resourceId === folderA.resourceId) {
+        folderACursors.push(cursor)
+        return cursor ? parentPage : listChildrenPage([folderB, folderC], 'folder-a-page-two')
+      }
+      if (resourceId === folderB.resourceId) {
+        throw new Error('temporary nested listing failure')
+      }
+      return listChildrenPage([])
+    })
+    const { queryClient } = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+    const folderBRow = await screen.findByRole('menuitem', { name: 'Insert folder Nested B' })
+    const folderCRow = screen.getByRole('menuitem', { name: 'Insert folder Nested C' })
+    fireEvent.mouseEnter(folderBRow)
+    const retry = await screen.findByRole('button', { name: 'Retry file listing' })
+    const folderAMenu = screen.getByRole('menu', { name: 'Folder A contents' })
+    const loadMore = within(folderAMenu).getByRole('button', { name: 'Load more' })
+    const folderAKey = desktopQueryKeys.gfsChildren('test:user-1:', folderA.resourceId, 'main', 1)
+
+    try {
+      fireEvent.click(loadMore)
+      await waitFor(() => expect(folderACursors).toEqual([undefined, 'folder-a-page-two']))
+      expect(
+        queryClient.getQueryCache().find({ queryKey: folderAKey, exact: true })?.state.fetchStatus
+      ).toBe('fetching')
+      const callsDuringParentPage = producers.listChildren.mock.calls.length
+
+      fireEvent.click(retry)
+      fireEvent.mouseEnter(folderCRow)
+
+      expect(producers.listChildren).toHaveBeenCalledTimes(callsDuringParentPage)
+      expect(folderCRow.isConnected).toBe(true)
+    } finally {
+      await act(async () => {
+        releaseParentPage(listChildrenPage([folderC]))
+        await parentPage
+      })
+    }
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryCache().find({ queryKey: folderAKey, exact: true })?.state.fetchStatus
+      ).toBe('idle')
+    )
+    fireEvent.mouseEnter(folderCRow)
+    await waitFor(() =>
+      expect(producers.listChildren).toHaveBeenCalledWith(folderC.resourceId, 'main', undefined)
+    )
+  })
+
+  it('allows root pagination while the EvenDrive submenu owner is current', async () => {
+    const producers = installProducers()
+    const pageTwoFile = accessibleResource(
+      'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      'Root page two.md',
+      'file'
+    )
+    const cursors: Array<string | undefined> = []
+    producers.listAccessible.mockImplementation(async (_drive, cursor) => {
+      cursors.push(cursor)
+      return cursor ? listAccessiblePage([pageTwoFile]) : listAccessiblePage([folderA], 'root-p2')
+    })
+    await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
+
+    expect(
+      await screen.findByRole('menuitem', { name: 'Insert link to Root page two.md' })
+    ).toBeTruthy()
+    expect(cursors).toEqual([undefined, 'root-p2'])
+  })
+
+  it('rejects a retained root Load more callback after synchronous parent close', async () => {
+    const requestForward = vi.spyOn(gfsQueryOperationCoordinator, 'requestGfsForwardPage')
+    const producers = installProducers()
+    const cursors: Array<string | undefined> = []
+    producers.listAccessible.mockImplementation(async (_drive, cursor) => {
+      cursors.push(cursor)
+      return listAccessiblePage([folderA], cursor ? null : 'root-p2')
+    })
+    await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    const loadMore = await screen.findByRole('button', { name: 'Load more' })
+    await waitFor(() => expect(cursors).toEqual([undefined]))
+    expect(loadMore.isConnected).toBe(true)
+    expect((loadMore as HTMLButtonElement).disabled).toBe(false)
+    const admissionsBeforeClose = requestForward.mock.calls.length
+
+    act(() => {
+      fireEvent.mouseDown(document.body)
+      expect(loadMore.isConnected).toBe(true)
+      expect((loadMore as HTMLButtonElement).disabled).toBe(false)
+      fireEvent.click(loadMore)
+    })
+
+    expect(requestForward).toHaveBeenCalledTimes(admissionsBeforeClose)
+    expect(cursors).toEqual([undefined])
+  })
+
+  it('rejects child paging while its retained parent snapshot is refreshing', async () => {
+    const requestForward = vi.spyOn(gfsQueryOperationCoordinator, 'requestGfsForwardPage')
+    const producers = installProducers()
+    let releaseParentRefresh!: () => void
+    const parentRefresh = new Promise<void>(resolve => {
+      releaseParentRefresh = resolve
+    })
+    let rootCalls = 0
+    producers.listAccessible.mockImplementation(async () => {
+      rootCalls += 1
+      if (rootCalls > 1) await parentRefresh
+      return listAccessiblePage([folderA])
+    })
+    const childCursors: Array<string | undefined> = []
+    producers.listChildren.mockImplementation(async (resourceId, _drive, cursor) => {
+      childCursors.push(cursor)
+      return listChildrenPage(
+        resourceId === folderA.resourceId ? [folderB] : [note],
+        cursor ? null : 'p2'
+      )
+    })
+    const { queryClient } = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+    const loadMore = await screen.findByRole('button', { name: 'Load more' })
+    await waitFor(() => expect(childCursors).toEqual([undefined]))
+    const rootKey = desktopQueryKeys.gfsAccessible('test:user-1:', 'main', 1)
+    const admissionsBeforeRefresh = requestForward.mock.calls.length
+
+    act(() => {
+      void queryClient.invalidateQueries({ queryKey: rootKey, exact: true })
+    })
+    await waitFor(() => expect(rootCalls).toBe(2))
+    expect(loadMore.isConnected).toBe(false)
+    expect(screen.queryByRole('menuitem', { name: 'Insert folder Nested B' })).toBeNull()
+    expect(requestForward).toHaveBeenCalledTimes(admissionsBeforeRefresh)
+    expect(childCursors).toEqual([undefined])
+
+    await act(async () => {
+      releaseParentRefresh()
+      await parentRefresh
+    })
+    await waitFor(() => expect(rootCalls).toBe(2))
+    const currentLoadMore = await screen.findByRole('button', { name: 'Load more' })
+    expect(screen.getByRole('menuitem', { name: 'Insert folder Nested B' })).toBeTruthy()
+    fireEvent.click(currentLoadMore)
+    await waitFor(() => expect(childCursors).toEqual([undefined, undefined, 'p2']))
+  })
+
+  it('does not open a folder removed from the live parent snapshot before React commits', async () => {
+    const producers = installProducers()
+    const { queryClient } = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    const folder = await screen.findByRole('menuitem', { name: 'Insert folder Folder A' })
+    const rootKey = desktopQueryKeys.gfsAccessible('test:user-1:', 'main', 1)
+    const root = queryClient.getQueryData<{ pages: Array<{ items: unknown[] }> }>(rootKey)
+    expect(root).toBeTruthy()
+
+    act(() => {
+      queryClient.setQueryData(rootKey, {
+        ...root!,
+        pages: root!.pages.map(page => ({ ...page, items: [] })),
+      })
+      // Invoke the retained row in the same batch, before the new projection commits.
+      fireEvent.mouseEnter(folder)
+    })
+
+    expect(producers.listChildren).not.toHaveBeenCalled()
+    expect(screen.queryByRole('menu', { name: 'Folder A contents' })).toBeNull()
+  })
+
+  it('does not retry children from a folder removed from the current parent snapshot', async () => {
+    const producers = installProducers()
+    producers.listChildren.mockRejectedValue(new Error('temporary listing failure'))
+    const { queryClient } = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    const folder = await screen.findByRole('menuitem', { name: 'Insert folder Folder A' })
+    fireEvent.mouseEnter(folder)
+    const retry = await screen.findByRole('button', { name: 'Retry file listing' })
+    await waitFor(() => expect(producers.listChildren).toHaveBeenCalledTimes(1))
+    const rootKey = desktopQueryKeys.gfsAccessible('test:user-1:', 'main', 1)
+    const root = queryClient.getQueryData<{ pages: Array<{ items: unknown[] }> }>(rootKey)
+    expect(root).toBeTruthy()
+
+    act(() => {
+      queryClient.setQueryData(rootKey, {
+        ...root!,
+        pages: root!.pages.map(page => ({ ...page, items: [] })),
+      })
+      fireEvent.click(retry)
+    })
+
+    expect(producers.listChildren).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not let a stale sibling disclosure collapse the active folder path', async () => {
+    const producers = installProducers()
+    const folderC = childView('dddddddddddddddddddddddddddddddd', 'Sibling C', 'directory', {
+      parentResourceId: folderA.resourceId,
+      path: '/Folder A/Sibling C',
+    })
+    producers.listChildren.mockImplementation(async resourceId =>
+      resourceId === folderA.resourceId
+        ? listChildrenPage([folderB, folderC])
+        : listChildrenPage([])
+    )
+    await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Nested B' }))
+    const staleDisclosure = await screen.findByRole('menuitem', {
+      name: 'Collapse folder Nested B',
+    })
+    const siblingRow = screen.getByRole('menuitem', { name: 'Insert folder Sibling C' })
+    act(() => {
+      fireEvent.mouseEnter(siblingRow)
+      fireEvent.click(staleDisclosure)
+    })
+    await waitFor(() =>
+      expect(producers.listChildren).toHaveBeenCalledWith(folderC.resourceId, 'main', undefined)
+    )
+    expect(staleDisclosure.isConnected).toBe(true)
+
+    expect(siblingRow.getAttribute('aria-expanded')).toBe('true')
+    expect(producers.listChildren).toHaveBeenCalledWith(folderC.resourceId, 'main', undefined)
+  })
+
+  it('rejects a retained Load more callback after synchronous parent close', async () => {
+    const producers = installProducers()
+    const cursors: Array<string | undefined> = []
+    producers.listChildren.mockImplementation(async (resourceId, _drive, cursor) => {
+      if (resourceId === folderA.resourceId) return listChildrenPage([folderB])
+      cursors.push(cursor)
+      return listChildrenPage([note], cursor ? null : 'p2')
+    })
+    const view = await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Nested B' }))
+    const loadMore = await screen.findByRole('button', { name: 'Load more' })
+    await waitFor(() => expect(cursors).toEqual([undefined]))
+    expect(loadMore.isConnected).toBe(true)
+    expect((loadMore as HTMLButtonElement).disabled).toBe(false)
+
+    // Keep React's commit deferred within this controlled event batch. The parent
+    // close writer must synchronously retire admission before the retained button
+    // callback can register or join a coordinator operation.
+    act(() => {
+      fireEvent.mouseDown(document.body)
+      expect(loadMore.isConnected).toBe(true)
+      expect((loadMore as HTMLButtonElement).disabled).toBe(false)
+      fireEvent.click(loadMore)
+    })
+
+    expect(cursors).toEqual([undefined])
+    expect(producers.listChildren).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(screen.queryByRole('menu', { name: 'EvenDrive links' })).toBeNull())
+    view.rerenderComposer()
+  })
+
+  it('does not expand a stale folder row after the synchronous permission fence', async () => {
+    const producers = installProducers()
+    await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+    const nestedFolder = await screen.findByRole('menuitem', { name: 'Insert folder Nested B' })
+    await waitFor(() => expect(producers.listChildren).toHaveBeenCalledTimes(1))
+    expect(
+      producers.listChildren.mock.calls.filter(([resourceId]) => resourceId === folderB.resourceId)
+    ).toHaveLength(0)
+
+    act(() => {
+      rendererEntityChangeRegistry.dispatch({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: 'composer-folder-expand-revoke',
+        scopes: ['gfs', 'authorization'],
+      })
+      // This is the stale committed DOM row in the same synchronous dispatch turn.
+      fireEvent.mouseEnter(nestedFolder)
+    })
+
+    expect(
+      producers.listChildren.mock.calls.filter(([resourceId]) => resourceId === folderB.resourceId)
+    ).toHaveLength(0)
+  })
+
+  it('rejects a retained child Load more callback after sibling-path replacement', async () => {
+    const requestForward = vi.spyOn(gfsQueryOperationCoordinator, 'requestGfsForwardPage')
+    const producers = installProducers()
+    const folderC = childView('dddddddddddddddddddddddddddddddd', 'Sibling C', 'directory', {
+      parentResourceId: folderA.resourceId,
+      path: '/Folder A/Sibling C',
+    })
+    const cursors: Array<string | undefined> = []
+    producers.listChildren.mockImplementation(async (resourceId, _drive, cursor) => {
+      if (resourceId === folderA.resourceId) return listChildrenPage([folderB, folderC])
+      if (resourceId === folderB.resourceId) {
+        cursors.push(cursor)
+        return listChildrenPage([note], cursor ? null : 'p2')
+      }
+      return listChildrenPage([])
+    })
+    await renderComposer()
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Nested B' }))
+    const loadMore = await screen.findByRole('button', { name: 'Load more' })
+    await waitFor(() => expect(cursors).toEqual([undefined]))
+    const admissionsBefore = requestForward.mock.calls.length
+
+    act(() => {
+      fireEvent.mouseEnter(screen.getByRole('menuitem', { name: 'Insert folder Sibling C' }))
+      expect(loadMore.isConnected).toBe(true)
+      fireEvent.click(loadMore)
+    })
+
+    expect(cursors).toEqual([undefined])
+    expect(requestForward).toHaveBeenCalledTimes(admissionsBefore)
+    await waitFor(() =>
+      expect(screen.queryByRole('menuitem', { name: 'Insert folder Sibling C' })).toBeTruthy()
+    )
+  })
+
+  it('shows EvenDrive in the authenticated composer plus menu', async () => {
     installProducers()
     await renderComposer()
 
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
-    expect(screen.getByRole('menuitem', { name: 'Insert EvenDrive link' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: 'EvenDrive' })).toBeTruthy()
   })
 
   it('does not expose the protected picker to a logged-out composer', async () => {
@@ -227,7 +820,7 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     await renderComposer({ authenticated: false })
 
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
-    expect(screen.queryByRole('menuitem', { name: 'Insert EvenDrive link' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: 'EvenDrive' })).toBeNull()
     expect(producers.listAccessible).not.toHaveBeenCalled()
   })
 
@@ -262,7 +855,7 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
         const request = {
           resourceId,
           settled: false,
-          resolve: value => {
+          resolve: (value: ReturnType<typeof delegationAffordances>) => {
             request.settled = true
             resolve(value)
           },
@@ -345,7 +938,7 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     showComposer = true
     view.rerender(<Consumers />)
     fireEvent.click(await screen.findByRole('button', { name: 'Add context' }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Insert EvenDrive link' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'EvenDrive' }))
     const pickerMenu = await screen.findByRole('menu', { name: 'EvenDrive links' })
     await waitFor(() => expect(permissionRequests).toHaveLength(nonPickerRequestCount + 4))
     const pickerRequests = permissionRequests.slice(nonPickerRequestCount)
@@ -386,7 +979,7 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
       if (request.settled) continue
       await act(async () => request.resolve(delegationAffordances(new Set(['read']), false)))
     }
-    await screen.findByRole('menuitem', { name: 'Open folder Folder A' })
+    await screen.findByRole('menuitem', { name: 'Insert folder Folder A' })
     expect(
       permissionRequests.filter(request => request.resourceId === note.resourceId)
     ).toHaveLength(
@@ -413,8 +1006,7 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
         }
       })
     const childCallsBefore = permissionRequests.length
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder Folder A' }))
-    await screen.findByRole('menuitem', { name: 'Back to shared files' })
+    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: 'Insert folder Folder A' }))
     await waitFor(() => expect(permissionRequests.length).toBeGreaterThan(childCallsBefore))
     expect(permissionRequests).toHaveLength(childCallsBefore + 1)
     expect(permissionRequests.at(-1)?.resourceId).toBe(nestedOnly.resourceId)
@@ -442,7 +1034,7 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
       settled: boolean
     }
     type Real = {
-      scheduler: ReturnType<typeof fc.scheduler>
+      scheduler: Scheduler
       textarea: HTMLTextAreaElement
       insert: HTMLElement
       pending: PendingPermission[]
@@ -683,9 +1275,9 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
       textarea.setSelectionRange(4, 9)
       fireEvent.select(textarea)
       fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Insert EvenDrive link' }))
-      fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Folder A' }))
-      fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Nested B' }))
+      fireEvent.mouseEnter(screen.getByRole('menuitem', { name: 'EvenDrive' }))
+      fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+      fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Nested B' }))
       const insertItem = await screen.findByRole('menuitem', {
         name: 'Insert link to Release notes.md',
       })
@@ -695,10 +1287,12 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
       await waitFor(() => expect(getComposerDraft(chatId, 'agent-1', tabId)).toBe(inserted))
       view.rerenderComposer()
       await waitFor(() => expect(textarea.value).toBe(inserted))
-      await waitFor(() => expect(document.activeElement).toBe(textarea))
       const caretAfterUri = inserted.indexOf('  text') + 1
-      expect(textarea.selectionStart).toBe(caretAfterUri)
-      expect(textarea.selectionEnd).toBe(caretAfterUri)
+      await waitFor(() => {
+        expect(document.activeElement).toBe(textarea)
+        expect(textarea.selectionStart).toBe(caretAfterUri)
+        expect(textarea.selectionEnd).toBe(caretAfterUri)
+      })
 
       expect(producers.listAccessible).toHaveBeenCalledOnce()
       expect(producers.listChildren).toHaveBeenCalledWith(folderA.resourceId, 'main', undefined)
@@ -748,9 +1342,9 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     expect(screen.queryByRole('menu', { name: 'EvenDrive links' })).toBeNull()
     textarea.setSelectionRange(7, 7)
     // The top-level + menu remains open after only its picker submenu closes.
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Insert EvenDrive link' }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Folder A' }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Nested B' }))
+    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Nested B' }))
     fireEvent.click(
       await screen.findByRole('menuitem', { name: 'Insert link to Release notes.md' })
     )
@@ -803,8 +1397,8 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     setComposerDraft(null, 'second draft', 'agent-1', 'tab-b')
     const view = await renderComposer()
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Insert EvenDrive link' }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder Folder A' }))
+    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: 'EvenDrive' }))
+    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Insert folder Folder A' }))
     await waitFor(() => expect(producers.listChildren).toHaveBeenCalledOnce())
     composerState.workspaceChatTabId = 'tab-b'
     view.rerenderComposer()
@@ -1040,6 +1634,7 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     textarea.setSelectionRange(textarea.value.length, textarea.value.length)
     fireEvent.select(textarea)
     const insert = await openNestedResource()
+    expect(noteCalls).toBe(1)
 
     fireEvent.click(insert)
     await waitFor(() => expect(noteCalls).toBe(2))
@@ -1052,6 +1647,50 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
       expect(getComposerDraft('chat-1', 'agent-1')).toBe(`keep this text${note.gfsUri} `)
     )
     expect(noteCalls).toBe(2)
+  })
+
+  it('retires a pending insertion when the GFS environment owner changes', async () => {
+    const producers = installProducers()
+    const pendingNoteChecks: Array<(value: ReturnType<typeof exactReadAffordance>) => void> = []
+    let noteCalls = 0
+    producers.affordances.mockImplementation(async resourceId => {
+      if (resourceId !== note.resourceId) return exactReadAffordance(['read'])
+      noteCalls += 1
+      if (noteCalls === 1) return exactReadAffordance(['read'])
+      return new Promise(resolve => {
+        pendingNoteChecks.push(resolve)
+      })
+    })
+    setComposerDraft('chat-1', 'keep this text', 'agent-1')
+    const writeDraft = vi.spyOn(composerDraftStore, 'setComposerDraft')
+    const { queryClient, setEnvironment } = await renderComposer()
+    const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+    fireEvent.select(textarea)
+    const insert = await openNestedResource()
+    expect(noteCalls).toBe(1)
+
+    fireEvent.click(insert)
+    await waitFor(() => expect(noteCalls).toBe(2))
+    writeDraft.mockClear()
+    setEnvironment('other-environment')
+    await waitFor(() => expect(producers.listAccessible).toHaveBeenCalledTimes(2))
+    expect(
+      queryClient.getQueryState(
+        desktopQueryKeys.gfsAccessible('other-environment:user-1:', 'main', 1)
+      )
+    ).toBeDefined()
+    await waitFor(() => expect(noteCalls).toBe(3))
+    const generationCallsBeforeResolve = producers.getSessionGeneration.mock.calls.length
+
+    await act(async () => pendingNoteChecks[0]!(exactReadAffordance(['read'])))
+    // The current exact listing membership fence may reject the old callback
+    // before it reaches the session-generation read.
+    await act(async () => Promise.resolve())
+    expect(producers.getSessionGeneration.mock.calls.length).toBe(generationCallsBeforeResolve)
+    await act(async () => pendingNoteChecks[1]!(exactReadAffordance(['read'])))
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe('keep this text')
+    expect(writeDraft).not.toHaveBeenCalled()
   })
 
   it('isolates pending insertion locks and errors by composer owner', async () => {
@@ -1183,7 +1822,8 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     textarea.setSelectionRange(textarea.value.length, textarea.value.length)
     fireEvent.select(textarea)
     const insert = await openNestedResource()
-    const directCallsBefore = producers.affordances.mock.calls.length
+    const directCallsBefore = producers.getSessionGeneration.mock.calls.length
+    const passiveCallsBefore = producers.affordances.mock.calls.length
     act(() => {
       rendererEntityChangeRegistry.dispatch({
         type: 'scope.invalidated',
@@ -1201,10 +1841,10 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
       await new Promise(resolve => setTimeout(resolve, 0))
     })
     expect(getComposerDraft('chat-1', 'agent-1')).toBe('keep this text')
-    expect(producers.affordances).toHaveBeenCalledTimes(directCallsBefore + 1)
+    expect(producers.getSessionGeneration).toHaveBeenCalledTimes(directCallsBefore)
 
     await waitFor(() =>
-      expect(producers.affordances.mock.calls.length).toBeGreaterThan(directCallsBefore)
+      expect(producers.affordances.mock.calls.length).toBeGreaterThan(passiveCallsBefore)
     )
     const recoveredInsert = await screen.findByRole('menuitem', {
       name: 'Insert link to Release notes.md',
