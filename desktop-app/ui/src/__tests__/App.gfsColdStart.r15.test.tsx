@@ -1,12 +1,5 @@
 // @vitest-environment jsdom
-import {
-  Fragment,
-  type ReactNode,
-  StrictMode,
-  createElement,
-  useEffect,
-  useLayoutEffect,
-} from 'react'
+import { Fragment, type ReactNode, StrictMode, createElement, useLayoutEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
