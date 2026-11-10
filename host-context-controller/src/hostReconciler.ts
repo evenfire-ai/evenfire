@@ -1607,10 +1607,11 @@ export class HostReconciler {
    * when it finds a difference, the API server is asked, with a dry-run
    * replace of the body the write would send, which template it would store;
    * only a difference from the observed template counts. The dry-run omits
-   * resourceVersion: it persists nothing, and a stale version would fail it
-   * with a 409 no caller retries. A failed dry-run throws: the pass fails
-   * before the Deployment write, and during token provisioning before the
-   * mint (a mint made earlier in the pass is reused on the next one).
+   * resourceVersion: it persists nothing, so a stale version must not fail it.
+   * A failed dry-run throws. Token provisioning then prepares nothing for the
+   * template change and still makes the renewal it decided without it (a 404
+   * retries provisioning against a fresh read); at the mutation read and the
+   * write gate, a failed dry-run fails the pass before the Deployment write.
    *
    * Known gap (accepted): HCC never writes `paused`, so its write unpauses a
    * Deployment someone paused by hand. A template edit held by that pause, in
@@ -2417,11 +2418,28 @@ export class HostReconciler {
         let decision = decideRefresh(observedFrontsOAuth)
         // A running pod has consumed the Secret's single-use refresh token, so
         // any new pod template needs fresh material before it is written.
-        const templateWillChange =
-          !!options.prepareForTemplateChange &&
+        // When the dry-run fails, nothing is prepared for the change and the
+        // renewal decided above still runs. The mutation read and the write gate
+        // ask again: a failed dry-run there fails the pass before the Deployment
+        // write, and a confirmed change still needs prepared material.
+        let templateWillChange = false
+        if (
+          options.prepareForTemplateChange &&
           HostReconciler.deploymentBelongsToHost(deployment, host) &&
-          (deployment.spec?.replicas ?? 1) > 0 &&
-          (await options.prepareForTemplateChange(deployment))
+          (deployment.spec?.replicas ?? 1) > 0
+        ) {
+          try {
+            templateWillChange = await options.prepareForTemplateChange(deployment)
+          } catch (error) {
+            // The Deployment is gone: retry against a fresh read, which mints for it.
+            if (getErrorCode(error) === 404) throw error
+            log.warn('pod template change not confirmed; no fresh bootstrap prepared for it', {
+              host: host.name,
+              namespace: host.namespace,
+              err: error,
+            })
+          }
+        }
         const bootstrapApplied =
           !!existing &&
           !!existingRevision &&
