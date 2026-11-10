@@ -10,6 +10,7 @@ import type { NavigationContextValue } from '@contexts/NavigationContext'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ComposerPanel } from '@components/agents/ComposerPanel'
+import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '@constants/navigation'
 import type { AccessCatalog } from '../../../../src/types'
 import {
   HARNESS_ME,
@@ -343,6 +344,63 @@ describe('useAppController agent selection and sending do not depend on the team
     unmountPanel = panel.unmount
     await expectComposerSends(app, panel, 'agent-x', 'send to an unlisted agent')
   })
+
+  it.each([
+    ['held', true],
+    ['not held', false],
+  ] as const)(
+    'a workspace snapshot that names an agent whose access is %s restores the selection only when it is not held',
+    async (_label, held) => {
+      const { clerum } = installAppControllerClerum({ agentNames: ['agent-x', 'agent-y'] })
+      const app = renderAppController()
+      unmount = app.unmount
+      await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+      act(() => {
+        app.result.current.handleOpenAgentWorkspace('agent-x', AGENT_WORKSPACE_ROUTES.members)
+      })
+      await waitFor(() => expect(app.result.current.selectedAgent).toBe('agent-x'))
+      const snapshot = app.result.current.captureWorkspaceNavigation()
+
+      act(() => {
+        app.result.current.handleSelectChatAgent('agent-y', { selectLatest: false })
+      })
+      await waitFor(() => expect(app.result.current.selectedAgent).toBe('agent-y'))
+      if (held) {
+        // The server denies agent-x's chat list, which holds it. The guarded
+        // handlers refuse a held agent, so only the snapshot restore can name it.
+        const denial = await ipcHostAccessDenied('rpc:listSessions')
+        clerum.rpc.listSessions.mockImplementation(async (hostRef: string) => {
+          if (hostRef === 'agent-x') throw denial
+          return { items: [] } as never
+        })
+        act(() => {
+          app.result.current.handleSelectChatAgent('agent-x', { selectLatest: false })
+        })
+        await waitFor(() => expect(app.result.current.isHostAccessBlocked('agent-x')).toBe(true))
+        act(() => {
+          app.result.current.handleSelectChatAgent('agent-y', { selectLatest: false })
+        })
+        await waitFor(() => expect(app.result.current.selectedAgent).toBe('agent-y'))
+      }
+      expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+
+      let restored: number | null = null
+      act(() => {
+        restored = app.result.current.restoreWorkspaceNavigation(
+          snapshot,
+          app.result.current.navigationIntentSequence
+        )
+      })
+
+      // Witness that the snapshot was applied: its route came back.
+      expect(typeof restored).toBe('number')
+      await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.agents))
+      expect(app.result.current.selectedAgentRoute).toBe(AGENT_WORKSPACE_ROUTES.members)
+      // The not-held row is the witness that the snapshot names agent-x.
+      await waitFor(() => expect(app.result.current.selectedAgent).toBe(held ? null : 'agent-x'))
+      expect(app.result.current.isHostAccessBlocked('agent-x')).toBe(held)
+    }
+  )
 
   describe('the server decides the selection', () => {
     const teamScopedCatalog = (teamId: string) =>
