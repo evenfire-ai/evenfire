@@ -5,13 +5,14 @@
  * Replaces `WorkflowRunReconciler`'s CRD watch loop with a Postgres
  * LISTEN/NOTIFY consumer. Runs the non-owner state transitions:
  *
- *   Pending → (reserve, create child recipe, claim) → Running   [processPending]
- *   Running → Succeeded|Failed|Canceled         [syncFromRecipeExecution]
+ *   Pending → (create child recipe) → Running   [processPending]
+ *   Pending|Running → Succeeded|Failed|Canceled [syncFromRecipeExecution]
  *   Running → Failed (timeout)                  [checkStuckRuns]
  *
- * Every UPDATE carries `WHERE owner_instance_id = $self AND phase = $expected`
- * as defense-in-depth: if another replica grabbed the row, we silently no-op
- * (rowCount=0) instead of colliding.
+ * Every UPDATE of `workflow_runs` names the phases it applies to. The start,
+ * timeout and reclaim statements also check ownership or the one-minute lease.
+ * A statement that matches nothing is a no-op (rowCount 0). The terminal sync
+ * and the heartbeat carry no owner check.
  *
  * The LISTEN session is isolated on a dedicated `pool.connect()` client —
  * the Postgres session pool must stay sticky for notifications to flow. A
@@ -102,26 +103,6 @@ const SELECT_RUN_FOR_UPDATE = `
    WHERE run_id = $1
    FOR UPDATE`
 
-/**
- * A Pending run's start lease is free when nobody holds it or the holder's
- * `last_reconciled_at` is older than one minute. `processPending` reserves the
- * lease before it creates the child recipe; a path that moves a Pending run
- * elsewhere (for example an authority pause) must require this predicate so it
- * cannot interleave with a start in progress.
- */
-export const PENDING_START_LEASE_FREE = `(owner_instance_id IS NULL
-          OR last_reconciled_at IS NULL
-          OR last_reconciled_at < now() - interval '1 minute')`
-
-const RESERVE_PENDING_START = `
-  UPDATE workflow_runs
-     SET owner_instance_id = $1,
-         last_reconciled_at = now(),
-         updated_at = now()
-   WHERE run_id = $2
-     AND phase = 'Pending'
-     AND ${PENDING_START_LEASE_FREE}`
-
 const CLAIM_PENDING = `
   UPDATE workflow_runs
      SET phase = 'Running',
@@ -147,15 +128,12 @@ const UPDATE_RUN_TERMINAL = `
        OR (phase = 'Failed' AND $1 = 'Succeeded')
      )`
 
-// Running only: on a Pending row `last_reconciled_at` is the start lease, which
-// only the reservation may refresh. A child whose run is still Pending requeues
-// until the claim; its syncs must not keep the lease alive.
 const UPDATE_RUN_PROGRESS = `
   UPDATE workflow_runs
      SET last_reconciled_at = now(),
          updated_at = now()
    WHERE run_id = $1
-     AND phase = 'Running'`
+     AND phase IN ('Pending', 'Running')`
 
 const UPSERT_STEP = `
   INSERT INTO workflow_run_steps
@@ -198,7 +176,9 @@ const FIND_ORPHAN_RUNS = `
   SELECT run_id, phase
     FROM workflow_runs
    WHERE phase IN ('Pending', 'Running')
-     AND ${PENDING_START_LEASE_FREE}
+     AND (owner_instance_id IS NULL
+          OR last_reconciled_at IS NULL
+          OR last_reconciled_at < now() - interval '1 minute')
    LIMIT 50`
 
 const CLAIM_ORPHAN_RUNNING = `
@@ -431,136 +411,81 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     }
   }
 
-  // Runs `work` in a short transaction that holds the per-run advisory lock
-  // (`wrc-run-<id>`, released at COMMIT/ROLLBACK) and the run row lock. No
-  // Kubernetes call may run inside `work`.
-  async function inRunLock<T>(
-    runId: string,
-    work: (client: PoolClient, run: DbRunRow | undefined) => Promise<{ commit: boolean; value: T }>
-  ): Promise<T> {
+  // ─── Public: processPending ──────────────────────────────────────────
+  //
+  // Concurrent calls for one run are expected: the NOTIFY dispatch, the orphan
+  // poll, and two pods during a rolling update (leader election has no
+  // production caller). `pg_advisory_xact_lock` on the run id and the row lock
+  // serialize them. The child create runs inside this transaction, so the
+  // locks and the pooled client are held until it returns. The production
+  // creator bounds that with DB_RUN_CHILD_CREATE_TIMEOUT_MS (k8sClient.ts); a
+  // caller queued on the advisory lock holds its client for that wait plus its
+  // own create.
+  async function processPending(runId: string): Promise<void> {
     const client = await connect()
-    let open = false
+    let committed = false
     try {
       await client.query('BEGIN')
-      open = true
+      // Per-run lock, released at COMMIT/ROLLBACK. The key is
+      // hashtext('wrc-run-' || run_id).
       await client.query("SELECT pg_advisory_xact_lock(hashtext('wrc-run-' || $1::text))", [runId])
       const selectRes = await client.query<DbRunRow>(SELECT_RUN_FOR_UPDATE, [runId])
-      const outcome = await work(client, selectRes.rows[0])
-      await client.query(outcome.commit ? 'COMMIT' : 'ROLLBACK')
-      open = false
-      return outcome.value
+      const run = selectRes.rows[0]
+      if (!run) {
+        await client.query('ROLLBACK')
+        committed = true
+        return
+      }
+
+      if (run.phase !== 'Pending') {
+        // Someone else already transitioned us past Pending — nothing to do
+        // here. `syncFromRecipeExecution` drives Running→terminal.
+        await client.query('ROLLBACK')
+        committed = true
+        return
+      }
+
+      const child = await opts.createChildRecipe(run)
+      const claimRes = await client.query(CLAIM_PENDING, [
+        opts.instanceId,
+        child.name,
+        child.namespace,
+        run.run_id,
+      ])
+      if (claimRes.rowCount === 0) {
+        // Another replica claimed the row between our SELECT and UPDATE —
+        // rollback and let the winner handle it. Child creation is idempotent
+        // on the run_id-derived name, so a retry re-attaches to the same
+        // child instead of materializing a duplicate execution.
+        log.warn('pending claim lost race', { run_id: run.run_id })
+        await client.query('ROLLBACK')
+        committed = true
+        return
+      }
+      await client.query('COMMIT')
+      committed = true
+      log.info('run transitioned to Running', {
+        run_id: run.run_id,
+        child_name: child.name,
+        child_namespace: child.namespace,
+      })
+      // Business state is durable before any best-effort tracing notification.
+      notifyRunStarted(run.run_id)
     } catch (err) {
-      if (open) {
+      if (!committed) {
         try {
           await client.query('ROLLBACK')
         } catch {
           /* swallow */
         }
       }
-      throw err
-    } finally {
-      client.release()
-    }
-  }
-
-  async function reservePendingStart(runId: string): Promise<DbRunRow | null> {
-    return inRunLock(runId, async (client, run) => {
-      // Not found, or someone already moved the run past Pending:
-      // `syncFromRecipeExecution` drives Running → terminal.
-      if (!run || run.phase !== 'Pending') return { commit: false, value: null }
-      const reserveRes = await client.query(RESERVE_PENDING_START, [opts.instanceId, run.run_id])
-      if (!reserveRes.rowCount) {
-        log.info('pending run start already reserved', {
-          run_id: run.run_id,
-          owner_instance_id: run.owner_instance_id,
-        })
-        return { commit: false, value: null }
-      }
-      return { commit: true, value: run }
-    })
-  }
-
-  async function claimReservedRun(reserved: DbRunRow, child: ChildRecipeRef): Promise<void> {
-    const claimed = await inRunLock(reserved.run_id, async (client, run) => {
-      if (
-        run?.phase === 'Running' &&
-        run.child_recipe_name === child.name &&
-        run.child_recipe_namespace === child.namespace
-      ) {
-        // Our lease expired during the create; another starter adopted the
-        // same deterministically named child and claimed the run.
-        log.info('pending run already claimed with the same child', {
-          run_id: reserved.run_id,
-          child_name: child.name,
-          child_namespace: child.namespace,
-        })
-        return { commit: false, value: false }
-      }
-      if (!run || run.phase !== 'Pending') {
-        log.error('pending run left Pending while its child was being created; child is unbound', {
-          run_id: reserved.run_id,
-          child_name: child.name,
-          child_namespace: child.namespace,
-          phase: run?.phase ?? null,
-          bound_child_name: run?.child_recipe_name ?? null,
-        })
-        throw new Error('workflow run start reservation lost before the claim')
-      }
-      const claimRes = await client.query(CLAIM_PENDING, [
-        opts.instanceId,
-        child.name,
-        child.namespace,
-        reserved.run_id,
-      ])
-      if (claimRes.rowCount === 0) {
-        // CLAIM_PENDING requires the row to be unowned or owned by this
-        // instance. Our lease expired and another instance reserved the run;
-        // its create adopts the same deterministically named child.
-        log.warn('pending claim lost race', { run_id: reserved.run_id })
-        return { commit: false, value: false }
-      }
-      return { commit: true, value: true }
-    })
-    if (!claimed) return
-    log.info('run transitioned to Running', {
-      run_id: reserved.run_id,
-      child_name: child.name,
-      child_namespace: child.namespace,
-    })
-    // Business state is durable before any best-effort tracing notification.
-    notifyRunStarted(reserved.run_id)
-  }
-
-  // ─── Public: processPending ──────────────────────────────────────────
-  //
-  // Starts a Pending run in three steps, so that no Kubernetes call runs while
-  // this process holds a transaction, a row lock, the per-run advisory lock or
-  // a pooled client:
-  //   1. reserve: a short transaction sets the start lease
-  //      (`owner_instance_id`, `last_reconciled_at`; free again after one
-  //      minute) on the Pending row and commits;
-  //   2. create the child WorkflowRecipe with nothing held;
-  //   3. claim: a short transaction re-reads the row under the locks and moves
-  //      it Pending → Running bound to the child.
-  // A concurrent call for the same run (NOTIFY plus the orphan poll, or two
-  // pods during a rollout) finds the lease held and returns without a create.
-  // A failed create keeps the reservation until the lease expires; the orphan
-  // poll then retries, and the deterministic child name makes the retry adopt
-  // a child the apiserver already accepted (409). The child cannot start before
-  // the claim commits: its DB-run provenance stays `pending` while the run is
-  // Pending with no child bound (`classifyWorkflowRunProvenance`).
-  async function processPending(runId: string): Promise<void> {
-    try {
-      const run = await reservePendingStart(runId)
-      if (!run) return
-      const child = await opts.createChildRecipe(run)
-      await claimReservedRun(run, child)
-    } catch (err) {
       log.error('processPending failed', {
         run_id: runId,
         err: err instanceof Error ? err.message : String(err),
       })
       throw err
+    } finally {
+      client.release()
     }
   }
 

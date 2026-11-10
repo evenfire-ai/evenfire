@@ -5,7 +5,12 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { WorkflowRecipeGfsIntentSpec } from '../types.js'
 import { createDbRunChildRecipe } from './dbRunChildRecipeCreator.js'
-import { makeExistingChild, makeParent, makeRun } from './dbRunChildRecipeCreator.testFixtures.js'
+import {
+  installedSignal,
+  makeExistingChild,
+  makeParent,
+  makeRun,
+} from './dbRunChildRecipeCreator.testFixtures.js'
 
 /** A signal that never aborts, for cases that do not exercise the deadline. */
 const idleSignal = () => new AbortController().signal
@@ -180,7 +185,8 @@ describe('createDbRunChildRecipe', () => {
       createNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 409 }),
     } as unknown as k8s.CustomObjectsApi
 
-    const child = await createDbRunChildRecipe(customApi, makeRun(), idleSignal())
+    const signal = idleSignal()
+    const child = await createDbRunChildRecipe(customApi, makeRun(), signal)
 
     expect(child).toEqual({
       name: 'demo-parent-00000000',
@@ -193,23 +199,23 @@ describe('createDbRunChildRecipe', () => {
     ).mock.calls
     expect(getCalls).toHaveLength(2)
     expect(createCalls).toHaveLength(1)
-    // The deadline reaches every call: parent read, create, and the 409 read-back.
+    // The caller's signal reaches every call: parent read, create, and the 409
+    // read-back. Running each call's middleware shows which signal it installs.
     for (const call of [getCalls[0], createCalls[0], getCalls[1]]) {
-      expect(call?.[1]).toEqual(
-        expect.objectContaining({
-          middleware: [expect.any(Object)],
-          middlewareMergeStrategy: 'append',
-        })
-      )
+      expect(await installedSignal(call?.[1])).toBe(signal)
     }
+    expect(getCalls[0]?.[1]).toMatchObject({ middlewareMergeStrategy: 'append' })
     expect(getCalls[1]?.[0]).toEqual(expect.objectContaining({ name: 'demo-parent-00000000' }))
   })
 
-  it('aborts a hung apiserver call at the deadline', async () => {
+  it('aborts a hung apiserver call when the signal fires', async () => {
     const requests: string[] = []
+    const deadline = new AbortController()
     const server = http.createServer(req => {
-      // Accept the request and never answer, like a stalled apiserver.
+      // Accept the request and never answer, like a stalled apiserver; the
+      // deadline then fires while the request is in flight.
       requests.push(`${req.method} ${req.url}`)
+      deadline.abort()
     })
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     try {
@@ -221,15 +227,13 @@ describe('createDbRunChildRecipe', () => {
         contexts: [{ name: 'hung', cluster: 'hung', user: 'anonymous' }],
         currentContext: 'hung',
       })
-      const startedAt = Date.now()
       await expect(
         createDbRunChildRecipe(
           kc.makeApiClient(k8sClient.CustomObjectsApi),
           makeRun(),
-          AbortSignal.timeout(200)
+          deadline.signal
         )
-      ).rejects.toThrow(/abort/i)
-      expect(Date.now() - startedAt).toBeLessThan(2_000)
+      ).rejects.toMatchObject({ name: 'AbortError' })
       // Witness: the request reached the server; the parent read is the one that hung.
       expect(requests).toEqual([
         'GET /apis/clerum.io/v1alpha1/namespaces/sandbox-recipes/workflowrecipes/demo-parent',

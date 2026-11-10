@@ -22,7 +22,7 @@ import { buildOAuthBrokerTokenSecret } from './reconciler/resourceBuilder'
 import type { SecretEventType, SecretLike } from './reconciler/secretWatcher'
 import type { WorkflowRecipeCRD } from './types'
 import { DB_RUN_CHILD_CREATE_TIMEOUT_MS } from './workflow/dbRunChildRecipeCreator'
-import { makeRun } from './workflow/dbRunChildRecipeCreator.testFixtures'
+import { installedSignal, makeRun } from './workflow/dbRunChildRecipeCreator.testFixtures'
 
 // startSecretWatch builds one SecretWatcher per namespace and hands it to a
 // K8sSecretWatchLoop. Capturing that hand-off lets a test drive the REAL
@@ -3399,31 +3399,50 @@ describe('handleOAuthBrokerTokenAdded', () => {
 })
 
 describe('DB run child creator wiring', () => {
+  const makeCreator = (getNamespacedCustomObject: unknown): ChildRecipeCreator => {
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as {
+      customApi: unknown
+      makeChildRecipeCreator: () => ChildRecipeCreator
+    }
+    internal.customApi = { getNamespacedCustomObject }
+    return internal.makeChildRecipeCreator()
+  }
+
+  it('reports a create cut by its deadline as a deadline and passes other errors through', async () => {
+    const aborted = Object.assign(new Error('The user aborted a request.'), { name: 'AbortError' })
+    const other = new Error('forbidden')
+    const getNamespacedCustomObject = vi
+      .fn()
+      .mockRejectedValueOnce(aborted)
+      .mockRejectedValueOnce(other)
+    const create = makeCreator(getNamespacedCustomObject)
+    await expect(create(makeRun())).rejects.toMatchObject({
+      message: `child WorkflowRecipe create exceeded its ${DB_RUN_CHILD_CREATE_TIMEOUT_MS} ms deadline`,
+      cause: aborted,
+    })
+    await expect(create(makeRun())).rejects.toBe(other)
+    expect(getNamespacedCustomObject).toHaveBeenCalledTimes(2)
+  })
+
   it('bounds the child create with DB_RUN_CHILD_CREATE_TIMEOUT_MS', async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
     try {
       const getNamespacedCustomObject = vi.fn().mockRejectedValue(new Error('parent read stopped'))
-      const internal = Object.create(WorkflowRecipeWatcher.prototype) as {
-        customApi: unknown
-        makeChildRecipeCreator: () => ChildRecipeCreator
-      }
-      internal.customApi = { getNamespacedCustomObject }
-
-      await expect(internal.makeChildRecipeCreator()(makeRun())).rejects.toThrow(
-        'parent read stopped'
-      )
+      // One creator serves every start: each call gets its own deadline.
+      const create = makeCreator(getNamespacedCustomObject)
+      await expect(create(makeRun())).rejects.toThrow('parent read stopped')
+      await expect(create(makeRun())).rejects.toThrow('parent read stopped')
 
       expect(DB_RUN_CHILD_CREATE_TIMEOUT_MS).toBe(30_000)
-      expect(timeoutSpy).toHaveBeenCalledTimes(1)
-      expect(timeoutSpy).toHaveBeenCalledWith(DB_RUN_CHILD_CREATE_TIMEOUT_MS)
-      // Witness: the request options carry that exact signal into the HTTP context.
-      const deadline = timeoutSpy.mock.results[0]?.value as AbortSignal
-      const options = getNamespacedCustomObject.mock.calls[0]?.[1] as {
-        middleware: Array<{ pre: (context: unknown) => { toPromise: () => Promise<unknown> } }>
+      expect(timeoutSpy.mock.calls).toEqual([
+        [DB_RUN_CHILD_CREATE_TIMEOUT_MS],
+        [DB_RUN_CHILD_CREATE_TIMEOUT_MS],
+      ])
+      // Witness: two parent reads, each carrying its own deadline into the HTTP context.
+      expect(getNamespacedCustomObject).toHaveBeenCalledTimes(2)
+      for (const [i, call] of getNamespacedCustomObject.mock.calls.entries()) {
+        expect(await installedSignal(call[1])).toBe(timeoutSpy.mock.results[i]?.value)
       }
-      const setSignal = vi.fn()
-      await options.middleware[0]!.pre({ setSignal }).toPromise()
-      expect(setSignal).toHaveBeenCalledWith(deadline)
     } finally {
       timeoutSpy.mockRestore()
     }

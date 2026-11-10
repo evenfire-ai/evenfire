@@ -822,16 +822,28 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
    * Builds the closure the DB run processor invokes when it needs to
    * materialize a child WorkflowRecipe for a Pending run. This is the ONLY
    * bridge between the DB-driven run lifecycle and the K8s API. The processor
-   * calls it with no database client or lock held; the deadline bounds the
-   * whole create.
+   * awaits it inside the run transaction, so each call gets its own deadline.
    */
   private makeChildRecipeCreator(): ChildRecipeCreator {
-    return async (run: DbRunRow) =>
-      createDbRunChildRecipe(
-        this.customApi,
-        run,
-        AbortSignal.timeout(DB_RUN_CHILD_CREATE_TIMEOUT_MS)
-      )
+    return async (run: DbRunRow) => {
+      try {
+        return await createDbRunChildRecipe(
+          this.customApi,
+          run,
+          AbortSignal.timeout(DB_RUN_CHILD_CREATE_TIMEOUT_MS)
+        )
+      } catch (err) {
+        // node-fetch reports a request cut by the signal as "AbortError: The
+        // user aborted a request."; the deadline is the only signal on these calls.
+        if (err instanceof Error && err.name === 'AbortError') {
+          throw new Error(
+            `child WorkflowRecipe create exceeded its ${DB_RUN_CHILD_CREATE_TIMEOUT_MS} ms deadline`,
+            { cause: err }
+          )
+        }
+        throw err
+      }
+    }
   }
 
   private makeChildRecipeExists(): ChildRecipeExistenceChecker {

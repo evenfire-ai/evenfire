@@ -26,8 +26,7 @@ export const RUN_INTERMEDIATE_PARAMS_ANNOTATION = 'clerum.io/run-intermediate-pa
 
 /**
  * Bound on the whole child creation (parent read, create, and the read-back on
- * 409). The run processor holds a one-minute start reservation while the create
- * runs; 30 s leaves the rest of that lease for the claim transaction.
+ * 409). `processPending` (dbRunProcessor.ts) describes what it bounds there.
  */
 export const DB_RUN_CHILD_CREATE_TIMEOUT_MS = 30_000
 
@@ -120,6 +119,7 @@ export async function createDbRunChildRecipe(
   // Adapter from the durable workflow_runs row to the child WorkflowRecipe
   // execution artifact. The DB row remains authoritative for identity,
   // idempotency, approval binding, and run status.
+  const abortOptions = kubernetesAbortOptions(signal)
   const response = (await customApi.getNamespacedCustomObject(
     {
       group: CRD_GROUP,
@@ -128,7 +128,7 @@ export async function createDbRunChildRecipe(
       plural: WORKFLOWRECIPE_PLURAL,
       name: run.recipe_name,
     },
-    kubernetesAbortOptions(signal)
+    abortOptions
   )) as ParentRecipeResponse
 
   const parentName = response.metadata?.name
@@ -218,7 +218,7 @@ export async function createDbRunChildRecipe(
         plural: WORKFLOWRECIPE_PLURAL,
         body: childRecipe,
       },
-      kubernetesAbortOptions(signal)
+      abortOptions
     )
   } catch (err) {
     if (getErrorCode(err) !== 409) throw err
@@ -231,7 +231,7 @@ export async function createDbRunChildRecipe(
         plural: WORKFLOWRECIPE_PLURAL,
         name: childName,
       },
-      kubernetesAbortOptions(signal)
+      abortOptions
     )) as ParentRecipeResponse
 
     if (
