@@ -259,8 +259,10 @@ describe('useAppController agent selection and sending do not depend on the team
       await waitFor(() => expect(catalogQueryData(app)?.teamId).toBe('team-b'))
       expect(app.result.current.selectedAgent).toBe(TEAM_A_AGENT)
 
-      // The second catalog must differ from the first, or the query keeps the
-      // same object and no selection effect runs again.
+      // The second catalog must differ from the first. The query keeps the
+      // same data object for an equal result, so nothing that reads the
+      // catalog would see a change, and the assertion below could not tell
+      // the refetched catalog from the first one.
       const secondAgentNames = ['team-b-only-agent', 'team-b-second-agent']
       teamBCatalog = {
         ...productionCatalog('team-b', 'team-b-only-agent'),
