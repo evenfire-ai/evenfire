@@ -857,6 +857,50 @@ describe('the driver can be composed with the Responses protocol', () => {
   })
 })
 
+describe('the driver raises a token limit below the Responses minimum', () => {
+  function capturingProvider() {
+    const raw = recorded('v1-rfc-gpt-6.1-terra')
+    const responsesCreate = vi.fn(async (_payload: Item) => structuredClone(raw))
+    const profile = { ...officialOpenAIProfile(), protocol: 'openai-responses' as const }
+    const provider = new OpenAIProvider(
+      {
+        baseURL: 'https://api.openai.com/v1',
+        responses: { create: responsesCreate },
+        chat: { completions: { create: vi.fn() } },
+      } as never,
+      'gpt-6.1-terra',
+      profile
+    )
+    return { provider, sent: () => responsesCreate.mock.calls[0]![0] }
+  }
+
+  it.each([
+    [0, 16],
+    [1, 16],
+    [15, 16],
+    [16, 16],
+    [4000, 4000],
+  ])('max_tokens %s is sent as max_output_tokens %s', async (requested, expected) => {
+    const text = capturingProvider()
+    await text.provider.completeSingleTurn([USER], { max_tokens: requested })
+    expect(text.sent().max_output_tokens).toBe(expected)
+
+    const tools = capturingProvider()
+    await tools.provider.completeSingleTurnWithTools([USER], TOOLS, { max_tokens: requested })
+    expect(tools.sent().max_output_tokens).toBe(expected)
+  })
+
+  it('no max_tokens sends no max_output_tokens', async () => {
+    const text = capturingProvider()
+    await text.provider.completeSingleTurn([USER])
+    expect(text.sent()).not.toHaveProperty('max_output_tokens')
+
+    const tools = capturingProvider()
+    await tools.provider.completeSingleTurnWithTools([USER], TOOLS)
+    expect(tools.sent()).not.toHaveProperty('max_output_tokens')
+  })
+})
+
 describe('the driver classifies a protocol failure as the protocol did', () => {
   const failure = (code: string | null) => {
     const raw = structuredClone(recorded('v1-rfc-gpt-6.1-terra'))

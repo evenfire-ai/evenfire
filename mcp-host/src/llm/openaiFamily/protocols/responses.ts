@@ -117,8 +117,20 @@ function sameOwner(owner: unknown, identity: DriverIdentity): boolean {
   )
 }
 
+const RESPONSES_MIN_OUTPUT_TOKENS = 16
+
+/**
+ * Responses rejects `max_output_tokens` below 16 with a 400 (16 itself is
+ * accepted), while callers can legitimately ask for less. Raising the limit to
+ * the minimum keeps the turn alive instead of failing it, so a configured cap
+ * below 16 yields up to 16 output tokens on this protocol.
+ */
 function tokenLimit(maxTokens: number | undefined): { max_output_tokens?: number } {
-  return maxTokens === undefined ? {} : { max_output_tokens: maxTokens }
+  if (maxTokens === undefined) return {}
+  return {
+    max_output_tokens:
+      maxTokens < RESPONSES_MIN_OUTPUT_TOKENS ? RESPONSES_MIN_OUTPUT_TOKENS : maxTokens,
+  }
 }
 
 function temperatureField(
