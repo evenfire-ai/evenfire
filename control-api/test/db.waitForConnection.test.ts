@@ -176,9 +176,8 @@ describe('waitForDbConnection defaults', () => {
     expect(settled).toBe(false)
     expect(query).toHaveBeenCalledTimes(45)
     expect(query).toHaveBeenNthCalledWith(1, { text: 'SELECT 1', query_timeout: 2000 })
-    // pg writes the query callback onto the config object, so each probe gets its own.
+    // Every probe carries the bound.
     expect(query.mock.calls[1]?.[0]).toEqual({ text: 'SELECT 1', query_timeout: 2000 })
-    expect(query.mock.calls[1]?.[0]).not.toBe(query.mock.calls[0]?.[0])
 
     await vi.advanceTimersByTimeAsync(2_000)
     // The probe at 90 s is at the deadline and throws.

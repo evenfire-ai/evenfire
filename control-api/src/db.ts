@@ -7027,7 +7027,6 @@ function dbWaitRetryCode(error: unknown): string | null {
  */
 export async function waitForDbConnection({
   ensureActive,
-  // A new config object per call: pg writes the query callback onto it.
   probe = () => {
     const probeQuery: QueryConfig & { query_timeout: number } = {
       text: 'SELECT 1',

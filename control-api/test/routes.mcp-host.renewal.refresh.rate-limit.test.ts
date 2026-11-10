@@ -347,6 +347,81 @@ describe('Workflow approval refresh: caller gone before the consume', () => {
     expect(consumedJtis.has(jti)).toBe(true)
   })
 
+  it('leaves the token unconsumed when the caller closed the connection during the Host lookup', async () => {
+    const gateway = new MockGateway('mcp-server')
+    const hostName = 'chatllm'
+    const host = (await gateway.createResource(
+      'hosts',
+      {
+        metadata: { name: hostName },
+        spec: { host: hostName, contextRef: 'ctx-a', secretRef: `${hostName}-llm` },
+      },
+      config.hostsNamespace
+    )) as { metadata: { uid: string } }
+    // An HCC-lineage token: the route looks up its Host after the revocation check.
+    const { token } = issueMcpHostRefreshJwt(config.hostsNamespace, 'standalone', [hostName], {
+      workflowControlScopes: ['workflow:list'],
+      hccCredential: { hostUid: host.metadata.uid },
+    })
+    const jti = (jwt.decode(token) as jwt.JwtPayload).jti as string
+    // Hold the Host lookup, not the revocation lookup, until released.
+    const lookupGate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const readHost = gateway.getResource.bind(gateway)
+    const hostLookup = vi
+      .spyOn(gateway, 'getResource')
+      .mockImplementation(async (plural, name, namespace) => {
+        await lookupGate
+        return readHost(plural, name, namespace)
+      })
+    const hostApp = createApp(gateway as never)
+    const server = createServer(hostApp)
+    // Resolves when the server side of the request sees its response close,
+    // which is when `res.closed` becomes true in the route.
+    const closedSeen = new Promise<void>(resolve => {
+      server.on('request', (_req, res) => res.once('close', () => resolve()))
+    })
+    const callerGoneBefore = await refreshCount('caller_gone')
+    const successBefore = await refreshCount('success')
+
+    // The caller gives up while the Host lookup is held, as the gateway does
+    // at its read timeout.
+    await expect(
+      request(server)
+        .post('/api/v1/workflow-auth/refresh')
+        .set('Authorization', `Bearer ${token}`)
+        .timeout(200)
+        .send()
+    ).rejects.toThrow()
+    // Witnesses: the revocation lookup answered and the request reached the
+    // Host lookup that is held.
+    await vi.waitFor(() => expect(hostLookup).toHaveBeenCalledTimes(1))
+    expect(hostLookup).toHaveBeenCalledWith('hosts', hostName, config.hostsNamespace)
+    expect(callsFor(jti, true)).toBe(1)
+    await closedSeen
+    release?.()
+
+    // Witness: the route resumed after the release and recorded its outcome.
+    await vi.waitFor(async () =>
+      expect(await refreshCount('caller_gone')).toBe(callerGoneBefore + 1)
+    )
+    expect(await refreshCount('success')).toBe(successBefore)
+    expect(callsFor(jti, false)).toBe(0)
+    expect(consumedJtis.has(jti)).toBe(false)
+
+    // The same token still renews on the next attempt, so the Host binding was valid.
+    const retried = await request(hostApp)
+      .post('/api/v1/workflow-auth/refresh')
+      .set('Authorization', `Bearer ${token}`)
+      .send()
+    expect(retried.status).toBe(200)
+    expect(retried.body.refreshToken).toBeDefined()
+    expect(hostLookup).toHaveBeenCalledTimes(2)
+    expect(callsFor(jti, false)).toBe(1)
+    expect(consumedJtis.has(jti)).toBe(true)
+  })
+
   it('consumes the token when the held lookup answers while the caller is still connected', async () => {
     const { token } = issueMcpHostRefreshJwt('ns', 'recipe')
     const jti = (jwt.decode(token) as jwt.JwtPayload).jti as string
