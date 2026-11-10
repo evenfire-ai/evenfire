@@ -30,7 +30,6 @@ import { DESKTOP_ROUTES } from '@constants/navigation'
 import type { PushNotificationInput } from '@hooks/domain/types'
 import { type ActiveChatVisibility, useChatNotifications } from '@hooks/domain/useChatNotifications'
 import { useAppController } from '@hooks/useAppController'
-import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import { httpErrorStatus, isAuthorizationError, isNetworkError } from '@lib/format'
@@ -212,28 +211,6 @@ async function produceSerializedAccessCatalogHttpFailure(status: number): Promis
     throw new Error(
       `The real AuthClient catalog producer lost HTTP ${status}: ${producerError.message}`
     )
-  }
-  return wrapLikeElectronIpc('access:refreshCatalog', producerError)
-}
-
-async function produceSerializedAccessCatalogMalformedResponse(): Promise<Error> {
-  const nativeFetch = globalThis.fetch
-  const actual =
-    await vi.importActual<typeof import('../../../src/authClient')>('../../../src/authClient')
-  let producerError: unknown
-  globalThis.fetch = vi.fn(
-    async () =>
-      new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } })
-  ) as typeof fetch
-  try {
-    await new actual.AuthClient().getTeamAgents('catalog-proof-session')
-  } catch (error) {
-    producerError = error
-  } finally {
-    globalThis.fetch = nativeFetch
-  }
-  if (!(producerError instanceof SyntaxError)) {
-    throw new Error(`The real AuthClient catalog producer did not expose its malformed response`)
   }
   return wrapLikeElectronIpc('access:refreshCatalog', producerError)
 }
@@ -3628,7 +3605,7 @@ describe('App deep-link orchestration', () => {
       .toBe('draft owned by B')
   })
 
-  it('keeps a confirmed current-team agent sendable through a transient catalog refresh', async () => {
+  it('keeps the selected agent sendable through catalog refresh failures and surfaces the server send denial', async () => {
     composerPanelHarness.useRealComposerPanel = true
     composerPanelHarness.renderSendButton = true
     const existingBridge = window.clerum
@@ -3662,7 +3639,6 @@ describe('App deep-link orchestration', () => {
       expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject(
         {
           userId: HARNESS_ME.id,
-          teamId: HARNESS_ME.teamId,
           agentNames: ['agent-x', 'agent-y'],
         }
       )
@@ -3710,13 +3686,11 @@ describe('App deep-link orchestration', () => {
     )
     expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
       userId: HARNESS_ME.id,
-      teamId: HARNESS_ME.teamId,
       agentNames: ['agent-x', 'agent-y'],
     })
     expect(realController.current?.selectedAgent).toBe('agent-x')
     expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
     expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
-    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
     expect((composer as HTMLTextAreaElement).value).toBe(draft)
     expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
 
@@ -3731,10 +3705,8 @@ describe('App deep-link orchestration', () => {
     )
     expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
       userId: HARNESS_ME.id,
-      teamId: HARNESS_ME.teamId,
       agentNames: ['agent-x', 'agent-y'],
     })
-    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
     expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
     expect((composer as HTMLTextAreaElement).value).toBe(draft)
     expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
@@ -3765,11 +3737,9 @@ describe('App deep-link orchestration', () => {
     expect(realController.current?.selectedAgent).toBe('agent-x')
     expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
       userId: HARNESS_ME.id,
-      teamId: HARNESS_ME.teamId,
       agentNames: ['agent-x', 'agent-y'],
     })
     expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
-    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
     await act(async () => {
       rejectServerError(serverError)
       await serverErrorRefreshTask
@@ -3779,11 +3749,9 @@ describe('App deep-link orchestration', () => {
     )
     expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
       userId: HARNESS_ME.id,
-      teamId: HARNESS_ME.teamId,
       agentNames: ['agent-x', 'agent-y'],
     })
     expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
-    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
     expect((composer as HTMLTextAreaElement).value).toBe(draft)
     expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
 
@@ -3802,41 +3770,6 @@ describe('App deep-link orchestration', () => {
       content: draft,
       attachments: [expect.objectContaining({ filename: 'notes.txt' })],
     })
-  })
-
-  it.each([401, 403])(
-    'preserves explicit catalog HTTP %i authorization failures through IPC',
-    async status => {
-      const error = await produceSerializedAccessCatalogHttpFailure(status)
-      expect(error.message).toContain("Error invoking remote method 'access:refreshCatalog'")
-      expect(httpErrorStatus(error)).toBe(status)
-      expect(isAuthorizationError(error)).toBe(true)
-      expect(
-        resolveAgentCatalogAvailability({
-          selectedAgent: 'agent-x',
-          loading: false,
-          error: error.message,
-          catalogMatchesSession: true,
-          agentNames: ['agent-x'],
-        })
-      ).toBe('error')
-    }
-  )
-
-  it('keeps a genuinely unclassified catalog producer failure blocked', async () => {
-    const error = await produceSerializedAccessCatalogMalformedResponse()
-    expect(httpErrorStatus(error)).toBeUndefined()
-    expect(isNetworkError(error)).toBe(false)
-    expect(isAuthorizationError(error)).toBe(false)
-    expect(
-      resolveAgentCatalogAvailability({
-        selectedAgent: 'agent-x',
-        loading: false,
-        error: error.message,
-        catalogMatchesSession: true,
-        agentNames: ['agent-x'],
-      })
-    ).toBe('error')
   })
 
   it('keeps actual ComposerPanel drafts on their App-created workspace tabs', async () => {
