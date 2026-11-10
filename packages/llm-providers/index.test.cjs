@@ -126,3 +126,47 @@ describe('provider families', () => {
     assert.equal(checkedFamilies, 22)
   })
 })
+
+describe('PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT', () => {
+  it('decides exactly the static-catalog providers, so a new provider forces a decision', () => {
+    const staticCatalog = providers.PROVIDER_IDS.filter(
+      id => providers.PROVIDER_MODEL_CATALOG_MODE[id] === 'static'
+    )
+    assert.deepEqual(
+      Object.keys(providers.PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT).sort(),
+      [...staticCatalog].sort()
+    )
+    for (const broker of providers.OAUTH_BROKER_IDS) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(
+          providers.PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT,
+          broker
+        ),
+        false
+      )
+    }
+    for (const value of Object.values(providers.PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT)) {
+      assert.equal(typeof value, 'boolean')
+    }
+    assert.ok(Object.isFrozen(providers.PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT))
+  })
+
+  it('enables only direct providers by default', () => {
+    const on = Object.entries(providers.PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT)
+      .filter(([, enabled]) => enabled)
+      .map(([id]) => id)
+      .sort()
+    assert.deepEqual(on, [
+      'claude',
+      'deepseek',
+      'gemini',
+      'minimax',
+      'mistral',
+      'moonshot',
+      'openai',
+      'perplexity',
+      'xai',
+      'zai',
+    ])
+  })
+})

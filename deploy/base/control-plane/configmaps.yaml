@@ -123,7 +123,8 @@ data:
   CONTROL_API_ENFORCE_IMAGE_ALLOWLIST: "false"
   # LLM catalog discovery sync cron (spec 09 Fase 4). Non-destructive; code
   # default off. Enabled here: the first sync runs a few seconds after
-  # control-api starts (fills image_input evidence), then every interval.
+  # control-api starts (loads the model catalog, auto-enabling per provider
+  # policy, and fills image_input evidence), then every interval.
   # Interval + plausibility floors keep their code defaults.
   LLM_CATALOG_SYNC_CRON_ENABLED: "true"
   # Subscription catalog reconciliation cron. A grant's catalog is written at

@@ -10,6 +10,7 @@ import { createAdminHostEnvRouter } from './hostEnv.js'
 import { createAdminHostsOverviewRouter } from './hostsOverview.js'
 import { createAdminLlmModelsRouter } from './llmModels.js'
 import { createAdminLlmPricesRouter } from './llmPrices.js'
+import { createAdminLlmProviderCatalogPolicyRouter } from './llmProviderCatalogPolicy.js'
 import { createAdminMcpServerOauthRouter } from './mcpServerOauth.js'
 import { createAdminOauthProvidersRouter } from './oauthProviders.js'
 import { createAdminOutputsRouter } from './outputs.js'
@@ -56,6 +57,7 @@ export function createAdminRouter(gateway: K8sGateway): Router {
   router.use(createAdminUsageRouter())
   router.use(createAdminLlmPricesRouter())
   router.use(createAdminLlmModelsRouter(gateway))
+  router.use(createAdminLlmProviderCatalogPolicyRouter())
   router.use(createAdminCodexSubscriptionRouter(undefined, gateway))
   router.use(createAdminBudgetsRouter())
   router.use(createAdminTracingRouter())

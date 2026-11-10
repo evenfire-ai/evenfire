@@ -8,13 +8,6 @@ type SubmittingAction = InvitationAction | null
 
 type InvitationActionPanelProps =
   | {
-      mode: 'session-check'
-      disabled: boolean
-      checking: boolean
-      onRetrySession: () => void
-      loginHref: string
-    }
-  | {
       mode: 'outcome-unknown'
       loginHref: string
       forgotPasswordHref: string
@@ -34,11 +27,21 @@ type InvitationActionPanelProps =
       ) => void
     }
   | {
-      mode: 'accepted'
-      downloadUrl: string
+      mode: 'password-updated'
       loginHref: string
+      downloadUrl: string
+      isPasswordReset: boolean
     }
-  | { mode: 'expired' }
+  | {
+      mode: 'used'
+      loginHref: string
+      downloadUrl: string
+      isPasswordReset: boolean
+      forgotPasswordHref: string
+    }
+  | { mode: 'link-error'; loginHref: string }
+  | { mode: 'terminal'; loginHref: string; forgotPasswordHref?: string }
+  | { mode: 'expired'; loginHref: string }
   | {
       mode: 'accept'
       busy: boolean
@@ -60,17 +63,6 @@ function buttonLabel(submitting: SubmittingAction, kind: InvitationAction, label
 
 export function InvitationActionPanel(props: InvitationActionPanelProps) {
   switch (props.mode) {
-    case 'session-check':
-      return (
-        <div className="stack">
-          <Button type="button" disabled={props.disabled} onClick={props.onRetrySession}>
-            {props.checking ? 'Checking account session...' : 'Retry account session check'}
-          </Button>
-          <a className="cu-btn" href={props.loginHref}>
-            Sign in instead
-          </a>
-        </div>
-      )
     case 'outcome-unknown':
       return (
         <div className="stack">
@@ -131,24 +123,71 @@ export function InvitationActionPanel(props: InvitationActionPanelProps) {
           </Button>
         </div>
       )
-    case 'accepted':
+    case 'password-updated':
       return (
         <div className="stack">
-          <a
-            className="cu-btn cu-btn--primary"
-            href={props.downloadUrl}
-            target="_blank"
-            rel="noreferrer"
-          >
+          <p className="body-copy">
+            Your password has been updated. Sign in with your new password to continue.
+          </p>
+          <a className="cu-btn cu-btn--primary" href={props.loginHref}>
+            Sign in
+          </a>
+          {!props.isPasswordReset ? (
+            <a className="cu-btn" href={props.downloadUrl} target="_blank" rel="noreferrer">
+              Download Evenfire
+            </a>
+          ) : null}
+        </div>
+      )
+    case 'used':
+      return (
+        <div className="stack">
+          <p className="body-copy">
+            This invitation has already been used. Sign in with your password to continue.
+          </p>
+          <a className="cu-btn cu-btn--primary" href={props.loginHref}>
+            Sign in
+          </a>
+          <a className="cu-btn" href={props.downloadUrl} target="_blank" rel="noreferrer">
             Download Evenfire
           </a>
+          {props.isPasswordReset ? (
+            <a className="cu-btn" href={props.forgotPasswordHref}>
+              Request a new recovery link
+            </a>
+          ) : null}
+        </div>
+      )
+    case 'link-error':
+      return (
+        <div className="stack">
           <a className="cu-btn" href={props.loginHref}>
-            Manage Profile
+            Sign in
           </a>
         </div>
       )
+    case 'terminal':
+      return (
+        <div className="stack">
+          <a className="cu-btn cu-btn--primary" href={props.loginHref}>
+            Sign in
+          </a>
+          {props.forgotPasswordHref ? (
+            <a className="cu-btn" href={props.forgotPasswordHref}>
+              Request a new recovery link
+            </a>
+          ) : null}
+        </div>
+      )
     case 'expired':
-      return <div className="message message--error-plain">This invitation has expired.</div>
+      return (
+        <div className="stack">
+          <div className="message message--error-plain">This invitation has expired.</div>
+          <a className="cu-btn" href={props.loginHref}>
+            Sign in
+          </a>
+        </div>
+      )
     case 'accept':
       return (
         <div>

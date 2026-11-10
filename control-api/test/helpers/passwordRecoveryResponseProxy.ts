@@ -7,13 +7,7 @@ export function responseDropProxyApp(
   onDroppedReset: () => void,
   options: {
     dropResetResponse?: boolean
-    resetFault?:
-      | 'html'
-      | 'missing_session'
-      | 'empty_session'
-      | 'invalid_payload'
-      | 'legacy_busy'
-      | 'legacy_unavailable'
+    resetFault?: 'html' | 'invalid_payload' | 'legacy_busy' | 'legacy_unavailable'
   } = {}
 ) {
   const producerBase = new URL(producerBaseUrl)
@@ -91,11 +85,6 @@ export function responseDropProxyApp(
         })
       } else if (options.resetFault === 'invalid_payload') {
         res.status(400).json({ error: 'invalid payload' })
-      } else {
-        const payload = JSON.parse(body)
-        if (options.resetFault === 'missing_session') delete payload.token
-        else payload.token = ''
-        res.status(upstream.status).json(payload)
       }
       return
     }

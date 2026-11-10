@@ -268,7 +268,9 @@ Currently whitelisted hints: `--da-grid-cols`, `fleetMenuPosition`,
 stacked-bar segment width in the context-window breakdown popover),
 `FlyoutPosition` (portaled flyout `left`/`top` computed from
 `getBoundingClientRect()` via `useFlyoutPosition`; matches the
-`*FlyoutPosition` result variables in `ComposerPanel` and `AgentTitleSelector`).
+`*FlyoutPosition` result variables in `ComposerPanel` and `AgentTitleSelector`),
+and `--sidebar-width` (the persisted user-selected Desktop navigation width,
+clamped against the live window width).
 
 ### Extending coverage
 

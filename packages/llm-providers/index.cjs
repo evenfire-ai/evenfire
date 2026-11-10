@@ -309,6 +309,47 @@ function familyProviderIds(family) {
   return Object.freeze(PROVIDER_IDS.filter(id => PROVIDER_FAMILY[id] === family))
 }
 
+/**
+ * Whether models newly discovered in the public catalog start enabled, per
+ * provider, when the operator has not overridden it. ON only where the
+ * provider publishes its own models under the ids its API accepts. OFF for:
+ * azure (`model` is a deployment name), bedrock (generic ids, not the regional
+ * inference profiles a deployment uses), vertex (per-project quotas/regions,
+ * partner models with `@version` ids), and multi-vendor hosts/aggregators
+ * whose hundreds of models would flood an all-models Host selector.
+ *
+ * Covers exactly the providers with a `static` model catalog. The
+ * oauth-broker providers have no entry: their models come from their own
+ * dynamic per-connection catalog, never from public catalog discovery, so a
+ * `false` here would read as a decision that does not exist.
+ *
+ * @type {Readonly<Record<string, boolean>>}
+ */
+const PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT = Object.freeze({
+  openai: true,
+  claude: true,
+  gemini: true,
+  deepseek: true,
+  mistral: true,
+  xai: true,
+  moonshot: true,
+  minimax: true,
+  zai: true,
+  perplexity: true,
+  azure: false,
+  bedrock: false,
+  vertex: false,
+  openrouter: false,
+  novita: false,
+  together: false,
+  fireworks: false,
+  deepinfra: false,
+  nebius: false,
+  groq: false,
+  cerebras: false,
+  bailian: false,
+})
+
 /** @type {Record<string, string | undefined>} */
 const PROVIDER_EXECUTE_SCOPE = Object.freeze({
   'codex-subscription': 'llm:codex:execute',
@@ -369,6 +410,7 @@ module.exports = {
   PROVIDER_AUTH_MODE,
   PROVIDER_MODEL_CATALOG_MODE,
   PROVIDER_FAMILY,
+  PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT,
   OAUTH_BROKER_IDS,
   buildProviderMaps,
   familyProviderIds,
