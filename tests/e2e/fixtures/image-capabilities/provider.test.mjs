@@ -1815,10 +1815,12 @@ test('document neighbour: the attachment-save request without a directive still 
   const h = harness()
   const message = {
     role: 'user',
-    content: saveUserText({ directive: false }).replace(
-      'Save this to EvenDrive.',
-      'Summarize the attached file.'
-    ),
+    // The save fixtures list the file as reader=binary, which the Host never
+    // emits (readers are text, pdf, xlsx or none) and this fixture now
+    // rejects; a readable text file is what the neighbour check needs.
+    content: saveUserText({ directive: false })
+      .replace('Save this to EvenDrive.', 'Summarize the attached file.')
+      .replace('reader=binary', 'reader=text'),
   }
 
   const response = await call(
@@ -1837,6 +1839,7 @@ test('document neighbour: the attachment-save request without a directive still 
       model: VISUAL_MODEL,
       imageSha256: null,
       responseKind: 'document-read-requested',
+      documentReader: 'text',
       documentSha256: null,
       documentByteLength: 4096,
     },
