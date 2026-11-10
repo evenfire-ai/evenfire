@@ -13,7 +13,12 @@ type AuthContext = {
 }
 
 type ResetPasswordDomainError =
-  'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid_invitation' | 'invalid_password'
+  | 'not_found'
+  | 'forbidden'
+  | 'not_pending'
+  | 'expired'
+  | 'invalid_invitation'
+  | 'invalid_password'
 
 function invitationPasswordDomainError(
   error: ControlApiError
@@ -24,6 +29,7 @@ function invitationPasswordDomainError(
   | 'not_pending'
   | 'expired'
   | 'invalid_password'
+  | 'password_already_set'
   | null {
   const code = error.code
   if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
@@ -32,6 +38,7 @@ function invitationPasswordDomainError(
   if (error.status === 404 && code === 'not_found') return 'not_found'
   if (error.status === 409 && code === 'invitation_not_accepted') return 'not_accepted'
   if (error.status === 409 && code === 'invitation_not_pending') return 'not_pending'
+  if (error.status === 409 && code === 'password_already_set') return 'password_already_set'
   if (error.status === 410 && code === 'expired') return 'expired'
   return null
 }
@@ -62,6 +69,22 @@ function unknownRecoveryOutcome(): ControlApiError {
   )
 }
 
+// Password setup never publishes a session representation. Keep the public
+// consumer contract free of these fields even against a mixed-version producer.
+function withoutSessionResponseFields<T extends object>(
+  data: T
+): Omit<T, 'sessionContext' | 'token'> {
+  const {
+    sessionContext: _sessionContext,
+    token: _token,
+    ...response
+  } = data as T & {
+    sessionContext?: unknown
+    token?: unknown
+  }
+  return response
+}
+
 function passwordAuthorityUnavailable(): ControlApiError {
   return new ControlApiError(
     'Password recovery authority unavailable',
@@ -77,7 +100,13 @@ export async function setupInvitationPassword(
   password: string
 ): Promise<{
   error?:
-    'not_found' | 'forbidden' | 'not_accepted' | 'not_pending' | 'expired' | 'invalid_password'
+    | 'not_found'
+    | 'forbidden'
+    | 'not_accepted'
+    | 'not_pending'
+    | 'expired'
+    | 'invalid_password'
+    | 'password_already_set'
   data?: InvitationPreview & { passwordUpdated: boolean }
 }> {
   try {
@@ -94,7 +123,7 @@ export async function setupInvitationPassword(
         userSessionToken: auth.sessionToken,
       }
     )
-    return { data }
+    return { data: withoutSessionResponseFields(data) }
   } catch (error) {
     if (error instanceof ControlApiTransportError) throw passwordAuthorityUnavailable()
     if (
@@ -130,15 +159,22 @@ export async function setupInvitationPasswordWithToken(
     | 'expired'
     | 'invalid_invitation'
     | 'invalid_password'
-  data?: InvitationPreview & { passwordUpdated: boolean; token: string }
+  data?: InvitationPreview & { passwordUpdated: boolean; reauthenticationRequired: true }
 }> {
   try {
     const data = await controlApiRequest<
-      InvitationPreview & { passwordUpdated: boolean; token: string }
+      InvitationPreview & {
+        passwordUpdated: boolean
+        reauthenticationRequired?: boolean
+        token?: string
+        sessionContext?: unknown
+      }
     >('POST', '/external/invitations/password-token', {
       body: { email, token, invitationId, password },
     })
-    return { data }
+    return {
+      data: { ...withoutSessionResponseFields(data), reauthenticationRequired: true },
+    }
   } catch (error) {
     if (error instanceof ControlApiTransportError) throw unknownRecoveryOutcome()
     if (error instanceof ControlApiError && error.status === 429) throw error

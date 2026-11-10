@@ -17,6 +17,7 @@ import {
 } from '../services/memberManagementService.js'
 import { TEAM_ROLES, TeamRole } from '../types.js'
 
+const MAX_INVITATION_EMAIL_LENGTH = 320
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
 const MAX_INVITEE_NAME_LENGTH = 120
@@ -150,9 +151,14 @@ export function createMembersRouter(): Router {
 
   router.post('/members/invite', requireAuth, async (req: AuthedRequest, res, next) => {
     try {
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
+      // The 320-character bound comes first: EMAIL_PATTERN alone accepts longer
+      // addresses, and control-api rejects them.
+      const rawEmail = req.body?.email
+      if (typeof rawEmail !== 'string' || rawEmail.length > MAX_INVITATION_EMAIL_LENGTH) {
+        res.status(400).json({ error: 'Valid email is required' })
+        return
+      }
+      const email = rawEmail.trim().toLowerCase()
       const name = String(req.body?.name || '').trim()
       const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
       if (!EMAIL_PATTERN.test(email)) {

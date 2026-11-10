@@ -712,7 +712,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
-    clipboard.writeText(result.url)
+    await clipboard.writeText(result.url)
     return result
   })
   ipcMain.handle(
@@ -2421,7 +2421,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     const teamId = sanitizeString(payload?.teamId)
     const result = await service.createSandboxUiDeepLink(teamId || undefined)
-    clipboard.writeText(result.url)
+    await clipboard.writeText(result.url)
     return result
   })
 

@@ -104,7 +104,8 @@ export async function runCompanion(): Promise<void> {
       policy: require('./dist/middleware/llmProviderAttemptAdmissionLimits.js').LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY,
       grok: require('@clerum/grok-provider-attempt-contract') }
     if (options.hostNamespace !== prod.config.hostsNamespace || !prod.config.grokSubscriptionEnabled || !prod.config.codexSubscriptionEnabled) throw new Error('both actual provider validators must be enabled')
-    if (prod.config.subscriptionCatalogSyncCronEnabled !== false || prod.config.llmCatalogSyncCronEnabled !== false) throw new Error('actual vendor crons must be disabled')
+    if (prod.config.subscriptionCatalogSyncCronEnabled !== false || prod.config.llmCatalogSyncCronEnabled !== false ||
+        prod.config.llmCatalogBootSyncEnabled !== false) throw new Error('actual vendor crons must be disabled')
     inspector = await connectInspector(options.inspectorPort)
     const server = await inspector.snapshot()
     const flags = [...server.execArgv, ...server.nodeOptions.split(/\s+/).filter(Boolean)]

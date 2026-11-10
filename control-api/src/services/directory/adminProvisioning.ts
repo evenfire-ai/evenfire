@@ -1,5 +1,6 @@
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
+import { revokeAllUserSessions } from '../auth/userSessionService.js'
 import { gfsDesktopOperatorLinkService } from '../gfsDesktopOperatorLinkService.js'
 import {
   type ControlApiPermissionChange,
@@ -9,6 +10,30 @@ import type { InvitationTeamAssignment } from './membership.js'
 import { type TeamRole, normalizeTeamRoleInput } from './types.js'
 
 const logger = rootLogger.child({ module: 'admin-provisioning' })
+
+async function setProvisionedUserPassword(
+  db: Pick<DbClient, 'query'>,
+  userId: string,
+  passwordHash: string,
+  advanceLifecycle: boolean
+): Promise<string | number> {
+  const update = await db.query(
+    `UPDATE users
+        SET password_hash = $2,
+            lifecycle_version = lifecycle_version + CASE WHEN $3::boolean THEN 1 ELSE 0 END,
+            password_set_at = NOW(),
+            updated_at = NOW()
+      WHERE id = $1
+      RETURNING lifecycle_version`,
+    [userId, passwordHash, advanceLifecycle]
+  )
+  const lifecycleVersion = (update.rows[0] as { lifecycle_version?: string | number } | undefined)
+    ?.lifecycle_version
+  if (lifecycleVersion === undefined) {
+    throw new Error('provisioned password update did not return its lifecycle generation')
+  }
+  return lifecycleVersion
+}
 
 /**
  * Ensure the user administers a team and that the default agent/context grants exist at
@@ -113,8 +138,14 @@ export async function provisionAdminDesktopWorkspace(
   const name = input.displayName.trim() || null
   const teamLabel = input.displayName.trim() || email
   const provision = async (db: Pick<DbClient, 'query'>): Promise<{ userId: string }> => {
-    const existing = await db.query(`SELECT id FROM users WHERE email = $1 LIMIT 1`, [email])
+    // Lock order: an existing user row before its team_members rows
+    // (ensureDefaultTeamAndGrants) and before the operator link's user lock.
+    const existing = await db.query(
+      `SELECT id FROM users WHERE email = $1 LIMIT 1 FOR NO KEY UPDATE`,
+      [email]
+    )
     let userId = (existing.rows[0] as { id: string } | undefined)?.id
+    const existingUser = Boolean(userId)
     if (!userId) {
       const inserted = await db.query(
         `INSERT INTO users(email, name) VALUES($1, $2) RETURNING id`,
@@ -130,11 +161,15 @@ export async function provisionAdminDesktopWorkspace(
     )
 
     if (input.seedPassword !== false) {
-      await db.query(
-        `UPDATE users SET password_hash = $2, password_set_at = NOW(), updated_at = NOW()
-          WHERE id = $1`,
-        [userId, input.passwordHash]
+      const lifecycleVersion = await setProvisionedUserPassword(
+        db,
+        userId,
+        input.passwordHash,
+        existingUser
       )
+      if (existingUser) {
+        await revokeAllUserSessions(userId, 'password_changed', db, undefined, lifecycleVersion)
+      }
     }
 
     await ensureDefaultTeamAndGrants(db, userId, teamLabel, input.agentNames, input.contextIds)
@@ -206,7 +241,8 @@ export async function provisionMemberFromAdmin(input: {
       `SELECT id, email, name
          FROM users
         WHERE lower(email) = lower($1)
-        LIMIT 1`,
+        LIMIT 1
+        FOR NO KEY UPDATE`,
       [admin.email]
     )
     let created = false
@@ -244,14 +280,15 @@ export async function provisionMemberFromAdmin(input: {
     )
 
     if (input.seedPassword) {
-      await db.query(
-        `UPDATE users
-            SET password_hash = $2,
-                password_set_at = NOW(),
-                updated_at = NOW()
-          WHERE id = $1`,
-        [user.id, admin.password_hash]
+      const lifecycleVersion = await setProvisionedUserPassword(
+        db,
+        user.id,
+        admin.password_hash,
+        !created
       )
+      if (!created) {
+        await revokeAllUserSessions(user.id, 'password_changed', db, undefined, lifecycleVersion)
+      }
     }
 
     if (assignments.size > 0) {

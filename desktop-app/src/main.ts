@@ -31,6 +31,7 @@ import {
   registerGfsDeepLinkListHandler,
   registerIpcHandlers,
 } from './ipc.js'
+import { mainWindowRoundedCorners } from './mainWindowChrome.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
@@ -90,6 +91,11 @@ const appService = new AppService({
         appDeepLinkMinimumId,
         gfsDeepLinkMinimumId,
       })
+    }
+  },
+  onSessionCleared: () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('auth:sessionCleared')
     }
   },
 })
@@ -548,6 +554,7 @@ async function createWindow(): Promise<void> {
     height: 860,
     show: false,
     frame: false,
+    roundedCorners: mainWindowRoundedCorners(),
     title:
       devIsolationPolicy.windowTitle ??
       (config.appName === EVENFIRE_APP_NAME

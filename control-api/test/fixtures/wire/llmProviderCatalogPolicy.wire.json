@@ -1,0 +1,244 @@
+{
+  "cases": {
+    "openai.default": {
+      "provider": "openai",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "claude.default": {
+      "provider": "claude",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "zai.default": {
+      "provider": "zai",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "bailian.default": {
+      "provider": "bailian",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "vertex.default": {
+      "provider": "vertex",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "bedrock.default": {
+      "provider": "bedrock",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "openrouter.default": {
+      "provider": "openrouter",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "gemini.default": {
+      "provider": "gemini",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "deepseek.default": {
+      "provider": "deepseek",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "groq.default": {
+      "provider": "groq",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "together.default": {
+      "provider": "together",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "fireworks.default": {
+      "provider": "fireworks",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "mistral.default": {
+      "provider": "mistral",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "xai.default": {
+      "provider": "xai",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "cerebras.default": {
+      "provider": "cerebras",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "deepinfra.default": {
+      "provider": "deepinfra",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "perplexity.default": {
+      "provider": "perplexity",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "moonshot.default": {
+      "provider": "moonshot",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "nebius.default": {
+      "provider": "nebius",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "novita.default": {
+      "provider": "novita",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "minimax.default": {
+      "provider": "minimax",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "azure.default": {
+      "provider": "azure",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": null,
+      "updated_by": null
+    },
+    "openai.override_off": {
+      "provider": "openai",
+      "auto_enable": false,
+      "default": true,
+      "overridden": true,
+      "updated_at": "2026-10-30T12:00:00.000Z",
+      "updated_by": "00000000-0000-4000-8000-000000000001"
+    },
+    "openai.override_same": {
+      "provider": "openai",
+      "auto_enable": true,
+      "default": true,
+      "overridden": true,
+      "updated_at": "2026-10-30T12:00:00.000Z",
+      "updated_by": "00000000-0000-4000-8000-000000000001"
+    },
+    "openai.reset": {
+      "provider": "openai",
+      "auto_enable": true,
+      "default": true,
+      "overridden": false,
+      "updated_at": "2026-10-30T12:00:00.000Z",
+      "updated_by": "00000000-0000-4000-8000-000000000001"
+    },
+    "groq.override_on": {
+      "provider": "groq",
+      "auto_enable": true,
+      "default": false,
+      "overridden": true,
+      "updated_at": "2026-10-30T12:00:00.000Z",
+      "updated_by": "00000000-0000-4000-8000-000000000001"
+    },
+    "groq.override_same": {
+      "provider": "groq",
+      "auto_enable": false,
+      "default": false,
+      "overridden": true,
+      "updated_at": "2026-10-30T12:00:00.000Z",
+      "updated_by": "00000000-0000-4000-8000-000000000001"
+    },
+    "groq.reset": {
+      "provider": "groq",
+      "auto_enable": false,
+      "default": false,
+      "overridden": false,
+      "updated_at": "2026-10-30T12:00:00.000Z",
+      "updated_by": "00000000-0000-4000-8000-000000000001"
+    }
+  },
+  "errors": {
+    "catalog_sync_in_progress": {
+      "status": 503,
+      "body": {
+        "error": "catalog_sync_in_progress",
+        "message": "a catalog sync is running and holds the policy lock; nothing was saved — retry shortly"
+      }
+    },
+    "not_found": {
+      "status": 404,
+      "body": {
+        "error": "not_found",
+        "message": "provider has no catalog auto-enable policy"
+      }
+    }
+  }
+}

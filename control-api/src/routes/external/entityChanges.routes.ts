@@ -1,22 +1,25 @@
 import { Request, Response, Router } from 'express'
 import { config } from '../../config.js'
+import type { DbClient } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
-  isCurrentExternalSession,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
-import type { AuthClaims } from '../../profileTypes.js'
+import type { ExternalSessionAuthentication } from '../../services/auth/externalSessionAuthentication.js'
+import {
+  type ExternalSessionCurrentness,
+  observeExternalSessionCurrentness,
+} from '../../services/auth/externalSessionCurrentnessObserver.js'
 import { parseRequestedEntityChangeCursor, streamEntityChanges } from '../entityChangeStream.js'
 
 export function isEntityChangeExternalSessionCurrent(
-  claims: AuthClaims,
-  nowMs = Date.now()
-): Promise<boolean> {
-  if (claims.exp * 1000 <= nowMs) return Promise.resolve(false)
-  return isCurrentExternalSession(claims)
+  authentication: Extract<ExternalSessionAuthentication, { status: 'authenticated' }>,
+  options: { db?: Pick<DbClient, 'query'> } = {}
+): Promise<ExternalSessionCurrentness> {
+  return observeExternalSessionCurrentness(authentication, options)
 }
 
 export function createExternalEntityChangesRouter(): Router {
@@ -42,7 +45,8 @@ export function createExternalEntityChangesRouter(): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const externalReq = req as ExternalAuthedRequest
       const claims = externalReq.externalAuth
-      if (!claims) {
+      const authentication = externalReq.externalSessionAuthentication
+      if (!claims || !authentication) {
         res.status(401).json({ error: 'Unauthorized' })
         return
       }
@@ -55,7 +59,7 @@ export function createExternalEntityChangesRouter(): Router {
         req,
         res,
         cursor,
-        () => isEntityChangeExternalSessionCurrent(claims),
+        () => isEntityChangeExternalSessionCurrent(authentication),
         'user',
         `user:${claims.userId}`
       )

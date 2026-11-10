@@ -223,13 +223,130 @@ Read the notes for every release you skip over, not only the target release.
    mark these fields. See also the [CRD reference](../crds/README.md).
 
 3. **Then roll out the images** for the new release, all from the same tag.
+   Before you do, check the feature-specific notes below for an order that
+   replaces this step. The [user access foundation
+   upgrade](user-access-foundation-upgrade.md) is one: it runs the migration
+   Job, then External REST and Profile UI, and only then control-api.
 4. **Follow any feature-specific runbook** below.
 
 ### Feature-specific notes
 
-| Note                                                                               | Read it when                                                                                                      |
-| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.        |
-| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.              |
-| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential. |
-| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.       |
+| Note                                                                               | Read it when                                                                                                                              |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                                |
+| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                                      |
+| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                         |
+| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                               |
+| [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network. |
+| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.          |
+| [User access foundation upgrade](user-access-foundation-upgrade.md)                | You upgrade to the release with External REST user sessions. It has a required order: edge before control-api.                            |
+| [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.  |
+
+#### Snippet runner Node permissions
+
+The workflow snippet runner starts each snippet worker under the Node permission
+model with the `--permission` flag. Node 24 accepts only this flag name and
+rejects the earlier `--experimental-permission`. Each path has its own grant: a
+worker can read the runner's `dist/` and `node_modules/` directories, and can
+write to the workflow output directory but not read it. Other workloads share
+the output volume, and Node follows a symlink inside a granted directory, so a
+read grant would let a snippet read the target of a link placed there.
+
+On earlier releases the snippet worker ran without the Node permission model
+(the old `--experimental-permission` flag was rejected and the runner continued
+without it), so an `ERR_ACCESS_DENIED` after this release comes from the
+sandbox now being enforced.
+
+At startup the runner checks that its Node runtime provides the permission
+model. If it does not, the runner exits with an error and its Pod does not
+become Ready.
+
+`CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS` is removed. The workflow-recipes
+controller never passed it to snippet-runner Pods: it passes them only an
+allowlisted set of environment variables, and this variable is not in that set.
+
+No action is needed when you use the runner image built from this repository:
+the repository images use Node 24. If `CLERUM_SNIPPET_RUNNER_IMAGE` points at
+your own image, run Node 24.x: `workflow-recipes` declares Node `>=24.22.1` and
+is tested only on Node 24. On Node 25 and later the runner starts, but snippet
+workers cannot open network connections, because those releases also restrict
+network access under `--permission`, and the runner does not pass `--allow-net`
+(Node 24 rejects that flag). On a runtime that rejects `--permission` (Node older
+than 22.13.0, or a 23.x release older than 23.5.0) the startup check fails and
+the runner exits.
+
+### rpc-proxy default changes
+
+The first release after v0.12.0 changes one rpc-proxy built-in default and makes
+an invalid status or activity stream cap stop startup. A built-in default
+applies when the variable is unset or empty in `rpc-proxy-config`.
+
+| Variable                                 | Old default       | New default         |
+| ---------------------------------------- | ----------------- | ------------------- |
+| `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` | `60000` ms (60 s) | `100000` ms (100 s) |
+
+If `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` is set in `rpc-proxy-config` or
+`rpc-proxy-secrets`, that value wins and nothing changes. rpc-proxy reads both
+through `envFrom`, the Secret last, so a key set in both takes the Secret's
+value. The common case is a ConfigMap without the variable, which was added in
+v0.11.0: rpc-proxy then used the old 60 s default and now uses 100 s. The timer
+bounds the in-cluster transfer of an artifact body from the Host after the
+Host's response headers arrive. It does not bound the client's download from
+rpc-proxy. The largest body it has to move is
+`RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB` (50 MiB by default), because rpc-proxy
+refuses a larger response. The Host's own 50 MiB limit applies to the file
+before the Host redacts secrets, and redaction can make the response longer. The
+slowest transfer that still completes is that cap divided by the timer: with the
+default 50 MiB, about 0.83 MiB/s with the old 60 s and 0.5 MiB/s with the new
+100 s.
+When the Host has to be woken first, the transfer is also bounded by the
+remaining request hold, which is at most 48 s (`MAX_REQUEST_HOLD_MS`).
+
+rpc-proxy sends nothing to the client until it has the whole body, so the edge
+waits for three phases in a row: the Host lookup against control-api and the
+Host's response headers, each bounded by `RPC_PROXY_UPSTREAM_TIMEOUT_MS` (8 s by
+default), and then this body timer. Behind Cloudflare, the origin read timeout
+(125 s by default) ends the request with an HTTP 524 when the three take longer,
+while rpc-proxy keeps reading. With the defaults the worst case is
+8 + 8 + 100 = 116 s. Keep twice `RPC_PROXY_UPSTREAM_TIMEOUT_MS` plus
+`RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` below your edge's timeout. If your
+`rpc-proxy-config` started as a copy of the minikube ConfigMap, as
+[the production guide](production.md) suggests, it sets `60000` and `300000`, a
+worst case of 420 s: lower both before you serve it behind an edge. A copy taken
+before v0.11.0 sets `RPC_PROXY_UPSTREAM_TIMEOUT_MS` to `60000` and
+`RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB` to `250` but not the download timer, so it
+now waits up to 60 + 60 + 100 = 220 s (180 s before this release), above
+Cloudflare's 125 s default: lower `RPC_PROXY_UPSTREAM_TIMEOUT_MS` so that the
+sum stays below your edge's timeout (the 8 s default gives 116 s). A body at its
+250 MiB cap also needs 2.5 MiB/s to finish within the 100 s timer. Confirming
+the timeout of the operated zones is tracked in #1309.
+
+The six stream caps below keep their defaults, but an invalid value is now a
+startup error. rpc-proxy reads the value as a number, as it already does for its
+timeouts, and stops with an error naming the variable unless that number is a
+whole number of at least 1: `abc`, `0`, `-1`, `1.5`, `Infinity` and a value that
+is only whitespace all stop it. A numeric form that evaluates to a whole number,
+such as `1e3` or `0x10`, is accepted as that number, and there is no upper
+limit. Each cap counts the open streams of one rpc-proxy pod, and
+a new stream gets HTTP 429 once its count reaches the cap. Before this release
+`abc` parsed as `NaN` and `Infinity` stayed unbounded, which turned the cap off
+in both cases, while `0` rejected every stream and a whitespace-only value parsed
+as `0` with the same effect.
+
+| Variable                                      | Limits                                  | Default |
+| --------------------------------------------- | --------------------------------------- | ------- |
+| `RPC_PROXY_STREAM_MAX_CONCURRENT`             | Host status streams, all users          | `1000`  |
+| `RPC_PROXY_STREAM_MAX_PER_USER`               | Host status streams per user            | `3`     |
+| `RPC_PROXY_STREAM_MAX_PER_USER_HOST`          | Host status streams per user and Host   | `1`     |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT`    | Host activity streams, all users        | `1000`  |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER`      | Host activity streams per user          | `3`     |
+| `RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST` | Host activity streams per user and Host | `1`     |
+
+To keep the old artifact download timeout, set
+`RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS` in `rpc-proxy-config` before you roll
+out the new image, and check every stream cap set in `rpc-proxy-config` or
+`rpc-proxy-secrets` against the rule above. For the Secret, list its key names
+only, for example
+`kubectl -n rpc-proxy get secret rpc-proxy-secrets -o go-template='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}'`;
+do not print its values. rpc-proxy reads these values at startup, so the new
+default and the cap check apply when the new pods start.

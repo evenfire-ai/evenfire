@@ -8,8 +8,8 @@ import {
   rateLimitMiddleware,
 } from '../../../middleware/rateLimitMiddleware.js'
 import { rateLimitHitsTotal } from '../../../observability/metrics.js'
+import { externalSessionUserIdForRateLimit } from '../../../services/auth/externalSessionAuthentication.js'
 import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
-import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
 import {
   mcpHostVerifiedRateLimitPrincipal,
   verifyMcpHostAccessJwt,
@@ -442,14 +442,15 @@ function unverifiedTriggerIpCredential(req: Request): string {
 
 /** Stable per-account key. Raw tokens rotate and must not mint new buckets. */
 function verifiedUserSessionRateLimitSubject(token: string): string | null {
-  const userId = verifyExternalSessionToken(token)?.userId
+  const userId = externalSessionUserIdForRateLimit(token)
   return userId ? `user:${userId}` : null
 }
 
 /**
- * External trigger lane: prefer the verified Profile userId when
- * external-rest-api forwards both a service bearer and x-user-session-token.
- * An unverified session header falls back to IP so rotation cannot evade the cap.
+ * External trigger lane: derive the budget key from the presented credential.
+ * This limiter runs before the session middleware, so a V1/V2 session token is
+ * signature-verified here; a raw unverified session header falls back to IP so
+ * rotation cannot evade the cap.
  */
 export function workflowTriggerRateLimitCredential(req: Request): string | null {
   const userSessionToken = String(req.header('x-user-session-token') || '').trim()
