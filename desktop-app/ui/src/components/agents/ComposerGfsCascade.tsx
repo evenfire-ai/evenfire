@@ -530,7 +530,7 @@ function GfsCascadeRow(props: Props & { entry: GfsBrowserChild; depth: number })
     validatedChildSnapshotRef.current?.key === childQueryIdentity
       ? validatedChildSnapshotRef.current
       : undefined
-  const flyoutPosition = useFlyoutPosition({
+  const nestedFlyoutPosition = useFlyoutPosition({
     anchorRef: rowRef,
     flyoutRef: panelRef,
     boundsAnchorRef: rootAnchorRef,
@@ -678,9 +678,9 @@ function GfsCascadeRow(props: Props & { entry: GfsBrowserChild; depth: number })
           className="composer-reference-submenu composer-reference-submenu--evendrive composer-reference-submenu--nested"
           role="menu"
           style={{
-            left: flyoutPosition?.left ?? 0,
-            top: flyoutPosition?.top ?? 0,
-            visibility: flyoutPosition ? undefined : 'hidden',
+            left: nestedFlyoutPosition?.left ?? 0,
+            top: nestedFlyoutPosition?.top ?? 0,
+            visibility: nestedFlyoutPosition ? undefined : 'hidden',
           }}
         >
           <GfsChildPanel
@@ -689,7 +689,7 @@ function GfsCascadeRow(props: Props & { entry: GfsBrowserChild; depth: number })
             depth={depth + 1}
             reusableSnapshot={reusableSnapshot}
             onValidatedSnapshot={rememberValidatedSnapshot}
-            parentPosition={flyoutPosition}
+            parentPosition={nestedFlyoutPosition}
             focusFirstChild={focusChildOnOpenRef.current}
             onFocusChild={finishFocusChild}
           />
