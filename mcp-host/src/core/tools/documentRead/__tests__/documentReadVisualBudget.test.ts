@@ -828,4 +828,51 @@ describe('document visual reads and the request image bounds', () => {
       maxVisualRequestBytes: ANTHROPIC.maxVisualRequestBytes,
     }).toEqual(ANTHROPIC)
   }, 30_000)
+  it('R1-H2: following the cursor of a long scan never takes the whole request over the ANTHROPIC bound', async () => {
+    // zach88's round-2 repro: a scan read page group by page group on the
+    // Claude profile grew the request base64 to 44.7 MB over the 32 MB bound.
+    // Every page the child returns here sits at the byte cap admission gave it,
+    // so each step is the largest request the admission permits, and each is
+    // pushed through the real asserter together with all earlier results and
+    // 3 MB of text already in the conversation.
+    const file = admittedFile('chain', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const text: ChatMessage = {
+      role: 'user',
+      content: 'x'.repeat(3_000_000),
+    }
+    const { runJob, jobs } = cappedVisualRunner()
+    const reader = documentTool(file, runJob)
+    const results: ToolResult[] = []
+    const delivered: Attachment[] = []
+    let cursor: string | undefined
+    let paused = false
+    for (let call = 1; call <= 30 && !paused; call += 1) {
+      const output = await reader.execute(
+        { attachmentId: file.id, mode: 'visual', ...(cursor ? { cursor } : {}) },
+        context(ANTHROPIC, requestImageUsage([text], results))
+      )
+      const body = JSON.parse(output.content)
+      if (body.status === 'read_budget_exhausted') {
+        paused = true
+        expect(body.message).toBe(IMAGE_MESSAGE)
+        break
+      }
+      expect(body.status).toBe('ok')
+      cursor = body.continuation?.cursor ?? cursor
+      delivered.push(...output.attachments!)
+      results.push(toolResult(`call-${call}`, output, output.attachments))
+      const request = finalVisualRequest([text], delivered)
+      expect(requestBytes(request)).toBeLessThanOrEqual(ANTHROPIC.maxVisualRequestBytes)
+      expect(() =>
+        assertVisualRequestFits(request, { messages: request }, true, ANTHROPIC)
+      ).not.toThrow()
+    }
+    // Witnesses: the chain delivered several calls and ended on the pause, not
+    // on the provider bound.
+    expect(paused).toBe(true)
+    expect(jobs.length).toBeGreaterThanOrEqual(2)
+    expect(delivered.length).toBeGreaterThanOrEqual(8)
+    const bytes = delivered.reduce((sum, image) => sum + Buffer.byteLength(image.dataBase64!), 0)
+    expect(bytes).toBeGreaterThan(20_000_000)
+  }, 60_000)
 })

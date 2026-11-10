@@ -623,6 +623,8 @@ export class DocumentReadTool implements Tool {
     }
     // The model's image bounds apply to the whole request, so this call gets
     // only what the images already in it leave.
+    // Each limit source, who wins and what happens on exhaustion: see
+    // VISUAL_BUDGET.md next to this file.
     const usage = context?.requestImages
     if (!usage) throw new Error('Document visual read requires the request image usage')
     // Above the threshold count every image must be small. Pages are rendered
