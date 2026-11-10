@@ -50,9 +50,9 @@ async function setup(options: { pauseTeamBGetMe?: boolean; pauseRestoreGetMe?: b
     started: ReturnType<typeof deferred<void>>
   }> = []
   const app = service as unknown as App
-  const teamOf = (token: string) => (token === 'session-team-b' ? 'team-b' : 'team-a')
+  const teamOf = (token: string) => (token === 'synthetic-session-team-b' ? 'team-b' : 'team-a')
   const heldInTeamB = (token: string) => {
-    if (token !== 'session-team-b') return Promise.resolve({ items: [] })
+    if (token !== 'synthetic-session-team-b') return Promise.resolve({ items: [] })
     hopStarted.resolve()
     return hopOperation.promise
   }
@@ -60,14 +60,14 @@ async function setup(options: { pauseTeamBGetMe?: boolean; pauseRestoreGetMe?: b
     googleLogin: vi.fn().mockResolvedValue(testLoginResult('synthetic-session-a', meA)),
     switchTeam: vi.fn(async (_token: string, teamId: string) => {
       switchCalls.push(teamId)
-      return testTeamSwitchResult(teamId)
+      return testTeamSwitchResult(teamId, `synthetic-session-${teamId}`)
     }),
     getMe: vi.fn(async (token: string) => {
-      if (options.pauseTeamBGetMe && token === 'session-team-b') {
+      if (options.pauseTeamBGetMe && token === 'synthetic-session-team-b') {
         teamBGetMeStarted.resolve()
         await teamBGetMe.promise
       }
-      if (options.pauseRestoreGetMe && token === 'session-team-a') {
+      if (options.pauseRestoreGetMe && token === 'synthetic-session-team-a') {
         restoreGetMeStarted.resolve()
         await restoreGetMe.promise
       }
@@ -152,7 +152,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
       await hopStarted.promise
       expect({ me: app.me?.teamId, token: app.sessionToken }).toEqual({
         me: 'team-b',
-        token: 'session-team-b',
+        token: 'synthetic-session-team-b',
       })
       const generation = app.sessionGeneration
       const pending = app[entry]()
@@ -161,7 +161,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
       hopOperation.resolve({ items: [] })
       await hop
       const catalog = await pending
-      expect(teamAgentsTokens).toEqual(['session-team-a'])
+      expect(teamAgentsTokens).toEqual(['synthetic-session-team-a'])
       expect(catalog.teamId).toBe('team-a')
       expect(catalog.agentNames).toEqual(['direct-agent', 'team-a-agent'])
       expect(app.accessCatalog?.teamId).toBe('team-a')
@@ -177,7 +177,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     await teamBGetMeStarted.promise
     expect({ me: app.me?.teamId, token: app.sessionToken }).toEqual({
       me: 'team-a',
-      token: 'session-team-b',
+      token: 'synthetic-session-team-b',
     })
     const pending = app.refreshAccessCatalog()
     await yieldToPendingWork()
@@ -186,7 +186,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     hopOperation.resolve({ items: [] })
     await approvals
     const catalog = await pending
-    expect(teamAgentsTokens).toEqual(['session-team-a'])
+    expect(teamAgentsTokens).toEqual(['synthetic-session-team-a'])
     expect(catalog.teamId).toBe('team-a')
     expect(catalog.agentNames).toEqual(['direct-agent', 'team-a-agent'])
   })
@@ -200,7 +200,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     await restoreGetMeStarted.promise
     expect({ me: app.me?.teamId, token: app.sessionToken }).toEqual({
       me: 'team-b',
-      token: 'session-team-a',
+      token: 'synthetic-session-team-a',
     })
     const pending = app.refreshAccessCatalog()
     await yieldToPendingWork()
@@ -208,7 +208,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     restoreGetMe.resolve()
     await approvals
     const catalog = await pending
-    expect(teamAgentsTokens).toEqual(['session-team-a'])
+    expect(teamAgentsTokens).toEqual(['synthetic-session-team-a'])
     expect(catalog.teamId).toBe('team-a')
     expect(catalog.agentNames).toEqual(['direct-agent', 'team-a-agent'])
   })
@@ -221,7 +221,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     await teamBGetMeStarted.promise
     expect({ me: app.me?.teamId, token: app.sessionToken }).toEqual({
       me: 'team-a',
-      token: 'session-team-b',
+      token: 'synthetic-session-team-b',
     })
     const pending = app.refreshAccessCatalog()
     await yieldToPendingWork()
@@ -230,7 +230,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     await switching
     const catalog = await pending
     expect(app.me?.teamId).toBe('team-b')
-    expect(teamAgentsTokens).toEqual(['session-team-b'])
+    expect(teamAgentsTokens).toEqual(['synthetic-session-team-b'])
     expect(catalog.teamId).toBe('team-b')
     expect(catalog.agentNames).toEqual(['direct-agent', 'team-b-agent'])
   })
@@ -247,14 +247,14 @@ describe('access catalog: a build in flight delays nothing else', () => {
     expect(await settlesWithin(hopStarted.promise)).toBe(true)
     expect({ me: app.me?.teamId, token: app.sessionToken }).toEqual({
       me: 'team-b',
-      token: 'session-team-b',
+      token: 'synthetic-session-team-b',
     })
     hopOperation.resolve({ items: [] })
     await approvals
     // The hop closed with a new home token; the build still holds the earlier one.
     expect({ me: app.me?.teamId, token: app.sessionToken }).toEqual({
       me: 'team-a',
-      token: 'session-team-a',
+      token: 'synthetic-session-team-a',
     })
     gate.resolve()
     const catalog = await pending
@@ -342,7 +342,7 @@ describe('access catalog: the session is replaced during a build', () => {
     gate.resolve()
     const catalog = await pending
     // One build with the old session, then exactly one rebuild with the new one.
-    expect(teamAgentsTokens).toEqual(['synthetic-session-a', 'session-team-b'])
+    expect(teamAgentsTokens).toEqual(['synthetic-session-a', 'synthetic-session-team-b'])
     expect(catalog.teamId).toBe('team-b')
     expect(catalog.agentNames).toEqual(['direct-agent', 'team-b-agent'])
     expect(app.accessCatalog?.teamId).toBe('team-b')
@@ -395,7 +395,7 @@ describe('access catalog: the session is replaced during a build', () => {
     expect(await settlesWithin(app.switchTeam('team-a'))).toBe(true)
     second.gate.resolve()
     expect(await pending).toEqual({ rejected: expect.stringContaining('stale_auth_epoch') })
-    expect(teamAgentsTokens).toEqual(['synthetic-session-a', 'session-team-b'])
+    expect(teamAgentsTokens).toEqual(['synthetic-session-a', 'synthetic-session-team-b'])
     expect(app.accessCatalog).toBeNull()
   })
 
