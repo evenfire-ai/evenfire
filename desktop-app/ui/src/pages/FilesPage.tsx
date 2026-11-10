@@ -73,6 +73,7 @@ import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import { copyGfsResourceId } from '@lib/gfsResourceClipboard'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
@@ -1621,19 +1622,6 @@ export function FilesPage({
     }
   }
 
-  const handleCopyRoute = async (uri: string, kind: GfsDriveResource['kind']) => {
-    const resourceType = kind === 'directory' ? 'folder' : 'file'
-    const resourceTypeTitle = kind === 'directory' ? 'Folder' : 'File'
-    try {
-      await navigator.clipboard.writeText(uri)
-      pushToast?.(`${resourceTypeTitle} ID copied`, 'success')
-    } catch (clipboardError) {
-      const message =
-        clipboardError instanceof Error ? clipboardError.message : 'clipboard is unavailable'
-      pushToast?.(`Could not copy the ${resourceType} ID: ${message}`, 'error')
-    }
-  }
-
   const handleRefreshCurrent = async () => {
     if (!current || refreshingCurrent) return
     beginExplicitFilesNavigation()
@@ -3100,7 +3088,10 @@ export function FilesPage({
         handlers: {
           refresh: () => void handleRefreshCurrent(),
           'copy-link': () => void handleCopyLink(current.gfsUri),
-          'copy-route': () => void handleCopyRoute(current.gfsUri, current.kind),
+          'copy-route': () =>
+            void copyGfsResourceId(current.gfsUri, current.kind, (message, tone) =>
+              pushToast?.(message, tone)
+            ),
           'open-route': () => setOpenLinkOpen(true),
           rename: () => openRenameTarget(current),
           move: () => openMoveTarget(current),
@@ -3181,7 +3172,10 @@ export function FilesPage({
         uri: resource.gfsUri,
         handlers: {
           'copy-link': () => void handleCopyLink(resource.gfsUri),
-          'copy-route': () => void handleCopyRoute(resource.gfsUri, resource.kind),
+          'copy-route': () =>
+            void copyGfsResourceId(resource.gfsUri, resource.kind, (message, tone) =>
+              pushToast?.(message, tone)
+            ),
           'open-route': () => setOpenLinkOpen(true),
           'open-folder': isDirectory ? () => openResource(resource) : undefined,
           'new-folder': canWrite

@@ -31,7 +31,8 @@ export type SidebarNavProps = {
   onGfsResourceAction?: (
     resource: GfsBrowserChild,
     actionId: GfsResourceActionId,
-    file?: File
+    file?: File,
+    renderedSessionGeneration?: number | null
   ) => void
   /** Transient feedback for the file explorer's download fallback. */
   pushToast: (message: string, tone: Tone) => void

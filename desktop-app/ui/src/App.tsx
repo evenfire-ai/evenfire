@@ -10,6 +10,7 @@ import {
   NotificationsContext,
   WorkspaceActionsProvider,
 } from '@contexts/index'
+import { type Query, useQueries } from '@tanstack/react-query'
 import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
@@ -57,6 +58,7 @@ import { createEmbedOwnershipMachine } from '@lib/embedOwnershipMachine'
 import type { EmbedRefreshErrorEvent } from '@lib/embedOwnershipMachine.types'
 import { embedFailureMessage, embedViewState } from '@lib/embedOwnershipView'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
+import { GFS_AUTHORITY_STALE_TIME_MS } from '@lib/gfsAuthorityQueryPolicy'
 import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import {
   authoritativeGfsStatus,
@@ -64,10 +66,12 @@ import {
   markPluginGfsPreviewUnavailable,
   shouldRevalidateGfsQuery,
 } from '@lib/gfsEntityChangeState'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
 import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
+import { copyGfsResourceId, sameGfsResourceBinding } from '@lib/gfsResourceClipboard'
 import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
@@ -159,6 +163,15 @@ type PendingSandboxUiDeepLinkLaunch = {
   navigationIntentSequence?: number
   restoreWorkspace?: boolean
   originEmbedClosed?: boolean
+}
+
+type PendingSidebarCopy = {
+  id: number
+  resource: GfsBrowserChild
+  sessionScope: string
+  sessionGeneration: number
+  ownerTabId: string
+  intentSequence: number
 }
 
 type EmbedHandoffWaiter = {
@@ -388,6 +401,9 @@ export function App() {
   const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
   const [pendingGfsResourceAction, setPendingGfsResourceAction] =
     React.useState<GfsResourceActionRequest | null>(null)
+  const [pendingSidebarCopies, setPendingSidebarCopies] = React.useState<PendingSidebarCopy[]>([])
+  const processedSidebarCopiesRef = React.useRef(new Set<number>())
+  const refreshingSidebarCopiesRef = React.useRef(new Set<number>())
   const pendingGfsResourceActionRef = React.useRef(pendingGfsResourceAction)
   pendingGfsResourceActionRef.current = pendingGfsResourceAction
   const gfsResourceActionRequestIdRef = React.useRef(0)
@@ -402,6 +418,10 @@ export function App() {
   // The universal tab store lives in the controller (single writer; `vm.navItem`
   // is its projection). App composes the strip/reveal/reconcile over it.
   const workspaceTabs = vm.workspaceTabs
+  const currentGfsSessionScope =
+    vm.isAuthenticated && vm.me
+      ? `${vm.runtimeConfigState?.envKey ?? ''}:${vm.me.id}:${vm.me.teamId ?? ''}`
+      : null
   const visibleWorkspaceTabs = React.useMemo(
     () =>
       workspaceTabs.tabs.map(tab =>
@@ -414,6 +434,24 @@ export function App() {
   const setWorkspaceTabs = vm.setWorkspaceTabs
   const navigationIntentSequenceRef = React.useRef(vm.navigationIntentSequence)
   navigationIntentSequenceRef.current = vm.navigationIntentSequence
+  const pendingSidebarCopyQueries = useQueries({
+    queries: pendingSidebarCopies.map(copy => ({
+      queryKey: desktopQueryKeys.gfsAffordances(
+        copy.sessionScope,
+        copy.resource.resourceId,
+        copy.resource.drive,
+        copy.sessionGeneration
+      ),
+      queryFn: () => window.clerum.gfs.affordances(copy.resource.resourceId, copy.resource.drive),
+      enabled: vm.isSessionGenerationCurrent(copy.sessionGeneration),
+      staleTime: GFS_AUTHORITY_STALE_TIME_MS,
+      refetchOnMount: (query: Query) =>
+        query.state.status !== 'error' &&
+        (query.state.dataUpdatedAt === 0 ||
+          Date.now() - query.state.dataUpdatedAt >= GFS_AUTHORITY_STALE_TIME_MS),
+      refetchOnWindowFocus: false,
+    })),
+  })
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
@@ -1018,7 +1056,12 @@ export function App() {
   )
 
   const handleSidebarGfsResourceAction = React.useCallback(
-    (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => {
+    (
+      resource: GfsBrowserChild,
+      actionId: GfsResourceActionId,
+      file?: File,
+      renderedSessionGeneration?: number | null
+    ) => {
       if (actionId === 'preview') {
         const preview = resolveGfsPreview(resource)
         if (preview) {
@@ -1047,6 +1090,34 @@ export function App() {
         actionId,
         targetResource,
         ...(file ? { file } : {}),
+      }
+
+      if (actionId === 'copy-route') {
+        const sessionGeneration = renderedSessionGeneration ?? null
+        const ownerTabId = workspaceTabs.activeTabId
+        const sessionScope = currentGfsSessionScope
+        if (
+          !sessionScope ||
+          !vm.isAuthenticated ||
+          sessionGeneration === null ||
+          !ownerTabId ||
+          !vm.isSessionGenerationCurrent(sessionGeneration) ||
+          !vm.isNavigationIntentCurrent(vm.navigationIntentSequence)
+        ) {
+          return
+        }
+        setPendingSidebarCopies(current => [
+          ...current,
+          {
+            id: request.id,
+            resource,
+            sessionScope,
+            sessionGeneration,
+            ownerTabId,
+            intentSequence: vm.navigationIntentSequence,
+          },
+        ])
+        return
       }
 
       if (actionId === 'copy-content') {
@@ -1082,8 +1153,131 @@ export function App() {
       vm.openFilesSection,
       vm.openPreviewSection,
       vm.pushToast,
+      vm.isAuthenticated,
+      vm.isNavigationIntentCurrent,
+      vm.isSessionGenerationCurrent,
+      vm.navigationIntentSequence,
+      currentGfsSessionScope,
+      workspaceTabs.activeTabId,
     ]
   )
+
+  React.useEffect(() => {
+    if (pendingSidebarCopies.length === 0) return
+    const completedIds = new Set<number>()
+    for (let index = 0; index < pendingSidebarCopies.length; index += 1) {
+      const copy = pendingSidebarCopies[index]
+      const permission = pendingSidebarCopyQueries[index]
+      if (!copy || !permission || processedSidebarCopiesRef.current.has(copy.id)) continue
+
+      const sessionCurrent =
+        vm.isAuthenticated &&
+        currentGfsSessionScope === copy.sessionScope &&
+        vm.isSessionGenerationCurrent(copy.sessionGeneration)
+      if (!sessionCurrent) {
+        processedSidebarCopiesRef.current.add(copy.id)
+        completedIds.add(copy.id)
+        continue
+      }
+
+      if (
+        !vm.isNavigationIntentCurrent(copy.intentSequence) ||
+        workspaceTabs.activeTabId !== copy.ownerTabId
+      ) {
+        processedSidebarCopiesRef.current.add(copy.id)
+        completedIds.add(copy.id)
+        continue
+      }
+
+      const parentQueryKey =
+        copy.resource.parentResourceId === null
+          ? desktopQueryKeys.gfsAccessible(
+              copy.sessionScope,
+              copy.resource.drive,
+              copy.sessionGeneration
+            )
+          : desktopQueryKeys.gfsChildren(
+              copy.sessionScope,
+              copy.resource.parentResourceId,
+              copy.resource.drive,
+              copy.sessionGeneration
+            )
+      const parentPageData = queryClient.getQueryData<{
+        pages?: Array<{ items?: GfsBrowserChild[] }>
+      }>(parentQueryKey)
+      const currentRow = parentPageData?.pages
+        ?.flatMap(page => page.items ?? [])
+        .find(candidate => candidate.resourceId === copy.resource.resourceId)
+      if (!sameGfsResourceBinding(currentRow, copy.resource)) {
+        processedSidebarCopiesRef.current.add(copy.id)
+        completedIds.add(copy.id)
+        vm.pushToast('This resource is no longer available from its parent folder.', 'error')
+        continue
+      }
+
+      if (permission.isError) {
+        processedSidebarCopiesRef.current.add(copy.id)
+        completedIds.add(copy.id)
+        const message = describeGfsReadError(permission.error).message
+        vm.pushToast(`Could not verify permissions for ${copy.resource.name}: ${message}`, 'error')
+        continue
+      }
+
+      if (permission.isFetching || !permission.data) continue
+      if (permission.isStale) {
+        if (!refreshingSidebarCopiesRef.current.has(copy.id)) {
+          refreshingSidebarCopiesRef.current.add(copy.id)
+          void permission.refetch().finally(() => {
+            refreshingSidebarCopiesRef.current.delete(copy.id)
+          })
+        }
+        continue
+      }
+
+      // Recheck all live bindings in the same synchronous stack as the one
+      // clipboard invocation. Nothing awaited between these guards and the
+      // shared Files/Preview clipboard effect owner.
+      if (
+        !vm.isAuthenticated ||
+        currentGfsSessionScope !== copy.sessionScope ||
+        !vm.isSessionGenerationCurrent(copy.sessionGeneration) ||
+        !vm.isNavigationIntentCurrent(copy.intentSequence) ||
+        workspaceTabs.activeTabId !== copy.ownerTabId
+      ) {
+        processedSidebarCopiesRef.current.add(copy.id)
+        completedIds.add(copy.id)
+        continue
+      }
+
+      processedSidebarCopiesRef.current.add(copy.id)
+      completedIds.add(copy.id)
+      void copyGfsResourceId(copy.resource.gfsUri, copy.resource.kind, (message, tone) =>
+        vm.pushToast(message, tone)
+      ).finally(() => {
+        processedSidebarCopiesRef.current.delete(copy.id)
+      })
+    }
+    if (completedIds.size > 0) {
+      setPendingSidebarCopies(current => current.filter(copy => !completedIds.has(copy.id)))
+    }
+  }, [
+    currentGfsSessionScope,
+    pendingSidebarCopies,
+    pendingSidebarCopyQueries,
+    queryClient,
+    vm.isAuthenticated,
+    vm.isNavigationIntentCurrent,
+    vm.isSessionGenerationCurrent,
+    vm.pushToast,
+    workspaceTabs.activeTabId,
+  ])
+
+  React.useEffect(() => {
+    const pendingIds = new Set(pendingSidebarCopies.map(copy => copy.id))
+    for (const id of processedSidebarCopiesRef.current) {
+      if (!pendingIds.has(id)) processedSidebarCopiesRef.current.delete(id)
+    }
+  }, [pendingSidebarCopies])
 
   const handleSidebarPreviewSection = React.useCallback(
     (preview: GfsPreviewResource) => {

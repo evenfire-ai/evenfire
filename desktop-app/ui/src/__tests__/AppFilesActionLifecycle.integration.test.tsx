@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClientProvider } from '@tanstack/react-query'
 import {
   act,
@@ -14,7 +15,9 @@ import {
 } from '@testing-library/react'
 import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
 import { DESKTOP_ROUTES } from '@constants/navigation'
+import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { installMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useNotificationsController } from '@hooks/domain/useNotificationsController'
 import { useAppController } from '@hooks/useAppController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
@@ -23,6 +26,7 @@ import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
   newChatTab,
+  openAppTab,
   openChatTab,
   openFilesTab,
   openPreviewTab,
@@ -34,6 +38,7 @@ import { App } from '@/App'
 import {
   accessibleResource,
   childView,
+  downloadResult,
   listAccessiblePage,
   listChildrenPage,
   previewDownloadResult,
@@ -218,6 +223,9 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
   const isNavigationIntentCurrent = vi.fn(
     (sequence: number) => sequence === navigationIntentSequence
   )
+  const isSessionGenerationCurrent = vi.fn(
+    (generation: number | null) => generation === controller.sessionGeneration
+  )
   const selectWorkspaceTabById = vi.fn((id: string) => {
     if (!controller.workspaceTabs.tabs.some(tab => tab.id === id)) return false
     beginUserNavigationIntent()
@@ -286,6 +294,7 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
     navigationIntentSequence,
     beginUserNavigationIntent,
     isNavigationIntentCurrent,
+    isSessionGenerationCurrent,
     selectWorkspaceTabById,
     activateWorkspaceChatTab: noop,
     activeChatId: null,
@@ -387,14 +396,20 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
   return controller
 }
 
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
+type Deferred<T> = {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (reason?: unknown) => void
+}
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>(done => {
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((done, fail) => {
     resolve = done
+    reject = fail
   })
-  return { promise, resolve }
+  return { promise, resolve, reject }
 }
 
 type HarnessResource = Awaited<ReturnType<typeof resolvedFile>>
@@ -524,6 +539,116 @@ function renderApp() {
       <App />
     </QueryClientProvider>
   )
+}
+
+async function renderActualA01App(
+  resources: Array<Awaited<ReturnType<typeof resolveResource>>>,
+  writeText: (text: string) => Promise<void>,
+  options: { readable?: boolean } = {}
+) {
+  const byUri = new Map(resources.map(resource => [resource.gfsUri, resource]))
+  const accessPage = await listAccessiblePage(
+    resources.map(resource =>
+      Object.assign(
+        accessibleResource(
+          resource.resourceId,
+          resource.name,
+          resource.kind as 'file' | 'directory',
+          {
+            gfsUri: resource.gfsUri,
+            parentResourceId: resource.parentResourceId,
+            version: resource.version,
+          }
+        ),
+        { readable: options.readable ?? true }
+      )
+    )
+  )
+  const sessionAuthority = {
+    authenticated: true,
+    generation: 1,
+    me: {
+      id: 'a01-user',
+      email: 'a01@example.test',
+      name: 'A01 User',
+      teamId: 'team-a',
+      teamName: 'Team A',
+    },
+  }
+  const { clerum } = installAppControllerClerum({
+    me: { teamId: 'team-a', teamName: 'Team A' },
+    teamDirectory: { items: [], currentTeamId: 'team-a' },
+    desktopEnvironmentHandoffProducer: {
+      getSessionState: async () => ({
+        authenticated: sessionAuthority.authenticated,
+        me: sessionAuthority.authenticated ? sessionAuthority.me : null,
+        sessionGeneration: sessionAuthority.generation,
+      }),
+      getSessionGeneration: () => sessionAuthority.generation,
+      getRuntimeConfigState: () => ({
+        configured: true,
+        isLocalhost: false,
+        selectorVisible: true,
+        activeOptionId: null,
+        currentConfig: undefined,
+        envKey: 'a01-environment',
+        storagePath: '/a01/runtime-configs',
+        options: [],
+      }),
+      selectRuntimeConfigForHandoff: async () => {
+        throw new Error('unused A01 probe boundary')
+      },
+      logout: async () => {
+        sessionAuthority.authenticated = false
+        sessionAuthority.generation += 1
+        return sessionAuthority.generation
+      },
+    },
+  })
+  const gfs = {
+    listAccessible: vi.fn(async () => accessPage),
+    listChildren: vi.fn(async () => await listChildrenPage([])),
+    affordances: vi.fn(async () => await resourceAffordances(['read', 'write'])),
+    download: vi.fn(async () => await downloadResult(resources[0]!)),
+    resolve: vi.fn(async (uri: string) => {
+      const resource = byUri.get(uri)
+      if (!resource) throw new Error(`unexpected GFS resolve: ${uri}`)
+      return resource
+    }),
+  }
+  Object.assign(clerum, {
+    gfs,
+    app: { rendererReady: vi.fn(async () => undefined) },
+    shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+    sandboxUi: {
+      onReleased: vi.fn(() => vi.fn()),
+      onSessionInvalidated: vi.fn(() => vi.fn()),
+      onDeepLink: vi.fn(() => vi.fn()),
+      listApps: vi.fn(async () => ({ apps: [] })),
+      listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
+      clearPendingDeepLinks: vi.fn(async () => 0),
+      acknowledgeDeepLink: vi.fn(async () => undefined),
+      setVisible: vi.fn(async () => undefined),
+      focusActive: vi.fn(async () => undefined),
+    },
+  })
+  const actual =
+    await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+  const realController: { current: AppController | null } = { current: null }
+  vi.mocked(useAppController).mockImplementation(() => {
+    realController.current = actual.useAppController()
+    return realController.current
+  })
+  render(
+    <QueryClientProvider client={desktopQueryClient}>
+      <AgentTaskTrackerProvider>
+        <App />
+      </AgentTaskTrackerProvider>
+    </QueryClientProvider>
+  )
+  await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+  await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+  return { controller: realController, gfs, clerum, writeText, sessionAuthority }
 }
 
 async function produceLatestSidebarSession() {
@@ -773,6 +898,798 @@ afterEach(() => {
 })
 
 describe('App → Files action lifecycle integration', () => {
+  it('A01 model: Copy ID preserves Chat with the real controller', async () => {
+    const file = await resolveResource(
+      resolvedFile('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'a01-real-controller.txt')
+    )
+    const writeCalls: string[] = []
+    let scheduler!: Scheduler
+    const writeText = vi.fn(async (text: string) => {
+      writeCalls.push(text)
+      return scheduler
+        .schedule(Promise.resolve(text), 'clipboard write settlement')
+        .then(() => undefined)
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller: realController, gfs } = await renderActualA01App([file], writeText)
+    act(() => realController.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('chat')
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-real-controller\.txt/ })
+    type Model = {
+      invoked: boolean
+      expectedClipboard: string | null
+      expectedActiveKind: 'chat'
+    }
+    type Real = {
+      scheduler: Scheduler
+      invokeClickedCopy: () => Promise<void>
+    }
+    class InvokeCapturedCopy implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return !model.invoked
+      }
+
+      async run(model: Model, real: Real) {
+        await real.invokeClickedCopy()
+        model.invoked = true
+        model.expectedClipboard = file.gfsUri
+      }
+
+      toString() {
+        return 'invoke Copy ID for the captured resource'
+      }
+    }
+    const command = new InvokeCapturedCopy()
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands([fc.constant(command)], { maxCommands: 1, size: '+1' }),
+        async (activeScheduler, commands) => {
+          scheduler = activeScheduler
+          const model: Model = {
+            invoked: false,
+            expectedClipboard: null,
+            expectedActiveKind: 'chat',
+          }
+          const real: Real = {
+            scheduler: activeScheduler,
+            invokeClickedCopy: async () => {
+              await chooseRowAction(file.name, 'Copy file ID')
+              await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+              await activeScheduler.waitAll()
+            },
+          }
+          const generatedCommands = [...commands]
+          if (generatedCommands.length === 0) generatedCommands.push(command)
+          await fc.asyncModelRun(() => ({ model, real }), generatedCommands)
+
+          // Independent A4 oracle: the click target and owner contract define
+          // the expected bytes and active surface, not App's dispatch code.
+          expect(model.invoked).toBe(true)
+          expect(model.expectedClipboard).toBe(file.gfsUri)
+          expect(writeCalls).toEqual([file.gfsUri])
+          expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe(
+            model.expectedActiveKind
+          )
+          expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+          expect(gfs.download).not.toHaveBeenCalled()
+        }
+      ),
+      { numRuns: 1, seed: 281110 }
+    )
+  })
+
+  it('A01 copies from the sidebar while an embedded app remains active', async () => {
+    const file = await resolveResource(
+      resolvedFile('17171717171717171717171717171717', 'a01-while-app-active.md')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    act(() => {
+      controller.current?.setWorkspaceTabs(state =>
+        openAppTab(state, { id: 'a01-app-tab', appRef: 'a01-test-app', title: 'A01 test app' })
+      )
+    })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+        kind: 'app',
+        id: 'a01-app-tab',
+      })
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-while-app-active\.md/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+      kind: 'app',
+      id: 'a01-app-tab',
+    })
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it('A01 copies from the sidebar while Preview remains active', async () => {
+    const file = await resolveResource(
+      resolvedFile('20202020202020202020202020202020', 'a01-while-preview-active.md')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    act(() => {
+      controller.current?.setWorkspaceTabs(state =>
+        openPreviewTab(state, {
+          id: 'a01-preview-tab',
+          title: file.name,
+          gfsUri: file.gfsUri,
+          fileKind: 'markdown',
+          mimeType: 'text/markdown',
+          byteLength: 24,
+          resourceVersion: file.version,
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+        kind: 'preview',
+        id: 'a01-preview-tab',
+      })
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-while-preview-active\.md/ })
+    const downloadsBeforeCopy = gfs.download.mock.calls.length
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+      kind: 'preview',
+      id: 'a01-preview-tab',
+    })
+    expect(gfs.download).toHaveBeenCalledTimes(downloadsBeforeCopy)
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it('A01 copies the exact clicked folder ID from the sidebar', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('21212121212121212121212121212121', 'a01-folder-target')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([folder], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-folder-target/ })
+
+    await chooseRowAction(folder.name, 'Copy folder ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(folder.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(controller.current?.toasts).toContainEqual(
+      expect.objectContaining({ text: 'Folder ID copied', tone: 'success' })
+    )
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it('A01 model: A stays the clipboard target after selecting B', async () => {
+    const resourceA = await resolveResource(
+      resolvedFile('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'a01-a.txt')
+    )
+    const resourceB = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'a01-b.txt')
+    )
+    let scheduler!: Scheduler
+    const writeCalls: string[] = []
+    const settledValues: string[] = []
+    const writeText = vi.fn(async (text: string) => {
+      writeCalls.push(text)
+      const settlement = scheduler.schedule(Promise.resolve(text), 'clipboard settlement')
+      void settlement.then(value => settledValues.push(value))
+      return settlement.then(() => undefined)
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([resourceA, resourceB], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-a\.txt/ })
+    await screen.findByRole('treeitem', { name: /a01-b\.txt/ })
+
+    type Model = {
+      copiedUri: string | null
+      selectedUri: string | null
+      invoked: boolean
+    }
+    type Real = {
+      scheduler: Scheduler
+      copyA: () => Promise<void>
+      selectB: () => Promise<void>
+    }
+    class CopyClickedA implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return model.copiedUri === null
+      }
+
+      async run(model: Model, real: Real) {
+        await real.copyA()
+        model.copiedUri = resourceA.gfsUri
+        model.invoked = true
+      }
+
+      toString() {
+        return 'click Copy ID on row A'
+      }
+    }
+    class SelectB implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return model.selectedUri === null
+      }
+
+      async run(model: Model, real: Real) {
+        await real.selectB()
+        model.selectedUri = resourceB.gfsUri
+      }
+
+      toString() {
+        return 'select row B'
+      }
+    }
+    const copyA = new CopyClickedA()
+    const selectB = new SelectB()
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands([fc.constantFrom(copyA, selectB)], { maxCommands: 2, size: '+1' }),
+        async (activeScheduler, generated) => {
+          scheduler = activeScheduler
+          const model: Model = { copiedUri: null, selectedUri: null, invoked: false }
+          const real: Real = {
+            scheduler: activeScheduler,
+            copyA: async () => {
+              await chooseRowAction(resourceA.name, 'Copy file ID')
+              await waitFor(() => expect(writeCalls).toHaveLength(1))
+            },
+            selectB: async () => {
+              fireEvent.click(await screen.findByRole('button', { name: resourceB.name }))
+              await waitFor(() =>
+                expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+                  kind: 'preview',
+                  preview: { gfsUri: resourceB.gfsUri },
+                })
+              )
+            },
+          }
+          const commands = [...generated]
+          if (!commands.some(command => command instanceof CopyClickedA)) commands.push(copyA)
+          if (!commands.some(command => command instanceof SelectB)) commands.push(selectB)
+          await fc.asyncModelRun(() => ({ model, real }), commands)
+          await activeScheduler.waitAll()
+
+          // Independent event model: selected-row state and click-bound target
+          // are distinct. The user event itself supplies the URI expectation.
+          expect(model.copiedUri).toBe(resourceA.gfsUri)
+          expect(model.selectedUri).toBe(resourceB.gfsUri)
+          expect(model.invoked).toBe(true)
+          expect(writeCalls).toEqual([resourceA.gfsUri])
+          expect(settledValues).toEqual([resourceA.gfsUri])
+          expect(gfs.download).not.toHaveBeenCalled()
+          expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+        }
+      ),
+      { numRuns: 1, seed: 281111 }
+    )
+  })
+
+  it.each([
+    {
+      outcome: 'fulfillment',
+      write: async (_text: string) => undefined,
+      toast: { text: 'File ID copied', tone: 'success' },
+    },
+    {
+      outcome: 'rejection',
+      write: async (_text: string) => {
+        throw new Error('clipboard unavailable')
+      },
+      toast: { text: 'Could not copy the file ID: clipboard unavailable', tone: 'error' },
+    },
+  ])('A01 preserves Files feedback on clipboard $outcome', async ({ write, toast }) => {
+    const file = await resolveResource(
+      resolvedFile('cccccccccccccccccccccccccccccccc', 'a01-feedback.txt')
+    )
+    const writeText = vi.fn(write)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-feedback\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(expect.objectContaining(toast))
+    )
+    expect(writeText).toHaveBeenCalledWith(file.gfsUri)
+  })
+
+  it('A01 cancels a queued copy before invocation after session revocation', async () => {
+    const file = await resolveResource(
+      resolvedFile('dddddddddddddddddddddddddddddddd', 'a01-before-logout.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs, sessionAuthority } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-before-logout\.txt/ })
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    gfs.affordances.mockImplementation(async () => {
+      return pendingPermission.promise
+    })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(file.resourceId, 'main'))
+    await act(async () => controller.current?.handleLogout())
+    expect(sessionAuthority).toMatchObject({ authenticated: false, generation: 2 })
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+    )
+  })
+
+  it('A01 leaves an invoked clipboard write to settle naturally after logout', async () => {
+    const file = await resolveResource(
+      resolvedFile('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'a01-after-logout.txt')
+    )
+    const pendingClipboard = deferred<void>()
+    const calls: string[] = []
+    let settledText: string | null = null
+    const writeText = vi.fn(async (text: string) => {
+      calls.push(text)
+      await pendingClipboard.promise
+      settledText = text
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, sessionAuthority } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-after-logout\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(calls).toEqual([file.gfsUri]))
+    await act(async () => controller.current?.handleLogout())
+    expect(sessionAuthority).toMatchObject({ authenticated: false, generation: 2 })
+    expect(settledText).toBeNull()
+    await act(async () => {
+      pendingClipboard.resolve()
+      await pendingClipboard.promise
+    })
+    await waitFor(() => expect(settledText).toBe(file.gfsUri))
+    expect(calls).toEqual([file.gfsUri])
+  })
+
+  it('A01 preserves rejection feedback when an invoked write rejects after logout', async () => {
+    const file = await resolveResource(
+      resolvedFile('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'a01-after-logout-reject.txt')
+    )
+    const pendingClipboard = deferred<void>()
+    const writeText = vi.fn(async (_text: string) => pendingClipboard.promise)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-after-logout-reject\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    await act(async () => controller.current?.handleLogout())
+    await act(async () => {
+      pendingClipboard.reject(new Error('clipboard interrupted'))
+      await pendingClipboard.promise.catch(() => undefined)
+    })
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'Could not copy the file ID: clipboard interrupted',
+          tone: 'error',
+        })
+      )
+    )
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+    )
+    expect(writeText).toHaveBeenCalledTimes(1)
+  })
+
+  it('A01 cancels a batched route request before its React commit', async () => {
+    const file = await resolveResource(
+      resolvedFile('ffffffffffffffffffffffffffffffff', 'a01-batched.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    const chatTabId = controller.current!.workspaceTabs.activeTabId
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-batched\.txt/ })
+    const menu = await openRowActions(file.name)
+    fireEvent.mouseEnter(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+
+    // A no-route copy request and a subsequent navigation intent share one
+    // React batch. The intent change must cancel the pending pre-invocation copy.
+    act(() => {
+      fireEvent.click(copyAction)
+      expect(controller.current?.selectWorkspaceTabById(chatTabId!)).toBe(true)
+    })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+    )
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    expect(writeText).not.toHaveBeenCalled()
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it('A01 keeps Copy ID eligible for an unreadable resource', async () => {
+    const file = await resolveResource(
+      resolvedFile('11111111111111111111111111111111', 'a01-unreadable.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText, { readable: false })
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-unreadable\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(gfs.download).not.toHaveBeenCalled()
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 rejects a clicked row removed from the live parent cache', async () => {
+    const file = await resolveResource(
+      resolvedFile('13131313131313131313131313131313', 'a01-removed-row.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-removed-row\.txt/ })
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+    const emptyPage = await listAccessiblePage([])
+
+    act(() => {
+      desktopQueryClient.setQueryData(
+        desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1),
+        { pages: [emptyPage], pageParams: [undefined] }
+      )
+      fireEvent.click(copyAction)
+    })
+
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 waits for the existing permission producer before writing', async () => {
+    const file = await resolveResource(
+      resolvedFile('14141414141414141414141414141414', 'a01-permission-pending.txt')
+    )
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-permission-pending\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    expect(writeText).not.toHaveBeenCalled()
+
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 reports an existing authority error without invoking the clipboard', async () => {
+    const file = await resolveResource(
+      resolvedFile('22222222222222222222222222222222', 'a01-authority-error.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    gfs.affordances.mockRejectedValue(
+      new Error(
+        "Error invoking remote method 'gfs:affordances': Error: gfs download failed: 429: " +
+          'Too Many Requests retryAfterSeconds=7'
+      )
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-authority-error\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text:
+            'Could not verify permissions for a01-authority-error.txt: ' +
+            'Too many file requests — try again in 7s.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it('A01 rejects an old menu callback after synchronous session revocation', async () => {
+    const file = await resolveResource(
+      resolvedFile('15151515151515151515151515151515', 'a01-old-session.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, clerum } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+    const authBridge = clerum as unknown as {
+      auth: { onExternalLogout: ReturnType<typeof vi.fn> }
+    }
+    const onExternalLogout = authBridge.auth.onExternalLogout.mock.calls.at(-1)?.[0] as
+      | (() => void)
+      | undefined
+
+    expect(onExternalLogout).toBeTypeOf('function')
+    act(() => {
+      onExternalLogout?.()
+      fireEvent.click(copyAction)
+    })
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.isAuthenticated).toBe(false)
+  })
+
+  it('A01 rejects a stale generation before React publishes the replacement session', async () => {
+    const file = await resolveResource(
+      resolvedFile('18181818181818181818181818181818', 'a01-generation-replaced.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, sessionAuthority } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+    await waitFor(() =>
+      expect(
+        desktopQueryClient.getQueryData(
+          desktopQueryKeys.gfsAffordances(
+            'a01-environment:a01-user:team-a',
+            file.resourceId,
+            'main',
+            1
+          )
+        )
+      ).toBeTruthy()
+    )
+    sessionAuthority.generation = 2
+
+    await act(async () => {
+      const loading = controller.current!.loadSession({ preserveNav: true })
+      for (
+        let turn = 0;
+        turn < 10 && controller.current!.isSessionGenerationCurrent(1);
+        turn += 1
+      ) {
+        await Promise.resolve()
+      }
+      expect(controller.current!.isSessionGenerationCurrent(1)).toBe(false)
+      expect(controller.current?.isAuthenticated).toBe(true)
+      expect(
+        desktopQueryClient.getQueryData(
+          desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+        )
+      ).toBeTruthy()
+      expect(
+        desktopQueryClient.getQueryState(
+          desktopQueryKeys.gfsAffordances(
+            'a01-environment:a01-user:team-a',
+            file.resourceId,
+            'main',
+            1
+          )
+        )?.status
+      ).toBe('success')
+      expect(
+        controller.current!.isNavigationIntentCurrent(controller.current!.navigationIntentSequence)
+      ).toBe(true)
+      fireEvent.click(copyAction)
+      await loading
+    })
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.sessionGeneration).toBe(2)
+  })
+
+  it('A01 rejects a stale row callback during the real team-switch generation gap', async () => {
+    const file = await resolveResource(
+      resolvedFile('19191919191919191919191919191919', 'a01-team-switch-gap.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, clerum } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+    await waitFor(() =>
+      expect(
+        desktopQueryClient.getQueryData(
+          desktopQueryKeys.gfsAffordances(
+            'a01-environment:a01-user:team-a',
+            file.resourceId,
+            'main',
+            1
+          )
+        )
+      ).toBeTruthy()
+    )
+    const teamBridge = clerum as unknown as {
+      team: { switch: ReturnType<typeof vi.fn> }
+    }
+    const teamSwitch = deferred<{
+      authenticated: true
+      me: NonNullable<AppController['me']>
+      sessionGeneration: number
+    }>()
+    teamBridge.team.switch.mockReturnValue(teamSwitch.promise)
+
+    await act(async () => {
+      const switching = controller.current!.handleEnsureTeamContext({ teamId: 'team-b' })
+      teamSwitch.resolve({
+        authenticated: true,
+        me: { ...controller.current!.me!, teamId: 'team-b', teamName: 'team-b' },
+        sessionGeneration: 2,
+      })
+      for (
+        let turn = 0;
+        turn < 20 && controller.current!.isSessionGenerationCurrent(1);
+        turn += 1
+      ) {
+        await Promise.resolve()
+      }
+      expect(controller.current!.isSessionGenerationCurrent(1)).toBe(false)
+      expect(controller.current?.isAuthenticated).toBe(true)
+      expect(controller.current?.me?.teamId).toBe('team-a')
+      expect(copyAction.isConnected).toBe(true)
+      fireEvent.click(copyAction)
+      await switching
+    })
+
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it('A01 cancels a pending copy when a new tab intent commits', async () => {
+    const file = await resolveResource(
+      resolvedFile('16161616161616161616161616161616', 'a01-navigation-pending.txt')
+    )
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-navigation-pending\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByTestId('nav-files'))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('files')
+    )
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+    )
+  })
+
+  it('A01 limits clipboard effects to one per accepted click', async () => {
+    const file = await resolveResource(
+      resolvedFile('12121212121212121212121212121212', 'a01-repeat.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { gfs } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-repeat\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2))
+    expect(writeText.mock.calls.map(([uri]) => uri)).toEqual([file.gfsUri, file.gfsUri])
+    expect(gfs.download).not.toHaveBeenCalled()
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
   it('keeps sidebar folder and file menus aligned with the shared action producer', async () => {
     const folder = await resolveResource(
       resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Parity folder')

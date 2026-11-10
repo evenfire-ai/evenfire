@@ -16,7 +16,12 @@ export interface FileExplorerTreeProps {
   /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void
   /** Run an action for the exact tree row, independent of the main-pane selection. */
-  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
+  onResourceAction: (
+    resource: GfsBrowserChild,
+    actionId: GfsResourceActionId,
+    file?: File,
+    renderedSessionGeneration?: number | null
+  ) => void
   /** Transient success/error feedback for the download fallback. */
   pushToast: (message: string, tone: Tone) => void
 }
@@ -53,7 +58,12 @@ export interface FileExplorerNodeProps {
   onToggle: (resourceId: string) => void
   onActivateFolder: (node: GfsBrowserChild) => void
   onActivateFile: (node: GfsBrowserChild) => void
-  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
+  onResourceAction: (
+    resource: GfsBrowserChild,
+    actionId: GfsResourceActionId,
+    file?: File,
+    renderedSessionGeneration?: number | null
+  ) => void
   /** Fail-closed hook: a listing authority error revokes the session. */
   onAuthorityFailure: (message: string, scope: string, sessionGeneration: number) => void
   onNodeDragStart: (

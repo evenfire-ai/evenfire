@@ -174,7 +174,7 @@ function FileExplorerNode({
             refresh:
               accessActive && !isUnreadable ? () => onResourceAction(node, 'refresh') : undefined,
             'copy-link': () => onResourceAction(node, 'copy-link'),
-            'copy-route': () => onResourceAction(node, 'copy-route'),
+            'copy-route': () => onResourceAction(node, 'copy-route', undefined, sessionGeneration),
             'open-route': () => onResourceAction(node, 'open-route'),
             rename: () => onResourceAction(node, 'rename'),
             move: () => onResourceAction(node, 'move'),
