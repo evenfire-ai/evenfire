@@ -78,6 +78,20 @@ function subjectsKeyOf(subjects: string[]): string {
   return [...subjects].sort().join(",");
 }
 
+/**
+ * Intrinsic operator authority: every request is allowed with no store read.
+ * Still audited by the caller. Not cached: it is already O(1) from
+ * ctx.isOperator with no store round-trip to save.
+ */
+function operatorDecisions(ctx: AuthzContext, requests: readonly AuthorizationRequest[]): Decision[] {
+  return requests.map((): Decision => ({
+    allowed: true,
+    via: "operator",
+    matchedSubject: ctx.subjects.includes("operator:") ? "operator:" : null,
+    authorizationSource: "operator",
+  }));
+}
+
 /** PostgreSQL renders uuid values with hyphens while the HTTP surface uses RID. */
 function resourceLookupKey(resourceId: string): string {
   return resourceId.replaceAll("-", "").toLowerCase();
@@ -92,7 +106,8 @@ function resourceLookupKey(resourceId: string): string {
  * grant or share denies. The cluster operator is the root of trust and is
  * allowed intrinsically (no stored grant). Every decision — allow, deny, or
  * error — emits an audit row; an audit-write failure propagates (no un-audited
- * op is served).
+ * op is served). `authorizeWithin` emits its rows in the caller's transaction;
+ * they persist only if it commits.
  */
 export class PermissionClient {
   constructor(
@@ -111,11 +126,12 @@ export class PermissionClient {
   }
 
   /**
-   * Snapshot the invalidation state so a long-running mutation (copy) can prove,
-   * inside its writer transaction, that no revocation NOTIFY landed after it
-   * authorized. A client with no decision cache cannot hear invalidations at all,
-   * so it reports `bypassed: true` — the mutation then fails closed rather than
-   * publishing against an authorization it cannot re-confirm.
+   * Snapshot the invalidation state so a mutation can tell, inside its writer
+   * transaction, whether a revocation NOTIFY landed after it authorized. A client
+   * with no decision cache cannot hear invalidations at all, so it reports
+   * `bypassed: true`. Rather than publishing against an authorization it cannot
+   * re-confirm, copy then fails closed, and upload finalization re-decides on its
+   * transaction client (`authorizeWithin`).
    */
   permissionEpoch(): PermissionEpoch {
     if (!this.cache) return { generation: 0, bypassed: true };
@@ -139,12 +155,7 @@ export class PermissionClient {
     // is still audited (and a failing audit still propagates below). Not cached —
     // it is already O(1) from ctx.isOperator with no store round-trip to save.
     if (ctx.isOperator) {
-      const decisions = requests.map((): Decision => ({
-        allowed: true,
-        via: "operator",
-        matchedSubject: ctx.subjects.includes("operator:") ? "operator:" : null,
-        authorizationSource: "operator",
-      }));
+      const decisions = operatorDecisions(ctx, requests);
       await this.auditBatch(ctx, requests, decisions, budget);
       return decisions;
     }
@@ -165,29 +176,13 @@ export class PermissionClient {
 
     try {
       if (misses.length > 0) {
-        const snapshot = async (db: Queryable) => {
-          const ancestorMap = await this.ancestorsMany(db, ctx.drive, misses.map(({ request }) => request.resourceId));
-          const allAncestors = [...new Set([...ancestorMap.values()].flat())];
-          const grants = await this.grantsFor(db, ctx.drive, allAncestors, ctx.subjects);
-          const shares = await this.sharesFor(db, ctx.drive, allAncestors, ctx.subjects);
-          return { ancestorMap, grants, shares };
-        };
-        const { ancestorMap, grants, shares } = budget
-          ? await withDeadlineTransaction(this.db, budget, true, snapshot)
-          : await snapshot(this.db);
-        misses.forEach(({ index, request }) => {
-          const ancestors = ancestorMap.get(resourceLookupKey(request.resourceId)) ?? [];
-          const decision = ancestors.length === 0
-            ? { allowed: false, via: null, matchedSubject: null, authorizationSource: null } as Decision
-            : resolveDecision({
-                resourceId: ancestors[0],
-                ancestors,
-                subjects: new Set(ctx.subjects),
-                isOperator: false,
-                op: request.op,
-                grants,
-                shares,
-              });
+        const missRequests = misses.map(({ request }) => request);
+        const decide = (db: Queryable) => this.decideFromStore(db, ctx, missRequests);
+        const missDecisions = budget
+          ? await withDeadlineTransaction(this.db, budget, true, decide)
+          : await decide(this.db);
+        misses.forEach(({ index, request }, missIndex) => {
+          const decision = missDecisions[missIndex];
           decisions[index] = decision;
           this.cache?.set({ subjectsKey: subjectKey, ...request }, decision);
         });
@@ -234,6 +229,59 @@ export class PermissionClient {
     budget?.signal?.throwIfAborted();
     await this.auditBatch(ctx, requests, complete, budget);
     return complete;
+  }
+
+  /**
+   * Re-decide `requests` for `ctx` from the permission store on `db`, a writer
+   * transaction's client. It reads ancestors, grants and shares on `db`, never on
+   * the client's own pool, and neither reads nor fills the decision cache: `db`
+   * may see the transaction's own uncommitted rows, so its decisions must not
+   * outlive it. Each decision is audited on `db`, so its row commits or rolls back
+   * with the publication it authorized. A store error propagates unchanged; the
+   * transactor maps deadlines.
+   */
+  async authorizeWithin(
+    db: Queryable,
+    ctx: AuthzContext,
+    requests: readonly AuthorizationRequest[]
+  ): Promise<Decision[]> {
+    if (requests.length === 0) {
+      throw new GfsError("internal", "authorizeWithin requires at least one request");
+    }
+    const decisions = ctx.isOperator
+      ? operatorDecisions(ctx, requests)
+      : await this.decideFromStore(db, ctx, requests);
+    for (let index = 0; index < requests.length; index += 1) {
+      const request = requests[index];
+      await this.auditDecision(ctx, request.resourceId, request.op, decisions[index], db);
+    }
+    return decisions;
+  }
+
+  /** Decide `requests` from the permission store read on `db`, in request order. */
+  private async decideFromStore(
+    db: Queryable,
+    ctx: AuthzContext,
+    requests: readonly AuthorizationRequest[]
+  ): Promise<Decision[]> {
+    const ancestorMap = await this.ancestorsMany(db, ctx.drive, requests.map(request => request.resourceId));
+    const allAncestors = [...new Set([...ancestorMap.values()].flat())];
+    const grants = await this.grantsFor(db, ctx.drive, allAncestors, ctx.subjects);
+    const shares = await this.sharesFor(db, ctx.drive, allAncestors, ctx.subjects);
+    return requests.map(request => {
+      const ancestors = ancestorMap.get(resourceLookupKey(request.resourceId)) ?? [];
+      return ancestors.length === 0
+        ? { allowed: false, via: null, matchedSubject: null, authorizationSource: null } as Decision
+        : resolveDecision({
+            resourceId: ancestors[0],
+            ancestors,
+            subjects: new Set(ctx.subjects),
+            isOperator: false,
+            op: request.op,
+            grants,
+            shares,
+          });
+    });
   }
 
   private async auditBatch(

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DecisionCache } from "./cache";
 import {
   AuditEvent,
@@ -336,5 +336,120 @@ describe("PermissionClient + DecisionCache (cache→store, fail-closed)", () => 
     await client.authorize(operatorCtx, "R", "read");
     expect(cache.size).toBe(0); // operator decisions are not cached
     expect(db.cteQueries).toBe(0);
+  });
+});
+
+describe("PermissionClient.authorizeWithin (re-decision on a writer transaction's client)", () => {
+  /** The writer transaction's client: records every statement it receives. */
+  class TxDb extends FakeDb {
+    statements: string[] = [];
+    override async query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> {
+      this.statements.push(text);
+      return super.query(text, values);
+    }
+  }
+
+  /** The client's own constructor pool: must never be reached. */
+  function untouchedPool() {
+    return {
+      query: vi.fn(async () => ({ rows: [] })),
+      connect: vi.fn(async () => {
+        throw new Error("authorizeWithin must not check out a pool client");
+      }),
+    };
+  }
+
+  function spiedCache(): DecisionCache {
+    const cache = new DecisionCache({ ttlMs: 30_000, now: () => 1_000 });
+    vi.spyOn(cache, "get");
+    vi.spyOn(cache, "set");
+    return cache;
+  }
+
+  const kinds = (statements: string[]) => statements.map(text =>
+    text.includes("INSERT INTO gfs_audit") ? "audit"
+      : text.includes("WITH RECURSIVE") ? "ancestors"
+        : text.includes("FROM gfs_grants") ? "grants"
+          : text.includes("FROM gfs_shares") ? "shares" : text);
+
+  it("W1: reads and audits only on the given client and never touches the pool or the cache", async () => {
+    const pool = untouchedPool();
+    const cache = spiedCache();
+    const tx = new TxDb();
+    tx.ancestors = ["R", "ROOT"];
+    tx.grants = [
+      { resource_id: "ROOT", subject_type: "user", subject_id: "user-1", permissions: ["write"], inherit: true },
+    ];
+    const client = new PermissionClient(pool as never, new DbAuditSink(pool as never), cache);
+
+    const decisions = await client.authorizeWithin(tx, userCtx, [{ resourceId: "R", op: "write" }]);
+
+    expect(decisions).toEqual([expect.objectContaining({ allowed: true, matchedSubject: "user:user-1" })]);
+    expect(kinds(tx.statements)).toEqual(["ancestors", "grants", "shares", "audit"]);
+    expect(tx.audits).toHaveLength(1);
+    expect(tx.audits[0][4]).toBe("allow");
+    expect(tx.audits[0][8]).toBe("user:user-1");
+    expect(tx.audits[0][7]).toBe("authorization_decision");
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(cache.get).not.toHaveBeenCalled();
+    expect(cache.set).not.toHaveBeenCalled();
+  });
+
+  it("W2: audits a deny on the given client", async () => {
+    const pool = untouchedPool();
+    const tx = new TxDb();
+    tx.ancestors = ["R", "ROOT"];
+    const client = new PermissionClient(pool as never, new DbAuditSink(pool as never));
+
+    const decisions = await client.authorizeWithin(tx, userCtx, [{ resourceId: "R", op: "write" }]);
+
+    expect(decisions[0].allowed).toBe(false);
+    expect(tx.audits).toHaveLength(1);
+    expect(tx.audits[0][4]).toBe("deny");
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it("W3: allows an operator with no store read and audits it on the given client", async () => {
+    const pool = untouchedPool();
+    const tx = new TxDb();
+    const client = new PermissionClient(pool as never, new DbAuditSink(pool as never));
+
+    const decisions = await client.authorizeWithin(tx, operatorCtx, [
+      { resourceId: "R", op: "write" },
+      { resourceId: "S", op: "read" },
+    ]);
+
+    expect(decisions.map(decision => decision.via)).toEqual(["operator", "operator"]);
+    expect(kinds(tx.statements)).toEqual(["audit", "audit"]);
+    expect(tx.cteQueries).toBe(0);
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it("W4: propagates a store error unchanged, with no not_mounted mapping and no audit", async () => {
+    const pool = untouchedPool();
+    const tx = new TxDb();
+    tx.ancestors = ["R"];
+    tx.failOn = "grants";
+    const client = new PermissionClient(pool as never, new DbAuditSink(pool as never));
+
+    await expect(client.authorizeWithin(tx, userCtx, [{ resourceId: "R", op: "write" }]))
+      .rejects.toThrow("permission store down");
+    await expect(client.authorizeWithin(tx, userCtx, [{ resourceId: "R", op: "write" }]))
+      .rejects.not.toMatchObject({ code: "not_mounted" });
+    expect(kinds(tx.statements)).toContain("ancestors");
+    expect(tx.audits).toHaveLength(0);
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty request list instead of returning a vacuous result", async () => {
+    const pool = untouchedPool();
+    const tx = new TxDb();
+    const client = new PermissionClient(pool as never, new DbAuditSink(pool as never));
+
+    await expect(client.authorizeWithin(tx, userCtx, [])).rejects.toMatchObject({ code: "internal" });
+    expect(tx.statements).toHaveLength(0);
   });
 });
