@@ -200,9 +200,9 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     ? String(agentContextByName[selectedAgent] || '').trim()
     : ''
   // Visible agent name (spec.host) for the workspace hero title. `selectedAgent`
-  // is always a catalog agent, so `agentDisplayByName` is total over it — the
-  // single sanctioned fallback (Decision #6) keeps the id if a display is
-  // missing. Display-only: lookups/actions keep using `selectedAgent`.
+  // may be absent from the catalog, so `agentDisplayByName` can miss it — the
+  // single sanctioned fallback (Decision #6) then keeps the identifier.
+  // Display-only: lookups/actions keep using `selectedAgent`.
   const selectedAgentDisplay = selectedAgent
     ? (agentDisplayByName[selectedAgent] ?? selectedAgent)
     : null

@@ -250,10 +250,6 @@ export function useAppController() {
     teamsData.teams.find(team => team.id === currentTeamId)?.name || auth.me?.teamName || ''
   const currentTeamIdRef = useRef(currentTeamId)
   currentTeamIdRef.current = currentTeamId
-  const accessCatalogScopeRef = useRef<{
-    principal: string | null
-    teamId: string | null
-  } | null>(null)
   const notificationTeamContextQueueRef = useRef<Promise<void>>(Promise.resolve())
   const openAgentConversationFromNotificationRef = useRef<
     (target: AgentConversationNotificationTarget) => Promise<void>
@@ -694,36 +690,11 @@ export function useAppController() {
 
   useEffect(() => {
     if (!auth.isAuthenticated) return
-    const catalog = agentsData.accessCatalog
-    if (!catalog) return
-    const previousScope = accessCatalogScopeRef.current
-    accessCatalogScopeRef.current = {
-      principal: authenticatedPrincipalIdentity,
-      teamId: catalog.teamId ?? null,
-    }
-    if (!nav.selectedAgent) return
-    if (isHostAccessBlocked(nav.selectedAgent)) {
-      nav.setSelectedAgent(null)
-      return
-    }
-    // Team catalogs are scoped data. A same-principal team switch must retain
-    // the workspace's agent selection while its data revalidates in the new
-    // scope; a later refresh within that team still applies revocations.
-    const changedTeamForSamePrincipal =
-      previousScope?.principal === authenticatedPrincipalIdentity &&
-      previousScope.teamId !== (catalog.teamId ?? null)
-    if (!changedTeamForSamePrincipal && !agentsData.agentNames.includes(nav.selectedAgent)) {
-      nav.setSelectedAgent(null)
-    }
-  }, [
-    agentsData.accessCatalog,
-    agentsData.agentNames,
-    authenticatedPrincipalIdentity,
-    auth.isAuthenticated,
-    nav.selectedAgent,
-    nav.setSelectedAgent,
-    isHostAccessBlocked,
-  ])
+    const agentRef = nav.selectedAgent
+    // A selection restored without a server check (useNavigationController's
+    // workspace snapshot) may name an agent whose access is held.
+    if (agentRef && isHostAccessBlocked(agentRef)) nav.setSelectedAgent(null)
+  }, [auth.isAuthenticated, isHostAccessBlocked, nav.selectedAgent, nav.setSelectedAgent])
 
   const switchTeamForWorkspace = useCallback(
     async (teamId: string, options: { announce?: boolean } = {}) => {

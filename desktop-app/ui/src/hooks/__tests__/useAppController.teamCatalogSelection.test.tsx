@@ -16,6 +16,7 @@ import {
   installAppControllerClerum,
   renderAppController,
 } from '../domain/__tests__/__fixtures__/appControllerHarness'
+import { ipcHostAccessDenied } from '../domain/__tests__/__fixtures__/ipcErrors'
 import { uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
 import { desktopQueryKeys } from '../domain/queryKeys'
 
@@ -244,6 +245,47 @@ describe('useAppController agent selection and sending do not depend on the team
   })
 
   it.each(TEAM_TRANSITIONS)(
+    '(b) keeps an unlisted agent sendable after %s when the new team catalog changes',
+    async transition => {
+      let teamBCatalog = productionCatalog('team-b', 'team-b-only-agent')
+      const { refreshCatalog, moveToTeamB } = installTeamSession(teamId =>
+        teamId === 'team-a' ? productionCatalog('team-a', TEAM_A_AGENT) : teamBCatalog
+      )
+      const app = await bootInTeamAWithAgent(TEAM_A_AGENT)
+      const firstPanel = renderControllerComposer(app)
+
+      await moveToTeamB(app, transition)
+      await waitFor(() => expect(catalogQueryData(app)?.teamId).toBe('team-b'))
+      expect(app.result.current.selectedAgent).toBe(TEAM_A_AGENT)
+
+      // The second catalog must differ from the first, or the query keeps the
+      // same object and no selection effect runs again.
+      const secondAgentNames = ['team-b-only-agent', 'team-b-second-agent']
+      teamBCatalog = {
+        ...productionCatalog('team-b', 'team-b-only-agent'),
+        teamAgentNames: secondAgentNames,
+        agentNames: secondAgentNames,
+      }
+      await waitFor(() =>
+        expect(app.queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.fetchStatus).toBe(
+          'idle'
+        )
+      )
+      const callsBeforeRemount = refreshCatalog.mock.calls.length
+      firstPanel.unmount()
+      const panel = renderControllerComposer(app)
+      unmountPanel = panel.unmount
+
+      await waitFor(() =>
+        expect(refreshCatalog.mock.calls.length).toBeGreaterThan(callsBeforeRemount)
+      )
+      await waitFor(() => expect(catalogQueryData(app)?.agentNames).toEqual(secondAgentNames))
+      expect(app.result.current.selectedAgent).toBe(TEAM_A_AGENT)
+      await expectComposerSends(app, panel, TEAM_A_AGENT, 'send after the catalog changed')
+    }
+  )
+
+  it.each(TEAM_TRANSITIONS)(
     '(c) sends when the catalog refresh fails after %s',
     async transition => {
       const { moveToTeamB } = installTeamSession(teamId => {
@@ -283,5 +325,70 @@ describe('useAppController agent selection and sending do not depend on the team
     expect(app.queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.status).toBe('pending')
     await expectComposerSends(app, panel, 'agent-x', 'send before the catalog loads')
     handle.resolveAuthenticatedLoad()
+  })
+
+  it('(e) keeps and sends to an agent the catalog does not list', async () => {
+    installAppControllerClerum({ agentNames: ['agent-y'] })
+    const app = renderAppController()
+    unmount = app.unmount
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(catalogQueryData(app)?.agentNames).toEqual(['agent-y']))
+
+    act(() => {
+      app.result.current.handleSelectChatAgent('agent-x', { selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe('agent-x'))
+
+    const panel = renderControllerComposer(app)
+    unmountPanel = panel.unmount
+    await expectComposerSends(app, panel, 'agent-x', 'send to an unlisted agent')
+  })
+
+  describe('the server decides the selection', () => {
+    const teamScopedCatalog = (teamId: string) =>
+      teamId === 'team-a'
+        ? productionCatalog('team-a', TEAM_A_AGENT)
+        : productionCatalog('team-b', 'team-b-only-agent')
+
+    const listSessionsCallsFor = (agent: string, fromCall: number) =>
+      vi
+        .mocked(window.clerum.rpc.listSessions)
+        .mock.calls.slice(fromCall)
+        .filter(([hostRef]) => hostRef === agent)
+
+    it('S-1: deselects and holds the agent when the server denies its chat list after a switch', async () => {
+      const { moveToTeamB } = installTeamSession(teamScopedCatalog)
+      const app = await bootInTeamAWithAgent(TEAM_A_AGENT)
+      const denial = await ipcHostAccessDenied('rpc:listSessions')
+      const listSessions = vi.mocked(window.clerum.rpc.listSessions)
+      const callsBeforeSwitch = listSessions.mock.calls.length
+      listSessions.mockImplementation(async (hostRef: string) => {
+        if (hostRef === TEAM_A_AGENT) throw denial
+        return { items: [] } as never
+      })
+
+      await moveToTeamB(app, 'team.switch')
+
+      await waitFor(() => expect(app.result.current.selectedAgent).toBeNull())
+      expect(app.result.current.isHostAccessBlocked(TEAM_A_AGENT)).toBe(true)
+      expect(listSessionsCallsFor(TEAM_A_AGENT, callsBeforeSwitch).length).toBeGreaterThan(0)
+    })
+
+    it('S-2: keeps and sends to the agent when the server allows its chat list after a switch', async () => {
+      const { moveToTeamB } = installTeamSession(teamScopedCatalog)
+      const app = await bootInTeamAWithAgent(TEAM_A_AGENT)
+      const callsBeforeSwitch = vi.mocked(window.clerum.rpc.listSessions).mock.calls.length
+      const panel = renderControllerComposer(app)
+      unmountPanel = panel.unmount
+
+      await moveToTeamB(app, 'team.switch')
+
+      await waitFor(() =>
+        expect(listSessionsCallsFor(TEAM_A_AGENT, callsBeforeSwitch).length).toBeGreaterThan(0)
+      )
+      expect(app.result.current.selectedAgent).toBe(TEAM_A_AGENT)
+      expect(app.result.current.isHostAccessBlocked(TEAM_A_AGENT)).toBe(false)
+      await expectComposerSends(app, panel, TEAM_A_AGENT, 'send after the server allowed the read')
+    })
   })
 })
