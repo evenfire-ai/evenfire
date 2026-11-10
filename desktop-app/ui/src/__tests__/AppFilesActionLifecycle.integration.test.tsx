@@ -18,12 +18,14 @@ import { DESKTOP_ROUTES } from '@constants/navigation'
 import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { installMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { useNavigationController } from '@hooks/domain/useNavigationController'
 import { useNotificationsController } from '@hooks/domain/useNotificationsController'
 import { useAppController } from '@hooks/useAppController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
+  closeWorkspaceTab,
   createWorkspaceTabsState,
   newChatTab,
   openAppTab,
@@ -54,6 +56,7 @@ type WorkspaceStateUpdater = WorkspaceState | ((state: WorkspaceState) => Worksp
 
 const appHarness = vi.hoisted(() => ({
   controller: null as unknown as AppController,
+  useRealNavigationController: false,
   forceRender: () => {},
   shortcutCommand: null as unknown as (commandId: string, source: 'host' | 'sandbox') => void,
   shortcutRegistrationCount: 0,
@@ -62,6 +65,7 @@ const appHarness = vi.hoisted(() => ({
   filesPageLatestPendingAction: null as unknown,
   filesPageRenderCount: 0,
   filesPageLastLocation: null as { gfsUri: string | null; name: string | null } | null,
+  filesPageReportLocation: null as ((gfsUri: string | null, name: string | null) => void) | null,
   previewPagePendingActions: [] as unknown[],
   sandboxUiShortcutAppRef: null as string | null,
   latestConversationNotification: null as unknown as {
@@ -78,8 +82,18 @@ const noop = () => {}
 
 function useReactiveController(): AppController {
   const [, force] = useReducer((count: number) => count + 1, 0)
+  const navigation = useNavigationController()
   appHarness.forceRender = force
-  const controller = appHarness.controller
+  let controller = appHarness.controller
+  if (appHarness.useRealNavigationController) {
+    controller = {
+      ...controller,
+      ...navigation,
+      activeWorkspaceTab: navigation.activeTab,
+    } as AppController
+    appHarness.controller = controller
+    return controller
+  }
   const activeTab = activeWorkspaceTab(controller.workspaceTabs)
   ;(controller as { activeWorkspaceTab: unknown }).activeWorkspaceTab = activeTab
   ;(controller as { navItem: unknown }).navItem = controller.appsPickerActive
@@ -167,6 +181,7 @@ vi.mock('@pages/FilesPage', async importOriginal => {
     FilesPage: (props: React.ComponentProps<typeof actual.FilesPage>) => {
       appHarness.filesPageRenderCount += 1
       appHarness.filesPageLatestPendingAction = props.pendingResourceAction ?? null
+      appHarness.filesPageReportLocation = props.onLocationChange ?? null
       if (props.pendingResourceAction) {
         appHarness.filesPagePendingActions.push(props.pendingResourceAction)
       }
@@ -456,7 +471,10 @@ function installClerum(
   const createFileFromPath = vi.fn(async () => ({}))
   const replaceFileFromPath = vi.fn(async () => ({}))
   const moveResource = vi.fn(async () => ({}))
+  let userNavigationGeneration = 0
   const gfs = {
+    getUserNavigationGeneration: vi.fn(() => userNavigationGeneration),
+    advanceUserNavigationGeneration: vi.fn(() => (userNavigationGeneration += 1)),
     listAccessible: vi.fn(async () => rootPage),
     listChildren: vi.fn(async (resourceId: string) =>
       listChildrenPage(options.childRowsByParent?.get(resourceId) ?? [])
@@ -869,10 +887,12 @@ beforeEach(() => {
   appHarness.filesPageLatestPendingAction = null
   appHarness.filesPageRenderCount = 0
   appHarness.filesPageLastLocation = null
+  appHarness.filesPageReportLocation = null
   appHarness.previewPagePendingActions = []
   appHarness.sandboxUiShortcutAppRef = null
   appHarness.latestConversationNotification = null
   appHarness.controller = makeController()
+  appHarness.useRealNavigationController = false
   vi.mocked(useAppController).mockImplementation(useReactiveController)
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
@@ -1857,7 +1877,7 @@ describe('App → Files action lifecycle integration', () => {
     expect(sidebarDialog.getAttribute('aria-label')).toBe(filesDialogName)
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
       kind: 'files',
-      files: { path: file.gfsUri },
+      files: { path: null },
     })
   })
 
@@ -2421,7 +2441,7 @@ describe('App → Files action lifecycle integration', () => {
     expect(gfs.getPathForFile).toHaveBeenCalledWith(replacement)
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
       kind: 'files',
-      files: { path: file.gfsUri },
+      files: { path: null },
     })
   })
 
@@ -2445,7 +2465,7 @@ describe('App → Files action lifecycle integration', () => {
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
       id: 'existing-target-files',
       kind: 'files',
-      files: { path: target.gfsUri },
+      files: { path: null },
     })
     expect(
       appHarness.controller.workspaceTabs.tabs.filter(tab => tab.kind === 'files')
@@ -2895,12 +2915,1324 @@ describe('App → Files action lifecycle integration', () => {
     fireEvent.click(targetTab!)
     await waitFor(() =>
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
-        kind: 'preview',
-        preview: { gfsUri: targetA.gfsUri },
+        kind: 'files',
+        files: { path: null },
       })
     )
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === targetA.gfsUri)).toHaveLength(1)
+    expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
     expect(deleteResource).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { actionName: 'Download', clipboardCount: 0, linkCopyCount: 0, expectedDownloads: [1, 1, 1] },
+    { actionName: 'Copy link', clipboardCount: 0, linkCopyCount: 1, expectedDownloads: [0, 0, 0] },
+    {
+      actionName: 'Copy file ID',
+      clipboardCount: 1,
+      linkCopyCount: 0,
+      expectedDownloads: [0, 0, 0],
+    },
+  ])(
+    'reproduces R2-H1 $actionName download counts with App and real navigation controller',
+    async ({ actionName, clipboardCount, linkCopyCount, expectedDownloads }) => {
+      const archive = await resolveResource(
+        resolvedFile('abababababababababababababababab', 'archive.bin')
+      )
+      const { gfs } = installClerum([archive])
+      const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+      Object.assign(gfs, { download })
+      const clipboardWrite = vi.fn(async (_value: string) => {})
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: clipboardWrite },
+      })
+      const savedFiles: string[] = []
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        value: vi.fn(() => 'blob:r2-h1-repro'),
+      })
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+        this: HTMLAnchorElement
+      ) {
+        savedFiles.push(this.download)
+      })
+      appHarness.useRealNavigationController = true
+      renderApp()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      await findResourceTreeRow(archive.name)
+      await chooseRowAction(archive.name, actionName)
+      await waitFor(() => expect(download).toHaveBeenCalledTimes(expectedDownloads[0]!))
+      await waitFor(() => expect(savedFiles).toHaveLength(expectedDownloads[0]!))
+      await waitFor(() => expect(clipboardWrite).toHaveBeenCalledTimes(clipboardCount))
+      await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(linkCopyCount))
+
+      let activeTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+      if (actionName === 'Copy file ID') {
+        expect(activeTab?.kind).toBe('chat')
+        expect(appHarness.controller.workspaceTabs.tabs.some(tab => tab.kind === 'files')).toBe(
+          false
+        )
+        act(() => appHarness.controller.openFilesSectionWithReceipt())
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
+        )
+        activeTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+      }
+
+      const filesOwnerId = activeTab?.id
+      expect(filesOwnerId).toBeTruthy()
+      expect(activeTab?.kind).toBe('files')
+      const counts = [download.mock.calls.length]
+
+      for (const expectedCount of expectedDownloads.slice(1)) {
+        act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+        )
+        act(() => appHarness.controller.selectWorkspaceTabById(filesOwnerId!))
+        await waitFor(() => expect(download).toHaveBeenCalledTimes(expectedCount))
+        await waitFor(() => expect(savedFiles).toHaveLength(expectedCount))
+        counts.push(download.mock.calls.length)
+      }
+
+      expect(counts).toEqual(expectedDownloads)
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.files?.path).toBeNull()
+      expect(clipboardWrite).toHaveBeenCalledTimes(clipboardCount)
+      expect(gfs.copyDeepLink).toHaveBeenCalledTimes(linkCopyCount)
+      expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+    }
+  )
+
+  it('models generated Files returns against App and the production navigation controller', async () => {
+    type Model = { active: 'files' | 'chat'; effects: number; path: string | null }
+    type Real = {
+      scheduler: Scheduler
+      ownerTabId: string
+      targetUri: string
+      initialResolveCount: number
+      returnToFiles: () => Promise<void>
+    }
+    class ReturnToFiles implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.active === 'files'
+      }
+
+      async run(model: Model, real: Real) {
+        await real.returnToFiles()
+        model.active = 'files'
+        expect(model.effects).toBe(1)
+        expect(model.path).toBeNull()
+        expect(
+          appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === real.ownerTabId)
+        ).toMatchObject({ kind: 'files', files: { path: model.path } })
+      }
+
+      toString() {
+        return 'leave and return to the consumed Files tab'
+      }
+    }
+
+    const command = new ReturnToFiles()
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands([fc.constant(command)], { maxCommands: 3 }),
+        async (scheduler, commands) => {
+          const archive = await resolveResource(
+            resolvedFile('abababababababababababababababab', 'archive.bin')
+          )
+          const { gfs } = installClerum([archive])
+          const originalResolve = gfs.resolve
+          Object.assign(gfs, {
+            resolve: vi.fn((uri: string) =>
+              scheduler.schedule(originalResolve(uri), 'action-owned Files resolution')
+            ),
+          })
+          const download = vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer }))
+          Object.assign(gfs, { download })
+          const savedFiles: string[] = []
+          vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+            this: HTMLAnchorElement
+          ) {
+            savedFiles.push(this.download)
+          })
+          appHarness.useRealNavigationController = true
+          renderApp()
+          fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+          await findResourceTreeRow(archive.name)
+          await chooseRowAction(archive.name, 'Download')
+          await scheduler.waitAll()
+          await waitFor(() => expect(download).toHaveBeenCalledTimes(1))
+          await waitFor(() => expect(savedFiles).toHaveLength(1))
+
+          const activeTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+          expect(activeTab?.kind).toBe('files')
+          const ownerTabId = activeTab!.id
+          const initialResolveCount = gfs.resolve.mock.calls.filter(
+            ([uri]) => uri === archive.gfsUri
+          ).length
+          const model: Model = { active: 'files', effects: 1, path: null }
+          const real: Real = {
+            scheduler,
+            ownerTabId,
+            targetUri: archive.gfsUri,
+            initialResolveCount,
+            returnToFiles: async () => {
+              act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
+              await waitFor(() =>
+                expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+              )
+              act(() => appHarness.controller.selectWorkspaceTabById(ownerTabId))
+              await waitFor(() =>
+                expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
+              )
+              expect(gfs.resolve.mock.calls.filter(([uri]) => uri === archive.gfsUri)).toHaveLength(
+                initialResolveCount
+              )
+              expect(download).toHaveBeenCalledTimes(1)
+              expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+            },
+          }
+          try {
+            await fc.asyncModelRun(() => ({ model, real }), [...commands])
+            expect(model.effects).toBe(1)
+            expect(download).toHaveBeenCalledTimes(1)
+            expect(savedFiles).toHaveLength(1)
+          } finally {
+            cleanup()
+            vi.restoreAllMocks()
+          }
+        }
+      ),
+      { numRuns: 3, endOnFailure: true }
+    )
+  })
+
+  it('generates resolve, cancellation, supersession and return orderings with a reference reducer', async () => {
+    type Model = {
+      active: 'chat' | 'old-files' | 'new-files'
+      oldStatus: 'pending' | 'resolved' | 'cancelled' | 'superseded'
+      oldRequestId: number
+      oldOwnerId: string
+      oldDownloads: number
+      oldPath: string | null
+      oldLocationReported: boolean
+      consumedSeed: { requestId: number; path: string } | null
+      newCopies: number
+      newPath: string | null
+      session: number
+      intent: number
+    }
+    type Event =
+      | { kind: 'resolve-old' }
+      | { kind: 'report-old-location' }
+      | { kind: 'cancel-old' }
+      | { kind: 'supersede-old' }
+      | { kind: 'return-old' }
+    const reduceModel = (model: Model, event: Event): Model => {
+      switch (event.kind) {
+        case 'resolve-old':
+          return {
+            ...model,
+            oldStatus: 'resolved',
+            oldDownloads: 1,
+            oldPath: null,
+            consumedSeed: { requestId: model.oldRequestId, path: realOldUri },
+          }
+        case 'report-old-location':
+          return { ...model, oldLocationReported: true, oldPath: realOldUri }
+        case 'cancel-old':
+          return {
+            ...model,
+            active: 'chat',
+            oldStatus: 'cancelled',
+            oldPath: null,
+            consumedSeed: { requestId: model.oldRequestId, path: realOldUri },
+            intent: model.intent + 1,
+          }
+        case 'supersede-old':
+          return {
+            ...model,
+            active: 'new-files',
+            oldStatus: 'superseded',
+            oldPath: null,
+            consumedSeed: { requestId: model.oldRequestId, path: realOldUri },
+            newCopies: 1,
+            newPath: null,
+            intent: model.intent + 1,
+          }
+        case 'return-old':
+          return { ...model, active: 'old-files' }
+      }
+    }
+    const realOldUri = 'gfs://main/abababababababababababababababab'
+    type Real = {
+      scheduler: Scheduler
+      oldOwnerId: string
+      oldUri: string
+      newUri: string
+      resolveOld: (expectDownload: boolean) => Promise<void>
+      reportOldLocation: () => Promise<void>
+      cancelOld: () => Promise<void>
+      supersedeOld: () => Promise<void>
+      returnOld: () => Promise<void>
+      download: ReturnType<typeof vi.fn>
+      savedFiles: string[]
+      oldResolveCount: () => number
+      newResolveCount: () => number
+    }
+    class ResolveOld implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.oldStatus === 'pending' && model.oldLocationReported
+      }
+      async run(model: Model, real: Real) {
+        await real.resolveOld(true)
+        Object.assign(model, reduceModel(model, { kind: 'resolve-old' }))
+        expect(real.download).toHaveBeenCalledTimes(model.oldDownloads)
+        expect(real.savedFiles).toHaveLength(model.oldDownloads)
+        expect(model.oldPath).toBeNull()
+        expect(
+          appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === real.oldOwnerId)
+        ).toMatchObject({ kind: 'files', files: { path: null } })
+      }
+      toString() {
+        return 'resolve and acknowledge the pending old file action'
+      }
+    }
+    class ReportOldLocation implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.oldStatus === 'pending' && !model.oldLocationReported
+      }
+      async run(model: Model, real: Real) {
+        await real.reportOldLocation()
+        Object.assign(model, reduceModel(model, { kind: 'report-old-location' }))
+        await waitFor(() =>
+          expect(
+            appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === real.oldOwnerId)
+          ).toMatchObject({ kind: 'files', files: { path: real.oldUri } })
+        )
+      }
+      toString() {
+        return 'report the action-owned URI while its action is still pending'
+      }
+    }
+    class CancelOld implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.oldStatus === 'pending'
+      }
+      async run(model: Model, real: Real) {
+        await real.cancelOld()
+        Object.assign(model, reduceModel(model, { kind: 'cancel-old' }))
+        expect(model.oldPath).toBeNull()
+      }
+      toString() {
+        return 'switch to Chat and cancel the pending old action'
+      }
+    }
+    class SupersedeOld implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.oldStatus === 'pending'
+      }
+      async run(model: Model, real: Real) {
+        await real.supersedeOld()
+        Object.assign(model, reduceModel(model, { kind: 'supersede-old' }))
+        expect(model.oldPath).toBeNull()
+        expect(model.newCopies).toBe(1)
+        expect(model.newPath).toBeNull()
+      }
+      toString() {
+        return 'accept a new-URI action into a distinct Files owner'
+      }
+    }
+    class SessionChange implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.oldStatus === 'pending'
+      }
+      async run(model: Model, real: Real) {
+        act(() => {
+          appHarness.controller.sessionGeneration = 2
+          appHarness.forceRender()
+        })
+        await real.cancelOld()
+        Object.assign(model, {
+          active: 'chat',
+          oldStatus: 'cancelled',
+          oldPath: null,
+          consumedSeed: { requestId: model.oldRequestId, path: real.oldUri },
+          session: model.session + 1,
+          intent: model.intent + 1,
+        })
+        expect(model.session).toBe(2)
+        expect(model.oldPath).toBeNull()
+      }
+      toString() {
+        return 'change session while the Files action is resolving'
+      }
+    }
+    class SettleStaleOld implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.oldStatus === 'cancelled' || model.oldStatus === 'superseded'
+      }
+      async run(model: Model, real: Real) {
+        await real.resolveOld(false)
+        expect(real.download).toHaveBeenCalledTimes(model.oldDownloads)
+        expect(real.savedFiles).toHaveLength(model.oldDownloads)
+        expect(real.oldResolveCount()).toBe(1)
+      }
+      toString() {
+        return 'settle the stale old resolver after cancellation or replacement'
+      }
+    }
+    class ReturnOld implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.oldStatus !== 'pending'
+      }
+      async run(model: Model, real: Real) {
+        await real.returnOld()
+        Object.assign(model, reduceModel(model, { kind: 'return-old' }))
+        expect(model.active).toBe('old-files')
+        expect(model.oldPath).toBeNull()
+        expect(real.oldResolveCount()).toBe(1)
+        expect(real.download).toHaveBeenCalledTimes(model.oldDownloads)
+        expect(real.newResolveCount()).toBe(model.newCopies)
+      }
+      toString() {
+        return 'return to the old Files owner without replay'
+      }
+    }
+
+    const commands = [
+      new ResolveOld(),
+      new ReportOldLocation(),
+      new CancelOld(),
+      new SupersedeOld(),
+      new SessionChange(),
+      new SettleStaleOld(),
+      new ReturnOld(),
+    ]
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands(
+          commands.map(command => fc.constant(command)),
+          { maxCommands: 4 }
+        ),
+        async (scheduler, generatedCommands) => {
+          const generated = [...generatedCommands]
+          const names = generated.map(command => command.toString())
+          const reportIndex = names.findIndex(name => name.includes('action-owned URI'))
+          const resolveIndex = names.findIndex(name => name.includes('resolve and acknowledge'))
+          const otherTerminalIndices = names
+            .map((name, index) => ({ name, index }))
+            .filter(({ name }) =>
+              /cancel the pending old action|distinct Files owner|change session/.test(name)
+            )
+            .map(({ index }) => index)
+          fc.pre(
+            reportIndex >= 0 &&
+              resolveIndex > reportIndex &&
+              otherTerminalIndices.every(index => index > resolveIndex)
+          )
+          const oldFile = await resolveResource(
+            resolvedFile('abababababababababababababababab', 'archive.bin')
+          )
+          const newFile = await resolveResource(
+            resolvedFile('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', 'second.bin')
+          )
+          const { gfs, deleteResource } = installClerum([oldFile, newFile])
+          const originalResolve = gfs.resolve
+          let oldResolveCount = 0
+          Object.assign(gfs, {
+            resolve: vi.fn((uri: string) => {
+              if (uri === oldFile.gfsUri) {
+                oldResolveCount += 1
+                return scheduler.schedule(
+                  new Promise(resolve => {
+                    setTimeout(() => {
+                      originalResolve(uri).then(resolve)
+                    }, 0)
+                  }),
+                  'old file resolution'
+                )
+              }
+              return originalResolve(uri)
+            }),
+          })
+          const download = vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer }))
+          Object.assign(gfs, { download })
+          const savedFiles: string[] = []
+          vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+            this: HTMLAnchorElement
+          ) {
+            savedFiles.push(this.download)
+          })
+          appHarness.useRealNavigationController = true
+          renderApp()
+          fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+          await findResourceTreeRow(oldFile.name)
+          await findResourceTreeRow(newFile.name)
+          await chooseRowAction(oldFile.name, 'Download')
+          await waitFor(() => expect(oldResolveCount).toBe(1))
+          const oldOwner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+          expect(oldOwner?.kind).toBe('files')
+          const initialModel: Model = {
+            active: 'old-files',
+            oldStatus: 'pending',
+            oldRequestId: (appHarness.filesPageLatestPendingAction as { id: number }).id,
+            oldOwnerId: oldOwner!.id,
+            oldDownloads: 0,
+            oldPath: oldFile.gfsUri,
+            oldLocationReported: false,
+            consumedSeed: null,
+            newCopies: 0,
+            newPath: null,
+            session: 1,
+            intent: 1,
+          }
+          const real: Real = {
+            scheduler,
+            oldOwnerId: oldOwner!.id,
+            oldUri: oldFile.gfsUri,
+            newUri: newFile.gfsUri,
+            reportOldLocation: async () => {
+              act(() => appHarness.filesPageReportLocation?.(oldFile.gfsUri, oldFile.name))
+            },
+            resolveOld: async expectDownload => {
+              await act(async () => scheduler.waitAll())
+              await waitFor(() => expect(oldResolveCount).toBeGreaterThanOrEqual(1))
+              await Promise.resolve()
+              await waitFor(() => expect(download).toHaveBeenCalledTimes(expectDownload ? 1 : 0))
+              await waitFor(() => expect(savedFiles).toHaveLength(expectDownload ? 1 : 0))
+            },
+            cancelOld: async () => {
+              act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
+              await waitFor(() =>
+                expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+              )
+            },
+            supersedeOld: async () => {
+              await chooseRowAction(newFile.name, 'Copy link')
+              await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1))
+            },
+            returnOld: async () => {
+              if (activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id !== 'chat-tab-1') {
+                act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
+                await waitFor(() =>
+                  expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+                )
+              }
+              act(() => appHarness.controller.selectWorkspaceTabById(oldOwner!.id))
+              await waitFor(() =>
+                expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(
+                  oldOwner!.id
+                )
+              )
+            },
+            download,
+            savedFiles,
+            oldResolveCount: () => oldResolveCount,
+            newResolveCount: () =>
+              gfs.resolve.mock.calls.filter(([uri]) => uri === newFile.gfsUri).length,
+          }
+          let model = initialModel
+          try {
+            if (!generated.length)
+              generated.push(new CancelOld(), new SettleStaleOld(), new ReturnOld())
+            await fc.asyncModelRun(() => ({ model, real }), generated)
+            if (model.oldStatus === 'pending') {
+              await new SessionChange().run(model, real)
+            }
+            if (model.oldStatus === 'cancelled' || model.oldStatus === 'superseded') {
+              await real.resolveOld(false)
+              await real.returnOld()
+              Object.assign(model, reduceModel(model, { kind: 'return-old' }))
+            }
+            await scheduler.waitAll()
+            await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+            expect(download).toHaveBeenCalledTimes(model.oldDownloads)
+            expect(savedFiles).toHaveLength(model.oldDownloads)
+            expect(oldResolveCount).toBe(1)
+            expect(deleteResource).not.toHaveBeenCalled()
+            expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+            if (model.consumedSeed) {
+              expect(model.consumedSeed).toEqual({
+                requestId: model.oldRequestId,
+                path: oldFile.gfsUri,
+              })
+              expect(model.oldOwnerId).toBe(oldOwner!.id)
+            }
+          } finally {
+            cleanup()
+            vi.restoreAllMocks()
+          }
+        }
+      ),
+      { numRuns: 5, maxSkipsPerRun: 1000, endOnFailure: true, seed: 281110 }
+    )
+  })
+
+  it('runs explicit-link and close-owner commands through real Files navigation', async () => {
+    type Model = {
+      activeTabId: string
+      requestId: number
+      consumedSeed: { requestId: number; path: string } | null
+      session: number
+      intent: number
+      path: string | null
+      downloads: number
+      explicit: boolean
+      closed: boolean
+    }
+    type Real = {
+      scheduler: Scheduler
+      ownerTabId: string
+      archiveUri: string
+      download: ReturnType<typeof vi.fn>
+    }
+    class ExplicitDeepLink implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return !model.explicit && !model.closed
+      }
+      async run(model: Model, real: Real) {
+        act(() => appHarness.controller.openFilesSectionWithReceipt(real.archiveUri))
+        await real.scheduler.waitAll()
+        await waitFor(() => expect(real.download).toHaveBeenCalledTimes(1))
+        expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+        model.explicit = true
+        model.consumedSeed = null
+        model.path = real.archiveUri
+        model.downloads = 1
+        const explicitOwner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+        expect(explicitOwner?.id).not.toBe(real.ownerTabId)
+        model.activeTabId = explicitOwner!.id
+        expect(
+          appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === model.activeTabId)
+        ).toMatchObject({ kind: 'files', files: { path: real.archiveUri } })
+      }
+      toString() {
+        return 'Open an explicit non-action file deep link'
+      }
+    }
+    class CloseOwner implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.explicit && !model.closed
+      }
+      async run(model: Model, real: Real) {
+        act(() =>
+          appHarness.controller.setWorkspaceTabs(state => closeWorkspaceTab(state, real.ownerTabId))
+        )
+        await waitFor(() =>
+          expect(
+            appHarness.controller.workspaceTabs.tabs.some(tab => tab.id === real.ownerTabId)
+          ).toBe(false)
+        )
+        model.closed = true
+        model.path = real.archiveUri
+        expect(model.session).toBe(1)
+        expect(model.intent).toBeGreaterThan(0)
+      }
+      toString() {
+        return 'Close the Files owner after an explicit request settles'
+      }
+    }
+
+    const scheduler = fc.sample(fc.scheduler(), { numRuns: 1 })[0]!
+    const archive = await resolveResource(
+      resolvedFile('abababababababababababababababab', 'archive.bin')
+    )
+    const { gfs } = installClerum([archive])
+    const originalDownload = gfs.download
+    const download = vi.fn((uri: string) =>
+      scheduler.schedule(originalDownload(uri), 'explicit file download operation')
+    )
+    Object.assign(gfs, { download })
+    const clipboardWrite = vi.fn(async (_value: string) => {})
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt())
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: null },
+      })
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(archive.name)
+    await chooseRowAction(archive.name, 'Copy file ID')
+    await scheduler.waitAll()
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledTimes(1))
+    const owner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+    expect(owner?.kind).toBe('files')
+    const ownerTabId = owner!.id
+    expect(appHarness.filesPagePendingActions).toHaveLength(0)
+    const model: Model = {
+      activeTabId: ownerTabId,
+      requestId: 0,
+      consumedSeed: null,
+      session: 1,
+      intent: 1,
+      path: null,
+      downloads: 0,
+      explicit: false,
+      closed: false,
+    }
+    const real: Real = {
+      scheduler,
+      ownerTabId,
+      archiveUri: archive.gfsUri,
+      download,
+    }
+    const explicit = new ExplicitDeepLink()
+    const close = new CloseOwner()
+    await fc.asyncModelRun(() => ({ model, real }), [explicit, close])
+    await scheduler.waitAll()
+    expect(model).toMatchObject({
+      consumedSeed: null,
+      downloads: 1,
+      explicit: true,
+      closed: true,
+    })
+    expect(download).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+  })
+
+  it('re-arms a same-owner same-URI successor under its own action request', async () => {
+    const firstResolve = deferred<unknown>()
+    const archive = await resolveResource(
+      resolvedFile('abababababababababababababababab', 'archive.bin')
+    )
+    const { gfs, deleteResource } = installClerum([archive])
+    const originalResolve = gfs.resolve
+    let targetCallCount = 0
+    Object.assign(gfs, {
+      resolve: vi.fn((uri: string) => {
+        if (uri === archive.gfsUri && targetCallCount++ === 0) return firstResolve.promise
+        return originalResolve(uri)
+      }),
+    })
+    appHarness.useRealNavigationController = true
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(archive.name)
+    await chooseDeleteAction(archive.name)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(archive.gfsUri))
+    await chooseRowAction(archive.name, 'Copy link')
+    await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1))
+    expect(targetCallCount).toBe(2)
+    expect(deleteResource).not.toHaveBeenCalled()
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: null },
+      })
+    )
+    await act(async () => {
+      firstResolve.resolve(archive)
+      await firstResolve.promise
+    })
+    expect(deleteResource).not.toHaveBeenCalled()
+    expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+  })
+
+  it('supersedes a delayed action into another Files owner without replaying the old owner', async () => {
+    const firstResolve = deferred<unknown>()
+    const archive = await resolveResource(
+      resolvedFile('abababababababababababababababab', 'archive.bin')
+    )
+    const second = await resolveResource(
+      resolvedFile('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', 'second.bin')
+    )
+    const { gfs, deleteResource } = installClerum([archive, second])
+    const originalResolve = gfs.resolve
+    let archiveCalls = 0
+    Object.assign(gfs, {
+      resolve: vi.fn((uri: string) => {
+        if (uri === archive.gfsUri && archiveCalls++ === 0) return firstResolve.promise
+        return originalResolve(uri)
+      }),
+    })
+    appHarness.useRealNavigationController = true
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(archive.name)
+    await findResourceTreeRow(second.name)
+    await chooseDeleteAction(archive.name)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(archive.gfsUri))
+    const oldOwner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+    expect(oldOwner?.kind).toBe('files')
+    const oldOwnerId = oldOwner!.id
+
+    await chooseRowAction(second.name, 'Copy link')
+    await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1))
+    const newOwner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+    expect(newOwner?.kind).toBe('files')
+    expect(newOwner!.id).not.toBe(oldOwnerId)
+    expect(
+      appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === oldOwnerId)
+    ).toMatchObject({ kind: 'files', files: { path: null } })
+    const archiveResolveCount = archiveCalls
+    const secondResolveCount = gfs.resolve.mock.calls.filter(
+      ([uri]) => uri === second.gfsUri
+    ).length
+
+    await act(async () => {
+      firstResolve.resolve(archive)
+      await firstResolve.promise
+    })
+    expect(deleteResource).not.toHaveBeenCalled()
+    act(() => appHarness.controller.selectWorkspaceTabById(oldOwnerId))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(oldOwnerId)
+    )
+    expect(archiveCalls).toBe(archiveResolveCount)
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === second.gfsUri)).toHaveLength(
+      secondResolveCount
+    )
+    expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1)
+    expect(
+      appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === newOwner!.id)
+    ).toMatchObject({ kind: 'files', files: { path: null } })
+    expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+  })
+
+  it.each(['tab-selection', 'session-change'] as const)(
+    'cancels a delayed action on real %s and keeps its file path consumed',
+    async cancellation => {
+      const delayedTarget = deferred<unknown>()
+      const archive = await resolveResource(
+        resolvedFile('abababababababababababababababab', 'archive.bin')
+      )
+      const { gfs, deleteResource } = installClerum([archive])
+      const originalResolve = gfs.resolve
+      let targetCalls = 0
+      Object.assign(gfs, {
+        resolve: vi.fn((uri: string) => {
+          if (uri === archive.gfsUri) {
+            targetCalls += 1
+            return delayedTarget.promise
+          }
+          return originalResolve(uri)
+        }),
+      })
+      appHarness.useRealNavigationController = true
+      renderApp()
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      await findResourceTreeRow(archive.name)
+      await chooseDeleteAction(archive.name)
+      await waitFor(() => expect(targetCalls).toBe(1))
+      const owner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+      expect(owner?.kind).toBe('files')
+
+      if (cancellation === 'session-change') {
+        act(() => {
+          appHarness.controller.sessionGeneration = 2
+          appHarness.forceRender()
+        })
+        await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+      }
+      act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+      )
+      expect(
+        appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === owner!.id)
+      ).toMatchObject({ kind: 'files', files: { path: null } })
+      await act(async () => {
+        delayedTarget.resolve(archive)
+        await delayedTarget.promise
+      })
+      act(() => appHarness.controller.selectWorkspaceTabById(owner!.id))
+      await waitFor(() =>
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe(owner!.id)
+      )
+      expect(targetCalls).toBe(1)
+      expect(deleteResource).not.toHaveBeenCalled()
+      expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+    }
+  )
+
+  it('closes a pending action owner without stealing the explicit Files owner', async () => {
+    const locationScheduler = fc.sample(fc.scheduler(), { numRuns: 1 })[0]!
+    type Model = {
+      oldOwnerId: string
+      explicitOwnerId: string | null
+      requestId: number
+      active: 'old-files' | 'chat' | 'explicit-files'
+      consumedSeed: { requestId: number; path: string } | null
+      oldDownloads: number
+      explicitDownloads: number
+      locationReports: number
+      settled: boolean
+      path: string | null
+    }
+    type Real = {
+      scheduler: Scheduler
+      oldOwnerId: string
+      oldUri: string
+      explicitUri: string
+      resolveOld: () => Promise<void>
+      closeOldOwner: () => Promise<void>
+      openExplicitOwner: () => Promise<string>
+      reportLocation: () => Promise<void>
+      explicitOwnerId: string | null
+      oldResolveCount: () => number
+      download: ReturnType<typeof vi.fn>
+    }
+    const reduce = (model: Model, event: 'close' | 'explicit' | 'settle-old'): Model => {
+      if (event === 'close') return { ...model, active: 'chat', consumedSeed: null, path: null }
+      if (event === 'explicit')
+        return {
+          ...model,
+          active: 'explicit-files',
+          explicitOwnerId: 'new-explicit-owner',
+          explicitDownloads: 1,
+          path: 'explicit-uri',
+        }
+      return { ...model, oldDownloads: 0 }
+    }
+    class CloseOldOwner implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.active === 'old-files'
+      }
+      async run(model: Model, real: Real) {
+        await real.closeOldOwner()
+        Object.assign(model, reduce(model, 'close'))
+        expect(model.consumedSeed).toBeNull()
+        expect(
+          appHarness.controller.workspaceTabs.tabs.some(tab => tab.id === real.oldOwnerId)
+        ).toBe(false)
+      }
+      toString() {
+        return 'CloseOwner: close the pending Files owner'
+      }
+    }
+    class ExplicitDeepLink implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.active === 'chat' && model.consumedSeed === null
+      }
+      async run(model: Model, real: Real) {
+        const newOwnerId = await real.openExplicitOwner()
+        Object.assign(model, reduce(model, 'explicit'))
+        model.explicitOwnerId = newOwnerId
+        expect(
+          appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === newOwnerId)
+        ).toMatchObject({ kind: 'files', files: { path: real.explicitUri } })
+      }
+      toString() {
+        return 'ExplicitDeepLink: open a new Files owner'
+      }
+    }
+    class ReportLocation implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return (
+          model.active === 'explicit-files' &&
+          model.explicitOwnerId !== null &&
+          model.locationReports === 0
+        )
+      }
+      async run(_model: Model, real: Real) {
+        await real.reportLocation()
+        _model.locationReports += 1
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          id: real.explicitOwnerId,
+          kind: 'files',
+          files: { path: real.explicitUri },
+        })
+      }
+      toString() {
+        return 'ReportLocation: report the explicit Files location'
+      }
+    }
+    class SettleStaleOld implements AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.active === 'explicit-files' && model.explicitOwnerId !== null && !model.settled
+      }
+      async run(model: Model, real: Real) {
+        await real.resolveOld()
+        Object.assign(model, reduce(model, 'settle-old'))
+        model.settled = true
+        expect(real.oldResolveCount()).toBe(1)
+        expect(real.download).toHaveBeenCalledTimes(model.explicitDownloads)
+        expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+          id: model.explicitOwnerId,
+          kind: 'files',
+          files: { path: real.explicitUri },
+        })
+        expect(
+          appHarness.controller.workspaceTabs.tabs.some(tab => tab.id === real.oldOwnerId)
+        ).toBe(false)
+        expect(appHarness.filesPageLatestPendingAction).toBeNull()
+      }
+      toString() {
+        return 'SettleStaleResolver: settle without changing the explicit owner'
+      }
+    }
+
+    const scheduler = fc.sample(fc.scheduler(), { numRuns: 1 })[0]!
+    const archive = await resolveResource(
+      resolvedFile('abababababababababababababababab', 'archive.bin')
+    )
+    const second = await resolveResource(
+      resolvedFile('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', 'second.bin')
+    )
+    const oldResolution = deferred<unknown>()
+    const { gfs } = installClerum([archive, second])
+    const originalResolve = gfs.resolve
+    let oldResolveCount = 0
+    Object.assign(gfs, {
+      resolve: vi.fn((uri: string) => {
+        if (uri === archive.gfsUri) {
+          oldResolveCount += 1
+          return scheduler.schedule(oldResolution.promise, 'pending old file resolver')
+        }
+        return originalResolve(uri)
+      }),
+    })
+    const originalDownload = gfs.download
+    const download = vi.fn((uri: string) => originalDownload(uri))
+    Object.assign(gfs, { download })
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:r2-h1-pending-owner'),
+    })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(archive.name)
+    await findResourceTreeRow(second.name)
+    await chooseRowAction(archive.name, 'Download')
+    await waitFor(() => expect(oldResolveCount).toBe(1))
+    const owner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+    expect(owner?.kind).toBe('files')
+    const ownerTabId = owner!.id
+    const requestId = (appHarness.filesPagePendingActions.at(-1) as { id: number }).id
+    const model: Model = {
+      oldOwnerId: ownerTabId,
+      explicitOwnerId: null,
+      requestId,
+      active: 'old-files',
+      consumedSeed: { requestId, path: archive.gfsUri },
+      oldDownloads: 0,
+      explicitDownloads: 0,
+      locationReports: 0,
+      settled: false,
+      path: archive.gfsUri,
+    }
+    const real: Real = {
+      scheduler,
+      oldOwnerId: ownerTabId,
+      oldUri: archive.gfsUri,
+      explicitUri: second.gfsUri,
+      explicitOwnerId: null,
+      resolveOld: async () => {
+        await act(async () => {
+          oldResolution.resolve(archive)
+          await oldResolution.promise
+          await scheduler.waitAll()
+        })
+      },
+      closeOldOwner: async () => {
+        act(() =>
+          appHarness.controller.setWorkspaceTabs(state => closeWorkspaceTab(state, ownerTabId))
+        )
+        await waitFor(() =>
+          expect(appHarness.controller.workspaceTabs.tabs.some(tab => tab.id === ownerTabId)).toBe(
+            false
+          )
+        )
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+        )
+      },
+      openExplicitOwner: async () => {
+        act(() => appHarness.controller.openFilesSectionWithReceipt(second.gfsUri))
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+            kind: 'files',
+            files: { path: second.gfsUri },
+          })
+        )
+        await waitFor(() => expect(download).toHaveBeenCalledTimes(1))
+        const active = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+        real.explicitOwnerId = active!.id
+        return active!.id
+      },
+      reportLocation: async () => {
+        const scheduledReport = locationScheduler
+          .schedule(Promise.resolve(), 'Files location report')
+          .then(() => appHarness.filesPageReportLocation?.(second.gfsUri, second.name))
+        await act(async () => locationScheduler.waitFor(scheduledReport))
+      },
+      oldResolveCount: () => oldResolveCount,
+      download,
+    }
+    const close = new CloseOldOwner()
+    const explicit = new ExplicitDeepLink()
+    const report = new ReportLocation()
+    const settle = new SettleStaleOld()
+    const generated = fc
+      .sample(
+        fc.commands(
+          [close, explicit, report, settle].map(command => fc.constant(command)),
+          { maxCommands: 4, size: '+1' }
+        ),
+        { numRuns: 10000, seed: 281110 }
+      )
+      .map(sample => [...sample])
+      .find(commands => {
+        const names = commands.map(command => command.toString().split(':', 1)[0])
+        return (
+          names.length === 4 &&
+          names[0] === 'CloseOwner' &&
+          names[1] === 'ExplicitDeepLink' &&
+          new Set(names.slice(2)).size === 2 &&
+          names.slice(2).includes('ReportLocation') &&
+          names.slice(2).includes('SettleStaleResolver')
+        )
+      })
+    expect(generated).toBeDefined()
+    await fc.asyncModelRun(() => ({ model, real }), generated!)
+    expect(model).toMatchObject({
+      active: 'explicit-files',
+      consumedSeed: null,
+      explicitDownloads: 1,
+      locationReports: 1,
+      settled: true,
+      oldDownloads: 0,
+      path: 'explicit-uri',
+    })
+    expect(download).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+  })
+
+  it('keeps a consumed file path at root after Rename reports the same URI', async () => {
+    const scheduler = fc.sample(fc.scheduler(), { numRuns: 1 })[0]!
+    const file = await resolveResource(
+      resolvedFile('abababababababababababababababab', 'before.txt')
+    )
+    const renameResource = vi.fn(() =>
+      scheduler.schedule(Promise.resolve({}), 'Rename operation before location acknowledgment')
+    )
+    const { gfs } = installClerum([file], new Map(), { affordanceBits: ['write'] })
+    Object.assign(gfs, { renameResource })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    await chooseRowAction(file.name, 'Rename')
+    const renameForms = await screen.findAllByRole('form', { name: 'Rename resource' })
+    const renameForm = renameForms.at(-1)!
+    fireEvent.change(within(renameForm).getByLabelText('New name'), {
+      target: { value: 'after.txt' },
+    })
+    fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
+    await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(1))
+    await scheduler.waitAll()
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'after.txt' }).length).toBeGreaterThan(0)
+    )
+    await waitFor(() =>
+      expect(appHarness.filesPageLastLocation).toMatchObject({
+        gfsUri: file.gfsUri,
+        name: 'before.txt',
+      })
+    )
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: null },
+      })
+    )
+    const resolveCount = gfs.resolve.mock.calls.filter(([uri]) => uri === file.gfsUri).length
+    act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+    )
+    const filesTab = appHarness.controller.workspaceTabs.tabs.find(tab => tab.kind === 'files')
+    expect(filesTab).toBeDefined()
+    act(() => appHarness.controller.selectWorkspaceTabById(filesTab!.id))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
+    )
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === file.gfsUri)).toHaveLength(resolveCount)
+    expect(renameResource).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+  })
+
+  it('keeps in-page folder navigation from replaying its previous Files seed', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('abababababababababababababababab', 'Parent folder')
+    )
+    const child = await resolveResource(
+      resolvedDirectory('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', 'Child folder', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const childRow = childView(child.resourceId, child.name, 'directory', {
+      gfsUri: child.gfsUri,
+      parentResourceId: parent.resourceId,
+      version: child.version,
+    })
+    const { gfs } = installClerum([parent, child], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parent.resourceId, [childRow]]]),
+    })
+    const originalResolve = gfs.resolve
+    Object.assign(gfs, {
+      resolve: vi.fn((uri: string) => originalResolve(uri)),
+    })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt(null))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    fireEvent.click(await within(filesBrowser).findByRole('button', { name: parent.name }))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+    )
+    await within(filesBrowser).findByRole('button', { name: child.name })
+    const parentResolveCount = gfs.resolve.mock.calls.filter(
+      ([uri]) => uri === parent.gfsUri
+    ).length
+    fireEvent.click(within(filesBrowser).getByRole('button', { name: child.name }))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: child.gfsUri },
+      })
+    )
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === parent.gfsUri)).toHaveLength(
+      parentResolveCount
+    )
+  })
+
+  it('does not preview a markdown file on return after a Files-owned Copy ID action', async () => {
+    const markdown = await resolveResource(
+      resolvedFile('acacacacacacacacacacacacacacacac', 'readme.md')
+    )
+    const { gfs } = installClerum([markdown])
+    const clipboardWrite = vi.fn(async (_value: string) => {})
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    })
+    appHarness.useRealNavigationController = true
+    renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt())
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: null },
+      })
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(markdown.name)
+    await chooseRowAction(markdown.name, 'Copy file ID')
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: null },
+      })
+    )
+    const targetResolveCount = gfs.resolve.mock.calls.filter(
+      ([uri]) => uri === markdown.gfsUri
+    ).length
+    const filesTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+    expect(filesTab?.kind).toBe('files')
+    act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+    )
+    act(() => appHarness.controller.selectWorkspaceTabById(filesTab!.id))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
+    )
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === markdown.gfsUri)).toHaveLength(
+      targetResolveCount
+    )
+    expect(clipboardWrite).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
+  })
+
+  it('preserves explicit markdown deep-link Preview through the production navigation hook', async () => {
+    const markdown = await resolveResource(
+      resolvedFile('efefefefefefefefefefefefefefefef', 'guide.md')
+    )
+    const { gfs } = installClerum([markdown])
+    appHarness.useRealNavigationController = true
+    renderApp()
+
+    act(() => appHarness.controller.openFilesSectionWithReceipt(markdown.gfsUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'preview',
+        preview: { gfsUri: markdown.gfsUri },
+      })
+    )
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === markdown.gfsUri)).toHaveLength(1)
+  })
+
+  it('preserves explicit non-previewable deep-link download and tab-path behavior', async () => {
+    const archive = await resolveResource(
+      resolvedFile('abababababababababababababababab', 'archive.bin')
+    )
+    const { gfs } = installClerum([archive])
+    const savedFiles: string[] = []
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer }))
+    Object.assign(gfs, { download })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      savedFiles.push(this.download)
+    })
+    appHarness.useRealNavigationController = true
+    renderApp()
+
+    act(() => appHarness.controller.openFilesSectionWithReceipt(archive.gfsUri))
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(savedFiles).toHaveLength(1))
+    expect(
+      within(screen.getByRole('navigation', { name: 'File location' })).getByText('Shared with me')
+    ).toBeTruthy()
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: archive.gfsUri },
+      })
+    )
+    const filesTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+    expect(filesTab).toMatchObject({ kind: 'files', files: { path: archive.gfsUri } })
+
+    act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+    )
+    act(() => appHarness.controller.selectWorkspaceTabById(filesTab!.id))
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(savedFiles).toHaveLength(2))
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === archive.gfsUri)).toHaveLength(2)
+    expect(
+      within(screen.getByRole('navigation', { name: 'File location' })).getByText('Shared with me')
+    ).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
   })
 
   it('does not replay a completed action after reaching its target, leaving, and returning', async () => {
@@ -2925,7 +4257,7 @@ describe('App → Files action lifecycle integration', () => {
     await waitFor(() =>
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
         kind: 'files',
-        files: { path: targetA.gfsUri },
+        files: { path: null },
       })
     )
 
@@ -2934,18 +4266,17 @@ describe('App → Files action lifecycle integration', () => {
     ).length
     fireEvent.click(getWorkspaceTabButtons('Files')[0]!)
     await waitFor(() => expect(screen.queryByText('Delete target-a.txt?')).toBeNull())
-    fireEvent.click(getWorkspaceTabButtons('target-a.txt')[0]!)
-    await waitFor(() =>
-      expect(
-        gfs.resolve.mock.calls.filter(([uri]) => uri === targetA.gfsUri).length
-      ).toBeGreaterThan(targetResolveCount)
-    )
+    fireEvent.click(getWorkspaceTabButtons('Files')[0]!)
     await waitFor(() =>
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
-        kind: 'preview',
-        preview: { gfsUri: targetA.gfsUri },
+        kind: 'files',
+        files: { path: null },
       })
     )
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === targetA.gfsUri).length).toBe(
+      targetResolveCount
+    )
+    expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
     expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1)
   })
@@ -2997,7 +4328,7 @@ describe('App → Files action lifecycle integration', () => {
         version: target.version,
         readable,
       })
-      const { moveResource } = installClerum([parent, target, destination], new Map(), {
+      const { gfs, moveResource } = installClerum([parent, target, destination], new Map(), {
         accessibleRows: [
           accessibleResource(parent.resourceId, parent.name, 'directory', {
             gfsUri: parent.gfsUri,
@@ -3046,6 +4377,9 @@ describe('App → Files action lifecycle integration', () => {
       const filesCalls = moveResource.mock.calls.map(call => [...call])
       moveResource.mockClear()
 
+      const parentResolveCountBeforeSidebar = gfs.resolve.mock.calls.filter(
+        ([uri]) => uri === parent.gfsUri
+      ).length
       await chooseRowAction(target.name, 'Move to')
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
         kind: 'files',
@@ -3075,6 +4409,9 @@ describe('App → Files action lifecycle integration', () => {
       )
       expect(moveResource.mock.calls.map(call => [...call])).toEqual(filesCalls)
       expect(sidebarDialogText).toBe(filesDialogText)
+      expect(gfs.resolve.mock.calls.filter(([uri]) => uri === parent.gfsUri)).toHaveLength(
+        parentResolveCountBeforeSidebar
+      )
     }
   )
 
