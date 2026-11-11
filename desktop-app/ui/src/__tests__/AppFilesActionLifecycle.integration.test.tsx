@@ -3748,6 +3748,64 @@ describe('App → Files action lifecycle integration', () => {
     expect(owner.get(previewRecord!.binding)).toBeNull()
   })
 
+  it('keeps post-switch publication neutral when auth preclear arrives before React commit', async () => {
+    const markdown = await resolveResource(
+      resolvedFile('70707070707070707070707070707070', 'post-switch-preclear.md')
+    )
+    const { gfs } = installClerum([markdown])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('post-switch-chat'), {
+        id: 'post-switch-files',
+        path: null,
+      })
+    )
+    appHarness.controller.desktopEnvironmentSetupComplete = false
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /post-switch-preclear\.md/ })
+    await chooseRowAction('post-switch-preclear.md', 'Preview')
+    await screen.findByRole('heading', { name: 'post-switch-preclear.md', level: 2 })
+    const resolveCount = gfs.resolve.mock.calls.length
+    const downloadCount = gfs.downloadPreview.mock.calls.length
+
+    let acknowledge!: (value: boolean) => void
+    let acknowledgementStarted = false
+    const acknowledgement = new Promise<boolean>(resolve => {
+      acknowledge = resolve
+    })
+    appHarness.acknowledgeSessionPreclear = async () => {
+      acknowledgementStarted = true
+      expect(screen.getByTestId('markdown-auth-neutral-surface')).toBeTruthy()
+      return acknowledgement
+    }
+
+    act(() => {
+      // Model the successful Team B publication followed synchronously by the
+      // main-process preclear event, before React can commit the B preview.
+      appHarness.controller.me = {
+        ...appHarness.controller.me!,
+        teamId: 'team-b',
+        teamName: 'Team B',
+      }
+      appHarness.controller.currentTeamId = 'team-b'
+      appHarness.controller.sessionGeneration = 2
+      appHarness.forceRender()
+      appHarness.sessionPreclear?.({
+        transitionId: 72,
+        sessionGeneration: 2,
+        reason: 'environment-change',
+      })
+    })
+
+    expect(acknowledgementStarted).toBe(true)
+    expect(screen.getByTestId('markdown-auth-neutral-surface')).toBeTruthy()
+    expect(appHarness.controller.currentTeamId).toBe('team-b')
+    expect(gfs.resolve).toHaveBeenCalledTimes(resolveCount)
+    expect(gfs.downloadPreview).toHaveBeenCalledTimes(downloadCount)
+    await act(async () => acknowledge(true))
+    act(() => appHarness.sessionCleared?.())
+  })
+
   it('blocks tab close during Save and releases the block after a failed Save', async () => {
     const markdown = await resolveResource(
       resolvedFile('77777777777777777777777777777777', 'pending-save.md')
