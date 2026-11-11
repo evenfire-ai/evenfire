@@ -48,6 +48,15 @@ from urllib.parse import urlsplit
 
 diff = Path(sys.argv[1]).read_text(errors="replace")
 bad = []
+# Mirrors the `!.env.*` exceptions in .gitignore: env templates committed on
+# purpose. Any other `.env.*` file name is reported as sensitive.
+TRACKED_ENV_TEMPLATES = {
+    ".env.example",
+    ".env.test",
+    ".env.e2e.example",
+    ".env.dev.example",
+    ".env.quickstart.example",
+}
 current = ""
 root = Path(sys.argv[2]).resolve()
 
@@ -162,7 +171,13 @@ for line in diff.splitlines():
             or ("screenshot" in path and not public_capture_source(current))
             or "e2e-artifacts" in path
         ):
-            if not (path.endswith(".env.example") or path.endswith(".env.test")):
+            # The env templates .gitignore tracks on purpose (its `!.env.*`
+            # lines) are public by design; their contents are still scanned.
+            if not (
+                path.endswith(".env.example")
+                or path.endswith(".env.test")
+                or path_parts[-1] in TRACKED_ENV_TEMPLATES
+            ):
                 finding = (current, "sensitive file name")
                 if finding not in bad:
                     bad.append(finding)

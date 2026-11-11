@@ -853,6 +853,51 @@ grep -Fq 'bearer token' "$tmp/malicious-public.err"
 grep -Fq 'private key' "$tmp/malicious-public.err"
 grep -Fq 'sensitive file name' "$tmp/malicious-public.err"
 
+# The env templates .gitignore tracks on purpose (.gitignore `!.env.*` lines)
+# may change; any other `.env.*` name stays a sensitive file. The template's
+# contents are still scanned.
+env_template_case() {
+  local name="$1" file="$2" line="$3"
+  local case_repo="$tmp/public-env-${name}"
+  mkdir -p "$case_repo"
+  git init -q -b dev "$case_repo"
+  git -C "$case_repo" config user.email test@example.invalid
+  git -C "$case_repo" config user.name boundary-test
+  printf 'base\n' >"$case_repo/README.md"
+  git -C "$case_repo" add README.md
+  git -C "$case_repo" commit -q -m base
+  ENV_CASE_BASE="$(git -C "$case_repo" rev-parse HEAD)"
+  ENV_CASE_REPO="$case_repo"
+  mkdir -p "$(dirname "$case_repo/$file")"
+  printf '%s\n' "$line" >"$case_repo/$file"
+}
+for template in .env.dev.example .env.quickstart.example desktop-app/.env.e2e.example; do
+  env_template_case "accept-$(basename "$template")" "$template" '# Required: set in your own copy.'
+  if ! T2_PUBLIC_ROOT="$ENV_CASE_REPO" T2_PUBLIC_BASE_REF="$ENV_CASE_BASE" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/env-accept.out" 2>"$tmp/env-accept.err"; then
+    echo "FAIL: public boundary rejected the tracked env template $template" >&2
+    cat "$tmp/env-accept.err" >&2
+    exit 1
+  fi
+  grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/env-accept.out"
+done
+for sensitive in .env.dev .env.dev.example.bak .env.staging.example; do
+  env_template_case "reject-$sensitive" "$sensitive" '# Required: set in your own copy.'
+  if T2_PUBLIC_ROOT="$ENV_CASE_REPO" T2_PUBLIC_BASE_REF="$ENV_CASE_BASE" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/env-reject.err"; then
+    echo "FAIL: public boundary accepted the untracked env file name $sensitive" >&2
+    exit 1
+  fi
+  grep -Fq "$sensitive: sensitive file name" "$tmp/env-reject.err"
+done
+env_template_case content-secret .env.dev.example 'PASS''WORD=ProdCustomerPassword123'
+if T2_PUBLIC_ROOT="$ENV_CASE_REPO" T2_PUBLIC_BASE_REF="$ENV_CASE_BASE" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/env-content.err"; then
+  echo 'FAIL: public boundary accepted a credential inside a tracked env template' >&2
+  exit 1
+fi
+grep -Fq 'credential assignment' "$tmp/env-content.err"
+
 # A logger test asserts the redaction marker under a secret-named key; that is
 # not a credential. A real value, or one that merely contains the marker, is.
 marker_repo="$tmp/public-marker-repo"
