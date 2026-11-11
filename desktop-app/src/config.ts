@@ -219,6 +219,30 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
   return profileUiBaseUrlFromExternalRestApi(externalRestApiBaseUrl) || 'http://127.0.0.1:3001'
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+}
+
+function sameProfileUiPairingRestEndpoint(left: string, right: string): boolean {
+  try {
+    const leftUrl = new URL(canonicalizeDesktopRestEndpoint(left))
+    const rightUrl = new URL(canonicalizeDesktopRestEndpoint(right))
+    const hostsMatch =
+      leftUrl.hostname === rightUrl.hostname ||
+      (isLoopbackHostname(leftUrl.hostname) && isLoopbackHostname(rightUrl.hostname))
+
+    return (
+      hostsMatch &&
+      leftUrl.protocol === rightUrl.protocol &&
+      leftUrl.port === rightUrl.port &&
+      leftUrl.pathname === rightUrl.pathname &&
+      leftUrl.search === rightUrl.search
+    )
+  } catch {
+    return false
+  }
+}
+
 /** Resolve the Profile origin paired with the currently active Desktop deployment. */
 export function getActiveDeploymentProfileUiBaseUrl(): string {
   const externalRestApiBaseUrl = config.externalRestApiBaseUrl
@@ -226,7 +250,7 @@ export function getActiveDeploymentProfileUiBaseUrl(): string {
   const explicitPairMatches =
     config.desktopProfileUiBaseUrlExplicit &&
     configuredProfileUiRestBaseUrl &&
-    sameDesktopRestEndpoint(externalRestApiBaseUrl, configuredProfileUiRestBaseUrl)
+    sameProfileUiPairingRestEndpoint(externalRestApiBaseUrl, configuredProfileUiRestBaseUrl)
 
   if (explicitPairMatches) {
     const explicitProfileUiBaseUrl = normalizeConfiguredProfileUiOrigin(
@@ -238,9 +262,9 @@ export function getActiveDeploymentProfileUiBaseUrl(): string {
       )
     }
 
-    const restUrl = new URL(externalRestApiBaseUrl)
+    const restUrl = new URL(canonicalizeDesktopRestEndpoint(externalRestApiBaseUrl))
     const explicitProfileUrl = new URL(explicitProfileUiBaseUrl)
-    if (explicitProfileUrl.protocol !== restUrl.protocol) {
+    if (isLoopbackHostname(restUrl.hostname) && !isLoopbackHostname(explicitProfileUrl.hostname)) {
       throw new Error(
         'Cannot resolve a shareable Profile UI link for the active desktop deployment'
       )

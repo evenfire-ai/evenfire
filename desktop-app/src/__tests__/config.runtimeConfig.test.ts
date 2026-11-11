@@ -124,7 +124,7 @@ describe('desktop runtime config', () => {
 
   it('uses the paired configured local Profile port for real App and GFS share links', async () => {
     process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:27191'
-    process.env.PROFILE_UI_BASE_URL = 'http://127.0.0.1:27101'
+    process.env.PROFILE_UI_BASE_URL = 'https://127.0.0.1:27101'
     vi.doMock('electron', () => ({
       app: {
         getPath: () => '/tmp/evenfire',
@@ -200,10 +200,10 @@ describe('desktop runtime config', () => {
     ])
 
     expect({ app: app.url, gfs: gfs.url }).toEqual({
-      app: 'http://127.0.0.1:27101/open/apps/sandbox-recipes/task-board?path=%2Ftasks%2F42',
-      gfs: 'http://127.0.0.1:27101/open/files?uri=' + encodeURIComponent(resourceUri),
+      app: 'https://127.0.0.1:27101/open/apps/sandbox-recipes/task-board?path=%2Ftasks%2F42',
+      gfs: 'https://127.0.0.1:27101/open/files?uri=' + encodeURIComponent(resourceUri),
     })
-    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('http://127.0.0.1:27101')
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('https://127.0.0.1:27101')
 
     for (const invalidOrigin of [
       'https://unrelated.example.test',
@@ -220,7 +220,12 @@ describe('desktop runtime config', () => {
 
     runtime.config.desktopProfileUiBaseUrl = 'http://127.0.0.1:27101'
     runtime.config.externalRestApiBaseUrl = 'http://localhost:27191'
-    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('http://localhost:3001')
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('http://127.0.0.1:27101')
+    runtime.config.desktopProfileUiBaseUrl = 'https://127.0.0.1:27101'
+    runtime.config.externalRestApiBaseUrl = 'http://[::1]:27191'
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('https://127.0.0.1:27101')
+    runtime.config.externalRestApiBaseUrl = 'http://[::1]:27192'
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('http://[::1]:3001')
     runtime.config.externalRestApiBaseUrl = 'https://api.customer.example.test:8443/base'
     expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe(
       'https://profile.customer.example.test:8443'
