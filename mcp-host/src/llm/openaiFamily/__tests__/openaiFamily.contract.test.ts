@@ -21,7 +21,6 @@ import {
   RECORDED_TEXT_RESPONSE,
   RECORDED_TOOLS_RESPONSE,
   buildFamilyProvider,
-  officialChatProfile,
 } from './familyHarness'
 import { recordedResponse } from './responsesFixtures'
 
@@ -204,85 +203,72 @@ describe('the driver reads its client on every call', () => {
   })
 })
 
-describe('T-E1 SDK errors classify the same on Responses as on Chat', () => {
-  // `model_not_found` carries the body recorded from the real API (`v1-404`).
-  // No over-limit tools response was recorded, so its body is an assumption:
-  // the case only proves both transports surface the same SDK error alike, not
-  // what Responses actually returns for more than 128 tools.
-  const errors: Array<[string, () => unknown]> = [
+describe('T-E1 SDK errors thrown by responses.create classify through the adapter', () => {
+  // Both errors are real `OpenAI.APIError`s built by the SDK. The 404 body is
+  // the one recorded from the API (`v1-404`); no over-limit tools response was
+  // recorded, so the 400 body is a synthetic shape and only fixes how the
+  // classifier treats a non-retryable 400 with a provider code. Chat and
+  // Responses share the classifier and neither wraps the SDK error, so the
+  // outcome is asserted outright instead of compared across protocols.
+  const MODEL_NOT_FOUND =
+    'The model `gpt-nonexistent-zz9` does not exist or you do not have access to it.'
+  const TOO_MANY_TOOLS =
+    "Invalid 'tools': array too long. Expected an array with maximum length 128, but got an array with length 129 instead."
+  const errors: Array<[string, () => unknown, Partial<LlmError>]> = [
     [
-      'model_not_found 404',
+      'model_not_found 404 (recorded body)',
       () =>
         openaiApiError(404, {
           code: 'model_not_found',
           type: 'invalid_request_error',
-          message:
-            'The model `gpt-nonexistent-zz9` does not exist or you do not have access to it.',
+          message: MODEL_NOT_FOUND,
         }),
+      {
+        code: LlmErrorCode.ModelNotAvailable,
+        retryable: false,
+        httpStatus: 404,
+        providerCode: 'model_not_found',
+        message: MODEL_NOT_FOUND,
+      },
     ],
     [
-      'too many tools 400',
+      'too many tools 400 (synthetic body)',
       () =>
         openaiApiError(400, {
           code: 'array_above_max_length',
           type: 'invalid_request_error',
-          message:
-            "Invalid 'tools': array too long. Expected an array with maximum length 128, but got an array with length 129 instead.",
+          message: TOO_MANY_TOOLS,
         }),
+      {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        httpStatus: 400,
+        providerCode: 'array_above_max_length',
+        message: TOO_MANY_TOOLS,
+      },
     ],
   ]
 
-  async function thrownThrough(provider: OpenAIProvider): Promise<unknown> {
-    const adapter = new LlmPortAdapter(provider, 'gpt-6.1-terra', 'openai')
-    return adapter.completeWithTools({ messages: MESSAGES, tools: TOOLS }).then(
-      () => {
-        throw new Error('expected the call to fail')
-      },
-      (err: unknown) => err
-    )
-  }
-
-  it.each(errors)('%s', async (_label, make) => {
-    const chatCreate = vi.fn(async () => {
-      throw make()
-    })
+  it.each(errors)('%s', async (_label, make, expected) => {
     const responsesCreate = vi.fn(async () => {
       throw make()
     })
-    const viaChat = new OpenAIProvider(
-      { chat: { completions: { create: chatCreate } } } as never,
-      'gpt-6.1-terra',
-      officialChatProfile()
-    )
-    const viaResponses = new OpenAIProvider(
+    const provider = new OpenAIProvider(
       { responses: { create: responsesCreate } } as never,
       'gpt-6.1-terra'
     )
+    const adapter = new LlmPortAdapter(provider, 'gpt-6.1-terra', 'openai')
 
-    const fromChat = await thrownThrough(viaChat)
-    const fromResponses = await thrownThrough(viaResponses)
+    const err = await adapter.completeWithTools({ messages: MESSAGES, tools: TOOLS }).then(
+      () => {
+        throw new Error('expected the call to fail')
+      },
+      (e: unknown) => e
+    )
 
-    expect(chatCreate).toHaveBeenCalledTimes(1)
     expect(responsesCreate).toHaveBeenCalledTimes(1)
-    const shape = (e: unknown) => {
-      const { code, retryable, httpStatus, providerCode, message } = e as LlmError
-      return { code, retryable, httpStatus, providerCode, message }
-    }
-    expect(fromResponses).toBeInstanceOf(LlmError)
-    expect(shape(fromResponses)).toEqual(shape(fromChat))
-  })
-
-  it('model_not_found stays apart from the over-limit tools error', () => {
-    const provider = new OpenAIProvider('unit-key', 'gpt-6.1-terra')
-    expect(provider.classifyError(errors[0]![1]())).toMatchObject({
-      code: LlmErrorCode.ModelNotAvailable,
-      retryable: false,
-      httpStatus: 404,
-    })
-    expect(provider.classifyError(errors[1]![1]())).toMatchObject({
-      code: LlmErrorCode.ApiCallFailed,
-      retryable: false,
-      httpStatus: 400,
-    })
+    expect(err).toBeInstanceOf(LlmError)
+    const { code, retryable, httpStatus, providerCode, message } = err as LlmError
+    expect({ code, retryable, httpStatus, providerCode, message }).toEqual(expected)
   })
 })
