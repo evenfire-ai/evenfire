@@ -15,6 +15,7 @@ import { OpenAIProvider } from '../../openai'
 import { OpenAICompatibleProvider } from '../../openaiCompatible'
 import { type LlmProvider, descriptorFor } from '../../registryCore'
 import type { SingleTurnProvider } from '../../types'
+import { withWellFormedRequestText } from '../../wellFormedRequestText'
 import { azureProfile, compatibleProfile } from '../endpointProfiles'
 import {
   AZURE_ENDPOINT,
@@ -169,9 +170,14 @@ describe('OpenAICompatibleProvider is a constructor-only alias', () => {
 
   // The prototype alone misses members assigned in the constructor and statics.
   // The reference is the registry's own composition, so the alias may carry
-  // exactly the fields the factory output carries and nothing more.
+  // exactly the fields the factory output carries and nothing more. The factory
+  // also wraps every provider with withWellFormedRequestText (#1433), which adds
+  // its request methods and classifyError as own non-enumerable members, so the
+  // alias is compared after the same wrap.
   it('instances carry the same own fields as the registry-built driver and no statics', () => {
-    expect(ownKeys(aliasFor('groq'))).toEqual(ownKeys(buildFamilyProvider('groq')))
+    expect(ownKeys(withWellFormedRequestText(aliasFor('groq')))).toEqual(
+      ownKeys(buildFamilyProvider('groq'))
+    )
     expect(ownKeys(OpenAICompatibleProvider)).toEqual(['length', 'name', 'prototype'])
   })
 
@@ -304,7 +310,8 @@ describe('T-E1 SDK errors thrown by responses.create classify through the adapte
           message: TOO_MANY_TOOLS,
         }),
       {
-        code: LlmErrorCode.ApiCallFailed,
+        // #1433: a provider HTTP 400 is a rejected request.
+        code: LlmErrorCode.UpstreamRejected,
         retryable: false,
         httpStatus: 400,
         providerCode: 'array_above_max_length',

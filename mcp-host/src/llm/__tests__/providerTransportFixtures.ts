@@ -182,6 +182,29 @@ function genaiGoogleAuth(): { prototype: { getRequestHeaders: (...args: never[])
 
 // ─── Replies ───
 
+/** The `openai` profile sends both operations through the Responses API. */
+export const OPENAI_RESPONSES_SUCCESS: FixtureReply = {
+  status: 200,
+  body: {
+    id: 'resp_fixture',
+    object: 'response',
+    created_at: 0,
+    status: 'completed',
+    model: 'fixture-model',
+    output: [
+      {
+        id: 'msg_fixture',
+        type: 'message',
+        status: 'completed',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'ok', annotations: [] }],
+      },
+    ],
+    usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+  },
+}
+
+/** Azure and the OpenAI-compatible profiles keep chat completions. */
 export const OPENAI_SUCCESS: FixtureReply = {
   status: 200,
   body: {
@@ -260,7 +283,7 @@ function subscriptionDeps(proxy: unknown) {
 export const ARMS: Arm[] = [
   {
     id: 'openai',
-    success: OPENAI_SUCCESS,
+    success: OPENAI_RESPONSES_SUCCESS,
     async make(reply) {
       const server = await http1Server(reply)
       setEnv('OPENAI_BASE_URL', `${server.url}/v1`)

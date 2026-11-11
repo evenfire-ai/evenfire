@@ -119,13 +119,23 @@ async function fixtureServer(reply: unknown, status = 200): Promise<{ url: strin
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, ...capture }
 }
 
+/** The `openai` profile sends both operations through the Responses API. */
 const OPENAI_REPLY = {
-  id: 'chatcmpl-fixture',
-  object: 'chat.completion',
-  created: 0,
+  id: 'resp_fixture',
+  object: 'response',
+  created_at: 0,
+  status: 'completed',
   model: 'fixture-model',
-  choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
-  usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  output: [
+    {
+      id: 'msg_fixture',
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'ok', annotations: [] }],
+    },
+  ],
+  usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
 }
 
 const ANTHROPIC_REPLY = {
@@ -1274,11 +1284,13 @@ describe('keys that become equal after repair (#1433 F3)', () => {
       TOOLS
     )
     expect(server.bodies).toHaveLength(1)
+    // Responses wire: the assistant's call is a `function_call` input item.
     const wire = JSON.parse(server.bodies[0]) as {
-      messages: { tool_calls?: { function: { arguments: string } }[] }[]
+      input: { type?: string; arguments?: string }[]
     }
-    const call = wire.messages.find(m => m.tool_calls)!.tool_calls![0]
-    expect(JSON.parse(call.function.arguments)).toEqual({ [`a${FFFD}`]: 1, [`b${FFFD}`]: 2 })
+    const calls = wire.input.filter(item => item.type === 'function_call')
+    expect(calls).toHaveLength(1)
+    expect(JSON.parse(calls[0].arguments!)).toEqual({ [`a${FFFD}`]: 1, [`b${FFFD}`]: 2 })
     const repairs = repairWarns(warn)
     expect(repairs).toHaveLength(1)
     expect(repairs[0]).toMatchObject({ role: 'assistant', repairedUnits: 2 })

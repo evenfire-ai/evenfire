@@ -132,6 +132,20 @@ describe('ClaudeProvider.classifyError', () => {
     expect(c.message).toBe(text)
   })
 
+  // The inner message is used for the 400 arm only (#1433): any other status that
+  // falls to the shared classifier keeps the SDK's `${status} {json}` message.
+  it('keeps the SDK message for an enveloped non-400 error', () => {
+    const err = anthropicApiError(401, 'authentication_error', 'invalid x-api-key')
+    const c = provider.classifyError(err)
+    expect(c).toMatchObject({
+      code: LlmErrorCode.AuthenticationFailed,
+      httpStatus: 401,
+      providerCode: 'authentication_error',
+    })
+    expect(c.message).toBe((err as Error).message)
+    expect(c.message).not.toBe('invalid x-api-key')
+  })
+
   // The credit-balance guard keys on the HTTP status, so it survives the 400
   // recode above (claude.ts). Real SDK envelope, not a plain object.
   it('still reclassifies an enveloped credit-balance 400 as InsufficientQuota', () => {
