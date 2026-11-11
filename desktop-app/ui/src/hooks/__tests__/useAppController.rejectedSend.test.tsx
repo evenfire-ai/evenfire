@@ -896,6 +896,80 @@ describe('useAppController: a send the server rejects', () => {
     expect.soft(clerum.chat.removeMessages, 'removal').not.toHaveBeenCalled()
   })
 
+  describe('T-A15: a send whose chat was deleted releases the activity stream', () => {
+    async function deleteChat(app: App, chatId: string) {
+      const deletion = await app.result.current.captureChatDeleteFence(AGENT)
+      await act(async () => {
+        await app.result.current.handleDeleteChatForAgent(AGENT, chatId, deletion)
+      })
+    }
+
+    it.each<[string, SendError | null]>([
+      ['a 401', http401],
+      ['a 403 whose read is not denied', () => ipcGenericForbidden('rpc:invokeHostMessage')],
+      ['a network error', networkError],
+      ['an accepted POST', null],
+    ])('%s', async (_label, postError) => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text for a chat deleted during the send'
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+      // Witness: the send opened the stream.
+      expect(clerum.hasActivityHandler(AGENT)).toBe(true)
+      await deleteChat(app, chatId)
+      expect(clerum.chat.delete).toHaveBeenCalledTimes(1)
+      const failure = postError ? await postError() : null
+      await act(async () => {
+        if (failure) post.reject(failure)
+        else (post.resolve as (value: unknown) => void)({ taskId: 'task-after-delete' })
+        await pendingSend
+      })
+
+      await waitFor(() => expect(clerum.hasActivityHandler(AGENT)).toBe(false))
+      expect.soft(app.result.current.isHostAccessBlocked(AGENT), 'blocked').toBe(false)
+    })
+
+    it('deleted while the send waits for the activity stream, before the POST', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const activity = deferred<() => Promise<void>>()
+      const activityCallsBefore = clerum.rpc.subscribeHostActivity.mock.calls.length
+      clerum.rpc.subscribeHostActivity.mockImplementationOnce(() => activity.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage('text deleted before the POST')
+      })
+      await waitFor(() =>
+        expect(clerum.rpc.subscribeHostActivity.mock.calls.length).toBeGreaterThan(
+          activityCallsBefore
+        )
+      )
+      await deleteChat(app, chatId)
+      let streamOpen = true
+      await act(async () => {
+        activity.resolve(async () => {
+          streamOpen = false
+        })
+        await pendingSend
+      })
+
+      // Witness: the send stopped before its POST.
+      expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+      await waitFor(() => expect(streamOpen).toBe(false))
+    })
+
+    it('a send accepted as a task keeps the activity stream open (control)', async () => {
+      const { app, clerum } = await boot()
+      await createChat(app)
+      clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-running' })
+      await send(app, 'text for a running task')
+      // Witness: the task is tracked.
+      await waitFor(() => expect(clerum.hasProgressHandler('task-running')).toBe(true))
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(clerum.hasActivityHandler(AGENT)).toBe(true)
+    })
+  })
+
   it('T-A10: a rejection that persists returns the text on every send', async () => {
     const { app, clerum } = await boot()
     const chatId = await createChat(app)

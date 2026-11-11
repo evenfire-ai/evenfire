@@ -3764,6 +3764,15 @@ export function useAgentChatController({
         }
         failRetainedSend(sendAgent, sendChatId, userMessageId, 'post_failed', detail, kind)
       }
+      // Ends this send's activity entry and closes the agent's activity stream
+      // when no other send or task of the agent uses it.
+      let activityHandedToTask = false
+      const releaseSendActivity = () => {
+        activityInFlightByAgentRef.current[sendAgent] = (
+          activityInFlightByAgentRef.current[sendAgent] || []
+        ).filter(messageId => messageId !== userMessageId)
+        void maybeStopAgentActivityStream(sendAgent)
+      }
       // Takes back the optimistic turn of a send the server never accepted. The
       // activity bookkeeping and the fence are settled before the store call;
       // after it, nothing is touched if the auth scope changed meanwhile. A
@@ -3771,10 +3780,7 @@ export function useAgentChatController({
       const withdrawUndeliveredTurn = async () => {
         if (!sendChatId) return
         const chatId = sendChatId
-        activityInFlightByAgentRef.current[sendAgent] = (
-          activityInFlightByAgentRef.current[sendAgent] || []
-        ).filter(messageId => messageId !== userMessageId)
-        void maybeStopAgentActivityStream(sendAgent)
+        releaseSendActivity()
         withdrawnTurnIdsRef.current.add(userMessageId)
         let refused = false
         try {
@@ -4077,10 +4083,6 @@ export function useAgentChatController({
             // a success toast right after it would contradict it.
             if (!fileReferencesDropped) pushToast(`Message sent to ${sendAgent}.`, 'success')
           }
-          activityInFlightByAgentRef.current[sendAgent] = (
-            activityInFlightByAgentRef.current[sendAgent] || []
-          ).filter(id => id !== userMessageId)
-          void maybeStopAgentActivityStream(sendAgent)
           return
         }
 
@@ -4142,6 +4144,8 @@ export function useAgentChatController({
           fsm.dispatch(taskKey, { type: 'SEND_STARTED', taskId })
           fsm.dispatch(taskKey, { type: 'TASK_CREATED', taskId })
         }
+        // The task owns the activity entry from here.
+        activityHandedToTask = true
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         if (
@@ -4219,13 +4223,10 @@ export function useAgentChatController({
           'error'
         )
         await keepUndeliveredTurn()
-        // The POST failed — no background task exists, so retire the activity
-        // stream now. (For a started task, onTrackerTerminal does this instead.)
-        activityInFlightByAgentRef.current[sendAgent] = (
-          activityInFlightByAgentRef.current[sendAgent] || []
-        ).filter(messageId => messageId !== userMessageId)
-        void maybeStopAgentActivityStream(sendAgent)
       } finally {
+        // A send that handed its activity entry to no task releases it here,
+        // whichever exit it took.
+        if (!activityHandedToTask) releaseSendActivity()
         // Fire & forget: release the synchronous setup guard immediately. The
         // task (if any) keeps running in the tracker.
         releaseSendSetup()
