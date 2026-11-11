@@ -267,6 +267,38 @@ describe('ipc host status stream handlers', () => {
     expect((await store.loadMessages('agent-x', 'c1')).map(message => message.id)).toEqual(['kept'])
   })
 
+  it('rejects an untrusted sender for chat:removeMessages before the store is called', async () => {
+    await bindChatStoreForUser('user-1', 'env-1', { teamId: 'team-a' })
+    const store = requireChatStore()
+    await store.createChat('agent-x', 'c1')
+    await store.saveMessages('agent-x', 'c1', [
+      { id: 'pending', role: 'user', content: 'pending', timestamp: 1 },
+    ])
+    const remove = vi.spyOn(store, 'removeMessages')
+    const handler = testState.handlers.get('chat:removeMessages')
+    expect(handler).toBeDefined()
+    const payload = { agentRef: 'agent-x', chatId: 'c1', messageIds: ['pending'] }
+
+    await expect(
+      Promise.resolve(
+        handler?.(
+          {
+            senderFrame: { url: 'https://evil.example.com' },
+            sender: { id: 1, send: vi.fn(), once: vi.fn() },
+          },
+          payload
+        )
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(remove).not.toHaveBeenCalled()
+    expect((await store.loadMessages('agent-x', 'c1')).map(message => message.id)).toEqual([
+      'pending',
+    ])
+    // Witness: the same payload from the trusted sender reaches the store and removes the turn.
+    await expect(Promise.resolve(handler?.(makeTrustedEvent().event, payload))).resolves.toBe(1)
+    expect(remove).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects untrusted sender for stream start', async () => {
     const handler = testState.handlers.get('rpc:hostStatusStreamStart')
     expect(handler).toBeDefined()

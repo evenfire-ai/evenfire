@@ -2682,6 +2682,47 @@ describe('removeMessages', () => {
     await expect(fs.access(chatMetaPath('upserted'))).resolves.toBeUndefined()
   })
 
+  it('S5b: a deleted chat whose files are still on disk returns 0 and keeps its snapshot', async () => {
+    const storedPageIds = async (chatId: string) => {
+      const pages = (await fs.readdir(chatPagesDir(chatId))).sort()
+      const messages = await Promise.all(
+        pages.map(
+          async page =>
+            (
+              JSON.parse(await fs.readFile(join(chatPagesDir(chatId), page), 'utf-8')) as {
+                messages: ChatMessage[]
+              }
+            ).messages
+        )
+      )
+      return messages.flat().map(message => message.id)
+    }
+    await seed('tombstoned', [user('kept'), user('pending')])
+    // A deletion whose file cleanup did not finish leaves the tombstone and the files.
+    const cleanup = vi
+      .spyOn(
+        store as unknown as {
+          finishPendingDeleteCleanup: (...args: unknown[]) => Promise<boolean>
+        },
+        'finishPendingDeleteCleanup'
+      )
+      .mockResolvedValue(false)
+    await expect(store.deleteChat('agent-1', 'tombstoned', TEAM_A_SCOPE)).resolves.toEqual({
+      cleanupPending: true,
+    })
+    // Witness: the tombstone is recorded and the snapshot is still on disk.
+    expect(cleanup).toHaveBeenCalled()
+    const index = await store.getIndex('agent-1')
+    expect(index.deletedChatTombstones?.map(tombstone => tombstone.chatId)).toContain('tombstoned')
+    const metaBefore = await fs.readFile(chatMetaPath('tombstoned'), 'utf-8')
+    expect(await storedPageIds('tombstoned')).toEqual(['kept', 'pending'])
+
+    await expect(store.removeMessages('agent-1', 'tombstoned', ['pending'])).resolves.toBe(0)
+
+    expect(await fs.readFile(chatMetaPath('tombstoned'), 'utf-8')).toBe(metaBefore)
+    expect(await storedPageIds('tombstoned')).toEqual(['kept', 'pending'])
+  })
+
   it('S6: runs in order with upsertMessages on the same chat', async () => {
     await seed('ordered-a', [user('turn-1-user'), assistant('turn-1-assistant')])
     const upsertThenRemove = [
