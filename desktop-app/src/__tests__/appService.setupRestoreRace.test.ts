@@ -250,17 +250,13 @@ describe('AppService setup and saved-session ownership', () => {
     if (!logout) throw new Error('the restore commit did not schedule logout')
     await logout
 
-    const currentGeneration = app.getSessionGeneration()
-    if (observed.authenticated) {
-      expect(observed.me).toEqual(restoredUser)
-      expect(observed.sessionGeneration).toBeLessThan(currentGeneration)
-    } else {
-      expect(observed).toEqual({
-        authenticated: false,
-        me: null,
-        sessionGeneration: currentGeneration,
-      })
-    }
+    expect(observed).toEqual({
+      authenticated: true,
+      me: restoredUser,
+      sessionGeneration: 1,
+    })
+    expect(app.getSessionGeneration()).toBe(3)
+    expect(service.sessionToken).toBeNull()
     expect(app.me).toBeNull()
   })
 })
