@@ -475,7 +475,7 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
-  describe('T-A5: an agent held by another path (D-4)', () => {
+  describe('T-A5: an agent held by another path', () => {
     it.each<[string, SendError]>([
       [
         'held by a denied transcript read while the POST is pending, then the POST is denied',
@@ -832,9 +832,51 @@ describe('useAppController: a send the server rejects', () => {
       expect.soft(app.result.current.toasts.slice(toastsBefore), 'toasts').toEqual([])
       expect.soft(app.result.current.chatMessages, 'messages').toBe(messagesBefore)
     })
+
+    it('a 401 whose removal is refused after a logout', async () => {
+      const { app, clerum, handle } = await boot()
+      const signedInState = handle.getSessionState.getMockImplementation() as
+        | (() => Promise<unknown>)
+        | undefined
+      if (!signedInState) throw new Error('The harness session state producer is unavailable')
+      let signedIn = true
+      handle.getSessionState.mockImplementation(async () =>
+        signedIn ? signedInState() : { authenticated: false, me: null }
+      )
+      handle.logout.mockImplementation(async () => {
+        signedIn = false
+        return { ok: true, sessionGeneration: 2 }
+      })
+      await createChat(app)
+      const text = 'text whose withdrawal is refused after a logout'
+      const warn = vi.spyOn(console, 'warn')
+      const removal = deferred<number>()
+      clerum.chat.removeMessages.mockImplementationOnce(() => removal.promise)
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(await http401())
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() => expect(clerum.chat.removeMessages).toHaveBeenCalledTimes(1))
+      await act(async () => app.result.current.handleLogout())
+      await waitFor(() => expect(app.result.current.isAuthenticated).toBe(false))
+      const toastsBefore = app.result.current.toasts.length
+      await act(async () => {
+        removal.reject(new Error('local chat store unavailable'))
+        await pendingSend
+      })
+
+      // Witness: the refusal was handled (its warning was logged).
+      expect(
+        warn.mock.calls.filter(
+          ([label]) => label === '[chat-history] failed to withdraw a rejected message'
+        )
+      ).toHaveLength(1)
+      expect(app.result.current.toasts.slice(toastsBefore)).toEqual([])
+    })
   })
 
-  describe('T-A12: a reconcile in flight at the rejection (D-13)', () => {
+  describe('T-A12: a reconcile in flight at the rejection', () => {
     const secondWindow = {
       agent: AGENT,
       state: 'idle',
@@ -1074,6 +1116,210 @@ describe('useAppController: a send the server rejects', () => {
     // Witness: the send was answered once and made its follow-up read.
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     await expectInputReturnedAfterReselect(app, clerum, chatId, text)
+  })
+
+  it('T-A16: an older page loaded while the removal is pending does not write the turn back', async () => {
+    const { app, clerum } = await boot()
+    const chatId = await createChat(app)
+    // The newest window holds turns 2 and 3, so turn 1 is an older page.
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: AGENT,
+      chatId,
+      state: 'idle',
+      totalTurns: 3,
+      turns: [
+        serverTurn(2, 'second question', 'second answer'),
+        serverTurn(3, 'third question', 'third answer'),
+      ],
+    })
+    await act(async () => {
+      await app.result.current.handleSelectChat(chatId)
+    })
+    await waitFor(() =>
+      expect(app.result.current.chatMessages.map(message => message.content)).toEqual([
+        'second question',
+        'second answer',
+        'third question',
+        'third answer',
+      ])
+    )
+    await waitFor(() => expect(app.result.current.hasOlderMessages).toBe(true))
+    clerum.chat.replaceMessages.mockImplementation(clerum.replaceStoredMessages)
+    const text = 'text rejected while an older page loads'
+    const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+
+    // The older page is requested and held.
+    const olderPage = deferred<void>()
+    const hasBeforeTurn = (args: unknown[]) =>
+      args.some(arg => typeof arg === 'object' && arg !== null && 'beforeTurn' in arg)
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args: unknown[]) => {
+      if (!hasBeforeTurn(args)) {
+        return { agent: AGENT, chatId, state: 'idle', totalTurns: 3, turns: [] }
+      }
+      await olderPage.promise
+      return {
+        agent: AGENT,
+        chatId,
+        state: 'idle',
+        totalTurns: 3,
+        turns: [serverTurn(1, 'first question', 'first answer')],
+      }
+    })
+    let backfill!: Promise<void>
+    act(() => {
+      backfill = app.result.current.handleLoadOlderMessages() as Promise<void>
+    })
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages.mock.calls.some(call => hasBeforeTurn(call))).toBe(true)
+    )
+
+    // Main applies the removal, but its reply has not reached the renderer.
+    const removalReply = deferred<void>()
+    const removeStored = clerum.chat.removeMessages.getMockImplementation()!
+    clerum.chat.removeMessages.mockImplementationOnce(async (...args: unknown[]) => {
+      const removed = await removeStored(...args)
+      await removalReply.promise
+      return removed
+    })
+    const rejection = await ipcGenericForbidden('rpc:invokeHostMessage')
+    let rejectionHandled!: Promise<void>
+    act(() => {
+      post.reject(rejection)
+      rejectionHandled = pendingSend
+    })
+    await waitFor(() => expect(clerum.chat.removeMessages).toHaveBeenCalledTimes(1))
+    await waitFor(async () => expect(await storedUserTurns(clerum, chatId, text)).toHaveLength(0))
+    // Witness: the turn is still in the visible list the backfill merges onto.
+    expect(visibleUserTurns(app, text)).toHaveLength(1)
+    const replaceCallsBefore = clerum.chat.replaceMessages.mock.calls.length
+    await act(async () => {
+      olderPage.resolve()
+      await backfill
+    })
+    // Witness: the backfill wrote a list holding the older turn.
+    const backfillWrites = clerum.chat.replaceMessages.mock.calls.slice(replaceCallsBefore)
+    expect(
+      backfillWrites.some(([, , messages]) =>
+        (messages as Array<{ id: string }>).some(message => message.id === 'turn-1-user')
+      )
+    ).toBe(true)
+    await act(async () => {
+      removalReply.resolve()
+      await rejectionHandled
+    })
+
+    expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
+    expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+    expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+  })
+
+  it('T-A17: a turn withdrawn while its chat is hidden does not come back from memory', async () => {
+    const { app, clerum } = await boot()
+    const chatB = await createChat(app)
+    const chatA = await createChat(app)
+    const text = 'text from chat A'
+    const warn = vi.spyOn(console, 'warn')
+    const localReadFailures = () =>
+      warn.mock.calls.filter(([label]) => label === '[chat-history] failed to load local messages')
+        .length
+    const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+    await waitFor(() => expect(visibleUserTurns(app, text)).toHaveLength(1))
+    const selectChat = async (chatId: string) => {
+      await act(async () => {
+        await app.result.current.handleSelectChat(chatId)
+      })
+      await waitFor(() => expect(app.result.current.activeChatId).toBe(chatId))
+    }
+    const loadLocal = clerum.chat.loadMessages.getMockImplementation()!
+    const failNextLocalReadOf = (chatId: string) => {
+      let failed = false
+      clerum.chat.loadMessages.mockImplementation(async (...args: unknown[]) => {
+        if (!failed && args[1] === chatId) {
+          failed = true
+          throw new Error('local chat store unavailable')
+        }
+        return loadLocal(...args)
+      })
+    }
+
+    // Witness: with a failed local read, the remembered transcript is what is
+    // shown. The pending turn comes back from memory while the send is pending.
+    await selectChat(chatB)
+    failNextLocalReadOf(chatA)
+    await selectChat(chatA)
+    expect(localReadFailures()).toBe(1)
+    expect(visibleUserTurns(app, text), 'remembered while pending').toHaveLength(1)
+    clerum.chat.loadMessages.mockImplementation(loadLocal)
+
+    await selectChat(chatB)
+    const rejection = await ipcGenericForbidden('rpc:invokeHostMessage')
+    await act(async () => {
+      post.reject(rejection)
+      await pendingSend
+    })
+    // Witness: the turn was withdrawn while chat B was shown.
+    expect(clerum.chat.removeMessages).toHaveBeenCalledTimes(1)
+    expect(await storedUserTurns(clerum, chatA, text)).toHaveLength(0)
+
+    // The server window stays pending, so only the first paint is observed.
+    const serverWindow = deferred<never>()
+    clerum.rpc.loadSessionMessages.mockImplementation(() => serverWindow.promise)
+    failNextLocalReadOf(chatA)
+    act(() => {
+      void app.result.current.handleSelectChat(chatA)
+    })
+    await waitFor(() => expect(app.result.current.activeChatId).toBe(chatA))
+    await waitFor(() => expect(localReadFailures()).toBe(2))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(visibleUserTurns(app, text), 'visible turn on return').toHaveLength(0)
+    clerum.chat.loadMessages.mockImplementation(loadLocal)
+  })
+
+  it('T-A18: a logout during the follow-up read leaves the draft store and the turn alone', async () => {
+    const { app, clerum, handle } = await boot()
+    const signedInState = handle.getSessionState.getMockImplementation() as
+      | (() => Promise<unknown>)
+      | undefined
+    if (!signedInState) throw new Error('The harness session state producer is unavailable')
+    let signedIn = true
+    handle.getSessionState.mockImplementation(async () =>
+      signedIn ? signedInState() : { authenticated: false, me: null }
+    )
+    handle.logout.mockImplementation(async () => {
+      signedIn = false
+      return { ok: true, sessionGeneration: 2 }
+    })
+    const chatId = await createChat(app)
+    const text = 'text rejected before a logout during the read'
+    const followUp = deferred<{ items: never[] }>()
+    clerum.rpc.listSessions.mockImplementation(async (_hostRef, _hostRefs, query) =>
+      isFollowUpRead(query) ? followUp.promise : { items: [] }
+    )
+    clerum.rpc.invokeHostMessage.mockRejectedValueOnce(
+      await ipcGenericForbidden('rpc:invokeHostMessage')
+    )
+    let pendingSend!: Promise<void>
+    act(() => {
+      pendingSend = app.result.current.handleSendAgentMessage(text)
+    })
+    await waitFor(() =>
+      expect(clerum.rpc.listSessions.mock.calls.some(([, , query]) => isFollowUpRead(query))).toBe(
+        true
+      )
+    )
+    await act(async () => app.result.current.handleLogout())
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(false))
+    // Witness: the logout cleared the draft store.
+    expect(getComposerDraft(chatId, AGENT)).toBe('')
+    await act(async () => {
+      followUp.resolve({ items: [] })
+      await pendingSend
+    })
+
+    // Witness: the send was answered once and its follow-up read settled.
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe('')
+    expect.soft(clerum.chat.removeMessages, 'removal').not.toHaveBeenCalled()
   })
 
   describe('the composer attachments while a rejected send was pending', () => {
