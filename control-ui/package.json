@@ -69,7 +69,7 @@
     "@clerum/llm-providers": "file:../packages/llm-providers",
     "@clerum/workflow-recipe-capability-policy": "file:../packages/workflow-recipe-capability-policy",
     "@uiw/react-md-editor": "^4.1.0",
-    "next": "^16.3.5",
+    "next": "^16.4.6",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
