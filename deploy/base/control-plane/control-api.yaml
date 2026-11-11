@@ -96,7 +96,8 @@ spec:
         # `deploy/scripts/apply-inter-service-tokens.sh` (via kubectl patch,
         # which writes outside the last-applied-configuration envelope so
         # `kubectl apply -k` does NOT wipe them on every CI redeploy).
-        # Keys projected: CONTROL_API_INTERNAL_SERVICE_TOKENS, CONTROL_API_INTERNAL_TOKENS.
+        # control-api reads CONTROL_API_INTERNAL_SERVICE_TOKENS from it. The script also
+        # writes CONTROL_API_INTERNAL_TOKENS, which control-api no longer reads.
         - secretRef:
             name: control-api-internal-tokens
         # HS256 secrets for WRC/HCC InternalControl JWT verification.
