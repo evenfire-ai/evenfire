@@ -663,12 +663,15 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     await waitFor(() => expect(reportCalls).toBe(2))
     await waitFor(() => expect(childFolderCalls).toBe(2))
     await waitFor(() => {
+      expect(client.getQueryState(reportKey)?.fetchStatus).toBe('fetching')
+      expect(client.getQueryState(folderKey)?.fetchStatus).toBe('fetching')
       expect(
-        screen.getByRole('status', { name: /Checking permissions for report\.txt/ })
-      ).toBeTruthy()
+        screen.queryByRole('status', { name: /Checking permissions for report\.txt/ })
+      ).toBeNull()
       expect(
-        screen.getByRole('status', { name: /Checking permissions for Child folder/ })
-      ).toBeTruthy()
+        screen.queryByRole('status', { name: /Checking permissions for Child folder/ })
+      ).toBeNull()
+      expect(document.querySelector('.da-gfs-drive__grid .da-permission-status-slot')).toBeNull()
     })
     expectFolderRowMutationMenu('Child folder', true)
 

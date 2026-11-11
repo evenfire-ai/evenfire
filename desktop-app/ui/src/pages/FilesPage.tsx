@@ -547,38 +547,6 @@ export function FilesPage({
       ])
     ),
   }
-  const rowPermissionNoticeFor = (resourceId: string, resourceName: string) => {
-    if (
-      ctrl.rowAffordancesResourceId === resourceId &&
-      ctrl.rowAffordancesEnabled &&
-      ctrl.rowAffordancesFetching
-    ) {
-      return {
-        role: 'status' as const,
-        tone: 'info' as const,
-        message: `Checking permissions for ${resourceName}`,
-      }
-    }
-    // Shared-root rows inherit status from one accessible-list query. A
-    // background refresh of that shared query is not a separate permission
-    // check for every row, and its page-level feedback must not be repeated
-    // in twenty row live regions.
-    if (!currentIsFolder && accessibleRootResourceIds.has(resourceId)) return null
-    if (ctrl.authorityPending || ctrl.accessState !== 'active') return null
-    const statuses = ctrl.rowPermissionStatusByResourceId
-    if (!statuses) return null
-    const status = statuses[resourceId]
-    if (status?.status === 'ready' || status?.status === 'stale') return null
-    if (status?.status === 'error') return null
-    if (status?.status === 'checking' && status.isEnabled && status.isFetching) {
-      return {
-        role: 'status' as const,
-        tone: 'info' as const,
-        message: `Checking permissions for ${resourceName}`,
-      }
-    }
-    return null
-  }
   const moveWorkspaceRef = useRef({
     sessionScope,
     sessionGeneration: ctrl.sessionGeneration,
@@ -3714,7 +3682,6 @@ export function FilesPage({
               <div className="da-grid__body">
                 {visibleResources.map(resource => {
                   const resourceName = resource.name || resource.drive
-                  const permissionNotice = rowPermissionNoticeFor(resource.resourceId, resourceName)
                   const isDragging =
                     draggingResourceId === resource.resourceId ||
                     movingResourceId === resource.resourceId
@@ -3827,14 +3794,6 @@ export function FilesPage({
                           {resource.readable === false ? (
                             <Badge tone="neutral">No access</Badge>
                           ) : null}
-                          <PermissionStatusIndicator
-                            active={permissionNotice?.role === 'status'}
-                            announce={visiblePermissionErrorItems.length === 0 || actionDialogOpen}
-                            label={
-                              permissionNotice?.message ??
-                              `Checking permissions for ${resourceName}`
-                            }
-                          />
                         </span>
                       </span>
                       <span className="da-gfs-drive__size da-grid__cell da-grid__cell--right">

@@ -97,6 +97,13 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
           gfsUri: 'gfs://main/preview-parent',
         })
       )
+      const currentFileId = '0123456789abcdef0123456789abcdef'
+      const currentFile = await resolveResource(
+        resolvedFile(currentFileId, 'Current report.txt', {
+          gfsUri: `gfs://main/${currentFileId}`,
+          parentResourceId: 'source-parent',
+        })
+      )
       const rootPage = await listAccessiblePage([
         accessibleResource('folder-active', 'Reports', 'directory', {
           gfsUri: 'gfs://main/folder-active',
@@ -118,11 +125,13 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
         'child-report',
         'preview-file',
         'preview-parent',
+        currentFileId,
       ]) {
         successfulAffordances[id] = await produceAffordance(id, 'main')
       }
       const errorMessages: Record<string, string> = {}
       for (const id of Object.keys(successfulAffordances)) {
+        if (id === currentFileId) continue
         errorMessages[id] = await affordancesFailureMessage(
           id === 'folder-active' ? 429 : 503,
           id === 'folder-active'
@@ -135,12 +144,14 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
       browser = await chromium.launch({ headless: true })
       const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
       page.setDefaultTimeout(10_000)
+      page.setDefaultNavigationTimeout(30_000)
       await page.addInitScript(
         ({
           folder,
           sourceParent,
           preview,
           previewParent,
+          currentFile,
           rootPage,
           childrenPage,
           successfulAffordances,
@@ -205,6 +216,7 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
                 if (uri === sourceParent.gfsUri) return pass(sourceParent)
                 if (uri === preview.gfsUri) return pass(preview)
                 if (uri === previewParent.gfsUri) return pass(previewParent)
+                if (uri === currentFile.gfsUri) return pass(currentFile)
                 throw new Error(`Unexpected fixture resolve: ${uri}`)
               },
               listChildren: async (id: string) => {
@@ -227,6 +239,7 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
           sourceParent,
           preview,
           previewParent,
+          currentFile,
           rootPage,
           childrenPage,
           successfulAffordances,
@@ -295,6 +308,16 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
         `http://127.0.0.1:${address.port}/permission-status-geometry.html?gfsUri=${encodeURIComponent('gfs://main/folder-active')}`
       )
       await page.getByRole('button', { name: 'report.txt', exact: true }).waitFor()
+      const breadcrumbOrder = await page.locator('.da-gfs-drive__title-row').evaluate(row => {
+        const children = Array.from(row.children)
+        const menu = children.findIndex(child =>
+          child.querySelector('.da-gfs-resource-menu__trigger')
+        )
+        const spinner = children.findIndex(child => child.matches('.da-permission-status-slot'))
+        return { menu, spinner }
+      })
+      expect(breadcrumbOrder.menu).toBeGreaterThanOrEqual(0)
+      expect(breadcrumbOrder.spinner).toBeGreaterThan(breadcrumbOrder.menu)
       const fileSelectors = [
         '.da-gfs-drive__title-row',
         '.da-gfs-drive__breadcrumbs',
@@ -302,17 +325,15 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
         '.da-gfs-resource-menu__trigger',
         '.da-gfs-drive__grid .da-grid__row',
         '.da-gfs-drive__grid .da-gfs-list__identity',
-        '.da-gfs-drive__grid .da-gfs-list__name > .da-permission-status-slot',
         '.da-gfs-drive__grid .da-gfs-list__actions',
       ]
       const measureFiles = () => page.evaluate(measureRects, fileSelectors)
       for (const width of [1280, 390]) {
         await page.setViewportSize({ width, height: 900 })
         await assertReservedSlot(page, '.da-gfs-drive__title-row > .da-permission-status-slot')
-        await assertReservedSlot(
-          page,
-          '.da-gfs-drive__grid .da-gfs-list__name > .da-permission-status-slot'
-        )
+        const rowStatusSlotCount = await page
+          .locator('.da-gfs-drive__grid .da-gfs-list__name > .da-permission-status-slot')
+          .count()
         const folderBefore = await measureFiles()
         await page.evaluate(() => {
           window.__permissionStatusGeometry?.setPermissionMode('folder-active', 'pending')
@@ -377,7 +398,25 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
           window.__permissionStatusGeometry?.setPermissionMode('child-report', 'pending')
           window.__permissionStatusGeometry?.startAffordanceRefetch('files', 'child-report')
         })
-        await page.getByRole('status', { name: 'Checking permissions for report.txt' }).waitFor()
+        await page.waitForFunction(
+          () =>
+            window.__permissionStatusGeometry?.filesClient
+              .getQueryCache()
+              .getAll()
+              .some(
+                query =>
+                  query.queryKey.includes('child-report') && query.state.fetchStatus === 'fetching'
+              ),
+          undefined,
+          { timeout: 5000 }
+        )
+        const activeRowIndicatorCount = await page
+          .locator('.da-gfs-drive__grid .da-gfs-list__name .da-permission-status-indicator')
+          .count()
+        expect({ rowStatusSlotCount, activeRowIndicatorCount }).toEqual({
+          rowStatusSlotCount: 0,
+          activeRowIndicatorCount: 0,
+        })
         assertStable(rowBefore, await measureFiles(), `Files child row ${width}px`)
         await page.evaluate(() =>
           window.__permissionStatusGeometry?.settlePermission('child-report', 'success')
@@ -385,6 +424,11 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
         await page.waitForFunction(
           () => !document.querySelector('.da-gfs-drive__grid .da-permission-status-indicator')
         )
+        expect(
+          await page
+            .locator('.da-gfs-drive__grid .da-gfs-list__name > .da-permission-status-slot')
+            .count()
+        ).toBe(0)
         assertStable(rowBefore, await measureFiles(), `Files child row settled ${width}px`)
       }
 
@@ -402,6 +446,10 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
       })
       await filesDialog.waitFor()
       expect(await page.getByRole('alertdialog').count()).toBe(1)
+      expect(
+        await page.locator('.da-gfs-drive__grid .da-permission-status-indicator').count()
+      ).toBe(0)
+      expect(await page.locator('.da-gfs-drive__grid .da-permission-status-slot').count()).toBe(0)
       expect(await filesDialog.getAttribute('aria-modal')).toBe('true')
       const filesDialogRect = await filesDialog.boundingBox()
       expect(filesDialogRect).toBeTruthy()
@@ -424,6 +472,64 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
       ).toBe('Options for report.txt')
       assertStable(rowBeforeError, await measureFiles(), 'Files row error dismissed')
 
+      await page.goto(
+        `http://127.0.0.1:${address.port}/permission-status-geometry.html?deepLink=1&gfsUri=${encodeURIComponent(currentFile.gfsUri)}`
+      )
+      await page
+        .getByRole('heading', { name: 'Current report.txt' })
+        .waitFor({ timeout: 5000 })
+        .catch(async () => {
+          throw new Error(
+            `Current-file fixture did not open: ${await page.locator('body').innerText()}`
+          )
+        })
+      const currentTitle = page.locator('.da-gfs-current-file__title-row')
+      const currentOrder = () =>
+        currentTitle.evaluate(row =>
+          Array.from(row.children).map(child => {
+            if (child.matches('h3')) return 'filename'
+            if (child.querySelector('.da-gfs-resource-menu__trigger')) return 'menu'
+            if (child.matches('.da-permission-status-slot')) return 'spinner'
+            return 'other'
+          })
+        )
+      const currentSelectors = [
+        '.da-gfs-current-file__title-row',
+        '.da-gfs-current-file__title-row > .da-permission-status-slot',
+        '.da-gfs-current-file__title-row .da-gfs-resource-menu__trigger',
+      ]
+      const measureCurrent = () => page.evaluate(measureRects, currentSelectors)
+      for (const width of [1280, 390]) {
+        await page.setViewportSize({ width, height: 900 })
+        await assertReservedSlot(
+          page,
+          '.da-gfs-current-file__title-row > .da-permission-status-slot'
+        )
+        expect(await currentOrder()).toEqual(['filename', 'menu', 'spinner'])
+        const before = await measureCurrent()
+        await page.evaluate(id => {
+          window.__permissionStatusGeometry?.setPermissionMode(id, 'pending')
+          window.__permissionStatusGeometry?.startAffordanceRefetch('files', id)
+        }, currentFileId)
+        await page
+          .getByRole('status', { name: 'Checking permissions for Current report.txt' })
+          .waitFor()
+        expect(await currentOrder()).toEqual(['filename', 'menu', 'spinner'])
+        assertStable(before, await measureCurrent(), `Files current file ${width}px`)
+        await page.evaluate(
+          id => window.__permissionStatusGeometry?.settlePermission(id, 'success'),
+          currentFileId
+        )
+        await page.waitForFunction(
+          () =>
+            !document.querySelector(
+              '.da-gfs-current-file__title-row .da-permission-status-indicator'
+            )
+        )
+        expect(await currentOrder()).toEqual(['filename', 'menu', 'spinner'])
+        assertStable(before, await measureCurrent(), `Files current file settled ${width}px`)
+      }
+
       await page.evaluate(() => window.__permissionStatusGeometry?.setSurface('preview'))
       await page.getByRole('heading', { name: 'diagram.png' }).waitFor()
       const previewOptions = page.getByRole('button', { name: 'Options for diagram.png' })
@@ -435,6 +541,15 @@ describe('EvenDrive permission status Chromium geometry and accessibility', () =
         '.da-gfs-image-preview-dialog__body',
       ]
       const measurePreview = () => page.evaluate(measureRects, previewSelectors)
+      const previewOrder = await page.locator('.da-gfs-preview-title-row').evaluate(row =>
+        Array.from(row.children).map(child => {
+          if (child.matches('.da-gfs-preview-title')) return 'filename'
+          if (child.querySelector('.da-gfs-resource-menu__trigger')) return 'menu'
+          if (child.matches('.da-permission-status-slot')) return 'spinner'
+          return 'other'
+        })
+      )
+      expect(previewOrder).toEqual(['filename', 'menu', 'spinner'])
       for (const width of [1280, 390]) {
         await page.setViewportSize({ width, height: 900 })
         await assertReservedSlot(page, '.da-gfs-preview-title-row > .da-permission-status-slot')

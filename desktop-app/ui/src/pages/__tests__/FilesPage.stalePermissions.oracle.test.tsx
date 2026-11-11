@@ -234,7 +234,9 @@ describe('FilesPage stale permission action oracle', () => {
         expect(retainedQuery?.state.status).toBe('error')
         const rowQueryIdentity = retainedQuery
 
-        render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+        const { container } = render(<FilesPage pendingGfsUri={FOLDER_URI} />, {
+          wrapper: wrapper(client),
+        })
         await screen.findByRole('status', { name: 'Loading files' })
         expect(screen.queryByRole('alertdialog')).toBeNull()
         expect(client.getQueryCache().find({ queryKey: rowKey, exact: true })).toBe(
@@ -252,9 +254,11 @@ describe('FilesPage stale permission action oracle', () => {
           rowQueryIdentity
         )
         expect(screen.queryByRole('alertdialog')).toBeNull()
+        expect(client.getQueryState(rowKey)?.fetchStatus).toBe('fetching')
         expect(
           screen.queryByRole('status', { name: /Checking permissions for report.txt/ })
-        ).toBeTruthy()
+        ).toBeNull()
+        expect(container.querySelector('.da-gfs-list__name .da-permission-status-slot')).toBeNull()
 
         if (outcome === 'success') {
           await act(async () => {
@@ -345,7 +349,9 @@ describe('FilesPage stale permission action oracle', () => {
       expect(client.getQueryState(rowKey)?.status).toBe('error')
       expect(client.getQueryState(rowKey)?.data).toBeTruthy()
 
-      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      const { container } = render(<FilesPage pendingGfsUri={FOLDER_URI} />, {
+        wrapper: wrapper(client),
+      })
       await screen.findByRole('status', { name: 'Loading files' })
       expect(screen.queryByRole('alertdialog')).toBeNull()
       expect(client.getQueryCache().find({ exact: true, queryKey: rowKey })).toBe(retained)
@@ -358,9 +364,11 @@ describe('FilesPage stale permission action oracle', () => {
       await screen.findByText('report.txt')
       await waitFor(() => expect(affordances).toHaveBeenCalledWith('child-report', 'main'))
       expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(client.getQueryState(rowKey)?.fetchStatus).toBe('fetching')
       expect(
-        screen.getByRole('status', { name: /Checking permissions for report.txt/ })
-      ).toBeTruthy()
+        screen.queryByRole('status', { name: /Checking permissions for report.txt/ })
+      ).toBeNull()
+      expect(container.querySelector('.da-gfs-list__name .da-permission-status-slot')).toBeNull()
       expect(client.getQueryCache().find({ exact: true, queryKey: rowKey })).toBe(retained)
       expect(client.getQueryState(rowKey)?.fetchStatus).toBe('fetching')
 
@@ -676,8 +684,14 @@ describe('FilesPage stale permission action oracle', () => {
 
       const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
       try {
-        render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+        const { container } = render(<FilesPage pendingGfsUri={FOLDER_URI} />, {
+          wrapper: wrapper(client),
+        })
         await screen.findByRole('button', { name: 'Options for b.txt' })
+        expect(
+          container.querySelector('.da-gfs-list__name .da-permission-status-indicator')
+        ).toBeNull()
+        expect(container.querySelector('.da-gfs-list__name .da-permission-status-slot')).toBeNull()
         const dialog = await screen.findByRole('alertdialog')
         await waitFor(() =>
           expect(
@@ -692,6 +706,10 @@ describe('FilesPage stale permission action oracle', () => {
           ).toBe('error')
         )
         expect(within(dialog).getByText(/Could not verify permissions for a\.txt/)).toBeTruthy()
+        expect(
+          container.querySelector('.da-gfs-list__name .da-permission-status-indicator')
+        ).toBeNull()
+        expect(container.querySelector('.da-gfs-list__name .da-permission-status-slot')).toBeNull()
         if (completionOrder === 'staggered') {
           expect(within(dialog).queryByText(/Could not verify permissions for b\.txt/)).toBeNull()
           await act(async () => {
@@ -1135,6 +1153,12 @@ describe('FilesPage stale permission action oracle', () => {
     })
 
     const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const reportKey = desktopQueryKeys.gfsAffordances(
+      'test-environment:user-1:team-1',
+      'child-report',
+      'main',
+      0
+    )
     const { rerender } = render(<FilesPage pendingGfsUri={FOLDER_URI} />, {
       wrapper: wrapper(client),
     })
@@ -1151,7 +1175,9 @@ describe('FilesPage stale permission action oracle', () => {
     })
     await waitFor(() => expect(reportPermissionReads).toBe(2))
     expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
-    expect(screen.getByRole('status', { name: 'Checking permissions for report.txt' })).toBeTruthy()
+    expect(client.getQueryState(reportKey)?.fetchStatus).toBe('fetching')
+    expect(screen.queryByRole('status', { name: 'Checking permissions for report.txt' })).toBeNull()
+    expect(document.querySelector('.da-gfs-list__name .da-permission-status-slot')).toBeNull()
     expect(renameResource).not.toHaveBeenCalled()
 
     await act(async () => {

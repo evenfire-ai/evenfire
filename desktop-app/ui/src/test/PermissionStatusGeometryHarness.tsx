@@ -51,7 +51,10 @@ const authValue = {
 
 function PermissionStatusGeometryHarness() {
   const [surface, setSurfaceState] = useState<'files' | 'preview'>('files')
-  const pendingGfsUri = new URLSearchParams(window.location.search).get('gfsUri')
+  const query = new URLSearchParams(window.location.search)
+  const pendingGfsUri = query.get('gfsUri')
+  const pendingFileDeepLink =
+    query.get('deepLink') === '1' && pendingGfsUri ? { id: 1, uri: pendingGfsUri } : null
   const filesClient = useMemo(
     () =>
       new QueryClient({
@@ -118,7 +121,13 @@ function PermissionStatusGeometryHarness() {
     <AuthContext.Provider value={authValue}>
       {surface === 'files' ? (
         <QueryClientProvider client={filesClient}>
-          <FilesPage pendingGfsUri={pendingGfsUri} />
+          <FilesPage
+            pendingGfsUri={pendingFileDeepLink ? null : pendingGfsUri}
+            pendingGfsDeepLink={pendingFileDeepLink}
+            isPendingGfsDeepLinkCurrent={() => true}
+            onPendingGfsDeepLinkOutcome={() => undefined}
+            onOpenPendingGfsPreview={() => true}
+          />
         </QueryClientProvider>
       ) : (
         <QueryClientProvider client={previewClient}>
