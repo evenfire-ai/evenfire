@@ -54,10 +54,11 @@ function summarizeTierWindow(msgs: ChatMessage[]): number {
 
 async function compactWith(
   model: string,
-  fixture: string,
+  fixture: string | (() => RecordedResponse),
   options: PressureContextManagerOptions = {}
 ) {
-  const create = vi.fn(async (_payload: Record<string, unknown>) => recordedResponse(fixture))
+  const respond = typeof fixture === 'string' ? () => recordedResponse(fixture) : fixture
+  const create = vi.fn(async (_payload: Record<string, unknown>) => respond())
   const chatCreate = vi.fn()
   const provider = new OpenAIProvider(
     { responses: { create }, chat: { completions: { create: chatCreate } } } as never,
@@ -145,20 +146,33 @@ describe('T-R2 compaction summarizes over Responses', () => {
   })
 })
 
+/** The recorded empty `completed` message with its text replaced by whitespace. */
+function whitespaceOnlyMessage(): RecordedResponse {
+  const raw = recordedResponse('v2-final-answer-empty-message-gpt-6.1-terra')
+  const message = raw.output.find(item => item.type === 'message') as {
+    content: Array<{ text: string }>
+  }
+  for (const part of message.content) part.text = '  \n\t \n'
+  return raw
+}
+
 // A reasoning model can spend the whole output budget thinking: the call
 // succeeds with an empty or cut-off body. Persisting it would replace the
 // archived turns with nothing, so the turns are archived verbatim instead.
 describe('T-R2 compaction falls back to MoveToWorkspace on an unusable summary', () => {
   it.each([
     // T-R2b: reasoning only, no message item.
-    ['gpt-6.1-terra', 'v1-incomplete-gpt-6.1-terra'],
+    ['gpt-6.1-terra', 'v1-incomplete-gpt-6.1-terra', undefined],
     // T-R2c: partial output text cut by max_output_tokens.
-    ['gpt-5.4-mini', 'v1-incomplete-gpt-5.4-mini'],
+    ['gpt-5.4-mini', 'v1-incomplete-gpt-5.4-mini', undefined],
     // A `completed` response whose message is empty: the finish reason is not
     // Length, so only the empty-body check keeps it from being persisted.
-    ['gpt-6.1-terra', 'v2-final-answer-empty-message-gpt-6.1-terra'],
-  ])('%s (%s): the archived turns reach the daily log in full', async (model, fixture) => {
-    const { create, workspace, result } = await compactWith(model, fixture)
+    ['gpt-6.1-terra', 'v2-final-answer-empty-message-gpt-6.1-terra', undefined],
+    // The same `completed` response whose message is only whitespace: still
+    // nothing to persist as a summary.
+    ['gpt-6.1-terra', 'whitespace-only message', whitespaceOnlyMessage],
+  ])('%s (%s): the archived turns reach the daily log in full', async (model, label, fixture) => {
+    const { create, workspace, result } = await compactWith(model, fixture ?? label)
     const expected = await archivedVerbatim()
 
     expect(create).toHaveBeenCalledTimes(1)
