@@ -5,6 +5,7 @@ import {
   type MarkdownDraftBinding,
   MarkdownDraftOwner,
   type MarkdownDraftRecordSnapshot,
+  type MarkdownSaveRequest,
 } from '../markdownDraftOwner'
 
 const binding: MarkdownDraftBinding = {
@@ -436,6 +437,7 @@ describe('MarkdownDraftOwner generated command oracle', () => {
       draft: string
       editing: boolean
       pending: number | null
+      pendingSubmitted: string | null
       closed: boolean
       savedContent: string
       savedVersion: number
@@ -444,7 +446,7 @@ describe('MarkdownDraftOwner generated command oracle', () => {
       candidateVersion: number | null
       remoteAhead: boolean
     }
-    type Real = { owner: MarkdownDraftOwner }
+    type Real = { owner: MarkdownDraftOwner; pendingRequest: MarkdownSaveRequest | null }
     const assertEquivalent = (model: Model, owner: MarkdownDraftOwner) => {
       if (model.closed) {
         expect(owner.get(binding)).toBeNull()
@@ -455,7 +457,8 @@ describe('MarkdownDraftOwner generated command oracle', () => {
         localBaseline: model.baseline,
         draft: model.draft,
         editing: model.editing,
-        pendingSave: model.pending === null ? null : { id: model.pending },
+        pendingSave:
+          model.pending === null ? null : { id: model.pending, submitted: model.pendingSubmitted },
         dirty: model.draft !== model.baseline,
         savedSnapshot: { content: model.savedContent, version: model.savedVersion },
         observedVersion: model.observedVersion,
@@ -505,7 +508,7 @@ describe('MarkdownDraftOwner generated command oracle', () => {
         return `Type(${JSON.stringify(this.value)})`
       }
     }
-    class Save implements fc.Command<Model, Real> {
+    class ReserveSave implements fc.Command<Model, Real> {
       check(m: Readonly<Model>) {
         return !m.closed && m.editing && m.pending === null && m.draft !== m.baseline
       }
@@ -513,21 +516,54 @@ describe('MarkdownDraftOwner generated command oracle', () => {
         const request = r.owner.reserveSave(binding)
         expect(request?.submitted).toBe(m.draft)
         expect(request).not.toHaveProperty('ifMatch')
+        r.pendingRequest = request!
         m.pending = request!.id
-        const version = m.observedVersion + 1
-        r.owner.completeSave(request!, { kind: 'success', version })
-        m.pending = null
-        m.savedContent = m.draft
-        m.savedVersion = version
-        m.observedVersion = version
-        m.remoteAhead = false
-        m.candidateRequestId = request!.id
-        m.candidateVersion = version
-        m.baseline = m.draft
+        m.pendingSubmitted = request!.submitted
         assertEquivalent(m, r.owner)
       }
       toString() {
-        return 'SaveAndResolveSuccess'
+        return 'ReserveSave'
+      }
+    }
+    class DuplicateSave implements fc.Command<Model, Real> {
+      check(m: Readonly<Model>) {
+        return !m.closed && m.editing && m.pending !== null
+      }
+      run(m: Model, r: Real) {
+        expect(r.owner.reserveSave(binding)).toBeNull()
+        assertEquivalent(m, r.owner)
+      }
+      toString() {
+        return 'DuplicateSaveWhilePending'
+      }
+    }
+    class ResolveSave implements fc.Command<Model, Real> {
+      check(m: Readonly<Model>) {
+        return !m.closed && m.pending !== null
+      }
+      run(m: Model, r: Real) {
+        const request = r.pendingRequest!
+        const version = m.observedVersion + 1
+        expect(r.owner.completeSave(request, { kind: 'success', version })).toBe(true)
+        r.pendingRequest = null
+        m.pending = null
+        m.pendingSubmitted = null
+        m.savedContent = request.submitted
+        m.savedVersion = version
+        m.observedVersion = version
+        m.remoteAhead = false
+        m.baseline = request.submitted
+        if (m.draft === request.submitted) {
+          m.candidateRequestId = request.id
+          m.candidateVersion = version
+        } else {
+          m.candidateRequestId = null
+          m.candidateVersion = null
+        }
+        assertEquivalent(m, r.owner)
+      }
+      toString() {
+        return 'ResolveSaveSuccess'
       }
     }
     class Discard implements fc.Command<Model, Real> {
@@ -615,7 +651,9 @@ describe('MarkdownDraftOwner generated command oracle', () => {
     const commands = [
       fc.constant(new Edit()),
       fc.string({ maxLength: 12 }).map(value => new Type(value)),
-      fc.constant(new Save()),
+      fc.constant(new ReserveSave()),
+      fc.constant(new DuplicateSave()),
+      fc.constant(new ResolveSave()),
       fc.constant(new RefreshAfterSave()),
       fc.constant(new CommitSaveView()),
       fc.constant(new Discard()),
@@ -629,6 +667,7 @@ describe('MarkdownDraftOwner generated command oracle', () => {
           draft: 'saved',
           editing: false,
           pending: null,
+          pendingSubmitted: null,
           closed: false,
           savedContent: 'saved',
           savedVersion: 1,
@@ -637,7 +676,7 @@ describe('MarkdownDraftOwner generated command oracle', () => {
           candidateVersion: null,
           remoteAhead: false,
         }
-        fc.modelRun(() => ({ model, real: { owner } }), generated)
+        fc.modelRun(() => ({ model, real: { owner, pendingRequest: null } }), generated)
         assertEquivalent(model, owner)
       }),
       { numRuns: 150 }
