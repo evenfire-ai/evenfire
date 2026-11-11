@@ -708,7 +708,7 @@ interface LLMProvider {
 
 #### OpenAI Provider
 
-- SDK: `openai` v4.70.0
+- SDK: `openai` ^4.87.0
 - Default model: `gpt-5.4-mini`
 - Wire protocol: Responses API (`responses.create`, `store: false`); Azure OpenAI and the OpenAI-compatible providers use Chat Completions instead
 - Tool format: function tools (`type: "function"`)
@@ -726,7 +726,7 @@ interface LLMProvider {
 
 #### ZAI Provider (z.ai / ZhipuAI)
 
-- SDK: `openai` v4.70.0 (z.ai is OpenAI-compatible, uses the same SDK with `baseURL: "https://api.z.ai/api/coding/paas/v4"`)
+- SDK: `openai` ^4.87.0 (z.ai is OpenAI-compatible, uses the same SDK with `baseURL: "https://api.z.ai/api/coding/paas/v4"`)
 - Default model: `glm-5.1`
 - Wire protocol: Chat Completions (the same serializer Azure OpenAI uses; official OpenAI is on Responses)
 - Tool format: OpenAI function calling schema
@@ -736,7 +736,7 @@ interface LLMProvider {
 
 #### Bailian Provider (Alibaba DashScope)
 
-- SDK: `openai` v4.70.0 (OpenAI-compatible, `baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"`)
+- SDK: `openai` ^4.87.0 (OpenAI-compatible, `baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"`)
 - Default model: `qwen3-coder-plus`
 - API key: `BAILIAN_API_KEY` / Secret key `bailian-api-key`
 - Implementation: same data-driven `compatibleProfile` (`openaiFamily/endpointProfiles.ts`) as ZAI
@@ -858,7 +858,7 @@ The HTTP response is held open until the agent finishes processing. The response
 
 ### Dependencies
 
-- `openai` ^4.70.0 - OpenAI API client
+- `openai` ^4.87.0 - OpenAI API client (`/v1/responses` needs >= 4.87.0)
 - `@anthropic-ai/sdk` ^0.32.0 - Anthropic Claude API client
 - `@modelcontextprotocol/sdk` ^1.0.0 - MCP protocol SDK
 - `@kubernetes/client-node` ^1.0.0 - K8s API access
