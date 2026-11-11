@@ -223,39 +223,32 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
 export function getActiveDeploymentProfileUiBaseUrl(): string {
   const externalRestApiBaseUrl = config.externalRestApiBaseUrl
   const profileUiBaseUrl = profileUiBaseUrlFromExternalRestApi(externalRestApiBaseUrl)
-  if (profileUiBaseUrl) {
-    const restUrl = new URL(externalRestApiBaseUrl)
-    const isLocalDeployment =
-      restUrl.hostname === '127.0.0.1' ||
-      restUrl.hostname === 'localhost' ||
-      restUrl.hostname === '[::1]'
-    if (
-      isLocalDeployment &&
-      config.desktopProfileUiBaseUrlExplicit &&
-      configuredProfileUiRestBaseUrl &&
-      sameDesktopRestEndpoint(externalRestApiBaseUrl, configuredProfileUiRestBaseUrl)
-    ) {
-      const explicitProfileUiBaseUrl = normalizeConfiguredProfileUiOrigin(
-        config.desktopProfileUiBaseUrl
+  const explicitPairMatches =
+    config.desktopProfileUiBaseUrlExplicit &&
+    configuredProfileUiRestBaseUrl &&
+    sameDesktopRestEndpoint(externalRestApiBaseUrl, configuredProfileUiRestBaseUrl)
+
+  if (explicitPairMatches) {
+    const explicitProfileUiBaseUrl = normalizeConfiguredProfileUiOrigin(
+      config.desktopProfileUiBaseUrl
+    )
+    if (!explicitProfileUiBaseUrl) {
+      throw new Error(
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
       )
-      if (!explicitProfileUiBaseUrl) {
-        throw new Error(
-          'Cannot resolve a shareable Profile UI link for the active desktop deployment'
-        )
-      }
-      const explicitProfileUrl = new URL(explicitProfileUiBaseUrl)
-      if (
-        explicitProfileUrl.protocol !== restUrl.protocol ||
-        explicitProfileUrl.hostname !== restUrl.hostname
-      ) {
-        throw new Error(
-          'Cannot resolve a shareable Profile UI link for the active desktop deployment'
-        )
-      }
-      return explicitProfileUiBaseUrl
     }
-    return profileUiBaseUrl
+
+    const restUrl = new URL(externalRestApiBaseUrl)
+    const explicitProfileUrl = new URL(explicitProfileUiBaseUrl)
+    if (explicitProfileUrl.protocol !== restUrl.protocol) {
+      throw new Error(
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+      )
+    }
+    return explicitProfileUiBaseUrl
   }
+
+  if (profileUiBaseUrl) return profileUiBaseUrl
 
   throw new Error('Cannot resolve a shareable Profile UI link for the active desktop deployment')
 }

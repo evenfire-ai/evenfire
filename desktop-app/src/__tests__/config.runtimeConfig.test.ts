@@ -61,7 +61,7 @@ describe('desktop runtime config', () => {
   })
 
   it('resolves shareable Profile origins from the active deployment across transitions', async () => {
-    process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.dev.evenfire.test'
+    process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.prod.evenfire.test'
     process.env.PROFILE_UI_BASE_URL = 'https://profile.prod.evenfire.test'
     vi.doMock('electron', () => ({
       app: {
@@ -74,6 +74,7 @@ describe('desktop runtime config', () => {
     }))
     const runtime = await import('../config.js')
 
+    runtime.config.externalRestApiBaseUrl = 'https://api.dev.evenfire.test'
     expect(runtime.config.desktopProfileUiBaseUrl).toBe('https://profile.prod.evenfire.test')
     expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('https://profile.dev.evenfire.test')
 
@@ -81,9 +82,10 @@ describe('desktop runtime config', () => {
     expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('https://profile.prod.evenfire.test')
   })
 
-  it('refuses an unknown active deployment instead of using a configured fallback origin', async () => {
-    process.env.EXTERNAL_REST_API_BASE_URL = 'https://customer.example'
-    process.env.PROFILE_UI_BASE_URL = 'https://profile.prod.evenfire.test'
+  it('uses the explicit Profile origin for its matching custom REST binding', async () => {
+    process.env.EXTERNAL_REST_API_BASE_URL =
+      'https://customer-rest.example.test:9443/api?tenant=one'
+    process.env.PROFILE_UI_BASE_URL = 'https://profile.customer.example.test:9444'
     vi.doMock('electron', () => ({
       app: {
         getPath: () => '/tmp/evenfire',
@@ -94,6 +96,26 @@ describe('desktop runtime config', () => {
       },
     }))
     const runtime = await import('../config.js')
+
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe(
+      'https://profile.customer.example.test:9444'
+    )
+  })
+
+  it('refuses an unknown active deployment instead of using a configured fallback origin', async () => {
+    process.env.EXTERNAL_REST_API_BASE_URL = 'https://configured-customer.example'
+    process.env.PROFILE_UI_BASE_URL = 'https://profile.customer.example'
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: () => '/tmp/evenfire',
+        isPackaged: false,
+        isReady: () => false,
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+    runtime.config.externalRestApiBaseUrl = 'https://active-customer.example'
 
     expect(() => runtime.getActiveDeploymentProfileUiBaseUrl()).toThrow(
       'Cannot resolve a shareable Profile UI link for the active desktop deployment'
