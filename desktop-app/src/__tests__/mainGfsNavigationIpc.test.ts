@@ -277,7 +277,7 @@ describe('main.ts GFS navigation-generation composition', () => {
     expect(listPending(ipcEvent(ownContents)).links).toEqual([])
   })
 
-  it('reloads the hidden renderer before revealing a cleared session', () => {
+  it('notifies a fresh renderer before revealing a cleared session', () => {
     const ownContents = harness.windows[0]?.webContents
     if (!ownContents) throw new Error('main.ts did not create the owning BrowserWindow')
     if (!harness.sessionCleared) throw new Error('main.ts did not pass onSessionCleared')
@@ -291,12 +291,14 @@ describe('main.ts GFS navigation-generation composition', () => {
     expect(mainWindow.hide).toHaveBeenCalledOnce()
     expect(ownContents.reload).toHaveBeenCalledOnce()
     expect(mainWindow.show).not.toHaveBeenCalled()
-    const didFinishLoad = ownContents.once.mock.calls.find(
-      ([event]) => event === 'did-finish-load'
-    )?.[1]
-    expect(didFinishLoad).toEqual(expect.any(Function))
-    didFinishLoad?.()
+    const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
+    rendererReady(ipcEvent(ownContents))
+    expect(ownContents.send).toHaveBeenCalledWith('auth:sessionCleared')
     expect(mainWindow.show).toHaveBeenCalledOnce()
+    rendererReady(ipcEvent(ownContents))
+    expect(
+      ownContents.send.mock.calls.filter(([channel]) => channel === 'auth:sessionCleared')
+    ).toHaveLength(1)
   })
 
   it('keeps post-invalidation App and resource links above the main queue reset floors', () => {

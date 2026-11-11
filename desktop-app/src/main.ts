@@ -77,13 +77,14 @@ process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
 let forceFreshRendererAfterSessionClear = false
+let sessionTransitionRevealPending = false
+let pendingSessionClearedNotifications = 0
 const reloadHiddenRendererAfterSessionTransition = () => {
   const window = mainWindow
   if (!forceFreshRendererAfterSessionClear || !window || window.isDestroyed()) return
   forceFreshRendererAfterSessionClear = false
-  window.webContents.once('did-finish-load', () => {
-    if (!window.isDestroyed()) window.show()
-  })
+  sessionTransitionRevealPending = true
+  mainWindowRendererReady = false
   window.webContents.reload()
 }
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
@@ -104,7 +105,8 @@ const appService = new AppService({
   },
   onSessionCleared: () => {
     // Keep the previous authenticated React tree hidden until a fresh renderer
-    // has read the now-cleared main-process session.
+    // installs its session-cleared listener and reads the cleared main session.
+    pendingSessionClearedNotifications += 1
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
     forceFreshRendererAfterSessionClear = true
     reloadHiddenRendererAfterSessionTransition()
@@ -313,6 +315,14 @@ ipcMain.handle('app:rendererReady', event => {
   assertTrustedSender(event)
   if (!mainWindow || event.sender !== mainWindow.webContents) return
   mainWindowRendererReady = true
+  while (pendingSessionClearedNotifications > 0) {
+    pendingSessionClearedNotifications -= 1
+    mainWindow.webContents.send('auth:sessionCleared')
+  }
+  if (sessionTransitionRevealPending && !forceFreshRendererAfterSessionClear) {
+    sessionTransitionRevealPending = false
+    mainWindow.show()
+  }
   emitWindowControlsState(mainWindow)
   evenfireDeepLinkRouter.drainPending()
   // U5: flush mcp-oauth completions that arrived before the renderer installed
