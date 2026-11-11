@@ -2444,12 +2444,14 @@ describe('FilePreviewPage', () => {
       sessionScope: scope,
     }))
     const { resolve } = stubGfs({
-      downloadPreview: async () => {
+      downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
+      resolve: async () => {
         if (!allowed) throw new Error(deniedMessage)
-        return { bytes: new Uint8Array([1, 2, 3]).buffer }
+        return resolvePreviewResource(uri)
       },
-      resolve: async () => resolvePreviewResource(uri),
     })
+    const titlebarLeadingTarget = document.createElement('div')
+    document.body.appendChild(titlebarLeadingTarget)
     const element = () => (
       <FilePreviewPage
         gfsUri={uri}
@@ -2458,14 +2460,16 @@ describe('FilePreviewPage', () => {
         mimeType="image/png"
         byteLength={3}
         tabId="same-preview-tab"
+        titlebarLeadingTarget={titlebarLeadingTarget}
       />
     )
     const { rerender } = render(element())
 
-    expect(
-      await screen.findByText(/403 Forbidden.*not authorized to read this resource/)
-    ).toBeTruthy()
-    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(await screen.findByAltText('Preview of shared.png')).toBeTruthy()
+    allowed = false
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
+    expect(screen.queryByAltText('Preview of shared.png')).toBeNull()
 
     scope = 'preview-test-user:team-b'
     allowed = true
