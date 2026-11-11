@@ -1568,8 +1568,9 @@ assert_control_api_runtime_access_contract_is_exact() {
   peer_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$peer_file")"
   duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$profile_file")"
   invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_delete|none)$/) { count++ } END { print count + 0 }' "$profile_file")"
+  # Control API owns one protocol-attempt relation beyond the shared peer relation set.
   name_diff="$(comm -3 \
-    <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$profile_file" | sort) \
+    <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$profile_file" | grep -vx 'oidc_protocol_attempts' | sort) \
     <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$peer_file" | sort))"
   local -a sentinels=(
     $'dynamic_clients\tlegacy_dml'
@@ -1606,7 +1607,7 @@ assert_control_api_runtime_access_contract_is_exact() {
   sequence_duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$sequence_profile_file")"
   sequence_invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_rw|consume|none)$/) { count++ } END { print count + 0 }' "$sequence_profile_file")"
 
-  if [[ "$relation_count" -gt 0 && "$relation_count" == "$peer_count" && -z "$name_diff" && -z "$missing_sentinels" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
+  if [[ "$relation_count" -gt 0 && "$relation_count" -eq "$((peer_count + 1))" && -z "$name_diff" && -z "$missing_sentinels" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
      [[ "$sequence_count" == "9" && "$sequence_duplicate_count" == "0" && "$sequence_invalid_count" == "0" ]] && \
      grep -qx $'dynamic_clients_id_seq\tlegacy_rw' "$sequence_profile_file" && \
      grep -qx $'entity_change_outbox_id_seq\tnone' "$sequence_profile_file" && \

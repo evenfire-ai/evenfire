@@ -58,7 +58,7 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
         DROP COLUMN browser_binding_hash
     `)
     await pool!.query(
-      `DELETE FROM schema_migrations WHERE version = '0133_oidc_protocol_attempt_browser_binding'`
+      `DELETE FROM schema_migrations WHERE version = '0141_oidc_protocol_attempt_browser_binding'`
     )
     const attemptId = randomUUID()
     await pool!.query(
@@ -80,7 +80,7 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
         WHERE status = 'pending'
     `)
     await pool!.query(
-      `DELETE FROM schema_migrations WHERE version = '0132_oidc_protocol_attempt_expiry_index'`
+      `DELETE FROM schema_migrations WHERE version = '0140_oidc_protocol_attempt_expiry_index'`
     )
 
     await initDb({ connect: () => pool!.connect() })
@@ -109,15 +109,15 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
     expect(row.rows[0]?.finished_at).toBeInstanceOf(Date)
     const receipt = await pool!.query<{ version: string }>(
       `SELECT version FROM schema_migrations
-        WHERE version = '0132_oidc_protocol_attempt_expiry_index'`
+        WHERE version = '0140_oidc_protocol_attempt_expiry_index'`
     )
-    expect(receipt.rows).toEqual([{ version: '0132_oidc_protocol_attempt_expiry_index' }])
+    expect(receipt.rows).toEqual([{ version: '0140_oidc_protocol_attempt_expiry_index' }])
     const browserBindingReceipt = await pool!.query<{ version: string }>(
       `SELECT version FROM schema_migrations
-        WHERE version = '0133_oidc_protocol_attempt_browser_binding'`
+        WHERE version = '0141_oidc_protocol_attempt_browser_binding'`
     )
     expect(browserBindingReceipt.rows).toEqual([
-      { version: '0133_oidc_protocol_attempt_browser_binding' },
+      { version: '0141_oidc_protocol_attempt_browser_binding' },
     ])
   }, 60_000)
 

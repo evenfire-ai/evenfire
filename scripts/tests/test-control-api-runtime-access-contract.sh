@@ -10,8 +10,9 @@ relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print cou
 peer_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$PEER_FILE")"
 duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$PROFILE_FILE")"
 invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_delete|none)$/) { count++ } END { print count + 0 }' "$PROFILE_FILE")"
+# Control API owns one protocol-attempt relation beyond the shared peer relation set.
 name_diff="$(comm -3 \
-  <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$PROFILE_FILE" | sort) \
+  <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$PROFILE_FILE" | grep -vx 'oidc_protocol_attempts' | sort) \
   <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$PEER_FILE" | sort))"
 
 # Existing sentinel rows, plus the three session rows. The expected relation
@@ -53,7 +54,7 @@ if ! grep -Fq '$2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_dele
   contract_fragments_ok=0
 fi
 
-if [[ "$relation_count" -le 0 || "$relation_count" != "$peer_count" || -n "$name_diff" || "$duplicate_count" != "0" || "$invalid_count" != "0" || ${#missing_sentinels[@]} -gt 0 || "$contract_fragments_ok" != "1" ]]; then
+if [[ "$relation_count" -le 0 || "$relation_count" != "$((peer_count + 1))" || -n "$name_diff" || "$duplicate_count" != "0" || "$invalid_count" != "0" || ${#missing_sentinels[@]} -gt 0 || "$contract_fragments_ok" != "1" ]]; then
   printf 'FAIL: control-api runtime access contract is incomplete or not exact (%s has %s relations, %s has %s relations; duplicates=%s invalid=%s)\n' \
     "$PROFILE_FILE" "$relation_count" "$PEER_FILE" "$peer_count" "$duplicate_count" "$invalid_count" >&2
   if [[ -n "$name_diff" ]]; then

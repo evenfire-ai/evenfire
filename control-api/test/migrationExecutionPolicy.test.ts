@@ -49,6 +49,9 @@ describe('D34 migration execution policy', () => {
     expect(PR1_MIGRATION_VERSIONS).toEqual([
       '0137_user_access_foundation',
       '0138_legacy_password_security_epoch_backfill',
+      '0139_oidc_protocol_attempts',
+      '0140_oidc_protocol_attempt_expiry_index',
+      '0141_oidc_protocol_attempt_browser_binding',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -529,7 +532,12 @@ describe('PR1 earlier-head guard', () => {
     })
 
     expect(queries.filter(({ sql }) => sql.includes(EARLIER_HEAD_GUARD_MARKER))).toHaveLength(1)
-    expect(recorded).toEqual(['0138_legacy_password_security_epoch_backfill'])
+    expect(recorded).toEqual([
+      '0138_legacy_password_security_epoch_backfill',
+      '0139_oidc_protocol_attempts',
+      '0140_oidc_protocol_attempt_expiry_index',
+      '0141_oidc_protocol_attempt_browser_binding',
+    ])
   })
 })
 

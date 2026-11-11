@@ -13,6 +13,11 @@ import {
 } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
 import {
+  applyOidcProtocolAttemptBrowserBindingSchema,
+  applyOidcProtocolAttemptExpiryIndexMigration,
+  applyOidcProtocolAttemptSchema,
+} from './oidc/protocolAttemptStore.js'
+import {
   applyUserAccessFoundationSchema,
   backfillLegacyPasswordSecurityEpochs,
 } from './services/access/userAccessFoundationSchema.js'
@@ -6421,6 +6426,22 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0138_legacy_password_security_epoch_backfill',
     apply: backfillLegacyPasswordSecurityEpochs,
+  },
+  {
+    version: '0139_oidc_protocol_attempts',
+    // Preserve receipts from all previously used feature-branch identities.
+    legacyVersions: ['0130_oidc_protocol_attempts', '0131_oidc_protocol_attempts'],
+    apply: applyOidcProtocolAttemptSchema,
+  },
+  {
+    version: '0140_oidc_protocol_attempt_expiry_index',
+    legacyVersions: ['0132_oidc_protocol_attempt_expiry_index'],
+    apply: applyOidcProtocolAttemptExpiryIndexMigration,
+  },
+  {
+    version: '0141_oidc_protocol_attempt_browser_binding',
+    legacyVersions: ['0133_oidc_protocol_attempt_browser_binding'],
+    apply: applyOidcProtocolAttemptBrowserBindingSchema,
   },
 ]
 

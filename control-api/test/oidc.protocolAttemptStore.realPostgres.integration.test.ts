@@ -5,6 +5,7 @@ import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
 import type { PinnedFetchOptions } from '../src/http/pinnedFetch.js'
 import {
   type OidcProtocolAttemptBinding,
+  applyOidcProtocolAttemptBrowserBindingSchema,
   applyOidcProtocolAttemptExpiryIndexMigration,
   applyOidcProtocolAttemptSchema,
   cancelOidcProtocolAttempt,
@@ -386,12 +387,12 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
   })
 
   it('upgrades legacy attempt rows and requires browser binding for new pending attempts', async () => {
-    await pool!.query('DROP TABLE oidc_protocol_attempts')
+    await pool!.query('DROP TABLE IF EXISTS oidc_protocol_attempts')
     await pool!.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
       [
-        '0131_oidc_protocol_attempts',
-        '0132_oidc_protocol_attempt_expiry_index',
-        '0133_oidc_protocol_attempt_browser_binding',
+        '0139_oidc_protocol_attempts',
+        '0140_oidc_protocol_attempt_expiry_index',
+        '0141_oidc_protocol_attempt_browser_binding',
       ],
     ])
     await applyOidcProtocolAttemptSchema(pool!)
@@ -488,17 +489,17 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
       [
         [
           '0130_oidc_protocol_attempts',
-          '0131_oidc_protocol_attempts',
-          '0132_oidc_protocol_attempt_expiry_index',
-          '0133_oidc_protocol_attempt_browser_binding',
+          '0139_oidc_protocol_attempts',
+          '0140_oidc_protocol_attempt_expiry_index',
+          '0141_oidc_protocol_attempt_browser_binding',
         ],
       ]
     )
     expect(version.rows.map(row => row.version)).toEqual([
       '0130_oidc_protocol_attempts',
-      '0131_oidc_protocol_attempts',
-      '0132_oidc_protocol_attempt_expiry_index',
-      '0133_oidc_protocol_attempt_browser_binding',
+      '0139_oidc_protocol_attempts',
+      '0140_oidc_protocol_attempt_expiry_index',
+      '0141_oidc_protocol_attempt_browser_binding',
     ])
 
     await expect(
@@ -539,35 +540,94 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
     await initDb({ connect: () => pool!.connect() })
     expect(
       await pool!.query(`SELECT version FROM schema_migrations WHERE version = $1`, [
-        '0133_oidc_protocol_attempt_browser_binding',
+        '0141_oidc_protocol_attempt_browser_binding',
       ])
     ).toMatchObject({ rowCount: 1 })
   })
 
-  it('adopts the original feature migration receipt without rerunning its schema', async () => {
-    const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0131_oidc_protocol_attempts'
-    )
-    expect(migration?.legacyVersions).toEqual(['0130_oidc_protocol_attempts'])
+  it.each(['0130_oidc_protocol_attempts', '0131_oidc_protocol_attempts'])(
+    'adopts the earlier attempt-schema receipt %s without rerunning its schema',
+    async oldReceipt => {
+      const migration = CONTROL_API_MIGRATIONS.find(
+        candidate => candidate.version === '0139_oidc_protocol_attempts'
+      )
+      await pool!.query('DROP TABLE IF EXISTS oidc_protocol_attempts')
+      await pool!.query('DELETE FROM schema_migrations WHERE version = $1', [migration!.version])
+      await pool!.query(
+        `INSERT INTO schema_migrations(version) VALUES ($1)
+         ON CONFLICT (version) DO NOTHING`,
+        [oldReceipt]
+      )
 
-    await pool!.query('DROP TABLE oidc_protocol_attempts')
-    await pool!.query('DELETE FROM schema_migrations WHERE version = $1', [migration!.version])
+      await initDb({ connect: () => pool!.connect() })
+
+      const receipt = await pool!.query<{ version: string }>(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        [migration!.version]
+      )
+      const relation = await pool!.query<{ relation: string | null }>(
+        "SELECT to_regclass('public.oidc_protocol_attempts') AS relation"
+      )
+      expect(receipt.rows).toEqual([{ version: '0139_oidc_protocol_attempts' }])
+      expect(relation.rows[0]?.relation).toBeNull()
+    }
+  )
+
+  it('adopts the earlier expiry-index receipt without rebuilding its missing index', async () => {
+    await applyOidcProtocolAttemptSchema(pool!)
+    await applyOidcProtocolAttemptExpiryIndexMigration(pool!)
+    await applyOidcProtocolAttemptBrowserBindingSchema(pool!)
+    await pool!.query('DELETE FROM schema_migrations WHERE version = $1', [
+      '0140_oidc_protocol_attempt_expiry_index',
+    ])
+    await pool!.query('DROP INDEX IF EXISTS oidc_protocol_attempts_expiry_idx')
     await pool!.query(
-      `INSERT INTO schema_migrations(version) VALUES ($1)
-       ON CONFLICT (version) DO NOTHING`,
-      ['0130_oidc_protocol_attempts']
+      `INSERT INTO schema_migrations(version) VALUES ('0132_oidc_protocol_attempt_expiry_index')
+       ON CONFLICT (version) DO NOTHING`
     )
 
     await initDb({ connect: () => pool!.connect() })
 
+    const index = await pool!.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = 'oidc_protocol_attempts_expiry_idx'`
+    )
     const receipt = await pool!.query<{ version: string }>(
-      'SELECT version FROM schema_migrations WHERE version = $1',
-      [migration!.version]
+      `SELECT version FROM schema_migrations WHERE version = '0140_oidc_protocol_attempt_expiry_index'`
     )
-    const relation = await pool!.query<{ relation: string | null }>(
-      "SELECT to_regclass('public.oidc_protocol_attempts') AS relation"
+    expect(index.rows).toEqual([])
+    expect(receipt.rows).toEqual([{ version: '0140_oidc_protocol_attempt_expiry_index' }])
+  })
+
+  it('adopts the earlier browser-binding receipt without reapplying its ALTER', async () => {
+    await applyOidcProtocolAttemptSchema(pool!)
+    await applyOidcProtocolAttemptExpiryIndexMigration(pool!)
+    await applyOidcProtocolAttemptBrowserBindingSchema(pool!)
+    await pool!.query(`
+      ALTER TABLE oidc_protocol_attempts
+        DROP CONSTRAINT oidc_protocol_attempts_pending_requires_browser_binding,
+        DROP CONSTRAINT oidc_protocol_attempts_browser_binding_hash_format,
+        DROP COLUMN browser_binding_hash
+    `)
+    await pool!.query('DELETE FROM schema_migrations WHERE version = $1', [
+      '0141_oidc_protocol_attempt_browser_binding',
+    ])
+    await pool!.query(
+      `INSERT INTO schema_migrations(version) VALUES ('0133_oidc_protocol_attempt_browser_binding')
+       ON CONFLICT (version) DO NOTHING`
     )
-    expect(receipt.rows).toEqual([{ version: '0131_oidc_protocol_attempts' }])
-    expect(relation.rows[0]?.relation).toBeNull()
+
+    await initDb({ connect: () => pool!.connect() })
+
+    const column = await pool!.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'oidc_protocol_attempts'
+          AND column_name = 'browser_binding_hash'`
+    )
+    const receipt = await pool!.query<{ version: string }>(
+      `SELECT version FROM schema_migrations WHERE version = '0141_oidc_protocol_attempt_browser_binding'`
+    )
+    expect(column.rows).toEqual([])
+    expect(receipt.rows).toEqual([{ version: '0141_oidc_protocol_attempt_browser_binding' }])
   })
 })

@@ -7,7 +7,7 @@ vi.mock('pg', () => ({
   }),
 }))
 
-const VERSION = '0131_oidc_protocol_attempts'
+const VERSION = '0139_oidc_protocol_attempts'
 
 describe(`${VERSION} migration`, () => {
   it('is registered after the latest development migration', async () => {
@@ -17,13 +17,14 @@ describe(`${VERSION} migration`, () => {
     )
     expect(migrationIndex).toBeGreaterThan(0)
     expect(CONTROL_API_MIGRATIONS[migrationIndex - 1]?.version).toBe(
-      '0130_password_login_success_admission'
+      '0138_legacy_password_security_epoch_backfill'
     )
     expect(CONTROL_API_MIGRATIONS[migrationIndex]?.legacyVersions).toEqual([
       '0130_oidc_protocol_attempts',
+      '0131_oidc_protocol_attempts',
     ])
     expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(
-      '0133_oidc_protocol_attempt_browser_binding'
+      '0141_oidc_protocol_attempt_browser_binding'
     )
   })
 
@@ -47,6 +48,20 @@ describe(`${VERSION} migration`, () => {
     expect(sql).not.toMatch(
       /CREATE TABLE IF NOT EXISTS (users|teams|invitations|sessions|access_requests)/i
     )
+  })
+
+  it('registers the complete OIDC migration tail and legacy receipts', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    expect(CONTROL_API_MIGRATIONS.slice(-3).map(migration => migration.version)).toEqual([
+      '0139_oidc_protocol_attempts',
+      '0140_oidc_protocol_attempt_expiry_index',
+      '0141_oidc_protocol_attempt_browser_binding',
+    ])
+    expect(CONTROL_API_MIGRATIONS.slice(-3).map(migration => migration.legacyVersions)).toEqual([
+      ['0130_oidc_protocol_attempts', '0131_oidc_protocol_attempts'],
+      ['0132_oidc_protocol_attempt_expiry_index'],
+      ['0133_oidc_protocol_attempt_browser_binding'],
+    ])
   })
 
   it('registers the relation in the production runtime access profile', () => {

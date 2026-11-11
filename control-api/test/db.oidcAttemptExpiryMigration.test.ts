@@ -6,13 +6,13 @@ vi.mock('pg', () => ({
   }),
 }))
 
-const VERSION = '0132_oidc_protocol_attempt_expiry_index'
+const VERSION = '0140_oidc_protocol_attempt_expiry_index'
 
 describe(`${VERSION} migration`, () => {
   it('follows the existing OIDC attempt schema without rewriting its receipt', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const schemaIndex = CONTROL_API_MIGRATIONS.findIndex(
-      migration => migration.version === '0131_oidc_protocol_attempts'
+      migration => migration.version === '0139_oidc_protocol_attempts'
     )
     const upgrade = CONTROL_API_MIGRATIONS.find(migration => migration.version === VERSION)
 
