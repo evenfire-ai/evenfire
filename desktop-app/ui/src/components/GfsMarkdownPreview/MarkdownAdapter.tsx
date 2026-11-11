@@ -59,7 +59,28 @@ const MARKDOWN_COMPONENTS: MarkdownComponents = {
   },
 }
 
+type MarkdownHastNode = {
+  type: string
+  value?: string
+  children?: MarkdownHastNode[]
+}
+
+function preserveRawHtmlAsInertText() {
+  return (tree: MarkdownHastNode) => {
+    const visit = (parent: MarkdownHastNode) => {
+      if (!parent.children) return
+      parent.children = parent.children.map(child => {
+        if (child.type === 'raw') return { type: 'text', value: child.value ?? '' }
+        visit(child)
+        return child
+      })
+    }
+    visit(tree)
+  }
+}
+
 const MARKDOWN_REHYPE_PLUGINS: NonNullable<MarkdownPreviewProps['rehypePlugins']> = [
+  preserveRawHtmlAsInertText as never,
   [
     rehypeSanitize,
     {
@@ -86,7 +107,7 @@ const MARKDOWN_PREVIEW_OPTIONS = {
       : plugins,
   rehypePlugins: MARKDOWN_REHYPE_PLUGINS,
   remarkPlugins: [remarkGfm],
-  skipHtml: true,
+  skipHtml: false,
   urlTransform: transformMarkdownUrl,
 }
 

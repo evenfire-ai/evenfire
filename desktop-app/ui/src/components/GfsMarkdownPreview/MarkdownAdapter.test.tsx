@@ -33,6 +33,8 @@ describe('GFS Markdown adapter', () => {
     const article = screen.getByRole('article', { name: 'Markdown preview of unsafe.md' })
     expect(within(article).getByRole('heading', { name: 'Safe heading', level: 1 })).toBeTruthy()
     expect(within(article).queryByRole('heading', { name: 'Raw HTML heading' })).toBeNull()
+    expect(article.textContent).toContain('<h2>Raw HTML heading</h2>')
+    expect(article.textContent).toContain('<script>alert(1)</script>')
     expect(container.querySelector('script, iframe, form')).toBeNull()
     expect(container.querySelector('input[type="checkbox"]:not(:disabled)')).toBeNull()
     expect(container.querySelector('[onfocus], [onclick], [onerror]')).toBeNull()
