@@ -203,7 +203,12 @@ export class DefaultReasoningPort implements ReasoningPort {
         maxTokens: this.contextMaxTokens ?? 0,
       })
     } catch (err) {
-      logger.error({ component: 'Reasoning', err }, 'Context breakdown capture failed (ignored)')
+      // Only an Error is reduced to {name, code, status} by the logger; any other
+      // thrown value would be logged with its content, so record just its type.
+      logger.error(
+        { component: 'Reasoning', err: err instanceof Error ? err : { thrown: typeof err } },
+        'Context breakdown capture failed (ignored)'
+      )
     }
   }
 
