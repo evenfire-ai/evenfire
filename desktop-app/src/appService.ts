@@ -944,8 +944,10 @@ export class AppService {
   private gfsDispatchBlocked = true
   // A transient runWithTeamContext hop temporarily installs another team's
   // token in sessionToken. Existing GFS jobs keep their captured token and
-  // scope, but new GFS operations must not capture that temporary token.
+  // scope. New unrelated GFS operations wait until the committed team is
+  // restored before capturing a token.
   private gfsTransientTeamHopDepth = 0
+  private readonly gfsTransientTeamHopWaiters = new Set<() => void>()
   // While a `runWithTeamContext` hop that will restore the original team is in
   // flight, `me.teamId` holds the borrowed team. The chat store (and the delete
   // fence derived from it) stays on the original team: rebinding it for the hop
@@ -1342,6 +1344,10 @@ export class AppService {
         this.entityChangeSessionExpiryDeferred = false
         this.emitEntityChangeSessionExpired()
       }
+      if (this.gfsTransientTeamHopDepth === 0) {
+        for (const resolve of this.gfsTransientTeamHopWaiters) resolve()
+        this.gfsTransientTeamHopWaiters.clear()
+      }
     }
   }
 
@@ -1353,9 +1359,15 @@ export class AppService {
       }
       this.assertSessionGeneration(expectedSessionGeneration)
     }
-    if (this.gfsTransientTeamHopDepth > 0) {
-      throw new Error('GFS upload dispatch is unavailable during a transient team hop')
+  }
+
+  private async captureGfsDispatchToken(expectedSessionGeneration = this.sessionGeneration) {
+    this.assertGfsDispatchAllowed(expectedSessionGeneration)
+    while (this.gfsTransientTeamHopDepth > 0) {
+      await new Promise<void>(resolve => this.gfsTransientTeamHopWaiters.add(resolve))
     }
+    this.assertGfsDispatchAllowed(expectedSessionGeneration)
+    return this.requireSessionToken()
   }
 
   private runWithTeamContext<T>(
@@ -1954,7 +1966,12 @@ export class AppService {
     if (this.gfsDispatchBlocked || !this.sessionToken || !this.me) {
       throw new Error('GFS upload dispatch is unavailable without an active authenticated scope')
     }
-    if (!options.allowTransientTeamHop) this.assertGfsDispatchAllowed()
+    if (!options.allowTransientTeamHop) {
+      this.assertGfsDispatchAllowed()
+      if (this.gfsTransientTeamHopDepth > 0) {
+        throw new Error('GFS upload dispatch is unavailable during a transient team hop')
+      }
+    }
     const identity = this.gfsScopeIdentity
     if (!identity) {
       throw new Error('GFS upload dispatch is unavailable before scope activation')
@@ -3154,8 +3171,8 @@ export class AppService {
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
   async resolveGfsUri(uri: string, expectedSessionGeneration?: number) {
-    this.assertGfsDispatchAllowed(expectedSessionGeneration)
-    return this.gfsClient.resolveUri(uri, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
+    return this.gfsClient.resolveUri(uri, token)
   }
 
   /**
@@ -3170,10 +3187,10 @@ export class AppService {
     signal?: AbortSignal,
     expectedSessionGeneration?: number
   ) {
-    this.assertGfsDispatchAllowed(expectedSessionGeneration)
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
     return this.gfsClient.download(
       uri,
-      this.requireSessionToken(),
+      token,
       maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
     )
   }
@@ -3192,9 +3209,10 @@ export class AppService {
     signal: AbortSignal | undefined,
     onChunk: (chunk: Uint8Array) => Promise<void>
   ) {
+    const token = await this.captureGfsDispatchToken()
     return this.gfsClient.downloadInto(
       uri,
-      this.requireSessionToken(),
+      token,
       signal ? { maxBytes, signal } : { maxBytes },
       onChunk
     )
@@ -3202,7 +3220,8 @@ export class AppService {
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */
   async listGfsChildren(resourceId: string, drive?: string, cursor?: string, signal?: AbortSignal) {
-    return this.gfsClient.listChildren(resourceId, this.requireSessionToken(), {
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.listChildren(resourceId, token, {
       drive,
       cursor,
       signal,
@@ -3211,7 +3230,8 @@ export class AppService {
 
   /** List explicit gfs resources the current user can read through grants or shares. */
   async listAccessibleGfsResources(drive?: string, cursor?: string) {
-    return this.gfsClient.listAccessible(this.requireSessionToken(), { drive, cursor })
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.listAccessible(token, { drive, cursor })
   }
 
   /**
@@ -3225,12 +3245,8 @@ export class AppService {
     drive?: string,
     expectedSessionGeneration?: number
   ): Promise<DelegationAffordances> {
-    this.assertGfsDispatchAllowed(expectedSessionGeneration)
-    const { held, isOperator } = await this.gfsClient.affordances(
-      resourceId,
-      this.requireSessionToken(),
-      drive
-    )
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
+    const { held, isOperator } = await this.gfsClient.affordances(resourceId, token, drive)
     return delegationAffordances(new Set(held), isOperator)
   }
 
@@ -3248,12 +3264,13 @@ export class AppService {
     drive?: string,
     inherit?: boolean
   ) {
+    const token = await this.captureGfsDispatchToken()
     // One atomic bulk PUT for every selected subject (server caps at 100). Each
     // key is parsed to its structured subject up front, so a single malformed
     // key fails the whole call before any round-trip — never a partial write.
     await this.gfsClient.grant(
       { resourceId, drive, subjects: subjectKeys.map(parseSubjectKey), permissions: bits, inherit },
-      this.requireSessionToken()
+      token
     )
   }
 
@@ -3263,22 +3280,26 @@ export class AppService {
    * enforced server-side; a caller without manage_acl gets the API's 403.
    */
   async listGfsGrants(resourceId: string, drive?: string) {
-    return this.gfsClient.listGrants({ resourceId, drive }, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.listGrants({ resourceId, drive }, token)
   }
 
   /** Revoke an ACL row by id (id learned from listGfsGrants). */
   async revokeGfsGrant(grantId: string) {
-    await this.gfsClient.revokeGrant(grantId, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    await this.gfsClient.revokeGrant(grantId, token)
   }
 
   /** List direct URI shares on a resource for the combined access-management view. */
   async listGfsShares(resourceId: string, drive?: string) {
-    return this.gfsClient.listShares({ resourceId, drive }, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.listShares({ resourceId, drive }, token)
   }
 
   /** Revoke a direct URI share by its server-issued row id. */
   async revokeGfsShare(shareId: string) {
-    await this.gfsClient.revokeShare(shareId, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    await this.gfsClient.revokeShare(shareId, token)
   }
 
   /**
@@ -3298,6 +3319,7 @@ export class AppService {
    * read + share. includeDescendants so a folder share covers its subtree.
    */
   async createGfsShare(resourceId: string, subjectKeys: string[], drive?: string) {
+    const token = await this.captureGfsDispatchToken()
     await this.gfsClient.createShare(
       {
         resourceId,
@@ -3306,21 +3328,23 @@ export class AppService {
         permissions: ['read'],
         includeDescendants: true,
       },
-      this.requireSessionToken()
+      token
     )
   }
 
   async createGfsFolder(parentResourceId: string, name: string, drive?: string) {
+    const token = await this.captureGfsDispatchToken()
     return this.gfsClient.createResource(
       { parentResourceId, drive, name, kind: 'directory' },
-      this.requireSessionToken()
+      token
     )
   }
 
   async createGfsFile(parentResourceId: string, name: string, encodedData: string, drive?: string) {
+    const token = await this.captureGfsDispatchToken()
     return this.gfsClient.createResource(
       { parentResourceId, drive, name, kind: 'file', encodedData },
-      this.requireSessionToken()
+      token
     )
   }
 
@@ -3858,11 +3882,8 @@ export class AppService {
     ifMatch?: number,
     expectedSessionGeneration?: number
   ) {
-    this.assertGfsDispatchAllowed(expectedSessionGeneration)
-    return this.gfsClient.replaceFile(
-      { resourceId, drive, encodedData, ifMatch },
-      this.requireSessionToken()
-    )
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
+    return this.gfsClient.replaceFile({ resourceId, drive, encodedData, ifMatch }, token)
   }
 
   async replaceGfsFileFromPath(
@@ -3905,10 +3926,8 @@ export class AppService {
   }
 
   async renameGfsResource(resourceId: string, newName: string, drive?: string, ifMatch?: number) {
-    return this.gfsClient.renameResource(
-      { resourceId, drive, newName, ifMatch },
-      this.requireSessionToken()
-    )
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.renameResource({ resourceId, drive, newName, ifMatch }, token)
   }
 
   /**
@@ -3928,7 +3947,7 @@ export class AppService {
     if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
       throw new Error('invalid_session_generation')
     }
-    this.assertSessionGeneration(expectedSessionGeneration)
+    const token = await this.captureGfsDispatchToken(expectedSessionGeneration)
     try {
       const receipt = await this.gfsClient.moveResource(
         {
@@ -3938,7 +3957,7 @@ export class AppService {
           ifMatch,
           ...(newName !== undefined ? { newName } : {}),
         },
-        this.requireSessionToken()
+        token
       )
       this.assertSessionGeneration(expectedSessionGeneration)
       return receipt
@@ -3949,7 +3968,8 @@ export class AppService {
   }
 
   async deleteGfsResource(resourceId: string, drive?: string, ifMatch?: number) {
-    return this.gfsClient.deleteResource({ resourceId, drive, ifMatch }, this.requireSessionToken())
+    const token = await this.captureGfsDispatchToken()
+    return this.gfsClient.deleteResource({ resourceId, drive, ifMatch }, token)
   }
 
   private requireSessionToken(): string {
