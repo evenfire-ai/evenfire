@@ -3649,16 +3649,16 @@ export function FilesPage({
                   ) : (
                     <>
                       <h3>{current.name}</h3>
+                      <GfsResourceMenu
+                        actions={getGfsMenuActions(currentResourceActions)}
+                        resourceName={current.name}
+                      />
                       <PermissionStatusIndicator
                         active={Boolean(currentPermissionLabel || movePermissionLabel)}
                         announce={visiblePermissionErrorItems.length === 0 || actionDialogOpen}
                         label={[currentPermissionLabel, movePermissionLabel]
                           .filter(Boolean)
                           .join('; ')}
-                      />
-                      <GfsResourceMenu
-                        actions={getGfsMenuActions(currentResourceActions)}
-                        resourceName={current.name}
                       />
                     </>
                   )}

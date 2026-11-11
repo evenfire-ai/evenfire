@@ -135,8 +135,8 @@ export function GfsImagePreviewBody({
           <HeadingTag className="da-gfs-preview-title" id={headingId}>
             {fileName}
           </HeadingTag>
-          {permissionProgress}
           {titleActions}
+          {permissionProgress}
         </div>
         <div className="da-gfs-image-preview-dialog__header-actions">{headerActions}</div>
       </header>

@@ -82,8 +82,8 @@ export function GfsVideoPreviewBody({
           <HeadingTag className="da-gfs-preview-title" id={headingId}>
             {fileName}
           </HeadingTag>
-          {permissionProgress}
           {titleActions}
+          {permissionProgress}
         </div>
         {headerActions}
       </header>

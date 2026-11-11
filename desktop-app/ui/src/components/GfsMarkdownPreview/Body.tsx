@@ -177,8 +177,8 @@ export function GfsMarkdownPreviewBody({
           <HeadingTag className="da-gfs-preview-title" id={headingId}>
             {fileName}
           </HeadingTag>
-          {permissionProgress}
           {titleActions}
+          {permissionProgress}
         </div>
         <div className="da-gfs-markdown-preview-dialog__header-actions">{headerActions}</div>
       </header>

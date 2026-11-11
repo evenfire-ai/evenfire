@@ -2162,6 +2162,32 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Renamed to report-renamed.txt', 'success')
   })
 
+  it('renders the current-file title menu before the final permission status slot', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'file-1',
+        gfsUri: 'gfs://main/file-1',
+        name: 'report.txt',
+        kind: 'file',
+        version: 7,
+      },
+      loadingAffordances: true,
+    })
+
+    const { container } = renderFilesPage()
+    const titleRow = container.querySelector('.da-gfs-current-file__title-row')
+    expect(titleRow).toBeTruthy()
+    expect(
+      Array.from(titleRow!.children).map(child => {
+        if (child.matches('h3')) return 'filename'
+        if (child.querySelector('.da-gfs-resource-menu__trigger')) return 'menu'
+        if (child.matches('.da-permission-status-slot')) return 'spinner'
+        return 'other'
+      })
+    ).toEqual(['filename', 'menu', 'spinner'])
+  })
+
   it.each(['admin', 'inviter', 'member'] as const)(
     'shows selectable teammates from the directory for a current %s',
     async role => {
