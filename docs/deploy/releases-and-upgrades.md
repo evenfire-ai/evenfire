@@ -307,6 +307,7 @@ Read the notes for every release you skip over, not only the target release.
 | [User access foundation upgrade](user-access-foundation-upgrade.md)                | You upgrade to the release with External REST user sessions. It has a required order: edge before control-api.                             |
 | [Changed code defaults](#changed-code-defaults-first-release-after-v0120)          | You run HCC, WRC, control-api, control-ui or the approval reader with a variable unset. The pull Secret change restarts Host pods once; plan a window. |
 | [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.   |
+| [Required secrets without code defaults](#required-secrets-without-code-defaults)  | You run webhook-proxy, or run rpc-proxy or external-rest-api with `NODE_ENV` other than `production`. Unset secrets now stop startup.      |
 
 #### Snippet runner Node permissions
 
@@ -340,6 +341,36 @@ network access under `--permission`, and the runner does not pass `--allow-net`
 (Node 24 rejects that flag). On a runtime that rejects `--permission` (Node older
 than 22.13.0, or a 23.x release older than 23.5.0) the startup check fails and
 the runner exits.
+
+### Required secrets without code defaults
+
+The first release after v0.12.0 removes the built-in development values of five
+secrets. Each service now stops at startup when one of them is unset, empty or a
+`replace-with-*` placeholder.
+
+| Service           | Variable                                      | Written in a cluster by                       |
+| ----------------- | --------------------------------------------- | --------------------------------------------- |
+| webhook-proxy     | `WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN`     | `deploy/scripts/apply-inter-service-tokens.sh` |
+| rpc-proxy         | `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`         | `deploy/scripts/apply-inter-service-tokens.sh` |
+| rpc-proxy         | `RPC_PROXY_DESKTOP_COOKIE_SECRET`             | `deploy/scripts/gen-jwt-keys.sh`              |
+| rpc-proxy         | `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`          | `deploy/scripts/gen-jwt-keys.sh`              |
+| external-rest-api | `EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN` | `deploy/scripts/apply-inter-service-tokens.sh` |
+
+- **webhook-proxy** has no `NODE_ENV` in its image, so it used
+  `dev-webhook-proxy-token` in every cluster where the variable was unset. A base
+  install that applies the manifests without running
+  `apply-inter-service-tokens.sh` now leaves webhook-proxy crash-looping on the
+  Secret's `replace-with-*` value, where it used to start and fail every registry
+  lookup. Apply the manifests, then run `apply-inter-service-tokens.sh`, which
+  writes the token and restarts webhook-proxy. Before you upgrade, check that
+  `webhook-proxy-secrets` in `webhook-ingress` holds a real token.
+- **rpc-proxy and external-rest-api** images set `NODE_ENV=production`, where
+  these variables were already required, so deployed pods do not change. The
+  change applies to processes run with another `NODE_ENV`, such as `npm run dev`
+  or a Deployment that overrides `NODE_ENV`: export the variables there.
+- **control-api** no longer reads `CONTROL_API_INTERNAL_TOKENS`. It reads only
+  `CONTROL_API_INTERNAL_SERVICE_TOKENS`. `apply-inter-service-tokens.sh` still
+  writes both keys, so no action is needed.
 
 ### Changed code defaults (first release after v0.12.0)
 
