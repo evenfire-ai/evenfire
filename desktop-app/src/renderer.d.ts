@@ -113,6 +113,32 @@ declare global {
         getDesktopReleaseStatus: () => Promise<DesktopReleaseStatus>
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
+        prepareSessionClear: () => Promise<{
+          transitionId: number
+          sessionGeneration: number
+          reason: 'logout' | 'session-ended' | 'environment-change'
+        } | null>
+        acknowledgeSessionPreclear: (notice: {
+          transitionId: number
+          sessionGeneration: number
+          reason: 'logout' | 'session-ended' | 'environment-change'
+        }) => Promise<boolean>
+        authorizeMarkdownTabClose: (requestId: string) => Promise<string | null>
+        consumeMarkdownTabClosePermit: (permit: string) => Promise<boolean>
+        onSessionPreclear: (
+          callback: (notice: {
+            transitionId: number
+            sessionGeneration: number
+            reason: 'logout' | 'session-ended' | 'environment-change'
+          }) => void
+        ) => () => void
+        onSessionPreclearCancelled: (
+          callback: (notice: {
+            transitionId: number
+            sessionGeneration: number
+            reason: 'logout' | 'session-ended' | 'environment-change'
+          }) => void
+        ) => () => void
         onExternalLogout: (callback: () => void) => () => void
         onSessionCleared: (callback: () => void) => () => void
         logout: () => Promise<{ ok: true; sessionGeneration: number }>
@@ -147,7 +173,10 @@ declare global {
             userNavigationGenerationAtActivation: number
           }) => void
         ) => () => void
-        resolve: (uri: string) => Promise<{
+        resolve: (
+          uri: string,
+          expectedSessionGeneration?: number
+        ) => Promise<{
           drive: string
           resourceId: string
           parentResourceId: string | null
@@ -183,7 +212,8 @@ declare global {
         }>
         downloadPreview: (
           uri: string,
-          maxBytes: number
+          maxBytes: number,
+          expectedSessionGeneration?: number
         ) => Promise<{
           resource: {
             drive: string
@@ -248,7 +278,8 @@ declare global {
         }>
         affordances: (
           resourceId: string,
-          drive?: string
+          drive?: string,
+          expectedSessionGeneration?: number
         ) => Promise<{
           held: string[]
           canDelegate: boolean
@@ -395,7 +426,8 @@ declare global {
           resourceId: string,
           encodedData: string,
           drive?: string,
-          ifMatch?: number
+          ifMatch?: number,
+          expectedSessionGeneration?: number
         ) => Promise<{
           resourceId: string
           rid: string

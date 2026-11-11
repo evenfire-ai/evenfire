@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import type {
   AccessCatalog,
@@ -16,6 +17,7 @@ import {
   type HostAuthorityStore,
   createHostAuthorityStore,
 } from '../lib/hostAuthorityStore'
+import { MarkdownDraftOwner } from '../lib/markdownDraftOwner'
 import { selectUnauthenticatedView } from '../lib/unauthenticatedView'
 import { summarizeWorkflowResource } from '../lib/workflows'
 import type {
@@ -133,6 +135,7 @@ export function scheduleAfterFirstPaintForSession(
 }
 
 export function useAppController() {
+  const [markdownDraftOwner] = useState(() => new MarkdownDraftOwner())
   const queryClient = useQueryClient()
 
   // ─── Toast ───
@@ -246,6 +249,13 @@ export function useAppController() {
           .trim()
           .toLowerCase()}`
       : null
+  const markdownPrincipalOwner = useMemo(
+    () =>
+      authenticatedPrincipalIdentity
+        ? `${authenticatedPrincipalIdentity}:${globalThis.crypto.randomUUID()}`
+        : null,
+    [authenticatedPrincipalIdentity]
+  )
   const currentTeamName =
     teamsData.teams.find(team => team.id === currentTeamId)?.name || auth.me?.teamName || ''
   const currentTeamIdRef = useRef(currentTeamId)
@@ -729,17 +739,40 @@ export function useAppController() {
     async (teamId: string, options: { announce?: boolean } = {}) => {
       const { announce = true } = options
       auth.setBusy(true)
+      const priorPrincipalOwner = markdownPrincipalOwner
+      const priorUserId = auth.me?.id ?? null
+      const priorTeamId = String(auth.me?.teamId ?? '').trim()
+      const priorScopeKey =
+        auth.isAuthenticated && auth.me
+          ? `${auth.runtimeConfigState?.envKey ?? ''}:${auth.me.id}:${auth.me.teamId ?? ''}`
+          : null
+      const priorEnvironmentKey = auth.runtimeConfigState?.envKey ?? ''
+      const priorGeneration = sessionGenerationRef.current
+      let scopeTransition: Readonly<{ id: number; fromScope: string | null }> | null = null
       try {
         if (!teamId) throw new Error('Select a team')
+        if (priorPrincipalOwner && priorScopeKey) {
+          flushSync(() => {
+            scopeTransition = markdownDraftOwner.beginScopeTransition()
+            if (scopeTransition) markdownDraftOwner.commitScopeTransitionRender(scopeTransition)
+          })
+          if (!scopeTransition) throw new Error('markdown_scope_transition_in_progress')
+        }
         const sessionState = await window.clerum.team.switch(teamId)
         if (!sessionState.authenticated || !sessionState.me) {
           throw new Error('Team switch ended without an authenticated session')
         }
-        sessionGenerationRef.current =
+        const nextGeneration =
           Number.isSafeInteger(sessionState.sessionGeneration) &&
           (sessionState.sessionGeneration ?? -1) >= 0
             ? sessionState.sessionGeneration!
             : null
+        if (scopeTransition && nextGeneration === null) {
+          throw new Error('Team switch did not return a verifiable session generation')
+        }
+        if (scopeTransition && nextGeneration !== null) {
+          markdownDraftOwner.installMainSession(scopeTransition, nextGeneration)
+        }
         // Team is a data scope, not a principal boundary. Terminate Team A's
         // task/FSM/reconcile ownership while preserving workspace tabs, focus,
         // selection, and local drafts for this same principal.
@@ -748,12 +781,49 @@ export function useAppController() {
         // per-connector OAuth authorization state — drop it here (before the
         // refresh below repopulates) so the previous team's grants cannot show,
         // even for the frame between the confirmed switch and the refetch.
+        const activeTeamId = String(sessionState.me.teamId ?? '').trim()
+        if (scopeTransition && !markdownDraftOwner.ownsScopeTransition(scopeTransition)) {
+          throw new Error('Team switch was superseded by an authentication transition')
+        }
+        // Team switch may have succeeded before a later asynchronous teardown
+        // or another auth transition changed the main-process session. Re-read
+        // its authority after the await and publish only this exact snapshot.
+        const confirmed = await window.clerum.auth.getSessionState()
+        const confirmedEnvironment = await window.clerum.auth.getRuntimeConfigState()
+        if (
+          !confirmed.authenticated ||
+          !confirmed.me ||
+          confirmed.me.id !== sessionState.me.id ||
+          String(confirmed.me.teamId ?? '').trim() !== activeTeamId ||
+          confirmed.sessionGeneration !== nextGeneration ||
+          confirmedEnvironment.envKey !== priorEnvironmentKey ||
+          (scopeTransition && !markdownDraftOwner.ownsScopeTransition(scopeTransition))
+        ) {
+          throw new Error('Team switch result no longer matches current main-process authority')
+        }
+        if (scopeTransition && nextGeneration !== null) {
+          const principalOwner = priorPrincipalOwner
+          const scopeKey = `${priorEnvironmentKey}:${sessionState.me.id}:${activeTeamId}`
+          if (!principalOwner) throw new Error('The authenticated Markdown owner is unavailable')
+          if (
+            !markdownDraftOwner.publishScope(
+              scopeTransition,
+              principalOwner,
+              scopeKey,
+              nextGeneration
+            )
+          ) {
+            throw new Error('Could not publish the verified Markdown session scope')
+          }
+        }
+        // No await separates authority validation from owner and renderer
+        // publication, so an old async team-switch completion cannot win.
+        sessionGenerationRef.current = nextGeneration
         connectorsData.reset()
         auth.setIsAuthenticated(true)
-        auth.setMe(sessionState.me)
-        setPublishedSessionGeneration(sessionGenerationRef.current)
-        auth.setEmail(sessionState.me.email || '')
-        const activeTeamId = String(sessionState.me.teamId ?? '').trim()
+        auth.setMe(confirmed.me)
+        setPublishedSessionGeneration(nextGeneration)
+        auth.setEmail(confirmed.me.email || '')
         currentTeamIdRef.current = activeTeamId
         const switchedIdentity = `${sessionState.me.id}:${sessionState.me.email}:${activeTeamId}`
         activeAuthenticatedSessionIdentityRef.current = switchedIdentity
@@ -769,6 +839,75 @@ export function useAppController() {
             activeTeamId
           fullSetStatus(`Switched team to ${teamName}.`, 'success')
         }
+      } catch (error) {
+        if (scopeTransition && priorPrincipalOwner && priorScopeKey && priorGeneration !== null) {
+          // A rejected IPC can have an ambiguous main-process outcome. Release
+          // the visual barrier only when an authoritative session read proves
+          // that the original principal, team, and generation remain active.
+          try {
+            const current = await window.clerum.auth.getSessionState()
+            const currentEnvironment = await window.clerum.auth.getRuntimeConfigState()
+            const currentGeneration = current.sessionGeneration
+            const sameOriginalSession =
+              current.authenticated &&
+              current.me?.id === auth.me?.id &&
+              String(current.me?.teamId ?? '') === String(auth.me?.teamId ?? '') &&
+              currentGeneration === priorGeneration &&
+              currentEnvironment.envKey === priorEnvironmentKey &&
+              markdownDraftOwner.ownsScopeTransition(scopeTransition)
+            if (sameOriginalSession) {
+              markdownDraftOwner.reconcileScopeUnchanged(
+                scopeTransition,
+                priorPrincipalOwner,
+                priorScopeKey,
+                priorGeneration
+              )
+            } else if (
+              current.authenticated &&
+              current.me?.id === priorUserId &&
+              String(current.me.teamId ?? '').trim() !== priorTeamId &&
+              Number.isSafeInteger(currentGeneration) &&
+              currentGeneration !== null &&
+              currentGeneration !== undefined &&
+              currentEnvironment.envKey === priorEnvironmentKey &&
+              markdownDraftOwner.ownsScopeTransition(scopeTransition)
+            ) {
+              // The main process may have committed Team B before local task
+              // teardown failed. Reconcile to confirmed authority so the
+              // owner barrier cannot strand every preview tab indefinitely.
+              const currentTeamId = String(current.me.teamId ?? '').trim()
+              const principalOwner = priorPrincipalOwner
+              const currentScopeKey = `${priorEnvironmentKey}:${current.me.id}:${currentTeamId}`
+              markdownDraftOwner.installMainSession(scopeTransition, currentGeneration)
+              if (
+                principalOwner &&
+                markdownDraftOwner.publishScope(
+                  scopeTransition,
+                  principalOwner,
+                  currentScopeKey,
+                  currentGeneration
+                )
+              ) {
+                sessionGenerationRef.current = currentGeneration
+                connectorsData.reset()
+                auth.setIsAuthenticated(true)
+                auth.setMe(current.me)
+                setPublishedSessionGeneration(currentGeneration)
+                auth.setEmail(current.me.email || '')
+                currentTeamIdRef.current = currentTeamId
+                const switchedIdentity = `${current.me.id}:${current.me.email}:${currentTeamId}`
+                activeAuthenticatedSessionIdentityRef.current = switchedIdentity
+                authenticatedSessionIdentityRef.current = switchedIdentity
+                setPostPaintDataReady(true)
+                void refreshAuthenticatedData().catch(() => undefined)
+              }
+            }
+          } catch {
+            // Keep the owner barrier closed when main-process authority cannot
+            // be established; stale scope content must remain hidden.
+          }
+        }
+        throw error
       } finally {
         auth.setBusy(false)
       }
@@ -777,10 +916,17 @@ export function useAppController() {
       auth.setBusy,
       auth.setEmail,
       auth.setIsAuthenticated,
+      auth.isAuthenticated,
+      auth.me,
+      auth.runtimeConfigState?.envKey,
+      auth.me?.id,
+      auth.me?.teamId,
       auth.setMe,
       chat.teardownTeamActivity,
       connectorsData.reset,
       fullSetStatus,
+      markdownPrincipalOwner,
+      markdownDraftOwner,
       refreshAuthenticatedData,
       setPostPaintDataReady,
       teamsData.teams,
@@ -1015,6 +1161,19 @@ export function useAppController() {
   // ─── Cross-domain: handleLogout ───
   const logoutAndGetSessionGeneration = useCallback(async (): Promise<number | null> => {
     let logoutGeneration: number | null = null
+    const logoutPrincipal = markdownPrincipalOwner
+    const logoutSessionGeneration = sessionGenerationRef.current
+    let authBarrierToken: { id: number } | null = null
+    if (logoutPrincipal && logoutSessionGeneration !== null) {
+      flushSync(() => {
+        authBarrierToken = markdownDraftOwner.beginAuthBarrier(
+          logoutPrincipal,
+          logoutSessionGeneration,
+          true
+        )
+      })
+      if (!authBarrierToken) throw new Error('auth_transition_in_progress')
+    }
     const reflectSignedOutState = () => {
       auth.setIsAuthenticated(false)
       auth.setMe(null)
@@ -1022,6 +1181,13 @@ export function useAppController() {
     }
     try {
       auth.setBusy(true)
+      if (authBarrierToken) {
+        const prepared = await window.clerum.auth.prepareSessionClear()
+        if (!prepared) {
+          markdownDraftOwner.restoreAfterAuthBarrier(authBarrierToken, logoutSessionGeneration!)
+          throw new Error('session_clear_preparation_failed')
+        }
+      }
       const logoutResult = await window.clerum.auth.logout()
       logoutGeneration = logoutResult.sessionGeneration
       const cleanupErrors: unknown[] = []
@@ -1111,6 +1277,8 @@ export function useAppController() {
     queryClient,
     resetWorkflowsData,
     teamsData.reset,
+    authenticatedPrincipalIdentity,
+    markdownPrincipalOwner,
   ])
   const handleLogout = useCallback(async (): Promise<void> => {
     await logoutAndGetSessionGeneration()
@@ -1641,6 +1809,7 @@ export function useAppController() {
 
   return {
     // Auth
+    markdownDraftOwner,
     booting: auth.booting,
     sessionGeneration: publishedSessionGeneration,
     initialExperienceLoading:
@@ -1657,6 +1826,8 @@ export function useAppController() {
     availableTeamIds,
     teamDirectoryHydrated: teamsData.teamDirectoryHydrated,
     authenticatedPrincipalIdentity,
+    markdownPrincipalOwner,
+    sessionGenerationRef,
     email: auth.email,
     password: auth.password,
     desktopSetupAuthorizationToken: auth.desktopSetupAuthorizationToken,

@@ -12,17 +12,45 @@ import {
   within,
 } from '@testing-library/react'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
+import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
-import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { MARKDOWN_DRAFT_MAX_BYTES, MarkdownDraftOwner } from '@lib/markdownDraftOwner'
+import {
+  previewDownloadResult,
+  resolveDeniedMessage,
+  resolveResource,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
 
 const hookMock = vi.hoisted(() => ({
   useGfsBrowserController: vi.fn(),
+  useRealMarkdownEditor: false,
 }))
 
 vi.mock('@hooks/domain/useGfsBrowserController', () => hookMock)
+vi.mock('@components/GfsMarkdownPreview/MarkdownAdapter', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('@components/GfsMarkdownPreview/MarkdownAdapter')>()
+  return {
+    ...actual,
+    GfsMarkdownEditor: (props: {
+      ariaLabel: string
+      onChange: (value: string) => void
+      value: string
+    }) =>
+      hookMock.useRealMarkdownEditor ? (
+        <actual.GfsMarkdownEditor {...props} />
+      ) : (
+        <textarea
+          aria-label={props.ariaLabel}
+          onChange={event => props.onChange(event.target.value)}
+          value={props.value}
+        />
+      ),
+  }
+})
 
 function controller(
   accessState: 'active' | 'revoked' = 'active',
@@ -58,6 +86,16 @@ async function resolvePreviewResource(gfsUri: string) {
   })
 }
 
+async function previewResult(
+  gfsUri: string,
+  bytes: ArrayBuffer,
+  version = 1,
+  maxBytes = GFS_MARKDOWN_PREVIEW_MAX_BYTES
+) {
+  const resource = await resolvePreviewResource(gfsUri)
+  return previewDownloadResult({ ...resource, version }, bytes, maxBytes)
+}
+
 const queryClients: QueryClient[] = []
 
 function render(ui: ReactNode) {
@@ -72,9 +110,12 @@ function render(ui: ReactNode) {
   })
 }
 
-// The producer (`window.clerum.gfs.downloadPreview`) returns `{ bytes: ArrayBuffer }`.
-function stubDownload(impl: () => Promise<{ bytes: ArrayBuffer }>) {
-  const downloadPreview = vi.fn(impl)
+// Derive preview responses from the real GFS client fixture: `{ resource, bytes }`.
+function stubDownload(impl: (uri: string) => Promise<{ bytes: ArrayBuffer }>) {
+  const downloadPreview = vi.fn(async (uri: string, maxBytes: number) => {
+    const { bytes } = await impl(uri)
+    return previewResult(uri, bytes, 1, maxBytes)
+  })
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
@@ -91,10 +132,13 @@ function stubDownload(impl: () => Promise<{ bytes: ArrayBuffer }>) {
 // Preview + the per-resource re-check primitive (`gfs.resolve`) the focus
 // revalidation calls. `resolve` rejects to model an unshared resource.
 function stubGfs(opts: {
-  downloadPreview: () => Promise<{ bytes: ArrayBuffer }>
+  downloadPreview: (uri: string) => Promise<{ bytes: ArrayBuffer }>
   resolve: (uri: string) => Promise<unknown>
 }) {
-  const downloadPreview = vi.fn(opts.downloadPreview)
+  const downloadPreview = vi.fn(async (uri: string, maxBytes: number) => {
+    const { bytes } = await opts.downloadPreview(uri)
+    return previewResult(uri, bytes, 1, maxBytes)
+  })
   const resolve = vi.fn(opts.resolve)
   Object.defineProperty(window, 'clerum', {
     configurable: true,
@@ -132,6 +176,7 @@ function clickPreviewAction(fileName: string, actionName: string) {
 
 describe('FilePreviewPage', () => {
   beforeEach(() => {
+    hookMock.useRealMarkdownEditor = false
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
       value: vi.fn(() => 'blob:gfs-preview'),
@@ -966,6 +1011,1111 @@ describe('FilePreviewPage', () => {
     expect(await screen.findByRole('heading', { name: 'Hi', level: 1 })).toBeTruthy()
   })
 
+  it('rejects a stable preview read older than the page owner snapshot', async () => {
+    const uri = 'gfs://main/abababababababababababababababcf'
+    const resource = await resolvePreviewResource(uri)
+    let currentVersion = 9
+    let currentContent = '# Latest owner snapshot'
+    const resolve = vi.fn(async () => ({ ...resource, version: currentVersion }))
+    const downloadPreview = vi.fn(async (_uri: string, maxBytes: number) =>
+      previewDownloadResult(
+        { ...resource, version: currentVersion },
+        new TextEncoder().encode(currentContent).buffer,
+        maxBytes
+      )
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          downloadPreview,
+          affordances: vi.fn(async () => activeAffordances),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-stale-read',
+      gfsUri: uri,
+    }
+    const props = {
+      byteLength: currentContent.length,
+      fileKind: 'markdown' as const,
+      fileName: 'README.md',
+      gfsUri: uri,
+      markdownDraftOwner,
+      tabId: binding.tabId,
+    }
+    const view = render(<FilePreviewPage {...props} />)
+    const completeRead = vi.spyOn(markdownDraftOwner, 'completeStableRead')
+
+    expect(
+      await screen.findByRole('heading', { name: 'Latest owner snapshot', level: 1 })
+    ).toBeTruthy()
+    await waitFor(() =>
+      expect(markdownDraftOwner.get(binding)).toMatchObject({
+        observedVersion: 9,
+        savedSnapshot: { content: '# Latest owner snapshot', version: 9 },
+      })
+    )
+
+    currentVersion = 8
+    currentContent = '# Stale version'
+    view.rerender(<FilePreviewPage {...props} reloadVersion={1} />)
+
+    expect(
+      await screen.findByText('The file changed while loading. Refresh to try again.')
+    ).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Stale version', level: 1 })).toBeNull()
+    expect(markdownDraftOwner.get(binding)?.savedSnapshot).toEqual({
+      content: '# Latest owner snapshot',
+      version: 9,
+    })
+    expect(completeRead).toHaveBeenLastCalledWith(expect.anything(), {
+      content: '# Stale version',
+      version: 8,
+      stable: true,
+    })
+    const menu = openPreviewActions('README.md')
+    expect(
+      within(menu).getByRole('menuitem', { name: 'Copy content' }) as HTMLButtonElement
+    ).toHaveProperty('disabled', true)
+    expect(resolve).toHaveBeenCalled()
+    expect(downloadPreview).toHaveBeenLastCalledWith(uri, GFS_MARKDOWN_PREVIEW_MAX_BYTES, 1)
+    markdownDraftOwner.quit()
+  })
+
+  it('edits from the preview menu and saves through unconditional GFS replacement', async () => {
+    hookMock.useRealMarkdownEditor = true
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const source = '# Saved source'
+    let serverSource = source
+    let serverVersion = 1
+    const resolve = vi.fn(async () => ({
+      kind: 'file',
+      resourceId: '0123456789abcdef0123456789abcdef',
+      drive: 'main',
+      version: serverVersion,
+    }))
+    const replaceFile = vi.fn(async () => {
+      serverSource = '# Updated source'
+      serverVersion += 1
+      return { version: serverVersion }
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(
+              downloadUri,
+              new TextEncoder().encode(serverSource).buffer,
+              serverVersion,
+              maxBytes
+            )
+          ),
+          affordances: vi.fn(async () => activeAffordances),
+          replaceFile,
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+
+    render(
+      <FilePreviewPage
+        byteLength={source.length}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId="preview-tab-1"
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Saved source' })
+    await waitFor(() => {
+      expect(
+        markdownDraftOwner.get({
+          principalOwner: 'principal-owner-1',
+          scopeKey: 'preview-test-user:main',
+          tabId: 'preview-tab-1',
+          gfsUri: uri,
+        })
+      ).toMatchObject({ readReady: true, capability: 'positive' })
+    })
+    const menu = openPreviewActions('README.md')
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Edit' }))
+    const editor = await screen.findByRole('textbox', {
+      name: 'Edit Markdown source for README.md',
+    })
+    fireEvent.change(editor, { target: { value: '# Updated source' } })
+    expect(screen.getByRole('button', { name: 'Discard' })).toBeTruthy()
+    const resolveCallsBeforeSave = resolve.mock.calls.length
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    })
+    expect(resolve).toHaveBeenCalledTimes(resolveCallsBeforeSave + 1)
+
+    await waitFor(() => expect(replaceFile).toHaveBeenCalledTimes(1))
+    expect(replaceFile).toHaveBeenCalledWith(
+      '0123456789abcdef0123456789abcdef',
+      btoa('# Updated source'),
+      'main',
+      undefined,
+      1
+    )
+    expect(await screen.findByRole('heading', { name: 'Updated source' })).toBeTruthy()
+    expect(
+      markdownDraftOwner.get({
+        principalOwner: 'principal-owner-1',
+        scopeKey: 'preview-test-user:main',
+        tabId: 'preview-tab-1',
+        gfsUri: uri,
+      })?.dirty
+    ).toBe(false)
+    markdownDraftOwner.quit()
+  })
+
+  it('keeps Edit hidden while write capability is pending or denied', async () => {
+    const uri = 'gfs://main/abababababababababababababababab'
+    let resolveAffordances!: (value: ReturnType<typeof delegationAffordances>) => void
+    const pendingAffordances = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+      resolveAffordances = resolve
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: 'abababababababababababababababab',
+            drive: 'main',
+            version: 1,
+          })),
+          downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
+            previewResult(uri, new TextEncoder().encode('# Saved source').buffer, 1, maxBytes)
+          ),
+          affordances: vi.fn(() => pendingAffordances),
+          replaceFile: vi.fn(async () => ({ version: 2 })),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={14}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId="preview-tab-capability-pending"
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Saved source' })
+    const menu = openPreviewActions('README.md')
+    expect(within(menu).queryByRole('menuitem', { name: 'Edit' })).toBeNull()
+
+    await act(async () => resolveAffordances(delegationAffordances(new Set(['read']), false)))
+    await waitFor(() =>
+      expect(
+        markdownDraftOwner.get({
+          principalOwner: 'principal-owner-1',
+          scopeKey: 'preview-test-user:main',
+          tabId: 'preview-tab-capability-pending',
+          gfsUri: uri,
+        })?.capability
+      ).toBe('denied')
+    )
+    expect(within(menu).queryByRole('menuitem', { name: 'Edit' })).toBeNull()
+    markdownDraftOwner.quit()
+  })
+
+  it('hides Edit immediately while a previously positive capability is revalidating', async () => {
+    const uri = 'gfs://main/abababababababababababababababce'
+    const resource = await resolvePreviewResource(uri)
+    let resolveAgain!: (value: typeof resource) => void
+    let resolveCalls = 0
+    let holdResolves = false
+    const secondResolve = new Promise<typeof resource>(resolve => {
+      resolveAgain = resolve
+    })
+    const { resolve } = stubGfs({
+      downloadPreview: async () => ({ bytes: new TextEncoder().encode('# Saved').buffer }),
+      resolve: async () => {
+        resolveCalls += 1
+        return holdResolves ? secondResolve : resource
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={7}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId="preview-tab-capability-refresh"
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Saved' })
+    await waitFor(() =>
+      expect(
+        markdownDraftOwner.get({
+          principalOwner: 'principal-owner-1',
+          scopeKey: 'preview-test-user:main',
+          tabId: 'preview-tab-capability-refresh',
+          gfsUri: uri,
+        })?.capability
+      ).toBe('positive')
+    )
+    const menu = openPreviewActions('README.md')
+    expect(within(menu).getByRole('menuitem', { name: 'Edit' })).toBeTruthy()
+
+    const resolveCallsBeforeFocus = resolve.mock.calls.length
+    vi.spyOn(markdownDraftOwner, 'beginCapabilityRefresh').mockReturnValue(null)
+    holdResolves = true
+    fireEvent.focus(window)
+    await waitFor(() => expect(resolve.mock.calls.length).toBeGreaterThan(resolveCallsBeforeFocus))
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull()
+    expect(
+      markdownDraftOwner.get({
+        principalOwner: 'principal-owner-1',
+        scopeKey: 'preview-test-user:main',
+        tabId: 'preview-tab-capability-refresh',
+        gfsUri: uri,
+      })?.capability
+    ).toBe('positive')
+
+    await act(async () => resolveAgain(resource))
+    markdownDraftOwner.quit()
+  })
+
+  it('keeps Markdown readable but unavailable for editing when permission lookup fails', async () => {
+    const uri = 'gfs://main/abababababababababababababababcd'
+    const replaceFile = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: 'abababababababababababababababcd',
+            drive: 'main',
+            version: 1,
+          })),
+          downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
+            previewResult(
+              uri,
+              new TextEncoder().encode('# Readable while permissions fail').buffer,
+              1,
+              maxBytes
+            )
+          ),
+          affordances: vi.fn(async () => {
+            throw new Error('permission service unavailable')
+          }),
+          replaceFile,
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-permission-error',
+      gfsUri: uri,
+    }
+    render(
+      <FilePreviewPage
+        byteLength={40}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId={binding.tabId}
+      />
+    )
+
+    expect(
+      await screen.findByRole('heading', { name: 'Readable while permissions fail' })
+    ).toBeTruthy()
+    expect((await screen.findByRole('alert')).textContent).toContain(
+      'Could not verify file permissions'
+    )
+    expect(
+      within(openPreviewActions('README.md')).queryByRole('menuitem', { name: 'Edit' })
+    ).toBeNull()
+    expect(markdownDraftOwner.beginEdit(binding)).toBe(false)
+    expect(markdownDraftOwner.reserveSave(binding)).toBeNull()
+    expect(replaceFile).not.toHaveBeenCalled()
+    markdownDraftOwner.quit()
+  })
+
+  it('keeps typing made while Save is pending after the submitted draft succeeds', async () => {
+    const uri = 'gfs://main/11111111111111111111111111111111'
+    const source = '# Saved source'
+    let serverSource = source
+    let serverVersion = 1
+    let resolveSave!: (value: { version: number }) => void
+    const save = new Promise<{ version: number }>(resolve => {
+      resolveSave = resolve
+    })
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-save-type-gap',
+      gfsUri: uri,
+    }
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: '11111111111111111111111111111111',
+            drive: 'main',
+            version: serverVersion,
+          })),
+          downloadPreview: vi.fn(async () =>
+            previewResult(
+              uri,
+              new TextEncoder().encode(serverSource).buffer,
+              serverVersion,
+              2_097_152
+            )
+          ),
+          affordances: vi.fn(async () => activeAffordances),
+          replaceFile: vi.fn(() => save),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={source.length}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId={binding.tabId}
+      />
+    )
+    await screen.findByRole('heading', { name: 'Saved source' })
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.capability).toBe('positive'))
+    fireEvent.click(within(openPreviewActions('README.md')).getByRole('menuitem', { name: 'Edit' }))
+    const editor = await screen.findByRole('textbox', {
+      name: 'Edit Markdown source for README.md',
+    })
+    fireEvent.change(editor, { target: { value: '# Submitted' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(window.clerum.gfs.replaceFile).toHaveBeenCalledOnce())
+    fireEvent.change(editor, { target: { value: '# Newer draft' } })
+
+    await act(async () => {
+      serverSource = '# Submitted'
+      serverVersion = 2
+      resolveSave({ version: 2 })
+      await Promise.resolve()
+      fireEvent.change(editor, { target: { value: '# Commit-gap draft' } })
+    })
+
+    expect(
+      screen.getByRole('textbox', { name: 'Edit Markdown source for README.md' })
+    ).toHaveProperty('value', '# Commit-gap draft')
+    expect(markdownDraftOwner.get(binding)).toMatchObject({
+      savedSnapshot: { content: '# Submitted', version: 2 },
+      draft: '# Commit-gap draft',
+      dirty: true,
+      editing: true,
+      pendingSave: null,
+    })
+    markdownDraftOwner.quit()
+  })
+
+  it('keeps typing received after Save acknowledgment but before the view commit', async () => {
+    const uri = 'gfs://main/12121212121212121212121212121212'
+    const source = '# Saved source'
+    let serverSource = source
+    let serverVersion = 1
+    let resolveSave!: (value: { version: number }) => void
+    const save = new Promise<{ version: number }>(resolve => {
+      resolveSave = resolve
+    })
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-save-commit-gap',
+      gfsUri: uri,
+    }
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: '12121212121212121212121212121212',
+            drive: 'main',
+            version: serverVersion,
+          })),
+          downloadPreview: vi.fn(async () =>
+            previewResult(
+              uri,
+              new TextEncoder().encode(serverSource).buffer,
+              serverVersion,
+              2_097_152
+            )
+          ),
+          affordances: vi.fn(async () => activeAffordances),
+          replaceFile: vi.fn(() => save),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={source.length}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId={binding.tabId}
+      />
+    )
+    await screen.findByRole('heading', { name: 'Saved source' })
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.capability).toBe('positive'))
+    fireEvent.click(within(openPreviewActions('README.md')).getByRole('menuitem', { name: 'Edit' }))
+    const editor = await screen.findByRole('textbox', {
+      name: 'Edit Markdown source for README.md',
+    })
+    fireEvent.change(editor, { target: { value: '# Submitted' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(window.clerum.gfs.replaceFile).toHaveBeenCalledOnce())
+
+    await act(async () => {
+      serverSource = '# Submitted'
+      serverVersion = 2
+      resolveSave({ version: 2 })
+      await save
+      fireEvent.change(editor, { target: { value: '# Post-ack draft' } })
+    })
+
+    expect(
+      screen.getByRole('textbox', { name: 'Edit Markdown source for README.md' })
+    ).toHaveProperty('value', '# Post-ack draft')
+    expect(markdownDraftOwner.get(binding)).toMatchObject({
+      savedSnapshot: { content: '# Submitted', version: 2 },
+      draft: '# Post-ack draft',
+      dirty: true,
+      editing: true,
+      pendingSave: null,
+    })
+    markdownDraftOwner.quit()
+  })
+
+  it('explains the 2 MiB UTF-8 limit and preserves an over-limit draft', async () => {
+    const uri = 'gfs://main/22222222222222222222222222222222'
+    const source = '# Saved source'
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-size-limit',
+      gfsUri: uri,
+    }
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: '22222222222222222222222222222222',
+            drive: 'main',
+            version: 1,
+          })),
+          downloadPreview: vi.fn(async () =>
+            previewResult(uri, new TextEncoder().encode(source).buffer, 1, 2_097_152)
+          ),
+          affordances: vi.fn(async () => activeAffordances),
+          replaceFile: vi.fn(async () => ({ version: 2 })),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={source.length}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId={binding.tabId}
+      />
+    )
+    await screen.findByRole('heading', { name: 'Saved source' })
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.capability).toBe('positive'))
+    fireEvent.click(within(openPreviewActions('README.md')).getByRole('menuitem', { name: 'Edit' }))
+    const overLimit = `#${'é'.repeat(Math.floor(MARKDOWN_DRAFT_MAX_BYTES / 2))}`
+    expect(markdownDraftOwner.type(binding, overLimit)).toBe(true)
+
+    expect((await screen.findByRole('status')).textContent).toContain(
+      'Your current text is preserved.'
+    )
+    expect(markdownDraftOwner.get(binding)).toMatchObject({ draft: overLimit, sizeExceeded: true })
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true)
+
+    markdownDraftOwner.quit()
+  })
+
+  it('does not show a different file draft when one tab changes its URI', async () => {
+    const fileA = {
+      uri: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      resourceId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      name: 'A.md',
+      content: '# Saved A',
+    }
+    const fileB = {
+      uri: 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      resourceId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      name: 'B.md',
+      content: '# Saved B',
+    }
+    const files = new Map([
+      [fileA.uri, fileA],
+      [fileB.uri, fileB],
+    ])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async (uri: string) => {
+            const file = files.get(uri)
+            if (!file) throw new Error('missing test file')
+            return {
+              kind: 'file',
+              resourceId: file.resourceId,
+              drive: 'main',
+              version: 1,
+            }
+          }),
+          downloadPreview: vi.fn(async (uri: string, maxBytes: number) => {
+            const file = files.get(uri)
+            if (!file) throw new Error('missing test file')
+            return previewResult(uri, new TextEncoder().encode(file.content).buffer, 1, maxBytes)
+          }),
+          affordances: vi.fn(async () => activeAffordances),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    const binding = {
+      principalOwner: 'markdown-session-owner-token',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'same-preview-tab',
+    }
+    const view = render(
+      <FilePreviewPage
+        byteLength={fileA.content.length}
+        fileKind="markdown"
+        fileName={fileA.name}
+        gfsUri={fileA.uri}
+        markdownDraftOwner={markdownDraftOwner}
+        markdownPrincipalOwner={binding.principalOwner}
+        tabId={binding.tabId}
+      />
+    )
+
+    const bindingA = { ...binding, gfsUri: fileA.uri }
+    await screen.findByRole('heading', { name: 'Saved A' })
+    await waitFor(() =>
+      expect(markdownDraftOwner.get(bindingA)).toMatchObject({
+        readReady: true,
+        capability: 'positive',
+      })
+    )
+    const menu = openPreviewActions(fileA.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Edit' }))
+    const editor = await screen.findByRole('textbox', { name: 'Edit Markdown source for A.md' })
+    fireEvent.change(editor, { target: { value: '# Private draft for A' } })
+    await waitFor(() => expect(markdownDraftOwner.get(bindingA)?.dirty).toBe(true))
+
+    view.rerender(
+      <FilePreviewPage
+        byteLength={fileB.content.length}
+        fileKind="markdown"
+        fileName={fileB.name}
+        gfsUri={fileB.uri}
+        markdownDraftOwner={markdownDraftOwner}
+        markdownPrincipalOwner={binding.principalOwner}
+        tabId={binding.tabId}
+      />
+    )
+
+    expect(await screen.findByRole('heading', { name: 'Saved B' })).toBeTruthy()
+    expect(screen.queryByRole('textbox', { name: 'Edit Markdown source for B.md' })).toBeNull()
+    expect(screen.queryByText('Private draft for A')).toBeNull()
+    expect(markdownDraftOwner.get(bindingA)).toMatchObject({
+      draft: '# Private draft for A',
+      dirty: true,
+    })
+    expect(markdownDraftOwner.get({ ...binding, gfsUri: fileB.uri })?.draft).toBe('# Saved B')
+    markdownDraftOwner.quit()
+  })
+
+  it('keeps the preview neutral when a delayed outgoing-scope read settles after switch intent', async () => {
+    const uri = 'gfs://main/ffeeddccbbaa99887766554433221100'
+    let downloadCount = 0
+    let releaseDelayedDownload!: (value: { bytes: ArrayBuffer }) => void
+    const delayedDownload = new Promise<{ bytes: ArrayBuffer }>(resolve => {
+      releaseDelayedDownload = resolve
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: 'ffeeddccbbaa99887766554433221100',
+            drive: 'main',
+            version: 1,
+          })),
+          downloadPreview: vi.fn(async () => {
+            downloadCount += 1
+            return delayedDownload
+          }),
+          affordances: vi.fn(async () => activeAffordances),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={10}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId="preview-tab-team-a"
+      />
+    )
+    await waitFor(() => expect(downloadCount).toBe(1))
+    await waitFor(() =>
+      expect(
+        markdownDraftOwner.get({
+          principalOwner: 'principal-owner-1',
+          scopeKey: 'preview-test-user:main',
+          tabId: 'preview-tab-team-a',
+          gfsUri: uri,
+        })
+      ).toBeTruthy()
+    )
+    await act(async () => {
+      const transition = markdownDraftOwner.beginScopeTransition()
+      expect(transition).not.toBeNull()
+      expect(markdownDraftOwner.commitScopeTransitionRender(transition!)).toBe(true)
+    })
+    expect(screen.getByText('Changing workspace')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'README.md' })).toBeNull()
+
+    await act(async () => {
+      releaseDelayedDownload({ bytes: new TextEncoder().encode('# Late Team A').buffer })
+      await Promise.resolve()
+    })
+    expect(screen.getByText('Changing workspace')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Late Team A' })).toBeNull()
+    markdownDraftOwner.quit()
+  })
+
+  it('rechecks current write permission after a rejected scope switch', async () => {
+    const uri = 'gfs://main/12341234123412341234123412341234'
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-rejected-scope-switch',
+      gfsUri: uri,
+    }
+    let permissionCalls = 0
+    let denyPermission = false
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: '12341234123412341234123412341234',
+            drive: 'main',
+            version: 1,
+          })),
+          downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
+            previewResult(uri, new TextEncoder().encode('# Saved source').buffer, 1, maxBytes)
+          ),
+          affordances: vi.fn(async () => {
+            permissionCalls += 1
+            return denyPermission
+              ? delegationAffordances(new Set(['read']), false)
+              : activeAffordances
+          }),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: binding.principalOwner,
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={14}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId={binding.tabId}
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Saved source' })
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.capability).toBe('positive'))
+    const initialPermissionCalls = permissionCalls
+    fireEvent.click(within(openPreviewActions('README.md')).getByRole('menuitem', { name: 'Edit' }))
+    fireEvent.change(
+      await screen.findByRole('textbox', { name: 'Edit Markdown source for README.md' }),
+      {
+        target: { value: '# Draft preserved through rollback' },
+      }
+    )
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.dirty).toBe(true))
+
+    let transition: ReturnType<MarkdownDraftOwner['beginScopeTransition']>
+    await act(async () => {
+      transition = markdownDraftOwner.beginScopeTransition()
+      expect(transition).not.toBeNull()
+      expect(markdownDraftOwner.commitScopeTransitionRender(transition!)).toBe(true)
+    })
+    expect(screen.getByText('Changing workspace')).toBeTruthy()
+
+    denyPermission = true
+    await act(async () => {
+      expect(
+        markdownDraftOwner.reconcileScopeUnchanged(
+          transition!,
+          binding.principalOwner,
+          binding.scopeKey,
+          1
+        )
+      ).toBe(true)
+    })
+
+    await waitFor(() =>
+      expect(markdownDraftOwner.get(binding)).toMatchObject({
+        capability: 'denied',
+        readReady: true,
+        draft: '# Draft preserved through rollback',
+        dirty: true,
+        editing: false,
+      })
+    )
+    expect(permissionCalls).toBeGreaterThan(initialPermissionCalls)
+    expect(
+      within(openPreviewActions('README.md')).queryByRole('menuitem', { name: 'Edit' })
+    ).toBeNull()
+    markdownDraftOwner.quit()
+  })
+
+  it('ignores a delayed permission result invalidated by a later scope transition', async () => {
+    const uri = 'gfs://main/43214321432143214321432143214321'
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-stale-capability',
+      gfsUri: uri,
+    }
+    let holdPermissionRefresh = false
+    let releasePermission!: (value: ReturnType<typeof delegationAffordances>) => void
+    let permissionRefreshStarted!: () => void
+    const delayedPermission = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+      releasePermission = resolve
+    })
+    const permissionStarted = new Promise<void>(resolve => {
+      permissionRefreshStarted = resolve
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: '43214321432143214321432143214321',
+            drive: 'main',
+            version: 1,
+          })),
+          downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
+            previewResult(uri, new TextEncoder().encode('# Saved source').buffer, 1, maxBytes)
+          ),
+          affordances: vi.fn(() => {
+            if (holdPermissionRefresh) {
+              permissionRefreshStarted()
+              return delayedPermission
+            }
+            return Promise.resolve(activeAffordances)
+          }),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: binding.principalOwner,
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={14}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId={binding.tabId}
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Saved source' })
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.capability).toBe('positive'))
+    fireEvent.click(within(openPreviewActions('README.md')).getByRole('menuitem', { name: 'Edit' }))
+    fireEvent.change(
+      await screen.findByRole('textbox', { name: 'Edit Markdown source for README.md' }),
+      {
+        target: { value: '# Draft survives stale permission' },
+      }
+    )
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.dirty).toBe(true))
+
+    let firstTransition: ReturnType<MarkdownDraftOwner['beginScopeTransition']>
+    await act(async () => {
+      firstTransition = markdownDraftOwner.beginScopeTransition()
+      expect(firstTransition).not.toBeNull()
+      expect(markdownDraftOwner.commitScopeTransitionRender(firstTransition!)).toBe(true)
+    })
+    holdPermissionRefresh = true
+    await act(async () => {
+      expect(
+        markdownDraftOwner.reconcileScopeUnchanged(
+          firstTransition!,
+          binding.principalOwner,
+          binding.scopeKey,
+          1
+        )
+      ).toBe(true)
+    })
+    await permissionStarted
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.capabilityPending).toBe(true))
+
+    let secondTransition: ReturnType<MarkdownDraftOwner['beginScopeTransition']>
+    await act(async () => {
+      secondTransition = markdownDraftOwner.beginScopeTransition()
+      expect(secondTransition).not.toBeNull()
+      expect(markdownDraftOwner.commitScopeTransitionRender(secondTransition!)).toBe(true)
+    })
+    await act(async () => releasePermission(activeAffordances))
+
+    expect(markdownDraftOwner.get(binding)).toMatchObject({
+      capability: 'unknown',
+      capabilityPending: false,
+      draft: '# Draft survives stale permission',
+      dirty: true,
+      editing: false,
+    })
+    expect(screen.getByText('Changing workspace')).toBeTruthy()
+    markdownDraftOwner.quit()
+  })
+
+  it('honors an explicit discard after an ambiguous Save even when the reconciliation read fails', async () => {
+    const uri = 'gfs://main/abcdef0123456789abcdef0123456789'
+    const source = '# Saved source'
+    const resolve = vi.fn(async () => ({
+      kind: 'file',
+      resourceId: 'abcdef0123456789abcdef0123456789',
+      drive: 'main',
+      version: 1,
+    }))
+    let downloadCalls = 0
+    const downloadPreview = vi.fn(async () => {
+      downloadCalls += 1
+      if (downloadCalls > 1) throw new Error('network timeout')
+      return { bytes: new TextEncoder().encode(source).buffer }
+    })
+    const replaceFile = vi.fn(async () => {
+      throw new Error('network timeout')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          downloadPreview,
+          affordances: vi.fn(async () => activeAffordances),
+          replaceFile,
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-ambiguous',
+      gfsUri: uri,
+    }
+    render(
+      <FilePreviewPage
+        byteLength={source.length}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId={binding.tabId}
+      />
+    )
+    await screen.findByRole('heading', { name: 'Saved source' })
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.capability).toBe('positive'))
+    fireEvent.click(within(openPreviewActions('README.md')).getByRole('menuitem', { name: 'Edit' }))
+    const editor = await screen.findByRole('textbox', {
+      name: 'Edit Markdown source for README.md',
+    })
+    fireEvent.change(editor, { target: { value: '# Local draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(markdownDraftOwner.get(binding)).toMatchObject({
+        lastSaveOutcome: 'ambiguous',
+        dirty: true,
+        pendingSave: null,
+      })
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
+    await screen.findByText('network timeout')
+    await waitFor(() =>
+      expect(markdownDraftOwner.get(binding)).toMatchObject({
+        draft: source,
+        dirty: false,
+        editing: false,
+      })
+    )
+    markdownDraftOwner.quit()
+  })
+
+  it('retains the draft and lets the backend authorize Save after access revocation', async () => {
+    const uri = 'gfs://main/0987654321abcdef0987654321abcdef'
+    const source = '# Saved source'
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-revoked',
+      gfsUri: uri,
+    }
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: '0987654321abcdef0987654321abcdef',
+            drive: 'main',
+            version: 1,
+          })),
+          downloadPreview: vi.fn(async () => ({ bytes: new TextEncoder().encode(source).buffer })),
+          affordances: vi.fn(async () => activeAffordances),
+          replaceFile: vi.fn(async () => {
+            throw Object.assign(new Error('403 write permission revoked'), { status: 403 })
+          }),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={source.length}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId={binding.tabId}
+      />
+    )
+    await screen.findByRole('heading', { name: 'Saved source' })
+    await waitFor(() => expect(markdownDraftOwner.get(binding)?.capability).toBe('positive'))
+    fireEvent.click(within(openPreviewActions('README.md')).getByRole('menuitem', { name: 'Edit' }))
+    fireEvent.change(
+      await screen.findByRole('textbox', { name: 'Edit Markdown source for README.md' }),
+      {
+        target: { value: '# Retained draft' },
+      }
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(markdownDraftOwner.get(binding)).toMatchObject({
+        capability: 'denied',
+        dirty: true,
+        draft: '# Retained draft',
+        pendingSave: null,
+      })
+    )
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByRole('textbox', { name: 'Edit Markdown source for README.md' })).toBeTruthy()
+    markdownDraftOwner.quit()
+  })
+
   it('mounts the video body for a video preview tab', async () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller())
     stubDownload(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
@@ -1049,7 +2199,7 @@ describe('FilePreviewPage', () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller())
     stubGfs({
       downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
-      resolve: async () => ({ kind: 'file' }),
+      resolve: async () => ({ kind: 'file', version: 1 }),
     })
 
     render(
@@ -1078,7 +2228,7 @@ describe('FilePreviewPage', () => {
       downloadPreview: async () => ({
         bytes: new TextEncoder().encode(`# Load ${++downloadNumber}`).buffer,
       }),
-      resolve: async () => ({ kind: 'file' }),
+      resolve: async () => ({ kind: 'file', version: 1 }),
     })
     hookMock.useGfsBrowserController.mockReturnValue(controller())
 
@@ -1097,7 +2247,7 @@ describe('FilePreviewPage', () => {
     expect(await screen.findByRole('heading', { name: 'Load 1' })).toBeTruthy()
     fireEvent.click(within(titlebarLeadingRoot).getByRole('button', { name: 'Refresh' }))
 
-    await waitFor(() => expect(resolve).toHaveBeenCalledWith(uri))
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(uri, 1))
     expect(await screen.findByRole('heading', { name: 'Load 2' })).toBeTruthy()
     expect(downloadPreview).toHaveBeenCalledTimes(2)
     expect(screen.getByRole('heading', { name: 'report.md', level: 2 })).toBeTruthy()
@@ -1377,10 +2527,56 @@ describe('FilePreviewPage', () => {
     expect(screen.getByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
     expect(screen.queryByText(deniedMessage)).toBeNull()
     expect(screen.queryByText('secret.png')).toBeNull()
-    expect(resolve).toHaveBeenCalledWith('gfs://main/secret')
+    expect(resolve).toHaveBeenCalledWith('gfs://main/secret', 1)
     // A per-resource 403 is NOT a session-authority failure: it was routed
     // through handleAuthorityFailure (which declined) and did not revoke.
     expect(controllerState.handleAuthorityFailure).toHaveReturnedWith(false)
+  })
+
+  it('clears a resource denial when the same preview moves to a different session scope', async () => {
+    const uri = 'gfs://main/scope-recovered-resource'
+    const deniedMessage = await resolveDeniedMessage(uri)
+    let scope = 'preview-test-user:team-a'
+    let allowed = false
+    hookMock.useGfsBrowserController.mockImplementation(() => ({
+      ...controller(),
+      sessionScope: scope,
+    }))
+    const { resolve } = stubGfs({
+      downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
+      resolve: async () => {
+        if (!allowed) throw new Error(deniedMessage)
+        return resolvePreviewResource(uri)
+      },
+    })
+    const titlebarLeadingTarget = document.createElement('div')
+    document.body.appendChild(titlebarLeadingTarget)
+    const element = () => (
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="shared.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={3}
+        tabId="same-preview-tab"
+        titlebarLeadingTarget={titlebarLeadingTarget}
+      />
+    )
+    const { rerender } = render(element())
+
+    expect(await screen.findByAltText('Preview of shared.png')).toBeTruthy()
+    allowed = false
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
+    expect(screen.queryByAltText('Preview of shared.png')).toBeNull()
+
+    scope = 'preview-test-user:team-b'
+    allowed = true
+    rerender(element())
+
+    expect(await screen.findByAltText('Preview of shared.png')).toBeTruthy()
+    expect(resolve.mock.calls.length).toBeGreaterThan(1)
+    expect(screen.queryByRole('heading', { name: 'File unavailable', level: 3 })).toBeNull()
   })
 
   // H2 no-regress: a SESSION-authority failure discovered by the focus re-check

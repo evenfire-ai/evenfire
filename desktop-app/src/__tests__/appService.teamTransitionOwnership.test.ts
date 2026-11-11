@@ -214,7 +214,7 @@ describe('AppService deliberate team transition ownership', () => {
       appName: 'Environment A',
     })
     await save
-    await expect(restore).resolves.toEqual({ authenticated: true, me, sessionGeneration: 3 })
+    await expect(restore).resolves.toEqual({ authenticated: true, me, sessionGeneration: 2 })
     expect(getDesktopEnvironment).toHaveBeenCalledOnce()
 
     expect(runtimeConfig.getDesktopRuntimeConfigState().currentConfig.rpcProxyBaseUrl).toBe(

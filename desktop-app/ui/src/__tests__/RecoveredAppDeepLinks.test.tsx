@@ -4436,10 +4436,20 @@ describe('App deep-link orchestration', () => {
   it('keeps a real newer workspace tab selected when an older app-link catalog request fails', async () => {
     const existingBridge = window.clerum
     let activeTeamId = 'team-a'
-    const { clerum } = installAppControllerClerum({
+    let sessionGeneration = 1
+    const { clerum, handle } = installAppControllerClerum({
       me: { teamId: 'team-a', teamName: 'Team A' },
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
+    handle.getSessionState.mockImplementation(async () => ({
+      authenticated: true,
+      me: {
+        ...HARNESS_ME,
+        teamId: activeTeamId,
+        teamName: activeTeamId === 'team-a' ? 'Team A' : 'Team B',
+      },
+      sessionGeneration,
+    }))
     Object.assign(clerum, {
       shortcuts: existingBridge.shortcuts,
       app: existingBridge.app,
@@ -4449,6 +4459,7 @@ describe('App deep-link orchestration', () => {
     Object.assign(window.clerum.team, {
       switch: vi.fn(async (teamId: string) => {
         activeTeamId = teamId
+        sessionGeneration += 1
         return {
           authenticated: true,
           me: {
@@ -4456,6 +4467,7 @@ describe('App deep-link orchestration', () => {
             teamId,
             teamName: teamId === 'team-a' ? 'Team A' : 'Team B',
           },
+          sessionGeneration,
         }
       }),
     })
@@ -4630,11 +4642,21 @@ describe('App deep-link orchestration', () => {
 
   it('does not restore or relaunch an origin app when team rollback fails', async () => {
     let liveTeamId = 'team-a'
+    let sessionGeneration = 1
     const existingBridge = window.clerum
-    const { clerum } = installAppControllerClerum({
+    const { clerum, handle } = installAppControllerClerum({
       me: { teamId: 'team-a', teamName: 'Team A' },
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
+    handle.getSessionState.mockImplementation(async () => ({
+      authenticated: true,
+      me: {
+        ...HARNESS_ME,
+        teamId: liveTeamId,
+        teamName: liveTeamId === 'team-a' ? 'Team A' : 'Team B',
+      },
+      sessionGeneration,
+    }))
     Object.assign(clerum, {
       shortcuts: existingBridge.shortcuts,
       app: existingBridge.app,
@@ -4646,6 +4668,7 @@ describe('App deep-link orchestration', () => {
         throw new Error('origin team is unavailable')
       }
       liveTeamId = teamId
+      sessionGeneration += 1
       return {
         authenticated: true,
         me: {
@@ -4653,6 +4676,7 @@ describe('App deep-link orchestration', () => {
           teamId,
           teamName: teamId === 'team-a' ? 'Team A' : 'Team B',
         },
+        sessionGeneration,
       }
     })
     Object.assign(window.clerum.team, { switch: switchTeam })

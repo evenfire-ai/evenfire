@@ -31,7 +31,9 @@ const harness = vi.hoisted(() => {
       webContents: {
         id: 41,
         on: vi.fn(),
+        once: vi.fn(),
         send: vi.fn(),
+        reload: vi.fn(),
         setWindowOpenHandler: vi.fn(),
         loadFile: vi.fn().mockResolvedValue(undefined),
         loadURL: vi.fn().mockResolvedValue(undefined),
@@ -48,6 +50,7 @@ const harness = vi.hoisted(() => {
       isFocused: vi.fn(() => true),
       restore: vi.fn(),
       show: vi.fn(),
+      hide: vi.fn(),
       focus: vi.fn(),
       maximize: vi.fn(),
       setTitle: vi.fn(),
@@ -274,18 +277,26 @@ describe('main.ts GFS navigation-generation composition', () => {
     expect(listPending(ipcEvent(ownContents)).links).toEqual([])
   })
 
-  it('tells the main window when main ends the committed session', () => {
+  it('reloads the hidden renderer before revealing a cleared session', () => {
     const ownContents = harness.windows[0]?.webContents
     if (!ownContents) throw new Error('main.ts did not create the owning BrowserWindow')
     if (!harness.sessionCleared) throw new Error('main.ts did not pass onSessionCleared')
     ownContents.send.mockClear()
+    const mainWindow = harness.windows[0]
+    if (!mainWindow) throw new Error('main.ts did not create the owning BrowserWindow')
+    mainWindow.show.mockClear()
 
     harness.sessionCleared()
 
-    const notices = ownContents.send.mock.calls.filter(
-      ([channel]) => channel === 'auth:sessionCleared'
-    )
-    expect(notices).toEqual([['auth:sessionCleared']])
+    expect(mainWindow.hide).toHaveBeenCalledOnce()
+    expect(ownContents.reload).toHaveBeenCalledOnce()
+    expect(mainWindow.show).not.toHaveBeenCalled()
+    const didFinishLoad = ownContents.once.mock.calls.find(
+      ([event]) => event === 'did-finish-load'
+    )?.[1]
+    expect(didFinishLoad).toEqual(expect.any(Function))
+    didFinishLoad?.()
+    expect(mainWindow.show).toHaveBeenCalledOnce()
   })
 
   it('keeps post-invalidation App and resource links above the main queue reset floors', () => {

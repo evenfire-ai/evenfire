@@ -2,14 +2,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
+import { MarkdownDraftOwner } from '@lib/markdownDraftOwner'
 import { GfsMarkdownPreviewBody } from './Body'
 
 // Mirror the producer shape: `window.clerum.gfs.downloadPreview` → `{ bytes: ArrayBuffer }`.
 function stubDownload(text: string) {
   const downloadPreview = vi.fn(async () => ({ bytes: new TextEncoder().encode(text).buffer }))
+  const resolve = vi.fn(async () => ({ version: 1 }))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { downloadPreview } },
+    value: { gfs: { downloadPreview, resolve } },
   })
   return downloadPreview
 }
@@ -40,9 +42,93 @@ describe('GfsMarkdownPreviewBody', () => {
     expect(container.querySelector('script')).toBeNull()
     expect(downloadPreview).toHaveBeenCalledWith(
       'gfs://main/markdown-1',
-      GFS_MARKDOWN_PREVIEW_MAX_BYTES
+      GFS_MARKDOWN_PREVIEW_MAX_BYTES,
+      undefined
     )
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('retries a torn read once and publishes only bytes paired with a stable version', async () => {
+    const versions = [1, 2, 2, 2]
+    const resolve = vi.fn(async () => ({ version: versions.shift()! }))
+    const downloadPreview = vi
+      .fn()
+      .mockResolvedValueOnce({ bytes: new TextEncoder().encode('# Torn').buffer })
+      .mockResolvedValueOnce({ bytes: new TextEncoder().encode('# Stable').buffer })
+    const onSourceLoaded = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { downloadPreview, resolve } },
+    })
+    render(
+      <GfsMarkdownPreviewBody
+        byteLength={8}
+        fileName="README.md"
+        gfsUri="gfs://main/stable"
+        expectedSessionGeneration={7}
+        onSourceLoaded={onSourceLoaded}
+      />
+    )
+    expect(await screen.findByRole('heading', { name: 'Stable', level: 1 })).toBeTruthy()
+    expect(downloadPreview).toHaveBeenCalledTimes(2)
+    expect(downloadPreview).toHaveBeenLastCalledWith(
+      'gfs://main/stable',
+      GFS_MARKDOWN_PREVIEW_MAX_BYTES,
+      7
+    )
+    expect(onSourceLoaded).toHaveBeenCalledWith('# Stable', 2)
+    expect(screen.queryByRole('heading', { name: 'Torn' })).toBeNull()
+  })
+
+  it('does not render or expose bytes that the draft owner rejects as older', async () => {
+    const binding = {
+      principalOwner: 'preview-principal',
+      scopeKey: 'preview-scope',
+      tabId: 'preview-tab',
+      gfsUri: 'gfs://main/stale-preview',
+    }
+    const owner = new MarkdownDraftOwner()
+    owner.open(binding, { savedSnapshot: { content: '# Latest', version: 9 } })
+    const resolve = vi.fn(async () => ({ version: 8 }))
+    const downloadPreview = vi.fn(async () => ({
+      bytes: new TextEncoder().encode('# Stale').buffer,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { downloadPreview, resolve } },
+    })
+    const copyContent: { current: (() => Promise<boolean>) | null } = { current: null }
+    const onSourceLoaded = (content: string, version: number) => {
+      const token = owner.beginStableRead(binding)
+      if (!token) return false
+      owner.completeStableRead(token, { content, version, stable: true })
+      const current = owner.getVisibleRecord(binding)
+      return (
+        current?.savedSnapshot?.version === version && current.savedSnapshot.content === content
+      )
+    }
+
+    render(
+      <GfsMarkdownPreviewBody
+        byteLength={8}
+        fileName="README.md"
+        gfsUri={binding.gfsUri}
+        onCopyContentReady={copy => {
+          copyContent.current = copy
+        }}
+        onSourceLoaded={onSourceLoaded}
+      />
+    )
+
+    expect(
+      await screen.findByText('The file changed while loading. Refresh to try again.')
+    ).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Stale', level: 1 })).toBeNull()
+    expect(copyContent.current).toBeNull()
+    expect(owner.get(binding)?.savedSnapshot).toEqual({ content: '# Latest', version: 9 })
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(downloadPreview).toHaveBeenCalledTimes(1)
+    owner.quit()
   })
 
   it('renders a .txt file as plain text', async () => {
@@ -102,7 +188,7 @@ describe('GfsMarkdownPreviewBody', () => {
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { downloadPreview } },
+      value: { gfs: { downloadPreview, resolve: vi.fn(async () => ({ version: 1 })) } },
     })
     render(
       <GfsMarkdownPreviewBody

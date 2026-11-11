@@ -159,7 +159,7 @@ describe('preview rename refreshes the workspace title from GFS', () => {
     expect(screen.getByTestId('active-tab-id').textContent).toBe('preview-tab')
     expect(screen.getByTestId('active-tab-uri').textContent).toBe(uri)
     expect(renamedUris).toEqual([uri])
-    expect(resolve).toHaveBeenCalledWith(uri)
+    expect(resolve).toHaveBeenCalledWith(uri, 1)
     expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
   })
 })
@@ -205,7 +205,7 @@ describe('FilePreviewPage unchanged rename', () => {
     )
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
-    await waitFor(() => expect(affordances).toHaveBeenCalledWith(id, 'main'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(id, 'main', 1))
     fireEvent.click(screen.getByRole('button', { name: 'Options for diagram.png' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
     const dialog = await screen.findByRole('dialog', { name: 'Rename file' })

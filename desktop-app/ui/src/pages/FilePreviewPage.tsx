@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Button, EmptyState, StatusBanner } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
+import { GfsMarkdownEditor } from '@components/GfsMarkdownPreview/MarkdownAdapter'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
@@ -12,7 +13,10 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import { httpErrorStatus } from '@lib/format'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import { MARKDOWN_DRAFT_MAX_BYTES } from '@lib/markdownDraftOwner'
+import type { MarkdownDraftBinding, MarkdownDraftOwner } from '@lib/markdownDraftOwner'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
 import { useFilePreviewResourceActions } from './useFilePreviewResourceActions'
 
@@ -32,6 +36,15 @@ function toMessage(error: unknown): string {
 function isPerResourceAccessDenial(message: string): boolean {
   const normalized = message.toLowerCase()
   return /(^|\D)403(\D|$)/.test(normalized) || normalized.includes('forbidden')
+}
+
+function encodeUtf8Base64(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  return btoa(binary)
 }
 
 /**
@@ -74,6 +87,9 @@ export function FilePreviewPage({
   pendingResourceAction,
   onPendingResourceActionHandled,
   titlebarLeadingTarget,
+  markdownDraftOwner,
+  markdownPrincipalOwner,
+  tabId,
 }: FilePreviewPageProps) {
   const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController()
@@ -81,8 +97,12 @@ export function FilePreviewPage({
   const [denied, setDenied] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [copyContentReady, setCopyContentReady] = useState(false)
+  const [draftRecord, setDraftRecord] = useState<ReturnType<MarkdownDraftOwner['get']>>(null)
+  const [scopeTransitionPending, setScopeTransitionPending] = useState(false)
   const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
   const lastHandledResourceActionIdRef = useRef<number | null>(null)
+  const discardAfterReadBindingRef = useRef<MarkdownDraftBinding | null>(null)
+  const lastCapabilityScopeRef = useRef<{ key: string; generation: number } | null>(null)
   const accessRevoked = ctrl.accessState === 'revoked'
   const liveAuthorityRef = useRef({
     sessionScope: ctrl.sessionScope,
@@ -95,6 +115,58 @@ export function FilePreviewPage({
   }
   const capturedSessionScope = ctrl.sessionScope
   const capturedSessionGeneration = ctrl.sessionGeneration
+  const markdownEligible = fileKind === 'markdown' && /\.(?:md|markdown)$/i.test(fileName)
+  const draftBinding: MarkdownDraftBinding | null =
+    markdownDraftOwner &&
+    tabId &&
+    (markdownPrincipalOwner || ctrl.principalScope) &&
+    ctrl.sessionScope
+      ? {
+          principalOwner: markdownPrincipalOwner || ctrl.principalScope!,
+          scopeKey: ctrl.sessionScope,
+          tabId,
+          gfsUri,
+        }
+      : null
+  const liveResourceUriRef = useRef(gfsUri)
+  liveResourceUriRef.current = gfsUri
+  const liveBindingRef = useRef(draftBinding)
+  liveBindingRef.current = draftBinding
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+  useEffect(() => {
+    if (!markdownDraftOwner || !draftBinding) {
+      setDraftRecord(null)
+      return
+    }
+    const refresh = () => {
+      setDraftRecord(
+        markdownDraftOwner.getVisibleRecord(draftBinding) ?? markdownDraftOwner.get(draftBinding)
+      )
+      setScopeTransitionPending(markdownDraftOwner.hasPendingTransition())
+    }
+    const unsubscribe = markdownDraftOwner.subscribe(refresh)
+    markdownDraftOwner.setActiveScope(
+      draftBinding.principalOwner,
+      draftBinding.scopeKey,
+      capturedSessionGeneration
+    )
+    markdownDraftOwner.open(draftBinding, { sessionGeneration: capturedSessionGeneration })
+    refresh()
+    return unsubscribe
+  }, [
+    capturedSessionGeneration,
+    draftBinding?.gfsUri,
+    draftBinding?.principalOwner,
+    draftBinding?.scopeKey,
+    draftBinding?.tabId,
+    markdownDraftOwner,
+  ])
   const handlePreviewAuthorityFailure = useCallback(
     (
       message: string,
@@ -117,10 +189,308 @@ export function FilePreviewPage({
     pushToast,
   })
 
+  useEffect(() => {
+    if (!markdownDraftOwner || !draftBinding || previewResourceActions.resourceVersion === null)
+      return
+    markdownDraftOwner.observeVersion(draftBinding, previewResourceActions.resourceVersion)
+  }, [
+    draftBinding?.gfsUri,
+    draftBinding?.principalOwner,
+    draftBinding?.scopeKey,
+    draftBinding?.tabId,
+    markdownDraftOwner,
+    previewResourceActions.resourceVersion,
+  ])
+
+  useEffect(() => {
+    if (!markdownDraftOwner || !draftBinding) return
+    const token = markdownDraftOwner.beginCapabilityRefresh(draftBinding)
+    if (token) markdownDraftOwner.completeCapabilityRefresh(token, previewResourceActions.canWrite)
+  }, [
+    draftBinding?.gfsUri,
+    draftBinding?.principalOwner,
+    draftBinding?.scopeKey,
+    draftBinding?.tabId,
+    markdownDraftOwner,
+    previewResourceActions.canWrite,
+  ])
+
+  useEffect(() => {
+    if (!markdownEligible || !markdownDraftOwner || !draftBinding || !draftRecord) return
+    const key = `${draftBinding.principalOwner}\u0000${draftBinding.scopeKey}\u0000${draftBinding.tabId}\u0000${draftBinding.gfsUri}`
+    const previous = lastCapabilityScopeRef.current
+    lastCapabilityScopeRef.current = { key, generation: draftRecord.scopeGeneration }
+    if (
+      !previous ||
+      previous.key !== key ||
+      previous.generation === draftRecord.scopeGeneration ||
+      draftRecord.capability !== 'unknown'
+    )
+      return
+
+    const token = markdownDraftOwner.beginCapabilityRefresh(draftBinding)
+    if (!token) return
+    void previewResourceActions.revalidateWriteCapability().then(allowed => {
+      markdownDraftOwner.completeCapabilityRefresh(token, allowed)
+    })
+  }, [
+    draftBinding?.gfsUri,
+    draftBinding?.principalOwner,
+    draftBinding?.scopeKey,
+    draftBinding?.tabId,
+    draftRecord?.capability,
+    draftRecord?.scopeGeneration,
+    markdownEligible,
+    markdownDraftOwner,
+    previewResourceActions.revalidateWriteCapability,
+  ])
+
+  const handleMarkdownSourceLoaded = useCallback(
+    (content: string, version: number): boolean => {
+      // Preview-only consumers without the editing owner have no owner
+      // snapshot to compare against; keep their read-only viewer behavior.
+      if (!markdownDraftOwner || !draftBinding) return true
+      markdownDraftOwner.open(draftBinding, {
+        savedSnapshot: { content, version },
+        sessionGeneration: capturedSessionGeneration,
+      })
+      const token = markdownDraftOwner.beginStableRead(draftBinding)
+      if (!token) return false
+      const completed = markdownDraftOwner.completeStableRead(token, {
+        content,
+        version,
+        stable: true,
+      })
+      const current = markdownDraftOwner.getVisibleRecord(draftBinding)
+      const accepted = Boolean(
+        completed &&
+        current?.savedSnapshot?.version === version &&
+        current.savedSnapshot.content === content
+      )
+      if (!accepted) return false
+      const pendingDiscard = discardAfterReadBindingRef.current
+      if (
+        pendingDiscard &&
+        pendingDiscard.principalOwner === draftBinding.principalOwner &&
+        pendingDiscard.scopeKey === draftBinding.scopeKey &&
+        pendingDiscard.tabId === draftBinding.tabId &&
+        pendingDiscard.gfsUri === draftBinding.gfsUri
+      ) {
+        discardAfterReadBindingRef.current = null
+        markdownDraftOwner.discard(draftBinding)
+      }
+      return true
+    },
+    [
+      capturedSessionGeneration,
+      draftBinding?.gfsUri,
+      draftBinding?.principalOwner,
+      draftBinding?.scopeKey,
+      draftBinding?.tabId,
+      markdownDraftOwner,
+    ]
+  )
+
+  useEffect(() => {
+    const candidate = draftRecord?.viewCandidate
+    if (!candidate || !markdownDraftOwner || !draftBinding) return
+    markdownDraftOwner.commitSaveView(candidate.requestId, draftBinding)
+  }, [
+    draftBinding?.gfsUri,
+    draftBinding?.principalOwner,
+    draftBinding?.scopeKey,
+    draftBinding?.tabId,
+    draftRecord?.readReady,
+    draftRecord?.readPending,
+    draftRecord?.viewCandidate?.requestId,
+    markdownDraftOwner,
+  ])
+
+  const handleEditMarkdown = useCallback(() => {
+    if (
+      !markdownDraftOwner ||
+      !draftBinding ||
+      !markdownEligible ||
+      !previewResourceActions.canWrite ||
+      byteLength > MARKDOWN_DRAFT_MAX_BYTES
+    )
+      return
+    markdownDraftOwner.beginEdit(draftBinding)
+  }, [
+    byteLength,
+    draftBinding?.gfsUri,
+    draftBinding?.principalOwner,
+    draftBinding?.scopeKey,
+    draftBinding?.tabId,
+    markdownDraftOwner,
+    markdownEligible,
+    previewResourceActions.canWrite,
+  ])
+
+  const handleSaveMarkdown = useCallback(async () => {
+    if (!markdownDraftOwner || !draftBinding || !draftRecord) return
+    const request = markdownDraftOwner.reserveSave(draftBinding)
+    if (!request) return
+    try {
+      const requestGeneration = request.expectedSessionGeneration ?? undefined
+      const resource = await window.clerum.gfs.resolve(gfsUri, requestGeneration)
+      const encoded = encodeUtf8Base64(request.submitted)
+      const saved = await window.clerum.gfs.replaceFile(
+        resource.resourceId,
+        encoded,
+        resource.drive,
+        undefined,
+        requestGeneration
+      )
+      markdownDraftOwner.completeSave(request, { kind: 'success', version: saved.version })
+      if (
+        mountedRef.current &&
+        liveResourceUriRef.current === request.binding.gfsUri &&
+        liveAuthorityRef.current.sessionGeneration === requestGeneration &&
+        liveBindingRef.current?.principalOwner === request.binding.principalOwner &&
+        liveBindingRef.current?.scopeKey === request.binding.scopeKey &&
+        liveBindingRef.current?.tabId === request.binding.tabId
+      ) {
+        setReloadToken(value => value + 1)
+        pushToast?.('Markdown saved', 'success')
+      }
+    } catch (error) {
+      const status = httpErrorStatus(error)
+      const kind =
+        status && status >= 400 && status < 500 && status !== 408 ? 'failure' : 'ambiguous'
+      markdownDraftOwner.completeSave(request, { kind })
+      if (status === 401) {
+        ctrl.handleAuthorityFailure(
+          toMessage(error),
+          'operation',
+          capturedSessionScope,
+          request.expectedSessionGeneration
+        )
+      } else if (status === 403) {
+        const capability = markdownDraftOwner.beginCapabilityRefresh(request.binding)
+        if (capability) markdownDraftOwner.completeCapabilityRefresh(capability, false)
+      }
+      if (
+        mountedRef.current &&
+        liveResourceUriRef.current === request.binding.gfsUri &&
+        liveAuthorityRef.current.sessionGeneration === request.expectedSessionGeneration &&
+        liveBindingRef.current?.principalOwner === request.binding.principalOwner &&
+        liveBindingRef.current?.scopeKey === request.binding.scopeKey &&
+        liveBindingRef.current?.tabId === request.binding.tabId
+      ) {
+        pushToast?.(
+          kind === 'ambiguous'
+            ? 'Save outcome is unknown. Your draft is retained; review it before saving again.'
+            : `Could not save Markdown: ${toMessage(error)}`,
+          'error'
+        )
+      }
+    }
+  }, [
+    capturedSessionGeneration,
+    capturedSessionScope,
+    ctrl.handleAuthorityFailure,
+    draftBinding?.gfsUri,
+    draftBinding?.principalOwner,
+    draftBinding?.scopeKey,
+    draftBinding?.tabId,
+    draftRecord,
+    gfsUri,
+    markdownDraftOwner,
+    pushToast,
+  ])
+
+  const handleDiscardMarkdown = useCallback(() => {
+    if (!markdownDraftOwner || !draftBinding) return
+    const current = markdownDraftOwner.get(draftBinding)
+    if (!current || current.pendingSave) return
+    if (
+      current.lastSaveOutcome === 'ambiguous' ||
+      (current.savedSnapshot && current.observedVersion > current.savedSnapshot.version)
+    ) {
+      discardAfterReadBindingRef.current = draftBinding
+      setReloadToken(value => value + 1)
+      return
+    }
+    markdownDraftOwner.discard(draftBinding)
+  }, [
+    draftBinding?.gfsUri,
+    draftBinding?.principalOwner,
+    draftBinding?.scopeKey,
+    draftBinding?.tabId,
+    markdownDraftOwner,
+  ])
+
+  const visibleDraftRecord =
+    draftRecord &&
+    draftBinding &&
+    draftRecord.binding.principalOwner === draftBinding.principalOwner &&
+    draftRecord.binding.scopeKey === draftBinding.scopeKey &&
+    draftRecord.binding.tabId === draftBinding.tabId &&
+    draftRecord.binding.gfsUri === draftBinding.gfsUri
+      ? draftRecord
+      : null
+  const editingMarkdown = Boolean(visibleDraftRecord?.editing)
+  const editAvailable = Boolean(
+    markdownEligible &&
+    byteLength <= MARKDOWN_DRAFT_MAX_BYTES &&
+    previewResourceActions.canWrite &&
+    visibleDraftRecord?.readReady &&
+    !visibleDraftRecord.readPending &&
+    Boolean(visibleDraftRecord.savedSnapshot) &&
+    visibleDraftRecord.observedVersion <= (visibleDraftRecord.savedSnapshot?.version ?? -1) &&
+    visibleDraftRecord.capability === 'positive' &&
+    !visibleDraftRecord.capabilityPending &&
+    !visibleDraftRecord.sizeExceeded
+  )
+  const headerActions =
+    editingMarkdown && visibleDraftRecord ? (
+      <div className="da-gfs-markdown-edit-actions">
+        <Button
+          disabled={Boolean(visibleDraftRecord.pendingSave)}
+          onClick={handleDiscardMarkdown}
+          size="sm"
+          variant="outline"
+        >
+          Discard
+        </Button>
+        <Button
+          disabled={
+            !visibleDraftRecord.dirty ||
+            visibleDraftRecord.sizeExceeded ||
+            Boolean(visibleDraftRecord.pendingSave)
+          }
+          loading={Boolean(visibleDraftRecord.pendingSave)}
+          onClick={() => void handleSaveMarkdown()}
+          size="sm"
+        >
+          Save
+        </Button>
+      </div>
+    ) : null
+  const markdownEditor =
+    editingMarkdown && visibleDraftRecord ? (
+      <>
+        {visibleDraftRecord.sizeExceeded ? (
+          <div className="da-gfs-markdown-size-warning" role="status">
+            Markdown files can be up to 2 MiB. Shorten this draft before saving. Your current text
+            is preserved.
+          </div>
+        ) : null}
+        <GfsMarkdownEditor
+          ariaLabel={`Edit Markdown source for ${fileName}`}
+          onChange={value => {
+            if (draftBinding) markdownDraftOwner?.type(draftBinding, value)
+          }}
+          value={visibleDraftRecord.draft}
+        />
+      </>
+    ) : null
+
   // Each previewed resource starts from a clean per-resource verdict.
   useEffect(() => {
     setDenied(null)
-  }, [gfsUri])
+  }, [capturedSessionGeneration, capturedSessionScope, ctrl.principalScope, gfsUri])
 
   useEffect(() => {
     if (unavailable) setDenied(null)
@@ -140,6 +510,7 @@ export function FilePreviewPage({
 
   const handleDownloadError = useCallback(
     (error: unknown) => {
+      if (liveResourceUriRef.current !== gfsUri) return
       if (
         !isGfsSessionAuthorityCurrent(
           capturedSessionScope,
@@ -149,6 +520,17 @@ export function FilePreviewPage({
         )
       )
         return
+      const pendingDiscard = discardAfterReadBindingRef.current
+      if (
+        pendingDiscard &&
+        pendingDiscard.principalOwner === draftBinding?.principalOwner &&
+        pendingDiscard.scopeKey === draftBinding?.scopeKey &&
+        pendingDiscard.tabId === draftBinding?.tabId &&
+        pendingDiscard.gfsUri === gfsUri
+      ) {
+        discardAfterReadBindingRef.current = null
+        if (draftBinding) markdownDraftOwner?.discard(draftBinding)
+      }
       ctrl.handleAuthorityFailure(
         toMessage(error),
         'operation',
@@ -156,7 +538,17 @@ export function FilePreviewPage({
         capturedSessionGeneration
       )
     },
-    [capturedSessionGeneration, capturedSessionScope, ctrl.handleAuthorityFailure]
+    [
+      capturedSessionGeneration,
+      capturedSessionScope,
+      ctrl.handleAuthorityFailure,
+      draftBinding?.gfsUri,
+      draftBinding?.principalOwner,
+      draftBinding?.scopeKey,
+      draftBinding?.tabId,
+      gfsUri,
+      markdownDraftOwner,
+    ]
   )
 
   const handleRefresh = useCallback(async () => {
@@ -167,8 +559,9 @@ export function FilePreviewPage({
     const requestId = ++refreshRequestRef.current
     setRefreshing(true)
     try {
-      await window.clerum.gfs.resolve(gfsUri)
+      await window.clerum.gfs.resolve(gfsUri, generation ?? undefined)
       if (
+        liveResourceUriRef.current !== gfsUri ||
         !isGfsSessionAuthorityCurrent(
           scope,
           generation,
@@ -183,6 +576,7 @@ export function FilePreviewPage({
     } catch (error) {
       const message = toMessage(error)
       if (
+        liveResourceUriRef.current !== gfsUri ||
         !isGfsSessionAuthorityCurrent(
           scope,
           generation,
@@ -271,6 +665,7 @@ export function FilePreviewPage({
         (fileKind === 'image' || fileKind === 'markdown')
           ? () => void handleCopyContent()
           : undefined,
+      'edit-markdown': editAvailable ? handleEditMarkdown : undefined,
       ...previewResourceActions.handlers,
     },
     canShare: previewResourceActions.canShare,
@@ -280,12 +675,14 @@ export function FilePreviewPage({
     canDelete: previewResourceActions.canDelete,
     mutating: previewResourceActions.mutating,
     canCopyContent: copyContentReady,
+    canEditMarkdown: editAvailable,
     refreshing,
   })
   const menuResourceName = denied || unavailable || accessRevoked ? 'unavailable file' : fileName
   const fileActionsMenu = (
     <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={menuResourceName} />
   )
+  const markdownActions = editingMarkdown ? headerActions : fileActionsMenu
 
   useEffect(() => {
     const request = pendingResourceAction
@@ -338,6 +735,7 @@ export function FilePreviewPage({
         { throwOnError: true }
       )
       if (
+        liveResourceUriRef.current !== gfsUri ||
         !isGfsSessionAuthorityCurrent(
           capturedScope,
           capturedGeneration,
@@ -349,6 +747,7 @@ export function FilePreviewPage({
     } catch (error) {
       const message = toMessage(error)
       if (
+        liveResourceUriRef.current !== gfsUri ||
         !isGfsSessionAuthorityCurrent(
           capturedScope,
           capturedGeneration,
@@ -384,7 +783,7 @@ export function FilePreviewPage({
 
   // Remounting the body on a reload bump discards any stale bytes and re-runs the
   // fetch from scratch — the simplest correct "re-dispatch the fetch" (§3.B.3).
-  const bodyKey = `${gfsUri}:${reloadToken}:${reloadVersion ?? 0}`
+  const bodyKey = `${capturedSessionScope ?? ''}:${capturedSessionGeneration ?? ''}:${gfsUri}:${reloadToken}:${reloadVersion ?? 0}`
 
   return (
     <section className="page">
@@ -418,7 +817,12 @@ export function FilePreviewPage({
           </div>
         ))}
         <div className="da-gfs-preview-content">
-          {denied || unavailable || accessRevoked ? (
+          {scopeTransitionPending ? (
+            <EmptyState
+              title="Changing workspace"
+              body="Refreshing file access for the selected team."
+            />
+          ) : denied || unavailable || accessRevoked ? (
             <>
               <div className="da-gfs-preview-unavailable-actions">{fileActionsMenu}</div>
               <EmptyState title="File unavailable" body="This item is no longer available." />
@@ -444,9 +848,12 @@ export function FilePreviewPage({
                   byteLength={byteLength}
                   fileName={fileName}
                   gfsUri={gfsUri}
+                  expectedSessionGeneration={capturedSessionGeneration ?? undefined}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
-                  titleActions={fileActionsMenu}
+                  onSourceLoaded={handleMarkdownSourceLoaded}
+                  editor={markdownEditor}
+                  titleActions={markdownActions}
                   headingLevel={2}
                 />
               ) : null}

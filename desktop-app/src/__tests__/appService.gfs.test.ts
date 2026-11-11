@@ -24,6 +24,7 @@ function gfsService() {
       listShares: ReturnType<typeof vi.fn>
       revokeShare: ReturnType<typeof vi.fn>
       moveResource: ReturnType<typeof vi.fn>
+      replaceFile: ReturnType<typeof vi.fn>
     }
     grantGfs: (
       resourceId: string,
@@ -42,6 +43,13 @@ function gfsService() {
       drive?: string,
       ifMatch?: number
     ) => Promise<{ resourceId: string; version: number }>
+    replaceGfsFile: (
+      resourceId: string,
+      encodedData: string,
+      drive: string,
+      ifMatch: number | undefined,
+      expectedSessionGeneration: number
+    ) => Promise<{ version: number }>
   }
   service.sessionToken = 'session-token'
   service.gfsClient = {
@@ -50,11 +58,36 @@ function gfsService() {
     listShares: vi.fn().mockResolvedValue([]),
     revokeShare: vi.fn().mockResolvedValue(undefined),
     moveResource: vi.fn().mockResolvedValue({ resourceId: RESOURCE_ID, version: 9 }),
+    replaceFile: vi.fn().mockResolvedValue({ version: 10 }),
   }
   return service
 }
 
 describe('AppService GFS delegation subject boundary', () => {
+  it('performs an unconditional replace only under the captured session generation', async () => {
+    const service = gfsService()
+    const encodedData = Buffer.from('# Updated Markdown').toString('base64')
+
+    await service.replaceGfsFile(RESOURCE_ID, encodedData, 'main', undefined, 0)
+
+    expect(service.gfsClient.replaceFile).toHaveBeenCalledTimes(1)
+    expect(service.gfsClient.replaceFile).toHaveBeenCalledWith(
+      { resourceId: RESOURCE_ID, drive: 'main', encodedData, ifMatch: undefined },
+      'session-token'
+    )
+  })
+
+  it('rejects a stale editor generation before dispatching an unconditional replace', async () => {
+    const service = gfsService()
+    const encodedData = Buffer.from('# Stale editor request').toString('base64')
+
+    await expect(
+      service.replaceGfsFile(RESOURCE_ID, encodedData, 'main', undefined, 1)
+    ).rejects.toThrow('stale_session_generation')
+
+    expect(service.gfsClient.replaceFile).not.toHaveBeenCalled()
+  })
+
   it('moves a resource into a destination folder through the user-plane GFS client', async () => {
     const service = gfsService()
     const destinationId = '33333333-3333-4333-8333-333333333333'
@@ -327,6 +360,18 @@ function authenticatedUploadService(statePath: string): UploadScopeTestService {
 }
 
 describe('AppService GFS upload security scope', () => {
+  it('blocks GFS session listing during a reserved session preclear', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-session-preclear-'))
+    try {
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      ;(service as any).pendingSessionPreclear = { notice: { sessionGeneration: 0 } }
+
+      await expect(service.listGfsUploadSessions('main')).rejects.toThrow('session_clear_pending')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('falls back to the bounded legacy create path for a fresh start when v2 is disabled', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-legacy-start-fallback-'))
     try {

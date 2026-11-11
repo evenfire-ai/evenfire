@@ -2372,14 +2372,17 @@ describe('App deep-link orchestration', () => {
       me: { teamId: 'team-a', teamName: 'Team A' },
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
-    if (resetSessionWhilePending) {
-      const sessionAuthority = main.service as unknown as {
-        sessionGeneration: number
-        sessionToken: string | null
-        me: NonNullable<AppController['me']> | null
-        getSessionState(): ReturnType<typeof main.service.getSessionState>
-        getSessionGeneration(): number
-      }
+    type SessionAuthorityHarness = {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: NonNullable<AppController['me']> | null
+      getSessionState(): ReturnType<typeof main.service.getSessionState>
+      getSessionGeneration(): number
+    }
+    const sessionAuthority = resetSessionWhilePending
+      ? (main.service as unknown as SessionAuthorityHarness)
+      : null
+    if (sessionAuthority) {
       sessionAuthority.sessionGeneration = 1
       sessionAuthority.sessionToken = 'session-a'
       sessionAuthority.me = {
@@ -2436,7 +2439,20 @@ describe('App deep-link orchestration', () => {
         await originRollback
       }
       activeTeamId = teamId
-      return switchTeamProducer(teamId)
+      const switched = (await switchTeamProducer(teamId)) as {
+        authenticated: boolean
+        me: AppController['me']
+        sessionGeneration?: number
+      }
+      if (sessionAuthority && switched.me) {
+        sessionAuthority.sessionGeneration =
+          switched.sessionGeneration ?? sessionAuthority.sessionGeneration
+        sessionAuthority.me = {
+          ...sessionAuthority.me,
+          ...switched.me,
+        }
+      }
+      return switched
     })
 
     listApps.mockImplementation(async () => ({
@@ -2552,13 +2568,20 @@ describe('App deep-link orchestration', () => {
       const principalIdentity = getController().authenticatedPrincipalIdentity
       expect(principalIdentity).toBeTruthy()
       activeTeamId = 'team-a'
+      if (sessionAuthority?.me) {
+        sessionAuthority.me = {
+          ...sessionAuthority.me,
+          teamId: 'team-a',
+          teamName: 'Team A',
+        }
+      }
       main.endSession((getController().sessionGeneration ?? 1) + 1)
       await main.settle()
       await waitFor(() => expect(queue.list()).toEqual([]))
       await act(async () => {
         await getController().loadSession()
       })
-      expect(getController().sessionGeneration).toBe(2)
+      expect(getController().sessionGeneration).toBe(3)
       expect(getController().getCurrentTeamId()).toBe('team-a')
       await waitFor(() =>
         expect(

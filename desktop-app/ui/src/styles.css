@@ -16027,6 +16027,10 @@ pre {
   background: rgba(var(--panel-rgb), 0.48);
 }
 
+.da-gfs-markdown-preview-dialog__header {
+  min-width: 0;
+}
+
 .da-gfs-image-preview-dialog__header-actions,
 .da-gfs-markdown-preview-dialog__header-actions,
 .da-gfs-video-preview-dialog__header-actions {
@@ -16049,6 +16053,18 @@ pre {
 
 .da-gfs-preview-title-row > .da-gfs-resource-menu {
   flex: 0 0 auto;
+}
+
+.da-gfs-preview-title-row--editing > .da-gfs-preview-title {
+  flex: 1 1 auto;
+}
+
+.da-gfs-markdown-edit-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 
 .da-gfs-image-preview-dialog__header-main {
@@ -16203,6 +16219,45 @@ pre {
   overflow: auto;
   padding: var(--space-5);
   background: var(--panel);
+}
+
+.da-gfs-markdown-preview-dialog__body--editing {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.da-gfs-markdown-editor {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+}
+
+.da-gfs-markdown-editor > [data-color-mode] {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+}
+
+.da-gfs-markdown-editor .w-md-editor {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.da-gfs-markdown-editor .w-md-editor-content {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+}
+
+.da-gfs-markdown-editor .w-md-editor-input {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .da-gfs-markdown-preview-dialog__loading {
@@ -18382,4 +18437,19 @@ pre {
    text on the selected row (the row-level color above cannot reach it). */
 .left-nav .nav-latest-session.active .nav-latest-session__main {
   color: var(--text);
+}
+
+.app-auth-neutral-surface {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--text);
+}
+.da-gfs-markdown-size-warning {
+  margin-block: 0.5rem;
+  color: var(--warning);
+  font-size: var(--font-size-sm);
 }

@@ -32,6 +32,7 @@ vi.mock('../appService.js', () => ({ AppService: class {} }))
 
 const service = {
   downloadGfsUri: vi.fn(async () => new ArrayBuffer(0)),
+  replaceGfsFile: vi.fn(async () => ({ version: 2 })),
 }
 const trusted = { senderFrame: { url: 'file:///app/index.html' } }
 const uri = 'gfs://drive/resource'
@@ -49,6 +50,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   service.downloadGfsUri.mockClear()
+  service.replaceGfsFile.mockClear()
 })
 
 describe('gfs:downloadPreview maxBytes ceiling', () => {
@@ -67,6 +69,28 @@ describe('gfs:downloadPreview maxBytes ceiling', () => {
     ['a smaller per-type limit (image, 10 MiB)', 10 * 1024 * 1024],
   ])('forwards %s to the service', async (_label, maxBytes) => {
     await handler('gfs:downloadPreview')(trusted, { uri, maxBytes })
-    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, maxBytes)
+    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, maxBytes, undefined, undefined)
+  })
+})
+
+describe('gfs:replaceFile markdown save contract', () => {
+  it('forwards an unconditional authorized replace with the captured session generation', async () => {
+    const payload = {
+      resourceId: 'file-resource-1',
+      encodedData: btoa('# Updated Markdown'),
+      drive: 'main',
+      expectedSessionGeneration: 9,
+    }
+
+    await handler('gfs:replaceFile')(trusted, payload)
+
+    expect(service.replaceGfsFile).toHaveBeenCalledOnce()
+    expect(service.replaceGfsFile).toHaveBeenCalledWith(
+      'file-resource-1',
+      payload.encodedData,
+      'main',
+      undefined,
+      9
+    )
   })
 })

@@ -19,6 +19,7 @@ import { useNavigationController } from '@hooks/domain/useNavigationController'
 import { useNotificationsController } from '@hooks/domain/useNotificationsController'
 import { useAppController } from '@hooks/useAppController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import { MarkdownDraftOwner } from '@lib/markdownDraftOwner'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
@@ -48,6 +49,11 @@ import {
 type AppController = ReturnType<typeof useAppController>
 type WorkspaceState = AppController['workspaceTabs']
 type WorkspaceStateUpdater = WorkspaceState | ((state: WorkspaceState) => WorkspaceState)
+type MarkdownSessionPreclearNotice = {
+  transitionId: number
+  sessionGeneration: number
+  reason: 'logout' | 'session-ended' | 'environment-change'
+}
 
 const appHarness = vi.hoisted(() => ({
   controller: null as unknown as AppController,
@@ -68,6 +74,10 @@ const appHarness = vi.hoisted(() => ({
     teamId?: string
     chatId?: string
   } | null,
+  markdownOwners: [] as Array<{ quit: () => void }>,
+  sessionPreclear: null as ((notice: MarkdownSessionPreclearNotice) => void) | null,
+  sessionCleared: null as (() => void) | null,
+  acknowledgeSessionPreclear: async (_notice: MarkdownSessionPreclearNotice) => true,
 }))
 
 const allowNotificationDelivery = () => true
@@ -208,6 +218,8 @@ vi.mock('@pages/FilePreviewPage', async importOriginal => {
 vi.mocked(useAppController).mockImplementation(useReactiveController)
 
 function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')): AppController {
+  const markdownDraftOwner = new MarkdownDraftOwner()
+  appHarness.markdownOwners.push(markdownDraftOwner)
   let controller: AppController
   let tabSequence = 2
   let navigationIntentSequence = 0
@@ -268,6 +280,8 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
   })
 
   controller = {
+    markdownDraftOwner,
+    markdownPrincipalOwner: 'integration-principal-owner',
     booting: false,
     initialExperienceLoading: false,
     busy: false,
@@ -472,6 +486,7 @@ function installClerum(
     createFolder,
     createFileFromPath,
     replaceFileFromPath,
+    replaceFile: vi.fn(async () => ({ version: 2 })),
     moveResource,
     copyDeepLink: vi.fn(async () => ({ url: 'https://profile.fixture.test/link' })),
     download: vi.fn(),
@@ -498,6 +513,20 @@ function installClerum(
       auth: {
         getDesktopAppInfo: vi.fn(async () => ({ version: 'test' })),
         getSessionGeneration: vi.fn(async () => 1),
+        acknowledgeSessionPreclear: vi.fn((notice: MarkdownSessionPreclearNotice) =>
+          appHarness.acknowledgeSessionPreclear(notice)
+        ),
+        onSessionPreclear: vi.fn((handler: (notice: MarkdownSessionPreclearNotice) => void) => {
+          appHarness.sessionPreclear = handler
+          return vi.fn()
+        }),
+        onSessionPreclearCancelled: vi.fn(() => vi.fn()),
+        onSessionCleared: vi.fn((handler: () => void) => {
+          appHarness.sessionCleared = handler
+          return vi.fn()
+        }),
+        authorizeMarkdownTabClose: vi.fn(async () => 'integration-close-permit'),
+        consumeMarkdownTabClosePermit: vi.fn(async () => true),
       },
       shortcuts: {
         onCommand: vi.fn((handler: (commandId: string, source: 'host' | 'sandbox') => void) => {
@@ -766,6 +795,10 @@ beforeEach(() => {
   appHarness.previewPagePendingActions = []
   appHarness.sandboxUiShortcutAppRef = null
   appHarness.latestConversationNotification = null
+  appHarness.markdownOwners = []
+  appHarness.sessionPreclear = null
+  appHarness.sessionCleared = null
+  appHarness.acknowledgeSessionPreclear = async () => true
   appHarness.controller = makeController()
   appHarness.useRealNavigationController = false
   vi.mocked(useAppController).mockImplementation(useReactiveController)
@@ -777,6 +810,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  for (const owner of appHarness.markdownOwners) owner.quit()
+  appHarness.markdownOwners = []
   desktopQueryClient.clear()
   if (originalClipboardDescriptor) {
     Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
@@ -972,6 +1007,7 @@ describe('App → Files action lifecycle integration', () => {
     appHarness.controller = makeController(
       openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
     )
+    appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
@@ -1002,6 +1038,7 @@ describe('App → Files action lifecycle integration', () => {
     appHarness.controller = makeController(
       openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
     )
+    appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
@@ -1559,7 +1596,6 @@ describe('App → Files action lifecycle integration', () => {
     const deferredTarget = deferred<unknown>()
     const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
     const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
-    appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
@@ -3244,7 +3280,16 @@ describe('App → Files action lifecycle integration', () => {
         preview: { gfsUri: markdown.gfsUri },
       })
     )
-    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === markdown.gfsUri)).toHaveLength(1)
+    // Keep the resource-action lookup singular while allowing the Markdown
+    // body to resolve before and after download for its stable-version check.
+    const markdownResolveCalls = gfs.resolve.mock.calls.filter(
+      ([uri]) => uri === markdown.gfsUri
+    ).length
+    expect(markdownResolveCalls).toBeGreaterThanOrEqual(3)
+    expect(markdownResolveCalls).toBeLessThanOrEqual(4)
+    expect(gfs.downloadPreview.mock.calls.filter(([uri]) => uri === markdown.gfsUri)).toHaveLength(
+      1
+    )
   })
 
   it('preserves explicit non-previewable deep-link download and tab-path behavior', async () => {
@@ -3532,6 +3577,284 @@ describe('App → Files action lifecycle integration', () => {
     expect(deleteResource).not.toHaveBeenCalled()
   })
 
+  it('guards dirty Markdown tabs from strip close and retains or discards on choice', async () => {
+    const markdown = await resolveResource(
+      resolvedFile('66666666666666666666666666666666', 'close-protected.md')
+    )
+    installClerum([markdown])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    appHarness.controller.desktopEnvironmentSetupComplete = false
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /close-protected\.md/ })
+    await chooseRowAction('close-protected.md', 'Preview')
+    await screen.findByRole('heading', { name: 'close-protected.md', level: 2 })
+    fireEvent.click(screen.getByRole('button', { name: 'Options for close-protected.md' }))
+    const previewMenu = await screen.findByRole('menu', { name: 'Actions for close-protected.md' })
+    await waitFor(() =>
+      expect(within(previewMenu).getByRole('menuitem', { name: 'Edit' })).toBeTruthy()
+    )
+    fireEvent.click(within(previewMenu).getByRole('menuitem', { name: 'Edit' }))
+    fireEvent.change(
+      await screen.findByRole('textbox', { name: 'Edit Markdown source for close-protected.md' }),
+      { target: { value: '# Keep this draft' } }
+    )
+
+    const tabStripClose = screen.getByRole('button', { name: 'Close close-protected.md' })
+    fireEvent.click(tabStripClose)
+    expect(
+      await screen.findByRole('dialog', { name: 'Discard unsaved Markdown changes?' })
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Stay and Continue Editing' }))
+    expect(
+      screen.getByRole('textbox', { name: 'Edit Markdown source for close-protected.md' })
+    ).toBeTruthy()
+    expect(screen.queryByRole('dialog', { name: 'Discard unsaved Markdown changes?' })).toBeNull()
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('preview')
+
+    act(() => appHarness.shortcutCommand('chat.closeTab', 'host'))
+    expect(appHarness.lastShortcutCommand).toBe('chat.closeTab')
+    expect(
+      await screen.findByRole('dialog', { name: 'Discard unsaved Markdown changes?' })
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Stay and Continue Editing' }))
+    expect(
+      screen.getByRole('textbox', { name: 'Edit Markdown source for close-protected.md' })
+    ).toBeTruthy()
+
+    fireEvent.click(tabStripClose)
+    expect(
+      await screen.findByRole('dialog', { name: 'Discard unsaved Markdown changes?' })
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Discard and Close' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: 'close-protected.md' })).toBeNull()
+    )
+    expect(
+      screen.queryByRole('textbox', { name: 'Edit Markdown source for close-protected.md' })
+    ).toBeNull()
+  })
+
+  it('keeps the in-memory draft through ordinary tab switching and preview remount', async () => {
+    const markdown = await resolveResource(
+      resolvedFile('68686868686868686868686868686868', 'switch-retained.md')
+    )
+    installClerum([markdown])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'switch-files', path: null })
+    )
+    appHarness.controller.desktopEnvironmentSetupComplete = false
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /switch-retained\.md/ })
+    await chooseRowAction('switch-retained.md', 'Preview')
+    await screen.findByRole('heading', { name: 'switch-retained.md', level: 2 })
+    fireEvent.click(screen.getByRole('button', { name: 'Options for switch-retained.md' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for switch-retained.md' })
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: 'Edit' })).toBeTruthy())
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Edit' }))
+    const editorName = 'Edit Markdown source for switch-retained.md'
+    fireEvent.change(await screen.findByRole('textbox', { name: editorName }), {
+      target: { value: '# Retain this draft' },
+    })
+
+    const previewTabId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+    const chatTab = appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === 'chat-tab-1')
+    expect(previewTabId).toBeTruthy()
+    expect(chatTab?.kind).toBe('chat')
+    const tabStrip = screen.getByRole('toolbar', { name: 'Workspace tabs' })
+    fireEvent.click(within(tabStrip).getByRole('button', { name: chatTab!.title }))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe('chat-tab-1')
+    )
+    expect(screen.queryByRole('dialog', { name: 'Discard unsaved Markdown changes?' })).toBeNull()
+
+    const previewTab = appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === previewTabId)
+    expect(previewTab?.kind).toBe('preview')
+    fireEvent.click(within(tabStrip).getByRole('button', { name: previewTab!.title }))
+    expect(await screen.findByRole('textbox', { name: editorName })).toHaveProperty(
+      'value',
+      '# Retain this draft'
+    )
+    expect(screen.queryByRole('dialog', { name: 'Discard unsaved Markdown changes?' })).toBeNull()
+  })
+
+  it('commits a neutral preview before acknowledging session preclear', async () => {
+    const markdown = await resolveResource(
+      resolvedFile('69696969696969696969696969696969', 'preclear-draft.md')
+    )
+    installClerum([markdown])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('preclear-chat'), {
+        id: 'preclear-files',
+        path: null,
+      })
+    )
+    appHarness.controller.desktopEnvironmentSetupComplete = false
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /preclear-draft\.md/ })
+    await chooseRowAction('preclear-draft.md', 'Preview')
+    await screen.findByRole('heading', { name: 'preclear-draft.md', level: 2 })
+    fireEvent.click(screen.getByRole('button', { name: 'Options for preclear-draft.md' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for preclear-draft.md' })
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: 'Edit' })).toBeTruthy())
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Edit' }))
+    const editorName = 'Edit Markdown source for preclear-draft.md'
+    fireEvent.change(await screen.findByRole('textbox', { name: editorName }), {
+      target: { value: '# Keep until preclear is acknowledged' },
+    })
+
+    let acknowledge!: (value: boolean) => void
+    const acknowledgement = new Promise<boolean>(resolve => {
+      acknowledge = resolve
+    })
+    let acknowledgementStarted = false
+    appHarness.acknowledgeSessionPreclear = async () => {
+      acknowledgementStarted = true
+      expect(screen.getByTestId('markdown-auth-neutral-surface')).toBeTruthy()
+      return acknowledgement
+    }
+    const notice: MarkdownSessionPreclearNotice = {
+      transitionId: 71,
+      sessionGeneration: 1,
+      reason: 'environment-change',
+    }
+    const previewTab = appHarness.controller.workspaceTabs.tabs.find(
+      tab => tab.kind === 'preview' && tab.preview?.gfsUri === markdown.gfsUri
+    )
+    expect(previewTab).toBeTruthy()
+    const owner = appHarness.controller.markdownDraftOwner
+    const previewRecord = owner.getForTab(
+      previewTab!.id,
+      appHarness.controller.markdownPrincipalOwner!
+    )[0]
+    expect(previewRecord).toMatchObject({
+      dirty: true,
+      draft: '# Keep until preclear is acknowledged',
+    })
+    expect(appHarness.sessionPreclear).toBeTruthy()
+    act(() => appHarness.sessionPreclear!(notice))
+
+    expect(acknowledgementStarted).toBe(true)
+    expect(screen.getByTestId('markdown-auth-neutral-surface')).toBeTruthy()
+    const draft = owner.get(previewRecord!.binding)
+    expect(draft).toMatchObject({ dirty: true, draft: '# Keep until preclear is acknowledged' })
+
+    await act(async () => acknowledge(true))
+    act(() => appHarness.sessionCleared?.())
+    expect(owner.get(previewRecord!.binding)).toBeNull()
+  })
+
+  it('keeps post-switch publication neutral when auth preclear arrives before React commit', async () => {
+    const markdown = await resolveResource(
+      resolvedFile('70707070707070707070707070707070', 'post-switch-preclear.md')
+    )
+    const { gfs } = installClerum([markdown])
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('post-switch-chat'), {
+        id: 'post-switch-files',
+        path: null,
+      })
+    )
+    appHarness.controller.desktopEnvironmentSetupComplete = false
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /post-switch-preclear\.md/ })
+    await chooseRowAction('post-switch-preclear.md', 'Preview')
+    await screen.findByRole('heading', { name: 'post-switch-preclear.md', level: 2 })
+    const resolveCount = gfs.resolve.mock.calls.length
+    const downloadCount = gfs.downloadPreview.mock.calls.length
+
+    let acknowledge!: (value: boolean) => void
+    let acknowledgementStarted = false
+    const acknowledgement = new Promise<boolean>(resolve => {
+      acknowledge = resolve
+    })
+    appHarness.acknowledgeSessionPreclear = async () => {
+      acknowledgementStarted = true
+      expect(screen.getByTestId('markdown-auth-neutral-surface')).toBeTruthy()
+      return acknowledgement
+    }
+
+    act(() => {
+      // Model the successful Team B publication followed synchronously by the
+      // main-process preclear event, before React can commit the B preview.
+      appHarness.controller.me = {
+        ...appHarness.controller.me!,
+        teamId: 'team-b',
+        teamName: 'Team B',
+      }
+      appHarness.controller.currentTeamId = 'team-b'
+      appHarness.controller.sessionGeneration = 2
+      appHarness.forceRender()
+      appHarness.sessionPreclear?.({
+        transitionId: 72,
+        sessionGeneration: 2,
+        reason: 'environment-change',
+      })
+    })
+
+    expect(acknowledgementStarted).toBe(true)
+    expect(screen.getByTestId('markdown-auth-neutral-surface')).toBeTruthy()
+    expect(appHarness.controller.currentTeamId).toBe('team-b')
+    expect(gfs.resolve).toHaveBeenCalledTimes(resolveCount)
+    expect(gfs.downloadPreview).toHaveBeenCalledTimes(downloadCount)
+    await act(async () => acknowledge(true))
+    act(() => appHarness.sessionCleared?.())
+  })
+
+  it('blocks tab close during Save and releases the block after a failed Save', async () => {
+    const markdown = await resolveResource(
+      resolvedFile('77777777777777777777777777777777', 'pending-save.md')
+    )
+    const { gfs } = installClerum([markdown])
+    let rejectSave!: (error: Error) => void
+    const save = new Promise<{ version: number }>((_resolve, reject) => {
+      rejectSave = reject
+    })
+    gfs.replaceFile.mockImplementation(() => save)
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'pending-save-files', path: null })
+    )
+    appHarness.controller.desktopEnvironmentSetupComplete = false
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /pending-save\.md/ })
+    await chooseRowAction('pending-save.md', 'Preview')
+    await screen.findByRole('heading', { name: 'pending-save.md', level: 2 })
+    fireEvent.click(screen.getByRole('button', { name: 'Options for pending-save.md' }))
+    const menu = await screen.findByRole('menu', { name: 'Actions for pending-save.md' })
+    await waitFor(() => expect(within(menu).getByRole('menuitem', { name: 'Edit' })).toBeTruthy())
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Edit' }))
+    const editor = await screen.findByRole('textbox', {
+      name: 'Edit Markdown source for pending-save.md',
+    })
+    fireEvent.change(editor, { target: { value: '# Pending draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(gfs.replaceFile).toHaveBeenCalledOnce())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close pending-save.md' }))
+    expect(screen.queryByRole('dialog', { name: 'Discard unsaved Markdown changes?' })).toBeNull()
+    expect(
+      screen.getByRole('textbox', { name: 'Edit Markdown source for pending-save.md' })
+    ).toBeTruthy()
+
+    await act(async () => rejectSave(new Error('permission revoked')))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Close pending-save.md' }))
+    expect(
+      await screen.findByRole('dialog', { name: 'Discard unsaved Markdown changes?' })
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('textbox', { name: 'Edit Markdown source for pending-save.md' })
+    ).toHaveProperty('value', '# Pending draft')
+    fireEvent.click(screen.getByRole('button', { name: 'Stay and Continue Editing' }))
+  })
+
   it('cancels a pending Preview copy when its active Preview tab is selected again', async () => {
     const resource = await resolveResource(
       resolvedFile('55555555555555555555555555555555', 'copy-target.md')
@@ -3544,14 +3867,13 @@ describe('App → Files action lifecycle integration', () => {
       configurable: true,
       value: { writeText },
     })
-    appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /copy-target\.md/ })
     await chooseRowAction('copy-target.md', 'Copy content')
     await waitFor(() =>
-      expect(gfs.downloadPreview).toHaveBeenCalledWith(resource.gfsUri, 2_097_152)
+      expect(gfs.downloadPreview).toHaveBeenCalledWith(resource.gfsUri, 2_097_152, 1)
     )
     await expectActionAtConsumer(
       appHarness.previewPagePendingActions,

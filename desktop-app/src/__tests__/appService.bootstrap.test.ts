@@ -429,11 +429,11 @@ describe('AppService invitation configuration lookup', () => {
     await expect(service.getSessionState()).resolves.toEqual({
       authenticated: true,
       me,
-      sessionGeneration: 3,
+      sessionGeneration: 2,
     })
     expect(service.getCachedUserId()).toBe('user-1')
     expect(getSessionToken).not.toHaveBeenCalled()
-    expect(getMe).not.toHaveBeenCalled()
+    expect(getMe).toHaveBeenCalledWith('test-token')
     expect(service.gfsDispatchBlocked).toBe(false)
   })
 

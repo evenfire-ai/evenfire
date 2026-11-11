@@ -192,6 +192,44 @@ const clerum = Object.freeze({
     getDesktopAppInfo: () => ipcRenderer.invoke('auth:getDesktopAppInfo'),
     openDesktopRelease: (releaseUrl: string) =>
       ipcRenderer.invoke('auth:openDesktopRelease', { releaseUrl }),
+    prepareSessionClear: () => ipcRenderer.invoke('auth:prepareSessionClear'),
+    acknowledgeSessionPreclear: (notice: {
+      transitionId: number
+      sessionGeneration: number
+      reason: 'logout' | 'session-ended' | 'environment-change'
+    }) => ipcRenderer.invoke('auth:acknowledgeSessionPreclear', notice),
+    authorizeMarkdownTabClose: (requestId: string): Promise<string | null> =>
+      ipcRenderer.invoke('auth:authorizeMarkdownTabClose', { requestId }),
+    consumeMarkdownTabClosePermit: (permit: string): Promise<boolean> =>
+      ipcRenderer.invoke('auth:consumeMarkdownTabClosePermit', { permit }),
+    onSessionPreclear: (
+      callback: (notice: {
+        transitionId: number
+        sessionGeneration: number
+        reason: 'logout' | 'session-ended' | 'environment-change'
+      }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        notice: Parameters<typeof callback>[0]
+      ) => callback(notice)
+      ipcRenderer.on('auth:sessionWillClear', listener)
+      return () => ipcRenderer.off('auth:sessionWillClear', listener)
+    },
+    onSessionPreclearCancelled: (
+      callback: (notice: {
+        transitionId: number
+        sessionGeneration: number
+        reason: 'logout' | 'session-ended' | 'environment-change'
+      }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        notice: Parameters<typeof callback>[0]
+      ) => callback(notice)
+      ipcRenderer.on('auth:sessionClearCancelled', listener)
+      return () => ipcRenderer.off('auth:sessionClearCancelled', listener)
+    },
     onExternalLogout: (callback: () => void) => {
       const listener = () => callback()
       ipcRenderer.on('auth:externalLogout', listener)
@@ -229,11 +267,12 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('gfs:deepLink', listener)
     },
     copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
-    resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
+    resolve: (uri: string, expectedSessionGeneration?: number) =>
+      ipcRenderer.invoke('gfs:resolve', { uri, expectedSessionGeneration }),
     download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
       cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
-    downloadPreview: (uri: string, maxBytes: number) =>
-      ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
+    downloadPreview: (uri: string, maxBytes: number, expectedSessionGeneration?: number) =>
+      ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes, expectedSessionGeneration }),
     listAccessible: (drive?: string, cursor?: string) =>
       ipcRenderer.invoke('gfs:listAccessible', { drive, cursor }),
     listChildren: (
@@ -242,8 +281,8 @@ const clerum = Object.freeze({
       cursor?: string,
       options?: { signal?: AbortSignal }
     ) => cancellableGfsInvoke('gfs:listChildren', { resourceId, drive, cursor }, options?.signal),
-    affordances: (resourceId: string, drive?: string) =>
-      ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
+    affordances: (resourceId: string, drive?: string, expectedSessionGeneration?: number) =>
+      ipcRenderer.invoke('gfs:affordances', { resourceId, drive, expectedSessionGeneration }),
     zipStream: {
       start: () => ipcRenderer.invoke('gfs:zipStream:start'),
       append: (jobId: string, name: string, bytes: ArrayBuffer) =>
@@ -314,8 +353,20 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
     cancelUpload: (uploadId: string, drive = 'main') =>
       ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
-    replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
-      ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
+    replaceFile: (
+      resourceId: string,
+      encodedData: string,
+      drive?: string,
+      ifMatch?: number,
+      expectedSessionGeneration?: number
+    ) =>
+      ipcRenderer.invoke('gfs:replaceFile', {
+        resourceId,
+        encodedData,
+        drive,
+        ifMatch,
+        expectedSessionGeneration,
+      }),
     replaceFileFromPath: (resourceId: string, filePath: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:replaceFileFromPath', { resourceId, filePath, drive, ifMatch }),
     getPathForFile: (file: File) => webUtils.getPathForFile(file),
