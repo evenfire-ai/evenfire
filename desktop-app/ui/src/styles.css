@@ -16257,7 +16257,17 @@ pre {
 
 .da-gfs-markdown-editor .w-md-editor-input {
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
+}
+
+.da-gfs-markdown-editor .w-md-editor-text-pre {
+  max-height: none;
+  overflow: visible;
+}
+
+.da-gfs-markdown-editor .w-md-editor-preview pre,
+.da-gfs-markdown-preview__content pre {
+  max-height: none;
 }
 
 .da-gfs-markdown-preview-dialog__loading {
