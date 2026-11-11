@@ -39,6 +39,7 @@ import {
 const FIXTURES = join(__dirname, '__fixtures__')
 const CORPUS_PATH = join(FIXTURES, 'chatPayloads.base.json')
 const UPDATE = process.env.UPDATE_CHAT_CORPUS === '1'
+const IN_CI = !!process.env.CI && process.env.CI !== 'false' && process.env.CI !== '0'
 
 function stable(value: unknown): unknown {
   return JSON.parse(
@@ -480,6 +481,11 @@ describe('OpenAI wire family — byte-identical chat corpus', () => {
   it('matches the corpus recorded from the pre-composition drivers', async () => {
     const corpus = await buildCorpus()
     if (UPDATE) {
+      // Regenerating rewrites the oracle and skips every comparison, so in CI it
+      // would turn any wire-format regression into a green run.
+      if (IN_CI) {
+        throw new Error('UPDATE_CHAT_CORPUS must not be set in CI; regenerate the corpus locally')
+      }
       // One entry per line keeps failures diffable without bloating the file.
       const lines = Object.entries(corpus).map(
         ([k, v]) => `${JSON.stringify(k)}:${JSON.stringify(v)}`
