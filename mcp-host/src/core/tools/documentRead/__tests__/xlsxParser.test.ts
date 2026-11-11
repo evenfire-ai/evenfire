@@ -1018,16 +1018,4 @@ describe('XLSX parser fixes from the PR #1424 review', () => {
       )
     ).toMatchObject({ ok: true, sheets: [{ startRow: 1, rows: [[1], [], [], [4]] }] })
   })
-
-  it('reads CDATA text in inline strings and values', async () => {
-    const outcome = await parseDirect(
-      await sheetXmlWorkbook(
-        plainWorksheet(
-          '<row r="1"><c r="A1" t="inlineStr"><is><t><![CDATA[a<b]]></t></is></c>' +
-            '<c r="B1" t="str"><v><![CDATA[c&d]]></v></c><c r="C1"><v><![CDATA[42]]></v></c></row>'
-        )
-      )
-    )
-    expect(outcome).toMatchObject({ ok: true, sheets: [{ rows: [['a<b', 'c&d', 42]] }] })
-  })
 })

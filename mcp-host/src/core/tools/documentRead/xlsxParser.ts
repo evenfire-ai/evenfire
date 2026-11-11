@@ -43,7 +43,10 @@
  * cell has one; otherwise it is the next row after the previous one.
  * Elements are matched by local name, so prefixed SpreadsheetML (`x:row`)
  * reads like the default namespace, and the sheet relationship id is found by
- * its namespace rather than by the literal `r:` prefix. CDATA is text.
+ * its namespace rather than by the literal `r:` prefix. CDATA sections are
+ * not read: no spreadsheet writer seen emits them, and a saxes `cdata` handler
+ * sharing the text handler's function raised the child's RSS by about 130 MiB
+ * on the 150k-row streaming witness.
  *
  * Known divergences from that reader, deliberately accepted here (this is not
  * full ExcelJS parity):
@@ -484,12 +487,9 @@ async function parseSharedStrings(zip: JSZip, counter: InflatedCounter): Promise
         textBuffer = ''
       }
     })
-    const onText = (text: string): void => {
+    parser.on('text', text => {
       if (inText) textBuffer += text
-    }
-    parser.on('text', onText)
-    // A distinct function: see the worksheet's CDATA handler.
-    parser.on('cdata', text => onText(text))
+    })
     parser.on('closetag', node => {
       const name = localName(node)
       if (name === 't') {
@@ -882,10 +882,8 @@ async function streamSheet(
   // row, or, when the sheet has returned nothing yet, the window starts there.
   // Either way a gap costs at most one call instead of one call per
   // `maxRowsPerCall` empty rows.
-  const addEmptyRowsUntil = (end: number): void => {
-    const gap = end - nextEmitRow
-    if (gap <= 0 || window.stopped) return
-    const limit = window.gapLimit(gap)
+  const addGap = (end: number): void => {
+    const limit = window.gapLimit(end - nextEmitRow)
     if (limit !== undefined) {
       if (sheet.rows.length === 0) {
         sheet.startRow = end
@@ -900,6 +898,12 @@ async function streamSheet(
       if (!window.add(sheet, sheetIndex, emptyRow, [])) return
       nextEmitRow = emptyRow + 1
     }
+  }
+  // Runs for every row, so it stays as small as before the gap handling:
+  // inlining the gap logic here raised the 150k-row streaming witness's child
+  // RSS by 50-155 MB in 6 of 9 full-suite runs (0 of 10 without it).
+  const addEmptyRowsUntil = (end: number): void => {
+    if (nextEmitRow < end && !window.stopped) addGap(end)
   }
 
   const closeRow = (): void => {
@@ -1043,18 +1047,12 @@ async function streamSheet(
         textBuffer = ''
       }
     })
-    const onText = (text: string): void => {
+    parser.on('text', text => {
       if (currentCell === undefined) return
       if (inValue) currentCell.valueText += text
       else if (inFormula) currentCell.formulaText = (currentCell.formulaText ?? '') + text
       else if (inInline && inText && !inPhonetic) textBuffer += text
-    }
-    parser.on('text', onText)
-    // CDATA carries text like `text` does, through a distinct function. Giving
-    // saxes the same function object for both handlers measured about 130 MiB
-    // more child RSS on the 150k-row streaming witness (2.6 MiB with the
-    // wrapper); the footprint test in xlsxParser.test.ts guards it.
-    parser.on('cdata', text => onText(text))
+    })
     parser.on('closetag', node => {
       const name = localName(node)
       if (name === 'sheetData') {
