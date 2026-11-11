@@ -177,6 +177,38 @@ describe('MarkdownDraftOwner', () => {
     })
   })
 
+  it('keeps the submitted draft in edit mode when a newer stable read beats Save view commit', () => {
+    const owner = createOwner('server-v1', 1)
+    expect(owner.beginEdit(binding)).toBe(true)
+    expect(owner.type(binding, 'submitted-v2')).toBe(true)
+    const request = owner.reserveSave(binding)!
+    expect(owner.completeSave(request, { kind: 'success', version: 2 })).toBe(true)
+    expect(readyState(owner).viewCandidate).toMatchObject({
+      requestId: request.id,
+      submitted: 'submitted-v2',
+      version: 2,
+    })
+
+    const refresh = owner.beginStableRead(binding)!
+    expect(
+      owner.completeStableRead(refresh, {
+        content: 'external-server-v3',
+        version: 3,
+        stable: true,
+      })
+    ).toBe(true)
+
+    expect(owner.commitSaveView(request.id, binding)).toBe(false)
+    expect(readyState(owner)).toMatchObject({
+      savedSnapshot: { content: 'external-server-v3', version: 3 },
+      observedVersion: 3,
+      remoteAhead: true,
+      draft: 'submitted-v2',
+      editing: true,
+      viewCandidate: null,
+    })
+  })
+
   it('retains drafts and releases the close block after definite or ambiguous failure', () => {
     for (const failure of ['failure', 'ambiguous'] as const) {
       const owner = createOwner()
@@ -387,6 +419,12 @@ describe('MarkdownDraftOwner generated command oracle', () => {
       editing: boolean
       pending: number | null
       closed: boolean
+      savedContent: string
+      savedVersion: number
+      observedVersion: number
+      candidateRequestId: number | null
+      candidateVersion: number | null
+      remoteAhead: boolean
     }
     type Real = { owner: MarkdownDraftOwner }
     const assertEquivalent = (model: Model, owner: MarkdownDraftOwner) => {
@@ -401,6 +439,17 @@ describe('MarkdownDraftOwner generated command oracle', () => {
         editing: model.editing,
         pendingSave: model.pending === null ? null : { id: model.pending },
         dirty: model.draft !== model.baseline,
+        savedSnapshot: { content: model.savedContent, version: model.savedVersion },
+        observedVersion: model.observedVersion,
+        remoteAhead: model.remoteAhead,
+        viewCandidate:
+          model.candidateRequestId === null
+            ? null
+            : {
+                requestId: model.candidateRequestId,
+                version: model.candidateVersion,
+                submitted: model.baseline,
+              },
       })
     }
     class Edit implements fc.Command<Model, Real> {
@@ -411,7 +460,10 @@ describe('MarkdownDraftOwner generated command oracle', () => {
         const allowed = r.owner.beginEdit(binding)
         if (allowed) {
           m.editing = true
-          m.draft = m.baseline
+          m.draft = m.savedContent
+          m.baseline = m.savedContent
+          m.candidateRequestId = null
+          m.candidateVersion = null
         }
         assertEquivalent(m, r.owner)
       }
@@ -427,6 +479,8 @@ describe('MarkdownDraftOwner generated command oracle', () => {
       run(m: Model, r: Real) {
         expect(r.owner.type(binding, this.value)).toBe(true)
         m.draft = this.value
+        m.candidateRequestId = null
+        m.candidateVersion = null
         assertEquivalent(m, r.owner)
       }
       toString() {
@@ -442,12 +496,16 @@ describe('MarkdownDraftOwner generated command oracle', () => {
         expect(request?.submitted).toBe(m.draft)
         expect(request).not.toHaveProperty('ifMatch')
         m.pending = request!.id
-        const version = (r.owner.get(binding)?.observedVersion ?? 0) + 1
+        const version = m.observedVersion + 1
         r.owner.completeSave(request!, { kind: 'success', version })
-        r.owner.commitSaveView(request!.id, binding)
         m.pending = null
+        m.savedContent = m.draft
+        m.savedVersion = version
+        m.observedVersion = version
+        m.remoteAhead = false
+        m.candidateRequestId = request!.id
+        m.candidateVersion = version
         m.baseline = m.draft
-        m.editing = false
         assertEquivalent(m, r.owner)
       }
       toString() {
@@ -460,12 +518,58 @@ describe('MarkdownDraftOwner generated command oracle', () => {
       }
       run(m: Model, r: Real) {
         expect(r.owner.discard(binding)).toBe(true)
-        m.draft = m.baseline
+        m.draft = m.savedContent
+        m.baseline = m.savedContent
         m.editing = false
+        m.candidateRequestId = null
+        m.candidateVersion = null
         assertEquivalent(m, r.owner)
       }
       toString() {
         return 'Discard'
+      }
+    }
+    class RefreshAfterSave implements fc.Command<Model, Real> {
+      check(m: Readonly<Model>) {
+        return !m.closed && m.pending === null && m.editing && m.candidateRequestId !== null
+      }
+      run(m: Model, r: Real) {
+        const candidateRequestId = m.candidateRequestId!
+        const version = m.observedVersion + 1
+        const read = r.owner.beginStableRead(binding)!
+        expect(
+          r.owner.completeStableRead(read, {
+            content: 'external newer server content',
+            version,
+            stable: true,
+          })
+        ).toBe(true)
+        m.savedContent = 'external newer server content'
+        m.savedVersion = version
+        m.observedVersion = version
+        m.remoteAhead = true
+        m.candidateRequestId = null
+        m.candidateVersion = null
+        expect(r.owner.commitSaveView(candidateRequestId, binding)).toBe(false)
+        assertEquivalent(m, r.owner)
+      }
+      toString() {
+        return 'NewerStableReadBeforeSaveViewCommit'
+      }
+    }
+    class CommitSaveView implements fc.Command<Model, Real> {
+      check(m: Readonly<Model>) {
+        return !m.closed && m.pending === null && m.candidateRequestId !== null
+      }
+      run(m: Model, r: Real) {
+        expect(r.owner.commitSaveView(m.candidateRequestId!, binding)).toBe(true)
+        m.candidateRequestId = null
+        m.candidateVersion = null
+        m.editing = false
+        assertEquivalent(m, r.owner)
+      }
+      toString() {
+        return 'CommitSaveView'
       }
     }
     class Close implements fc.Command<Model, Real> {
@@ -494,6 +598,8 @@ describe('MarkdownDraftOwner generated command oracle', () => {
       fc.constant(new Edit()),
       fc.string({ maxLength: 12 }).map(value => new Type(value)),
       fc.constant(new Save()),
+      fc.constant(new RefreshAfterSave()),
+      fc.constant(new CommitSaveView()),
       fc.constant(new Discard()),
       fc.constant(new Close()),
     ]
@@ -506,6 +612,12 @@ describe('MarkdownDraftOwner generated command oracle', () => {
           editing: false,
           pending: null,
           closed: false,
+          savedContent: 'saved',
+          savedVersion: 1,
+          observedVersion: 1,
+          candidateRequestId: null,
+          candidateVersion: null,
+          remoteAhead: false,
         }
         fc.modelRun(() => ({ model, real: { owner } }), generated)
         assertEquivalent(model, owner)

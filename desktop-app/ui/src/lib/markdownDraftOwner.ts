@@ -385,6 +385,8 @@ export class MarkdownDraftOwner {
     record.readReady = true
     record.remoteAhead =
       record.lastWriteAck !== null && result.version > record.lastWriteAck.version
+    if (record.viewCandidate && result.version > record.viewCandidate.version)
+      record.viewCandidate = null
     if (firstRead) {
       record.draft = result.content
       record.localBaseline = result.content
@@ -564,7 +566,8 @@ export class MarkdownDraftOwner {
       !record.readReady ||
       record.readPending ||
       record.savedSnapshot === null ||
-      record.savedSnapshot.version < record.observedVersion
+      record.savedSnapshot.version < record.observedVersion ||
+      candidate.version < record.observedVersion
     )
       return false
     record.viewCandidate = null
