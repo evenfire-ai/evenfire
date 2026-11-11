@@ -31,8 +31,9 @@ export const ALL_FAILOVER_CLASSES: readonly FailoverClass[] = [
  *   - `ApiCallFailed ∧ retryable` → provider_unavailable (timeout / network;
  *     also `classifyUnknown`'s default bucket — restrict `triggerOn` to avoid
  *     firing on unrecognised errors)
- *   - `ApiCallFailed ∧ !retryable` → null (400 / validation / content-policy —
- *     never trigger; masking these would hide bugs)
+ *   - `ApiCallFailed ∧ !retryable` → null (validation / content-policy —
+ *     never trigger; masking these would hide bugs). An HTTP 400 is
+ *     `UpstreamRejected` since #1433, below.
  *   - everything else (InvalidResponse, ContextLengthExceeded, ContentFiltered,
  *     ModelNotAvailable, ToolCallLimitExceeded, StreamDurationExceeded,
  *     UpstreamRejected) → null

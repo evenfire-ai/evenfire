@@ -122,10 +122,7 @@ export class ClaudeProvider implements SingleTurnProvider {
           : httpClassification
       // Anthropic quirk: insufficient credit is reported as HTTP 400
       // (not 402), detectable only by message substring.
-      if (
-        classified.code === LlmErrorCode.ApiCallFailed &&
-        /credit balance is too low/i.test(classified.message)
-      ) {
+      if (classified.httpStatus === 400 && /credit balance is too low/i.test(classified.message)) {
         return {
           ...classified,
           code: LlmErrorCode.InsufficientQuota,

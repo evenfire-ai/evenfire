@@ -45,8 +45,10 @@ export enum LlmErrorCode {
   ControlPlaneUnavailable = 'LLM_CONTROL_PLANE_UNAVAILABLE',
   /**
    * Issue #720 — a subscription proxy reported `upstream_rejected`: the
-   * provider answered a 4xx the proxy has no specific code for (Grok 402/403
-   * entitlement, 404, 409, 422). The same request gets the same answer, so it
+   * provider answered a 4xx the proxy has no specific code for (400, Grok
+   * 402/403 entitlement, 404, 409, 422). #1433 — also an OpenAI-family or
+   * Anthropic API-key provider's HTTP 400 that no body code maps elsewhere
+   * (`errorClassification.ts`). The same request gets the same answer, so it
    * is not retryable and never fails over.
    */
   UpstreamRejected = 'LLM_UPSTREAM_REJECTED',

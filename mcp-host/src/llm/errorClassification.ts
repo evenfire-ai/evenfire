@@ -78,7 +78,10 @@ export function classifyByHttpStatus(err: unknown): ClassifiedError | null {
     return { code: LlmErrorCode.ModelOverloaded, retryable: true, message: rawMsg, ...diag }
   }
   if (e.status === 400) {
-    return { code: LlmErrorCode.ApiCallFailed, retryable: false, message: rawMsg, ...diag }
+    // #1433: the provider rejected this request. The same request gets the
+    // same answer, so it is not retryable and never fails over; it is not a
+    // connection error either, which `ApiCallFailed` renders as.
+    return { code: LlmErrorCode.UpstreamRejected, retryable: false, message: rawMsg, ...diag }
   }
   return null
 }
