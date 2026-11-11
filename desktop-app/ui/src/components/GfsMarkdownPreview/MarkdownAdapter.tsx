@@ -106,11 +106,13 @@ export function GfsMarkdownDocument({ source }: { source: string }) {
 
 export function GfsMarkdownEditor({ ariaLabel, onChange, value }: GfsMarkdownEditorProps) {
   return (
-    <div data-color-mode="dark">
+    <div className="da-gfs-markdown-editor" data-color-mode="dark">
       <MDEditor
+        height="100%"
         onChange={nextValue => onChange(nextValue ?? '')}
         previewOptions={MARKDOWN_PREVIEW_OPTIONS}
         textareaProps={{ 'aria-label': ariaLabel }}
+        visibleDragbar={false}
         value={value}
       />
     </div>

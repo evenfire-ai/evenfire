@@ -141,7 +141,13 @@ export function GfsMarkdownPreviewBody({
         </div>
         <div className="da-gfs-markdown-preview-dialog__header-actions">{headerActions}</div>
       </header>
-      <div className="da-gfs-markdown-preview-dialog__body">
+      <div
+        className={`da-gfs-markdown-preview-dialog__body${
+          editor && source !== null && !previewError
+            ? ' da-gfs-markdown-preview-dialog__body--editing'
+            : ''
+        }`}
+      >
         {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
         {!previewError && source === null ? (
           <div className="da-gfs-markdown-preview-dialog__loading" role="status">

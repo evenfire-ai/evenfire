@@ -109,6 +109,8 @@ describe('GFS Markdown adapter', () => {
 
     const editor = screen.getByRole('textbox', { name: 'Markdown source' })
     expect((editor as HTMLTextAreaElement).value).toBe('# Start')
+    expect(editor.closest('.w-md-editor')?.getAttribute('style')).toContain('height: 100%')
+    expect(editor.closest('.w-md-editor')?.querySelector('.w-md-editor-bar')).toBeNull()
     fireEvent.change(editor, { target: { value: '# Updated' } })
     expect(onChange).toHaveBeenCalledWith('# Updated')
   })

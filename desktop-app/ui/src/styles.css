@@ -16221,6 +16221,45 @@ pre {
   background: var(--panel);
 }
 
+.da-gfs-markdown-preview-dialog__body--editing {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.da-gfs-markdown-editor {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+}
+
+.da-gfs-markdown-editor > [data-color-mode] {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+}
+
+.da-gfs-markdown-editor .w-md-editor {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.da-gfs-markdown-editor .w-md-editor-content {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+}
+
+.da-gfs-markdown-editor .w-md-editor-input {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .da-gfs-markdown-preview-dialog__loading {
   min-height: 100%;
   display: grid;
