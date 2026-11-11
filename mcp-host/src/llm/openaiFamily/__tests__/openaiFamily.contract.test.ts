@@ -149,6 +149,7 @@ describe('OpenAICompatibleProvider is a constructor-only alias', () => {
         })
         payloads.push(mock.chatCreate.mock.calls)
       }
+      expect(payloads[0]).toHaveLength(1)
       expect(JSON.stringify(payloads[0])).toBe(JSON.stringify(payloads[1]))
     }
   )
