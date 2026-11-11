@@ -592,6 +592,53 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
     expect({ messages, tools }).toEqual(snapshot)
   })
 
+  it('T5b: an own "__proto__" key and a null prototype survive the repair of a sibling', async () => {
+    const inner = vi
+      .spyOn(OpenAIProvider.prototype, 'completeSingleTurnWithTools')
+      .mockResolvedValue({ content: 'ok', tool_calls: null, finish_reason: 'stop' } as never)
+    // JSON.parse makes "__proto__" an ordinary own key, as decoded tool arguments have it.
+    const withProtoKey = JSON.parse(`{"__proto__":"keep","k":"v\\ud83d"}`) as Record<
+      string,
+      unknown
+    >
+    expect(Object.keys(withProtoKey)).toEqual(['__proto__', 'k'])
+    const nullProto = Object.assign(Object.create(null) as Record<string, unknown>, {
+      k: `v${HIGH}`,
+    })
+    const tool_calls = [
+      { id: 'c1', name: 'page_read', arguments: withProtoKey },
+      { id: 'c2', name: 'page_read', arguments: nullProto },
+    ]
+
+    await openaiProvider().completeSingleTurnWithTools(
+      [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: '', tool_calls },
+      ],
+      TOOLS
+    )
+
+    expect(inner).toHaveBeenCalledTimes(1)
+    const sent = (inner.mock.calls[0][0] as ChatMessage[])[1].tool_calls!
+    const sentProtoKey = sent[0].arguments
+    // Witness that the object was rebuilt: the sibling is repaired in a copy.
+    expect(sentProtoKey).not.toBe(withProtoKey)
+    expect(sentProtoKey.k).toBe(`v${FFFD}`)
+    expect(Object.keys(sentProtoKey)).toEqual(['__proto__', 'k'])
+    expect(Object.getOwnPropertyDescriptor(sentProtoKey, '__proto__')).toEqual({
+      value: 'keep',
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+    expect(Object.getPrototypeOf(sentProtoKey)).toBe(Object.prototype)
+    expect(JSON.stringify(sentProtoKey)).toBe(`{"__proto__":"keep","k":"v${FFFD}"}`)
+    const sentNullProto = sent[1].arguments
+    expect(sentNullProto).not.toBe(nullProto)
+    expect(sentNullProto.k).toBe(`v${FFFD}`)
+    expect(Object.getPrototypeOf(sentNullProto)).toBeNull()
+  })
+
   it('T6/T14: every makeProvider arm keeps its type, its optional methods and its own keys', () => {
     setEnv('MCP_HOST_CODEX_SUBSCRIPTION_ENABLED', 'true')
     setEnv('MCP_HOST_GROK_SUBSCRIPTION_ENABLED', 'true')
@@ -676,7 +723,10 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
         expect(Object.keys(provider), arm.id).not.toContain(name)
       }
       if (arm.bare) {
-        expect(Object.keys(provider).sort(), arm.id).toEqual(Object.keys(arm.bare()).sort())
+        const bare = arm.bare()
+        expect(Object.keys(provider).sort(), arm.id).toEqual(Object.keys(bare).sort())
+        // The wrapped provider is still an instance of its class.
+        expect(provider, arm.id).toBeInstanceOf(bare.constructor)
       }
     }
   })
@@ -812,6 +862,8 @@ describe('callers outside the adapter get repaired providers (#1433)', () => {
 describe('a stored user message with a lone surrogate does not poison the session (#1433)', () => {
   it('T9: both turns complete and the replayed history is repaired; the store is not rewritten', async () => {
     const server = await openaiFixture()
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue('openai', 'user')
     const manager = new ConversationManager()
     const adapter = new LlmPortAdapter(openaiProvider(), 'fixture-model', 'openai')
     const conversation = await manager.getOrCreate('t9-user:rpc:t9-agent:chat')
@@ -833,6 +885,11 @@ describe('a stored user message with a lone surrogate does not poison the sessio
     expect(server.bodies[1]).toContain(`hi ${FFFD}`)
     expect(server.bodies[1]).toContain('and again')
     expect(conversation.turns[0].user_input).toBe(`hi ${HIGH}`)
+    // The adapter's plain path is completeSingleTurn: each call reports the
+    // repair of the stored message, on the first turn and on its replay.
+    const repair = { component: 'LLM', provider: 'openai', role: 'user', repairedUnits: 1 }
+    expect(repairWarns(warn)).toEqual([repair, repair])
+    expect(await counterValue('openai', 'user')).toBe(before + 2)
   })
 })
 
@@ -964,6 +1021,42 @@ describe('deeply nested and cyclic input (#1433 F1)', () => {
     // The back-edge still points at the original container: it was not entered.
     expect(sent.child.back).toBe(cyclic)
   })
+
+  it('T12b: a sub-object referenced twice is repaired at both references', async () => {
+    const inner = vi
+      .spyOn(OpenAIProvider.prototype, 'completeSingleTurnWithTools')
+      .mockResolvedValue({ content: 'ok', tool_calls: null, finish_reason: 'stop' } as never)
+    const warn = vi.spyOn(logger, 'warn')
+    const shared = { type: 'string', description: `d${HIGH}` }
+
+    await openaiProvider().completeSingleTurnWithTools(
+      [{ role: 'user', content: 'hi' }],
+      [
+        {
+          name: 'shared',
+          description: 'shared',
+          parameters: { type: 'object', properties: { a: shared, b: shared } },
+        },
+      ]
+    )
+
+    expect(inner).toHaveBeenCalledTimes(1)
+    const sent = (inner.mock.calls[0][1] as ToolDefinition[])[0].parameters
+    expect(sent).toEqual({
+      type: 'object',
+      properties: {
+        a: { type: 'string', description: `d${FFFD}` },
+        b: { type: 'string', description: `d${FFFD}` },
+      },
+    })
+    expect(allWellFormed(sent)).toBe(true)
+    // Each reference is walked, so the lone unit is counted once per reference.
+    const repairs = repairWarns(warn)
+    expect(repairs).toHaveLength(1)
+    expect(repairs[0]).toMatchObject({ role: 'tool_definition', repairedUnits: 2 })
+    // The shared input is untouched.
+    expect(shared.description).toBe(`d${HIGH}`)
+  })
 })
 
 // ─── F3: a repair that would merge two keys refuses the request ───
@@ -1052,6 +1145,87 @@ describe('keys that become equal after repair (#1433 F3)', () => {
     expect(repairWarns(warn)).toHaveLength(1)
     expect(await counterValue('openai', 'user')).toBe(before + 1)
   })
+
+  const STABLE_PARTS = () => ({
+    stable: `x${LOW}y`,
+    context: 'context',
+    stableHash: 'a'.repeat(64),
+    contextHash: 'b'.repeat(64),
+  })
+  const REPAIRABLE: ChatMessage = { role: 'user', content: `a${HIGH}b` }
+  const COLLIDING_TOOLS = (): ToolDefinition[] => [
+    {
+      name: 'page_read',
+      description: 'Read',
+      parameters: { type: 'object', properties: { [`p${HIGH}`]: {}, [`p${LOW}`]: {} } },
+    },
+  ]
+  // The colliding keys sit in the last thing each method repairs, after text
+  // that is repairable, so a report made before the whole request is repaired
+  // would show up as a warn.
+  const REQUEST_METHODS: Array<{
+    method: string
+    refused: (provider: SingleTurnProvider) => Promise<unknown>
+    sent: (provider: SingleTurnProvider) => Promise<unknown>
+    roles: string[]
+  }> = [
+    {
+      method: 'completeSingleTurn',
+      refused: p => p.completeSingleTurn([REPAIRABLE, ...argumentsTurn(COLLIDING_ARGS()).slice(1)]),
+      sent: p => p.completeSingleTurn([REPAIRABLE]),
+      roles: ['user'],
+    },
+    {
+      method: 'completeSingleTurnWithTools',
+      refused: p => p.completeSingleTurnWithTools([REPAIRABLE], COLLIDING_TOOLS()),
+      sent: p => p.completeSingleTurnWithTools([REPAIRABLE], TOOLS),
+      roles: ['user'],
+    },
+    {
+      method: 'completeSingleTurnAndCache',
+      refused: p =>
+        p.completeSingleTurnAndCache!(STABLE_PARTS(), [
+          REPAIRABLE,
+          ...argumentsTurn(COLLIDING_ARGS()).slice(1),
+        ]),
+      sent: p => p.completeSingleTurnAndCache!(STABLE_PARTS(), [REPAIRABLE]),
+      roles: ['system_prompt', 'user'],
+    },
+    {
+      method: 'completeSingleTurnWithToolsAndCache',
+      refused: p =>
+        p.completeSingleTurnWithToolsAndCache!(STABLE_PARTS(), [REPAIRABLE], COLLIDING_TOOLS()),
+      sent: p => p.completeSingleTurnWithToolsAndCache!(STABLE_PARTS(), [REPAIRABLE], TOOLS),
+      roles: ['system_prompt', 'user'],
+    },
+  ]
+
+  it.each(REQUEST_METHODS)(
+    'T15c: $method refuses colliding keys as a rejected promise and reports no repair',
+    async ({ refused, sent, roles }) => {
+      const server = await anthropicFixture()
+      const warn = vi.spyOn(logger, 'warn')
+      const provider = claudeProvider()
+
+      let attempt: Promise<unknown> | undefined
+      expect(() => {
+        attempt = refused(provider)
+      }).not.toThrow()
+      expect(await settle(attempt!)).toBeInstanceOf(RequestTextKeyCollisionError)
+      expect(server.bodies).toHaveLength(0)
+      expect(repairWarns(warn)).toHaveLength(0)
+
+      // Witness: the same method on the same instance, without the colliding
+      // keys, is sent and reports the repairs the refused request held back.
+      await sent(provider)
+      expect(server.bodies).toHaveLength(1)
+      expect(
+        repairWarns(warn)
+          .map(fields => fields.role)
+          .sort()
+      ).toEqual(roles)
+    }
+  )
 
   it('T16: colliding schema properties refuse the request, naming the tool definition', async () => {
     const server = await openaiFixture()
