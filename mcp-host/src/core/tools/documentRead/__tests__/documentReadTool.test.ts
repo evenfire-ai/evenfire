@@ -595,7 +595,7 @@ describe('DocumentReadTool budgets', () => {
 })
 
 describe('DocumentReadTool configured masking', () => {
-  it('applies the Tool cell cap after whole-value redaction and preserves surrogate pairs', async () => {
+  it('applies the Tool cell cap without splitting a surrogate pair', async () => {
     const value = `a😀${'b'.repeat(12)}`
     const file = admittedFile(
       'xlsx-file',
@@ -690,6 +690,71 @@ describe('DocumentReadTool configured masking', () => {
     )
     // The overlap becomes one mixed replacement; the separate range keeps its own.
     expect(result.body).toMatchObject({ pages: [{ text: 'before [REDACTED] [C]' }] })
+  })
+
+  it('masks a configured value that a continuation cut splits, on both sides of the cut', async () => {
+    const configured = 'fixture-configured-value'
+    const text = `${'a'.repeat(100)}${configured}${'b'.repeat(100)}`
+    const cut = 100 + 7
+    const file = admittedFile('pdf-file', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const runJob: RunDocumentJob = async job => {
+      if (job.kind !== 'pdf_text') throw new Error('Only PDF text is read here')
+      const outcome: PdfTextOutcome =
+        job.start.charOffset === 0
+          ? {
+              ok: true,
+              pageCount: 1,
+              pages: [{ page: 1, text, from: 0, to: cut, lowText: false }],
+              next: { page: 1, charOffset: cut },
+              stoppedBy: 'max_extracted_chars',
+            }
+          : {
+              ok: true,
+              pageCount: 1,
+              pages: [{ page: 1, text, from: cut, to: text.length, lowText: false }],
+            }
+      return outcome as never
+    }
+    const tool = toolFor([file], runJob, { redactor: maskProvider(configured) })
+    const first = await read(tool, { attachmentId: 'pdf-file' })
+    const cursor = (first.body.continuation as { cursor: string }).cursor
+    const second = await read(tool, { attachmentId: 'pdf-file', cursor })
+    const emitted = [first, second]
+      .map(result => (result.body.pages as Array<{ text: string }>)[0]!.text)
+      .join('|')
+    // Each side of the cut shows the masked text, never a fragment of the value.
+    expect(emitted).not.toContain(configured.slice(0, 7))
+    expect(emitted).not.toContain(configured.slice(7))
+    expect(emitted).toContain('[MASKED]')
+  })
+
+  it('redacts a whole cell before the cell cap can cut the configured value', async () => {
+    const configured = 'fixture-configured-value'
+    // The value ends past maxCellChars, so capping first would cut the
+    // configured value into a prefix that no longer matches it.
+    const value = `${'x'.repeat(1_990)}${configured}`
+    const file = admittedFile(
+      'xlsx-file',
+      await valuesWorkbook(witnessCode()),
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    const outcome: XlsxOutcome = {
+      ok: true,
+      sheetNames: ['Values'],
+      sheets: [{ name: 'Values', startRow: 1, rows: [[value]], truncated: false, lastRow: 1 }],
+    }
+    const result = await read(
+      toolFor([file], fakeRunner(outcome).runJob, {
+        redactor: maskProvider(configured),
+        limits: documentLimits({ maxCellChars: 2_000 }),
+      }),
+      { attachmentId: 'xlsx-file' }
+    )
+    expect(result.body).toMatchObject({
+      status: 'ok',
+      sheets: [{ rows: [[`${'x'.repeat(1_990)}[MASKED]`]] }],
+    })
+    expect(result.output.content).not.toContain(configured.slice(0, 5))
   })
 })
 
