@@ -130,17 +130,30 @@ describe('useAppController team-scoped catalog selection', () => {
   })
 
   it('keeps a team-A-only agent selected through a successful same-principal switch', async () => {
-    installAppControllerClerum({
+    const { handle } = installAppControllerClerum({
       me: { teamId: 'team-a', teamName: 'Team A' },
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     let currentTeamId = 'team-a'
+    let currentGeneration = 1
+    const currentMe = () => ({
+      ...HARNESS_ME,
+      teamId: currentTeamId,
+      teamName: currentTeamId === 'team-a' ? 'Team A' : 'Team B',
+    })
+    handle.getSessionState.mockImplementation(async () => ({
+      authenticated: true,
+      me: currentMe(),
+      sessionGeneration: currentGeneration,
+    }))
     Object.assign(window.clerum.team, {
       switch: vi.fn(async (teamId: string) => {
         currentTeamId = teamId
+        currentGeneration += 1
         return {
           authenticated: true,
-          me: { ...HARNESS_ME, teamId, teamName: teamId === 'team-a' ? 'Team A' : 'Team B' },
+          me: currentMe(),
+          sessionGeneration: currentGeneration,
         }
       }),
     })
@@ -156,6 +169,8 @@ describe('useAppController team-scoped catalog selection', () => {
     unmount = app.unmount
 
     await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+    const markdownOwner = app.result.current.markdownPrincipalOwner
+    expect(markdownOwner).toBeTruthy()
     await waitFor(() =>
       expect(
         app.queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamAgentNames
@@ -180,6 +195,7 @@ describe('useAppController team-scoped catalog selection', () => {
       ).toBe('team-b')
     )
     expect(app.result.current.currentTeamId).toBe('team-b')
+    expect(app.result.current.markdownPrincipalOwner).toBe(markdownOwner)
     expect(
       app.queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamAgentNames
     ).toEqual(['team-b-only-agent'])
@@ -194,12 +210,25 @@ describe('useAppController team-scoped catalog selection', () => {
         teamDirectory: { items: [], currentTeamId: 'team-a' },
       })
       let currentTeamId = 'team-a'
+      let currentGeneration = 1
+      const currentMe = () => ({
+        ...HARNESS_ME,
+        teamId: currentTeamId,
+        teamName: currentTeamId === 'team-a' ? 'Team A' : 'Team B',
+      })
+      handle.getSessionState.mockImplementation(async () => ({
+        authenticated: true,
+        me: currentMe(),
+        sessionGeneration: currentGeneration,
+      }))
       Object.assign(window.clerum.team, {
         switch: vi.fn(async (teamId: string) => {
           currentTeamId = teamId
+          currentGeneration += 1
           return {
             authenticated: true,
-            me: { ...HARNESS_ME, teamId, teamName: teamId === 'team-a' ? 'Team A' : 'Team B' },
+            me: currentMe(),
+            sessionGeneration: currentGeneration,
           }
         }),
       })
@@ -237,9 +266,11 @@ describe('useAppController team-scoped catalog selection', () => {
         })
       } else {
         currentTeamId = 'team-b'
+        currentGeneration += 1
         handle.getSessionState.mockResolvedValue({
           authenticated: true,
           me: { ...HARNESS_ME, teamId: 'team-b', teamName: 'Team B' },
+          sessionGeneration: currentGeneration,
         })
         await act(async () => {
           await app.result.current.loadSession({ preserveNav: true })
@@ -287,18 +318,30 @@ describe('useAppController team-scoped catalog selection', () => {
         teamDirectory: { items: [], currentTeamId: 'team-a' },
       })
       let currentTeamId = 'team-a'
+      let currentGeneration = 1
       let failTeamBRefresh = true
       const refreshCatalog = vi.fn(async () => {
         if (currentTeamId === 'team-a') return productionCatalog('team-a', 'team-a-only-agent')
         if (failTeamBRefresh) throw new Error('Team B catalog unavailable')
         return productionCatalog('team-b', 'team-b-only-agent')
       })
+      handle.getSessionState.mockImplementation(async () => ({
+        authenticated: true,
+        me: {
+          ...HARNESS_ME,
+          teamId: currentTeamId,
+          teamName: currentTeamId === 'team-a' ? 'Team A' : 'Team B',
+        },
+        sessionGeneration: currentGeneration,
+      }))
       Object.assign(window.clerum.team, {
         switch: vi.fn(async (teamId: string) => {
           currentTeamId = teamId
+          currentGeneration += 1
           return {
             authenticated: true,
             me: { ...HARNESS_ME, teamId, teamName: teamId === 'team-a' ? 'Team A' : 'Team B' },
+            sessionGeneration: currentGeneration,
           }
         }),
       })
@@ -329,9 +372,11 @@ describe('useAppController team-scoped catalog selection', () => {
         })
       } else {
         currentTeamId = 'team-b'
+        currentGeneration += 1
         handle.getSessionState.mockResolvedValue({
           authenticated: true,
           me: { ...HARNESS_ME, teamId: 'team-b', teamName: 'Team B' },
+          sessionGeneration: currentGeneration,
         })
         await act(async () => {
           await app.result.current.loadSession({ preserveNav: true })

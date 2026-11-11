@@ -251,8 +251,8 @@ describe('FilePreviewPage move permission contract', () => {
       // the background source check and opens only after that exact query resolves.
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
       expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
-      expect(affordances).toHaveBeenCalledWith(resourceId, 'main')
-      expect(affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(affordances).toHaveBeenCalledWith(resourceId, 'main', 1)
+      expect(affordances).toHaveBeenCalledWith(parentId, 'main', 1)
       expect(affordances).toHaveBeenCalledTimes(4)
 
       await act(async () => {
@@ -474,7 +474,7 @@ describe('FilePreviewPage move permission contract', () => {
 
     await screen.findByAltText('Preview of diagram.png')
     await waitFor(() =>
-      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main', 1)
     )
     const menu = await openPreviewActions()
 
@@ -489,7 +489,7 @@ describe('FilePreviewPage move permission contract', () => {
 
     await screen.findByAltText('Preview of diagram.png')
     await waitFor(() =>
-      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main', 1)
     )
     const menu = await openPreviewActions()
 
@@ -504,7 +504,7 @@ describe('FilePreviewPage move permission contract', () => {
 
     await screen.findByAltText('Preview of diagram.png')
     await waitFor(() =>
-      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main', 1)
     )
     const menu = await openPreviewActions()
 
@@ -518,7 +518,7 @@ describe('FilePreviewPage move permission contract', () => {
 
     await screen.findByAltText('Preview of diagram.png')
     await waitFor(() =>
-      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main', 1)
     )
     expect(
       screen.queryByText('You need write and delete access to the source folder to move this file.')
@@ -542,7 +542,7 @@ describe('FilePreviewPage move permission contract', () => {
     await screen.findByAltText('Preview of diagram.png')
     const notice = await screen.findByText(/Could not verify move permissions/)
     expect(notice).toBeTruthy()
-    expect(affordances).toHaveBeenCalledWith(parentId, 'main')
+    expect(affordances).toHaveBeenCalledWith(parentId, 'main', 1)
     fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
 
     await waitFor(() =>
@@ -558,7 +558,7 @@ describe('FilePreviewPage move permission contract', () => {
 
     await screen.findByAltText('Preview of diagram.png')
     await waitFor(() =>
-      expect(affordances).toHaveBeenCalledWith('0123456789abcdef0123456789abcdef', 'main')
+      expect(affordances).toHaveBeenCalledWith('0123456789abcdef0123456789abcdef', 'main', 1)
     )
     const menu = await openPreviewActions()
 
@@ -577,7 +577,7 @@ describe('FilePreviewPage move permission contract', () => {
     renderPreview()
 
     await screen.findByAltText('Preview of diagram.png')
-    await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentId, 'main'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentId, 'main', 1))
     const menu = await openPreviewActions()
     expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
 
@@ -632,7 +632,7 @@ describe('FilePreviewPage move permission contract', () => {
       })
 
       expect(queryClient.getQueryData(sourceKey)).toBeTruthy()
-      expect(affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(affordances).toHaveBeenCalledWith(parentId, 'main', 1)
       expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
       expect(moveResource).not.toHaveBeenCalled()
     } finally {
@@ -658,7 +658,7 @@ describe('FilePreviewPage move permission contract', () => {
 
     await screen.findByAltText('Preview of diagram.png')
     await waitFor(() =>
-      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main', 1)
     )
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
@@ -701,8 +701,8 @@ describe('FilePreviewPage move permission contract', () => {
     expect(
       await within(dialog).findByText('You do not have write access to the destination folder.')
     ).toBeTruthy()
-    expect(affordances).toHaveBeenCalledWith(parentId, 'main')
-    expect(affordances).toHaveBeenCalledWith('destination-1', 'main')
+    expect(affordances).toHaveBeenCalledWith(parentId, 'main', 1)
+    expect(affordances).toHaveBeenCalledWith('destination-1', 'main', 1)
     expect(moveResource).not.toHaveBeenCalled()
   })
 
@@ -730,7 +730,7 @@ describe('FilePreviewPage move permission contract', () => {
     const { queryClient } = renderPreview()
 
     await screen.findByAltText('Preview of diagram.png')
-    await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentId, 'main'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentId, 'main', 1))
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
@@ -852,7 +852,7 @@ describe('FilePreviewPage move permission contract', () => {
     const { queryClient } = renderPreview()
 
     await screen.findByAltText('Preview of diagram.png')
-    await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentId, 'main'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentId, 'main', 1))
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
@@ -863,8 +863,8 @@ describe('FilePreviewPage move permission contract', () => {
       await within(dialog).findByText('Too many file requests — try again in 7s.')
     ).toBeTruthy()
     expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
-    expect(affordances).toHaveBeenCalledWith(parentId, 'main')
-    expect(affordances).toHaveBeenCalledWith('destination-1', 'main')
+    expect(affordances).toHaveBeenCalledWith(parentId, 'main', 1)
+    expect(affordances).toHaveBeenCalledWith('destination-1', 'main', 1)
     expect(moveResource).not.toHaveBeenCalled()
 
     vi.useFakeTimers()
@@ -949,7 +949,7 @@ describe('FilePreviewPage move permission contract', () => {
     )
     await act(async () => finishDestinationCheck(fullAccess))
 
-    expect(resolve).toHaveBeenLastCalledWith(nextUri)
+    expect(resolve).toHaveBeenLastCalledWith(nextUri, 1)
     expect(moveResource).not.toHaveBeenCalled()
     queryClient.clear()
   })
@@ -972,7 +972,7 @@ describe('FilePreviewPage move permission contract', () => {
 
     await screen.findByAltText('Preview of diagram.png')
     await waitFor(() =>
-      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main', 1)
     )
     const menu = await openPreviewActions()
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))

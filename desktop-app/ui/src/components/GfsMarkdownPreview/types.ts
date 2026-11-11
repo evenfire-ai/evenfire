@@ -9,8 +9,11 @@ export type GfsMarkdownPreviewBodyProps = {
   byteLength: number
   fileName: string
   gfsUri: string
+  expectedSessionGeneration?: number
   onDownloadError?: (error: unknown) => void
   onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
+  onSourceLoaded?: (source: string, version: number) => void
+  editor?: ReactNode
   titleId?: string
   titleActions?: ReactNode
   headerActions?: ReactNode

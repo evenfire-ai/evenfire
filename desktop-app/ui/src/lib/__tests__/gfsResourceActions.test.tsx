@@ -189,4 +189,38 @@ describe('GFS resource action model', () => {
     menuAction?.run(file)
     expect(replace).toHaveBeenCalledWith(file)
   })
+
+  it('exposes Markdown Edit only from a positively authorized file action', () => {
+    const edit = handler()
+    const eligible = getGfsMenuActions(
+      buildGfsResourceActions({
+        kind: 'file',
+        uri: resourceUri,
+        handlers: { 'edit-markdown': edit },
+        canEditMarkdown: true,
+      })
+    )
+    const denied = buildGfsResourceActions({
+      kind: 'file',
+      uri: resourceUri,
+      handlers: { 'edit-markdown': edit },
+      canEditMarkdown: false,
+    })
+    const unknown = buildGfsResourceActions({
+      kind: 'file',
+      uri: resourceUri,
+      handlers: { 'edit-markdown': edit },
+    })
+    const directory = buildGfsResourceActions({
+      kind: 'directory',
+      uri: resourceUri,
+      handlers: { 'edit-markdown': edit },
+      canEditMarkdown: true,
+    })
+
+    expect(eligible).toMatchObject([{ id: 'edit-markdown', label: 'Edit', menu: true }])
+    expect(denied.some(action => action.id === 'edit-markdown')).toBe(false)
+    expect(unknown.some(action => action.id === 'edit-markdown')).toBe(false)
+    expect(directory.some(action => action.id === 'edit-markdown')).toBe(false)
+  })
 })

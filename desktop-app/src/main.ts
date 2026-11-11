@@ -76,6 +76,16 @@ process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
+let forceFreshRendererAfterSessionClear = false
+const reloadHiddenRendererAfterSessionTransition = () => {
+  const window = mainWindow
+  if (!forceFreshRendererAfterSessionClear || !window || window.isDestroyed()) return
+  forceFreshRendererAfterSessionClear = false
+  window.webContents.once('did-finish-load', () => {
+    if (!window.isDestroyed()) window.show()
+  })
+  window.webContents.reload()
+}
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 const appService = new AppService({
   ...(devIsolationPlan
@@ -93,8 +103,35 @@ const appService = new AppService({
     }
   },
   onSessionCleared: () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('auth:sessionCleared')
+    // Keep the previous authenticated React tree hidden until a fresh renderer
+    // has read the now-cleared main-process session.
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
+    forceFreshRendererAfterSessionClear = true
+    reloadHiddenRendererAfterSessionTransition()
+  },
+  onSessionPreclear: notice => {
+    const window = mainWindow
+    if (!window || window.isDestroyed()) return false
+    // Hide synchronously at the main-process reservation point, before a queued
+    // renderer commit can paint and before the notice/any await.
+    window.hide()
+    if (window.webContents.isDestroyed() || window.webContents.isLoading()) {
+      forceFreshRendererAfterSessionClear = true
+      return false
+    }
+    window.webContents.send('auth:sessionWillClear', notice)
+    return true
+  },
+  onSessionPreclearTimeout: () => {
+    forceFreshRendererAfterSessionClear = true
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
+  },
+  onSessionPreclearCancelled: notice => {
+    if (forceFreshRendererAfterSessionClear) {
+      reloadHiddenRendererAfterSessionTransition()
+    } else if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('auth:sessionClearCancelled', notice)
+      mainWindow.show()
     }
   },
 })
@@ -649,7 +686,7 @@ if (gotSingleInstanceLock) {
       // runtime eagerly on first call, and a plugin can be mounted the moment
       // the window paints.
       initPluginSdkRuntime({ service: appService, getMainWindow: () => mainWindow })
-      registerIpcHandlers(appService, logoutAndClearGfsResourceDeepLinks)
+      registerIpcHandlers(appService, logoutAndClearGfsResourceDeepLinks, () => mainWindow)
       mainWindowLifecycleReady = true
       wirePowerMonitor()
       app.on('activate', () => {

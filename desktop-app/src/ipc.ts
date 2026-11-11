@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
-import { AppService } from './appService.js'
+import { AppService, type SessionPreclearNotice, type SessionPreclearReason } from './appService.js'
 import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
   getChatStoreBindingGeneration,
@@ -202,6 +202,14 @@ function sanitizeOptionalInteger(input: unknown): number | undefined {
     throw new Error('Invalid integer')
   }
   return input
+}
+
+function sanitizeOptionalSessionGeneration(input: unknown): number | undefined {
+  const generation = sanitizeOptionalInteger(input)
+  if (generation !== undefined && generation < 0) {
+    throw new Error('Invalid session generation')
+  }
+  return generation
 }
 
 function sanitizeOptionalPositiveInteger(input: unknown, label: string): number | undefined {
@@ -440,7 +448,11 @@ function sanitizeDesktopNotificationActions(
     .slice(0, 3)
 }
 
-export function registerIpcHandlers(service: AppService, logout: () => Promise<number>): void {
+export function registerIpcHandlers(
+  service: AppService,
+  logout: () => Promise<number>,
+  getMainWindow: () => BrowserWindow | null = () => null
+): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
@@ -617,8 +629,69 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.openDesktopRelease(sanitizeString(payload?.releaseUrl))
   })
+  ipcMain.handle('auth:prepareSessionClear', async event => {
+    assertTrustedSender(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Session preclear requires the owning window')
+    }
+    return service.prepareSessionClear()
+  })
+  ipcMain.handle(
+    'auth:acknowledgeSessionPreclear',
+    async (
+      event,
+      payload: {
+        transitionId: number
+        sessionGeneration: number
+        reason: SessionPreclearReason
+      }
+    ) => {
+      assertTrustedSender(event)
+      const mainWindow = getMainWindow()
+      if (!mainWindow || event.sender !== mainWindow.webContents) {
+        throw new Error('Session preclear acknowledgment requires the owning window')
+      }
+      const transitionId = sanitizeOptionalPositiveInteger(payload?.transitionId, 'transitionId')
+      const sessionGeneration = sanitizeOptionalSessionGeneration(payload?.sessionGeneration)
+      const reason = payload?.reason
+      if (
+        transitionId === undefined ||
+        sessionGeneration === undefined ||
+        !['logout', 'session-ended', 'environment-change'].includes(reason)
+      ) {
+        throw new Error('Invalid session preclear acknowledgment')
+      }
+      const notice: SessionPreclearNotice = {
+        transitionId,
+        sessionGeneration,
+        reason,
+      }
+      return service.acknowledgeSessionPreclear(notice)
+    }
+  )
+  ipcMain.handle('auth:authorizeMarkdownTabClose', (event, payload: { requestId?: unknown }) => {
+    assertTrustedSender(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Markdown tab close requires the owning window')
+    }
+    return service.authorizeMarkdownTabClose(sanitizeString(payload?.requestId))
+  })
+  ipcMain.handle('auth:consumeMarkdownTabClosePermit', (event, payload: { permit?: unknown }) => {
+    assertTrustedSender(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Markdown tab close requires the owning window')
+    }
+    return service.consumeMarkdownTabClosePermit(sanitizeString(payload?.permit))
+  })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
+    const mainWindow = getMainWindow()
+    if (mainWindow && event.sender !== mainWindow.webContents) {
+      throw new Error('Logout requires the owning window')
+    }
     const sessionGeneration = await logout()
     return { ok: true, sessionGeneration }
   })
@@ -694,10 +767,16 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.listTeamMembers()
   })
-  ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
-    assertTrustedSender(event)
-    return service.resolveGfsUri(sanitizeString(payload?.uri))
-  })
+  ipcMain.handle(
+    'gfs:resolve',
+    async (event, payload: { uri: string; expectedSessionGeneration?: unknown }) => {
+      assertTrustedSender(event)
+      return service.resolveGfsUri(
+        sanitizeString(payload?.uri),
+        sanitizeOptionalSessionGeneration(payload?.expectedSessionGeneration)
+      )
+    }
+  )
   ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
@@ -724,7 +803,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   )
   ipcMain.handle(
     'gfs:downloadPreview',
-    async (event, payload: { uri: string; maxBytes: number }) => {
+    async (
+      event,
+      payload: { uri: string; maxBytes: number; expectedSessionGeneration?: unknown }
+    ) => {
       assertTrustedSender(event)
       // The preview path is bounded: a required ceiling caps the download so an
       // oversized payload is rejected before it materializes (the save-to-disk
@@ -740,7 +822,12 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       if (maxBytes > GFS_PREVIEW_MAX_BYTES) {
         throw new Error('preview download limit exceeds the allowed maximum')
       }
-      return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
+      return service.downloadGfsUri(
+        sanitizeString(payload?.uri),
+        maxBytes,
+        undefined,
+        sanitizeOptionalSessionGeneration(payload?.expectedSessionGeneration)
+      )
     }
   )
   ipcMain.handle(
@@ -769,10 +856,17 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   )
   ipcMain.handle(
     'gfs:affordances',
-    async (event, payload: { resourceId: string; drive?: string }) => {
+    async (
+      event,
+      payload: { resourceId: string; drive?: string; expectedSessionGeneration?: unknown }
+    ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
-      return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
+      return service.gfsAffordances(
+        sanitizeString(payload?.resourceId),
+        drive,
+        sanitizeOptionalSessionGeneration(payload?.expectedSessionGeneration)
+      )
     }
   )
   // Streamed, file-backed folder-zip assembly (R1-H2): entries append to a
@@ -1013,7 +1107,13 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     'gfs:replaceFile',
     async (
       event,
-      payload: { resourceId: string; encodedData: string; drive?: string; ifMatch?: number }
+      payload: {
+        resourceId: string
+        encodedData: string
+        drive?: string
+        ifMatch?: number
+        expectedSessionGeneration?: unknown
+      }
     ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
@@ -1021,7 +1121,8 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.encodedData),
         drive,
-        sanitizeOptionalInteger(payload?.ifMatch)
+        sanitizeOptionalInteger(payload?.ifMatch),
+        sanitizeOptionalSessionGeneration(payload?.expectedSessionGeneration)
       )
     }
   )

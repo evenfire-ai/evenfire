@@ -7,9 +7,10 @@ import { GfsMarkdownPreviewBody } from './Body'
 // Mirror the producer shape: `window.clerum.gfs.downloadPreview` → `{ bytes: ArrayBuffer }`.
 function stubDownload(text: string) {
   const downloadPreview = vi.fn(async () => ({ bytes: new TextEncoder().encode(text).buffer }))
+  const resolve = vi.fn(async () => ({ version: 1 }))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { downloadPreview } },
+    value: { gfs: { downloadPreview, resolve } },
   })
   return downloadPreview
 }
@@ -40,9 +41,42 @@ describe('GfsMarkdownPreviewBody', () => {
     expect(container.querySelector('script')).toBeNull()
     expect(downloadPreview).toHaveBeenCalledWith(
       'gfs://main/markdown-1',
-      GFS_MARKDOWN_PREVIEW_MAX_BYTES
+      GFS_MARKDOWN_PREVIEW_MAX_BYTES,
+      undefined
     )
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('retries a torn read once and publishes only bytes paired with a stable version', async () => {
+    const versions = [1, 2, 2, 2]
+    const resolve = vi.fn(async () => ({ version: versions.shift()! }))
+    const downloadPreview = vi
+      .fn()
+      .mockResolvedValueOnce({ bytes: new TextEncoder().encode('# Torn').buffer })
+      .mockResolvedValueOnce({ bytes: new TextEncoder().encode('# Stable').buffer })
+    const onSourceLoaded = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { downloadPreview, resolve } },
+    })
+    render(
+      <GfsMarkdownPreviewBody
+        byteLength={8}
+        fileName="README.md"
+        gfsUri="gfs://main/stable"
+        expectedSessionGeneration={7}
+        onSourceLoaded={onSourceLoaded}
+      />
+    )
+    expect(await screen.findByRole('heading', { name: 'Stable', level: 1 })).toBeTruthy()
+    expect(downloadPreview).toHaveBeenCalledTimes(2)
+    expect(downloadPreview).toHaveBeenLastCalledWith(
+      'gfs://main/stable',
+      GFS_MARKDOWN_PREVIEW_MAX_BYTES,
+      7
+    )
+    expect(onSourceLoaded).toHaveBeenCalledWith('# Stable', 2)
+    expect(screen.queryByRole('heading', { name: 'Torn' })).toBeNull()
   })
 
   it('renders a .txt file as plain text', async () => {
@@ -102,7 +136,7 @@ describe('GfsMarkdownPreviewBody', () => {
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { downloadPreview } },
+      value: { gfs: { downloadPreview, resolve: vi.fn(async () => ({ version: 1 })) } },
     })
     render(
       <GfsMarkdownPreviewBody

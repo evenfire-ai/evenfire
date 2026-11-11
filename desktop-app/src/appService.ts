@@ -881,6 +881,25 @@ export interface AppServiceOptions {
   tokenStore?: TokenStore
   onSandboxUiSessionInvalidated?: () => void
   onSessionCleared?: () => void
+  onSessionPreclear?: (notice: SessionPreclearNotice) => boolean | void
+  onSessionPreclearTimeout?: (notice: SessionPreclearNotice) => void
+  onSessionPreclearCancelled?: (notice: SessionPreclearNotice) => void
+}
+
+export type SessionPreclearReason = 'logout' | 'session-ended' | 'environment-change'
+
+export interface SessionPreclearNotice {
+  transitionId: number
+  sessionGeneration: number
+  reason: SessionPreclearReason
+}
+
+interface PendingSessionPreclear {
+  notice: SessionPreclearNotice
+  promise: Promise<boolean>
+  resolve: (acknowledged: boolean) => void
+  settled: boolean
+  logoutQueued: boolean
 }
 
 export class AppService {
@@ -899,6 +918,9 @@ export class AppService {
   private readonly tokenStore: TokenStore
   private readonly onSandboxUiSessionInvalidated?: () => void
   private readonly onSessionCleared?: () => void
+  private readonly onSessionPreclear?: (notice: SessionPreclearNotice) => boolean | void
+  private readonly onSessionPreclearTimeout?: (notice: SessionPreclearNotice) => void
+  private readonly onSessionPreclearCancelled?: (notice: SessionPreclearNotice) => void
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -953,6 +975,14 @@ export class AppService {
     promise: Promise<unknown>
   }>()
   private sessionGeneration = 0
+  private nextSessionPreclearId = 0
+  private pendingSessionPreclear: PendingSessionPreclear | null = null
+  private pendingLogout: Promise<number> | null = null
+  private nextMarkdownClosePermitId = 0
+  private readonly markdownClosePermits = new Map<
+    string,
+    { requestId: string; expiresAt: number }
+  >()
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
@@ -1006,6 +1036,9 @@ export class AppService {
     this.tokenStore = options.tokenStore ?? new TokenStore()
     this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
     this.onSessionCleared = options.onSessionCleared
+    this.onSessionPreclear = options.onSessionPreclear
+    this.onSessionPreclearTimeout = options.onSessionPreclearTimeout
+    this.onSessionPreclearCancelled = options.onSessionPreclearCancelled
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1312,7 +1345,14 @@ export class AppService {
     }
   }
 
-  private assertGfsDispatchAllowed(): void {
+  private assertGfsDispatchAllowed(expectedSessionGeneration?: number): void {
+    if (this.pendingSessionPreclear) throw new Error('session_clear_pending')
+    if (expectedSessionGeneration !== undefined) {
+      if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+        throw new Error('invalid_session_generation')
+      }
+      this.assertSessionGeneration(expectedSessionGeneration)
+    }
     if (this.gfsTransientTeamHopDepth > 0) {
       throw new Error('GFS upload dispatch is unavailable during a transient team hop')
     }
@@ -1602,6 +1642,134 @@ export class AppService {
     this.rpcTokenManager.clear()
     unbindChatStore()
     this.invalidateSandboxUiSession()
+    this.pendingSessionPreclear = null
+  }
+
+  private reserveSessionPreclear(reason: SessionPreclearReason): PendingSessionPreclear | null {
+    if (!this.sessionToken || !this.me) return null
+    const current = this.pendingSessionPreclear
+    if (current) {
+      if (current.notice.sessionGeneration !== this.sessionGeneration) {
+        throw new Error('stale_session_generation')
+      }
+      if (reason === 'logout') current.logoutQueued = true
+      return current
+    }
+
+    let resolve!: (acknowledged: boolean) => void
+    const promise = new Promise<boolean>(done => {
+      resolve = done
+    })
+    const pending: PendingSessionPreclear = {
+      notice: {
+        transitionId: ++this.nextSessionPreclearId,
+        sessionGeneration: this.sessionGeneration,
+        reason,
+      },
+      promise,
+      resolve,
+      settled: false,
+      logoutQueued: reason === 'logout',
+    }
+    this.pendingSessionPreclear = pending
+
+    // In tests and startup paths without an authenticated renderer, there is no
+    // visible surface to neutralize. Production main always supplies a sender.
+    if (!this.onSessionPreclear) {
+      pending.settled = true
+      pending.resolve(true)
+      return pending
+    }
+    try {
+      const delivered = this.onSessionPreclear(pending.notice)
+      if (delivered === false) {
+        pending.settled = true
+        pending.resolve(true)
+      }
+    } catch {
+      // Fail closed until the bounded deadline invokes the hide-window fallback.
+    }
+    return pending
+  }
+
+  private async awaitSessionPreclear(pending: PendingSessionPreclear): Promise<boolean> {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<boolean>(resolve => {
+      timeoutId = setTimeout(() => resolve(false), 3000)
+    })
+    const acknowledged = await Promise.race([pending.promise, timeout])
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+    if (!acknowledged) {
+      pending.settled = true
+      this.onSessionPreclearTimeout?.(pending.notice)
+    }
+    if (this.sessionGeneration !== pending.notice.sessionGeneration) {
+      throw new Error('stale_session_generation')
+    }
+    return acknowledged
+  }
+
+  private releaseSessionPreclear(
+    pending: PendingSessionPreclear,
+    releasingReason: SessionPreclearReason = pending.notice.reason
+  ): void {
+    if (this.pendingSessionPreclear !== pending) return
+    if (pending.logoutQueued && releasingReason !== 'logout') return
+    this.pendingSessionPreclear = null
+    this.onSessionPreclearCancelled?.(pending.notice)
+  }
+
+  private async clearLiveSessionAfterPreclear(reason: SessionPreclearReason): Promise<void> {
+    const pending = this.reserveSessionPreclear(reason)
+    if (pending) await this.awaitSessionPreclear(pending)
+    if (pending && this.sessionGeneration !== pending.notice.sessionGeneration) {
+      throw new Error('stale_session_generation')
+    }
+    this.clearAuthenticatedSessionState()
+    this.onSessionCleared?.()
+  }
+
+  /** Reserve a renderer-neutral barrier before renderer-initiated logout IPC. */
+  async prepareSessionClear(): Promise<SessionPreclearNotice | null> {
+    const pending = this.reserveSessionPreclear('logout')
+    if (!pending) return null
+    await this.awaitSessionPreclear(pending)
+    return pending.notice
+  }
+
+  acknowledgeSessionPreclear(notice: SessionPreclearNotice): boolean {
+    const pending = this.pendingSessionPreclear
+    if (
+      !pending ||
+      pending.settled ||
+      pending.notice.transitionId !== notice.transitionId ||
+      pending.notice.sessionGeneration !== notice.sessionGeneration ||
+      pending.notice.sessionGeneration !== this.sessionGeneration
+    ) {
+      return false
+    }
+    pending.settled = true
+    pending.resolve(true)
+    return true
+  }
+
+  /** Main-process linearization point for a renderer tab-close attempt. */
+  authorizeMarkdownTabClose(requestId: string): string | null {
+    if (!/^[a-zA-Z0-9:_-]{1,160}$/.test(requestId) || this.pendingSessionPreclear) return null
+    const now = Date.now()
+    for (const [permit, record] of this.markdownClosePermits) {
+      if (record.expiresAt <= now) this.markdownClosePermits.delete(permit)
+      else if (record.requestId === requestId) return null
+    }
+    const permit = `markdown-close:${++this.nextMarkdownClosePermitId}:${requestId}`
+    this.markdownClosePermits.set(permit, { requestId, expiresAt: now + 30_000 })
+    return permit
+  }
+
+  consumeMarkdownTabClosePermit(permit: string): boolean {
+    const record = this.markdownClosePermits.get(permit)
+    this.markdownClosePermits.delete(permit)
+    return Boolean(record && record.expiresAt > Date.now())
   }
 
   /**
@@ -1610,16 +1778,41 @@ export class AppService {
    * the saved token could not be removed, because the in-memory session is gone.
    */
   private async endCommittedSession(): Promise<void> {
-    this.clearAuthenticatedSessionState()
+    const pending = this.reserveSessionPreclear('session-ended')
+    if (pending) await this.awaitSessionPreclear(pending)
+    const capturedGeneration = this.sessionGeneration
+    const capturedToken = this.sessionToken
+    const capturedMe = this.me
     try {
       await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
         legacyEnvKeys: getActiveLegacyEnvKeys(),
       })
     } catch (clearError) {
       console.warn('[AppService] Failed to clear the saved session token:', clearError)
-    } finally {
-      this.onSessionCleared?.()
+      if (capturedToken && capturedMe) {
+        try {
+          const currentMe = await this.authClient.getMe(capturedToken)
+          if (
+            this.sessionGeneration === capturedGeneration &&
+            this.sessionToken === capturedToken &&
+            this.me === capturedMe &&
+            currentMe.id === capturedMe.id &&
+            String(currentMe.teamId || '') === String(capturedMe.teamId || '')
+          ) {
+            // The persisted token is still valid, so restore the same GFS
+            // scope before releasing its preclear fence.
+            this.activateGfsAuthScope(desktopGfsUploadIdentity(capturedMe))
+            if (pending) this.releaseSessionPreclear(pending, 'session-ended')
+            return
+          }
+        } catch (verificationError) {
+          if (!AppService.isSessionEndedByMe(verificationError)) throw clearError
+        }
+      }
     }
+    if (capturedGeneration !== this.sessionGeneration || this.sessionToken !== capturedToken) return
+    this.clearAuthenticatedSessionState()
+    this.onSessionCleared?.()
   }
 
   /**
@@ -1639,6 +1832,8 @@ export class AppService {
     }
     const identity =
       this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
+    const pending = this.reserveSessionPreclear('session-ended')
+    if (pending) await this.awaitSessionPreclear(pending)
     try {
       await this.suspendDesktopGfsUploadsForAuthBoundary(identity)
     } catch (fenceError) {
@@ -1720,6 +1915,7 @@ export class AppService {
     driveValue: string | undefined,
     options: { allowTransientTeamHop?: boolean } = {}
   ): DesktopGfsUploadScope {
+    if (this.pendingSessionPreclear) throw new Error('session_clear_pending')
     if (this.gfsDispatchBlocked || !this.sessionToken || !this.me) {
       throw new Error('GFS upload dispatch is unavailable without an active authenticated scope')
     }
@@ -1876,7 +2072,9 @@ export class AppService {
     if (reservation.tokenReadFailed) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
-        if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+        if (this.sessionToken !== null || this.me !== null) {
+          await this.clearLiveSessionAfterPreclear('session-ended')
+        }
         return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
@@ -1885,7 +2083,9 @@ export class AppService {
     if (!token) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
-        if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+        if (this.sessionToken !== null || this.me !== null) {
+          await this.clearLiveSessionAfterPreclear('session-ended')
+        }
         return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
       })
     }
@@ -1947,7 +2147,9 @@ export class AppService {
     } catch (error) {
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
-        if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+        if (this.sessionToken !== null || this.me !== null) {
+          await this.clearLiveSessionAfterPreclear('session-ended')
+        }
         // A 401, 403 or 410 from `/me` ended the session and removes the saved token;
         // any other restore failure signs this process out and keeps the token for
         // the next start.
@@ -2132,15 +2334,16 @@ export class AppService {
     const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
     const oldSessionToken = this.sessionToken
     const oldMe = this.me
+    const hadAuthenticatedScope = Boolean(oldSessionToken && oldMe)
+    const preclear = hadAuthenticatedScope
+      ? this.reserveSessionPreclear('environment-change')
+      : null
+    if (preclear) await this.awaitSessionPreclear(preclear)
+    const transitionGeneration = this.sessionGeneration
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
-      const hadAuthenticatedScope = Boolean(this.sessionToken && this.me)
       this.entityChangeEnvironmentSwitching = true
       this.entityChangeConnectionStop?.({ silent: true })
-      // Invalidate a restore that may still be awaiting keychain/getMe before it
-      // can bind an old-environment token to the newly selected runtime.
-      this.sessionGeneration += 1
-      const transitionGeneration = this.sessionGeneration
       if (hadAuthenticatedScope) await this.suspendDesktopGfsUploadsForAuthBoundary()
       this.assertSessionGeneration(transitionGeneration)
       try {
@@ -2153,18 +2356,20 @@ export class AppService {
           normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
         if (!environmentUnchanged) {
           this.discardRuntimeConfigDiscoveryOutsideCurrentBinding()
+          await this.tokenStore.clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
+          this.assertSessionGeneration(transitionGeneration)
           this.clearAuthenticatedSessionState()
-          await this.tokenStore
-            .clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
-            .catch(() => undefined)
+          this.onSessionCleared?.()
         } else if (
           hadAuthenticatedScope &&
           this.sessionToken === oldSessionToken &&
           this.me === oldMe &&
+          this.sessionGeneration === transitionGeneration &&
           this.sessionToken &&
           this.me
         ) {
           this.activateGfsAuthScope()
+          if (preclear) this.releaseSessionPreclear(preclear, 'environment-change')
         }
         throw error
       }
@@ -2172,15 +2377,42 @@ export class AppService {
         getActiveEnvKey() !== oldEnvKey ||
         normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) !== oldBaseUrl
       if (boundaryChanged) {
-        this.clearAuthenticatedSessionState()
         await this.tokenStore.clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
+        this.assertSessionGeneration(transitionGeneration)
+        this.clearAuthenticatedSessionState()
+        this.onSessionCleared?.()
       } else if (hadAuthenticatedScope && this.sessionToken && this.me) {
         this.activateGfsAuthScope()
         this.sessionGeneration += 1
+        if (preclear) this.releaseSessionPreclear(preclear, 'environment-change')
       } else {
         this.sessionGeneration += 1
       }
       return this.sessionGeneration
+    } catch (error) {
+      const boundaryChanged =
+        getActiveEnvKey() !== oldEnvKey ||
+        normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) !== oldBaseUrl
+      if (
+        preclear &&
+        this.pendingSessionPreclear === preclear &&
+        this.sessionGeneration === transitionGeneration &&
+        this.sessionToken === oldSessionToken &&
+        this.me === oldMe
+      ) {
+        if (boundaryChanged) {
+          // Once the runtime boundary moved, the captured session cannot remain
+          // active even if clearing its persisted token failed.
+          this.clearAuthenticatedSessionState()
+          this.onSessionCleared?.()
+        } else {
+          // A failed operation on the original boundary must return the still
+          // current session to a visible, usable state.
+          this.activateGfsAuthScope()
+          this.releaseSessionPreclear(preclear, 'environment-change')
+        }
+      }
+      throw error
     } finally {
       this.entityChangeEnvironmentSwitching = false
       if (
@@ -2775,9 +3007,13 @@ export class AppService {
     return { opened: true }
   }
 
-  async logout(): Promise<number> {
-    return this.withNativeAuthEnvironmentCommit(async () => {
-      this.sessionGeneration += 1
+  logout(): Promise<number> {
+    if (this.pendingLogout) return this.pendingLogout
+    // Reserve before entering the native auth queue: a queued team/environment
+    // operation must not leave the outgoing renderer visible while logout waits.
+    const preclear = this.reserveSessionPreclear('logout')
+    const operation = this.withNativeAuthEnvironmentCommit(async () => {
+      if (preclear) await this.awaitSessionPreclear(preclear)
       const logoutGeneration = this.sessionGeneration
       const logoutToken = this.sessionToken
       const logoutMe = this.me
@@ -2785,16 +3021,77 @@ export class AppService {
       try {
         const envKey = getActiveEnvKey()
         const legacyEnvKeys = getActiveLegacyEnvKeys()
-        await this.suspendDesktopGfsUploadsForAuthBoundary()
+        try {
+          await this.suspendDesktopGfsUploadsForAuthBoundary()
+        } catch (error) {
+          if (
+            this.sessionGeneration === logoutGeneration &&
+            this.sessionToken === logoutToken &&
+            this.me === logoutMe
+          ) {
+            // Suspension happens before token removal. If it fails, the old
+            // session still owns the renderer; restore its GFS dispatch scope
+            // and release even a preclear that was shared with a queued logout.
+            try {
+              this.activateGfsAuthScope()
+            } catch {
+              // Preserve the initiating failure, but never strand the renderer
+              // behind a preclear after the logout operation has settled.
+            }
+          }
+          if (preclear) this.releaseSessionPreclear(preclear, 'logout')
+          throw error
+        }
         this.assertSessionGeneration(logoutGeneration)
         try {
           await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
           this.assertSessionGeneration(logoutGeneration)
         } catch (error) {
-          if (logoutToken && logoutMe) this.activateGfsAuthScope()
+          if (logoutToken && logoutMe && preclear) {
+            try {
+              const currentMe = await this.authClient.getMe(logoutToken)
+              if (
+                this.sessionGeneration === logoutGeneration &&
+                this.sessionToken === logoutToken &&
+                this.me === logoutMe &&
+                currentMe.id === logoutMe.id &&
+                String(currentMe.teamId || '') === String(logoutMe.teamId || '')
+              ) {
+                this.activateGfsAuthScope()
+                this.releaseSessionPreclear(preclear, 'logout')
+              } else if (
+                this.sessionGeneration === logoutGeneration &&
+                this.sessionToken === logoutToken &&
+                this.me === logoutMe
+              ) {
+                // A valid token now identifies a different principal or team.
+                // Retire the old in-memory authority before revealing the app.
+                this.clearAuthenticatedSessionState()
+                this.onSessionCleared?.()
+              }
+            } catch (verificationError) {
+              if (AppService.isSessionEndedByMe(verificationError)) {
+                this.clearAuthenticatedSessionState()
+                this.onSessionCleared?.()
+              } else if (
+                this.sessionGeneration === logoutGeneration &&
+                this.sessionToken === logoutToken &&
+                this.me === logoutMe
+              ) {
+                // The token-store write failed and `/me` could not establish a
+                // different auth state. Keep the still-committed session usable
+                // and release the renderer preclear so the user can retry.
+                this.activateGfsAuthScope()
+                this.releaseSessionPreclear(preclear, 'logout')
+              }
+            }
+          } else if (logoutToken && logoutMe) {
+            this.activateGfsAuthScope()
+          }
           throw error
         }
         this.clearAuthenticatedSessionState()
+        this.onSessionCleared?.()
         await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
         // Grants survive logout (they are keyed by userId), but every cached SDK
         // result must not: the next user of this machine gets nothing of this one's.
@@ -2804,10 +3101,17 @@ export class AppService {
         releasePrewarm()
       }
     })
+    this.pendingLogout = operation
+    const clearPendingLogout = () => {
+      if (this.pendingLogout === operation) this.pendingLogout = null
+    }
+    void operation.then(clearPendingLogout, clearPendingLogout)
+    return operation
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
-  async resolveGfsUri(uri: string) {
+  async resolveGfsUri(uri: string, expectedSessionGeneration?: number) {
+    this.assertGfsDispatchAllowed(expectedSessionGeneration)
     return this.gfsClient.resolveUri(uri, this.requireSessionToken())
   }
 
@@ -2817,7 +3121,13 @@ export class AppService {
    * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
    * reads the full body.
    */
-  async downloadGfsUri(uri: string, maxBytes?: number, signal?: AbortSignal) {
+  async downloadGfsUri(
+    uri: string,
+    maxBytes?: number,
+    signal?: AbortSignal,
+    expectedSessionGeneration?: number
+  ) {
+    this.assertGfsDispatchAllowed(expectedSessionGeneration)
     return this.gfsClient.download(
       uri,
       this.requireSessionToken(),
@@ -2867,7 +3177,12 @@ export class AppService {
    * (the existing pure lib) maps them to {canDelegate, grantableBits,
    * canCreateShare}. Enforcement is always server-side — this only hides controls.
    */
-  async gfsAffordances(resourceId: string, drive?: string): Promise<DelegationAffordances> {
+  async gfsAffordances(
+    resourceId: string,
+    drive?: string,
+    expectedSessionGeneration?: number
+  ): Promise<DelegationAffordances> {
+    this.assertGfsDispatchAllowed(expectedSessionGeneration)
     const { held, isOperator } = await this.gfsClient.affordances(
       resourceId,
       this.requireSessionToken(),
@@ -3493,7 +3808,14 @@ export class AppService {
     }
   }
 
-  async replaceGfsFile(resourceId: string, encodedData: string, drive?: string, ifMatch?: number) {
+  async replaceGfsFile(
+    resourceId: string,
+    encodedData: string,
+    drive?: string,
+    ifMatch?: number,
+    expectedSessionGeneration?: number
+  ) {
+    this.assertGfsDispatchAllowed(expectedSessionGeneration)
     return this.gfsClient.replaceFile(
       { resourceId, drive, encodedData, ifMatch },
       this.requireSessionToken()
@@ -3588,6 +3910,7 @@ export class AppService {
   }
 
   private requireSessionToken(): string {
+    if (this.pendingSessionPreclear) throw new Error('session_clear_pending')
     if (!this.sessionToken) {
       throw new Error('Not authenticated')
     }

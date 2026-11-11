@@ -189,7 +189,7 @@ describe('AppService session rejected by /me while a login is reserved (K4d-C01)
     expect(tokenStore.clearSessionToken).toHaveBeenCalledTimes(1)
     expect(service.suspendDesktopGfsUploadsForAuthBoundary).toHaveBeenCalledTimes(1)
     expect(tokenStore.setSessionToken).not.toHaveBeenCalled()
-    expect(onSessionCleared).not.toHaveBeenCalled()
+    expect(onSessionCleared).toHaveBeenCalledOnce()
     expect(service.sessionToken).toBeNull()
   })
 
@@ -309,4 +309,39 @@ describe('AppService workflow listing fallback when the session is replaced (K4d
       expect(service.workflowTeamByKey.size).toBe(0)
     }
   )
+})
+
+describe('AppService session preclear acknowledgment', () => {
+  it('keeps the committed token and avoids logout cleanup until the renderer acknowledges neutral UI', async () => {
+    let notice: { transitionId: number; sessionGeneration: number; reason: string } | null = null
+    const tokenStore = {
+      clearSessionToken: vi.fn().mockResolvedValue(undefined),
+      getSessionToken: vi.fn().mockResolvedValue(null),
+      setSessionToken: vi.fn().mockResolvedValue(undefined),
+    }
+    const service = new AppService({
+      tokenStore: tokenStore as never,
+      onSessionPreclear: incoming => {
+        notice = incoming
+        return true
+      },
+    }) as any
+    service.sessionToken = 'token-a'
+    service.me = sessionMe('user-a', 'team-a')
+    service.beginPrewarmAuthTransition = () => () => undefined
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
+
+    const logout = service.logout()
+    await vi.waitFor(() => expect(notice).toMatchObject({ reason: 'logout' }))
+
+    expect(service.sessionToken).toBe('token-a')
+    expect(service.suspendDesktopGfsUploadsForAuthBoundary).not.toHaveBeenCalled()
+    expect(tokenStore.clearSessionToken).not.toHaveBeenCalled()
+
+    expect(service.acknowledgeSessionPreclear(notice)).toBe(true)
+    await expect(logout).resolves.toBeGreaterThan(0)
+    expect(service.suspendDesktopGfsUploadsForAuthBoundary).toHaveBeenCalledOnce()
+    expect(tokenStore.clearSessionToken).toHaveBeenCalledOnce()
+    expect(service.sessionToken).toBeNull()
+  })
 })

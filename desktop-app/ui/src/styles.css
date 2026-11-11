@@ -18383,3 +18383,18 @@ pre {
 .left-nav .nav-latest-session.active .nav-latest-session__main {
   color: var(--text);
 }
+
+.app-auth-neutral-surface {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--text);
+}
+.da-gfs-markdown-size-warning {
+  margin-block: 0.5rem;
+  color: var(--warning);
+  font-size: var(--font-size-sm);
+}

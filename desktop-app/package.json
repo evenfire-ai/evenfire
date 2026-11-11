@@ -53,12 +53,15 @@
     "@clerum/desktop-app-links": "file:../packages/desktop-app-links",
     "@clerum/gfs-interaction-policy": "file:../packages/gfs-interaction-policy",
     "@tanstack/react-query": "5.100.10",
+    "@uiw/react-md-editor": "^4.1.2",
     "hast-util-to-jsx-runtime": "^2.3.6",
     "js-yaml": "^4.3.2",
     "keytar": "^7.9.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
     "remark-rehype": "^11.1.2",
@@ -99,6 +102,7 @@
   "overrides": {
     "@tootallnate/once": "^3.0.1",
     "tmp": "^0.2.4",
-    "tar": "7.5.19"
+    "tar": "7.5.19",
+    "hast-util-raw": "9.1.1"
   }
 }

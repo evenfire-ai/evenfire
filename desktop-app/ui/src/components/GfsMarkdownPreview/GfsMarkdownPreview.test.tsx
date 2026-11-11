@@ -5,9 +5,10 @@ import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 
 function stubDownload(text: string) {
   const downloadPreview = vi.fn(async () => ({ bytes: new TextEncoder().encode(text).buffer }))
+  const resolve = vi.fn(async () => ({ version: 1 }))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { downloadPreview } },
+    value: { gfs: { downloadPreview, resolve } },
   })
   return downloadPreview
 }
@@ -48,6 +49,10 @@ describe('GfsMarkdownPreview public barrel', () => {
     )
     expect(within(table).getByRole('cell', { name: 'GFS files' })).toBeTruthy()
     expect(within(article).queryByRole('link', { name: 'Unsafe link' })).toBeNull()
-    expect(downloadPreview).toHaveBeenCalledWith('gfs://main/inventory', expect.any(Number))
+    expect(downloadPreview).toHaveBeenCalledWith(
+      'gfs://main/inventory',
+      expect.any(Number),
+      undefined
+    )
   })
 })

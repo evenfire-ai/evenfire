@@ -80,10 +80,10 @@ function installBridge() {
   bridge.gfs.downloadPreview = downloadPreview
   let session: unknown = { authenticated: true, me: USER_A, sessionGeneration: 1 }
   bridge.auth.getSessionState = vi.fn(async () => session)
-  let sessionCleared: (() => void) | null = null
+  const sessionClearListeners = new Set<() => void>()
   bridge.auth.onSessionCleared = vi.fn((listener: () => void) => {
-    sessionCleared = listener
-    return vi.fn()
+    sessionClearListeners.add(listener)
+    return () => sessionClearListeners.delete(listener)
   })
   return {
     downloadPreview,
@@ -97,11 +97,11 @@ function installBridge() {
     },
     // Main ended or replaced the session, so the renderer reloads the session state.
     changeSession: async (next: unknown) => {
-      if (!sessionCleared) throw new Error('the App did not subscribe to the session notice')
-      const notify = sessionCleared
+      if (sessionClearListeners.size === 0)
+        throw new Error('the App did not subscribe to the session notice')
       session = next
       await act(async () => {
-        notify()
+        for (const notify of [...sessionClearListeners]) notify()
         await Promise.resolve()
       })
     },

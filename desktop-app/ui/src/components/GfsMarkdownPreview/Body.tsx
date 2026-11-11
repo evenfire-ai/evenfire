@@ -1,78 +1,14 @@
-// Renderer exception recorded in docs/agents/frontend-style-rules.md
-// ("Markdown rendering and editing"): this read-only GFS markdown preview uses
-// ReactMarkdown + remark-gfm as the established, tested preview integration.
-// GFM tables use a labelled, keyboard-focusable scroll region.
-// MDEditor.Markdown supports custom table components; switching requires a
-// separate migration that revalidates rendering, keyboard operation, and
-// untrusted-content handling. Guarantees: no rehype-raw, so raw HTML stays
-// inert; urlTransform restricts `src` to inline data:image URIs and links to
-// http(s):/mailto:/# fragments; code blocks render as plain `pre` > `code`.
-// Covered by the GfsMarkdownPreview and GfsMarkdownPreviewBody suites.
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import type { Components } from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { StatusBanner } from '@components/Common'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
+import { GfsMarkdownDocument } from './MarkdownAdapter'
 import type { GfsMarkdownPreviewBodyProps } from './types'
 
 function isPlainTextName(fileName: string): boolean {
   return fileName.toLowerCase().endsWith('.txt')
 }
-
-function transformMarkdownUrl(url: string, key: string): string {
-  const value = url.trim()
-  if (key === 'src') {
-    return /^data:image\/(?:png|gif|jpe?g|webp);base64,/i.test(value) ? value : ''
-  }
-  return /^(?:https?:\/\/|mailto:|#)/i.test(value) ? value : ''
-}
-
-const GFS_MARKDOWN_COMPONENTS: Components = {
-  a: ({ children, href, node, ...props }) => {
-    void node
-    return href ? (
-      <a {...props} href={href} rel="noreferrer" target="_blank">
-        {children}
-      </a>
-    ) : (
-      <span>{children}</span>
-    )
-  },
-  img: ({ alt, node, src, ...props }) => {
-    void node
-    return src ? (
-      <img {...props} alt={alt ?? ''} loading="lazy" referrerPolicy="no-referrer" src={src} />
-    ) : alt ? (
-      <span>{alt}</span>
-    ) : null
-  },
-  table: ({ children, node, ...props }) => {
-    void node
-    return (
-      <div
-        aria-label="Scrollable Markdown table"
-        className="gfs-markdown-table-scroll"
-        role="region"
-        tabIndex={0}
-      >
-        <table {...props}>{children}</table>
-      </div>
-    )
-  },
-  th: ({ children, node, ...props }) => {
-    void node
-    return (
-      <th {...props} scope={props.scope ?? 'col'}>
-        {children}
-      </th>
-    )
-  },
-}
-
-const GFS_MARKDOWN_REMARK_PLUGINS = [remarkGfm]
 
 /**
  * De-modalized markdown/text preview body (spec 18 §3.B.2). Owns the byte fetch
@@ -85,8 +21,11 @@ export function GfsMarkdownPreviewBody({
   byteLength,
   fileName,
   gfsUri,
+  expectedSessionGeneration,
   onDownloadError,
   onCopyContentReady,
+  onSourceLoaded,
+  editor,
   titleId,
   titleActions,
   headerActions,
@@ -121,13 +60,25 @@ export function GfsMarkdownPreviewBody({
         // download itself is independently bounded so a wrong listed size cannot
         // materialize an oversized payload.
         assertGfsMarkdownPreviewSize(byteLength)
-        const { bytes } = await window.clerum.gfs.downloadPreview(
-          gfsUri,
-          GFS_MARKDOWN_PREVIEW_MAX_BYTES
-        )
-        assertGfsMarkdownPreviewSize(bytes.byteLength)
-        const markdown = new TextDecoder().decode(bytes)
-        if (active) setSource(markdown)
+        let stable: { content: string; version: number } | null = null
+        for (let attempt = 0; attempt < 2 && !stable; attempt += 1) {
+          const before = await window.clerum.gfs.resolve(gfsUri, expectedSessionGeneration)
+          const { bytes } = await window.clerum.gfs.downloadPreview(
+            gfsUri,
+            GFS_MARKDOWN_PREVIEW_MAX_BYTES,
+            expectedSessionGeneration
+          )
+          assertGfsMarkdownPreviewSize(bytes.byteLength)
+          const after = await window.clerum.gfs.resolve(gfsUri, expectedSessionGeneration)
+          if (before.version === after.version) {
+            stable = { content: new TextDecoder().decode(bytes), version: after.version }
+          }
+        }
+        if (!stable) throw new Error('The file changed while loading. Refresh to try again.')
+        if (active) {
+          setSource(stable.content)
+          onSourceLoaded?.(stable.content, stable.version)
+        }
       } catch (error) {
         if (!active) return
         onDownloadErrorRef.current?.(error)
@@ -148,7 +99,7 @@ export function GfsMarkdownPreviewBody({
     return () => {
       active = false
     }
-  }, [byteLength, gfsUri])
+  }, [byteLength, expectedSessionGeneration, gfsUri, onSourceLoaded])
 
   const copySourceToClipboard = useCallback(async (): Promise<boolean> => {
     if (source === null || !mountedRef.current || previewError) return false
@@ -187,7 +138,8 @@ export function GfsMarkdownPreviewBody({
             Loading preview…
           </div>
         ) : null}
-        {source !== null && !previewError ? (
+        {editor && source !== null && !previewError ? editor : null}
+        {source !== null && !previewError && !editor ? (
           isPlainText ? (
             <article
               aria-label={`Text preview of ${fileName}`}
@@ -205,13 +157,7 @@ export function GfsMarkdownPreviewBody({
               className="da-gfs-markdown-preview__content markdown-content"
             >
               {source.trim() ? (
-                <ReactMarkdown
-                  components={GFS_MARKDOWN_COMPONENTS}
-                  remarkPlugins={GFS_MARKDOWN_REMARK_PLUGINS}
-                  urlTransform={transformMarkdownUrl}
-                >
-                  {source}
-                </ReactMarkdown>
+                <GfsMarkdownDocument source={source} />
               ) : (
                 <p className="da-gfs-markdown-preview__empty">This Markdown file is empty.</p>
               )}
