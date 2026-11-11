@@ -5,7 +5,9 @@
  * deny the agent) returns the input to the composer with no message, keeps the
  * agent selected and withdraws the rejected turn. A loss of access holds or
  * revokes the agent as before; the input waits for the user in the composer, or
- * behind Recover input when the send carried attachments.
+ * behind Recover input when the send carried attachments. Where the input waits
+ * behind Recover input, the composer shows the sentence for the failure's kind
+ * and keeps the raw error under Technical details.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, waitFor } from '@testing-library/react'
@@ -41,6 +43,12 @@ type SendError = () => Promise<Error>
 const networkError: SendError = async () => new Error('network down')
 const http401: SendError = () =>
   ipcHttpError('rpc:invokeHostMessage', 401, 'Unauthorized', { error: 'expired' })
+
+// The alert a send kept behind Recover input shows for its kind.
+const AUTH_ALERT =
+  'Access issue while sending to this agent. You may not have access to this agent anymore. Sign in again or ask an admin for access.'
+const NETWORK_ALERT =
+  'Temporary connection issue while sending to the agent. Temporary connectivity issue. Retry in a few seconds or check backend health.'
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void
@@ -1118,7 +1126,108 @@ describe('useAppController: a send the server rejects', () => {
     await expectInputReturnedAfterReselect(app, clerum, chatId, text)
   })
 
-  it('T-A16: an older page loaded while the removal is pending does not write the turn back', async () => {
+  describe('T-A14: the alert of a send kept behind Recover input', () => {
+    it('a loss of access with a reference', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text sent as access is lost'
+      await addReference(app)
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(
+        await ipcHostAccessRevoked('rpc:invokeHostMessage')
+      )
+      await send(app, text)
+      await waitFor(() => expect(app.result.current.selectedAgent).toBeNull())
+      await reselect(app, clerum, chatId)
+      // Witness: the retained failure is the visible one and keeps the raw detail.
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      expect
+        .soft(app.result.current.failedAgentSend?.message, 'technical detail')
+        .toContain('host_access_revoked')
+      expect.soft(app.result.current.agentError, 'alert').toBe(AUTH_ALERT)
+    })
+
+    it('a generic rejection after the draft changed', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text rejected after a new draft'
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+      act(() => {
+        setComposerDraft(chatId, 'a newer draft', AGENT)
+      })
+      const rejection = await ipcGenericForbidden('rpc:invokeHostMessage')
+      await act(async () => {
+        post.reject(rejection)
+        await pendingSend
+      })
+      // Witness: the retained failure is the visible one.
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      expect.soft(app.result.current.failedAgentSend?.message, 'technical detail').toContain('403')
+      expect.soft(app.result.current.agentError, 'alert').toBe(AUTH_ALERT)
+    })
+
+    it('an agent held before the POST, with a reference', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text held before the POST'
+      await addReference(app)
+      const activity = deferred<() => Promise<void>>()
+      const activityCallsBefore = clerum.rpc.subscribeHostActivity.mock.calls.length
+      clerum.rpc.subscribeHostActivity.mockImplementationOnce(() => activity.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      await waitFor(() =>
+        expect(clerum.rpc.subscribeHostActivity.mock.calls.length).toBeGreaterThan(
+          activityCallsBefore
+        )
+      )
+      await holdByDeniedRead(
+        app,
+        clerum,
+        chatId,
+        await ipcHostAccessRevoked('rpc:loadSessionMessages')
+      )
+      await act(async () => {
+        activity.resolve(async () => undefined)
+        await pendingSend
+      })
+      // Witness: the send stopped before its POST, and its input is the visible failure.
+      expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+      await reselect(app, clerum, chatId)
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      expect.soft(app.result.current.agentError, 'alert').toBe(AUTH_ALERT)
+    })
+
+    it('a network failure, after the user resumed typing', async () => {
+      const { app, clerum } = await boot()
+      await createChat(app)
+      const text = 'text that fails to send'
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(await networkError())
+      await send(app, text)
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      expect.soft(app.result.current.agentError, 'alert at the failure').toBe(NETWORK_ALERT)
+      act(() => app.result.current.clearComposerSendError())
+      // Witness: the retained failure is still the visible one.
+      expect(app.result.current.failedAgentSend?.content).toBe(text)
+      expect.soft(app.result.current.agentError, 'alert after typing').toBe(NETWORK_ALERT)
+    })
+
+    it('a synchronous error envelope keeps the text the Host sent (control)', async () => {
+      const { app, clerum } = await boot()
+      await createChat(app)
+      const text = 'text the Host answers with an error'
+      clerum.rpc.invokeHostMessage.mockResolvedValueOnce({
+        error: { message: 'The model is overloaded.', code: 'LLM_MODEL_OVERLOADED' },
+      })
+      await send(app, text)
+      // Witness: the retained failure is the visible one.
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      expect(app.result.current.agentError).toBe('The model is overloaded.')
+    })
+  })
+
+  it('T-A16:an older page loaded while the removal is pending does not write the turn back', async () => {
     const { app, clerum } = await boot()
     const chatId = await createChat(app)
     // The newest window holds turns 2 and 3, so turn 1 is an older page.

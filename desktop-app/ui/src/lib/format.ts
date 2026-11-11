@@ -272,10 +272,34 @@ export function errorRecoveryHint(kind: AppErrorKind): string {
   if (kind === 'network')
     return 'Temporary connectivity issue. Retry in a few seconds or check backend health.'
   if (kind === 'auth')
-    return 'Authentication/permission issue. Re-authenticate or switch team/access scope.'
+    return 'You may not have access to this agent anymore. Sign in again or ask an admin for access.'
   if (kind === 'validation') return 'Request format issue. Review payload and required fields.'
   if (kind === 'upstream') return 'Upstream service failed. Retry or check server/runtime health.'
   return 'Unexpected failure. Retry and check server health if it persists.'
+}
+
+/** The sentence and the recovery hint shown for a send whose POST failed. */
+export function describeSendFailure(
+  message: string,
+  kind: AppErrorKind
+): { summary: string; hint: string } {
+  const normalized = message.toLowerCase()
+  if (normalized.includes('request entity too large') || normalized.includes('payload too large')) {
+    return {
+      summary:
+        'The message is larger than the deployed runtime accepts (images or attached files).',
+      hint: 'Send fewer or smaller attachments. If small attachments are refused too, the rpc-proxy and mcp-host deployments may predate the current payload limits.',
+    }
+  }
+  const summary =
+    kind === 'waking'
+      ? 'Agent is waking up.'
+      : kind === 'network'
+        ? 'Temporary connection issue while sending to the agent.'
+        : kind === 'auth'
+          ? 'Access issue while sending to this agent.'
+          : 'Unable to send message to this agent.'
+  return { summary, hint: errorRecoveryHint(kind) }
 }
 
 function toTimestampMs(value?: number | string | Date | null): number | null {

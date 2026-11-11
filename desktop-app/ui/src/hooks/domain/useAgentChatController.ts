@@ -62,7 +62,7 @@ import type { SessionMessagesResult } from '../../../../src/types'
 import { DESKTOP_ROUTES } from '../../constants/navigation'
 import {
   classifyErrorKind,
-  errorRecoveryHint,
+  describeSendFailure,
   extractAssistantReply,
   isAuthorizationError,
   isConfirmedHostAccessRevoked,
@@ -4160,24 +4160,9 @@ export function useAgentChatController({
           }
           return
         }
-        const normalized = message.toLowerCase()
-        const isRequestEntityTooLarge =
-          normalized.includes('request entity too large') ||
-          normalized.includes('payload too large')
         const kind = classifyErrorKind(message)
-        const fallback = isRequestEntityTooLarge
-          ? 'Send fewer or smaller attachments. If small attachments are refused too, the rpc-proxy and mcp-host deployments may predate the current payload limits.'
-          : errorRecoveryHint(kind)
-        const friendlyMessage = isRequestEntityTooLarge
-          ? 'The message is larger than the deployed runtime accepts (images or attached files).'
-          : kind === 'waking'
-            ? 'Agent is waking up.'
-            : kind === 'network'
-              ? 'Temporary connection issue while sending to the agent.'
-              : kind === 'auth'
-                ? 'Access issue while sending to this agent.'
-                : 'Unable to send message to this agent.'
-        setAgentError(`${friendlyMessage} ${fallback}`)
+        const { summary, hint: fallback } = describeSendFailure(message, kind)
+        setAgentError(`${summary} ${fallback}`)
         // Issue #654 — keep the payload recoverable and record WHO it belongs
         // to, so recovery can never overwrite a different chat's composer or a
         // newer draft. Memory only; released on terminal success/discard.
@@ -4304,6 +4289,18 @@ export function useAgentChatController({
       answeredWithoutFiles: snapshot.reason === 'host_files_dropped',
     } satisfies FailedAgentSend
   }, [retainedSends, retainedRevision, selectedAgent, activeChatId])
+  // The alert for a retained failure. A failed POST recorded the thrown error,
+  // which is technical detail and stays under "Technical details": its alert is
+  // the sentence for its kind. Other reasons keep the text they recorded.
+  const retainedFailureAlert = useMemo(() => {
+    if (!visibleRetainedFailure) return null
+    if (visibleRetainedFailure.reason !== 'post_failed') return visibleRetainedFailure.message
+    const { summary, hint } = describeSendFailure(
+      visibleRetainedFailure.message,
+      visibleRetainedFailure.kind
+    )
+    return `${summary} ${hint}`
+  }, [visibleRetainedFailure])
   const visibleFailure =
     visibleRetainedFailure ??
     (failedAgentSend &&
@@ -4711,9 +4708,9 @@ export function useAgentChatController({
     composerReferenceAttachments,
     agentSending,
     // A fresh send-time error (a blocked image send, a new POST failure) wins;
-    // the retained failure's message covers the banner only when nothing newer
-    // has been reported.
-    agentError: agentError ?? visibleRetainedFailure?.message ?? null,
+    // the retained failure's alert covers the banner only when nothing newer has
+    // been reported.
+    agentError: agentError ?? retainedFailureAlert,
     failedAgentSend: visibleFailure,
     chatEndRef,
     scrollChatToBottom,

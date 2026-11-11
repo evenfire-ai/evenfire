@@ -340,9 +340,11 @@ describe('older failures of a chat (#654 M2)', () => {
     await settleMount()
     await sendFailing(result, 'first try')
 
-    // With no fresh error, the banner falls back to the retained failure.
+    // With no fresh error, the banner shows the sentence for the retained failure.
     act(() => result.current.clearComposerSendError())
-    expect(result.current.agentError).toBe('network down')
+    expect(result.current.agentError).toBe(
+      'Temporary connection issue while sending to the agent. Temporary connectivity issue. Retry in a few seconds or check backend health.'
+    )
 
     // An image send is blocked before any POST: the model selection for this
     // chat was never loaded, so the send-time guard reports a fresh error.
