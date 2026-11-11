@@ -855,30 +855,36 @@ export class DocumentReadTool implements Tool {
 
     // A row that cannot fit even alone in a full ledger page is emitted as []
     // (the same shape the worker uses for its own skipped rows) instead of
-    // failing the whole read: the next row must stay reachable. The probe is
-    // the smallest result a call starting at that row could emit (the row, its
-    // sheet envelope and the continuation to the next row), measured after
+    // failing the whole read: the next row must stay reachable. A row's probe
+    // is the smallest result a call starting at that row could emit (the row,
+    // its sheet envelope and the continuation to the next row), measured after
     // redaction and the cell cap exactly as `build` measures its results.
+    //
+    // Measuring every row's probe ran the full measure (preview plus token
+    // counts) up to 5,000 times per call on the Host event loop, each time
+    // over the whole sheet list (review M2). Rows are measured in groups
+    // instead: a group probe holds every row of the group in one envelope, so
+    // when it fits with `margin` to spare (the most a single row's own startRow
+    // and continuation can add), each of its rows fits alone too, the same
+    // monotonicity `fit` relies on. A group that does not fit is halved; only a
+    // single row gets the exact probe. An envelope that alone exceeds the page
+    // makes every row exceed it, with one measure.
     const pageTokens = attachmentReadBudgets(this.contextWindowTokens).pageTokens
     const skippedRowsBySheet = sheets.map((sheet, sheetIndex) => {
       const skipped = [...sheet.skipped]
       const parserSkipped = new Set(skipped)
       const nextSheet = sheets[sheetIndex + 1]
-      for (let rowIndex = 0; rowIndex < sheet.rows.length; rowIndex += 1) {
-        const rowNumber = sheet.startRow + rowIndex
-        if (parserSkipped.has(rowNumber)) continue
-        const remainsInSheet = rowIndex + 1 < sheet.rows.length
-        // A last row still leaves rows of the same sheet when the worker's
-        // window stopped after it; the result must say so.
-        const truncated = remainsInSheet || sheet.truncated
-        const continuation: DocumentContinuation | undefined = remainsInSheet
-          ? {
-              cursor: encodeCursor(
-                { format: 'xlsx', sheetIndex: sheet.sheetIndex, row: rowNumber + 1 },
-                identity.referenceId
-              ),
-              limit: 'page_budget',
-            }
+      const inSheet = (row: number): DocumentContinuation => ({
+        cursor: encodeCursor(
+          { format: 'xlsx', sheetIndex: sheet.sheetIndex, row },
+          identity.referenceId
+        ),
+        limit: 'page_budget',
+      })
+      // The continuation after emitting rows up to `rowIndex` of this sheet.
+      const continuationAfter = (rowIndex: number): DocumentContinuation | undefined =>
+        rowIndex + 1 < sheet.rows.length
+          ? inSheet(sheet.startRow + rowIndex + 1)
           : nextSheet
             ? {
                 cursor: encodeCursor(
@@ -897,27 +903,69 @@ export class DocumentReadTool implements Tool {
                   limit: stopLimit(outcome.stoppedBy),
                 }
               : undefined
-        const probe: DocumentReadResult = {
-          status: 'ok',
-          ...identity,
-          format: 'xlsx',
-          sheetNames,
-          ...(continuation ? { continuation } : {}),
-          sheets: [
-            {
-              name: sheet.name,
-              startRow: rowNumber,
-              rows: [sheet.rows[rowIndex]!],
-              truncated,
-              lastRow: sheet.lastRow,
-            },
-          ],
-        }
-        if (measure(JSON.stringify(probe)) > pageTokens) {
-          sheet.rows[rowIndex] = []
-          skipped.push(rowNumber)
-        }
+      const probe = (
+        from: number,
+        to: number,
+        continuation: DocumentContinuation | undefined,
+        truncated: boolean
+      ): number =>
+        measure(
+          JSON.stringify({
+            status: 'ok',
+            ...identity,
+            format: 'xlsx',
+            sheetNames,
+            ...(continuation ? { continuation } : {}),
+            sheets: [
+              {
+                name: sheet.name,
+                startRow: sheet.startRow + from,
+                rows: sheet.rows.slice(from, to),
+                truncated,
+                lastRow: sheet.lastRow,
+              },
+            ],
+          } satisfies DocumentReadResult)
+        )
+      const skip = (rowIndex: number): void => {
+        const rowNumber = sheet.startRow + rowIndex
+        if (parserSkipped.has(rowNumber)) return
+        sheet.rows[rowIndex] = []
+        skipped.push(rowNumber)
       }
+      // A last row still leaves rows of the same sheet when the worker's
+      // window stopped after it; the result must say so.
+      const truncatedAfter = (rowIndex: number): boolean =>
+        rowIndex + 1 < sheet.rows.length || sheet.truncated
+      const check = (from: number, to: number): void => {
+        if (to - from === 1) {
+          if (parserSkipped.has(sheet.startRow + from)) return
+          if (probe(from, to, continuationAfter(from), truncatedAfter(from)) > pageTokens) {
+            skip(from)
+          }
+          return
+        }
+        if (
+          probe(from, to, continuationAfter(to - 1), truncatedAfter(to - 1)) <=
+          pageTokens - margin
+        ) {
+          return
+        }
+        const middle = from + Math.floor((to - from) / 2)
+        check(from, middle)
+        check(middle, to)
+      }
+      if (sheet.rows.length === 0) return skipped.sort((a, b) => a - b)
+      // `true` is the shorter literal, so this envelope is a lower bound.
+      if (probe(0, 0, undefined, true) > pageTokens) {
+        for (let rowIndex = 0; rowIndex < sheet.rows.length; rowIndex += 1) skip(rowIndex)
+        return skipped.sort((a, b) => a - b)
+      }
+      const lastRowNumber = sheet.startRow + sheet.rows.length - 1
+      const margin = measure(
+        JSON.stringify({ startRow: lastRowNumber, continuation: inSheet(lastRowNumber + 1) })
+      )
+      check(0, sheet.rows.length)
       return skipped.sort((a, b) => a - b)
     })
 

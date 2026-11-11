@@ -594,6 +594,74 @@ describe('DocumentReadTool budgets', () => {
   })
 })
 
+describe('DocumentReadTool XLSX row probe cost (review M2)', () => {
+  const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  // Excel-legal 31-character names. Every probe and result carries the list.
+  const names = (count: number): string[] =>
+    Array.from({ length: count }, (_, index) =>
+      `Sheet ${String(index).padStart(4, '0')} `.padEnd(31, 'n')
+    )
+
+  async function countedRead(
+    outcome: XlsxOutcome
+  ): Promise<{ body: Record<string, unknown>; measures: number; measuredChars: number }> {
+    const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+    let measures = 0
+    let measuredChars = 0
+    const counted = (raw: string): number => {
+      measures += 1
+      measuredChars += raw.length
+      return measureResult(raw)
+    }
+    const { body } = await read(
+      toolFor([file], fakeRunner(outcome).runJob),
+      { attachmentId: 'xlsx-file' },
+      { measureResult: counted }
+    )
+    return { body, measures, measuredChars }
+  }
+
+  it('measures a 5,000-row window by groups instead of once per row', async () => {
+    const sheetNames = names(150)
+    const rows = Array.from({ length: 5_000 }, (_, index) => [index + 1])
+    const { body, measures, measuredChars } = await countedRead({
+      ok: true,
+      sheetNames,
+      sheets: [{ name: sheetNames[0]!, startRow: 1, rows, truncated: true, lastRow: 20_000 }],
+      next: { sheetIndex: 0, row: 5_001 },
+      stoppedBy: 'max_rows',
+    })
+    expect(body.status).toBe('ok')
+    const sheet = (body.sheets as Array<Record<string, unknown>>)[0]!
+    const emitted = sheet.rows as number[][]
+    // No row was wide; the page holds a prefix of the window, in order.
+    expect(sheet.skippedRows).toBeUndefined()
+    expect(emitted.length).toBeGreaterThan(0)
+    expect(emitted).toEqual(rows.slice(0, emitted.length))
+    expect((body.continuation as { limit: string }).limit).toBe('page_budget')
+    // e1fe20095 measured one probe per row, each carrying the 150 names:
+    // 5,000+ measures and over 25 MB of measured text.
+    expect(measures).toBeLessThan(100)
+    expect(measuredChars).toBeLessThan(2_000_000)
+  })
+
+  it('skips every row with one measure when the sheet list alone exceeds a page', async () => {
+    const sheetNames = names(600)
+    const rows = Array.from({ length: 50 }, (_, index) => [index + 1])
+    const { body, measures } = await countedRead({
+      ok: true,
+      sheetNames,
+      sheets: [{ name: sheetNames[0]!, startRow: 1, rows, truncated: false, lastRow: 50 }],
+    })
+    expect(body).toMatchObject({
+      status: 'error',
+      reason: 'document_limits_exceeded',
+      limit: 'row_width',
+    })
+    expect(measures).toBeLessThan(20)
+  })
+})
+
 describe('DocumentReadTool configured masking', () => {
   it('applies the Tool cell cap without splitting a surrogate pair', async () => {
     const value = `a😀${'b'.repeat(12)}`
