@@ -2032,8 +2032,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     }
   )
 
-  // Removes only local user turns the server never answered; the store
-  // enforces the rule and refuses anything else.
+  // Removes local user turns that carry no stored sign of a server answer.
+  // The store applies the rule to what is stored: it throws when a requested
+  // message that is stored fails the rule, and removes nothing from a deleted
+  // or missing chat.
   ipcMain.handle(
     'chat:removeMessages',
     async (event, payload: { agentRef: string; chatId: string; messageIds: unknown }) => {

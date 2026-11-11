@@ -11,10 +11,11 @@
  * and released only on an explicit terminal outcome: its own successful reply
  * or cancel, a user-initiated discard (which also drops the older failures of
  * that chat), a newer send for the same chat that reaches a successful
- * terminal, which supersedes every failure recorded before it, or a rejection
- * by the server whose payload went back to the composer. Documents the
- * Host never received are the exception (#678 D13): only a discard, recovery or
- * retry of that snapshot itself, or a store reset, releases them. A snapshot still
+ * terminal, which supersedes every failure recorded before it, or a send that
+ * the server rejected, or that ended before its POST while its agent was on
+ * hold, and whose payload went back to the composer. Documents the Host never
+ * received are the exception (#678 D13): only a discard, recovery or retry of
+ * that snapshot itself, or a store reset, releases them. A snapshot still
  * awaiting its own terminal is never released by another send. Receiving a
  * `taskId` is NOT a terminal acknowledgement — a started task can still fail —
  * so it never releases the snapshot by itself.

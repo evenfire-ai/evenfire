@@ -689,7 +689,9 @@ export function useAgentChatController({
   // a snapshot of its own; `sendAgentMessage` has several early returns (image
   // guard, running task, send in flight) that retain nothing.
   const lastRetainedSendIdRef = useRef<string | null>(null)
-  // Ids of optimistic user turns withdrawn after the server rejected their send.
+  // Ids of optimistic user turns withdrawn because the server rejected their
+  // send, or because the send ended before its POST while its agent was on
+  // hold.
   // A reconcile or an older-page backfill that read the transcript before the
   // withdrawal drops them from what it writes, so the rejected turn does not
   // come back. Cleared with the retained-send store; each id is a random UUID
@@ -3330,7 +3332,8 @@ export function useAgentChatController({
 
   // Puts an undelivered payload back in the composer: the text in the draft of
   // `chatId`, then the attachments. An empty text never replaces a draft. Used
-  // by Recover input and by a send the server rejected.
+  // by Recover input and by a send that ends undelivered: rejected by the
+  // server, or ended before its POST while its agent was on hold.
   const restoreComposerPayload = useCallback(
     (
       chatId: string | null,
@@ -3603,7 +3606,8 @@ export function useAgentChatController({
       // Persist before the async POST so a Host wake, approval, tab switch, or
       // Desktop restart cannot erase the only copy of the user's outgoing turn.
       // The acknowledgement below updates this same ID with its task id. A send
-      // the server rejects withdraws it again (`withdrawUndeliveredTurn`).
+      // the server rejects, or one that ends before its POST while its agent is
+      // on hold, withdraws it again (`withdrawUndeliveredTurn`).
       if (sendChatId) {
         try {
           await chatStore.upsertMessages(sendAgent, sendChatId, [userMessage])

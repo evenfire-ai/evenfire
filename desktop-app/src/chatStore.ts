@@ -2238,14 +2238,17 @@ export class ChatStore {
   }
 
   /**
-   * Remove local user turns the server never answered, such as the optimistic
-   * turn of a send the server rejected. Each requested message that is stored
-   * must be a user turn with no server turn number and no task id, with no
-   * assistant message lacking a server turn number stored after it (a
-   * synchronous reply or a legacy reply). Numbered server turns after it are
-   * the normal result of a reconcile and do not count. If any requested
-   * message fails the rule, the call throws and removes nothing. Ids that are
-   * not stored are ignored. A deleted or missing chat is not created.
+   * Remove local user turns that carry no stored sign of a server answer, such
+   * as the optimistic turn of a send the server rejected or that was never
+   * posted. The store cannot ask the server; it checks what is stored. Each
+   * requested message that is stored must be a user turn with no server turn
+   * number and no task id, with no assistant message lacking a server turn
+   * number stored after it (for example a synchronous reply, a legacy reply,
+   * an error reply, or the reply of an earlier task stored before its turn
+   * number is known). Numbered server turns after it are the normal result of
+   * a reconcile and do not count. If any requested message fails the rule,
+   * the call throws and removes nothing. Ids that are not stored are ignored.
+   * A deleted or missing chat is not created.
    *
    * Returns the number of messages removed. The indexed message count is not
    * lowered: the index keeps the maximum because it can count server turns the
