@@ -85,8 +85,8 @@ describe('provider registry — auto-detection order (§5.9)', () => {
 
 describe('descriptor id === key invariant', () => {
   it('every descriptor reports its own key as id', () => {
-    // CoreProviderDescriptor.id is typed `string` and OpenAICompatibleProvider
-    // returns `cfg.id as LlmProvider`, so a typo (key `bailian`, id `'balian'`)
+    // CoreProviderDescriptor.id is typed `string` and `compatibleProfile`
+    // reports `cfg.id as LlmProvider`, so a typo (key `bailian`, id `'balian'`)
     // would compile and report the wrong provider. Lock id === key here.
     for (const p of ALL_PROVIDERS) {
       expect(descriptorFor(p).id).toBe(p)
@@ -186,10 +186,11 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
     expect(result?.getProviderType()).toBe('openai')
   })
 
-  // Covers the OpenAI-compatible factory arm end-to-end: the registry's
-  // descriptor.baseURL lookup + OpenAICompatibleProvider construction. The
-  // provider-specific tests build OpenAICompatibleProvider directly, so this is
-  // the only path exercising makeProvider's OpenAI-compatible (baseURL) branch.
+  // Covers the OpenAI-compatible factory arm through createLLMProvider: the
+  // registry's descriptor.baseURL lookup + OpenAIProvider composed with
+  // `compatibleProfile`. The provider-specific tests build the legacy
+  // OpenAICompatibleProvider alias directly; the wire-family tests
+  // (openaiFamily/__tests__/familyHarness.ts) also reach this branch via makeProvider.
   it('constructs an OpenAI-compatible provider (zai) through the registry', () => {
     const result = createLLMProvider(
       { zai: { 'zai-api-key': 'sk-zai' } },
