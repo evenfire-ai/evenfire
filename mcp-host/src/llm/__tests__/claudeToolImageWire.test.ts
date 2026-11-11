@@ -229,7 +229,11 @@ describe('#654 Claude tool-role image serialization (real serializer)', () => {
 
   it('refuses a tool-role image on a family whose wire has no tool-image position', async () => {
     const create = vi.fn(async (_input: unknown) => OPENAI_OK)
-    const provider = new OpenAIProvider({ chat: { completions: { create } } } as never, 'gpt-4o')
+    // The same spy on both protocols, so "nothing reached the SDK" holds whichever one runs.
+    const provider = new OpenAIProvider(
+      { chat: { completions: { create } }, responses: { create } } as never,
+      'gpt-4o'
+    )
     const adapter = new LlmPortAdapter(
       provider,
       'gpt-4o',
