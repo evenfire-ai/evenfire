@@ -19,9 +19,8 @@ example to copy from.
 
 - All platform services run on a real cluster (not a single dev-mode `mcp-host`).
 - The JWT auth chain is on the external edges (desktop → rpc-proxy,
-  service → control-api). RPC Proxy → MCP Host runtime calls also require the
-  dedicated shared edge credential, caller/service markers, and existing
-  Host/action bindings; NetworkPolicies restrict that edge.
+  service → control-api). `mcp-host` runtime routes still use edge trust
+  headers, restricted by NetworkPolicy.
 - Default-deny NetworkPolicies are enforced by the CNI.
 - Secrets and LLM keys live in cluster Secrets.
 - Workloads run non-root with capabilities dropped. The connector-image
@@ -220,6 +219,10 @@ covers the supported Minikube path. Production GCP rollout/rollback orchestratio
 is owned by `keyper-labs/evenfire-infra`; this OSS repository does not publish its
 exact workflow path. Do not enable the strict production Host protocol until that
 orchestrator enforces both directions of the barrier.
+The strict protocol also needs the dedicated edge credential
+(`RPC_PROXY_MCP_HOST_EDGE_TOKEN` in `rpc-proxy-secrets` and in the `mcp-host`
+Secret `rpc-proxy-edge-credentials`). No script in this repository creates it,
+and the default `legacy-headers` protocol does not use it.
 
 [minikube.md](minikube.md) and `scripts/minikube/full-setup.sh` show the full
 dependency graph. The minikube scripts are bound to a minikube profile; the

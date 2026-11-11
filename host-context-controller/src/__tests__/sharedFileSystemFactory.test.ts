@@ -427,13 +427,10 @@ describe('sharedFileSystemFactory — buildDeployment (controller + root initCon
     expect(byName.WSF_MAX_UPLOAD_BYTES?.value).toBe(String(100 * 1024 * 1024))
     expect(byName.WSF_MAX_LIST_ENTRIES?.value).toBe('5000')
     expect(byName.WSF_MAX_PATH_DEPTH?.value).toBe('32')
-    expect(byName.WSF_CONTROL_API_BASE_URL?.value).toBe(
-      'http://control-api.control-plane.svc.cluster.local:8090'
-    )
-    expect(byName.WSF_CONTROL_API_SERVICE_TOKEN?.valueFrom?.secretKeyRef).toEqual({
-      name: 'workspace-files-controller-service-token',
-      key: 'token',
-    })
+    // The controller has no call to control-api, so no Secret is projected:
+    // the public key above is its only credential input.
+    expect(env.filter(e => e.valueFrom?.secretKeyRef)).toEqual([])
+    expect(env.filter(e => e.name.startsWith('WSF_CONTROL_API_'))).toEqual([])
   })
 
   it('uses Recreate strategy so RWO upgrades do not deadlock on volume re-attach', () => {
@@ -449,8 +446,6 @@ describe('sharedFileSystemFactory — buildDeployment (controller + root initCon
 
   it('selects pods by app=workspace-files-controller plus SFS identity', () => {
     const dep = buildDeployment(makeSfs(), config)
-    expect(dep.metadata?.labels?.[SFS_LABEL]).toBe('team-mission')
-    expect(dep.metadata?.labels?.[SFS_NAMESPACE_LABEL]).toBe('mcp-host')
     expect(dep.spec?.selector.matchLabels).toMatchObject({
       app: WFC_APP_LABEL,
       [SFS_LABEL]: 'team-mission',
@@ -495,7 +490,7 @@ describe('sharedFileSystemFactory — NetworkPolicies', () => {
     expect(np.metadata?.labels?.['clerum.io/policy-type']).toBe(WFC_POLICY_TYPE)
   })
 
-  it('egress policy allows only DNS and the Control API checkpoint', () => {
+  it('egress policy allows DNS only', () => {
     const sfs = makeSfs()
     const np = buildEgressNetworkPolicy(sfs, config)
     expect(np.spec?.policyTypes).toEqual(['Egress'])
@@ -509,15 +504,6 @@ describe('sharedFileSystemFactory — NetworkPolicies', () => {
       { port: 53, protocol: 'UDP' },
       { port: 53, protocol: 'TCP' },
     ])
-    expect(np.spec?.egress?.[1]).toEqual({
-      to: [
-        {
-          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'control-plane' } },
-          podSelector: { matchLabels: { app: 'control-api' } },
-        },
-      ],
-      ports: [{ port: 8090, protocol: 'TCP' }],
-    })
-    expect(np.spec?.egress).toHaveLength(2)
+    expect(np.spec?.egress).toHaveLength(1)
   })
 })

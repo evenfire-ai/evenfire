@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import type { GlobalFileSystemCRD } from '../types'
 import {
   DEFAULT_GFS_STORAGE_CLASS,
-  GFS_LABEL,
   GFS_TEMPLATE_HASH_ANNOTATION,
   GfsFactoryConfig,
   buildDeployment,
@@ -80,10 +79,6 @@ describe('readerReplicas', () => {
 describe('gfsFactory writer Deployment', () => {
   const dep = buildDeployment(gfs(), config, 'writer')
 
-  it('retains the GlobalFileSystem identity label for credential rotation selection', () => {
-    expect(dep.metadata?.labels?.[GFS_LABEL]).toBe('gfs')
-  })
-
   it('is a single RW replica with same-pod ownership preparation', () => {
     expect(dep.metadata?.name).toBe('gfsc-writer')
     expect(dep.spec?.replicas).toBe(1)
@@ -150,17 +145,16 @@ describe('gfsFactory writer Deployment', () => {
     expect(byName('GFS_PORT')?.value).toBe('8087')
     expect(byName('GFS_DRIVE_NAME')?.value).toBe('main')
     expect(byName('GFS_TOKEN_AUDIENCE')?.value).toBe('gfs-controller')
-    expect(byName('GFS_CONTROL_API_BASE_URL')?.value).toBe(
-      'http://control-api.control-plane.svc.cluster.local:8090'
-    )
-    expect(byName('GFS_CONTROL_API_SERVICE_TOKEN')?.valueFrom?.secretKeyRef).toEqual({
-      name: 'gfs-controller-service-token',
-      key: 'token',
-    })
     expect(byName('GFS_PG_CONNECTION_STRING')?.valueFrom?.secretKeyRef?.name).toBe(
       'gfs-controller-db'
     )
     expect(byName('GFS_JWT_PUBLIC_KEY')?.valueFrom?.configMapKeyRef?.name).toBe('gfs-config')
+    // The controller has no call to control-api, so it gets no control-api
+    // credential: the permission-store DSN is its only Secret reference.
+    expect(env.filter(e => e.valueFrom?.secretKeyRef).map(e => e.name)).toEqual([
+      'GFS_PG_CONNECTION_STRING',
+    ])
+    expect(env.filter(e => e.name.startsWith('GFS_CONTROL_API_'))).toEqual([])
     expect(byName('GFS_SYNC_COPY_MAX_OBJECTS')).toBeUndefined()
     expect(byName('GFS_SYNC_COPY_MAX_BYTES')).toBeUndefined()
     expect(byName('GFS_SYNC_COPY_TIMEOUT_MS')).toBeUndefined()
@@ -311,9 +305,9 @@ describe('gfsFactory reader Deployment', () => {
     expect(mount?.readOnly).toBe(true)
     const env = dep.spec?.template.spec?.containers[0].env ?? []
     expect(env.find(e => e.name === 'GFS_STORAGE_ROLE')?.value).toBe('reader')
-    expect(
-      env.find(e => e.name === 'GFS_PG_CONNECTION_STRING')?.valueFrom?.secretKeyRef?.name
-    ).toBe('gfs-controller-reader-db')
+    expect(env.find(e => e.valueFrom?.secretKeyRef)?.valueFrom?.secretKeyRef?.name).toBe(
+      'gfs-controller-reader-db'
+    )
     expect(dep.spec?.strategy).toEqual({
       type: 'RollingUpdate',
       rollingUpdate: { maxUnavailable: 0, maxSurge: 1 },
@@ -374,7 +368,7 @@ describe('gfsFactory NetworkPolicies', () => {
     expect(rule.ports?.[0].port).toBe(8087)
   })
 
-  it('egress allows only DNS, permission Postgres, and the Control API checkpoint', () => {
+  it('egress allows DNS AND the permission-store Postgres (gfs-specific, NOT DNS-only like SFS)', () => {
     const np = buildEgressNetworkPolicy(gfs(), config)
     const egress = np.spec?.egress ?? []
     // DNS rule
@@ -385,16 +379,9 @@ describe('gfsFactory NetworkPolicies', () => {
     expect(pg).toBeDefined()
     const pgTo = pg?.to?.[0] as { podSelector?: { matchLabels?: Record<string, string> } }
     expect(pgTo.podSelector?.matchLabels?.app).toBe('control-postgres')
-    const checkpoint = egress.find(r => r.ports?.some(p => p.port === 8090))
-    expect(checkpoint?.to).toEqual([
-      {
-        namespaceSelector: {
-          matchLabels: { 'kubernetes.io/metadata.name': 'control-plane' },
-        },
-        podSelector: { matchLabels: { app: 'control-api' } },
-      },
-    ])
-    expect(egress).toHaveLength(3)
+    // DNS and Postgres are the whole egress: no path to control-api.
+    expect(egress).toHaveLength(2)
+    expect(egress.filter(r => r.ports?.some(p => p.port === 8090))).toEqual([])
   })
 
   it('adds kube-dns service-ip egress only when GKE NodeLocal DNS CIDR is configured', () => {
