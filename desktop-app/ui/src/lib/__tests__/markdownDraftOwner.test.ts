@@ -18,12 +18,26 @@ const owners: MarkdownDraftOwner[] = []
 
 function createOwner(content = 'saved', version = 1): MarkdownDraftOwner {
   const owner = new MarkdownDraftOwner()
-  owner.open(binding, { savedSnapshot: { content, version }, sessionGeneration: 1 })
+  owner.open(binding, { sessionGeneration: 1 })
   owners.push(owner)
+  completeStableRead(owner, binding, content, version)
   const capability = owner.beginCapabilityRefresh(binding)
   if (!capability) throw new Error('capability request was not reserved')
   owner.completeCapabilityRefresh(capability, true)
   return owner
+}
+
+function completeStableRead(
+  owner: MarkdownDraftOwner,
+  target: MarkdownDraftBinding,
+  content: string,
+  version: number
+): void {
+  const token = owner.beginStableRead(target)
+  if (!token) throw new Error('stable read was not reserved')
+  if (!owner.completeStableRead(token, { content, version, stable: true })) {
+    throw new Error('stable read was not accepted')
+  }
 }
 
 function readyState(owner: MarkdownDraftOwner): MarkdownDraftRecordSnapshot {
@@ -43,13 +57,13 @@ describe('MarkdownDraftOwner', () => {
     const otherScope = { ...binding, scopeKey: 'principal-1/team-b/env-dev' }
     const otherPrincipal = { ...binding, principalOwner: 'principal-owner-2' }
 
-    owner.open(sameTabOtherFile, { savedSnapshot: { content: 'other', version: 1 } })
-    owner.open(otherScope, { savedSnapshot: { content: 'scope b', version: 1 } })
-    owner.open(otherPrincipal, { savedSnapshot: { content: 'other user', version: 1 } })
+    owner.open(sameTabOtherFile)
+    owner.open(otherScope)
+    owner.open(otherPrincipal)
     expect(owner.get(binding)?.draft).toBe('saved')
-    expect(owner.get(sameTabOtherFile)?.draft).toBe('other')
-    expect(owner.get(otherScope)?.draft).toBe('scope b')
-    expect(owner.get(otherPrincipal)?.draft).toBe('other user')
+    expect(owner.get(sameTabOtherFile)).toMatchObject({ draft: '', savedSnapshot: null })
+    expect(owner.get(otherScope)).toMatchObject({ draft: '', savedSnapshot: null })
+    expect(owner.get(otherPrincipal)).toMatchObject({ draft: '', savedSnapshot: null })
   })
 
   it('never exposes another file draft from the same tab', () => {
@@ -57,7 +71,8 @@ describe('MarkdownDraftOwner', () => {
     owner.beginEdit(binding)
     owner.type(binding, 'secret draft for file A')
     const fileB = { ...binding, gfsUri: 'gfs://main/resource-2' }
-    owner.open(fileB, { savedSnapshot: { content: 'saved file B', version: 1 } })
+    owner.open(fileB)
+    completeStableRead(owner, fileB, 'saved file B', 1)
     expect(owner.getVisibleRecord(fileB)?.draft).toBe('saved file B')
     expect(owner.getVisibleRecord(fileB)?.editing).toBe(false)
     expect(owner.getVisibleRecord(binding)?.draft).toBe('secret draft for file A')
@@ -264,8 +279,11 @@ describe('MarkdownDraftOwner', () => {
     owner.type(binding, 'team a draft')
     const save = owner.reserveSave(binding)!
     const teamB = { ...binding, scopeKey: 'principal-1/team-b/env-dev' }
-    owner.open(teamB, { savedSnapshot: { content: 'team b saved', version: 1 } })
+    owner.open(teamB, { sessionGeneration: 2 })
     owner.setActiveScope(binding.principalOwner, teamB.scopeKey, 2)
+    completeStableRead(owner, teamB, 'team b saved', 1)
+    const teamBCapability = owner.beginCapabilityRefresh(teamB)!
+    owner.completeCapabilityRefresh(teamBCapability, true)
     expect(owner.requestClose(binding.tabId)).toBe('blocked')
     owner.completeSave(save, { kind: 'failure' })
     expect(owner.requestClose(binding.tabId)).toBe('confirm')
