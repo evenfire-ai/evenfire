@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import type { CanonicalActionTarget } from '@clerum/action-context-contracts'
@@ -126,6 +126,39 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     expect(databasePool?.idleCount ?? 0).toBe(databasePool?.totalCount ?? 0)
   })
 
+  // Cases issue sessions for the one shared user, and `createUserSession`
+  // keeps at most USER_SESSION_MAX_ACTIVE_PER_USER live sessions per user.
+  // Among sessions of one database second it revokes by `sid`, not by age, so
+  // the sessions earlier cases left behind could cost a case a session it
+  // still holds. Each case starts with none.
+  beforeEach(async () => {
+    await databasePool.query(`DELETE FROM external_user_sessions WHERE user_id = $1`, [userId])
+  })
+
+  /**
+   * Issues one session for the shared user. Fails when that create's session
+   * cap revoked a live session of this user (see `beforeEach`): no case here
+   * may depend on which one.
+   */
+  async function issueUserSession() {
+    const issued = await createUserSession({
+      userId,
+      email: `${userId}@example.test`,
+      authenticationMethods: ['password'],
+    })
+    const sessions = await databasePool.query<{ issuedLive: string; capped: string }>(
+      `SELECT count(*) FILTER (WHERE sid = $2 AND revoked_at IS NULL)::text AS "issuedLive",
+              count(*) FILTER (WHERE revocation_reason = 'session_limit')::text AS capped
+         FROM external_user_sessions
+        WHERE user_id = $1`,
+      [userId, issued.identity.sid]
+    )
+    // The issued session is live in this user's rows, so `capped` was read from them.
+    expect(sessions.rows[0]?.issuedLive).toBe('1')
+    expect(sessions.rows[0]?.capped).toBe('0')
+    return issued
+  }
+
   async function authority(input?: {
     operationId?: 'workflow.trigger' | 'workflow.read' | 'workflow.approval.decide'
     resourceType?: 'workflow_recipe' | 'workflow_approval'
@@ -133,11 +166,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     target?: CanonicalActionTarget
     effectiveTeamId?: string
   }): Promise<WorkflowAuthorityBinding> {
-    const issued = await createUserSession({
-      userId,
-      email: `${userId}@example.test`,
-      authenticationMethods: ['password'],
-    })
+    const issued = await issueUserSession()
     const operationId = input?.operationId ?? 'workflow.trigger'
     const target =
       input?.target ?? Object.freeze({ recipeNamespace: 'sandbox-recipes', recipeName: 'demo' })
@@ -200,11 +229,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
        ON CONFLICT DO NOTHING`,
       [userId, recipeNamespace, recipeName]
     )
-    const session = await createUserSession({
-      userId,
-      email: `${userId}@example.test`,
-      authenticationMethods: ['password'],
-    })
+    const session = await issueUserSession()
     const resource = canonicalResourceIdentity({
       environmentId: canonicalEnvironmentId(),
       type: 'workflow_approval',
@@ -496,11 +521,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
 
   /** One session that several delegations of a case share. */
   async function sharedSession(): Promise<SharedSession> {
-    const issued = await createUserSession({
-      userId,
-      email: `${userId}@example.test`,
-      authenticationMethods: ['password'],
-    })
+    const issued = await issueUserSession()
     return Object.freeze({
       sid: issued.identity.sid,
       sessionVersion: issued.identity.sessionVersion,
