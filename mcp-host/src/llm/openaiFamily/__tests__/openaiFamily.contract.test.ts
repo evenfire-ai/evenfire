@@ -9,7 +9,9 @@ import type { ChatMessage, ToolDefinition } from '../../../core/types'
 import { OpenAIProvider } from '../../openai'
 import { OpenAICompatibleProvider } from '../../openaiCompatible'
 import { type LlmProvider, descriptorFor } from '../../registryCore'
+import { azureProfile, compatibleProfile } from '../endpointProfiles'
 import {
+  AZURE_ENDPOINT,
   CHAT_FAMILY,
   FAMILY,
   RECORDED_TEXT_RESPONSE,
@@ -61,6 +63,20 @@ describe('OpenAI family — chat-only endpoints never call responses.create', ()
     await provider.completeSingleTurnWithTools(MESSAGES, TOOLS, { tool_choice: 'required' })
     expect(mock.chatCreate).toHaveBeenCalledTimes(2)
     expect(mock.responsesCreate).not.toHaveBeenCalled()
+  })
+})
+
+describe('only the official endpoint accepts a ready-built client', () => {
+  const ready = mockClient('https://unit.invalid/v1').client as never
+  const groq = descriptorFor('groq')
+
+  it.each([
+    ['azure', () => azureProfile(name => ({ AZURE_OPENAI_ENDPOINT: AZURE_ENDPOINT })[name])],
+    ['groq', () => compatibleProfile({ id: groq.id, baseURL: groq.baseURL! })],
+  ] as const)('%s refuses a client object instead of a key', (id, profile) => {
+    expect(() => profile().createClient(ready)).toThrow(TypeError)
+    expect(() => profile().createClient(ready)).toThrow(`[LLM] ${id}: expected an API key string`)
+    expect(profile().createClient(`unit-${id}-key`).baseURL).not.toBe('https://unit.invalid/v1')
   })
 })
 
