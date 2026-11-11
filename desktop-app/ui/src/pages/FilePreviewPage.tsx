@@ -342,7 +342,11 @@ export function FilePreviewPage({
         undefined,
         requestGeneration
       )
-      markdownDraftOwner.completeSave(request, { kind: 'success', version: saved.version })
+      const completed = markdownDraftOwner.completeSave(request, {
+        kind: 'success',
+        version: saved.version,
+      })
+      if (!completed) return
       if (
         mountedRef.current &&
         liveResourceUriRef.current === request.binding.gfsUri &&

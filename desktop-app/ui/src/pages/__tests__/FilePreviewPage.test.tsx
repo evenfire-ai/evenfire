@@ -1189,6 +1189,73 @@ describe('FilePreviewPage', () => {
     markdownDraftOwner.quit()
   })
 
+  it('does not announce success when the draft owner rejects save completion', async () => {
+    hookMock.useRealMarkdownEditor = true
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdea'
+    const replaceFile = vi.fn(async () => ({ version: 2 }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve: vi.fn(async () => ({
+            kind: 'file',
+            resourceId: '0123456789abcdef0123456789abcdea',
+            drive: 'main',
+            version: 2,
+          })),
+          downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
+            previewResult(uri, new TextEncoder().encode('# Saved source').buffer, 1, maxBytes)
+          ),
+          affordances: vi.fn(async () => activeAffordances),
+          replaceFile,
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    const completeSave = vi.spyOn(markdownDraftOwner, 'completeSave').mockReturnValue(false)
+    const pushToast = vi.fn()
+    render(
+      <FilePreviewPage
+        byteLength={14}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        pushToast={pushToast}
+        tabId="preview-tab-rejected-save-completion"
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Saved source' })
+    await waitFor(() =>
+      expect(
+        markdownDraftOwner.get({
+          principalOwner: 'principal-owner-1',
+          scopeKey: 'preview-test-user:main',
+          tabId: 'preview-tab-rejected-save-completion',
+          gfsUri: uri,
+        })
+      ).toMatchObject({ readReady: true, capability: 'positive' })
+    )
+    const menu = openPreviewActions('README.md')
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Edit' }))
+    fireEvent.change(
+      await screen.findByRole('textbox', { name: 'Edit Markdown source for README.md' }),
+      { target: { value: '# Updated source' } }
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(replaceFile).toHaveBeenCalledOnce())
+    await waitFor(() => expect(completeSave).toHaveBeenCalledOnce())
+    expect(pushToast).not.toHaveBeenCalledWith('Markdown saved', 'success')
+    expect(screen.getByRole('textbox', { name: 'Edit Markdown source for README.md' })).toBeTruthy()
+    markdownDraftOwner.quit()
+  })
+
   it('keeps Edit hidden while write capability is pending or denied', async () => {
     const uri = 'gfs://main/abababababababababababababababab'
     let resolveAffordances!: (value: ReturnType<typeof delegationAffordances>) => void
