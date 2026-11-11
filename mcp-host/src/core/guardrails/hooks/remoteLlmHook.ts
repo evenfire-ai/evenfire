@@ -28,7 +28,7 @@ import type {
 import type { Capability, Contributor } from '../types'
 import { DEFAULT_HOOK_HARD_DEADLINE_MS, guardHookFetcher } from './guardedFetch'
 import { type HookBreakerRegistry, defaultBreakerRegistry } from './hookBreaker'
-import { projectForHook } from './hookProjection'
+import { projectForHook, withoutProviderState } from './hookProjection'
 import type { HookDescriptor, HookFetcher, HookHttpResult, LifecyclePoint } from './types'
 
 type LlmContributor = Contributor<ToolCompletionRequest, ToolCompletionResponse>
@@ -185,7 +185,11 @@ export class RemoteLlmHook {
       // legacy path the system prompt lives inside `messages`; on the tiered path
       // there is none here and it rides `systemPromptParts`, preserved by the spread).
       const originalSystem = request.messages.filter(m => m.role === 'system')
-      next.messages = [...originalSystem, ...stripSystemRole(patch.messages as ChatMessage[])]
+      // Provider state may only come from a first-party decode, never from a hook.
+      const patched = stripSystemRole(patch.messages as ChatMessage[]).map(m =>
+        isRecord(m) ? withoutProviderState(m) : m
+      )
+      next.messages = [...originalSystem, ...patched]
     }
     const params = isRecord(patch.params) ? patch.params : undefined
     if (params) {
@@ -269,6 +273,12 @@ export class RemoteLlmHook {
       tool_calls: toolCalls,
       usage: response.usage,
       finish_reason: response.finish_reason,
+      // Kept even when the hook redacted the text or dropped a call: the hook
+      // never saw this state, it returns only to the driver that produced it,
+      // and a dropped call no longer matches its digest, so nothing is replayed.
+      ...(response.provider_continuation
+        ? { provider_continuation: response.provider_continuation }
+        : {}),
     }
     return this.contribution('allow', 'post_transformed', { phase: 'post', substitute })
   }

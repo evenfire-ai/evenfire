@@ -17,14 +17,13 @@
  * truth for the data.
  */
 import type { ProviderCredentials } from '../types'
-import { AzureOpenAIProvider } from './azure'
 import { ClaudeProvider } from './claude'
 import { type CodexSubscriptionDeps, CodexSubscriptionProvider } from './codexSubscription'
 import { buildBedrockConverseDriver } from './drivers/bedrockConverse'
 import { buildGoogleGenerativeDriver } from './drivers/googleGenerative'
 import { type GrokSubscriptionDeps, GrokSubscriptionProvider } from './grokSubscription'
 import { OpenAIProvider } from './openai'
-import { OpenAICompatibleProvider } from './openaiCompatible'
+import { azureProfile, compatibleProfile } from './openaiFamily/endpointProfiles'
 import { type ProviderEnvLookup, processEnvLookup } from './providerEnv'
 import { type LlmProvider, descriptorFor, primarySlot } from './registryCore'
 import type { SingleTurnProvider } from './types'
@@ -94,10 +93,10 @@ function constructProvider(
       // (AZURE_OPENAI_ENDPOINT) + `api-key` header + deployment-name-as-model, so
       // it deliberately has NO static baseURL and must not hit the data arm
       // below. Fails closed (throws) if the operator omitted the endpoint.
-      return new AzureOpenAIProvider(
+      return new OpenAIProvider(
         credentials[primarySlot(d).dataKey],
         model ?? d.defaultModel ?? '',
-        env
+        azureProfile(env)
       )
     case 'codex-subscription':
       if (process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true') {
@@ -128,10 +127,10 @@ function constructProvider(
     if (!d.defaultModel) {
       throw new Error(`[LLM] makeProvider: provider '${d.id}' requires a defaultModel`)
     }
-    return new OpenAICompatibleProvider(
-      { id: d.id, baseURL: d.baseURL, defaultModel: d.defaultModel },
+    return new OpenAIProvider(
       credentials[primarySlot(d).dataKey],
-      model
+      model ?? d.defaultModel,
+      compatibleProfile({ id: d.id, baseURL: d.baseURL })
     )
   }
   throw new Error(`[LLM] makeProvider: no factory registered for provider '${String(provider)}'`)

@@ -66,17 +66,3 @@ vulnerabilities:
       - "usr/local/lib/node_modules/npm/node_modules/undici/package.json"
     expired_at: 2027-02-28
     statement: "npm CLI bundled in the node:24.22.1-alpine base image; at runtime npm only launches next start and makes no registry requests. Clears with a base image bump. https://github.com/evenfire-ai/evenfire/issues/1431 devDependency (jsdom) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
-  - id: CVE-2026-93749
-    # source-map-js@1.2.1
-    paths:
-      - "app/control-ui/node_modules/source-map-js/package.json"
-      - "app/profile-ui/node_modules/source-map-js/package.json"
-    expired_at: 2027-02-28
-    statement: "Production dependency of next, also accepted in scripts/ci/dependency-audit-baseline.json. https://github.com/evenfire-ai/evenfire/issues/939"
-  - id: GHSA-wq5f-xc86-pv6w
-    # sharp@0.35.4
-    paths:
-      - "app/control-ui/node_modules/sharp/package.json"
-      - "app/profile-ui/node_modules/sharp/package.json"
-    expired_at: 2027-02-28
-    statement: "Production dependency of next, also accepted in scripts/ci/dependency-audit-baseline.json. https://github.com/evenfire-ai/evenfire/issues/939"
