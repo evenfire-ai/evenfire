@@ -278,7 +278,14 @@ export function errorRecoveryHint(kind: AppErrorKind): string {
   return 'Unexpected failure. Retry and check server health if it persists.'
 }
 
-/** The sentence and the recovery hint shown for a send whose POST failed. */
+/**
+ * The sentence and the recovery hint shown for a failed send: at the time of
+ * the failure, and for a retained failure with reason `post_failed`. `message`
+ * is the error the send threw (while opening the activity stream, in the call
+ * to the main process, or in a later step), or the fixed sentence recorded for
+ * a send its agent's hold stopped before it was handed to main. Only a
+ * payload-size error changes the text; otherwise `kind` selects it.
+ */
 export function describeSendFailure(
   message: string,
   kind: AppErrorKind

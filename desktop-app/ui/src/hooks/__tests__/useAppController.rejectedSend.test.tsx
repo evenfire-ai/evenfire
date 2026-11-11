@@ -844,7 +844,7 @@ describe('useAppController: a send the server rejects', () => {
     expect.soft(added, 'toasts').toHaveLength(1)
     expect.soft(added[0]?.tone, 'toast tone').toBe('error')
     const warning = warn.mock.calls.find(
-      ([label]) => label === '[chat-history] failed to withdraw a rejected message'
+      ([label]) => label === '[chat-history] failed to withdraw an undelivered message'
     )
     expect.soft(warning?.[1], 'warning').toEqual({ agentRef: AGENT, chatId, error: storeFault })
     expect.soft(JSON.stringify(warning?.[1] ?? null), 'warning text').not.toContain(text)
@@ -1107,7 +1107,7 @@ describe('useAppController: a send the server rejects', () => {
       // Witness: the refusal was handled (its warning was logged).
       expect(
         warn.mock.calls.filter(
-          ([label]) => label === '[chat-history] failed to withdraw a rejected message'
+          ([label]) => label === '[chat-history] failed to withdraw an undelivered message'
         )
       ).toHaveLength(1)
       expect(app.result.current.toasts.slice(toastsBefore)).toEqual([])

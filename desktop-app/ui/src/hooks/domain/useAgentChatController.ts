@@ -165,7 +165,7 @@ const HOST_FILE_ATTACHMENTS_DROPPED_MESSAGE =
 const HOST_INVALID_ATTACHMENT_CODE = 'LLM_INVALID_ATTACHMENT'
 // Recorded on a retained send that stopped because another path held its agent.
 const SEND_HELD_AGENT_MESSAGE = 'The agent was on hold, so the message was not sent.'
-// Shown when the local chat store refuses to withdraw a rejected turn.
+// Shown when the local chat store refuses to remove a withdrawn turn.
 const WITHDRAW_REJECTED_TURN_FAILED_MESSAGE =
   'Could not remove the unsent message from this conversation locally.'
 const LATEST_PAGE_FALLBACK_WINDOW = Symbol('latest-page-fallback-window')
@@ -690,10 +690,10 @@ export function useAgentChatController({
   // guard, running task, send in flight) that retain nothing.
   const lastRetainedSendIdRef = useRef<string | null>(null)
   // Ids of optimistic user turns withdrawn because the server rejected their
-  // send, or because the send ended before its POST while its agent was on
-  // hold.
+  // send, or because the send ended before it was handed to the main process
+  // while its agent was on hold.
   // A reconcile or an older-page backfill that read the transcript before the
-  // withdrawal drops them from what it writes, so the rejected turn does not
+  // withdrawal drops them from what it writes, so the withdrawn turn does not
   // come back. Cleared with the retained-send store; each id is a random UUID
   // made by one send.
   const withdrawnTurnIdsRef = useRef(new Set<string>())
@@ -2179,8 +2179,8 @@ export function useAgentChatController({
   // so the live branch can anchor and the idle branch can decide the durable
   // fallback. Replace is guarded on: chat active, server strictly grew, and NO
   // live tracker entry (a running task holds an optimistic turn a replace would
-  // drop) — re-checked after every await (TOCTOU). Turns withdrawn after a
-  // rejected send (`withdrawnTurnIdsRef`) are dropped from what it writes.
+  // drop) — re-checked after every await (TOCTOU). Withdrawn turns
+  // (`withdrawnTurnIdsRef`) are dropped from what it writes.
   const hydrateActiveChatFromServer = useCallback(
     async (
       chatKey: TaskKey,
@@ -2286,9 +2286,9 @@ export function useAgentChatController({
       setChatMessages(rendered)
       const meta = await chatStore.createChat(agentRef, chatId)
       if (!mayHydrate()) return staleResult(rendered)
-      // A send rejected during that await withdrew its turn after `rendered`
-      // was computed: filter again so neither the store, the loaded count nor
-      // the returned list brings it back.
+      // A send that ended during that await may have withdrawn its turn after
+      // `rendered` was computed: filter again so neither the store, the loaded
+      // count nor the returned list brings it back.
       rendered = withoutMessageIds(rendered, withdrawnTurnIdsRef.current)
       if (resp.activeTaskId) {
         await chatStore.replaceMessages(agentRef, chatId, rendered, {
@@ -3333,7 +3333,8 @@ export function useAgentChatController({
   // Puts an undelivered payload back in the composer: the text in the draft of
   // `chatId`, then the attachments. An empty text never replaces a draft. Used
   // by Recover input and by a send that ends undelivered: rejected by the
-  // server, or ended before its POST while its agent was on hold.
+  // server, or ended before it was handed to the main process while its agent
+  // was on hold.
   const restoreComposerPayload = useCallback(
     (
       chatId: string | null,
@@ -3606,8 +3607,9 @@ export function useAgentChatController({
       // Persist before the async POST so a Host wake, approval, tab switch, or
       // Desktop restart cannot erase the only copy of the user's outgoing turn.
       // The acknowledgement below updates this same ID with its task id. A send
-      // the server rejects, or one that ends before its POST while its agent is
-      // on hold, withdraws it again (`withdrawUndeliveredTurn`).
+      // the server rejects, or one that ends before it is handed to the main
+      // process while its agent is on hold, withdraws it again
+      // (`withdrawUndeliveredTurn`).
       if (sendChatId) {
         try {
           await chatStore.upsertMessages(sendAgent, sendChatId, [userMessage])
@@ -3791,7 +3793,7 @@ export function useAgentChatController({
           await chatStore.removeMessages(sendAgent, chatId, [userMessageId])
         } catch (error) {
           refused = true
-          console.warn('[chat-history] failed to withdraw a rejected message', {
+          console.warn('[chat-history] failed to withdraw an undelivered message', {
             agentRef: sendAgent,
             chatId,
             error,
@@ -3830,14 +3832,21 @@ export function useAgentChatController({
           }
           await chatStore.upsertMessages(sendAgent, sendChatId, [failedUserMessage])
         } catch {
-          // persistence is best-effort; the in-memory view still shows it
+          // Persistence is best-effort. When the chat is visible, the in-memory
+          // view still shows the marked turn. When it is not (for example the
+          // agent was held and deselected), neither memory nor the store keeps
+          // the mark, and the input survives only in the retained snapshot.
         }
       }
       // Another path held the agent while this send was pending, and the scope and
-      // the chat are still there. A send that was never posted, or that the server
-      // rejected with a 401 or 403, is withdrawn, and its input is kept as for a
-      // loss of access. A send that was posted and failed in another way keeps its
-      // turn, and its input is retained with the failure.
+      // the chat are still there. `postIssued` marks that the send was handed to
+      // the main process (`invokeHostMessage` was called), not that its POST was
+      // made: main can still refuse it before the POST, for example on request
+      // validation or while minting the RPC token, and such a refusal is treated
+      // as posted. A send that was not handed to main, or that was rejected with a
+      // 401 or 403, is withdrawn, and its input is kept as for a loss of access. A
+      // send that was handed to main and failed in another way keeps its turn,
+      // and its input is retained with the failure.
       let postIssued = false
       const sendHeldByAnotherPath = () =>
         sendAuthScopeIsCurrent() && !sendChatWasDeleted() && isHostAccessBlocked(sendAgent)
@@ -3879,6 +3888,7 @@ export function useAgentChatController({
           ...(fileReferences.length > 0 ? { fileReferences } : {}),
         }
 
+        // Handed to main from here, even if main refuses it before the POST.
         postIssued = true
         const response = await window.clerum.rpc.invokeHostMessage(
           sendAgent,
@@ -4305,9 +4315,13 @@ export function useAgentChatController({
       answeredWithoutFiles: snapshot.reason === 'host_files_dropped',
     } satisfies FailedAgentSend
   }, [retainedSends, retainedRevision, selectedAgent, activeChatId])
-  // The alert for a retained failure. A failed POST recorded the thrown error,
-  // which is technical detail and stays under "Technical details": its alert is
-  // the sentence for its kind. Other reasons keep the text they recorded.
+  // The alert for a retained failure. Reason `post_failed` records either the
+  // error the send threw (while opening the activity stream, in the call to the
+  // main process, or in a later step of the send), or the fixed
+  // `SEND_HELD_AGENT_MESSAGE` of a send its agent's hold stopped before it was
+  // handed to main. That text is technical detail and stays under "Technical
+  // details": the alert is the sentence for the failure's kind. Other reasons
+  // keep the text they recorded.
   const retainedFailureAlert = useMemo(() => {
     if (!visibleRetainedFailure) return null
     if (visibleRetainedFailure.reason !== 'post_failed') return visibleRetainedFailure.message
