@@ -15,7 +15,9 @@ import { OpenAIProvider } from '../../openai'
 import { OpenAICompatibleProvider } from '../../openaiCompatible'
 import { type LlmProvider, descriptorFor } from '../../registryCore'
 import type { SingleTurnProvider } from '../../types'
+import { azureProfile, compatibleProfile } from '../endpointProfiles'
 import {
+  AZURE_ENDPOINT,
   CHAT_FAMILY,
   FAMILY,
   RECORDED_TEXT_RESPONSE,
@@ -127,9 +129,36 @@ describe('T-R1 chat-only endpoints never call responses.create', () => {
   })
 })
 
+describe('only the official endpoint accepts a ready-built client', () => {
+  const ready = mockClient('https://unit.invalid/v1').client as never
+  const groq = descriptorFor('groq')
+
+  it.each([
+    ['azure', () => azureProfile(name => ({ AZURE_OPENAI_ENDPOINT: AZURE_ENDPOINT })[name])],
+    ['groq', () => compatibleProfile({ id: groq.id, baseURL: groq.baseURL! })],
+  ] as const)('%s refuses a client object instead of a key', (id, profile) => {
+    expect(() => profile().createClient(ready)).toThrow(TypeError)
+    expect(() => profile().createClient(ready)).toThrow(`[LLM] ${id}: expected an API key string`)
+    expect(profile().createClient(`unit-${id}-key`).baseURL).not.toBe('https://unit.invalid/v1')
+  })
+})
+
 describe('OpenAICompatibleProvider is a constructor-only alias', () => {
+  // Reflect.ownKeys also sees non-enumerable and symbol keys, which a member
+  // added with Object.defineProperty would use to hide from Object.keys.
+  const ownKeys = (target: object) => Reflect.ownKeys(target).map(String).sort()
+
+  function aliasFor(id: LlmProvider, model?: string) {
+    const d = descriptorFor(id)
+    return new OpenAICompatibleProvider(
+      { id: d.id, baseURL: d.baseURL!, defaultModel: d.defaultModel! },
+      `unit-${id}-key`,
+      model
+    )
+  }
+
   it('declares no members besides its constructor', () => {
-    expect(Object.getOwnPropertyNames(OpenAICompatibleProvider.prototype)).toEqual(['constructor'])
+    expect(ownKeys(OpenAICompatibleProvider.prototype)).toEqual(['constructor'])
     expect(Object.getPrototypeOf(OpenAICompatibleProvider.prototype)).toBe(OpenAIProvider.prototype)
   })
 
@@ -137,21 +166,50 @@ describe('OpenAICompatibleProvider is a constructor-only alias', () => {
   // The reference is the registry's own composition, so the alias may carry
   // exactly the fields the factory output carries and nothing more.
   it('instances carry the same own fields as the registry-built driver and no statics', () => {
-    const d = descriptorFor('groq')
-    const alias = new OpenAICompatibleProvider(
-      { id: d.id, baseURL: d.baseURL!, defaultModel: d.defaultModel! },
-      'unit-groq-key'
-    )
-    const registryBuilt = buildFamilyProvider('groq')
-    expect(Object.keys(alias).sort()).toEqual(Object.keys(registryBuilt).sort())
-    expect(Object.getOwnPropertySymbols(alias)).toEqual([])
-    expect(Object.getOwnPropertyNames(OpenAICompatibleProvider).sort()).toEqual([
-      'length',
-      'name',
-      'prototype',
-    ])
-    expect(Object.getOwnPropertySymbols(OpenAICompatibleProvider)).toEqual([])
+    expect(ownKeys(aliasFor('groq'))).toEqual(ownKeys(buildFamilyProvider('groq')))
+    expect(ownKeys(OpenAICompatibleProvider)).toEqual(['length', 'name', 'prototype'])
   })
+
+  // Same fields are not enough: the constructor could still compose them from
+  // different arguments. What the alias exposes and sends must match the factory.
+  it.each([
+    ['groq', undefined],
+    ['moonshot', undefined],
+    ['zai', 'unit-explicit-model'],
+  ] as const)(
+    '%s: identity, client and wire payload match the registry-built driver',
+    async (id, model) => {
+      const built = [aliasFor(id, model), buildFamilyProvider(id, model)].map(provider => {
+        const holder = provider as unknown as {
+          client: { baseURL: string; apiKey: string }
+          defaultModel: string
+        }
+        return {
+          provider,
+          observed: {
+            type: provider.getProviderType(),
+            defaultModel: holder.defaultModel,
+            baseURL: holder.client.baseURL,
+            apiKey: holder.client.apiKey,
+          },
+          holder,
+        }
+      })
+      expect(built[0]!.observed).toEqual(built[1]!.observed)
+
+      const payloads = []
+      for (const { provider, holder } of built) {
+        const mock = mockClient(holder.client.baseURL)
+        ;(holder as { client: unknown }).client = mock.client
+        await provider.completeSingleTurnWithTools(MESSAGES, TOOLS, {
+          temperature: 1.7,
+          tool_choice: 'required',
+        })
+        payloads.push(mock.chatCreate.mock.calls)
+      }
+      expect(JSON.stringify(payloads[0])).toBe(JSON.stringify(payloads[1]))
+    }
+  )
 })
 
 describe('the driver reads its client on every call', () => {

@@ -6,7 +6,10 @@
  * snapshot of that behavior, not an equivalence oracle against older code.
  *
  * The base corpus was generated from the pre-composition drivers by running
- * this same file with UPDATE_CHAT_CORPUS=1. Every provider is built through the
+ * this same file with UPDATE_CHAT_CORPUS=1, except the `missing-credential|*`
+ * entries: they were regenerated from the composed drivers once only the SDK
+ * error's first sentence was recorded, and that sentence is the same one the
+ * pre-composition drivers raise. Every provider is built through the
  * real factory (`makeProvider`) and its SDK client is swapped for a recorder
  * after construction, so what is compared is exactly what the driver hands to
  * `chat.completions.create` (payload + request options), plus the decoded core
@@ -497,7 +500,7 @@ async function buildCorpus(): Promise<Record<string, unknown>> {
 }
 
 describe('OpenAI wire family — byte-identical chat corpus', () => {
-  it('matches the corpus recorded from the pre-composition drivers', async () => {
+  it('matches the recorded chat corpus', async () => {
     const corpus = await buildCorpus()
     if (UPDATE) {
       // Regenerating rewrites the oracle and skips every comparison, so in CI it
@@ -510,7 +513,11 @@ describe('OpenAI wire family — byte-identical chat corpus', () => {
         ([k, v]) => `${JSON.stringify(k)}:${JSON.stringify(v)}`
       )
       writeFileSync(CORPUS_PATH, `{\n${lines.join(',\n')}\n}\n`)
-      return
+      // A regeneration compares nothing, so it must never report green: a dev
+      // regenerating on top of a regression would otherwise see it accepted.
+      throw new Error(
+        'chat corpus regenerated; review the fixture diff and re-run without UPDATE_CHAT_CORPUS to compare'
+      )
     }
     expect(existsSync(CORPUS_PATH)).toBe(true)
     const base = JSON.parse(readFileSync(CORPUS_PATH, 'utf8')) as Record<string, unknown>

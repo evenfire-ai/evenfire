@@ -12,17 +12,28 @@ import type { ClassifiedError } from '../types'
 import type { EndpointProfile, OptionPolicy } from './endpointProfile'
 import { azureParamPolicy, compatibleParamPolicy, officialParamPolicy } from './modelParamPolicy'
 
-/**
- * Official OpenAI historically accepted any non-string as a ready client, while
- * Azure and the compatibles always built their own; a missing credential must
- * keep failing at construction there (the SDK throws on an absent key).
- */
+/** Official OpenAI historically accepted any non-string as a ready client. */
 function officialClient(keyOrClient: string | OpenAI): OpenAI {
   return typeof keyOrClient === 'string' ? new OpenAI({ apiKey: keyOrClient }) : keyOrClient
 }
 
-function ownClient(keyOrClient: string | OpenAI, build: (apiKey: string) => OpenAI): OpenAI {
-  return typeof keyOrClient === 'object' && keyOrClient !== null ? keyOrClient : build(keyOrClient)
+/**
+ * Azure and the compatibles always build their own client, because the base
+ * URL and auth header live in it: a ready client would silently bypass both,
+ * so it is refused. An absent key still reaches the SDK, which keeps failing
+ * at construction with its own missing-credential error.
+ */
+function ownClient(
+  id: string,
+  keyOrClient: string | OpenAI,
+  build: (apiKey: string) => OpenAI
+): OpenAI {
+  if (typeof keyOrClient === 'object' && keyOrClient !== null) {
+    throw new TypeError(
+      `[LLM] ${id}: expected an API key string, got a client object; this endpoint builds its own client`
+    )
+  }
+  return build(keyOrClient)
 }
 
 export function officialOpenAIProfile(): EndpointProfile {
@@ -77,6 +88,7 @@ export function azureProfile(env: ProviderEnvLookup = processEnvLookup): Endpoin
     protocol: 'openai-chat',
     createClient: keyOrClient =>
       ownClient(
+        'azure',
         keyOrClient,
         apiKey =>
           new OpenAI({
@@ -154,7 +166,7 @@ export function compatibleProfile(cfg: { id: string; baseURL: string }): Endpoin
     id: cfg.id as LlmProvider,
     protocol: 'openai-chat',
     createClient: keyOrClient =>
-      ownClient(keyOrClient, apiKey => new OpenAI({ apiKey, baseURL: cfg.baseURL })),
+      ownClient(cfg.id, keyOrClient, apiKey => new OpenAI({ apiKey, baseURL: cfg.baseURL })),
     options: {
       temperatureCeiling: cfg.id === 'moonshot' ? 1 : 2,
       downgradeRequiredToolChoice: cfg.id === 'moonshot',
