@@ -126,12 +126,12 @@ function service(
   const configured = svc.configure({
     provider: 'openai',
     model: MODEL,
-    apiKey: 'sk-primary-0000000000',
+    apiKey: 'sk-fake-primary-0000',
     llmSecretName: 'chatllm-api-keys',
     ...(withFallback
       ? {
           llmPolicy: {
-            fallbacks: [{ provider: 'openai', model: MODEL, apiKey: 'sk-fallback-0000000000' }],
+            fallbacks: [{ provider: 'openai', model: MODEL, apiKey: 'sk-fake-fallback-0000' }],
           },
         }
       : {}),
@@ -144,15 +144,15 @@ const step = (stepId: string) => ({ stepId, instruction: 'Say hello.', contextVa
 
 describe('T-R2 workflow text step over Responses', () => {
   it('returns the recorded text and meters its usage', async () => {
-    const sdk = sdkByKey({ 'sk-primary-0000000000': [recorded('v1-text-gpt-6.1-terra')] })
+    const sdk = sdkByKey({ 'sk-fake-primary-0000': [recorded('v1-text-gpt-6.1-terra')] })
     const { svc, enqueued } = service(sdk.llmFactory, false)
 
     const res = await svc.executeStep(step('s1'))
 
     const usage = recordedResponse('v1-text-gpt-6.1-terra').usage as Record<string, number>
     expect(sdk.chatCalls()).toBe(0)
-    expect(sdk.calls('sk-primary-0000000000')).toBe(1)
-    expect(sdk.payload('sk-primary-0000000000', 0)).toMatchObject({ model: MODEL, store: false })
+    expect(sdk.calls('sk-fake-primary-0000')).toBe(1)
+    expect(sdk.payload('sk-fake-primary-0000', 0)).toMatchObject({ model: MODEL, store: false })
     expect(res).toMatchObject({
       status: 'completed',
       output: outputText('v1-text-gpt-6.1-terra'),
@@ -169,7 +169,7 @@ describe('T-R2 workflow text step over Responses', () => {
 
   it('reads an incomplete response as a length stop and asks for one continuation', async () => {
     const sdk = sdkByKey({
-      'sk-primary-0000000000': [
+      'sk-fake-primary-0000': [
         recorded('v1-incomplete-gpt-5.4-mini'),
         recorded('v1-text-gpt-6.1-terra'),
       ],
@@ -178,7 +178,7 @@ describe('T-R2 workflow text step over Responses', () => {
 
     const res = await svc.executeStep(step('s1'))
 
-    expect(sdk.calls('sk-primary-0000000000')).toBe(2)
+    expect(sdk.calls('sk-fake-primary-0000')).toBe(2)
     expect(res.status).toBe('completed')
     expect(res.output).toBe(
       `${outputText('v1-incomplete-gpt-5.4-mini')}\n${outputText('v1-text-gpt-6.1-terra')}`
@@ -189,7 +189,7 @@ describe('T-R2 workflow text step over Responses', () => {
 describe('T-R2 workflow failover text step over Responses', () => {
   it('a rate-limited primary fails over and the step returns the fallback text and usage', async () => {
     const sdk = sdkByKey({
-      'sk-primary-0000000000': [
+      'sk-fake-primary-0000': [
         async () => {
           throw openaiApiError(429, {
             code: 'rate_limit_exceeded',
@@ -198,7 +198,7 @@ describe('T-R2 workflow failover text step over Responses', () => {
           })
         },
       ],
-      'sk-fallback-0000000000': [recorded('v1-text-gpt-4.1')],
+      'sk-fake-fallback-0000': [recorded('v1-text-gpt-4.1')],
     })
     const { svc, enqueued } = service(sdk.llmFactory, true)
 
@@ -206,8 +206,8 @@ describe('T-R2 workflow failover text step over Responses', () => {
 
     const usage = recordedResponse('v1-text-gpt-4.1').usage as Record<string, number>
     expect(sdk.chatCalls()).toBe(0)
-    expect(sdk.calls('sk-primary-0000000000')).toBe(1)
-    expect(sdk.calls('sk-fallback-0000000000')).toBe(1)
+    expect(sdk.calls('sk-fake-primary-0000')).toBe(1)
+    expect(sdk.calls('sk-fake-fallback-0000')).toBe(1)
     expect(res).toMatchObject({
       status: 'completed',
       output: outputText('v1-text-gpt-4.1'),
@@ -223,25 +223,22 @@ describe('T-R2 workflow failover text step over Responses', () => {
 describe('T-E4 workflow: a failed 2xx is not retried, failed over or cooled down', () => {
   it('one call to the primary, the fallback is never reached, the next step still uses the primary', async () => {
     const sdk = sdkByKey({
-      'sk-primary-0000000000': [
-        failedResponse('invalid_prompt'),
-        recorded('v1-text-gpt-6.1-terra'),
-      ],
-      'sk-fallback-0000000000': [recorded('v1-text-gpt-4.1')],
+      'sk-fake-primary-0000': [failedResponse('invalid_prompt'), recorded('v1-text-gpt-6.1-terra')],
+      'sk-fake-fallback-0000': [recorded('v1-text-gpt-4.1')],
     })
     const { svc } = service(sdk.llmFactory, true)
 
     const failed = await svc.executeStep(step('s1'))
 
     expect(failed.status).toBe('failed')
-    expect(sdk.calls('sk-primary-0000000000')).toBe(1)
-    expect(sdk.calls('sk-fallback-0000000000')).toBe(0)
+    expect(sdk.calls('sk-fake-primary-0000')).toBe(1)
+    expect(sdk.calls('sk-fake-fallback-0000')).toBe(0)
 
     // Without a cooldown the next step is served by the primary again.
     const next = await svc.executeStep(step('s2'))
 
     expect(next).toMatchObject({ status: 'completed', output: outputText('v1-text-gpt-6.1-terra') })
-    expect(sdk.calls('sk-primary-0000000000')).toBe(2)
-    expect(sdk.calls('sk-fallback-0000000000')).toBe(0)
+    expect(sdk.calls('sk-fake-primary-0000')).toBe(2)
+    expect(sdk.calls('sk-fake-fallback-0000')).toBe(0)
   })
 })
