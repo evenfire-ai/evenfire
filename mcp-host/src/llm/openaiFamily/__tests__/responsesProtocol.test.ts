@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import type OpenAI from 'openai'
 import { LlmError, LlmErrorCode } from '../../../core/errors'
 import {
   type ChatMessage,
@@ -819,6 +820,42 @@ describe('Responses decode — a response that did not complete throws', () => {
       expect(llmErr.message).not.toMatch(/empty response/i)
       expect(llmErr).not.toHaveProperty('usage')
     })
+  }
+
+  // Typed over the SDK's own union: a code the SDK adds fails to compile here
+  // until it is classified.
+  const byProviderCode: Record<OpenAI.Responses.ResponseError['code'], [LlmErrorCode, boolean]> = {
+    server_error: [LlmErrorCode.ModelOverloaded, true],
+    rate_limit_exceeded: [LlmErrorCode.RateLimited, true],
+    invalid_prompt: [LlmErrorCode.InvalidResponse, false],
+    vector_store_timeout: [LlmErrorCode.InvalidResponse, false],
+    invalid_image: [LlmErrorCode.InvalidAttachment, false],
+    invalid_image_format: [LlmErrorCode.InvalidAttachment, false],
+    invalid_base64_image: [LlmErrorCode.InvalidAttachment, false],
+    invalid_image_url: [LlmErrorCode.InvalidAttachment, false],
+    image_too_large: [LlmErrorCode.InvalidAttachment, false],
+    image_too_small: [LlmErrorCode.InvalidAttachment, false],
+    image_parse_error: [LlmErrorCode.InvalidAttachment, false],
+    invalid_image_mode: [LlmErrorCode.InvalidAttachment, false],
+    image_file_too_large: [LlmErrorCode.InvalidAttachment, false],
+    unsupported_image_media_type: [LlmErrorCode.InvalidAttachment, false],
+    empty_image_file: [LlmErrorCode.InvalidAttachment, false],
+    failed_to_download_image: [LlmErrorCode.InvalidAttachment, false],
+    image_file_not_found: [LlmErrorCode.InvalidAttachment, false],
+    image_content_policy_violation: [LlmErrorCode.ContentFiltered, false],
+  }
+
+  for (const op of ops) {
+    it.each(Object.entries(byProviderCode))(
+      `${op}: failed with SDK code %s`,
+      (providerCode, [code, retryable]) => {
+        const err = thrown(op, withStatus('failed', { code: providerCode, message: 'x' }))
+        expect(err).toBeInstanceOf(OpenAIResponseFailedError)
+        const llmErr = err as LlmError
+        expect([llmErr.code, llmErr.retryable]).toEqual([code, retryable])
+        expect(llmErr.providerCode).toBe(providerCode)
+      }
+    )
   }
 
   it('leaves a content-free warning whose keys the logger does not redact', () => {

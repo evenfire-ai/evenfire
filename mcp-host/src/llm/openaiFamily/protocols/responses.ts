@@ -38,16 +38,18 @@ const OPENAI_RESPONSES = 'openai-responses' as const
  * A 2xx whose `status` is neither `completed` nor `incomplete`. Not retryable
  * by default: the same request gets the same answer. The transient provider
  * codes are classified as their HTTP status would be, so a failure reported
- * inside a 2xx behaves like the equivalent 5xx/429.
+ * inside a 2xx behaves like the equivalent 5xx/429. A rejected image is named
+ * as such so the turn fails as a bad attachment, not as a provider fault.
  */
 export class OpenAIResponseFailedError extends LlmError {
   constructor(provider: string, status: string | undefined, providerCode: string | undefined) {
     const transient = providerCode === undefined ? undefined : TRANSIENT_CODES.get(providerCode)
+    const terminal = providerCode === undefined ? undefined : TERMINAL_CODES.get(providerCode)
     super(
       `OpenAI response finished with status '${status ?? 'missing'}'` +
         (providerCode ? ` (${providerCode})` : ''),
       provider,
-      transient ?? LlmErrorCode.InvalidResponse,
+      transient ?? terminal ?? LlmErrorCode.InvalidResponse,
       transient !== undefined,
       undefined,
       undefined,
@@ -60,6 +62,26 @@ export class OpenAIResponseFailedError extends LlmError {
 const TRANSIENT_CODES: ReadonlyMap<string, LlmErrorCode> = new Map([
   ['server_error', LlmErrorCode.ModelOverloaded],
   ['rate_limit_exceeded', LlmErrorCode.RateLimited],
+])
+
+type ResponseErrorCode = OpenAI.Responses.ResponseError['code']
+
+// The same image fails the same way on a retry and on any other provider.
+const TERMINAL_CODES: ReadonlyMap<string, LlmErrorCode> = new Map<ResponseErrorCode, LlmErrorCode>([
+  ['invalid_image', LlmErrorCode.InvalidAttachment],
+  ['invalid_image_format', LlmErrorCode.InvalidAttachment],
+  ['invalid_base64_image', LlmErrorCode.InvalidAttachment],
+  ['invalid_image_url', LlmErrorCode.InvalidAttachment],
+  ['image_too_large', LlmErrorCode.InvalidAttachment],
+  ['image_too_small', LlmErrorCode.InvalidAttachment],
+  ['image_parse_error', LlmErrorCode.InvalidAttachment],
+  ['invalid_image_mode', LlmErrorCode.InvalidAttachment],
+  ['image_file_too_large', LlmErrorCode.InvalidAttachment],
+  ['unsupported_image_media_type', LlmErrorCode.InvalidAttachment],
+  ['empty_image_file', LlmErrorCode.InvalidAttachment],
+  ['failed_to_download_image', LlmErrorCode.InvalidAttachment],
+  ['image_file_not_found', LlmErrorCode.InvalidAttachment],
+  ['image_content_policy_violation', LlmErrorCode.ContentFiltered],
 ])
 
 // ─── Shared pieces ──────────────────────────────────────────
