@@ -6,7 +6,7 @@ import {
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
 import { canonicalRefusalCode } from './imageSource'
 import { rateLimitedCode, retryAfterMs } from './retryAfter'
-import { upstreamRejectedStatus } from './upstreamRejected'
+import { upstreamRejectedStatus, upstreamRequestRejectedMessage } from './upstreamRejected'
 
 export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completions'
 
@@ -14,7 +14,13 @@ export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completion
  * Operator-facing text for a proxy denial. Codes an operator must act on get a
  * sentence that says what to do; everything else keeps the diagnostic shape.
  */
-export function grokProxyErrorMessage(code: string, status?: number): string {
+export function grokProxyErrorMessage(
+  code: string,
+  status?: number,
+  upstreamStatus?: number
+): string {
+  const rejected = upstreamRequestRejectedMessage(code, upstreamStatus)
+  if (rejected) return rejected
   if (
     code === 'visual_host_share' ||
     code === 'visual_gate' ||
@@ -217,9 +223,10 @@ export class GrokLlmProxyClient {
             : response.status === 413
               ? 'payload_too_large'
               : 'provider_unavailable'
-      throw new GrokProxyError(code, grokProxyErrorMessage(code, response.status), {
+      const upstreamStatus = upstreamRejectedStatus(code, payload.upstreamStatus)
+      throw new GrokProxyError(code, grokProxyErrorMessage(code, response.status, upstreamStatus), {
         retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined,
-        upstreamStatus: upstreamRejectedStatus(code, payload.upstreamStatus),
+        upstreamStatus,
       })
     }
     if (!response.body) {
@@ -254,9 +261,12 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<GrokProxy
       if (!line) continue
       const frame = JSON.parse(line.slice(6)) as GrokProxyFrame
       if (frame.type === 'error') {
-        throw new GrokProxyError(frame.code, grokProxyErrorMessage(frame.code), {
-          upstreamStatus: upstreamRejectedStatus(frame.code, frame.upstreamStatus),
-        })
+        const upstreamStatus = upstreamRejectedStatus(frame.code, frame.upstreamStatus)
+        throw new GrokProxyError(
+          frame.code,
+          grokProxyErrorMessage(frame.code, undefined, upstreamStatus),
+          { upstreamStatus }
+        )
       }
       if (frame.type === 'text') text += frame.text
       if (frame.type === 'tool_call') toolCalls.push(frame)
