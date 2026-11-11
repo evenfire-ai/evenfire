@@ -84,6 +84,7 @@ import {
   RESPONSES_MODEL,
   type RecordedItem,
   deepFreeze,
+  driverEpoch,
   recordedResponse,
 } from './responsesFixtures'
 
@@ -547,7 +548,7 @@ class World {
         provider: 'openai',
         protocol: 'openai-responses',
         model: RESPONSES_MODEL,
-        epoch: (this.primary.driver as unknown as { epoch: string }).epoch,
+        epoch: driverEpoch(this.primary.driver),
       },
       layout: [
         {

@@ -22,6 +22,19 @@ export function recordedResponse(name: string): RecordedResponse {
   return JSON.parse(readFileSync(join(FIXTURES, `${name}.json`), 'utf8')).res
 }
 
+/**
+ * The continuity epoch of a real driver, read from its private field. Throws
+ * if the field is gone or no longer a UUID, so a rename turns the forgery
+ * tests red instead of letting them forge an owner with `epoch: undefined`.
+ */
+export function driverEpoch(driver: unknown): string {
+  const epoch = (driver as { epoch?: unknown }).epoch
+  if (typeof epoch !== 'string' || !/^[0-9a-f-]{36}$/i.test(epoch)) {
+    throw new Error(`driver has no continuity epoch (got ${typeof epoch})`)
+  }
+  return epoch
+}
+
 export function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
     Object.freeze(value)

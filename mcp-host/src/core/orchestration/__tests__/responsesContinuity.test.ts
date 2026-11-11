@@ -14,6 +14,7 @@ import {
   RESPONSES_MODEL,
   type RecordedItem,
   decodedResponse,
+  driverEpoch,
   recordedResponse,
   responsesDriver,
 } from '../../../llm/openaiFamily/__tests__/responsesFixtures'
@@ -128,6 +129,7 @@ describe('hooks never see continuity, and seeing the request does not erase it',
     // made up. It claims the driver's owner and a matching digest (computable
     // from the calls the hook can see), so only the strip can stop it.
     const digest = decodedResponse('v1-rfc-gpt-6.1-terra').provider_continuation!.digest
+    const epoch = driverEpoch(driver.provider)
     const transport = recordingTransport((point, body) => {
       if (point !== 'pre_call') return {}
       const messages = (body.messages as Record<string, unknown>[]).map(m =>
@@ -139,7 +141,7 @@ describe('hooks never see continuity, and seeing the request does not erase it',
                   provider: 'openai',
                   protocol: 'openai-responses',
                   model: RESPONSES_MODEL,
-                  epoch: (driver.provider as unknown as { epoch: string }).epoch,
+                  epoch,
                 },
                 layout: [
                   {

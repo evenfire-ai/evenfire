@@ -234,6 +234,16 @@ describe('Responses encode — request parameters', () => {
     for (const model of PASSED) expect(encode(model).temperature, model).toBe(0.3)
   })
 
+  // Responses has a single output-token field, written by its encoder; a
+  // tokenField on its rows would be data nothing reads.
+  it('resolves no token field for Responses', () => {
+    for (const model of ['gpt-6.1-terra', 'gpt-4.1']) {
+      expect(officialParamPolicy.resolve(model, 'openai-responses'), model).toStrictEqual({
+        temperature: model === 'gpt-4.1' ? 'pass' : 'omit',
+      })
+    }
+  })
+
   it('leaves the Chat rows of the official policy unchanged', () => {
     expect(officialParamPolicy.resolve('gpt-6.1-terra', 'openai-chat')).toEqual({
       tokenField: 'max_tokens',
@@ -657,6 +667,10 @@ describe('Responses decode — continuity is attached only for replayable output
       'function_call',
     ])
     expect(decoded.provider_continuation?.owner).toEqual(TERRA)
+  })
+
+  it('caps the continuity carried per message at 256 KiB', () => {
+    expect(CONTINUATION_REASONING_MAX_BYTES).toBe(256 * 1024)
   })
 
   it('reasoning over the size limit is dropped with a size-only warning', () => {

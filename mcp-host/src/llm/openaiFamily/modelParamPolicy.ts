@@ -5,10 +5,11 @@
  */
 import type { WireProtocolId } from './protocols/types'
 
-export type TokenField = 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'
+export type TokenField = 'max_tokens' | 'max_completion_tokens'
 
 export interface ResolvedModelParams {
-  readonly tokenField: TokenField
+  /** Chat only: Responses has a single output-token field, set by its encoder. */
+  readonly tokenField?: TokenField
   readonly temperature: 'pass' | 'omit'
 }
 
@@ -16,11 +17,15 @@ export interface ModelParamPolicy {
   resolve(model: string, protocol: WireProtocolId): ResolvedModelParams
 }
 
-interface ParamRow extends ResolvedModelParams {
-  readonly protocol: WireProtocolId
+interface RowMatch {
   /** `null` matches any model. */
   readonly family: RegExp | null
+  readonly temperature: 'pass' | 'omit'
 }
+
+type ParamRow =
+  | (RowMatch & { readonly protocol: 'openai-chat'; readonly tokenField: TokenField })
+  | (RowMatch & { readonly protocol: Exclude<WireProtocolId, 'openai-chat'> })
 
 /**
  * OpenAI's reasoning/latest families reject the legacy `max_tokens` field and
@@ -36,7 +41,9 @@ function tablePolicy(name: string, rows: readonly ParamRow[]): ModelParamPolicy 
       if (!row) {
         throw new Error(`[LLM] ${name} param policy has no row for protocol '${protocol}'`)
       }
-      return { tokenField: row.tokenField, temperature: row.temperature }
+      return row.protocol === 'openai-chat'
+        ? { tokenField: row.tokenField, temperature: row.temperature }
+        : { temperature: row.temperature }
     },
   }
 }
@@ -67,13 +74,11 @@ const OFFICIAL_RESPONSES_ROWS: readonly ParamRow[] = [
   {
     protocol: 'openai-responses',
     family: OPENAI_RESPONSES_REASONING_FAMILY,
-    tokenField: 'max_output_tokens',
     temperature: 'omit',
   },
   {
     protocol: 'openai-responses',
     family: null,
-    tokenField: 'max_output_tokens',
     temperature: 'pass',
   },
 ]
