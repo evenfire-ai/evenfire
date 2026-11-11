@@ -816,16 +816,27 @@ export class MarkdownDraftOwner {
     sessionGeneration: number
   ): boolean {
     const transition = this.scopeTransition
+    const uninitializedNoPreviewScope =
+      this.activePrincipalOwner === null &&
+      this.activeScopeKey === null &&
+      this.activeSessionGeneration === null &&
+      this.records.size === 0 &&
+      transition?.mainSessionGeneration === null
     if (
       !transition ||
       transition.id !== token.id ||
-      principalOwner !== this.activePrincipalOwner ||
-      scopeKey !== this.activeScopeKey ||
-      sessionGeneration !== this.activeSessionGeneration ||
+      (!uninitializedNoPreviewScope &&
+        (principalOwner !== this.activePrincipalOwner ||
+          scopeKey !== this.activeScopeKey ||
+          sessionGeneration !== this.activeSessionGeneration)) ||
       (transition.mainSessionGeneration !== null &&
         transition.mainSessionGeneration !== sessionGeneration)
     )
       return false
+    // With no preview, there is no owner scope to restore or initialize. The
+    // caller has already proved that main still reports the exact pre-switch
+    // authority; releasing only this empty transition leaves the later preview
+    // responsible for installing its own verified owner binding.
     this.scopeTransition = null
     this.scopeGeneration += 1
     for (const record of this.records.values()) {

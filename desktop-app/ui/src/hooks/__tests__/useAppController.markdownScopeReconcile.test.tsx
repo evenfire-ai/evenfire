@@ -135,6 +135,33 @@ describe('useAppController Markdown scope reconciliation', () => {
     app.unmount()
   })
 
+  it('releases a rejected no-preview switch so the user can retry', async () => {
+    const { handle } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    const session = configureSwitchingSession(handle)
+    session.switchTeam.mockRejectedValueOnce(new Error('team switch rejected'))
+
+    const app = renderAppController()
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-a'))
+    expect(app.result.current.sessionGeneration).toBe(1)
+
+    await act(async () => {
+      await expect(
+        app.result.current.handleEnsureTeamContext({ teamId: 'team-b' })
+      ).rejects.toThrow('team switch rejected')
+    })
+
+    expect(app.result.current.markdownDraftOwner.hasPendingTransition()).toBe(false)
+    await act(async () => {
+      await app.result.current.handleEnsureTeamContext({ teamId: 'team-b' })
+    })
+    expect(app.result.current.currentTeamId).toBe('team-b')
+    app.unmount()
+  })
+
   it('does not publish Team B after auth retirement supersedes a switch during teardown', async () => {
     const { handle } = installAppControllerClerum({
       me: { teamId: 'team-a', teamName: 'Team A' },
