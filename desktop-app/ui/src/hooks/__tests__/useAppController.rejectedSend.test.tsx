@@ -970,6 +970,53 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
+  describe('a send that starts no task releases the activity stream', () => {
+    it('a POST that fails with a network error while the agent is not held keeps the turn', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text whose POST fails with a network error'
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+      // Witness: the send opened the stream.
+      expect(clerum.hasActivityHandler(AGENT)).toBe(true)
+      const failure = await networkError()
+      await act(async () => {
+        post.reject(failure)
+        await pendingSend
+      })
+
+      // Witness: the send took the generic failure path and kept its turn.
+      expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(false)
+      expect(app.result.current.failedAgentSend?.content).toBe(text)
+      expect(await storedUserTurns(clerum, chatId, text)).toHaveLength(1)
+      await waitFor(() => expect(clerum.hasActivityHandler(AGENT)).toBe(false))
+    })
+
+    it('a synchronous reply', async () => {
+      const { app, clerum } = await boot()
+      await createChat(app)
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, 'text answered at once')
+      // Witness: the send opened the stream.
+      expect(clerum.hasActivityHandler(AGENT)).toBe(true)
+      await act(async () => {
+        ;(post.resolve as (value: unknown) => void)({
+          success: true,
+          content: 'synchronous reply',
+        })
+        await pendingSend
+      })
+
+      // Witness: the reply was shown.
+      await waitFor(() =>
+        expect(
+          app.result.current.chatMessages.some(
+            message => message.role === 'assistant' && message.content === 'synchronous reply'
+          )
+        ).toBe(true)
+      )
+      await waitFor(() => expect(clerum.hasActivityHandler(AGENT)).toBe(false))
+    })
+  })
+
   it('T-A10: a rejection that persists returns the text on every send', async () => {
     const { app, clerum } = await boot()
     const chatId = await createChat(app)
@@ -1457,7 +1504,7 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
-  it('T-A16:an older page loaded while the removal is pending does not write the turn back', async () => {
+  it('T-A16: an older page loaded while the removal is pending does not write the turn back', async () => {
     const { app, clerum } = await boot()
     const chatId = await createChat(app)
     // The newest window holds turns 2 and 3, so turn 1 is an older page.
@@ -1646,10 +1693,14 @@ describe('useAppController: a send the server rejects', () => {
         true
       )
     )
+    // The send already emptied this chat's draft, so a draft of another chat
+    // is what can show that the logout cleared the draft store.
+    setComposerDraft('another-chat', 'draft written before the logout', AGENT)
+    expect(getComposerDraft('another-chat', AGENT)).toBe('draft written before the logout')
     await act(async () => app.result.current.handleLogout())
     await waitFor(() => expect(app.result.current.isAuthenticated).toBe(false))
     // Witness: the logout cleared the draft store.
-    expect(getComposerDraft(chatId, AGENT)).toBe('')
+    expect(getComposerDraft('another-chat', AGENT), 'draft of another chat').toBe('')
     await act(async () => {
       followUp.resolve({ items: [] })
       await pendingSend

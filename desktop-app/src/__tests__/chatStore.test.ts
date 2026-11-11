@@ -2605,7 +2605,7 @@ describe('removeMessages', () => {
       [user('legacy-1'), assistant('legacy-1-reply'), user('legacy-2')],
       'legacy-2',
     ],
-  ] as const)('S2b: removes %s', async (_label, messages, target) => {
+  ] as const)('removes an unanswered last turn: %s', async (_label, messages, target) => {
     await seed('allowed', [...messages])
     expect(await ids('allowed')).toContain(target)
 
@@ -2615,7 +2615,7 @@ describe('removeMessages', () => {
     expect(await ids('allowed')).toHaveLength(messages.length - 1)
   })
 
-  it('S2b: removes a pending turn followed by numbered server turns from a reconcile', async () => {
+  it('removes a pending turn followed by numbered server turns from a reconcile', async () => {
     await seed('reconciled', [
       user('turn-1-user', { serverTurnNumber: 1 }),
       assistant('turn-1-assistant', { serverTurnNumber: 1 }),
