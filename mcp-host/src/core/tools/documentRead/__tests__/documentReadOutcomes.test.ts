@@ -20,6 +20,7 @@ import {
   emptySelectionWorkbook,
   imageOnlyPdf,
   malformedPdf,
+  sheetXmlWorkbook,
   textPdf,
   valuesWorkbook,
   witnessCode,
@@ -459,5 +460,47 @@ describe('document reader admission order (zach88 R2-L5)', () => {
     )
     expect(rendered.attachments).toHaveLength(1)
     expect(ledger.snapshot().reads).toBe(1)
+  }, 30_000)
+})
+
+describe('sparse XLSX gaps through the real worker and the Tool (review M6)', () => {
+  it('crosses a 200k-row gap in one call by following the cursor', async () => {
+    const worksheet =
+      '<?xml version="1.0"?><worksheet ' +
+      'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+      '<row r="1"><c r="A1"><v>1</v></c></row>' +
+      '<row r="200001"><c r="A200001"><v>200001</v></c></row>' +
+      '<row r="200002"><c r="A200002"><v>200002</v></c></row>' +
+      '</sheetData></worksheet>'
+    const file = admittedFile('sparse', await sheetXmlWorkbook(worksheet), XLSX_MIME)
+    const ledger = new AttachmentReadLedger()
+    const reader = tool(
+      file,
+      documentLimits({ maxRowsPerCall: 5, maxCellsPerCall: 100_000 }),
+      runDocumentJob,
+      ledger
+    )
+    // The gap does not fit the 5-row window: the first call stops before it.
+    const first = JSON.parse((await reader.execute({ attachmentId: file.id }, context())).content)
+    expect(first).toMatchObject({
+      status: 'ok',
+      sheets: [{ startRow: 1, rows: [[1]], truncated: true, lastRow: 200002 }],
+      continuation: { cursor: boundCursor('v1.xlsx.0.200001', file), limit: 'max_rows' },
+    })
+    // The continuation lands on the next valued row, not inside the gap.
+    const second = JSON.parse(
+      (
+        await reader.execute(
+          { attachmentId: file.id, cursor: first.continuation.cursor },
+          context()
+        )
+      ).content
+    )
+    expect(second).toMatchObject({
+      status: 'ok',
+      sheets: [{ startRow: 200001, rows: [[200001], [200002]], truncated: false }],
+    })
+    expect(second.continuation).toBeUndefined()
+    expect(ledger.snapshot().reads).toBe(2)
   }, 30_000)
 })
