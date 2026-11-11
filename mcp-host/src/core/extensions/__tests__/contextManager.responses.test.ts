@@ -154,6 +154,9 @@ describe('T-R2 compaction falls back to MoveToWorkspace on an unusable summary',
     ['gpt-6.1-terra', 'v1-incomplete-gpt-6.1-terra'],
     // T-R2c: partial output text cut by max_output_tokens.
     ['gpt-5.4-mini', 'v1-incomplete-gpt-5.4-mini'],
+    // A `completed` response whose message is empty: the finish reason is not
+    // Length, so only the empty-body check keeps it from being persisted.
+    ['gpt-6.1-terra', 'v2-final-answer-empty-message-gpt-6.1-terra'],
   ])('%s (%s): the archived turns reach the daily log in full', async (model, fixture) => {
     const { create, workspace, result } = await compactWith(model, fixture)
     const expected = await archivedVerbatim()
