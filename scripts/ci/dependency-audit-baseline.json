@@ -194,22 +194,6 @@
       "expires": "2027-02-28"
     },
     {
-      "lockfile": "control-ui",
-      "advisory": "GHSA-wq5f-xc86-pv6w",
-      "package": "sharp",
-      "severity": "high",
-      "tracking": "https://github.com/evenfire-ai/evenfire/issues/939",
-      "expires": "2027-02-28"
-    },
-    {
-      "lockfile": "control-ui",
-      "advisory": "GHSA-68fv-2mgg-jv7q",
-      "package": "source-map-js",
-      "severity": "high",
-      "tracking": "https://github.com/evenfire-ai/evenfire/issues/939",
-      "expires": "2027-02-28"
-    },
-    {
       "lockfile": "external-rest-api",
       "advisory": "GHSA-27r3-jxmh-p828",
       "package": "body-parser",
@@ -741,22 +725,6 @@
       "lockfile": "mcp-servers/web-search",
       "advisory": "GHSA-mrhx-c7xc-m3w5",
       "package": "zod",
-      "severity": "high",
-      "tracking": "https://github.com/evenfire-ai/evenfire/issues/939",
-      "expires": "2027-02-28"
-    },
-    {
-      "lockfile": "profile-ui",
-      "advisory": "GHSA-wq5f-xc86-pv6w",
-      "package": "sharp",
-      "severity": "high",
-      "tracking": "https://github.com/evenfire-ai/evenfire/issues/939",
-      "expires": "2027-02-28"
-    },
-    {
-      "lockfile": "profile-ui",
-      "advisory": "GHSA-68fv-2mgg-jv7q",
-      "package": "source-map-js",
       "severity": "high",
       "tracking": "https://github.com/evenfire-ai/evenfire/issues/939",
       "expires": "2027-02-28"

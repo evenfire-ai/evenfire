@@ -723,6 +723,20 @@ assert_eq "closed stdout does not rewrite the verdict exit code" 0 "$LAST_RC"
 assert_contains "the verdict file recorded PASS despite the closed stdout" \
   "${EVIDENCE_DIR}/verdict.txt" "E2E_CDN_ROTATION_VERDICT=PASS EXIT=0 REASON=none"
 
+# deploy/base declares the overlap with its production value, so the key alone
+# is not a leftover; only phase 1's own value is.
+overlap_leftover_rc() { if hcc_env_has_test_overlap "$1"; then echo 0; else echo 1; fi; }
+assert_eq "the deploy/base overlap is not a leftover override" 1 \
+  "$(overlap_leftover_rc '[{"name":"HCC_EXTERNAL_EGRESS_OVERLAP_SEC","value":"3600"}]')"
+assert_eq "an env without the overlap is not a leftover override" 1 \
+  "$(overlap_leftover_rc '[{"name":"HCC_TEST_ENV","value":"original"}]')"
+phase1_overlap_env="$(jq -cn --arg value "$HCC_TEST_OVERLAP_SEC" \
+  '[{name: "HCC_EXTERNAL_EGRESS_OVERLAP_SEC", value: $value}]')"
+assert_eq "phase 1's overlap is a leftover override" 0 "$(overlap_leftover_rc "$phase1_overlap_env")"
+# Phase 0 needs a cluster, so this pins the only call site of the predicate.
+assert_contains "phase 0 refuses through the leftover predicate" \
+  "$HARNESS_ROOT/scripts/e2e/e2e-egress-cdn-rotation.sh" 'if hcc_env_has_test_overlap "$HCC_ENV_ORIGINAL" ||'
+
 # ── Summary: zero executed checks is never a pass ──────────────────────
 printf 'egress-cdn-rotation-cleanup: %d checks, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
 [ "$TESTS_RUN" -gt 0 ] || { echo "FAIL: zero checks executed" >&2; exit 1; }
