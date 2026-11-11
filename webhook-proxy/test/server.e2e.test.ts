@@ -1,5 +1,5 @@
 import http, { IncomingMessage, Server, ServerResponse } from 'node:http'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { loadConfig, type ProxyConfig } from '../src/config'
 import { RegistryClient } from '../src/registry'
 import { start } from '../src/server'
@@ -152,6 +152,7 @@ describe('webhook-proxy end-to-end (W1.1)', () => {
         body: JSON.stringify({ exists: false, reason: 'recipe_not_found' }),
       }
     }
+    vi.stubEnv('WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN', 'test-webhook-proxy-token')
     const config: ProxyConfig = {
       ...loadConfig(),
       httpPort: proxyPort,

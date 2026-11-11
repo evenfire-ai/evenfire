@@ -26,9 +26,9 @@ data:
 # Service-token Secret. The actual value lives in
 # `internal-service-tokens` mapping inside control-api's config; we
 # reference it by service name when calling the registry endpoint.
-# In dev/minikube this can be the literal "dev-webhook-proxy-token"
-# (matches control-api's default in src/config.ts). In prod it is
-# rotated via apply-inter-service-tokens.sh, same flow as rpc-proxy.
+# The value below is a placeholder that webhook-proxy refuses at startup.
+# deploy/scripts/apply-inter-service-tokens.sh writes the real token (in
+# minikube and in clusters alike) and restarts webhook-proxy.
 apiVersion: v1
 kind: Secret
 metadata:
