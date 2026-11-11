@@ -3823,13 +3823,21 @@ export function useAgentChatController({
           // persistence is best-effort; the in-memory view still shows it
         }
       }
-      // Another path held the agent while this send was pending (D-4): the
-      // input is kept as for a loss of access, and nothing new is shown.
+      // Another path held the agent while this send was pending, and the scope and
+      // the chat are still there. A send that was never posted, or that the server
+      // rejected with a 401 or 403, is withdrawn, and its input is kept as for a
+      // loss of access. A send that was posted and failed in another way keeps its
+      // turn, and its input is retained with the failure.
+      let postIssued = false
       const sendHeldByAnotherPath = () =>
         sendAuthScopeIsCurrent() && !sendChatWasDeleted() && isHostAccessBlocked(sendAgent)
       const endSendHeldByAnotherPath = async (detail: string, kind: FailedAgentSend['kind']) => {
         returnUndeliveredSend(detail, kind, false)
         await withdrawUndeliveredTurn()
+      }
+      const keepSendHeldByAnotherPath = async (detail: string, kind: FailedAgentSend['kind']) => {
+        failRetainedSend(sendAgent, sendChatId, userMessageId, 'post_failed', detail, kind)
+        await keepUndeliveredTurn()
       }
 
       try {
@@ -3861,6 +3869,7 @@ export function useAgentChatController({
           ...(fileReferences.length > 0 ? { fileReferences } : {}),
         }
 
+        postIssued = true
         const response = await window.clerum.rpc.invokeHostMessage(
           sendAgent,
           request,
@@ -4172,7 +4181,9 @@ export function useAgentChatController({
         }
         if (!sendStillAuthorized()) {
           if (sendHeldByAnotherPath()) {
-            await endSendHeldByAnotherPath(message, classifyErrorKind(message))
+            if (!postIssued) await endSendHeldByAnotherPath(message, classifyErrorKind(message))
+            else if (isAuthorizationError(error)) await endSendHeldByAnotherPath(message, 'auth')
+            else await keepSendHeldByAnotherPath(message, classifyErrorKind(message))
           }
           return
         }

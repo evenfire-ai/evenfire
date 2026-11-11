@@ -489,7 +489,6 @@ describe('useAppController: a send the server rejects', () => {
         'held by a denied transcript read while the POST is pending, then the POST is denied',
         () => ipcHostAccessRevoked('rpc:invokeHostMessage'),
       ],
-      ['held while the POST is pending, then the POST fails with a network error', networkError],
     ])('%s', async (_label, postError) => {
       const { app, clerum } = await boot()
       const chatId = await createChat(app)
@@ -540,6 +539,163 @@ describe('useAppController: a send the server rejects', () => {
       expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
 
       await expectInputReturnedAfterReselect(app, clerum, chatId, text)
+    })
+
+    it.each<[string, SendError]>([
+      ['a network error', networkError],
+      [
+        'a 504',
+        () =>
+          ipcHttpError('rpc:invokeHostMessage', 504, 'Gateway Timeout', {
+            error: 'upstream timeout',
+          }),
+      ],
+      ['a 404', () => ipcHttpError('rpc:invokeHostMessage', 404, 'Not Found', { error: 'gone' })],
+    ])(
+      'held while the POST is pending, then the POST fails without a rejection: %s keeps the turn and offers the input back',
+      async (_label, postError) => {
+        const { app, clerum } = await boot()
+        const chatId = await createChat(app)
+        const text = 'text for the held agent'
+        const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+        await holdByDeniedRead(
+          app,
+          clerum,
+          chatId,
+          await ipcHostAccessRevoked('rpc:loadSessionMessages')
+        )
+        const failure = await postError()
+        await act(async () => {
+          post.reject(failure)
+          await pendingSend
+        })
+        await reselect(app, clerum, chatId)
+        const stored = await storedUserTurns(clerum, chatId, text)
+
+        // Witness: the send reached the Host once, and its failure was retained.
+        expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+        expect(app.result.current.failedAgentSend).not.toBeNull()
+        expect
+          .soft(stored, 'stored turn')
+          .toEqual([expect.objectContaining({ preserveLocal: true })])
+        expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(1)
+        expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe('')
+        expect.soft(app.result.current.failedAgentSend?.content, 'retained input').toBe(text)
+        expect.soft(clerum.chat.removeMessages, 'removal').not.toHaveBeenCalled()
+      }
+    )
+
+    it('held while the POST is pending, with a reference, then a network error: the kept send shows the network sentence', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text with a reference for the held agent'
+      await addReference(app)
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+      await holdByDeniedRead(
+        app,
+        clerum,
+        chatId,
+        await ipcHostAccessRevoked('rpc:loadSessionMessages')
+      )
+      const failure = await networkError()
+      await act(async () => {
+        post.reject(failure)
+        await pendingSend
+      })
+      await reselect(app, clerum, chatId)
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      const stored = await storedUserTurns(clerum, chatId, text)
+
+      // Witness: the send was posted once.
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+      expect.soft(stored, 'stored turn').toEqual([expect.objectContaining({ preserveLocal: true })])
+      expect.soft(clerum.chat.removeMessages, 'removal').not.toHaveBeenCalled()
+      expect.soft(app.result.current.failedAgentSend?.kind, 'kind').toBe('network')
+      expect.soft(app.result.current.failedAgentSend?.references, 'references').toHaveLength(1)
+      expect.soft(app.result.current.agentError, 'alert').toBe(NETWORK_ALERT)
+    })
+
+    /** Starts a send whose activity subscription stays pending. */
+    async function sendHeldAtStream(app: App, clerum: MockClerum, text: string) {
+      const activity = deferred<() => Promise<void>>()
+      const activityCallsBefore = clerum.rpc.subscribeHostActivity.mock.calls.length
+      clerum.rpc.subscribeHostActivity.mockImplementationOnce(() => activity.promise)
+      let pendingSend!: Promise<void>
+      act(() => {
+        pendingSend = app.result.current.handleSendAgentMessage(text)
+      })
+      // Witness: the send reached the subscription, inside the try.
+      await waitFor(() =>
+        expect(clerum.rpc.subscribeHostActivity.mock.calls.length).toBeGreaterThan(
+          activityCallsBefore
+        )
+      )
+      return { activity, pendingSend }
+    }
+
+    it.each<[string, SendError]>([
+      ['a network error', networkError],
+      ['a 403', () => ipcGenericForbidden('rpc:invokeHostMessage')],
+    ])(
+      'held while the activity stream opens, then the stream fails with %s: the send was never posted, so the turn is withdrawn and the text returns',
+      async (_label, streamError) => {
+        const { app, clerum } = await boot()
+        const chatId = await createChat(app)
+        const text = 'text whose stream fails while the agent is held'
+        const { activity, pendingSend } = await sendHeldAtStream(app, clerum, text)
+        await holdByDeniedRead(
+          app,
+          clerum,
+          chatId,
+          await ipcHostAccessRevoked('rpc:loadSessionMessages')
+        )
+        const failure = await streamError()
+        await act(async () => {
+          activity.reject(failure)
+          await pendingSend
+        })
+        await reselect(app, clerum, chatId)
+        const stored = await storedUserTurns(clerum, chatId, text)
+
+        // Witness: nothing was posted, and the withdrawal ran.
+        expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+        expect.soft(clerum.chat.removeMessages, 'removal').toHaveBeenCalledTimes(1)
+        expect.soft(stored, 'stored turn').toHaveLength(0)
+        expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+        expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+        expect.soft(app.result.current.failedAgentSend, 'retained failure').toBeNull()
+      }
+    )
+
+    it('held while the activity stream opens, with a reference, then the stream fails: the input waits behind Recover input under the network sentence', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text with a reference whose stream fails while held'
+      await addReference(app)
+      const { activity, pendingSend } = await sendHeldAtStream(app, clerum, text)
+      await holdByDeniedRead(
+        app,
+        clerum,
+        chatId,
+        await ipcHostAccessRevoked('rpc:loadSessionMessages')
+      )
+      await act(async () => {
+        activity.reject(new Error('network down'))
+        await pendingSend
+      })
+      await reselect(app, clerum, chatId)
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      const stored = await storedUserTurns(clerum, chatId, text)
+
+      // Witness: nothing was posted.
+      expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+      expect.soft(clerum.chat.removeMessages, 'removal').toHaveBeenCalledTimes(1)
+      expect.soft(stored, 'stored turn').toHaveLength(0)
+      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe('')
+      expect.soft(app.result.current.failedAgentSend?.references, 'references').toHaveLength(1)
+      expect.soft(app.result.current.failedAgentSend?.kind, 'kind').toBe('network')
+      expect.soft(app.result.current.failedAgentSend?.message, 'detail').toBe('network down')
+      expect.soft(app.result.current.agentError, 'alert').toBe(NETWORK_ALERT)
     })
   })
 
