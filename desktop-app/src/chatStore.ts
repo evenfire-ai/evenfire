@@ -2259,7 +2259,6 @@ export class ChatStore {
       if (!existingMeta) return 0
       const existingMessages = await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
       const requested = new Set(messageIds)
-      let removable = 0
       existingMessages.forEach((message, position) => {
         if (!requested.has(message.id)) return
         const answeredLocally = existingMessages
@@ -2273,10 +2272,10 @@ export class ChatStore {
         ) {
           throw new Error(`Chat message ${message.id} is not an unanswered local user turn`)
         }
-        removable += 1
       })
-      if (removable === 0) return 0
       const remaining = existingMessages.filter(message => !requested.has(message.id))
+      const removed = existingMessages.length - remaining.length
+      if (removed === 0) return 0
       const indexedCount = await this.indexedMessageCount(agentRef, chatId)
       await this.writePagedChatUnlocked(agentRef, chatId, remaining, {
         messageCount: Math.max(remaining.length, indexedCount ?? 0),
@@ -2285,7 +2284,7 @@ export class ChatStore {
         preserveExistingTotals: true,
         touchUpdatedAt: false,
       })
-      return removable
+      return removed
     })
   }
 

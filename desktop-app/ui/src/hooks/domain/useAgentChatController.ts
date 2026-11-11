@@ -3329,22 +3329,16 @@ export function useAgentChatController({
   ])
 
   // Puts an undelivered payload back in the composer: the text in the draft of
-  // `chatId`, then the attachments. Returns false, having changed nothing, when
-  // that draft cannot be written. An empty text never replaces a draft. Used by
-  // Recover input and by a send the server rejected.
+  // `chatId`, then the attachments. An empty text never replaces a draft. Used
+  // by Recover input and by a send the server rejected.
   const restoreComposerPayload = useCallback(
     (
       chatId: string | null,
       agentRef: string | undefined,
       workspaceTabId: string | null | undefined,
       payload: Pick<FailedAgentSend, 'content' | 'attachments' | 'files' | 'references'>
-    ): boolean => {
-      if (
-        (payload.content || !getComposerDraft(chatId, agentRef, workspaceTabId)) &&
-        !setComposerDraft(chatId, payload.content, agentRef, workspaceTabId)
-      ) {
-        return false
-      }
+    ): void => {
+      if (payload.content) setComposerDraft(chatId, payload.content, agentRef, workspaceTabId)
       if (payload.attachments.length) {
         handleAddComposerImageAttachments(
           payload.attachments.map(attachment => ({
@@ -3355,7 +3349,6 @@ export function useAgentChatController({
       }
       if (payload.files.length) handleRestoreComposerFiles(payload.files)
       if (payload.references.length) handleAddComposerReferenceAttachments(payload.references)
-      return true
     },
     [
       handleAddComposerImageAttachments,
@@ -3517,11 +3510,12 @@ export function useAgentChatController({
       let sendChatId = currentChatId
       const sendSelectionIntentRevision = currentChatId ? null : beginSelectionIntent()
       if (sendSelectionIntentRevision !== null) clearPendingSelection(sendAgent)
-      const sendStillAuthorized = () =>
+      const sendAuthScopeIsCurrent = () =>
         sendScope === sendScopeGeneration.current &&
-        sendScopeIdentity === currentAuthScopeRef.current &&
-        !isHostAccessBlocked(sendAgent) &&
-        (!sendChatId || !isChatDeleted(sendAgent, sendChatId))
+        sendScopeIdentity === currentAuthScopeRef.current
+      const sendChatWasDeleted = () => sendChatId !== null && isChatDeleted(sendAgent, sendChatId)
+      const sendStillAuthorized = () =>
+        sendAuthScopeIsCurrent() && !isHostAccessBlocked(sendAgent) && !sendChatWasDeleted()
       const sendChatIsVisible = () =>
         activeChatVisibilityRef.current.selectedAgent === sendAgent &&
         activeChatVisibilityRef.current.activeChatId === sendChatId
@@ -3735,10 +3729,6 @@ export function useAgentChatController({
       setFailedAgentSend(null)
       setAgentSending(true)
 
-      const sendAuthScopeIsCurrent = () =>
-        sendScope === sendScopeGeneration.current &&
-        sendScopeIdentity === currentAuthScopeRef.current
-      const sendChatWasDeleted = () => sendChatId !== null && isChatDeleted(sendAgent, sendChatId)
       // Ends a send the server never accepted, all or nothing: the payload goes
       // back to the composer when the draft of the send's chat is free and the
       // composer can take its attachments, and the retained snapshot is
@@ -3749,7 +3739,6 @@ export function useAgentChatController({
         kind: FailedAgentSend['kind'],
         attachmentsUsable: boolean
       ) => {
-        const chatId = sendChatId ?? null
         const payload = {
           content: trimmedContent,
           attachments: effectiveAttachments,
@@ -3761,22 +3750,19 @@ export function useAgentChatController({
           payload.files.length > 0 ||
           payload.references.length > 0
         const draftIsFree =
-          !payload.content || !getComposerDraft(chatId, sendAgent, originWorkspaceTabId)
+          !payload.content || !getComposerDraft(sendChatId, sendAgent, originWorkspaceTabId)
         const attachmentsCanReturn =
           !hasAttachments ||
           (attachmentsUsable &&
             attachmentRevisionAfterClear !== null &&
             composerAttachmentRevisionRef.current === attachmentRevisionAfterClear &&
             sendChatIsVisible())
-        if (
-          draftIsFree &&
-          attachmentsCanReturn &&
-          restoreComposerPayload(chatId, sendAgent, originWorkspaceTabId, payload)
-        ) {
-          releaseRetainedSend(sendAgent, chatId, userMessageId)
+        if (draftIsFree && attachmentsCanReturn) {
+          restoreComposerPayload(sendChatId, sendAgent, originWorkspaceTabId, payload)
+          releaseRetainedSend(sendAgent, sendChatId, userMessageId)
           return
         }
-        failRetainedSend(sendAgent, chatId, userMessageId, 'post_failed', detail, kind)
+        failRetainedSend(sendAgent, sendChatId, userMessageId, 'post_failed', detail, kind)
       }
       // Takes back the optimistic turn of a send the server never accepted. The
       // activity bookkeeping and the fence are settled before the store call;
@@ -3820,12 +3806,6 @@ export function useAgentChatController({
         } else {
           transcriptMemo.delete(chatTranscriptMemoKey(sendAgent, chatId))
         }
-        setActivityByAgentMessage(previous => {
-          const entries = previous[sendAgent]
-          if (!entries || !(userMessageId in entries)) return previous
-          const { [userMessageId]: _withdrawn, ...remaining } = entries
-          return { ...previous, [sendAgent]: remaining }
-        })
       }
       // Another path held the agent while this send was pending (D-4): the
       // input is kept as for a loss of access, and nothing new is shown.
@@ -4165,8 +4145,8 @@ export function useAgentChatController({
             }
             if (!sendAuthScopeIsCurrent()) return
           }
-          // Settled synchronously, as the hold always was: the composer first,
-          // then the hold. Only the withdrawal of the turn awaits.
+          // No await between the composer write and the hold; only the withdrawal
+          // of the turn awaits.
           const chatDeleted = sendChatWasDeleted()
           if (!chatDeleted) returnUndeliveredSend(message, 'auth', lossOfAccess === null)
           if (lossOfAccess === 'revoked') revokeHostAccess(sendAgent)
@@ -4419,20 +4399,12 @@ export function useAgentChatController({
         pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
         return
       }
-      if (
-        !restoreComposerPayload(
-          activeChatId,
-          selectedAgent ?? undefined,
-          workspaceTabId,
-          visibleFailure
-        )
-      ) {
-        pushToast(
-          'This composer no longer owns the draft. Select its chat tab and try again.',
-          'error'
-        )
-        return
-      }
+      restoreComposerPayload(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceTabId,
+        visibleFailure
+      )
       handleDiscardFailedAgentSend()
     },
     [
