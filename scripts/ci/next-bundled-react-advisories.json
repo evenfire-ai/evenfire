@@ -1,0 +1,24 @@
+{
+  "$comment": "React advisories that reach Next.js apps through the React copy compiled into the next package (next/dist/compiled). Lockfile scanners only see next, so check-next-bundled-react.mjs evaluates these against the installed next tree. See docs/testing/dependency-scanning.md.",
+  "advisories": [
+    {
+      "id": "CVE-2026-126187",
+      "aliases": ["GHSA-xqc2-xf4c-x3h3"],
+      "severity": "critical",
+      "summary": "React Server Components remote code execution via crafted typed-array payloads",
+      "references": [
+        "https://github.com/evenfire-ai/evenfire/issues/1430",
+        "https://github.com/advisories/GHSA-xqc2-xf4c-x3h3"
+      ],
+      "fixedReactVersions": ["19.0.9", "19.1.10", "19.2.9", "19.3.1"],
+      "fixMarker": "Cannot transport a detached buffer",
+      "fixMarkerNote": "next 16.4.0 and 16.4.6 both report React 19.3.0-canary-278794d7-20261002, but only 16.4.6 carries the fix, so the version string cannot decide. The minified server.browser.production.js builds encode the message and are excluded; they are not loaded by next start.",
+      "markerFiles": [
+        "^react-server-dom-(webpack|turbopack)/cjs/react-server-dom-(webpack|turbopack)-server\\.(node|edge)\\.(production|development)\\.js$",
+        "^react-server-dom-(webpack|turbopack)-experimental/cjs/react-server-dom-(webpack|turbopack)-server\\.(node|edge)\\.(production|development)\\.js$",
+        "^next-server/app-page(-turbo)?\\.runtime\\.(prod|dev)\\.js$",
+        "^next-server/app-page(-turbo)?-experimental\\.runtime\\.(prod|dev)\\.js$"
+      ]
+    }
+  ]
+}
