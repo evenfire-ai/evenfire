@@ -183,6 +183,70 @@ function createImageAttachment(overrides: Partial<Attachment> = {}): Attachment 
   }
 }
 
+/** A document reader whose worker must never run: the request has no free image slot. */
+function pausingDocumentReader(file: Attachment): DocumentReadTool {
+  const runJob: RunDocumentJob = async () => {
+    throw new Error('a request at its image-slot limit must pause before the worker')
+  }
+  return new DocumentReadTool(
+    { ...createTask('Read the scan').sourceMessage!, attachments: [file] },
+    {
+      contextWindowTokens: 20_000,
+      ledger: new AttachmentReadLedger(),
+      redactor: { toolOutputRedactionRanges: () => [] },
+      runJob,
+      limits: documentLimits(),
+    }
+  )
+}
+
+/**
+ * Runs the next approved call through the real single-tool executor with only
+ * `reader` registered and the Claude image profile, recording the request
+ * image usage taskExecutor forwarded and the result.
+ */
+function resumeThroughReader(reader: DocumentReadTool): {
+  forwarded?: RequestImageUsage
+  resumed?: ToolResult
+} {
+  const observed: { forwarded?: RequestImageUsage; resumed?: ToolResult } = {}
+  vi.mocked(executeSingleTool).mockImplementationOnce(
+    async (call, config, iteration, transform, requestImages) => {
+      observed.forwarded = requestImages
+      observed.resumed = await executeSingleToolDirect(
+        call,
+        {
+          ...config,
+          toolRegistry: {
+            get: name => (name === reader.name() ? reader : null),
+            listDefinitions: () => [],
+            register: vi.fn(),
+          },
+          visualInput: {
+            budget: new VisualInputBudget(),
+            resolveCapability: async () => ({
+              status: 'supported' as const,
+              provider: 'anthropic',
+              model: 'claude-test',
+              evidence: 'unit fixture',
+              deliveryLimits: resolveOfficialVisualDeliveryLimits(
+                'claude',
+                'https://api.anthropic.com/',
+                'completeWithTools'
+              )!,
+            }),
+          },
+        },
+        iteration,
+        transform,
+        requestImages
+      )
+      return observed.resumed
+    }
+  )
+  return observed
+}
+
 const workflowEnvKeys = [
   'MCP_HOST_GATEWAY_URL',
   'MCP_HOST_WORKFLOW_CONTROL_TOKEN',
@@ -994,19 +1058,7 @@ describe('TaskExecutor', () => {
 
   it('R2-L2: a resumed visual read receives the images already in its frozen request', async () => {
     const file = admittedFile('resume-scan', await imageOnlyPdf(witnessCode()), 'application/pdf')
-    const runJob: RunDocumentJob = async () => {
-      throw new Error('a request at its image-slot limit must pause before the worker')
-    }
-    const reader = new DocumentReadTool(
-      { ...createTask('Read the scan').sourceMessage!, attachments: [file] },
-      {
-        contextWindowTokens: 20_000,
-        ledger: new AttachmentReadLedger(),
-        redactor: { toolOutputRedactionRanges: () => [] },
-        runJob,
-        limits: documentLimits(),
-      }
-    )
+    const reader = pausingDocumentReader(file)
     const snapshot: ChatMessage[] = [
       {
         role: 'user',
@@ -1043,44 +1095,7 @@ describe('TaskExecutor', () => {
         },
       } as any)
       .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
-
-    let resumed: ToolResult | undefined
-    let forwardedRequestImages: RequestImageUsage | undefined
-    vi.mocked(executeSingleTool).mockImplementationOnce(
-      async (call, config, iteration, transform, requestImages) => {
-        forwardedRequestImages = requestImages
-        const result = await executeSingleToolDirect(
-          call,
-          {
-            ...config,
-            toolRegistry: {
-              get: name => (name === reader.name() ? reader : null),
-              listDefinitions: () => [],
-              register: vi.fn(),
-            },
-            visualInput: {
-              budget: new VisualInputBudget(),
-              resolveCapability: async () => ({
-                status: 'supported' as const,
-                provider: 'anthropic',
-                model: 'claude-test',
-                evidence: 'unit fixture',
-                deliveryLimits: resolveOfficialVisualDeliveryLimits(
-                  'claude',
-                  'https://api.anthropic.com/',
-                  'completeWithTools'
-                )!,
-              }),
-            },
-          },
-          iteration,
-          transform,
-          requestImages
-        )
-        resumed = result
-        return result
-      }
-    )
+    const observed = resumeThroughReader(reader)
 
     const deps = createDeps()
     const task = createTask('Read the scan')
@@ -1094,11 +1109,12 @@ describe('TaskExecutor', () => {
 
     expect(vi.mocked(executeSingleTool)).toHaveBeenCalledTimes(1)
     // This is the datum taskExecutor must forward from the frozen snapshot.
-    expect(forwardedRequestImages).toEqual({
+    expect(observed.forwarded).toEqual({
       images: 20,
       bytes: 20 * Buffer.from(PNG_2X2_BASE64, 'base64').length,
       maxSide: 2_048,
     })
+    const resumed = observed.resumed
     expect(resumed?.is_error).toBe(false)
     expect(JSON.parse(resumed!.rawContent ?? resumed!.content)).toMatchObject({
       status: 'read_budget_exhausted',
@@ -1106,6 +1122,86 @@ describe('TaskExecutor', () => {
       message: expect.stringContaining('The current request already carries as many images'),
     })
     // Witness: the approval resume ran to completion with the visual read's result.
+    expect(executor.executorState).toBe('completed')
+    expect(deps.onComplete).toHaveBeenCalledTimes(1)
+    expect(runToolUseLoop).toHaveBeenCalledTimes(2)
+  })
+
+  it('M19: a resumed visual read counts the images of the batch results completed before it', async () => {
+    const file = admittedFile('resume-batch', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const reader = pausingDocumentReader(file)
+    const visualCall = (id: string) => ({
+      id,
+      name: reader.name(),
+      arguments: { attachmentId: file.id, mode: 'visual' },
+    })
+    // The frozen messages carry no image. An earlier call of the same batch
+    // returned 20 large rendered pages; they reach the request only through
+    // `completed_results`, so the resumed call must count them from there.
+    const snapshot: ChatMessage[] = [
+      { role: 'user', content: 'Read the scan' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [visualCall('call-earlier'), visualCall('call-document-resume')],
+      },
+    ]
+    const earlier: ToolResult = {
+      tool_call_id: 'call-earlier',
+      name: reader.name(),
+      content: 'Rendered pages 1-20',
+      is_error: false,
+      attachments: Array.from({ length: 20 }, (_, index) =>
+        createImageAttachment({
+          id: `earlier-${index}`,
+          mimeType: 'image/png',
+          dataBase64: PNG_2X2_BASE64,
+          filename: `page-${index + 1}.png`,
+          // Above the many-image dimension threshold with the model's image
+          // count already spent: this read has no free slot.
+          width: 2_048,
+          height: 2_048,
+        })
+      ),
+    }
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-document-batch',
+          tool_name: reader.name(),
+          parameters: { attachmentId: file.id, mode: 'visual' },
+          description: 'Read the scanned page',
+          tool_call_id: 'call-document-resume',
+          context_snapshot: snapshot,
+          completed_results: [earlier],
+        },
+      } as any)
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    const observed = resumeThroughReader(reader)
+
+    const deps = createDeps()
+    const executor = new TaskExecutor(createTask('Read the scan'), deps)
+    await executor.run()
+    expect(executor.executorState).toBe('waiting_approval')
+
+    await executor.resumeAfterApproval(false)
+
+    expect(vi.mocked(executeSingleTool)).toHaveBeenCalledTimes(1)
+    // This is the datum taskExecutor must forward from the completed results.
+    expect(observed.forwarded).toEqual({
+      images: 20,
+      bytes: 20 * Buffer.from(PNG_2X2_BASE64, 'base64').length,
+      maxSide: 2_048,
+    })
+    const resumed = observed.resumed
+    expect(resumed?.is_error).toBe(false)
+    expect(JSON.parse(resumed!.rawContent ?? resumed!.content)).toMatchObject({
+      status: 'read_budget_exhausted',
+      attachmentId: file.id,
+      message: expect.stringContaining('The current request already carries as many images'),
+    })
+    // Witness: the resume rebuilt the batch and completed with both results.
     expect(executor.executorState).toBe('completed')
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
     expect(runToolUseLoop).toHaveBeenCalledTimes(2)

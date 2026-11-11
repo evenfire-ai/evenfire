@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 import { validateIncomingAttachments } from '../../../../agent/incomingAttachments'
 import type { Attachment } from '../../../types'
+import { encodeCursor } from '../selection'
 import { DEFAULT_DOCUMENT_READ_LIMITS, type DocumentReadLimits } from '../types'
 
 export function witnessCode(): string {
@@ -43,11 +44,26 @@ export function admittedFile(id: string, bytes: Buffer, mimeType: string): Attac
   return attachment
 }
 
-/** A cursor position as the tool issues it for `file`: bound to its content digest. */
+/**
+ * The cursor the tool issues for `position` of `file`, built by the
+ * production `encodeCursor`, so a test cursor follows the real format and
+ * content binding. `position` is written `v1.pdf.<page>.<charOffset>` or
+ * `v1.xlsx.<sheetIndex>.<row>`; it is not range-checked, so a test can still
+ * build a cursor the tool must refuse.
+ */
 export function boundCursor(position: string, file: Attachment): string {
-  const digest = /@sha256:([0-9a-f]{64})$/.exec(file.fileReference?.id ?? '')
-  if (!digest) throw new Error('Test fixture has no content-addressed reference')
-  return `${position}.${digest[1]!.slice(0, 12)}`
+  const match = /^v1\.(pdf|xlsx)\.(\d+)\.(\d+)$/.exec(position)
+  if (!match) throw new Error(`Test cursor position is malformed: ${position}`)
+  const referenceId = file.fileReference?.id
+  if (!referenceId) throw new Error('Test fixture has no file reference')
+  const first = Number(match[2])
+  const second = Number(match[3])
+  return encodeCursor(
+    match[1] === 'pdf'
+      ? { format: 'pdf', page: first, charOffset: second }
+      : { format: 'xlsx', sheetIndex: first, row: second },
+    referenceId
+  )
 }
 
 export async function textPdf(pageCodes: string[]): Promise<Buffer> {

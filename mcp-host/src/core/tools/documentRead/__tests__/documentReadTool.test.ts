@@ -8,6 +8,7 @@ import type { RedactionRange } from '../../../safety/safety'
 import type { Attachment, ToolOutput } from '../../../types'
 import type { AttachmentReadRedactor } from '../../attachmentRead'
 import { DocumentReadTool } from '../index'
+import { decodeCursor } from '../selection'
 import type {
   DocumentJob,
   DocumentReadLimits,
@@ -16,7 +17,7 @@ import type {
   XlsxCellValue,
   XlsxOutcome,
 } from '../types'
-import { runDocumentJob } from '../workerRunner'
+import { isJobOutcome, runDocumentJob } from '../workerRunner'
 import {
   admittedFile,
   boundCursor,
@@ -48,6 +49,18 @@ function executionContext(overrides: Partial<ExecutionContext> = {}): ExecutionC
   return { onOutput: () => undefined, measureResult, ...overrides }
 }
 
+/**
+ * A hand-built outcome as the real runner would deliver it: the same contract
+ * check runs at the process boundary, so a fixture the child could never
+ * produce fails the test instead of reaching the Tool.
+ */
+function contractOutcome(job: DocumentJob, outcome: unknown): never {
+  if (!isJobOutcome(job.kind, outcome)) {
+    throw new Error(`Fake ${job.kind} outcome breaks the worker outcome contract`)
+  }
+  return outcome as never
+}
+
 function fakeRunner(outcome: unknown): {
   runJob: RunDocumentJob
   calls: DocumentJob[]
@@ -55,7 +68,7 @@ function fakeRunner(outcome: unknown): {
   const calls: DocumentJob[] = []
   const runJob: RunDocumentJob = async job => {
     calls.push(job)
-    return outcome as never
+    return contractOutcome(job, outcome)
   }
   return { runJob, calls }
 }
@@ -161,6 +174,22 @@ describe('DocumentReadTool dispatch and identity', () => {
     })
   })
 
+  it('R1-M9: the fake runner refuses an outcome the worker contract rejects', async () => {
+    const file = admittedFile('pdf-file', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const page = { page: 1, text: 'text', from: 0, lowText: false }
+    // A window past the end of its page: the real runner rejects it as a
+    // defect, so a fixture like it must never reach the Tool.
+    const malformed = fakeRunner({ ok: true, pageCount: 1, pages: [{ ...page, to: 5 }] })
+    await expect(
+      read(toolFor([file], malformed.runJob), { attachmentId: 'pdf-file' })
+    ).rejects.toThrow('Fake pdf_text outcome breaks the worker outcome contract')
+    // Control: the same page with its window inside the text is delivered.
+    const valid = fakeRunner({ ok: true, pageCount: 1, pages: [{ ...page, to: 4 }] })
+    await expect(
+      read(toolFor([file], valid.runJob), { attachmentId: 'pdf-file' })
+    ).resolves.toMatchObject({ body: { status: 'ok', pages: [{ page: 1, text: 'text' }] } })
+  })
+
   it('rejects foreign, crossed and nonzero visual cursors and accepts a text cursor', async () => {
     const pdf = admittedFile('pdf-file', await imageOnlyPdf(witnessCode()), 'application/pdf')
     const { runJob, calls } = fakeRunner({
@@ -177,11 +206,13 @@ describe('DocumentReadTool dispatch and identity', () => {
       const result = await read(tool, { attachmentId: 'pdf-file', cursor })
       expect(result.body).toMatchObject({ status: 'error', reason: 'invalid_range' })
     }
-    const visual = await read(tool, {
-      attachmentId: 'pdf-file',
-      mode: 'visual',
-      cursor: boundCursor('v1.pdf.1.1', pdf),
-    })
+    // A visual read always carries the request image usage; the cursor is
+    // refused before the model capability is asked.
+    const visual = await read(
+      tool,
+      { attachmentId: 'pdf-file', mode: 'visual', cursor: boundCursor('v1.pdf.1.1', pdf) },
+      { requestImages: { images: 0, bytes: 0, maxSide: 0 } }
+    )
     expect(visual.body).toMatchObject({ status: 'error', reason: 'invalid_range' })
     expect(calls).toHaveLength(0)
     expect(
@@ -228,7 +259,7 @@ describe('DocumentReadTool dispatch and identity', () => {
     const { runJob } = fakeRunner({
       ok: true,
       sheetNames: ['Values'],
-      sheets: [{ name: 'Values', startRow: 1, rows: [['value']], truncated: false }],
+      sheets: [{ name: 'Values', startRow: 1, rows: [['value']], truncated: false, lastRow: 1 }],
     })
     const tool = toolFor([file, missing], runJob)
     const unknown = await read(tool, { attachmentId: 'absent' })
@@ -358,6 +389,63 @@ describe('DocumentReadTool budgets', () => {
     expect(result.body.status).toBe('ok')
     expect(result.body.continuation).toMatchObject({ limit: 'page_budget' })
     expect(result.body.pages).toHaveLength(1)
+  })
+
+  it('M24: follows text cursors through a page longer than two page budgets without a gap or a repeat', async () => {
+    // Position-coded text: any slice of it shows where it was cut. 36,000
+    // characters are more than four 2,000-token pages, so every later call
+    // starts mid-page, and all but the last still have over a page left.
+    const text = Array.from(
+      { length: 6_000 },
+      (_, index) => `${String(index).padStart(5, '0')} `
+    ).join('')
+    const file = admittedFile('pdf-file', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const starts: number[] = []
+    const runJob: RunDocumentJob = async job => {
+      if (job.kind !== 'pdf_text') throw new Error('Only PDF text is read here')
+      starts.push(job.start.charOffset)
+      // As the child: the whole page text, and the window from the cursor on.
+      return contractOutcome(job, {
+        ok: true,
+        pageCount: 1,
+        pages: [{ page: 1, text, from: job.start.charOffset, to: text.length, lowText: false }],
+      })
+    }
+    const tool = toolFor([file], runJob)
+    const offsets = [0]
+    let cursor: string | undefined
+    let emitted = ''
+    for (let call = 1; call <= 20; call += 1) {
+      const { body } = await read(tool, { attachmentId: 'pdf-file', ...(cursor ? { cursor } : {}) })
+      expect(body.status).toBe('ok')
+      const [page, ...rest] = body.pages as Array<{ page: number; text: string }>
+      expect(rest).toEqual([])
+      expect(page?.page).toBe(1)
+      const offset = offsets.at(-1)!
+      const continuation = body.continuation as { cursor: string; limit: string } | undefined
+      if (!continuation) {
+        expect(page!.text).toBe(text.slice(offset))
+        emitted += page!.text
+        break
+      }
+      expect(continuation.limit).toBe('page_budget')
+      const next = decodeCursor(continuation.cursor, file.fileReference!.id)
+      if (next?.format !== 'pdf') throw new Error('A PDF read returned a non-PDF cursor')
+      expect(next.page).toBe(1)
+      // Each cut lies past the previous one, and the page holds exactly the
+      // text between the two cursors.
+      expect(next.charOffset).toBeGreaterThan(offset)
+      expect(page!.text).toBe(text.slice(offset, next.charOffset))
+      emitted += page!.text
+      offsets.push(next.charOffset)
+      cursor = continuation.cursor
+    }
+    // Witnesses: at least two mid-page continuations were followed, every
+    // call resumed where the previous cursor pointed, and the page was read
+    // whole.
+    expect(offsets.length).toBeGreaterThanOrEqual(3)
+    expect(starts).toEqual(offsets)
+    expect(emitted).toBe(text)
   })
 
   it('names the turn budget when only a sub-page allowance remains', async () => {
@@ -697,10 +785,11 @@ describe('DocumentReadTool configured masking', () => {
       await valuesWorkbook(configured),
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
+    const pdfText = `before ${configured} after`
     const pdfOutcome: PdfTextOutcome = {
       ok: true,
       pageCount: 1,
-      pages: [{ page: 1, text: `before ${configured} after`, from: 0, to: 48, lowText: false }],
+      pages: [{ page: 1, text: pdfText, from: 0, to: pdfText.length, lowText: false }],
     }
     const pdf = await read(toolFor([pdfFile], fakeRunner(pdfOutcome).runJob, { redactor }), {
       attachmentId: 'pdf-file',
@@ -781,7 +870,7 @@ describe('DocumentReadTool configured masking', () => {
               pageCount: 1,
               pages: [{ page: 1, text, from: cut, to: text.length, lowText: false }],
             }
-      return outcome as never
+      return contractOutcome(job, outcome)
     }
     const tool = toolFor([file], runJob, { redactor: maskProvider(configured) })
     const first = await read(tool, { attachmentId: 'pdf-file' })

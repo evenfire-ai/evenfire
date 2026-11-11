@@ -119,7 +119,7 @@ function isXlsxSheet(sheet: unknown): boolean {
  * a worker or dependency regression rejects as a defect instead of becoming a
  * malformed model-visible result. The Tool still checks content bounds.
  */
-function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
+export function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
   if (!isRecord(message)) return false
   if (message.ok === false) {
     return (

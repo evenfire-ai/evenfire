@@ -211,3 +211,50 @@ describe('XLSX row width is measured without serializing the row', () => {
     })
   }, 60_000)
 })
+
+describe('XLSX row width boundary (M28)', () => {
+  it('returns a row that serializes to exactly maxExtractedChars and skips one a character wider', async () => {
+    // The measure is exact: brackets, commas, quotes and every cell type
+    // count, and only a row over the limit is skipped. Each exact row is the
+    // first row its call charges, so the per-call total cannot stop it first.
+    const limits = documentLimits({ maxExtractedChars: 100 })
+    const over = ['b'.repeat(81), true, null, 12_345]
+    // Ends in a number: only the final total reaches the limit.
+    const exactNumber = ['b'.repeat(80), true, null, 12_345]
+    // Ends in a string: the last cell's quoted length reaches the limit.
+    const exactString = ['a'.repeat(73), 12_345, true, null, 'tail']
+    expect(JSON.stringify(over)).toHaveLength(101)
+    expect(JSON.stringify(exactNumber)).toHaveLength(100)
+    expect(JSON.stringify(exactString)).toHaveLength(100)
+    const bytes = await workbook(sheet => {
+      for (const row of [over, exactNumber, exactString]) sheet.addRow(row)
+    })
+    const job = (start: { sheetIndex: number; row: number } | null) =>
+      runDocumentJob({ kind: 'xlsx', bytes: new Uint8Array(bytes), sheet: null, start, limits })
+
+    const first = await job(null)
+    expect(first).toEqual({
+      ok: true,
+      sheetNames: ['Data'],
+      sheets: [
+        {
+          name: 'Data',
+          startRow: 1,
+          rows: [[], exactNumber],
+          truncated: true,
+          lastRow: 3,
+          skippedRows: { count: 1, first: [1] },
+        },
+      ],
+      // The second exact row fits alone, not after 100 characters already charged.
+      next: { sheetIndex: 0, row: 3 },
+      stoppedBy: 'max_extracted_chars',
+    })
+    const second = await job({ sheetIndex: 0, row: 3 })
+    expect(second).toEqual({
+      ok: true,
+      sheetNames: ['Data'],
+      sheets: [{ name: 'Data', startRow: 3, rows: [exactString], truncated: false, lastRow: 3 }],
+    })
+  }, 60_000)
+})

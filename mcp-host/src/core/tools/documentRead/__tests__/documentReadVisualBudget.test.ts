@@ -30,7 +30,7 @@ import { BasicSafety } from '../../../safety/safety'
 import type { Attachment, ChatMessage, ToolResult } from '../../../types'
 import { DocumentReadTool } from '../index'
 import type { DocumentJob, RunDocumentJob } from '../types'
-import { runDocumentJob } from '../workerRunner'
+import { isJobOutcome, runDocumentJob } from '../workerRunner'
 import {
   admittedFile,
   boundCursor,
@@ -154,17 +154,21 @@ function earlierToolImages(count: number, decodedBytes: number, side: number): C
 /**
  * A child that returns the exact byte cap the Tool admitted, split across its
  * page allowance: every returned page sits at a bound, so the request built
- * from this outcome is the largest the admission permits.
+ * from this outcome is the largest the admission permits. With `scanPages` it
+ * reads a scan of that many pages as the real child does: from the job's
+ * start, with `next` while pages remain.
  */
-function cappedVisualRunner(): { runJob: RunDocumentJob; jobs: DocumentJob[] } {
+function cappedVisualRunner(scanPages?: number): { runJob: RunDocumentJob; jobs: DocumentJob[] } {
   const jobs: DocumentJob[] = []
   const runJob: RunDocumentJob = async job => {
     jobs.push(job)
     if (job.kind !== 'pdf_visual') throw new Error('expected a PDF visual job')
-    const pages = job.limits.maxVisualPagesPerCall
+    const first = scanPages === undefined ? 1 : (job.start?.page ?? 1)
+    const pageCount = scanPages ?? job.limits.maxVisualPagesPerCall
+    const pages = Math.min(job.limits.maxVisualPagesPerCall, pageCount - first + 1)
     const perPage = Math.floor(job.maxTotalImageBytes / pages)
     const images = Array.from({ length: pages }, (_, index) => ({
-      page: index + 1,
+      page: first + index,
       // 2000 px is the Claude many-image dimension; 2000x1000 keeps four pages
       // inside the 8,000,000-pixel per-call budget.
       width: 2_000,
@@ -173,7 +177,19 @@ function cappedVisualRunner(): { runJob: RunDocumentJob; jobs: DocumentJob[] } {
         index === pages - 1 ? job.maxTotalImageBytes - perPage * (pages - 1) : perPage
       ),
     }))
-    return { ok: true, pageCount: pages, images } as never
+    const next = first + pages <= pageCount ? first + pages : undefined
+    const outcome = {
+      ok: true,
+      pageCount,
+      images,
+      ...(next === undefined
+        ? {}
+        : { next: { page: next, charOffset: 0 }, stoppedBy: 'max_pages' as const }),
+    }
+    // The runner's own process-boundary contract, so the fixture stays one
+    // the real child could deliver.
+    if (!isJobOutcome(job.kind, outcome)) throw new Error('fake visual outcome breaks the contract')
+    return outcome as never
   }
   return { runJob, jobs }
 }
@@ -870,25 +886,43 @@ describe('document visual reads and the request image bounds', () => {
       role: 'user',
       content: 'x'.repeat(3_000_000),
     }
-    const { runJob, jobs } = cappedVisualRunner()
+    // A 120-page scan: the request bound pauses the chain long before its last
+    // page, so every delivering call must hand back a continuation.
+    const { runJob, jobs } = cappedVisualRunner(120)
     const reader = documentTool(file, runJob)
     const results: ToolResult[] = []
     const delivered: Attachment[] = []
+    const read: number[] = []
+    const starts: number[] = []
     let cursor: string | undefined
+    let followed = 0
     let paused = false
     for (let call = 1; call <= 30 && !paused; call += 1) {
       const output = await reader.execute(
         { attachmentId: file.id, mode: 'visual', ...(cursor ? { cursor } : {}) },
         context(ANTHROPIC, requestImageUsage([text], results))
       )
+      if (cursor) followed += 1
       const body = JSON.parse(output.content)
       if (body.status === 'read_budget_exhausted') {
         paused = true
         expect(body.message).toBe(IMAGE_MESSAGE)
+        // The pause resumes exactly where the last continuation pointed.
+        expect(body.resumeCursor).toBe(cursor)
         break
       }
       expect(body.status).toBe('ok')
-      cursor = body.continuation?.cursor ?? cursor
+      // Each call reads on from the page after the last one already read,
+      // never the scan's first pages again.
+      const returned = pages(body)
+      expect(returned.length).toBeGreaterThan(0)
+      expect(returned).toEqual(returned.map((_, index) => (read.at(-1) ?? 0) + 1 + index))
+      starts.push(returned[0]!)
+      read.push(...returned)
+      expect(body.continuation).toMatchObject({
+        cursor: boundCursor(`v1.pdf.${read.at(-1)! + 1}.0`, file),
+      })
+      cursor = body.continuation.cursor
       delivered.push(...output.attachments!)
       results.push(toolResult(`call-${call}`, output, output.attachments))
       const request = finalVisualRequest([text], delivered)
@@ -897,10 +931,15 @@ describe('document visual reads and the request image bounds', () => {
         assertVisualRequestFits(request, { messages: request }, true, ANTHROPIC)
       ).not.toThrow()
     }
-    // Witnesses: the chain delivered several calls and ended on the pause, not
-    // on the provider bound.
+    // Witnesses: the chain followed at least two continuations, each job
+    // started where the previous one stopped, and it ended on the pause, not on
+    // the provider bound.
     expect(paused).toBe(true)
+    expect(followed).toBeGreaterThanOrEqual(2)
     expect(jobs.length).toBeGreaterThanOrEqual(2)
+    expect(jobs.map(job => (job.kind === 'pdf_visual' ? (job.start?.page ?? 1) : 0))).toEqual(
+      starts
+    )
     expect(delivered.length).toBeGreaterThanOrEqual(8)
     const bytes = delivered.reduce((sum, image) => sum + Buffer.byteLength(image.dataBase64!), 0)
     expect(bytes).toBeGreaterThan(20_000_000)
