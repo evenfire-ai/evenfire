@@ -457,11 +457,13 @@ Step fields (`spec.steps[]`, max 100 steps):
 | `maxIterations`          | integer  | `50`    | 1–100. Maximum LLM tool-calling iterations for this step.                                                                                                    |
 | `agent.provider`         | string   | --      | Per-step provider override. Same enum as [`spec.agent.provider`](#39-agent-configuration-specagent).                                                        |
 | `agent.model`            | string   | --      | Per-step model override. `^[A-Za-z0-9._:/-]{1,128}$`.                                                                                                        |
-| `agent.soul`             | string   | --      | Per-step SOUL content, passed inline to the coordinator for this step.                                                                                       |
+| `agent.soul`             | string   | --      | This step's system prompt: it replaces any global SOUL for the step and is cleared when the step ends. Max 65,536 bytes of UTF-8 (WRC returns 422 above).    |
 | `requiresApproval`       | object   | --      | Human approval gate. See [§3.1.2](#312-step-approval-gates-stepsrequiresapproval).                                                                           |
 
 `step.agent` cannot be combined with `run` (CEL). Defaults above are CRD
-schema defaults.
+schema defaults. `agent.soul` needs `provider` and `model` on the step or in
+`spec.agent`: a step that inherits its model from the previous step runs
+without its soul.
 
 ```yaml
 steps:

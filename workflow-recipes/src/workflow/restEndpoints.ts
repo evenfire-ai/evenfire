@@ -2,6 +2,7 @@
  * WRC REST endpoints for workflow status reporting and management.
  */
 import * as k8s from '@kubernetes/client-node'
+import { createHash } from 'node:crypto'
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { loadConfig } from '../config'
 import type {
@@ -618,6 +619,19 @@ function validateDeclaredModelInjection(
   return null
 }
 
+/** Must match MAX_SOUL_BYTES in mcp-host's workflowService.ts. */
+const MAX_STEP_SOUL_BYTES = 65536
+
+/** The recipe's `spec.steps[stepId].agent.soul`, when it is a non-blank string. */
+function declaredStepSoul(recipe: unknown, stepId: string): string | undefined {
+  if (!isRecord(recipe) || !isRecord(recipe.spec) || !Array.isArray(recipe.spec.steps)) {
+    return undefined
+  }
+  const step = recipe.spec.steps.find(candidate => isRecord(candidate) && candidate.id === stepId)
+  const soul = isRecord(step) && isRecord(step.agent) ? step.agent.soul : undefined
+  return typeof soul === 'string' && soul.trim() !== '' ? soul : undefined
+}
+
 // ─── Signal Store (re-exported from signalStore.ts) ─────────────────────
 export { enqueueSignal, drainSignals, type WorkflowSignal } from './signalStore'
 
@@ -679,6 +693,25 @@ export function createWorkflowEndpointHandlers(
       return { status: 500, body: { error: 'Token factory not configured' } }
     }
 
+    // The soul comes from the recipe, never the request. Fail if the recipe is unreadable
+    // rather than configure the step without it.
+    const recipe = (await readRecipe(recipeName, recipeNamespaceClaim)) as {
+      metadata?: { annotations?: Record<string, string> }
+    } | null
+    if (!recipe) return { status: 404, body: { error: `Recipe '${recipeName}' not found` } }
+    const soulContent = declaredStepSoul(recipe, body.stepId)
+    const soulBytes = soulContent === undefined ? 0 : Buffer.byteLength(soulContent, 'utf8')
+    if (soulContent !== undefined) {
+      if (soulBytes > MAX_STEP_SOUL_BYTES) {
+        log.warn('Refusing the step soul: it exceeds the size limit', {
+          stepId: body.stepId,
+          soulBytes,
+          limitBytes: MAX_STEP_SOUL_BYTES,
+        })
+        return { status: 422, body: { error: `step soul exceeds ${MAX_STEP_SOUL_BYTES} bytes` } }
+      }
+    }
+
     // WRC stays the exclusive broker: it signs the configure token and reads the
     // backing provider Secret itself. The coordinator only requests a declared
     // step/provider/model tuple and never receives provider secret material.
@@ -688,9 +721,6 @@ export function createWorkflowEndpointHandlers(
     )
 
     const mcpHostEndpoint = buildMcpHostUrl(recipeName, sandboxNamespace)
-    const recipe = (await readRecipe(recipeName, recipeNamespaceClaim)) as {
-      metadata?: { annotations?: Record<string, string> }
-    } | null
     // Grant keys are per-provider names, so each broker only ever receives
     // the key read for the provider this request targets; the other broker's
     // key stays `unassigned` so a same-named grant can never be redeemed.
@@ -713,11 +743,23 @@ export function createWorkflowEndpointHandlers(
     // End-to-end wiring lands here: needs a workflowrecipe CRD field + coordinator
     // plumbing to source and pass the policy.
     const result = await modelConfigHandler.handle(
-      { stepId: body.stepId, provider: body.provider, model: body.model },
+      {
+        stepId: body.stepId,
+        provider: body.provider,
+        model: body.model,
+        ...(soulContent !== undefined ? { soulContent } : {}),
+      },
       mcpHostEndpoint,
       wrcConfigureToken,
       handleOpts
     )
+    if (soulContent !== undefined && result.status >= 200 && result.status < 300) {
+      log.info('Forwarded the step soul to mcp-host', {
+        stepId: body.stepId,
+        soulBytes,
+        soulSha256Prefix: createHash('sha256').update(soulContent).digest('hex').slice(0, 12),
+      })
+    }
     if (
       isLlmProviderId(body.provider) &&
       PROVIDER_AUTH_MODE[body.provider] === 'oauth-broker' &&

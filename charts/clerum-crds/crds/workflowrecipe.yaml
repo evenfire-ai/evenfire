@@ -621,7 +621,13 @@ spec:
                             enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription, grok-subscription]
                           soul:
                             type: string
-                            description: Per-step SOUL content override.
+                            # Counts characters; WRC also refuses more than 65,536 bytes of UTF-8.
+                            maxLength: 65536
+                            description: >-
+                              This step's system prompt. It replaces any global SOUL for
+                              the step and is cleared when the step ends. It needs provider
+                              and model on the step or in spec.agent; a step that inherits
+                              its model from the previous step runs without it.
                       requiresApproval:
                         type: object
                         description: >-

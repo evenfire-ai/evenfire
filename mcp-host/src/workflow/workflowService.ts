@@ -7,6 +7,7 @@
  * - Model/provider can be swapped per-step without restart
  * - SOUL content can be overridden per-step, reverted after execution
  */
+import { createHash } from 'node:crypto'
 import { BudgetClient } from '../budget/budgetClient'
 import type { BudgetVerdict } from '../budget/types'
 import { createGetCapabilitiesTool } from '../capabilities/getCapabilitiesTool'
@@ -719,10 +720,7 @@ export class WorkflowService {
       this.configured
     ) {
       this.currentLlmSecretName = llmSecretName
-      if (pendingSoul !== undefined) {
-        this.stepSoulContent = pendingSoul
-        this.soulOverrideActive = true
-      }
+      this.applyStepSoul(pendingSoul)
       return {
         configured: true,
         provider: req.provider,
@@ -755,10 +753,7 @@ export class WorkflowService {
     this.currentApiKey = apiKey
     this.currentLlmSecretName = llmSecretName
     this.configured = true
-    if (pendingSoul !== undefined) {
-      this.stepSoulContent = pendingSoul
-      this.soulOverrideActive = true
-    }
+    this.applyStepSoul(pendingSoul)
     this.notifyLlmConfigured(req.provider, model, apiKey)
 
     return {
@@ -877,6 +872,23 @@ export class WorkflowService {
     // Capture provider into local const — eliminates non-null assertions inside async loop
     // and prevents concurrent configure() from nullifying mid-execution.
     const provider = this.currentProvider!
+    // Likewise capture the soul: a stale attempt of this step that finishes later (e.g. one held
+    // at approval past the coordinator timeout) clears the stored soul, not this one.
+    const soulContent = this.soulOverrideActive ? this.stepSoulContent : this.globalSoulContent
+    if (this.soulOverrideActive && this.stepSoulContent) {
+      logger.info(
+        {
+          component: LOG_COMPONENT,
+          stepId: req.stepId,
+          soulBytes: Buffer.byteLength(this.stepSoulContent, 'utf-8'),
+          soulSha256Prefix: createHash('sha256')
+            .update(this.stepSoulContent)
+            .digest('hex')
+            .slice(0, 12),
+        },
+        'Step starts with a step soul override'
+      )
+    }
 
     // MAX_TIMEOUT_SECONDS is defined at module scope (env-configurable via
     // CLERUM_MAX_STEP_TIMEOUT_SECONDS; default 5400 = 90 minutes).
@@ -966,6 +978,7 @@ export class WorkflowService {
       !WorkflowService.isCanonicalWorkflowExecutionId(workflowExecutionId)
     ) {
       clearTimeout(timeout)
+      this.revertSoulToGlobal()
       return {
         stepId: req.stepId,
         status: 'failed',
@@ -979,6 +992,7 @@ export class WorkflowService {
       descriptorFor(this.currentProviderName).authMode === 'oauth-broker'
     if (usageReportingEnabled && !this.currentLlmSecretName && !brokerUsage) {
       clearTimeout(timeout)
+      this.revertSoulToGlobal()
       return {
         stepId: req.stepId,
         status: 'failed',
@@ -1165,7 +1179,6 @@ export class WorkflowService {
       }
 
       // 3. Build system prompt
-      const soulContent = this.soulOverrideActive ? this.stepSoulContent : this.globalSoulContent
       const systemParts: string[] = []
       if (soulContent) systemParts.push(soulContent)
       systemParts.push(`[Step: ${req.stepId}]`)
@@ -1608,6 +1621,12 @@ export class WorkflowService {
   }
 
   // ─── SOUL Management ──────────────────────────────────────────────
+
+  /** Stores the step soul, or clears a stale one when the configure carries none. */
+  private applyStepSoul(soul: string | undefined): void {
+    this.stepSoulContent = soul ?? null
+    this.soulOverrideActive = soul !== undefined
+  }
 
   revertSoulToGlobal(): void {
     this.stepSoulContent = null

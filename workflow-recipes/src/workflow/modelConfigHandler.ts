@@ -47,6 +47,8 @@ export interface ConfigureModelRequest {
   stepId: string
   provider: string
   model: string
+  /** The step's `agent.soul`, read by WRC from the recipe. Wins over `soulStorageRef`. */
+  soulContent?: string
   soulStorageRef?: {
     bucket: string
     key: string
@@ -589,20 +591,8 @@ export class ModelConfigHandler {
         provider: req.provider,
         model: req.model,
       }
-      if (req.soulStorageRef && this.objectStorage) {
-        try {
-          const content = await this.objectStorage.download(
-            req.soulStorageRef.bucket,
-            req.soulStorageRef.key
-          )
-          if (content) configureBody.soulContent = content
-        } catch {
-          createLogger('wrc', 'model-config-handler').warn(
-            'SOUL download failed — continuing without step SOUL override',
-            { stepId: req.stepId }
-          )
-        }
-      }
+      const soulContent = await this.resolveStepSoul(req)
+      if (soulContent) configureBody.soulContent = soulContent
       try {
         const result = await this.mcpHost.configure(
           mcpHostEndpoint,
@@ -656,23 +646,8 @@ export class ModelConfigHandler {
       opts
     )
 
-    // 3. Optional SOUL download
-    let soulContent: string | undefined
-    if (req.soulStorageRef && this.objectStorage) {
-      try {
-        const content = await this.objectStorage.download(
-          req.soulStorageRef.bucket,
-          req.soulStorageRef.key
-        )
-        if (content) soulContent = content
-      } catch {
-        // Non-blocking: workflow continues without SOUL override
-        createLogger('wrc', 'model-config-handler').warn(
-          'SOUL download failed — continuing without step SOUL override',
-          { stepId: req.stepId }
-        )
-      }
-    }
+    // 3. Optional step SOUL
+    const soulContent = await this.resolveStepSoul(req)
 
     // 4. POST /configure to mcp_host — apiKey ONLY on this leg. The secret
     // name is non-secret metadata used only for usage attribution; the key
@@ -707,6 +682,25 @@ export class ModelConfigHandler {
     return {
       status: 202,
       body: { configured: true, provider: req.provider, model: req.model },
+    }
+  }
+
+  /** The inline step soul, else the `soulStorageRef` download; a failed download is non-blocking. */
+  private async resolveStepSoul(req: ConfigureModelRequest): Promise<string | undefined> {
+    if (req.soulContent) return req.soulContent
+    if (!req.soulStorageRef || !this.objectStorage) return undefined
+    try {
+      const content = await this.objectStorage.download(
+        req.soulStorageRef.bucket,
+        req.soulStorageRef.key
+      )
+      return content || undefined
+    } catch {
+      createLogger('wrc', 'model-config-handler').warn(
+        'SOUL download failed — continuing without step SOUL override',
+        { stepId: req.stepId }
+      )
+      return undefined
     }
   }
 

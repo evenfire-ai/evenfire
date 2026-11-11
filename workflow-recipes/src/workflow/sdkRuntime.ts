@@ -15,6 +15,7 @@ import {
   type WorkflowPhase,
   type WorkflowRecipeSpec,
   computeBackoff,
+  emitLog,
   renderPrompt,
   requestModelInjection,
   withRetry,
@@ -35,6 +36,12 @@ type AgentProvider = LlmProviderId
 const DEFAULT_STEP_TIMEOUT_SECONDS = 300
 const PROVIDER_OUTPUT_LENGTH_EXCEEDED = 'provider_output_length_exceeded'
 const MCP_HOST_NOT_READY = 'mcp_host not ready'
+const SOUL_INJECTION_RETRY_DELAYS_MS = [1_000, 2_000, 4_000]
+/** Must match MAX_STEP_SOUL_BYTES in restEndpoints.ts. */
+const MAX_STEP_SOUL_BYTES = 65_536
+// A 4xx other than 408/429, or a refused grant, is final. WRC reports mcp-host refusals as
+// 502, which is retried like any 5xx.
+const DEFINITE_INJECTION_FAILURE = /^Model injection (?:failed: 4(?!08|29)\d\d|refused)/
 
 interface RuntimeAgentSpec {
   provider: AgentProvider
@@ -86,6 +93,8 @@ export interface RuntimeDependencies {
   mcpHost?: McpHostClient | null
   snippetRunner?: SnippetRunnerClient | null
   modelInjection?: typeof requestModelInjection
+  /** Backoff (ms) between retries of a transiently failed soul injection. */
+  soulInjectionRetryDelaysMs?: readonly number[]
   waitForMcpHost?: boolean
   mcpHostReadyAttempts?: number
   mcpHostReadyDelayMs?: number
@@ -159,6 +168,7 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
     mcpHost,
     snippetRunner,
     modelInjection = requestModelInjection,
+    soulInjectionRetryDelaysMs = SOUL_INJECTION_RETRY_DELAYS_MS,
   } = deps
 
   const stopPolling = signals.pollSignals(signal => coordinator.injectSignal(signal))
@@ -176,6 +186,17 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
   const needsSnippetRunner = spec.steps.some(step => workflowStepUsesSnippetRunner(step))
 
   try {
+    // Fail fast with a clear reason; WRC would only answer a bare 422 at that step.
+    for (const step of spec.steps) {
+      if (isSnippetRuntimeStep(step) || step.agent?.soul === undefined) continue
+      if (!declaresStepModel(step, spec.agent)) continue
+      const soulBytes = Buffer.byteLength(step.agent.soul, 'utf8')
+      if (soulBytes > MAX_STEP_SOUL_BYTES) {
+        throw new Error(
+          `step '${step.id}' soul exceeds ${MAX_STEP_SOUL_BYTES} bytes of UTF-8 (${soulBytes} bytes)`
+        )
+      }
+    }
     if (needsMcpHost) {
       if (!mcpHost) {
         throw new Error('mcp_host endpoint and token are required for agentic workflow steps')
@@ -265,12 +286,7 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
           throw new Error('agent-config-missing')
         }
 
-        if (
-          needsInitialModelInjection ||
-          !currentAgent ||
-          stepAgent.provider !== currentAgent.provider ||
-          stepAgent.model !== currentAgent.model
-        ) {
+        const injectStepModel = async (): Promise<void> => {
           await modelInjection(config.wrcUrl, config.workflowName, config.tokenProvider, {
             stepId: runtimeStep.id,
             provider: stepAgent.provider,
@@ -278,6 +294,27 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
           })
           currentAgent = { provider: stepAgent.provider, model: stepAgent.model }
           needsInitialModelInjection = false
+        }
+        // mcp-host clears the soul when each attempt ends, so soul steps are injected per attempt.
+        // WRC configures only a declared provider/model: a step that inherits its model runs
+        // without its soul.
+        const injectSoulPerAttempt =
+          stepAgent.soul !== undefined && declaresStepModel(runtimeStep, spec.agent)
+        if (stepAgent.soul !== undefined && !injectSoulPerAttempt) {
+          emitLog(
+            'warn',
+            'Step declares a soul but no agent provider/model; it runs without the soul',
+            { stepId: runtimeStep.id }
+          )
+        }
+        if (
+          !injectSoulPerAttempt &&
+          (needsInitialModelInjection ||
+            !currentAgent ||
+            stepAgent.provider !== currentAgent.provider ||
+            stepAgent.model !== currentAgent.model)
+        ) {
+          await injectStepModel()
         }
 
         const instruction = renderPrompt(runtimeStep.instruction ?? '', {
@@ -294,7 +331,15 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
             ...(workflowTeamId ? { workflowTeamId } : {}),
             ...(workflowUserId ? { workflowUserId } : {}),
           },
-          approvalBindingProof
+          approvalBindingProof,
+          injectSoulPerAttempt
+            ? () =>
+                injectWithTransientRetry(
+                  runtimeStep.id,
+                  injectStepModel,
+                  soulInjectionRetryDelaysMs
+                )
+            : undefined
         )
 
         await status.reportStepStatus(runtimeStep.id, 'completed', {
@@ -456,6 +501,39 @@ function resolveLastCompletedAgent(
   return current
 }
 
+/** True when the step or the recipe declares provider and model, as WRC requires. */
+function declaresStepModel(step: RuntimeStepSpec, defaultAgent: RuntimeAgentSpec | undefined) {
+  return Boolean(
+    (step.agent?.provider || defaultAgent?.provider) && (step.agent?.model || defaultAgent?.model)
+  )
+}
+
+/**
+ * Soul steps inject on every attempt, so a transient failure (network, timeout, 5xx, 408, 429)
+ * is retried with backoff instead of failing the step; a definite failure is rethrown.
+ */
+async function injectWithTransientRetry(
+  stepId: string,
+  inject: () => Promise<void>,
+  delaysMs: readonly number[]
+): Promise<void> {
+  for (let retry = 0; ; retry++) {
+    try {
+      await inject()
+      return
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (retry >= delaysMs.length || DEFINITE_INJECTION_FAILURE.test(message)) throw err
+      emitLog('warn', 'Step soul injection failed; trying again', {
+        stepId,
+        retry: retry + 1,
+        error: message,
+      })
+      await sleep(delaysMs[retry])
+    }
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -469,7 +547,8 @@ async function executeAgenticStepWithRetry(
   step: RuntimeStepSpec,
   instruction: string,
   contextVars: Record<string, string>,
-  approvalBindingProof?: string
+  approvalBindingProof?: string,
+  beforeAttempt?: () => Promise<void>
 ): Promise<AgentStepResult> {
   const maxAttempts = step.maxRetries ?? step.retries ?? 2
   const backoffSeconds = step.backoffSeconds ?? 30
@@ -479,6 +558,16 @@ async function executeAgenticStepWithRetry(
 
   let lastError: Error | undefined
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // Outside the try: an injection failure fails the step instead of consuming an attempt.
+    if (beforeAttempt) {
+      try {
+        await beforeAttempt()
+      } catch (err) {
+        if (!lastError) throw err
+        const message = err instanceof Error ? err.message : String(err)
+        throw new Error(`${message} (after attempt ${attempt - 1} failed: ${lastError.message})`)
+      }
+    }
     try {
       const result = await mcpHost.executeAgentStep({
         stepId: step.id,
