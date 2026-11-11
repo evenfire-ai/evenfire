@@ -59,7 +59,7 @@ describe('apiSend request timeout', () => {
     await apiSend('POST', '/api/v1/example', { a: 1 }, {}, {}, { timeoutMs: 0 })
 
     // 0 must NOT arm setTimeout(fn, 0) (which would abort on the next tick); it falls
-    // back to the 30s default, matching the server proxy's resolveProxyTimeoutMs.
+    // back to the browser's 30s request default (API_REQUEST_TIMEOUT_MS).
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30000)
   })
 
