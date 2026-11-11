@@ -10,9 +10,13 @@
  * provider it builds with {@link withWellFormedRequestText}.
  *
  * A lone surrogate is replaced with U+FFFD (`String.prototype.toWellFormed`).
- * The repair is never silent: each repaired message emits one `warn` line
- * (provider, role, tool name, count, never the text) and increments
- * `clerum_llm_request_text_repaired_total`.
+ * The repair is never silent: each repaired message, tool definition or system
+ * prompt emits one `warn` line (provider, role, tool name, count, never the
+ * text) and increments `clerum_llm_request_text_repaired_total`, once the
+ * whole request has been repaired and right before it is sent. A repair that
+ * would make two keys of one object equal is not done: the request is refused
+ * before dispatch with {@link RequestTextKeyCollisionError}, which the
+ * provider classifies as `LLM_REQUEST_TEXT_REJECTED`.
  *
  * The wrap runs in the provider's public methods, before any request is built,
  * so the subscription providers hash the repaired request and control-api and
@@ -20,11 +24,12 @@
  * same references, so its requests and hashes are unchanged.
  */
 import { Counter } from 'prom-client'
+import { LlmErrorCode } from '../core/errors'
 import type { SystemPromptParts } from '../core/reasoning/systemPrompt'
 import type { ChatMessage, MessageContentPart, ToolDefinition } from '../core/types'
 import { logger } from '../logger'
 import type { LlmProvider } from './registryCore'
-import type { SingleTurnProvider } from './types'
+import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export const clerumLlmRequestTextRepairedTotal = new Counter({
   name: 'clerum_llm_request_text_repaired_total',
@@ -35,7 +40,11 @@ export const clerumLlmRequestTextRepairedTotal = new Counter({
 /** With the `u` flag, `\p{Cs}` matches only the surrogates that are not part of a pair. */
 const LONE_SURROGATE = /\p{Cs}/gu
 
-type Tally = { units: number }
+type Tally = { units: number; keyCollisions: number }
+
+function newTally(): Tally {
+  return { units: 0, keyCollisions: 0 }
+}
 
 function repairString(value: string, tally: Tally): string {
   if (value.isWellFormed()) return value
@@ -49,48 +58,161 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null
 }
 
-/**
- * `value` with every string repaired, object keys included. Arrays and plain
- * objects are walked; anything else (numbers, AbortSignal, Buffers) is
- * returned as is. Returns the same reference when nothing under it changed and
- * a shallow copy along the changed path otherwise, so inputs are never mutated.
- * `skipKeys` names keys whose values are left untouched at this level only.
- */
-function repairDeep<T>(value: T, tally: Tally, skipKeys?: ReadonlySet<string>): T {
-  if (typeof value === 'string') return repairString(value, tally) as T
-  if (Array.isArray(value)) {
-    let out: unknown[] | undefined
-    for (let i = 0; i < value.length; i++) {
-      const repaired = repairDeep(value[i], tally)
-      if (repaired !== value[i]) {
-        out ??= value.slice()
-        out[i] = repaired
-      }
-    }
-    return (out ?? value) as T
+function isContainer(value: unknown): value is unknown[] | Record<string, unknown> {
+  return Array.isArray(value) || isPlainObject(value)
+}
+
+type ArrayFrame = {
+  kind: 'array'
+  src: unknown[]
+  index: number
+  out: unknown[] | undefined
+  /** The child container being walked, as read from `src` on the way down. */
+  child: unknown
+}
+
+type ObjectFrame = {
+  kind: 'object'
+  src: Record<string, unknown>
+  keys: string[]
+  index: number
+  outKeys: string[]
+  values: unknown[]
+  changed: boolean
+  keyRepaired: boolean
+  skipKeys: ReadonlySet<string> | undefined
+  child: unknown
+}
+
+type Frame = ArrayFrame | ObjectFrame
+
+function newFrame(src: unknown[] | Record<string, unknown>, skipKeys?: ReadonlySet<string>): Frame {
+  if (Array.isArray(src)) return { kind: 'array', src, index: 0, out: undefined, child: undefined }
+  const keys = Object.keys(src)
+  return {
+    kind: 'object',
+    src,
+    keys,
+    index: 0,
+    outKeys: new Array<string>(keys.length),
+    values: new Array<unknown>(keys.length),
+    changed: false,
+    keyRepaired: false,
+    skipKeys,
+    child: undefined,
   }
-  if (!isPlainObject(value)) return value
-  let changed = false
-  const entries: Array<[string, unknown]> = []
-  for (const [key, item] of Object.entries(value)) {
-    const repairedKey = repairString(key, tally)
-    const repaired = skipKeys?.has(key) ? item : repairDeep(item, tally)
-    if (repairedKey !== key || repaired !== item) changed = true
-    entries.push([repairedKey, repaired])
-  }
-  if (!changed) return value
+}
+
+/** The repaired container of a finished frame, or its source when nothing under it changed. */
+function finishFrame(frame: Frame, tally: Tally): unknown {
+  if (frame.kind === 'array') return frame.out ?? frame.src
+  if (!frame.changed) return frame.src
   const out: Record<string, unknown> =
-    Object.getPrototypeOf(value) === null ? Object.create(null) : {}
-  // defineProperty keeps a key such as "__proto__" an ordinary own property.
-  for (const [key, item] of entries) {
+    Object.getPrototypeOf(frame.src) === null ? Object.create(null) : {}
+  for (let i = 0; i < frame.keys.length; i++) {
+    const key = frame.outKeys[i]
+    // Two keys that repair to the same text, or a repaired key equal to an
+    // untouched one: writing both would silently drop a value.
+    if (frame.keyRepaired && Object.prototype.hasOwnProperty.call(out, key)) {
+      tally.keyCollisions += 1
+    }
+    // defineProperty keeps a key such as "__proto__" an ordinary own property.
     Object.defineProperty(out, key, {
-      value: item,
+      value: frame.values[i],
       enumerable: true,
       writable: true,
       configurable: true,
     })
   }
-  return out as T
+  return out
+}
+
+/**
+ * `root` with every string repaired, object keys included. Arrays and plain
+ * objects are walked; anything else (numbers, AbortSignal, Buffers) is
+ * returned as is. Returns the same reference when nothing under it changed and
+ * a shallow copy along the changed path otherwise, so inputs are never mutated.
+ * `skipKeys` names keys whose values are left untouched at the top level only.
+ *
+ * The walk uses an explicit stack, so no nesting depth makes it fail; the
+ * parsers behind the providers keep their own depth limits. A container that
+ * is already on the current path (a cycle) is kept as is and not entered.
+ * Each property is read once.
+ */
+function repairDeep<T>(root: T, tally: Tally, skipKeys?: ReadonlySet<string>): T {
+  if (typeof root === 'string') return repairString(root, tally) as T
+  if (!isContainer(root)) return root
+  const stack: Frame[] = [newFrame(root, skipKeys)]
+  const onPath = new Set<unknown>([root])
+  let done: unknown
+  let hasDone = false
+  for (;;) {
+    const frame = stack[stack.length - 1]
+    if (hasDone) {
+      hasDone = false
+      const i = frame.index - 1
+      if (frame.kind === 'array') {
+        if (done !== frame.child) {
+          frame.out ??= frame.src.slice()
+          frame.out[i] = done
+        }
+      } else {
+        if (done !== frame.child) frame.changed = true
+        frame.values[i] = done
+      }
+      frame.child = undefined
+    }
+    const length = frame.kind === 'array' ? frame.src.length : frame.keys.length
+    let descended = false
+    while (frame.index < length) {
+      const i = frame.index++
+      let item: unknown
+      if (frame.kind === 'array') {
+        item = frame.src[i]
+      } else {
+        const key = frame.keys[i]
+        const repairedKey = repairString(key, tally)
+        if (repairedKey !== key) {
+          frame.changed = true
+          frame.keyRepaired = true
+        }
+        frame.outKeys[i] = repairedKey
+        item = frame.src[key]
+        if (frame.skipKeys?.has(key)) {
+          frame.values[i] = item
+          continue
+        }
+      }
+      if (typeof item === 'string') {
+        const repaired = repairString(item, tally)
+        if (frame.kind === 'array') {
+          if (repaired !== item) {
+            frame.out ??= frame.src.slice()
+            frame.out[i] = repaired
+          }
+        } else {
+          if (repaired !== item) frame.changed = true
+          frame.values[i] = repaired
+        }
+        continue
+      }
+      if (!isContainer(item) || onPath.has(item)) {
+        if (frame.kind === 'object') frame.values[i] = item
+        continue
+      }
+      frame.child = item
+      onPath.add(item)
+      stack.push(newFrame(item))
+      descended = true
+      break
+    }
+    if (descended) continue
+    done = finishFrame(frame, tally)
+    hasDone = true
+    onPath.delete(frame.src)
+    stack.pop()
+    if (stack.length === 0) return done as T
+  }
 }
 
 /** Image bytes are base64 and the MIME type is an enum: neither can hold a lone surrogate. */
@@ -121,111 +243,214 @@ function repairMessage(message: ChatMessage, tally: Tally): ChatMessage {
   return contentParts ? { ...repairedRest, contentParts: repairedParts } : repairedRest
 }
 
+/**
+ * The request was not sent: repairing its text would have made two keys of
+ * one object equal, which would silently drop a value. The message names the
+ * tool or role and never the keys or the text.
+ */
+export class RequestTextKeyCollisionError extends Error {
+  override readonly name = 'RequestTextKeyCollisionError'
+  readonly provider: LlmProvider
+  readonly role: string
+  readonly toolName: string | undefined
+  readonly toolCallId: string | undefined
+
+  constructor(fields: {
+    provider: LlmProvider
+    role: string
+    toolName?: string
+    toolCallId?: string
+  }) {
+    const subject =
+      fields.role === 'tool_definition'
+        ? `the definition of tool '${fields.toolName ?? 'unnamed'}'`
+        : `the ${fields.role} message${fields.toolName !== undefined ? ` for tool '${fields.toolName}'` : ''}`
+    super(
+      `Request not sent: ${subject} has object keys that become identical after invalid Unicode (lone UTF-16 surrogates) is replaced. The keys must be distinct.`
+    )
+    this.provider = fields.provider
+    this.role = fields.role
+    this.toolName = fields.toolName
+    this.toolCallId = fields.toolCallId
+  }
+}
+
 type RepairSignal = {
-  provider: LlmProvider
   role: string
   units: number
   toolName?: string
   toolCallId?: string
 }
 
-function reportRepair({ provider, role, units, toolName, toolCallId }: RepairSignal): void {
-  clerumLlmRequestTextRepairedTotal.inc({ provider, role }, units)
-  logger.warn(
-    {
-      component: 'LLM',
-      provider,
-      role,
-      ...(toolName !== undefined ? { toolName } : {}),
-      ...(toolCallId !== undefined ? { toolCallId } : {}),
-      repairedUnits: units,
-    },
-    'Replaced lone UTF-16 surrogates with U+FFFD before provider dispatch'
-  )
+/** The repairs of one provider call, reported only once the whole request is repaired. */
+type RepairRun = { provider: LlmProvider; signals: RepairSignal[] }
+
+function reportRepairs(run: RepairRun): void {
+  for (const { role, units, toolName, toolCallId } of run.signals) {
+    clerumLlmRequestTextRepairedTotal.inc({ provider: run.provider, role }, units)
+    logger.warn(
+      {
+        component: 'LLM',
+        provider: run.provider,
+        role,
+        ...(toolName !== undefined ? { toolName } : {}),
+        ...(toolCallId !== undefined ? { toolCallId } : {}),
+        repairedUnits: units,
+      },
+      'Replaced lone UTF-16 surrogates with U+FFFD before provider dispatch'
+    )
+  }
 }
 
-function repairMessages(messages: ChatMessage[], provider: LlmProvider): ChatMessage[] {
+function repairMessages(messages: ChatMessage[], run: RepairRun): ChatMessage[] {
   let out: ChatMessage[] | undefined
   for (let i = 0; i < messages.length; i++) {
-    const tally: Tally = { units: 0 }
+    const tally = newTally()
     const repaired = repairMessage(messages[i], tally)
     if (repaired === messages[i]) continue
+    const toolName = repaired.role === 'tool' ? repaired.name : undefined
+    if (tally.keyCollisions > 0) {
+      throw new RequestTextKeyCollisionError({
+        provider: run.provider,
+        role: repaired.role,
+        toolName,
+        toolCallId: repaired.tool_call_id,
+      })
+    }
     out ??= messages.slice()
     out[i] = repaired
-    reportRepair({
-      provider,
+    run.signals.push({
       role: repaired.role,
       units: tally.units,
-      toolName: repaired.role === 'tool' ? repaired.name : undefined,
+      toolName,
       toolCallId: repaired.tool_call_id,
     })
   }
   return out ?? messages
 }
 
-function repairTools(tools: ToolDefinition[], provider: LlmProvider): ToolDefinition[] {
+function repairTools(tools: ToolDefinition[], run: RepairRun): ToolDefinition[] {
   let out: ToolDefinition[] | undefined
   for (let i = 0; i < tools.length; i++) {
-    const tally: Tally = { units: 0 }
+    const tally = newTally()
     const repaired = repairDeep(tools[i], tally)
     if (repaired === tools[i]) continue
+    if (tally.keyCollisions > 0) {
+      throw new RequestTextKeyCollisionError({
+        provider: run.provider,
+        role: 'tool_definition',
+        toolName: repaired.name,
+      })
+    }
     out ??= tools.slice()
     out[i] = repaired
-    reportRepair({ provider, role: 'tool_definition', units: tally.units, toolName: repaired.name })
+    run.signals.push({ role: 'tool_definition', units: tally.units, toolName: repaired.name })
   }
   return out ?? tools
 }
 
-function repairSystemParts(parts: SystemPromptParts, provider: LlmProvider): SystemPromptParts {
-  const tally: Tally = { units: 0 }
+function repairSystemParts(parts: SystemPromptParts, run: RepairRun): SystemPromptParts {
+  const tally = newTally()
   const stable = repairString(parts.stable, tally)
   const context = repairString(parts.context, tally)
   if (stable === parts.stable && context === parts.context) return parts
-  reportRepair({ provider, role: 'system_prompt', units: tally.units })
+  run.signals.push({ role: 'system_prompt', units: tally.units })
   return { ...parts, stable, context }
+}
+
+/** Same descriptor as a class method, so `Object.keys(provider)` does not change. */
+function defineOwnMethod(target: object, name: string, value: unknown): void {
+  Object.defineProperty(target, name, {
+    value,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  })
 }
 
 /**
  * Make `provider` send only well-formed text. The request methods the instance
- * has are overridden in place, as own properties, so optional methods that are
- * absent stay absent, `this` is unchanged for every other member, and the
- * object stays an instance of its class.
+ * has, and `classifyError`, are overridden in place as non-enumerable own
+ * properties, so optional methods that are absent stay absent, `Object.keys`
+ * and `this` are unchanged for every other member, and the object stays an
+ * instance of its class. The overrides are `async`: a request refused by the
+ * repair reaches the caller as a rejected promise, which `classifyError`
+ * reports as `LLM_REQUEST_TEXT_REJECTED`, never dispatched and not retryable.
  */
 export function withWellFormedRequestText<T extends SingleTurnProvider>(provider: T): T {
   const providerType = provider.getProviderType()
+  const newRun = (): RepairRun => ({ provider: providerType, signals: [] })
 
   const completeSingleTurn = provider.completeSingleTurn.bind(provider)
-  provider.completeSingleTurn = (messages, options) =>
-    completeSingleTurn(repairMessages(messages, providerType), options)
+  const repairedCompleteSingleTurn: SingleTurnProvider['completeSingleTurn'] = async (
+    messages,
+    options
+  ) => {
+    const run = newRun()
+    const repairedMessages = repairMessages(messages, run)
+    reportRepairs(run)
+    return completeSingleTurn(repairedMessages, options)
+  }
+  defineOwnMethod(provider, 'completeSingleTurn', repairedCompleteSingleTurn)
 
   const completeSingleTurnWithTools = provider.completeSingleTurnWithTools.bind(provider)
-  provider.completeSingleTurnWithTools = (messages, tools, options) =>
-    completeSingleTurnWithTools(
-      repairMessages(messages, providerType),
-      repairTools(tools, providerType),
-      options
-    )
+  const repairedWithTools: SingleTurnProvider['completeSingleTurnWithTools'] = async (
+    messages,
+    tools,
+    options
+  ) => {
+    const run = newRun()
+    const repairedMessages = repairMessages(messages, run)
+    const repairedTools = repairTools(tools, run)
+    reportRepairs(run)
+    return completeSingleTurnWithTools(repairedMessages, repairedTools, options)
+  }
+  defineOwnMethod(provider, 'completeSingleTurnWithTools', repairedWithTools)
 
   if (provider.completeSingleTurnWithToolsAndCache) {
     const withToolsAndCache = provider.completeSingleTurnWithToolsAndCache.bind(provider)
-    provider.completeSingleTurnWithToolsAndCache = (parts, messages, tools, options) =>
-      withToolsAndCache(
-        repairSystemParts(parts, providerType),
-        repairMessages(messages, providerType),
-        repairTools(tools, providerType),
-        options
-      )
+    const repairedWithToolsAndCache: NonNullable<
+      SingleTurnProvider['completeSingleTurnWithToolsAndCache']
+    > = async (parts, messages, tools, options) => {
+      const run = newRun()
+      const repairedParts = repairSystemParts(parts, run)
+      const repairedMessages = repairMessages(messages, run)
+      const repairedTools = repairTools(tools, run)
+      reportRepairs(run)
+      return withToolsAndCache(repairedParts, repairedMessages, repairedTools, options)
+    }
+    defineOwnMethod(provider, 'completeSingleTurnWithToolsAndCache', repairedWithToolsAndCache)
   }
 
   if (provider.completeSingleTurnAndCache) {
     const andCache = provider.completeSingleTurnAndCache.bind(provider)
-    provider.completeSingleTurnAndCache = (parts, messages, options) =>
-      andCache(
-        repairSystemParts(parts, providerType),
-        repairMessages(messages, providerType),
-        options
-      )
+    const repairedAndCache: NonNullable<SingleTurnProvider['completeSingleTurnAndCache']> = async (
+      parts,
+      messages,
+      options
+    ) => {
+      const run = newRun()
+      const repairedParts = repairSystemParts(parts, run)
+      const repairedMessages = repairMessages(messages, run)
+      reportRepairs(run)
+      return andCache(repairedParts, repairedMessages, options)
+    }
+    defineOwnMethod(provider, 'completeSingleTurnAndCache', repairedAndCache)
   }
+
+  const classifyError = provider.classifyError.bind(provider)
+  const classifyWithRefusal: SingleTurnProvider['classifyError'] = err =>
+    err instanceof RequestTextKeyCollisionError
+      ? ({
+          code: LlmErrorCode.RequestTextRejected,
+          retryable: false,
+          message: err.message,
+          providerCode: 'request_text_key_collision',
+          // The repair runs before the inner method, so nothing left the process.
+          providerDispatched: false,
+        } satisfies ClassifiedError)
+      : classifyError(err)
+  defineOwnMethod(provider, 'classifyError', classifyWithRefusal)
 
   return provider
 }

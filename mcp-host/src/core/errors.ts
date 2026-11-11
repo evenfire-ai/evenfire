@@ -52,6 +52,14 @@ export enum LlmErrorCode {
    * is not retryable and never fails over.
    */
   UpstreamRejected = 'LLM_UPSTREAM_REJECTED',
+  /**
+   * Issue #1433 — the Host refused a request before dispatch because its text
+   * cannot be sent as written: repairing invalid Unicode (lone UTF-16
+   * surrogates) would make two keys of one object equal
+   * (`llm/wellFormedRequestText.ts`). Nothing left the process; the same
+   * request is refused again, so it is not retryable and never fails over.
+   */
+  RequestTextRejected = 'LLM_REQUEST_TEXT_REJECTED',
   /** One model response asked for more tool calls than the provider contract allows. */
   ToolCallLimitExceeded = 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
   /**

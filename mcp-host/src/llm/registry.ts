@@ -141,7 +141,9 @@ function constructProvider(
  * The single place that hands out LLM providers. Every provider it returns
  * sends only well-formed text: lone UTF-16 surrogates in messages, tool
  * definitions and system prompt parts are replaced with U+FFFD, with a `warn`
- * log and a counter (see ./wellFormedRequestText, issue #1433).
+ * log and a counter. A request whose repair would make two keys of one object
+ * equal is refused before dispatch with `LLM_REQUEST_TEXT_REJECTED` (see
+ * ./wellFormedRequestText, issue #1433).
  */
 export function makeProvider(
   provider: LlmProvider,

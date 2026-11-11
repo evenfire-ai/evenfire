@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { generateKeyPairSync } from 'node:crypto'
 import { type IncomingMessage, type Server, createServer } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import net, { type AddressInfo } from 'node:net'
 import { register } from 'prom-client'
 import {
   hashGrokCompletionRequest,
@@ -13,6 +14,7 @@ import {
 } from '@clerum/llm-provider-attempt-contract'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../../core/conversation/conversation'
+import { LlmErrorCode } from '../../core/errors'
 import type { ChatMessage, ToolDefinition } from '../../core/types'
 import { logger } from '../../logger'
 import type { PromptBridgeTarget } from '../../pluginWorkloadSdk/domain/types'
@@ -20,15 +22,16 @@ import { LlmBridge } from '../../pluginWorkloadSdk/promptBridge/llmBridge'
 import type { ApiKeys } from '../../types'
 import { FailoverSingleTurnProvider } from '../../workflow/failoverProvider'
 import { WorkflowService } from '../../workflow/workflowService'
-import { AzureOpenAIProvider } from '../azure'
 import { ClaudeProvider } from '../claude'
 import { CodexSubscriptionProvider } from '../codexSubscription'
-import { ALL_FAILOVER_CLASSES } from '../failover/classify'
+import { ALL_FAILOVER_CLASSES, classifyFailoverClass } from '../failover/classify'
 import { GrokSubscriptionProvider } from '../grokSubscription'
 import { createLLMProvider } from '../index'
 import { OpenAIProvider } from '../openai'
-import { OpenAICompatibleProvider } from '../openaiCompatible'
 import { descriptorFor, makeProvider, primarySlot } from '../registry'
+import type { SingleTurnProvider } from '../types'
+import { RequestTextKeyCollisionError } from '../wellFormedRequestText'
+import { installLoopbackOnlyNetwork } from './loopbackOnlyNetwork'
 
 // Issue #1433: a lone UTF-16 surrogate in any request text made every provider
 // reject the whole request with HTTP 400. makeProvider must hand out providers
@@ -156,6 +159,26 @@ function openaiProvider() {
   )
 }
 
+/** A throwaway service account: the key is generated here, never stored. */
+function vertexCredentials(): Record<string, string> {
+  const { privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+  })
+  return {
+    'vertex-service-account-json': JSON.stringify({
+      client_email: 'fixture@fixture-project.iam.gserviceaccount.com',
+      private_key: privateKey,
+      project_id: 'fixture-project',
+    }),
+  }
+}
+
+function bedrockCredentials(): Record<string, string> {
+  return { 'aws-access-key-id': 'AKIAFIXTURE', 'aws-secret-access-key': 'fixture-secret' }
+}
+
 function claudeProvider() {
   return makeProvider(
     'claude',
@@ -244,6 +267,12 @@ function toolTurn(content: string): ChatMessage[] {
 
 beforeEach(() => {
   uuid.next = 0
+  // Every test here drives real SDKs; nothing may leave the loopback interface.
+  installLoopbackOnlyNetwork()
+})
+
+it('the loopback-only guard refuses a non-loopback connection (witness)', () => {
+  expect(() => net.connect({ host: '203.0.113.1', port: 9 })).toThrow(/loopback-only test network/)
 })
 
 describe('makeProvider sends only well-formed text (#1433)', () => {
@@ -276,7 +305,7 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
     expect(await counterValue('openai', 'tool')).toBe(before + 1)
   })
 
-  it('T2: repairs the system prompt parts and the messages on the Anthropic cache path', async () => {
+  it('T2: repairs system parts, messages and tools on the Anthropic cache path with tools', async () => {
     const server = await anthropicFixture()
     const warn = vi.spyOn(logger, 'warn')
     const provider = claudeProvider()
@@ -285,12 +314,12 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
     await provider.completeSingleTurnWithToolsAndCache!(
       {
         stable: `x${LOW}y`,
-        context: 'ctx',
+        context: `c${HIGH}d`,
         stableHash: 'a'.repeat(64),
         contextHash: 'b'.repeat(64),
       },
       toolTurn(`a${HIGH}b`),
-      TOOLS
+      [{ ...TOOLS[0], description: `Read${HIGH}` }]
     )
 
     expect(server.bodies).toHaveLength(1)
@@ -298,12 +327,92 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
     expect(body).not.toMatch(LONE_ESCAPE)
     expect(allWellFormed(JSON.parse(body))).toBe(true)
     expect(body).toContain(`x${FFFD}y`)
+    expect(body).toContain(`c${FFFD}d`)
     expect(body).toContain(`a${FFFD}b`)
+    expect(body).toContain(`Read${FFFD}`)
     const roles = warn.mock.calls
       .filter(([, msg]) => /lone UTF-16 surrogates/.test(msg))
       .map(([fields]) => (fields as { role: string }).role)
       .sort()
-    expect(roles).toEqual(['system_prompt', 'tool'])
+    expect(roles).toEqual(['system_prompt', 'tool', 'tool_definition'])
+  })
+
+  it('T20: repairs system parts and messages on the Anthropic cache path without tools', async () => {
+    const server = await anthropicFixture()
+    const warn = vi.spyOn(logger, 'warn')
+    const provider = claudeProvider()
+    expect(provider.completeSingleTurnAndCache).toBeTypeOf('function')
+
+    await provider.completeSingleTurnAndCache!(
+      {
+        stable: `x${LOW}y`,
+        context: `c${HIGH}d`,
+        stableHash: 'a'.repeat(64),
+        contextHash: 'b'.repeat(64),
+      },
+      [{ role: 'user', content: `a${HIGH}b` }]
+    )
+
+    expect(server.bodies).toHaveLength(1)
+    const body = server.bodies[0]
+    expect(body).not.toMatch(LONE_ESCAPE)
+    expect(body).toContain(`x${FFFD}y`)
+    expect(body).toContain(`c${FFFD}d`)
+    expect(body).toContain(`a${FFFD}b`)
+    const repairs = warn.mock.calls
+      .filter(([, msg]) => /lone UTF-16 surrogates/.test(msg))
+      .map(([fields]) => fields as { role: string; repairedUnits: number })
+      .sort((a, b) => a.role.localeCompare(b.role))
+    expect(repairs.map(r => r.role)).toEqual(['system_prompt', 'user'])
+    expect(repairs[0].repairedUnits).toBe(2)
+  })
+
+  it('T21: reports a repaired tool definition once, with its unit count and counter', async () => {
+    const server = await openaiFixture()
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue('openai', 'tool_definition')
+
+    await openaiProvider().completeSingleTurnWithTools(
+      [{ role: 'user', content: 'list pages' }],
+      [
+        {
+          name: 'page_read',
+          description: `Read${HIGH}`,
+          parameters: {
+            type: 'object',
+            properties: { id: { type: 'string', description: `id${LOW}` } },
+          },
+        },
+      ]
+    )
+
+    expect(server.bodies).toHaveLength(1)
+    expect(server.bodies[0]).toContain(`Read${FFFD}`)
+    const repairs = warn.mock.calls.filter(([, msg]) => /lone UTF-16 surrogates/.test(msg))
+    expect(repairs).toHaveLength(1)
+    expect(repairs[0][0]).toEqual({
+      component: 'LLM',
+      provider: 'openai',
+      role: 'tool_definition',
+      toolName: 'page_read',
+      repairedUnits: 2,
+    })
+    expect(await counterValue('openai', 'tool_definition')).toBe(before + 2)
+  })
+
+  it('T22: counts every repaired unit in a message', async () => {
+    const server = await openaiFixture()
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue('openai', 'tool')
+
+    await openaiProvider().completeSingleTurnWithTools(toolTurn(`a${HIGH}b${LOW}c${HIGH}`), TOOLS)
+
+    expect(server.bodies).toHaveLength(1)
+    expect(server.bodies[0]).toContain(`a${FFFD}b${FFFD}c${FFFD}`)
+    const repairs = warn.mock.calls.filter(([, msg]) => /lone UTF-16 surrogates/.test(msg))
+    expect(repairs).toHaveLength(1)
+    expect(repairs[0][0]).toMatchObject({ role: 'tool', repairedUnits: 3 })
+    expect(await counterValue('openai', 'tool')).toBe(before + 3)
   })
 
   it.each(SUBSCRIPTIONS)(
@@ -346,7 +455,8 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
 
       uuid.next = 0
       const history = subscriptionDeps()
-      await p.make(history).completeSingleTurnWithTools(
+      const provider = p.make(history)
+      await provider.completeSingleTurnWithTools(
         [
           { role: 'system', content: 'be brief' },
           { role: 'user', content: 'café 漢字 🎵' },
@@ -364,10 +474,19 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
       expect(warn.mock.calls.filter(([, msg]) => /lone UTF-16 surrogates/.test(msg))).toHaveLength(
         0
       )
+
+      // Liveness witness: the same instance does repair, so the unchanged
+      // requests above went through the wrap rather than around it.
+      await provider.completeSingleTurnWithTools(toolTurn(`a${HIGH}b`), TOOLS)
+      expect(history.stream).toHaveBeenCalledTimes(2)
+      expect(JSON.stringify(history.stream.mock.calls[1][0].request)).toContain(`a${FFFD}b`)
+      expect(warn.mock.calls.filter(([, msg]) => /lone UTF-16 surrogates/.test(msg))).toHaveLength(
+        1
+      )
     }
   )
 
-  it('T4: leaves valid surrogate pairs untouched, passing the same references through', async () => {
+  it('T4b: leaves valid surrogate pairs untouched, passing the same references through', async () => {
     const server = await openaiFixture()
     const warn = vi.spyOn(logger, 'warn')
     const before = await counterValue('openai', 'user')
@@ -384,7 +503,8 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
     ]
     const tools: ToolDefinition[] = [{ ...TOOLS[0], description: 'Read 😀' }]
 
-    await openaiProvider().completeSingleTurnWithTools(messages, tools)
+    const wrapped = openaiProvider()
+    await wrapped.completeSingleTurnWithTools(messages, tools)
     await new OpenAIProvider('local-http-fixture', 'fixture-model').completeSingleTurnWithTools(
       messages,
       tools
@@ -397,6 +517,12 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
     expect(server.bodies[0]).toBe(server.bodies[1])
     expect(warn.mock.calls.filter(([, msg]) => /lone UTF-16 surrogates/.test(msg))).toHaveLength(0)
     expect(await counterValue('openai', 'user')).toBe(before)
+
+    // Liveness witness: the same instance does repair a lone unit.
+    await wrapped.completeSingleTurnWithTools(toolTurn(`a${HIGH}b`), tools)
+    expect(server.bodies).toHaveLength(3)
+    expect(server.bodies[2]).toContain(`a${FFFD}b`)
+    expect(warn.mock.calls.filter(([, msg]) => /lone UTF-16 surrogates/.test(msg))).toHaveLength(1)
   })
 
   it('T5: repairs every text field and keeps image bytes, without mutating the inputs', async () => {
@@ -466,59 +592,92 @@ describe('makeProvider sends only well-formed text (#1433)', () => {
     expect({ messages, tools }).toEqual(snapshot)
   })
 
-  it('T6: keeps the class, the provider type and exactly the optional methods the class has', () => {
+  it('T6/T14: every makeProvider arm keeps its type, its optional methods and its own keys', () => {
     setEnv('MCP_HOST_CODEX_SUBSCRIPTION_ENABLED', 'true')
     setEnv('MCP_HOST_GROK_SUBSCRIPTION_ENABLED', 'true')
     const key = (id: Parameters<typeof descriptorFor>[0]) => ({
       [primarySlot(descriptorFor(id)).dataKey]: 'local-http-fixture',
     })
-    const arms = [
-      { id: 'openai', cls: OpenAIProvider, make: () => makeProvider('openai', key('openai'), 'm') },
-      { id: 'claude', cls: ClaudeProvider, make: () => makeProvider('claude', key('claude'), 'm') },
+    const codexDeps = subscriptionDeps()
+    const grokDeps = subscriptionDeps()
+    // `bare` is the same class built without makeProvider, only for classes that
+    // exist on both sides of the OpenAI driver-family refactor.
+    const arms: Array<{ id: string; make: () => SingleTurnProvider; bare?: () => object }> = [
+      {
+        id: 'openai',
+        make: () => makeProvider('openai', key('openai'), 'm'),
+        bare: () => new OpenAIProvider('local-http-fixture', 'm'),
+      },
+      {
+        id: 'claude',
+        make: () => makeProvider('claude', key('claude'), 'm'),
+        bare: () => new ClaudeProvider('local-http-fixture', 'm'),
+      },
       {
         id: 'azure',
-        cls: AzureOpenAIProvider,
         make: () =>
           makeProvider('azure', key('azure'), 'm', {
             env: (name: string) =>
               name === 'AZURE_OPENAI_ENDPOINT' ? 'https://fixture.openai.azure.com' : undefined,
           }),
       },
-      {
-        id: 'zai',
-        cls: OpenAICompatibleProvider,
-        make: () => makeProvider('zai', key('zai'), 'm'),
-      },
+      { id: 'zai', make: () => makeProvider('zai', key('zai'), 'm') },
       {
         id: 'codex-subscription',
-        cls: CodexSubscriptionProvider,
-        make: () =>
-          makeProvider('codex-subscription', {}, 'm', { codex: subscriptionDeps() as never }),
+        make: () => makeProvider('codex-subscription', {}, 'm', { codex: codexDeps as never }),
+        bare: () => new CodexSubscriptionProvider('m', codexDeps as never),
       },
       {
         id: 'grok-subscription',
-        cls: GrokSubscriptionProvider,
-        make: () =>
-          makeProvider('grok-subscription', {}, 'm', { grok: subscriptionDeps() as never }),
+        make: () => makeProvider('grok-subscription', {}, 'm', { grok: grokDeps as never }),
+        bare: () => new GrokSubscriptionProvider('m', grokDeps as never),
       },
+      {
+        id: 'vertex',
+        make: () => makeProvider('vertex', vertexCredentials(), 'gemini-fixture'),
+      },
+      {
+        id: 'bedrock',
+        make: () =>
+          makeProvider('bedrock', bedrockCredentials(), 'bedrock-fixture', {
+            env: (name: string) => (name === 'AWS_REGION' ? 'us-east-1' : undefined),
+          }),
+      },
+    ]
+    const requestMethods = [
+      'completeSingleTurn',
+      'completeSingleTurnWithTools',
+      'completeSingleTurnAndCache',
+      'completeSingleTurnWithToolsAndCache',
     ] as const
-    const optional = ['completeSingleTurnAndCache', 'completeSingleTurnWithToolsAndCache'] as const
 
     for (const arm of arms) {
       const provider = arm.make()
-      expect(provider, arm.id).toBeInstanceOf(arm.cls)
+      const proto = Object.getPrototypeOf(provider) as Record<string, unknown>
       expect(provider.getProviderType(), arm.id).toBe(arm.id)
-      for (const method of optional) {
-        const onClass =
-          typeof (arm.cls.prototype as unknown as Record<string, unknown>)[method] === 'function'
+      for (const method of requestMethods) {
+        const onClass = typeof proto[method] === 'function'
+        // Optional methods the class lacks stay absent.
         expect(method in provider, `${arm.id}.${method}`).toBe(onClass)
-        expect(typeof provider[method] === 'function', `${arm.id}.${method}`).toBe(onClass)
+        const own = Object.getOwnPropertyDescriptor(provider, method)
+        if (onClass) {
+          // Wrapped (witness that the wrap ran), as a non-enumerable own method.
+          expect(own, `${arm.id}.${method}`).toBeDefined()
+          expect(own?.enumerable, `${arm.id}.${method}`).toBe(false)
+          expect(typeof own?.value, `${arm.id}.${method}`).toBe('function')
+        } else {
+          expect(own, `${arm.id}.${method}`).toBeUndefined()
+        }
       }
-      // The wrap is an own property only for the request methods.
-      expect(Object.prototype.hasOwnProperty.call(provider, 'completeSingleTurn'), arm.id).toBe(
-        true
-      )
-      expect(Object.prototype.hasOwnProperty.call(provider, 'classifyError'), arm.id).toBe(false)
+      const classify = Object.getOwnPropertyDescriptor(provider, 'classifyError')
+      expect(classify?.enumerable, `${arm.id}.classifyError`).toBe(false)
+      // The wrap adds no enumerable own key (#1419 compares Object.keys).
+      for (const name of [...requestMethods, 'classifyError']) {
+        expect(Object.keys(provider), arm.id).not.toContain(name)
+      }
+      if (arm.bare) {
+        expect(Object.keys(provider).sort(), arm.id).toEqual(Object.keys(arm.bare()).sort())
+      }
     }
   })
 
@@ -674,5 +833,368 @@ describe('a stored user message with a lone surrogate does not poison the sessio
     expect(server.bodies[1]).toContain(`hi ${FFFD}`)
     expect(server.bodies[1]).toContain('and again')
     expect(conversation.turns[0].user_input).toBe(`hi ${HIGH}`)
+  })
+})
+
+// ─── F1: no nesting depth makes the repair fail ───
+
+/** A plain-object chain `depth` levels deep whose innermost value is `{ leaf }`. */
+function nested(depth: number, leaf: unknown): Record<string, unknown> {
+  let value: Record<string, unknown> = { leaf }
+  for (let i = 0; i < depth; i++) value = { n: value }
+  return value
+}
+
+/** The innermost `leaf` of a chain built by `nested`, read with a loop. */
+function innermostLeaf(value: unknown): unknown {
+  let node = value as Record<string, unknown>
+  while ('n' in node) node = node.n as Record<string, unknown>
+  return node.leaf
+}
+
+async function settle(attempt: Promise<unknown>): Promise<unknown> {
+  return attempt.then(
+    () => undefined,
+    (caught: unknown) => caught
+  )
+}
+
+function repairWarns(warn: { mock: { calls: unknown[][] } }): Record<string, unknown>[] {
+  return warn.mock.calls
+    .filter(([, msg]) => /lone UTF-16 surrogates/.test(String(msg)))
+    .map(([fields]) => fields as Record<string, unknown>)
+}
+
+describe('deeply nested and cyclic input (#1433 F1)', () => {
+  it.each(SUBSCRIPTIONS)(
+    "T10: $name keeps the provider's typed refusal for a 150000-deep schema and arguments",
+    async p => {
+      setEnv(p.flag, 'true')
+      for (const shape of ['schema', 'arguments'] as const) {
+        const wired = subscriptionDeps()
+        const provider = p.make(wired)
+        const deep = nested(150000, 'x')
+        let attempt: Promise<unknown> | undefined
+        // A synchronous throw would escape this call; the wrap must reject instead.
+        expect(() => {
+          attempt =
+            shape === 'schema'
+              ? provider.completeSingleTurnWithTools(
+                  [{ role: 'user', content: 'hi' }],
+                  [{ name: 'deep', description: 'deep', parameters: deep }]
+                )
+              : provider.completeSingleTurnWithTools(
+                  [
+                    { role: 'user', content: 'hi' },
+                    {
+                      role: 'assistant',
+                      content: '',
+                      tool_calls: [{ id: 'c1', name: 'eventasks__read', arguments: deep }],
+                    },
+                    { role: 'tool', name: 'eventasks__read', tool_call_id: 'c1', content: 'ok' },
+                  ],
+                  TOOLS
+                )
+        }).not.toThrow()
+        const err = await settle(attempt!)
+        // The refusal comes from the provider's own bounded parser, not a RangeError.
+        expect(err, shape).toMatchObject({ code: 'invalid_request' })
+        expect(String((err as Error).message), shape).toMatch(/nesting depth/)
+        expect(wired.authorize, shape).not.toHaveBeenCalled()
+        expect(wired.stream, shape).not.toHaveBeenCalled()
+        expect(provider.classifyError(err), shape).toMatchObject({
+          retryable: false,
+          providerDispatched: false,
+        })
+      }
+      // Witness: the same provider dispatches a shallow request.
+      const wired = subscriptionDeps()
+      await p.make(wired).completeSingleTurnWithTools([{ role: 'user', content: 'hi' }], TOOLS)
+      expect(wired.authorize).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('T11: walks a 150000-deep schema, passing it unchanged or repairing its bottom', async () => {
+    const warn = vi.spyOn(logger, 'warn')
+    const inner = vi
+      .spyOn(OpenAIProvider.prototype, 'completeSingleTurnWithTools')
+      .mockResolvedValue({ content: 'ok', tool_calls: null, finish_reason: 'stop' } as never)
+    const provider = openaiProvider()
+
+    const wellFormed = [{ name: 'deep', description: 'deep', parameters: nested(150000, 'x') }]
+    await provider.completeSingleTurnWithTools([{ role: 'user', content: 'hi' }], wellFormed)
+    expect(inner).toHaveBeenCalledTimes(1)
+    expect(inner.mock.calls[0][1]).toBe(wellFormed)
+
+    const broken = nested(150000, `x${HIGH}`)
+    const tools = [{ name: 'deep', description: 'deep', parameters: broken }]
+    await provider.completeSingleTurnWithTools([{ role: 'user', content: 'hi' }], tools)
+    expect(inner).toHaveBeenCalledTimes(2)
+    const sent = inner.mock.calls[1][1] as ToolDefinition[]
+    // Reference comparison by hand: a failing `.not.toBe` on a 150000-deep
+    // value makes Vitest's deep equality overflow while it formats the message.
+    expect(sent === tools).toBe(false)
+    expect(innermostLeaf(sent[0].parameters)).toBe(`x${FFFD}`)
+    // The caller's input is not mutated.
+    expect(innermostLeaf(broken)).toBe(`x${HIGH}`)
+    const repairs = repairWarns(warn)
+    expect(repairs).toHaveLength(1)
+    expect(repairs[0]).toMatchObject({ role: 'tool_definition', repairedUnits: 1 })
+  })
+
+  it('T12: a cyclic schema keeps its back-edge as is; its other strings are repaired', async () => {
+    const inner = vi
+      .spyOn(OpenAIProvider.prototype, 'completeSingleTurnWithTools')
+      .mockResolvedValue({ content: 'ok', tool_calls: null, finish_reason: 'stop' } as never)
+    const cyclic: Record<string, unknown> = { type: 'object', description: `d${HIGH}` }
+    cyclic.child = { back: cyclic }
+
+    await openaiProvider().completeSingleTurnWithTools(
+      [{ role: 'user', content: 'hi' }],
+      [{ name: 'cyclic', description: 'cyclic', parameters: cyclic }]
+    )
+
+    expect(inner).toHaveBeenCalledTimes(1)
+    const sent = (inner.mock.calls[0][1] as ToolDefinition[])[0].parameters as Record<
+      string,
+      Record<string, unknown>
+    >
+    expect(sent).not.toBe(cyclic)
+    expect(sent.description).toBe(`d${FFFD}`)
+    // The back-edge still points at the original container: it was not entered.
+    expect(sent.child.back).toBe(cyclic)
+  })
+})
+
+// ─── F3: a repair that would merge two keys refuses the request ───
+
+function argumentsTurn(args: Record<string, unknown>): ChatMessage[] {
+  return [
+    { role: 'user', content: 'read the page' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'c1', name: 'page_read', arguments: args }],
+    },
+    { role: 'tool', name: 'page_read', tool_call_id: 'c1', content: 'ok' },
+  ]
+}
+
+const COLLIDING_ARGS = (): Record<string, unknown> => ({
+  [`k${HIGH}`]: 'first',
+  [`k${LOW}`]: 'second',
+})
+
+describe('keys that become equal after repair (#1433 F3)', () => {
+  it('T13/T15: two keys that repair to the same text are refused as a rejected promise', async () => {
+    const server = await openaiFixture()
+    const provider = openaiProvider()
+
+    let attempt: Promise<unknown> | undefined
+    expect(() => {
+      attempt = provider.completeSingleTurnWithTools(argumentsTurn(COLLIDING_ARGS()), TOOLS)
+    }).not.toThrow()
+    const err = await settle(attempt!)
+
+    expect(err).toBeInstanceOf(RequestTextKeyCollisionError)
+    expect(err).toMatchObject({ provider: 'openai', role: 'assistant' })
+    const message = (err as Error).message
+    expect(message).toMatch(/the assistant message has object keys that become identical/)
+    expect(message).not.toMatch(/first|second/)
+    expect(server.bodies).toHaveLength(0)
+    expect(provider.classifyError(err)).toEqual({
+      code: LlmErrorCode.RequestTextRejected,
+      retryable: false,
+      message,
+      providerCode: 'request_text_key_collision',
+      providerDispatched: false,
+    })
+    expect(classifyFailoverClass(LlmErrorCode.RequestTextRejected, false)).toBeNull()
+
+    // Witness: the same instance sends a request whose keys stay distinct.
+    await provider.completeSingleTurnWithTools(argumentsTurn({ k: 'only' }), TOOLS)
+    expect(server.bodies).toHaveLength(1)
+  })
+
+  it('T15b: a refused request reports no repair, even when an earlier message was repaired', async () => {
+    const server = await openaiFixture()
+    const warn = vi.spyOn(logger, 'warn')
+    const before = await counterValue('openai', 'user')
+    const provider = openaiProvider()
+    const repairable: ChatMessage = { role: 'user', content: `a${HIGH}b` }
+
+    await expect(
+      provider.completeSingleTurnWithTools(
+        [repairable, ...argumentsTurn(COLLIDING_ARGS()).slice(1)],
+        TOOLS
+      )
+    ).rejects.toBeInstanceOf(RequestTextKeyCollisionError)
+    await expect(
+      provider.completeSingleTurnWithTools(
+        [repairable],
+        [
+          {
+            name: 'page_read',
+            description: 'Read',
+            parameters: { type: 'object', properties: { [`p${HIGH}`]: {}, [`p${LOW}`]: {} } },
+          },
+        ]
+      )
+    ).rejects.toMatchObject({ role: 'tool_definition', toolName: 'page_read' })
+
+    expect(server.bodies).toHaveLength(0)
+    expect(repairWarns(warn)).toHaveLength(0)
+    expect(await counterValue('openai', 'user')).toBe(before)
+
+    // Witness: the repairable message alone is repaired, reported and sent.
+    await provider.completeSingleTurnWithTools([repairable], TOOLS)
+    expect(server.bodies).toHaveLength(1)
+    expect(repairWarns(warn)).toHaveLength(1)
+    expect(await counterValue('openai', 'user')).toBe(before + 1)
+  })
+
+  it('T16: colliding schema properties refuse the request, naming the tool definition', async () => {
+    const server = await openaiFixture()
+    const provider = openaiProvider()
+    const err = await settle(
+      provider.completeSingleTurnWithTools(
+        [{ role: 'user', content: 'hi' }],
+        [
+          {
+            name: 'page_read',
+            description: 'Read',
+            parameters: {
+              type: 'object',
+              properties: { [`p${HIGH}`]: { type: 'string' }, [`p${LOW}`]: { type: 'number' } },
+            },
+          },
+        ]
+      )
+    )
+    expect(err).toBeInstanceOf(RequestTextKeyCollisionError)
+    expect((err as Error).message).toMatch(/the definition of tool 'page_read'/)
+    expect(server.bodies).toHaveLength(0)
+    await provider.completeSingleTurnWithTools([{ role: 'user', content: 'hi' }], TOOLS)
+    expect(server.bodies).toHaveLength(1)
+  })
+
+  it('T17: a repaired key equal to an untouched key is refused too', async () => {
+    const server = await openaiFixture()
+    const provider = openaiProvider()
+    await expect(
+      provider.completeSingleTurnWithTools(
+        argumentsTurn({ [`k${FFFD}`]: 1, [`k${HIGH}`]: 2 }),
+        TOOLS
+      )
+    ).rejects.toBeInstanceOf(RequestTextKeyCollisionError)
+    expect(server.bodies).toHaveLength(0)
+    await provider.completeSingleTurnWithTools(argumentsTurn({ k: 1 }), TOOLS)
+    expect(server.bodies).toHaveLength(1)
+  })
+
+  it('T18: repaired keys that stay distinct are sent, both of them', async () => {
+    const server = await openaiFixture()
+    const warn = vi.spyOn(logger, 'warn')
+    await openaiProvider().completeSingleTurnWithTools(
+      argumentsTurn({ [`a${HIGH}`]: 1, [`b${HIGH}`]: 2 }),
+      TOOLS
+    )
+    expect(server.bodies).toHaveLength(1)
+    const wire = JSON.parse(server.bodies[0]) as {
+      messages: { tool_calls?: { function: { arguments: string } }[] }[]
+    }
+    const call = wire.messages.find(m => m.tool_calls)!.tool_calls![0]
+    expect(JSON.parse(call.function.arguments)).toEqual({ [`a${FFFD}`]: 1, [`b${FFFD}`]: 2 })
+    const repairs = repairWarns(warn)
+    expect(repairs).toHaveLength(1)
+    expect(repairs[0]).toMatchObject({ role: 'assistant', repairedUnits: 2 })
+  })
+
+  it('T19a: through LlmPortAdapter the refusal is a non-retryable LLM_REQUEST_TEXT_REJECTED', async () => {
+    const server = await openaiFixture()
+    const adapter = new LlmPortAdapter(openaiProvider(), 'fixture-model', 'openai')
+    await expect(
+      adapter.completeWithTools({ messages: argumentsTurn(COLLIDING_ARGS()), tools: TOOLS })
+    ).rejects.toMatchObject({
+      code: LlmErrorCode.RequestTextRejected,
+      retryable: false,
+      providerCode: 'request_text_key_collision',
+    })
+    expect(server.bodies).toHaveLength(0)
+    // Witness: the adapter dispatches a request without colliding keys.
+    await adapter.completeWithTools({ messages: argumentsTurn({ k: 1 }), tools: TOOLS })
+    expect(server.bodies).toHaveLength(1)
+  })
+
+  it('T19b: FailoverSingleTurnProvider does not fail over from the refusal', async () => {
+    const primaryServer = await openaiFixture()
+    const primary = createLLMProvider(
+      {
+        openai: { [primarySlot(descriptorFor('openai')).dataKey]: 'local-http-fixture' },
+      } as ApiKeys,
+      { provider: 'openai', name: 'fixture-model' }
+    )
+    expect(primary).not.toBeNull()
+    const buildFallback = vi.fn(() => primary)
+    const failover = new FailoverSingleTurnProvider({
+      primary: primary!,
+      primaryPair: { provider: 'openai', model: 'fixture-model' },
+      policy: {
+        cooldownSeconds: 60,
+        triggerOn: [...ALL_FAILOVER_CLASSES],
+        fallbacks: [{ provider: 'claude', model: 'fixture-model', apiKey: 'local-http-fixture' }],
+      },
+      buildFallback,
+    })
+
+    await expect(
+      failover.completeSingleTurnWithTools(argumentsTurn(COLLIDING_ARGS()), TOOLS)
+    ).rejects.toBeInstanceOf(RequestTextKeyCollisionError)
+    expect(buildFallback).not.toHaveBeenCalled()
+    expect(primaryServer.bodies).toHaveLength(0)
+    // Witness: the same failover provider dispatches a well-formed request.
+    await failover.completeSingleTurnWithTools(argumentsTurn({ k: 1 }), TOOLS)
+    expect(primaryServer.bodies).toHaveLength(1)
+  })
+
+  it('T19c: LlmBridge reports the refusal as not retryable and not executed', async () => {
+    const server = await openaiFixture()
+    const target: PromptBridgeTarget = {
+      targetRef: 'primary-openai',
+      provider: 'openai',
+      model: 'fixture-model',
+      credentialSlot: 'openai-api-key',
+    }
+    const bridge = new LlmBridge(
+      {
+        resolve: vi.fn(async () => ({
+          target,
+          keys: {
+            openai: { [primarySlot(descriptorFor('openai')).dataKey]: 'local-http-fixture' },
+          } as ApiKeys,
+          llmSecretName: 'openai-secret',
+        })),
+      },
+      { createProvider: createLLMProvider }
+    )
+    const request = (messages: unknown[]) => ({
+      invocationId: 'inv-1',
+      attemptGeneration: 1,
+      targets: [{ target }],
+      policyRevision: 1,
+      policyHash: 'a'.repeat(64),
+      credentialTicketIssuer: { issue: vi.fn(async () => ({ credentialTicket: 'fresh' })) },
+      messages: messages as never,
+      timeoutMs: 5_000,
+    })
+
+    const err = await settle(bridge.complete(request(argumentsTurn(COLLIDING_ARGS()))))
+
+    expect(err).toMatchObject({ retryable: false, providerMayHaveExecuted: false })
+    expect(String((err as Error).message)).toContain(LlmErrorCode.RequestTextRejected)
+    expect(server.bodies).toHaveLength(0)
+    // Witness: the bridge dispatches a request without colliding keys.
+    await bridge.complete(request(argumentsTurn({ k: 1 })))
+    expect(server.bodies).toHaveLength(1)
   })
 })
