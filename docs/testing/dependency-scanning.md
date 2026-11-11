@@ -81,7 +81,6 @@ scoped to the exact package `paths` in the image, with `expired_at` and a
 
 - the npm CLI bundled in the `node` base image;
 - devDependencies (`vite`, `undici` via `jsdom`) that the runtime stage copies
-  with the full `npm ci` tree;
-- `sharp` and `source-map-js`, also accepted in the lockfile baseline.
+  with the full `npm ci` tree.
 
 Pruning devDependencies from the runtime stage would clear the second group.
