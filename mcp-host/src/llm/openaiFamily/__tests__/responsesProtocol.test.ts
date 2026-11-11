@@ -872,34 +872,42 @@ describe('Responses decode — a response that did not complete throws', () => {
     )
   }
 
-  it.each([
-    ['too long', 'x'.repeat(65)],
-    ['with spaces and payload', 'server_error: {"prompt":"private text"}'],
-    ['with a line break', 'server_error\nforged log line'],
-    ['starting with a non-letter', '__proto__'],
-  ])('bounds a provider status and code %s to a fixed marker', (_label, label) => {
-    const warn = vi.spyOn(logger, 'warn')
-    const err = thrown('decodeTools', withStatus(label, { code: label, message: 'x' })) as LlmError
-    expect(err).toBeInstanceOf(OpenAIResponseFailedError)
-    expect(err.code).toBe(LlmErrorCode.InvalidResponse)
-    expect(err.providerCode).toBe('unrecognized')
-    expect(err.message).toBe("OpenAI response finished with status 'unrecognized' (unrecognized)")
-    expect(warn.mock.calls[0]?.[0]).toMatchObject({
-      status: 'unrecognized',
-      providerCode: 'unrecognized',
+  for (const op of ops) {
+    it.each([
+      ['too long', 'x'.repeat(65)],
+      ['with spaces and payload', 'server_error: {"prompt":"private text"}'],
+      ['with a line break', 'server_error\nforged log line'],
+      ['starting with a non-letter', '__proto__'],
+    ])(`${op}: bounds a provider status and code %s to a fixed marker`, (_case, value) => {
+      const warn = vi.spyOn(logger, 'warn')
+      const err = thrown(op, withStatus(value, { code: value, message: 'x' })) as LlmError
+      expect(err).toBeInstanceOf(OpenAIResponseFailedError)
+      expect(err.code).toBe(LlmErrorCode.InvalidResponse)
+      expect(err.providerCode).toBe('unrecognized')
+      expect(err.message).toBe("OpenAI response finished with status 'unrecognized' (unrecognized)")
+      expect(warn.mock.calls[0]?.[0]).toMatchObject({
+        status: 'unrecognized',
+        providerCode: 'unrecognized',
+      })
+      expect(JSON.stringify(warn.mock.calls[0])).not.toContain(value)
     })
-    expect(JSON.stringify(warn.mock.calls[0])).not.toContain(label)
-  })
+  }
 
   it('logs only numeric usage counts from a failed response', () => {
     const warn = vi.spyOn(logger, 'warn')
     const raw = withStatus('failed', { code: 'server_error', message: 'x' })
-    raw.usage = { ...raw.usage!, input_tokens: 'private text' as unknown as number }
+    raw.usage = {
+      ...raw.usage!,
+      input_tokens: 'private text' as unknown as number,
+      total_tokens: 'private total' as unknown as number,
+    }
     thrown('decodeTools', raw)
     expect(warn.mock.calls[0]?.[0]).toMatchObject({
       inputUsage: null,
       outputUsage: raw.usage.output_tokens,
+      totalUsage: null,
     })
+    expect(JSON.stringify(warn.mock.calls[0])).not.toContain('private total')
     expect(JSON.stringify(warn.mock.calls[0])).not.toContain('private text')
   })
 
