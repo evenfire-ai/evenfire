@@ -494,7 +494,11 @@ describe('OpenAI wire family — byte-identical chat corpus', () => {
         ([k, v]) => `${JSON.stringify(k)}:${JSON.stringify(v)}`
       )
       writeFileSync(CORPUS_PATH, `{\n${lines.join(',\n')}\n}\n`)
-      return
+      // A regeneration compares nothing, so it must never report green: a dev
+      // regenerating on top of a regression would otherwise see it accepted.
+      throw new Error(
+        'chat corpus regenerated; review the fixture diff and re-run without UPDATE_CHAT_CORPUS to compare'
+      )
     }
     expect(existsSync(CORPUS_PATH)).toBe(true)
     const base = JSON.parse(readFileSync(CORPUS_PATH, 'utf8')) as Record<string, unknown>
