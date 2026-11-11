@@ -76,8 +76,14 @@ export function GfsMarkdownPreviewBody({
         }
         if (!stable) throw new Error('The file changed while loading. Refresh to try again.')
         if (active) {
+          // The pre/post version pair proves the download was internally stable,
+          // while the owner also checks it against the newest version observed
+          // elsewhere in this tab. Do not render or expose bytes the owner rejects.
+          if (onSourceLoaded?.(stable.content, stable.version) === false) {
+            setPreviewError('The file changed while loading. Refresh to try again.')
+            return
+          }
           setSource(stable.content)
-          onSourceLoaded?.(stable.content, stable.version)
         }
       } catch (error) {
         if (!active) return

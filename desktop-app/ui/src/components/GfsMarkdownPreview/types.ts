@@ -12,7 +12,7 @@ export type GfsMarkdownPreviewBodyProps = {
   expectedSessionGeneration?: number
   onDownloadError?: (error: unknown) => void
   onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
-  onSourceLoaded?: (source: string, version: number) => void
+  onSourceLoaded?: (source: string, version: number) => boolean | void
   editor?: ReactNode
   titleId?: string
   titleActions?: ReactNode

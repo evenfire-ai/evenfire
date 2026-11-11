@@ -246,14 +246,28 @@ export function FilePreviewPage({
   ])
 
   const handleMarkdownSourceLoaded = useCallback(
-    (content: string, version: number) => {
-      if (!markdownDraftOwner || !draftBinding) return
+    (content: string, version: number): boolean => {
+      // Preview-only consumers without the editing owner have no owner
+      // snapshot to compare against; keep their read-only viewer behavior.
+      if (!markdownDraftOwner || !draftBinding) return true
       markdownDraftOwner.open(draftBinding, {
         savedSnapshot: { content, version },
         sessionGeneration: capturedSessionGeneration,
       })
       const token = markdownDraftOwner.beginStableRead(draftBinding)
-      if (token) markdownDraftOwner.completeStableRead(token, { content, version, stable: true })
+      if (!token) return false
+      const completed = markdownDraftOwner.completeStableRead(token, {
+        content,
+        version,
+        stable: true,
+      })
+      const current = markdownDraftOwner.getVisibleRecord(draftBinding)
+      const accepted = Boolean(
+        completed &&
+        current?.savedSnapshot?.version === version &&
+        current.savedSnapshot.content === content
+      )
+      if (!accepted) return false
       const pendingDiscard = discardAfterReadBindingRef.current
       if (
         pendingDiscard &&
@@ -265,6 +279,7 @@ export function FilePreviewPage({
         discardAfterReadBindingRef.current = null
         markdownDraftOwner.discard(draftBinding)
       }
+      return true
     },
     [
       capturedSessionGeneration,

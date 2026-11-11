@@ -1011,6 +1011,87 @@ describe('FilePreviewPage', () => {
     expect(await screen.findByRole('heading', { name: 'Hi', level: 1 })).toBeTruthy()
   })
 
+  it('rejects a stable preview read older than the page owner snapshot', async () => {
+    const uri = 'gfs://main/abababababababababababababababcf'
+    const resource = await resolvePreviewResource(uri)
+    let currentVersion = 9
+    let currentContent = '# Latest owner snapshot'
+    const resolve = vi.fn(async () => ({ ...resource, version: currentVersion }))
+    const downloadPreview = vi.fn(async (_uri: string, maxBytes: number) =>
+      previewDownloadResult(
+        { ...resource, version: currentVersion },
+        new TextEncoder().encode(currentContent).buffer,
+        maxBytes
+      )
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          downloadPreview,
+          affordances: vi.fn(async () => activeAffordances),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    const binding = {
+      principalOwner: 'principal-owner-1',
+      scopeKey: 'preview-test-user:main',
+      tabId: 'preview-tab-stale-read',
+      gfsUri: uri,
+    }
+    const props = {
+      byteLength: currentContent.length,
+      fileKind: 'markdown' as const,
+      fileName: 'README.md',
+      gfsUri: uri,
+      markdownDraftOwner,
+      tabId: binding.tabId,
+    }
+    const view = render(<FilePreviewPage {...props} />)
+    const completeRead = vi.spyOn(markdownDraftOwner, 'completeStableRead')
+
+    expect(
+      await screen.findByRole('heading', { name: 'Latest owner snapshot', level: 1 })
+    ).toBeTruthy()
+    await waitFor(() =>
+      expect(markdownDraftOwner.get(binding)).toMatchObject({
+        observedVersion: 9,
+        savedSnapshot: { content: '# Latest owner snapshot', version: 9 },
+      })
+    )
+
+    currentVersion = 8
+    currentContent = '# Stale version'
+    view.rerender(<FilePreviewPage {...props} reloadVersion={1} />)
+
+    expect(
+      await screen.findByText('The file changed while loading. Refresh to try again.')
+    ).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Stale version', level: 1 })).toBeNull()
+    expect(markdownDraftOwner.get(binding)?.savedSnapshot).toEqual({
+      content: '# Latest owner snapshot',
+      version: 9,
+    })
+    expect(completeRead).toHaveBeenLastCalledWith(expect.anything(), {
+      content: '# Stale version',
+      version: 8,
+      stable: true,
+    })
+    const menu = openPreviewActions('README.md')
+    expect(
+      within(menu).getByRole('menuitem', { name: 'Copy content' }) as HTMLButtonElement
+    ).toHaveProperty('disabled', true)
+    expect(resolve).toHaveBeenCalled()
+    expect(downloadPreview).toHaveBeenLastCalledWith(uri, GFS_MARKDOWN_PREVIEW_MAX_BYTES, 1)
+    markdownDraftOwner.quit()
+  })
+
   it('edits from the preview menu and saves through unconditional GFS replacement', async () => {
     hookMock.useRealMarkdownEditor = true
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
@@ -1300,6 +1381,8 @@ describe('FilePreviewPage', () => {
   it('keeps typing made while Save is pending after the submitted draft succeeds', async () => {
     const uri = 'gfs://main/11111111111111111111111111111111'
     const source = '# Saved source'
+    let serverSource = source
+    let serverVersion = 1
     let resolveSave!: (value: { version: number }) => void
     const save = new Promise<{ version: number }>(resolve => {
       resolveSave = resolve
@@ -1318,10 +1401,15 @@ describe('FilePreviewPage', () => {
             kind: 'file',
             resourceId: '11111111111111111111111111111111',
             drive: 'main',
-            version: 1,
+            version: serverVersion,
           })),
           downloadPreview: vi.fn(async () =>
-            previewResult(uri, new TextEncoder().encode(source).buffer, 1, 2_097_152)
+            previewResult(
+              uri,
+              new TextEncoder().encode(serverSource).buffer,
+              serverVersion,
+              2_097_152
+            )
           ),
           affordances: vi.fn(async () => activeAffordances),
           replaceFile: vi.fn(() => save),
@@ -1355,6 +1443,8 @@ describe('FilePreviewPage', () => {
     fireEvent.change(editor, { target: { value: '# Newer draft' } })
 
     await act(async () => {
+      serverSource = '# Submitted'
+      serverVersion = 2
       resolveSave({ version: 2 })
       await Promise.resolve()
       fireEvent.change(editor, { target: { value: '# Commit-gap draft' } })
@@ -1376,6 +1466,8 @@ describe('FilePreviewPage', () => {
   it('keeps typing received after Save acknowledgment but before the view commit', async () => {
     const uri = 'gfs://main/12121212121212121212121212121212'
     const source = '# Saved source'
+    let serverSource = source
+    let serverVersion = 1
     let resolveSave!: (value: { version: number }) => void
     const save = new Promise<{ version: number }>(resolve => {
       resolveSave = resolve
@@ -1394,10 +1486,15 @@ describe('FilePreviewPage', () => {
             kind: 'file',
             resourceId: '12121212121212121212121212121212',
             drive: 'main',
-            version: 1,
+            version: serverVersion,
           })),
           downloadPreview: vi.fn(async () =>
-            previewResult(uri, new TextEncoder().encode(source).buffer, 1, 2_097_152)
+            previewResult(
+              uri,
+              new TextEncoder().encode(serverSource).buffer,
+              serverVersion,
+              2_097_152
+            )
           ),
           affordances: vi.fn(async () => activeAffordances),
           replaceFile: vi.fn(() => save),
@@ -1430,6 +1527,8 @@ describe('FilePreviewPage', () => {
     await waitFor(() => expect(window.clerum.gfs.replaceFile).toHaveBeenCalledOnce())
 
     await act(async () => {
+      serverSource = '# Submitted'
+      serverVersion = 2
       resolveSave({ version: 2 })
       await save
       fireEvent.change(editor, { target: { value: '# Post-ack draft' } })
