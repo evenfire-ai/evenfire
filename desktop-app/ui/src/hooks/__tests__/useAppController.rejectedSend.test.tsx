@@ -186,6 +186,41 @@ describe('useAppController: a send the server rejects', () => {
     await waitFor(() => expect(app.result.current.activeChatId).toBe(chatId))
   }
 
+  /** Starts a send whose POST stays pending until the returned `post` settles. */
+  async function sendHeldAtPost(app: App, clerum: MockClerum, text: string) {
+    const post = deferred<never>()
+    const callsBefore = clerum.rpc.invokeHostMessage.mock.calls.length
+    clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
+    let pendingSend!: Promise<void>
+    act(() => {
+      pendingSend = app.result.current.handleSendAgentMessage(text)
+    })
+    await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(callsBefore + 1))
+    return { post, pendingSend }
+  }
+
+  /** Another path holds the agent: a read of the chat's transcript is denied. */
+  async function holdByDeniedRead(app: App, clerum: MockClerum, chatId: string, denial: Error) {
+    clerum.rpc.loadSessionMessages.mockRejectedValue(denial)
+    await act(async () => {
+      await app.result.current.handleSelectChat(chatId)
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
+  }
+
+  /** After access returns: the text is in the draft and the turn is gone. */
+  async function expectInputReturnedAfterReselect(
+    app: App,
+    clerum: MockClerum,
+    chatId: string,
+    text: string
+  ) {
+    await reselect(app, clerum, chatId)
+    expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
+    expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
+    expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+  }
+
   describe('T-A1: a generic rejection returns the input and keeps the agent', () => {
     const rows: Array<{
       label: string
@@ -441,34 +476,30 @@ describe('useAppController: a send the server rejects', () => {
   })
 
   describe('T-A5: an agent held by another path (D-4)', () => {
-    it('held by a denied transcript read while the POST is pending, then the POST is denied', async () => {
+    it.each<[string, SendError]>([
+      [
+        'held by a denied transcript read while the POST is pending, then the POST is denied',
+        () => ipcHostAccessRevoked('rpc:invokeHostMessage'),
+      ],
+      ['held while the POST is pending, then the POST fails with a network error', networkError],
+    ])('%s', async (_label, postError) => {
       const { app, clerum } = await boot()
       const chatId = await createChat(app)
       const text = 'text for the held agent'
-      const post = deferred<never>()
-      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
-      let pendingSend!: Promise<void>
-      act(() => {
-        pendingSend = app.result.current.handleSendAgentMessage(text)
-      })
-      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
-      clerum.rpc.loadSessionMessages.mockRejectedValue(
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+      await holdByDeniedRead(
+        app,
+        clerum,
+        chatId,
         await ipcHostAccessRevoked('rpc:loadSessionMessages')
       )
+      const failure = await postError()
       await act(async () => {
-        await app.result.current.handleSelectChat(chatId)
-      })
-      await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
-      const denial = await ipcHostAccessRevoked('rpc:invokeHostMessage')
-      await act(async () => {
-        post.reject(denial)
+        post.reject(failure)
         await pendingSend
       })
 
-      await reselect(app, clerum, chatId)
-      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
-      expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
-      expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+      await expectInputReturnedAfterReselect(app, clerum, chatId, text)
     })
 
     it('held while the send waits for the activity stream, before the POST', async () => {
@@ -487,13 +518,12 @@ describe('useAppController: a send the server rejects', () => {
           activityCallsBefore
         )
       )
-      clerum.rpc.loadSessionMessages.mockRejectedValue(
+      await holdByDeniedRead(
+        app,
+        clerum,
+        chatId,
         await ipcHostAccessRevoked('rpc:loadSessionMessages')
       )
-      await act(async () => {
-        await app.result.current.handleSelectChat(chatId)
-      })
-      await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
       await act(async () => {
         activity.resolve(async () => undefined)
         await pendingSend
@@ -501,39 +531,7 @@ describe('useAppController: a send the server rejects', () => {
       // Witness: the send stopped before its POST.
       expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
 
-      await reselect(app, clerum, chatId)
-      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
-      expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
-      expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
-    })
-
-    it('held while the POST is pending, then the POST fails with a network error', async () => {
-      const { app, clerum } = await boot()
-      const chatId = await createChat(app)
-      const text = 'text for a held agent with a network failure'
-      const post = deferred<never>()
-      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
-      let pendingSend!: Promise<void>
-      act(() => {
-        pendingSend = app.result.current.handleSendAgentMessage(text)
-      })
-      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
-      clerum.rpc.loadSessionMessages.mockRejectedValue(
-        await ipcHostAccessRevoked('rpc:loadSessionMessages')
-      )
-      await act(async () => {
-        await app.result.current.handleSelectChat(chatId)
-      })
-      await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
-      await act(async () => {
-        post.reject(await networkError())
-        await pendingSend
-      })
-
-      await reselect(app, clerum, chatId)
-      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
-      expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
-      expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+      await expectInputReturnedAfterReselect(app, clerum, chatId, text)
     })
   })
 
@@ -542,13 +540,7 @@ describe('useAppController: a send the server rejects', () => {
       const { app, clerum } = await boot()
       const chatId = await createChat(app)
       const text = 'text rejected after a new draft'
-      const post = deferred<never>()
-      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
-      let pendingSend!: Promise<void>
-      act(() => {
-        pendingSend = app.result.current.handleSendAgentMessage(text)
-      })
-      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
       act(() => {
         setComposerDraft(chatId, 'a newer draft', AGENT)
       })
@@ -581,13 +573,7 @@ describe('useAppController: a send the server rejects', () => {
         expect(chatA).not.toBe(chatB)
         const text = 'text from chat A'
         if (withReference) await addReference(app)
-        const post = deferred<never>()
-        clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
-        let pendingSend!: Promise<void>
-        act(() => {
-          pendingSend = app.result.current.handleSendAgentMessage(text)
-        })
-        await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+        const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
         await act(async () => {
           await app.result.current.handleSelectChat(chatB)
         })
@@ -728,13 +714,7 @@ describe('useAppController: a send the server rejects', () => {
     const { app, clerum } = await boot()
     const chatId = await createChat(app)
     const text = 'text for a chat deleted during the send'
-    const post = deferred<never>()
-    clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
-    let pendingSend!: Promise<void>
-    act(() => {
-      pendingSend = app.result.current.handleSendAgentMessage(text)
-    })
-    await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+    const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
     const deletion = await app.result.current.captureChatDeleteFence(AGENT)
     await act(async () => {
       await app.result.current.handleDeleteChatForAgent(AGENT, chatId, deletion)
@@ -873,13 +853,7 @@ describe('useAppController: a send the server rejects', () => {
       const chatId = await createChatWithServerTurn(app, clerum)
       clerum.chat.replaceMessages.mockImplementation(clerum.replaceStoredMessages)
       const text = 'text rejected during a reconcile'
-      const post = deferred<never>()
-      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
-      let pendingSend!: Promise<void>
-      act(() => {
-        pendingSend = app.result.current.handleSendAgentMessage(text)
-      })
-      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
 
       // The reconcile response is delivered while the POST is pending, and the
       // hydrate is held where it creates the chat before writing.
@@ -932,17 +906,7 @@ describe('useAppController: a send the server rejects', () => {
           (messages as Array<{ id: string }>).some(message => message.id === 'turn-2-assistant')
         )
       ).toBe(true)
-      expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
-      await waitFor(async () =>
-        expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
-      )
-      expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
-      expect
-        .soft(
-          (await clerum.persistedMessages(AGENT, chatId)).map(message => message.id),
-          'stored server turns'
-        )
-        .toEqual(['turn-1-user', 'turn-1-assistant', 'turn-2-user', 'turn-2-assistant'])
+      await expectTurnWithdrawnAndServerTurnsKept(app, clerum, chatId, text)
       expect
         .soft(
           app.result.current.chatMessages.map(message => message.content),
@@ -978,13 +942,7 @@ describe('useAppController: a send the server rejects', () => {
       const chatId = await createChatWithServerTurn(app, clerum)
       clerum.chat.replaceMessages.mockImplementation(clerum.replaceStoredMessages)
       const text = 'text rejected while the hydrate reads'
-      const post = deferred<never>()
-      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
-      let pendingSend!: Promise<void>
-      act(() => {
-        pendingSend = app.result.current.handleSendAgentMessage(text)
-      })
-      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
 
       // The hydrate's own read of the local page (the first one after the
       // server window arrives) returns what the store held when it was read,
@@ -1032,13 +990,7 @@ describe('useAppController: a send the server rejects', () => {
       const chatId = await createChatWithServerTurn(app, clerum)
       clerum.chat.replaceMessages.mockImplementation(clerum.replaceStoredMessages)
       const text = 'text rejected while its removal is pending'
-      const post = deferred<never>()
-      clerum.rpc.invokeHostMessage.mockImplementationOnce(() => post.promise)
-      let pendingSend!: Promise<void>
-      act(() => {
-        pendingSend = app.result.current.handleSendAgentMessage(text)
-      })
-      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
 
       // The server window is requested first and held, so the switch has read
       // its local page before the rejection.
@@ -1108,13 +1060,12 @@ describe('useAppController: a send the server rejects', () => {
         true
       )
     )
-    clerum.rpc.loadSessionMessages.mockRejectedValue(
+    await holdByDeniedRead(
+      app,
+      clerum,
+      chatId,
       await ipcHostAccessDenied('rpc:loadSessionMessages')
     )
-    await act(async () => {
-      await app.result.current.handleSelectChat(chatId)
-    })
-    await waitFor(() => expect(app.result.current.isHostAccessBlocked(AGENT)).toBe(true))
     await act(async () => {
       followUp.resolve({ items: [] })
       await pendingSend
@@ -1122,9 +1073,60 @@ describe('useAppController: a send the server rejects', () => {
 
     // Witness: the send was answered once and made its follow-up read.
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
-    await reselect(app, clerum, chatId)
-    expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
-    expect.soft(await storedUserTurns(clerum, chatId, text), 'stored turn').toHaveLength(0)
-    expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
+    await expectInputReturnedAfterReselect(app, clerum, chatId, text)
+  })
+
+  describe('the composer attachments while a rejected send was pending', () => {
+    it('U1: a text-only send rejected after a document was attached keeps that document', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'text-only send'
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+      const note = new File(['attached during the POST'], 'later.txt', { type: 'text/plain' })
+      act(() => app.result.current.handleAddComposerFiles([note], ''))
+      await waitFor(() =>
+        expect(app.result.current.composerFileAttachments.map(file => file.status)).toEqual([
+          'ready',
+        ])
+      )
+      const rejection = await http401()
+      await act(async () => {
+        post.reject(rejection)
+        await pendingSend
+      })
+
+      // Witness: the put-back ran.
+      expect(getComposerDraft(chatId, AGENT)).toBe(text)
+      expect(app.result.current.composerFileAttachments.map(file => file.filename)).toEqual([
+        'later.txt',
+      ])
+    })
+
+    it('U2: a send with a reference rejected after the attachments changed is retained', async () => {
+      const { app, clerum } = await boot()
+      const chatId = await createChat(app)
+      const text = 'send with a reference'
+      await addReference(app)
+      const { post, pendingSend } = await sendHeldAtPost(app, clerum, text)
+      await waitFor(() => expect(app.result.current.composerReferenceAttachments).toHaveLength(0))
+      const laterReference = { ...REFERENCE, id: 'later-ref', name: 'later' }
+      act(() => app.result.current.handleAddComposerReferenceAttachments([laterReference] as never))
+      await waitFor(() => expect(app.result.current.composerReferenceAttachments).toHaveLength(1))
+      const rejection = await http401()
+      await act(async () => {
+        post.reject(rejection)
+        await pendingSend
+      })
+
+      // Witness: the send ended and kept its payload.
+      await waitFor(() => expect(app.result.current.failedAgentSend?.content).toBe(text))
+      expect(app.result.current.failedAgentSend?.references.map(reference => reference.id)).toEqual(
+        [REFERENCE.id]
+      )
+      expect(getComposerDraft(chatId, AGENT)).toBe('')
+      expect(app.result.current.composerReferenceAttachments.map(item => item.id)).toEqual([
+        'later-ref',
+      ])
+    })
   })
 })
