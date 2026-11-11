@@ -669,7 +669,7 @@ describe('Responses decode — continuity is attached only for replayable output
     expect(decoded.provider_continuation?.owner).toEqual(TERRA)
   })
 
-  it('caps the continuity carried per message at 256 KiB', () => {
+  it('the per-message continuity cap is 256 KiB', () => {
     expect(CONTINUATION_REASONING_MAX_BYTES).toBe(256 * 1024)
   })
 

@@ -29,7 +29,7 @@ export function recordedResponse(name: string): RecordedResponse {
  */
 export function driverEpoch(driver: unknown): string {
   const epoch = (driver as { epoch?: unknown }).epoch
-  if (typeof epoch !== 'string' || !/^[0-9a-f-]{36}$/i.test(epoch)) {
+  if (typeof epoch !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(epoch)) {
     throw new Error(`driver has no continuity epoch (got ${typeof epoch})`)
   }
   return epoch
