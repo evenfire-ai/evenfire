@@ -502,6 +502,29 @@ describe('FilesPage', () => {
     expect(handled).toHaveBeenCalledOnce()
   })
 
+  it('keeps selected-file permission progress beside that file name and menu', async () => {
+    const file = await resolveResource(
+      resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'Current report.txt')
+    )
+    const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: fileCrumb,
+      loadingAffordances: true,
+      affordancesEnabled: true,
+      rowAffordancesResourceId: file.resourceId,
+    })
+
+    renderFilesPage()
+
+    const heading = await screen.findByRole('heading', { name: 'Current report.txt', level: 3 })
+    const status = screen.getByRole('status', {
+      name: 'Checking permissions for Current report.txt',
+    })
+    expect(heading.parentElement?.contains(status)).toBe(true)
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+  })
+
   it.each([
     ['initial GFS discovery', { loadingAccessible: true, loadingCurrentView: true }],
     [
@@ -7212,11 +7235,50 @@ describe('FilesPage', () => {
     // below describe a presented failure and not an unmounted branch.
     expect(screen.getByText('Could not load your files')).toBeTruthy()
     expect(screen.getByText(/503 Service Unavailable: upstream_unreachable/)).toBeTruthy()
+    expect(screen.getByText(/503 Service Unavailable: upstream_unreachable/)).toBeTruthy()
     expect(screen.queryByText(/Error invoking remote method/)).toBeNull()
     // No window was named, so nothing pretends to know one.
     expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
     const retry = screen.getByRole('button', { name: /retry file listing/i }) as HTMLButtonElement
     expect(retry.disabled).toBe(false)
+  })
+
+  it('keeps shared Home listing failures on the generic discovery surface', () => {
+    const resources = [
+      accessibleResource('home-file-1', 'Report.pdf', 'file'),
+      accessibleResource('home-file-2', 'Notes.md', 'file'),
+    ]
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      items: resources,
+      accessibleResources: resources,
+      accessibleError: '503 Service Unavailable: listing unavailable',
+      discoveryFailure: {
+        kind: 'failed',
+        message: '503 Service Unavailable: listing unavailable',
+        retryAvailableAt: null,
+      },
+      rowPermissionStatusByResourceId: Object.fromEntries(
+        resources.map(resource => [
+          resource.resourceId,
+          {
+            status: 'error',
+            message: '503 Service Unavailable: listing unavailable',
+            errorUpdateCount: 1,
+            isEnabled: true,
+            isFetching: false,
+            isSessionAuthorityFailure: false,
+            queryIdentity: {},
+          },
+        ])
+      ),
+    })
+
+    renderFilesPage()
+
+    expect(screen.getByText(/503 Service Unavailable: listing unavailable/)).toBeTruthy()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(screen.queryByRole('status', { name: /Checking permissions for/ })).toBeNull()
   })
 
   it('stops reporting the drive as busy once discovery has settled into a failure', () => {
