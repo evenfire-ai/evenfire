@@ -2,13 +2,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const originalEnv = process.env
 
-async function loadConfig(raw: string | undefined) {
+async function loadConfig(raw: string | undefined, minimalInfra?: string) {
   vi.resetModules()
   process.env = { ...originalEnv }
   if (raw === undefined) {
     delete process.env.CONTEXT_MAPPER_RUNTIME_NAMESPACES
   } else {
     process.env.CONTEXT_MAPPER_RUNTIME_NAMESPACES = raw
+  }
+  if (minimalInfra === undefined) {
+    delete process.env.CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES
+  } else {
+    process.env.CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES = minimalInfra
   }
   return import('./config')
 }
@@ -19,15 +24,17 @@ afterEach(() => {
 })
 
 describe('CONTEXT_MAPPER_RUNTIME_NAMESPACES', () => {
-  it('defaults to the four platform runtime namespaces', async () => {
+  it('defaults to the deploy/base runtime namespaces, without mcp-host', async () => {
     const { config } = await loadConfig(undefined)
 
     expect(config.runtimeNamespaces).toEqual([
       'mcp-server',
-      'mcp-host',
       'sandbox-recipes',
       'rpc-proxy',
+      'sandbox-ui',
     ])
+    // An HCC deny-all in mcp-host blocks LLM egress; its policies are static.
+    expect(config.runtimeNamespaces).not.toContain('mcp-host')
   })
 
   // N5 regression guard: listing llm-hooks here makes ensureInfrastructurePolicies
@@ -44,13 +51,19 @@ describe('CONTEXT_MAPPER_RUNTIME_NAMESPACES', () => {
   })
 
   it('honours an explicit override', async () => {
-    const { config } = await loadConfig('mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui')
+    const { config } = await loadConfig('mcp-server,rpc-proxy')
 
-    expect(config.runtimeNamespaces).toEqual([
-      'mcp-server',
-      'sandbox-recipes',
-      'rpc-proxy',
-      'sandbox-ui',
-    ])
+    expect(config.runtimeNamespaces).toEqual(['mcp-server', 'rpc-proxy'])
+  })
+})
+
+describe('CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES', () => {
+  it('defaults to sandbox-ui, matching deploy/base, and honours an explicit empty list', async () => {
+    const unset = await loadConfig(undefined)
+    expect(unset.config.minimalInfraNamespaces).toEqual(['sandbox-ui'])
+
+    // Witness: the key is read; an explicit empty value opts every namespace out.
+    const empty = await loadConfig(undefined, '')
+    expect(empty.config.minimalInfraNamespaces).toEqual([])
   })
 })

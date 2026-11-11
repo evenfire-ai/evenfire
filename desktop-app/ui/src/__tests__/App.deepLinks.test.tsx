@@ -1364,9 +1364,11 @@ describe('App deep-link orchestration', () => {
   // guard drops every post-paint task this test scheduled.
   function retireRealControllerSession(): void {
     if (!realController) return
-    const listeners = vi
-      .mocked(window.clerum.auth.onExternalLogout)
-      .mock.calls.map(([listener]) => listener)
+    // A bridge without auth reaches the throw below, not a bare TypeError.
+    const onExternalLogout = window.clerum.auth?.onExternalLogout
+    const listeners = onExternalLogout
+      ? vi.mocked(onExternalLogout).mock.calls.map(([listener]) => listener)
+      : []
     if (listeners.length === 0) {
       throw new Error('a real App controller mounted without an external-logout listener')
     }
@@ -1376,19 +1378,30 @@ describe('App deep-link orchestration', () => {
   }
 
   async function cleanupAppDeepLinkSuite(): Promise<void> {
+    let bodyChildElementCount = 0
     try {
-      retireRealControllerSession()
+      try {
+        retireRealControllerSession()
+      } finally {
+        // Unmount even when retirement throws, so its error is the one reported.
+        cleanup()
+      }
     } finally {
-      // Unmount even when retirement throws, so its error is the one reported.
-      cleanup()
+      // Reset even when unmounting or retirement throws, so the next test starts clean.
+      unmountRealApp = null
+      try {
+        bodyChildElementCount = document.body.childElementCount
+        vi.useRealTimers()
+        resetComposerDraftStore()
+        await main.dispose()
+      } finally {
+        try {
+          restoreActualSandboxUiEnvironment?.()
+        } finally {
+          restoreActualSandboxUiEnvironment = null
+        }
+      }
     }
-    unmountRealApp = null
-    restoreActualSandboxUiEnvironment?.()
-    restoreActualSandboxUiEnvironment = null
-    const bodyChildElementCount = document.body.childElementCount
-    vi.useRealTimers()
-    resetComposerDraftStore()
-    await main.dispose()
     expect(bodyChildElementCount, 'App deep-link suite body-empty postcondition').toBe(0)
   }
 
@@ -8297,6 +8310,31 @@ describe('App deep-link orchestration', () => {
       expect(dispose).toHaveBeenCalledOnce()
     } finally {
       leakedChild.remove()
+      if (vi.isFakeTimers()) vi.useRealTimers()
+      resetComposerDraftStore()
+      if (dispose.mock.calls.length === 0) await main.dispose()
+    }
+  })
+
+  it('resets suite state even when retiring the real controller session fails', async () => {
+    const dispose = vi.spyOn(main, 'dispose')
+    const chatId = 'teardown-retire-failure-chat'
+    const agentRef = 'teardown-retire-failure-agent'
+    setComposerDraft(chatId, 'draft that teardown must clear', agentRef)
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // The harness bridge has no auth and no real controller mounted its listener.
+    realController = currentController
+
+    try {
+      await expect(cleanupAppDeepLinkSuite()).rejects.toThrow(
+        'a real App controller mounted without an external-logout listener'
+      )
+      expect(vi.isFakeTimers()).toBe(false)
+      expect(getComposerDraft(chatId, agentRef)).toBe('')
+      expect(dispose).toHaveBeenCalledOnce()
+    } finally {
+      // Otherwise the afterEach teardown retires it again and reports the same error.
+      realController = null
       if (vi.isFakeTimers()) vi.useRealTimers()
       resetComposerDraftStore()
       if (dispose.mock.calls.length === 0) await main.dispose()

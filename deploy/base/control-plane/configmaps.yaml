@@ -98,9 +98,10 @@ data:
   CONTROL_API_ADMIN_GFS_GRANTS_PER_MIN: "150"
   CONTROL_API_ADMIN_GFS_SHARES_PER_MIN: "150"
   CONTROL_API_ADMIN_GFS_LEGACY_GRANT_REPORT_PER_MIN: "150"
-  # Hard ceiling for caller-provided ttlSeconds. Defaults to 48h so a client
-  # asking for ttlSeconds=604800 (code default) can't freeze a workflow step
-  # for a full week. Overlays may tighten further for stricter environments.
+  # Hard ceiling for caller-provided ttlSeconds: 48h (also the code default), so
+  # a client asking for ttlSeconds=604800 (the WorkflowRecipe timeoutSeconds
+  # maximum) can't freeze a workflow step for a full week. Overlays may tighten
+  # further for stricter environments.
   WORKFLOW_APPROVAL_MAX_TTL_SEC: '172800'
   WORKFLOW_APPROVAL_EXPIRY_INTERVAL_MS: '60000'
   # Terminal approvals are retained in the live table for 180 days, then
