@@ -670,9 +670,9 @@ function unexpectedAuthorizationResponse(): PluginWorkloadError {
  * Completions and as `max_output_tokens` on Responses (official OpenAI).
  * Responses rejects values below 16, so there a grant of 1-15 tokens is sent
  * as 16 and the response may overrun the grant by at most 16 - grant tokens.
- * On codex-subscription the ChatGPT wire
- * rejects `max_output_tokens` and the proxy omits it, so there the clamp bounds
- * the hashed request identity rather than the response, and the enforced bound
+ * On codex-subscription the ChatGPT wire rejects `max_output_tokens` and the
+ * proxy omits it, so there the clamp bounds the hashed request identity rather
+ * than the response, and the enforced bound
  * is the contract's structural `LIMITS.maxOutputTokens`. It still matters
  * there: an unclamped request above that limit fails the contract range check
  * as a non-retryable error, which is terminal with no failover.
