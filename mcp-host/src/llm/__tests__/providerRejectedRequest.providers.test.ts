@@ -83,8 +83,9 @@ const ROWS: Row[] = [
       retryable: false,
       httpStatus: 400,
       providerCode: 'invalid_request_error',
+      // The provider's own text, not the SDK's `400 {json}` string.
+      message: 'fixture rejection',
     },
-    keeps: 'fixture rejection',
   },
   {
     name: 'claude 400 for a low credit balance stays a quota error',

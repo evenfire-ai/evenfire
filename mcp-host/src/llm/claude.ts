@@ -132,6 +132,11 @@ export class ClaudeProvider implements SingleTurnProvider {
           message: rawMsg,
         }
       }
+      if (classified.code === LlmErrorCode.UpstreamRejected) {
+        // #1433: a refused request shows Anthropic's own text. Same reason as
+        // above: the shared classifier only sees the outer `${status} {json}`.
+        return { ...classified, message: rawMsg }
+      }
       return classified
     }
     return classifyUnknown(err)

@@ -117,8 +117,8 @@ describe('ClaudeProvider.classifyError', () => {
     expect(c.providerCode).not.toBe('error')
   })
 
-  // #1433: the request body that held a lone UTF-16 surrogate. The provider's
-  // own text is kept as the message; only the code changes.
+  // #1433: the request body that held a lone UTF-16 surrogate. The message is
+  // the provider's own text, not the SDK's `400 {json}` string.
   it('classifies the "request body is not valid JSON" 400 as UpstreamRejected', () => {
     const text =
       'The request body is not valid JSON: unexpected end of hex escape at line 1 column 9'
@@ -129,7 +129,7 @@ describe('ClaudeProvider.classifyError', () => {
       httpStatus: 400,
       providerCode: 'invalid_request_error',
     })
-    expect(c.message).toContain(text)
+    expect(c.message).toBe(text)
   })
 
   // The credit-balance guard keys on the HTTP status, so it survives the 400
