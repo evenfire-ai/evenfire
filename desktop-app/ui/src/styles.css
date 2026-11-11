@@ -16027,6 +16027,10 @@ pre {
   background: rgba(var(--panel-rgb), 0.48);
 }
 
+.da-gfs-markdown-preview-dialog__header {
+  min-width: 0;
+}
+
 .da-gfs-image-preview-dialog__header-actions,
 .da-gfs-markdown-preview-dialog__header-actions,
 .da-gfs-video-preview-dialog__header-actions {
@@ -16049,6 +16053,18 @@ pre {
 
 .da-gfs-preview-title-row > .da-gfs-resource-menu {
   flex: 0 0 auto;
+}
+
+.da-gfs-preview-title-row--editing > .da-gfs-preview-title {
+  flex: 1 1 auto;
+}
+
+.da-gfs-markdown-edit-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 
 .da-gfs-image-preview-dialog__header-main {

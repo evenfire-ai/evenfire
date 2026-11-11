@@ -129,7 +129,11 @@ export function GfsMarkdownPreviewBody({
   return (
     <>
       <header className="da-gfs-markdown-preview-dialog__header">
-        <div className="da-gfs-preview-title-row">
+        <div
+          className={`da-gfs-preview-title-row${
+            editor ? ' da-gfs-preview-title-row--editing' : ''
+          }`}
+        >
           <HeadingTag className="da-gfs-preview-title" id={headingId}>
             {fileName}
           </HeadingTag>
