@@ -20,7 +20,7 @@ export const RECORDED_TEXT_RESPONSE = JSON.parse(
 )
 
 export const AZURE_ENDPOINT = 'https://unit-resource.openai.azure.com/'
-const azureEnv = (values: Record<string, string>) => (name: string) => values[name]
+export const azureEnv = (values: Record<string, string>) => (name: string) => values[name]
 
 /**
  * Pinned to the providers the base corpus was recorded for, so adding a

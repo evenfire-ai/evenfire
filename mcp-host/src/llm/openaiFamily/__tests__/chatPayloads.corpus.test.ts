@@ -503,8 +503,8 @@ describe('OpenAI wire family — byte-identical chat corpus', () => {
   it('matches the recorded chat corpus', async () => {
     const corpus = await buildCorpus()
     if (UPDATE) {
-      // Regenerating rewrites the oracle and skips every comparison, so in CI it
-      // would turn any wire-format regression into a green run.
+      // Fails before writing so a CI run never rewrites the oracle it is meant
+      // to compare against.
       if (IN_CI) {
         throw new Error('UPDATE_CHAT_CORPUS must not be set in CI; regenerate the corpus locally')
       }
