@@ -2544,7 +2544,7 @@ describe('removeMessages', () => {
     await store.saveMessages('agent-1', chatId, messages)
   }
 
-  it('S1: removes an unsent local user turn, keeps the others and the indexed count', async () => {
+  it('removes an unsent local user turn, keeps the others and the indexed count', async () => {
     await seed('remove-1', [user('turn-1-user'), assistant('turn-1-assistant'), user('pending')])
     expect(await ids('remove-1')).toEqual(['turn-1-user', 'turn-1-assistant', 'pending'])
     const countBefore = (await store.getIndex('agent-1')).chats.find(
@@ -2580,7 +2580,7 @@ describe('removeMessages', () => {
       'legacy-1',
     ],
   ] as const)(
-    'S2: refuses %s and leaves the stored list unchanged',
+    'refuses %s and leaves the stored list unchanged',
     async (_label, messages, target) => {
       await seed('refuse', [...messages])
       const before = await ids('refuse')
@@ -2647,7 +2647,7 @@ describe('removeMessages', () => {
     ])
   })
 
-  it('S3: a request with one removable id and one refused id removes nothing', async () => {
+  it('a request with one removable id and one refused id removes nothing', async () => {
     await seed('mixed', [user('turn-1-user'), assistant('turn-1-assistant'), user('pending')])
     const before = await ids('mixed')
     expect(before).toEqual(['turn-1-user', 'turn-1-assistant', 'pending'])
@@ -2659,7 +2659,7 @@ describe('removeMessages', () => {
     expect(await ids('mixed')).toEqual(before)
   })
 
-  it('S4: an unknown id returns 0 and leaves the list unchanged', async () => {
+  it('an unknown id returns 0 and leaves the list unchanged', async () => {
     await seed('unknown', [user('turn-1-user'), assistant('turn-1-assistant')])
     const before = await ids('unknown')
     expect(before).toHaveLength(2)
@@ -2669,7 +2669,7 @@ describe('removeMessages', () => {
     expect(await ids('unknown')).toEqual(before)
   })
 
-  it('S5: a deleted chat returns 0, and a missing chat returns 0 and is not created', async () => {
+  it('a deleted chat returns 0, and a missing chat returns 0 and is not created', async () => {
     await seed('deleted', [user('pending')])
     await store.deleteChat('agent-1', 'deleted', TEAM_A_SCOPE)
     await expect(store.removeMessages('agent-1', 'deleted', ['pending'])).resolves.toBe(0)
@@ -2682,7 +2682,7 @@ describe('removeMessages', () => {
     await expect(fs.access(chatMetaPath('upserted'))).resolves.toBeUndefined()
   })
 
-  it('S5b: a deleted chat whose files are still on disk returns 0 and keeps its snapshot', async () => {
+  it('a deleted chat whose files are still on disk returns 0 and keeps its snapshot', async () => {
     const storedPageIds = async (chatId: string) => {
       const pages = (await fs.readdir(chatPagesDir(chatId))).sort()
       const messages = await Promise.all(
@@ -2723,7 +2723,7 @@ describe('removeMessages', () => {
     expect(await storedPageIds('tombstoned')).toEqual(['kept', 'pending'])
   })
 
-  it('S6: runs in order with upsertMessages on the same chat', async () => {
+  it('runs in order with upsertMessages on the same chat', async () => {
     await seed('ordered-a', [user('turn-1-user'), assistant('turn-1-assistant')])
     const upsertThenRemove = [
       store.upsertMessages('agent-1', 'ordered-a', [user('pending')]),

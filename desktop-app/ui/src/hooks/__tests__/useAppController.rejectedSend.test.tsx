@@ -229,7 +229,7 @@ describe('useAppController: a send the server rejects', () => {
     expect.soft(visibleUserTurns(app, text), 'visible turn').toHaveLength(0)
   }
 
-  describe('T-A1: a generic rejection returns the input and keeps the agent', () => {
+  describe('a generic rejection returns the input and keeps the agent', () => {
     const rows: Array<{
       label: string
       sendError: SendError
@@ -352,7 +352,7 @@ describe('useAppController: a send the server rejects', () => {
     )
   })
 
-  describe('T-A2: a loss of access holds the agent and keeps the input', () => {
+  describe('a loss of access holds the agent and keeps the input', () => {
     const rows: Array<{ label: string; sendError: SendError; readError: SendError | null }> = [
       {
         label: 'host_access_revoked on the send',
@@ -434,7 +434,7 @@ describe('useAppController: a send the server rejects', () => {
     )
   })
 
-  describe("T-A3: a failure that is not a rejection keeps today's error (control)", () => {
+  describe("a failure that is not a rejection keeps today's error (control)", () => {
     it.each([
       { label: 'a network error', sendError: networkError },
       {
@@ -483,7 +483,7 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
-  describe('T-A5: an agent held by another path', () => {
+  describe('an agent held by another path', () => {
     it.each<[string, SendError]>([
       [
         'held by a denied transcript read while the POST is pending, then the POST is denied',
@@ -699,7 +699,7 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
-  describe('T-A6: the composer changed while the POST was pending', () => {
+  describe('the composer changed while the POST was pending', () => {
     it("a new draft in the send's chat stays, and the rejected input is retained", async () => {
       const { app, clerum } = await boot()
       const chatId = await createChat(app)
@@ -781,7 +781,7 @@ describe('useAppController: a send the server rejects', () => {
     )
   })
 
-  describe('T-A7: a Retry answered with a 401', () => {
+  describe('a Retry answered with a 401', () => {
     it.each([
       { composer: 'empty', draft: '' },
       { composer: 'with a draft', draft: 'a draft typed after the failure' },
@@ -814,7 +814,7 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
-  it('T-A8: a removal the store refuses fails loud and keeps the turn, also through a later reconcile', async () => {
+  it('a removal the store refuses fails loud and keeps the turn, also through a later reconcile', async () => {
     const { app, clerum } = await boot()
     const chatId = await createChatWithServerTurn(app, clerum)
     const text = 'text whose withdrawal is refused'
@@ -874,7 +874,7 @@ describe('useAppController: a send the server rejects', () => {
     expect.soft(visibleUserTurns(app, text), 'visible turn after the reconcile').toHaveLength(1)
   })
 
-  it('T-A9: a loss of access answered after the chat was deleted', async () => {
+  it('a loss of access answered after the chat was deleted', async () => {
     const { app, clerum } = await boot()
     const chatId = await createChat(app)
     const text = 'text for a chat deleted during the send'
@@ -896,7 +896,7 @@ describe('useAppController: a send the server rejects', () => {
     expect.soft(clerum.chat.removeMessages, 'removal').not.toHaveBeenCalled()
   })
 
-  describe('T-A15: a send whose chat was deleted releases the activity stream', () => {
+  describe('a send whose chat was deleted releases the activity stream', () => {
     async function deleteChat(app: App, chatId: string) {
       const deletion = await app.result.current.captureChatDeleteFence(AGENT)
       await act(async () => {
@@ -1017,7 +1017,7 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
-  it('T-A10: a rejection that persists returns the text on every send', async () => {
+  it('a rejection that persists returns the text on every send', async () => {
     const { app, clerum } = await boot()
     const chatId = await createChat(app)
     const text = 'text the server keeps rejecting'
@@ -1042,7 +1042,7 @@ describe('useAppController: a send the server rejects', () => {
     expect.soft(app.result.current.toasts.slice(toastsBefore), 'toasts').toEqual([])
   })
 
-  describe('T-A11: the scope changes while the removal is pending', () => {
+  describe('the scope changes while the removal is pending', () => {
     it('a 401 followed by a logout', async () => {
       const { app, clerum, handle } = await boot()
       const signedInState = handle.getSessionState.getMockImplementation() as
@@ -1161,7 +1161,7 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
-  describe('T-A12: a reconcile in flight at the rejection', () => {
+  describe('a reconcile in flight at the rejection', () => {
     const secondWindow = {
       agent: AGENT,
       state: 'idle',
@@ -1367,7 +1367,7 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
-  it('T-A13: held by another path during the follow-up read', async () => {
+  it('held by another path during the follow-up read', async () => {
     const { app, clerum } = await boot()
     const chatId = await createChat(app)
     const text = 'text whose follow-up read is overtaken'
@@ -1403,7 +1403,7 @@ describe('useAppController: a send the server rejects', () => {
     await expectInputReturnedAfterReselect(app, clerum, chatId, text)
   })
 
-  describe('T-A14: the alert of a send kept behind Recover input', () => {
+  describe('the alert of a send kept behind Recover input', () => {
     it('a loss of access with a reference', async () => {
       const { app, clerum } = await boot()
       const chatId = await createChat(app)
@@ -1504,7 +1504,7 @@ describe('useAppController: a send the server rejects', () => {
     })
   })
 
-  it('T-A16: an older page loaded while the removal is pending does not write the turn back', async () => {
+  it('an older page loaded while the removal is pending does not write the turn back', async () => {
     const { app, clerum } = await boot()
     const chatId = await createChat(app)
     // The newest window holds turns 2 and 3, so turn 1 is an older page.
@@ -1599,7 +1599,7 @@ describe('useAppController: a send the server rejects', () => {
     expect.soft(getComposerDraft(chatId, AGENT), 'draft').toBe(text)
   })
 
-  it('T-A17: a turn withdrawn while its chat is hidden does not come back from memory', async () => {
+  it('a turn withdrawn while its chat is hidden does not come back from memory', async () => {
     const { app, clerum } = await boot()
     const chatB = await createChat(app)
     const chatA = await createChat(app)
@@ -1661,7 +1661,7 @@ describe('useAppController: a send the server rejects', () => {
     clerum.chat.loadMessages.mockImplementation(loadLocal)
   })
 
-  it('T-A18: a logout during the follow-up read leaves the draft store and the turn alone', async () => {
+  it('a logout during the follow-up read leaves the draft store and the turn alone', async () => {
     const { app, clerum, handle } = await boot()
     const signedInState = handle.getSessionState.getMockImplementation() as
       | (() => Promise<unknown>)
@@ -1713,7 +1713,7 @@ describe('useAppController: a send the server rejects', () => {
   })
 
   describe('the composer attachments while a rejected send was pending', () => {
-    it('U1: a text-only send rejected after a document was attached keeps that document', async () => {
+    it('a text-only send rejected after a document was attached keeps that document', async () => {
       const { app, clerum } = await boot()
       const chatId = await createChat(app)
       const text = 'text-only send'
@@ -1738,7 +1738,7 @@ describe('useAppController: a send the server rejects', () => {
       ])
     })
 
-    it('U2: a send with a reference rejected after the attachments changed is retained', async () => {
+    it('a send with a reference rejected after the attachments changed is retained', async () => {
       const { app, clerum } = await boot()
       const chatId = await createChat(app)
       const text = 'send with a reference'

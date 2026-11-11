@@ -73,7 +73,7 @@ afterEach(() => {
 })
 
 describe('AgentsPage with an empty or loading catalog', () => {
-  it('C1: shows the workspace for a selected agent when the catalog is empty', () => {
+  it('shows the workspace for a selected agent when the catalog is empty', () => {
     const queryClient = newQueryClient()
     queryClient.setQueryData(desktopQueryKeys.accessCatalog, emptyCatalog())
 
@@ -82,7 +82,7 @@ describe('AgentsPage with an empty or loading catalog', () => {
     expect(screen.getByTestId('agent-workspace-stub')).toBeTruthy()
   })
 
-  it('C2: shows the empty state when the catalog is empty and nothing is selected', () => {
+  it('shows the empty state when the catalog is empty and nothing is selected', () => {
     const queryClient = newQueryClient()
     queryClient.setQueryData(desktopQueryKeys.accessCatalog, emptyCatalog())
 
@@ -92,7 +92,7 @@ describe('AgentsPage with an empty or loading catalog', () => {
     expect(screen.getByText('You do not currently have authorized agents.')).toBeTruthy()
   })
 
-  it('C3: shows the workspace for a selected agent while the first catalog is fetching', async () => {
+  it('shows the workspace for a selected agent while the first catalog is fetching', async () => {
     const queryClient = newQueryClient()
     const { finish } = startCatalogFetch(queryClient)
 
@@ -103,7 +103,7 @@ describe('AgentsPage with an empty or loading catalog', () => {
     await finish()
   })
 
-  it('C4: shows the loading state while the first catalog is fetching and nothing is selected', async () => {
+  it('shows the loading state while the first catalog is fetching and nothing is selected', async () => {
     const queryClient = newQueryClient()
     const { finish } = startCatalogFetch(queryClient)
 

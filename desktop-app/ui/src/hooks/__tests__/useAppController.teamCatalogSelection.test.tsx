@@ -416,7 +416,7 @@ describe('useAppController agent selection and sending do not depend on the team
         .mock.calls.slice(fromCall)
         .filter(([hostRef]) => hostRef === agent)
 
-    it('S-1: deselects and holds the agent when the server denies its chat list after a switch', async () => {
+    it('deselects and holds the agent when the server denies its chat list after a switch', async () => {
       const { moveToTeamB } = installTeamSession(teamScopedCatalog)
       const app = await bootInTeamAWithAgent(TEAM_A_AGENT)
       const denial = await ipcHostAccessDenied('rpc:listSessions')
@@ -434,7 +434,7 @@ describe('useAppController agent selection and sending do not depend on the team
       expect(listSessionsCallsFor(TEAM_A_AGENT, callsBeforeSwitch).length).toBeGreaterThan(0)
     })
 
-    it('S-2: keeps and sends to the agent when the server allows its chat list after a switch', async () => {
+    it('keeps and sends to the agent when the server allows its chat list after a switch', async () => {
       const { moveToTeamB } = installTeamSession(teamScopedCatalog)
       const app = await bootInTeamAWithAgent(TEAM_A_AGENT)
       const callsBeforeSwitch = vi.mocked(window.clerum.rpc.listSessions).mock.calls.length

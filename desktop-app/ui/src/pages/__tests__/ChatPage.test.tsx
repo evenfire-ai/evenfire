@@ -84,7 +84,7 @@ afterEach(() => {
 })
 
 describe('ChatPage with an empty or loading catalog', () => {
-  it('C1: shows the workspace for a selected agent when the catalog is empty', () => {
+  it('shows the workspace for a selected agent when the catalog is empty', () => {
     const queryClient = newQueryClient()
     queryClient.setQueryData(desktopQueryKeys.accessCatalog, emptyCatalog())
 
@@ -93,7 +93,7 @@ describe('ChatPage with an empty or loading catalog', () => {
     expect(screen.getByTestId('agent-workspace-stub')).toBeTruthy()
   })
 
-  it('C2: shows the empty state when the catalog is empty and nothing is selected', () => {
+  it('shows the empty state when the catalog is empty and nothing is selected', () => {
     const queryClient = newQueryClient()
     queryClient.setQueryData(desktopQueryKeys.accessCatalog, emptyCatalog())
 
@@ -105,7 +105,7 @@ describe('ChatPage with an empty or loading catalog', () => {
     ).toBeTruthy()
   })
 
-  it('C3: shows the workspace for a selected agent while the first catalog is fetching', async () => {
+  it('shows the workspace for a selected agent while the first catalog is fetching', async () => {
     const queryClient = newQueryClient()
     const { catalog, fetching } = startCatalogFetch(queryClient)
 
@@ -120,7 +120,7 @@ describe('ChatPage with an empty or loading catalog', () => {
     })
   })
 
-  it('C4: shows the skeleton while the first catalog is fetching and nothing is selected', async () => {
+  it('shows the skeleton while the first catalog is fetching and nothing is selected', async () => {
     const queryClient = newQueryClient()
     const { catalog, fetching } = startCatalogFetch(queryClient)
 
@@ -133,7 +133,7 @@ describe('ChatPage with an empty or loading catalog', () => {
     })
   })
 
-  it('C5: does not remount the workspace while an empty catalog refreshes', async () => {
+  it('does not remount the workspace while an empty catalog refreshes', async () => {
     const queryClient = newQueryClient()
     queryClient.setQueryData(desktopQueryKeys.accessCatalog, emptyCatalog())
     renderChatPage(queryClient, 'agent-x')
