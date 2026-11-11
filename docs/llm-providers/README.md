@@ -87,7 +87,9 @@ profile (`compatibleProfile`).
 | Novita AI     | `novita`     | `novita-api-key`     | `deepseek/deepseek-v3.2`                            |
 | MiniMax       | `minimax`    | `minimax-api-key`    | `MiniMax-M2`                                        |
 
-`openai` itself also speaks this protocol but uses the official SDK (Group B).
+`openai` itself does not: the official endpoint is called over the Responses API
+(`/responses`) with the official SDK (Group B). Azure OpenAI and these compatible
+third parties are the providers that stay on Chat Completions.
 
 ### Group B — own SDK / bespoke wire protocol (4)
 

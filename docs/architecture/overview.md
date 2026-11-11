@@ -710,9 +710,10 @@ interface LLMProvider {
 
 - SDK: `openai` v4.70.0
 - Default model: `gpt-5.4-mini`
-- Tool format: OpenAI function calling schema
-- Tool responses: `role: "tool"` messages
-- System message: included in messages array
+- Wire protocol: Responses API (`responses.create`, `store: false`); Azure OpenAI and the OpenAI-compatible providers use Chat Completions instead
+- Tool format: function tools (`type: "function"`)
+- Tool responses: `function_call_output` input items
+- System message: kept in position as a `system` input message (not hoisted to `instructions`)
 
 #### Claude Provider
 
@@ -727,9 +728,10 @@ interface LLMProvider {
 
 - SDK: `openai` v4.70.0 (z.ai is OpenAI-compatible, uses the same SDK with `baseURL: "https://api.z.ai/api/coding/paas/v4"`)
 - Default model: `glm-5.1`
-- Tool format: OpenAI function calling schema (identical to OpenAI provider)
-- Tool responses: `role: "tool"` messages (identical to OpenAI provider)
-- System message: included in messages array (identical to OpenAI provider)
+- Wire protocol: Chat Completions (the same serializer Azure OpenAI uses; official OpenAI is on Responses)
+- Tool format: OpenAI function calling schema
+- Tool responses: `role: "tool"` messages
+- System message: included in messages array
 - Implementation: data-driven `compatibleProfile` (`openaiFamily/endpointProfiles.ts`) composed into `OpenAIProvider`, configured from the `PROVIDERS` descriptor in `registryCore.ts` (only the client `baseURL` differs)
 
 #### Bailian Provider (Alibaba DashScope)
