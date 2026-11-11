@@ -974,16 +974,56 @@ export class DocumentReadTool implements Tool {
         check(middle, to)
       }
       if (sheet.rows.length === 0) return skipped.sort((a, b) => a - b)
-      // `true` is the shorter literal, so this envelope is a lower bound.
-      if (probe(0, 0, undefined, true) > pageTokens) {
+      // The smallest result holding `count` rows of this sheet: every row
+      // `[]`, no continuation, and `true`, the shorter literal.
+      const emptyRows = (count: number): number =>
+        measure(
+          JSON.stringify({
+            status: 'ok',
+            ...identity,
+            format: 'xlsx',
+            sheetNames,
+            sheets: [
+              {
+                name: sheet.name,
+                startRow: sheet.startRow,
+                rows: Array.from({ length: count }, () => []),
+                truncated: true,
+                lastRow: sheet.lastRow,
+              },
+            ],
+          } satisfies DocumentReadResult)
+        )
+      if (emptyRows(0) > pageTokens) {
         for (let rowIndex = 0; rowIndex < sheet.rows.length; rowIndex += 1) skip(rowIndex)
         return skipped.sort((a, b) => a - b)
+      }
+      // This call can emit at most `reach` rows of the sheet: more cannot fit
+      // a page even as `[]`, and `fit`'s allowance never exceeds a page. Later
+      // rows start a later call, which probes them again, so only rows within
+      // reach are checked. Without this, a sheet list that nearly fills the
+      // page lets no group pass the margin and every row is probed about
+      // twice, each time with the whole list.
+      let reach = sheet.rows.length
+      if (emptyRows(reach) > pageTokens) {
+        let low = 1
+        let high = reach - 1
+        reach = 0
+        while (low <= high) {
+          const middle = Math.floor((low + high) / 2)
+          if (emptyRows(middle) <= pageTokens) {
+            reach = middle
+            low = middle + 1
+          } else {
+            high = middle - 1
+          }
+        }
       }
       const lastRowNumber = sheet.startRow + sheet.rows.length - 1
       const margin = measure(
         JSON.stringify({ startRow: lastRowNumber, continuation: inSheet(lastRowNumber + 1) })
       )
-      check(0, sheet.rows.length)
+      if (reach > 0) check(0, reach)
       return skipped.sort((a, b) => a - b)
     })
 

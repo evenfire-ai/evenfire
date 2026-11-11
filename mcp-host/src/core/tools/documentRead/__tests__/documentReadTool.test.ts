@@ -691,9 +691,11 @@ describe('DocumentReadTool XLSX row probe cost (review M2)', () => {
     )
 
   async function countedRead(
-    outcome: XlsxOutcome
+    outcome: XlsxOutcome,
+    admitted?: Attachment
   ): Promise<{ body: Record<string, unknown>; measures: number; measuredChars: number }> {
-    const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+    const file =
+      admitted ?? admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
     let measures = 0
     let measuredChars = 0
     const counted = (raw: string): number => {
@@ -747,6 +749,50 @@ describe('DocumentReadTool XLSX row probe cost (review M2)', () => {
       limit: 'row_width',
     })
     expect(measures).toBeLessThan(20)
+  })
+
+  it('checks only the rows a page can reach when the sheet list nearly fills it', async () => {
+    const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+    const rows = Array.from({ length: 5_000 }, (_, index) => [index + 1])
+    const sheetNames = names(40)
+    // The smallest result the Tool could emit for this sheet: no rows.
+    const envelope = (list: string[]): number =>
+      measureResult(
+        JSON.stringify({
+          status: 'ok',
+          attachmentId: file.id,
+          referenceId: file.fileReference!.id,
+          format: 'xlsx',
+          sheetNames: list,
+          sheets: [{ name: list[0], startRow: 1, rows: [], truncated: true, lastRow: 20_000 }],
+        })
+      )
+    // A crafted name leaves about 40 tokens of the 2,000-token page: room for
+    // a few rows and a continuation, but no group of rows passes the margin,
+    // so splitting alone measured every row about twice (10,015 measures),
+    // each time with the whole sheet list.
+    while (envelope(sheetNames) < 1_960) sheetNames[1] += 'p'
+    expect(envelope(sheetNames)).toBeLessThanOrEqual(1_961)
+    const { body, measures } = await countedRead(
+      {
+        ok: true,
+        sheetNames,
+        sheets: [{ name: sheetNames[0]!, startRow: 1, rows, truncated: true, lastRow: 20_000 }],
+        next: { sheetIndex: 0, row: 5_001 },
+        stoppedBy: 'max_rows',
+      },
+      file
+    )
+    expect(body.status).toBe('ok')
+    const sheet = (body.sheets as Array<Record<string, unknown>>)[0]!
+    const emitted = sheet.rows as number[][]
+    expect(sheet.skippedRows).toBeUndefined()
+    expect(emitted.length).toBeGreaterThan(0)
+    expect(emitted).toEqual(rows.slice(0, emitted.length))
+    // About two measures per row the page can reach (about 53 here, as `[]`)
+    // plus the reach search and the fit: bounded by the page, not by the
+    // 5,000-row window.
+    expect(measures).toBeLessThan(300)
   })
 })
 
