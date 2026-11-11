@@ -316,3 +316,55 @@ describe('minikube rpc-proxy ConfigMap', () => {
     )
   })
 })
+
+describe('secrets have no code default in any NODE_ENV', () => {
+  // [env var, config field, the script that writes it in a cluster]
+  const SECRETS = [
+    [
+      'RPC_PROXY_CONTROL_API_SERVICE_TOKEN',
+      'controlApiServiceToken',
+      'apply-inter-service-tokens.sh',
+    ],
+    ['RPC_PROXY_DESKTOP_COOKIE_SECRET', 'desktopCookieSecret', 'gen-jwt-keys.sh'],
+    ['RPC_PROXY_SANDBOX_UI_COOKIE_SECRET', 'sandboxUiCookieSecret', 'gen-jwt-keys.sh'],
+  ] as const
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.resetModules()
+  })
+
+  async function importConfig() {
+    vi.resetModules()
+    return (await import('../config.js')).config
+  }
+
+  it('reads each secret from the environment on the non-production path', async () => {
+    // The dev-default branch only exists outside production; prove these cases run there.
+    expect(process.env.NODE_ENV).not.toBe('production')
+    for (const [name] of SECRETS) vi.stubEnv(name, `${name.toLowerCase()}-value`)
+
+    const config = await importConfig()
+
+    for (const [name, field] of SECRETS) expect(config[field]).toBe(`${name.toLowerCase()}-value`)
+  })
+
+  it.each(SECRETS)('refuses to start when %s is unset', async name => {
+    vi.stubEnv(name, undefined)
+
+    await expect(importConfig()).rejects.toThrow(`Missing required environment variable: ${name}`)
+  })
+
+  it.each(SECRETS)(
+    'refuses to start when %s is a replace-with-* placeholder',
+    async (name, _field, writer) => {
+      vi.stubEnv(name, 'replace-with-a-real-value')
+
+      await expect(importConfig()).rejects.toThrow(
+        new RegExp(
+          `${name} has placeholder value .*Run deploy/scripts/${writer.replace('.', '\\.')}`
+        )
+      )
+    }
+  )
+})

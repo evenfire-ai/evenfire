@@ -176,11 +176,10 @@ export const config: Config = {
     'EXTERNAL_REST_API_CONTROL_API_BASE_URL',
     'http://profile-control-funnel.profiles.svc.cluster.local:8080/api/v1'
   ),
+  // Secret material has no code default in any NODE_ENV (a known default would let anyone
+  // who reads this file authenticate to control-api as this service).
   controlApiServiceToken: (() => {
-    const v = requiredOrDevDefault(
-      'EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN',
-      'dev-external-rest-api-token'
-    )
+    const v = required('EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN')
     assertNotPlaceholder('EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN', v)
     return v
   })(),

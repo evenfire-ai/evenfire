@@ -100,14 +100,22 @@ export function parseCorsOrigin(raw: string): string[] | '*' {
     .filter(Boolean)
 }
 
-function assertNotPlaceholder(label: string, value: string): void {
-  // Fail loud if the former overlay placeholder ever leaks into a running pod.
-  // Populated out-of-band by deploy/scripts/apply-inter-service-tokens.sh.
+function assertNotPlaceholder(label: string, value: string, writerScript: string): void {
+  // Fail loud if a `replace-with-*` placeholder ever leaks into a running pod.
+  // `writerScript` is the deploy script that populates the value out-of-band.
   if (/^replace-with-/.test(value)) {
     throw new Error(
-      `${label} has placeholder value "${value}". Run deploy/scripts/apply-inter-service-tokens.sh before deploying.`
+      `${label} has placeholder value "${value}". Run deploy/scripts/${writerScript} before deploying.`
     )
   }
+}
+
+// Secret material has no code default in any NODE_ENV: a known default would let anyone
+// who reads this file authenticate to control-api or forge a session cookie.
+function requiredSecret(name: string, writerScript: string): string {
+  const value = required(name)
+  assertNotPlaceholder(name, value, writerScript)
+  return value
 }
 
 export function parseSandboxUiAllowedPorts(raw: string): ReadonlySet<number> {
@@ -235,11 +243,10 @@ export const config: Config = {
     'RPC_PROXY_CONTROL_API_BASE_URL',
     'http://control-api.control-plane.svc.cluster.local:8090/api/v1'
   ),
-  controlApiServiceToken: (() => {
-    const v = requiredOrDevDefault('RPC_PROXY_CONTROL_API_SERVICE_TOKEN', 'dev-rpc-proxy-token')
-    assertNotPlaceholder('RPC_PROXY_CONTROL_API_SERVICE_TOKEN', v)
-    return v
-  })(),
+  controlApiServiceToken: requiredSecret(
+    'RPC_PROXY_CONTROL_API_SERVICE_TOKEN',
+    'apply-inter-service-tokens.sh'
+  ),
   controlApiServiceName: process.env.RPC_PROXY_CONTROL_API_SERVICE_NAME || 'rpc-proxy',
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   // The Host refuses artifact files above 50 MiB (MAX_ARTIFACT_BYTES in
@@ -321,10 +328,7 @@ export const config: Config = {
   hostNamespace: requiredOrDevDefault('RPC_PROXY_HOST_NAMESPACE', 'mcp-host'),
   desktopCookieName: process.env.RPC_PROXY_DESKTOP_COOKIE_NAME || 'clerum_desktop_session',
   desktopCookieMaxAgeMs: Number(process.env.RPC_PROXY_DESKTOP_COOKIE_MAX_AGE_MS || 3_600_000),
-  desktopCookieSecret: requiredOrDevDefault(
-    'RPC_PROXY_DESKTOP_COOKIE_SECRET',
-    'dev-desktop-cookie-secret-32chars!'
-  ),
+  desktopCookieSecret: requiredSecret('RPC_PROXY_DESKTOP_COOKIE_SECRET', 'gen-jwt-keys.sh'),
   desktopPort: Number(process.env.RPC_PROXY_DESKTOP_PORT || 3000),
   desktopApiToken: process.env.RPC_PROXY_DESKTOP_API_TOKEN || '',
   sandboxUiNamespace: process.env.RPC_PROXY_SANDBOX_UI_NAMESPACE || 'sandbox-ui',
@@ -335,10 +339,7 @@ export const config: Config = {
     process.env.RPC_PROXY_SANDBOX_UI_REGISTRY_CACHE_TTL_MS || 5000
   ),
   sandboxUiCookieName: process.env.RPC_PROXY_SANDBOX_UI_COOKIE_NAME || 'clerum_sandbox_ui_session',
-  sandboxUiCookieSecret: requiredOrDevDefault(
-    'RPC_PROXY_SANDBOX_UI_COOKIE_SECRET',
-    'dev-sandbox-ui-cookie-secret-32chars!'
-  ),
+  sandboxUiCookieSecret: requiredSecret('RPC_PROXY_SANDBOX_UI_COOKIE_SECRET', 'gen-jwt-keys.sh'),
   // 5 minute TTL on the UI session cookie.
   sandboxUiCookieMaxAgeSec: Number(process.env.RPC_PROXY_SANDBOX_UI_COOKIE_MAX_AGE_SEC || 300),
   // Defence-in-depth: even though the NetworkPolicy

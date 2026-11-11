@@ -9,6 +9,8 @@ import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthT
 
 const COOKIE_TTL_ENV = 'EXTERNAL_REST_API_PROFILE_SESSION_COOKIE_TTL_SECONDS'
 const EXTERNAL_REST_JWT_PUBLIC_KEY_ENV = 'EXTERNAL_REST_API_JWT_PUBLIC_KEY'
+// external-rest-api requires its control-api service token at config load (no code default).
+const EXTERNAL_REST_SERVICE_TOKEN_ENV = 'EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN'
 const claims = {
   userId: 'session-lifetime-user',
   email: 'session-lifetime@example.invalid',
@@ -26,7 +28,9 @@ async function withExternalCookieProducer(
 ): Promise<void> {
   const previousCookieTtl = process.env[COOKIE_TTL_ENV]
   const previousPublicKey = process.env[EXTERNAL_REST_JWT_PUBLIC_KEY_ENV]
+  const previousServiceToken = process.env[EXTERNAL_REST_SERVICE_TOKEN_ENV]
 
+  process.env[EXTERNAL_REST_SERVICE_TOKEN_ENV] = 'session-lifetime-service-token'
   if (ttlOverride === undefined) {
     delete process.env[COOKIE_TTL_ENV]
   } else {
@@ -55,6 +59,11 @@ async function withExternalCookieProducer(
       delete process.env[EXTERNAL_REST_JWT_PUBLIC_KEY_ENV]
     } else {
       process.env[EXTERNAL_REST_JWT_PUBLIC_KEY_ENV] = previousPublicKey
+    }
+    if (previousServiceToken === undefined) {
+      delete process.env[EXTERNAL_REST_SERVICE_TOKEN_ENV]
+    } else {
+      process.env[EXTERNAL_REST_SERVICE_TOKEN_ENV] = previousServiceToken
     }
     vi.resetModules()
   }

@@ -1,9 +1,10 @@
-import { generateKeyPairSync } from 'node:crypto'
+import { generateKeyPairSync, randomBytes } from 'node:crypto'
 
 /**
- * Shared test fixture: a real, randomly generated RSA public key so config
- * suites exercise the non-dev path without the removed historical default.
- * Suites that verify missing-key behavior delete this variable explicitly.
+ * Shared test fixture for the values config.ts requires with no code default: a real,
+ * randomly generated RSA public key and a random control-api service token, so config
+ * suites exercise the non-dev path. Suites that verify missing-value behavior delete the
+ * variable explicitly.
  */
 function testPublicKey(): string {
   return generateKeyPairSync('rsa', {
@@ -15,4 +16,8 @@ function testPublicKey(): string {
 
 if (!process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY) {
   process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY = testPublicKey()
+}
+
+if (!process.env.EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN) {
+  process.env.EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN = `test-${randomBytes(24).toString('hex')}`
 }
