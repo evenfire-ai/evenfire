@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants.js'
 import type { ChildRecipeRef, DbRunRow } from '../reconciler/dbRunProcessor.js'
 import { getErrorCode } from '../reconciler/k8sErrors.js'
+import { kubernetesAbortOptions } from '../reconciler/kubernetesAbortOptions.js'
 import type { WorkflowRecipeGfsIntentSpec } from '../types.js'
 import {
   INHERITED_PARENT_RESOURCES_ANNOTATION,
@@ -22,6 +23,12 @@ export const RUN_ACTOR_ID_LABEL = 'clerum.io/workflow-actor-id'
 export const RUN_ACTOR_TYPE_LABEL = 'clerum.io/workflow-actor-type'
 export const RUN_OUTPUT_OVERRIDES_ANNOTATION = 'clerum.io/run-output-overrides'
 export const RUN_INTERMEDIATE_PARAMS_ANNOTATION = 'clerum.io/run-intermediate-parameters'
+
+/**
+ * Bound on the whole child creation (parent read, create, and the read-back on
+ * 409). `processPending` (dbRunProcessor.ts) describes what it bounds there.
+ */
+export const DB_RUN_CHILD_CREATE_TIMEOUT_MS = 30_000
 
 function copiedGrantIdentityAnnotations(
   annotations: Record<string, string> | undefined
@@ -106,18 +113,23 @@ function isExpectedExistingChild(
 
 export async function createDbRunChildRecipe(
   customApi: k8s.CustomObjectsApi,
-  run: DbRunRow
+  run: DbRunRow,
+  signal: AbortSignal
 ): Promise<ChildRecipeRef> {
   // Adapter from the durable workflow_runs row to the child WorkflowRecipe
   // execution artifact. The DB row remains authoritative for identity,
   // idempotency, approval binding, and run status.
-  const response = (await customApi.getNamespacedCustomObject({
-    group: CRD_GROUP,
-    version: CRD_VERSION,
-    namespace: run.recipe_namespace,
-    plural: WORKFLOWRECIPE_PLURAL,
-    name: run.recipe_name,
-  })) as ParentRecipeResponse
+  const abortOptions = kubernetesAbortOptions(signal)
+  const response = (await customApi.getNamespacedCustomObject(
+    {
+      group: CRD_GROUP,
+      version: CRD_VERSION,
+      namespace: run.recipe_namespace,
+      plural: WORKFLOWRECIPE_PLURAL,
+      name: run.recipe_name,
+    },
+    abortOptions
+  )) as ParentRecipeResponse
 
   const parentName = response.metadata?.name
   const parentNamespace = response.metadata?.namespace
@@ -198,23 +210,29 @@ export async function createDbRunChildRecipe(
   ) as ParentRecipeResponse['spec']
 
   try {
-    await customApi.createNamespacedCustomObject({
-      group: CRD_GROUP,
-      version: CRD_VERSION,
-      namespace: parentNamespace,
-      plural: WORKFLOWRECIPE_PLURAL,
-      body: childRecipe,
-    })
+    await customApi.createNamespacedCustomObject(
+      {
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: parentNamespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        body: childRecipe,
+      },
+      abortOptions
+    )
   } catch (err) {
     if (getErrorCode(err) !== 409) throw err
 
-    const existing = (await customApi.getNamespacedCustomObject({
-      group: CRD_GROUP,
-      version: CRD_VERSION,
-      namespace: parentNamespace,
-      plural: WORKFLOWRECIPE_PLURAL,
-      name: childName,
-    })) as ParentRecipeResponse
+    const existing = (await customApi.getNamespacedCustomObject(
+      {
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: parentNamespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: childName,
+      },
+      abortOptions
+    )) as ParentRecipeResponse
 
     if (
       !isExpectedExistingChild(existing, {

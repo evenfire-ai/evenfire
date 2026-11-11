@@ -6,12 +6,15 @@
  * LISTEN/NOTIFY consumer. Runs the non-owner state transitions:
  *
  *   Pending → (create child recipe) → Running   [processPending]
- *   Running → Succeeded|Failed|Canceled         [syncFromRecipeExecution]
+ *   Pending|Running → Succeeded|Failed|Canceled [syncFromRecipeExecution]
+ *   Failed → Succeeded (recovered child)        [syncFromRecipeExecution]
  *   Running → Failed (timeout)                  [checkStuckRuns]
+ *   Running → Failed (child missing on reclaim) [reclaimRunning]
  *
- * Every UPDATE carries `WHERE owner_instance_id = $self AND phase = $expected`
- * as defense-in-depth: if another replica grabbed the row, we silently no-op
- * (rowCount=0) instead of colliding.
+ * Every UPDATE of `workflow_runs` names the phases it applies to. The start,
+ * timeout and reclaim statements also check ownership or the one-minute lease.
+ * A statement that matches nothing is a no-op (rowCount 0). The terminal sync
+ * and the heartbeat carry no owner check.
  *
  * The LISTEN session is isolated on a dedicated `pool.connect()` client —
  * the Postgres session pool must stay sticky for notifications to flow. A
@@ -412,18 +415,21 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
 
   // ─── Public: processPending ──────────────────────────────────────────
   //
-  // Invariant: only called when we hold the WRC leader lock. Per-run
-  // concurrency is further bounded by `pg_advisory_xact_lock(hash(run_id))`
-  // so two replicas cannot process the same run concurrently, even during a
-  // brief leader handover.
+  // Concurrent calls for one run are expected: the NOTIFY dispatch, the orphan
+  // poll, and two pods during a rolling update (leader election has no
+  // production caller). `pg_advisory_xact_lock` on the run id and the row lock
+  // serialize them. The child create runs inside this transaction, so the
+  // locks and the pooled client are held until it returns. The production
+  // creator bounds that with DB_RUN_CHILD_CREATE_TIMEOUT_MS (k8sClient.ts); a
+  // caller queued on the advisory lock holds its client for that wait plus its
+  // own create.
   async function processPending(runId: string): Promise<void> {
     const client = await connect()
     let committed = false
     try {
       await client.query('BEGIN')
-      // Per-run lock — released at COMMIT/ROLLBACK. hashtextextended(text,
-      // bigint) returns bigint, which `pg_advisory_xact_lock(bigint)`
-      // accepts. Fall back to hashtext when the extended form is unavailable.
+      // Per-run lock, released at COMMIT/ROLLBACK. The key is
+      // hashtext('wrc-run-' || run_id).
       await client.query("SELECT pg_advisory_xact_lock(hashtext('wrc-run-' || $1::text))", [runId])
       const selectRes = await client.query<DbRunRow>(SELECT_RUN_FOR_UPDATE, [runId])
       const run = selectRes.rows[0]

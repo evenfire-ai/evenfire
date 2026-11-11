@@ -9,6 +9,27 @@ const defaultedStep: Record<string, unknown> = {
   maxIterations: 50,
 }
 
+/**
+ * Runs every request middleware in one Kubernetes call's options and returns
+ * the signal they install on the request context. Fails unless the options
+ * carry middleware and exactly one signal is installed.
+ */
+export async function installedSignal(options: unknown): Promise<AbortSignal> {
+  const middleware = (options as { middleware?: unknown } | undefined)?.middleware
+  if (!Array.isArray(middleware) || middleware.length === 0) {
+    throw new Error(`call options carry no request middleware: ${JSON.stringify(options)}`)
+  }
+  const installed: AbortSignal[] = []
+  const context = { setSignal: (signal: AbortSignal) => installed.push(signal) }
+  for (const entry of middleware as Array<{
+    pre: (context: unknown) => { toPromise: () => Promise<unknown> }
+  }>) {
+    await entry.pre(context).toPromise()
+  }
+  if (installed.length !== 1) throw new Error(`middleware installed ${installed.length} signals`)
+  return installed[0]!
+}
+
 export function makeRun(overrides: Partial<DbRunRow> = {}): DbRunRow {
   return {
     run_id: '00000000-0000-0000-0000-000000000123',

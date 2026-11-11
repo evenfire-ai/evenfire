@@ -733,6 +733,42 @@ describe('createDbRunProcessor', () => {
     expect(commitCount).toBe(0)
   })
 
+  it('rolls back, releases the client and rethrows when the child create rejects', async () => {
+    const run = baseRun()
+    const client = makeClient(async sql => {
+      if (/FOR UPDATE/.test(sql) && !/SKIP LOCKED/.test(sql)) return { rows: [run], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    const pool = { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool
+    const failure = new Error('child WorkflowRecipe create exceeded its 30000 ms deadline')
+    const createChildRecipe = vi.fn(async () => {
+      throw failure
+    })
+    const onRunStarted = vi.fn()
+    const logger = silentLogger()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool,
+      runPollMs: 30_000,
+      createChildRecipe,
+      onRunStarted,
+      logger,
+    })
+    await expect(proc.processPending(run.run_id)).rejects.toBe(failure)
+    expect(createChildRecipe).toHaveBeenCalledTimes(1)
+    expect(client.calls.some(c => /FOR UPDATE/.test(c.sql))).toBe(true)
+    const trail = client.calls.map(c => c.sql.trim())
+    expect(trail[trail.length - 1]).toBe('ROLLBACK')
+    expect(trail).not.toContain('COMMIT')
+    expect(client.calls.some(c => /SET phase = 'Running'/.test(c.sql))).toBe(false)
+    expect(client.release).toHaveBeenCalledTimes(1)
+    expect(onRunStarted).not.toHaveBeenCalled()
+    expect(logger.error).toHaveBeenCalledWith('processPending failed', {
+      run_id: run.run_id,
+      err: failure.message,
+    })
+  })
+
   // ─── 10) Poll fallback picks up runs that missed LISTEN
   it('poll loop invokes processPending for orphan runs found via FIND_ORPHAN_RUNS', async () => {
     vi.useFakeTimers()

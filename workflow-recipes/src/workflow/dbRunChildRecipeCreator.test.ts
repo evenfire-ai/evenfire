@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
+import * as k8sClient from '@kubernetes/client-node'
 import type * as k8s from '@kubernetes/client-node'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import type { WorkflowRecipeGfsIntentSpec } from '../types.js'
 import { createDbRunChildRecipe } from './dbRunChildRecipeCreator.js'
-import { makeExistingChild, makeParent, makeRun } from './dbRunChildRecipeCreator.testFixtures.js'
+import {
+  installedSignal,
+  makeExistingChild,
+  makeParent,
+  makeRun,
+} from './dbRunChildRecipeCreator.testFixtures.js'
+
+/** A signal that never aborts, for cases that do not exercise the deadline. */
+const idleSignal = () => new AbortController().signal
 
 describe('createDbRunChildRecipe', () => {
   it('creates a stable child name derived from the run id', async () => {
@@ -13,7 +24,7 @@ describe('createDbRunChildRecipe', () => {
       }),
     } as unknown as k8s.CustomObjectsApi
 
-    const child = await createDbRunChildRecipe(customApi, makeRun())
+    const child = await createDbRunChildRecipe(customApi, makeRun(), idleSignal())
 
     expect(child).toEqual({
       name: 'demo-parent-00000000',
@@ -62,7 +73,8 @@ describe('createDbRunChildRecipe', () => {
       makeRun({
         team_id: '11111111-1111-4111-8111-111111111111',
         usage_team_id: '11111111-1111-4111-8111-111111111111',
-      })
+      }),
+      idleSignal()
     )
 
     expect(
@@ -84,7 +96,8 @@ describe('createDbRunChildRecipe', () => {
       makeRun({
         team_id: null,
         usage_team_id: 'control-plane-admin-ui',
-      })
+      }),
+      idleSignal()
     )
 
     expect(
@@ -103,7 +116,8 @@ describe('createDbRunChildRecipe', () => {
 
     await createDbRunChildRecipe(
       customApi,
-      makeRun({ actor_type: 'user', actor_id: '22222222-2222-4222-8222-222222222222' })
+      makeRun({ actor_type: 'user', actor_id: '22222222-2222-4222-8222-222222222222' }),
+      idleSignal()
     )
 
     expect(
@@ -126,7 +140,8 @@ describe('createDbRunChildRecipe', () => {
 
     await createDbRunChildRecipe(
       customApi,
-      makeRun({ actor_type: 'scheduled', actor_id: '22222222-2222-4222-8222-222222222222' })
+      makeRun({ actor_type: 'scheduled', actor_id: '22222222-2222-4222-8222-222222222222' }),
+      idleSignal()
     )
 
     expect(
@@ -150,7 +165,8 @@ describe('createDbRunChildRecipe', () => {
         actor_id: '99999999-9999-4999-8999-999999999999',
         team_id: null,
         usage_team_id: 'control-plane-admin-ui',
-      })
+      }),
+      idleSignal()
     )
 
     const labels = (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>)
@@ -169,15 +185,62 @@ describe('createDbRunChildRecipe', () => {
       createNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 409 }),
     } as unknown as k8s.CustomObjectsApi
 
-    const child = await createDbRunChildRecipe(customApi, makeRun())
+    const signal = idleSignal()
+    const child = await createDbRunChildRecipe(customApi, makeRun(), signal)
 
     expect(child).toEqual({
       name: 'demo-parent-00000000',
       namespace: 'sandbox-recipes',
     })
-    expect(
-      (customApi.getNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock.calls
-    ).toHaveLength(2)
+    const getCalls = (customApi.getNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>)
+      .mock.calls
+    const createCalls = (
+      customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls
+    expect(getCalls).toHaveLength(2)
+    expect(createCalls).toHaveLength(1)
+    // The caller's signal reaches every call: parent read, create, and the 409
+    // read-back. Running each call's middleware shows which signal it installs.
+    for (const call of [getCalls[0], createCalls[0], getCalls[1]]) {
+      expect(await installedSignal(call?.[1])).toBe(signal)
+    }
+    expect(getCalls[1]?.[0]).toEqual(expect.objectContaining({ name: 'demo-parent-00000000' }))
+  })
+
+  it('aborts a hung apiserver call when the signal fires', async () => {
+    const requests: string[] = []
+    const deadline = new AbortController()
+    const server = http.createServer(req => {
+      // Accept the request and never answer, like a stalled apiserver; the
+      // deadline then fires while the request is in flight.
+      requests.push(`${req.method} ${req.url}`)
+      deadline.abort()
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = server.address() as AddressInfo
+      const kc = new k8sClient.KubeConfig()
+      kc.loadFromOptions({
+        clusters: [{ name: 'hung', server: `http://127.0.0.1:${port}`, skipTLSVerify: true }],
+        users: [{ name: 'anonymous' }],
+        contexts: [{ name: 'hung', cluster: 'hung', user: 'anonymous' }],
+        currentContext: 'hung',
+      })
+      await expect(
+        createDbRunChildRecipe(
+          kc.makeApiClient(k8sClient.CustomObjectsApi),
+          makeRun(),
+          deadline.signal
+        )
+      ).rejects.toMatchObject({ name: 'AbortError' })
+      // Witness: the request reached the server; the parent read is the one that hung.
+      expect(requests).toEqual([
+        'GET /apis/clerum.io/v1alpha1/namespaces/sandbox-recipes/workflowrecipes/demo-parent',
+      ])
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 
   it('keeps parent computed values when on-demand inputs override parent inputs', async () => {
@@ -188,7 +251,7 @@ describe('createDbRunChildRecipe', () => {
       }),
     } as unknown as k8s.CustomObjectsApi
 
-    await createDbRunChildRecipe(customApi, makeRun({ inputs: { greeting: 'hola' } }))
+    await createDbRunChildRecipe(customApi, makeRun({ inputs: { greeting: 'hola' } }), idleSignal())
 
     const childSpec = (
       customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>
@@ -209,7 +272,7 @@ describe('createDbRunChildRecipe', () => {
       }),
     } as unknown as k8s.CustomObjectsApi
 
-    await createDbRunChildRecipe(customApi, makeRun())
+    await createDbRunChildRecipe(customApi, makeRun(), idleSignal())
 
     expect(
       (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock
@@ -229,7 +292,7 @@ describe('createDbRunChildRecipe', () => {
       }),
     } as unknown as k8s.CustomObjectsApi
 
-    await createDbRunChildRecipe(customApi, makeRun())
+    await createDbRunChildRecipe(customApi, makeRun(), idleSignal())
 
     expect(
       (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock
@@ -245,7 +308,7 @@ describe('createDbRunChildRecipe', () => {
       }),
     } as unknown as k8s.CustomObjectsApi
 
-    await createDbRunChildRecipe(customApi, makeRun())
+    await createDbRunChildRecipe(customApi, makeRun(), idleSignal())
 
     expect(
       (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock
@@ -271,7 +334,7 @@ describe('createDbRunChildRecipe', () => {
       }),
     } as unknown as k8s.CustomObjectsApi
 
-    await createDbRunChildRecipe(customApi, makeRun())
+    await createDbRunChildRecipe(customApi, makeRun(), idleSignal())
 
     expect(
       (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock
@@ -316,7 +379,7 @@ describe('createDbRunChildRecipe', () => {
       createNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 409 }),
     } as unknown as k8s.CustomObjectsApi
 
-    await expect(createDbRunChildRecipe(customApi, makeRun())).rejects.toThrow(
+    await expect(createDbRunChildRecipe(customApi, makeRun(), idleSignal())).rejects.toThrow(
       /does not match the expected workflow run child identity/i
     )
   })
