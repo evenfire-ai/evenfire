@@ -100,6 +100,12 @@ validators run in CI and will catch what the hook would have.
   release branch; changes reach it when `dev` is promoted.
 - CI (`.github/workflows/ci-public.yml`) builds, tests and typechecks every
   service in its matrix on each pull request.
+- CI also gates dependency advisories: `npm audit` for every lockfile against
+  a reviewed baseline, a check of the React copy bundled inside `next`, and a
+  Trivy scan of the Next.js app images. Lockfile scanners cannot see the
+  React inside `next`. See
+  [dependency scanning](docs/testing/dependency-scanning.md) for why, and for
+  what to do when one of these checks fails.
 
 ## Desktop App (Electron)
 
