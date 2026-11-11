@@ -750,6 +750,82 @@ jobs:
         # to dev, so build the same context here to fail the PR instead.
         run: timeout 900s docker build --target builder -f control-ui/Dockerfile .
 
+  # ─── Dependency advisories — every committed npm lockfile ─────────────────
+  # npm audit (production dependencies, high/critical) per lockfile, gated by
+  # scripts/ci/dependency-audit-baseline.json: findings missing from it, expired
+  # entries and entries that no longer match all fail. Reads only the lockfile
+  # and the registry advisory endpoint, so nothing is installed. See
+  # docs/testing/dependency-scanning.md.
+  dependency-audit:
+    name: Dependency audit (all lockfiles)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Test the dependency scanning scripts
+        run: >-
+          node scripts/tests/run-node-test-files.mjs
+          scripts/ci/audit-lockfiles.test.mjs
+          scripts/ci/check-next-bundled-react.test.mjs
+      - name: npm audit every lockfile against the reviewed baseline
+        run: node scripts/ci/audit-lockfiles.mjs
+
+  # ─── React bundled inside next — lockfile scanners cannot see it ──────────
+  # The App Router runs the React build compiled into the next package
+  # (next/dist/compiled), which no lockfile lists, so npm audit / Dependabot
+  # only ever report advisories filed against next itself (#1431). Check the
+  # installed tree and the built runtime image for the fix of every advisory in
+  # scripts/ci/next-bundled-react-advisories.json, then Trivy-scan the image
+  # (node_modules contents, not the lockfile) against a reviewed ignore file.
+  next-app-supply-chain:
+    name: Next.js supply chain (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [control-ui, profile-ui]
+    env:
+      APP: ${{ matrix.app }}
+      IMAGE: next-app-scan/${{ matrix.app }}:ci
+      # Trivy 0.76.1, pinned by index digest.
+      TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+      - name: Install dependencies
+        # Only the installed next tree is inspected, so lifecycle scripts are
+        # not needed here; the image build below runs the real npm ci.
+        working-directory: ${{ matrix.app }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check the React bundled inside next (installed tree)
+        run: node scripts/ci/check-next-bundled-react.mjs "$APP"
+      - name: Build the runtime image
+        run: timeout 1200s docker build -f "$APP/Dockerfile" -t "$IMAGE" .
+      - name: Check the React bundled inside next (runtime image)
+        # Runs with the image's own node and file layout, without network.
+        run: >-
+          docker run --rm --network none --entrypoint node
+          -v "$GITHUB_WORKSPACE/scripts/ci:/opt/evenfire-ci:ro"
+          "$IMAGE" /opt/evenfire-ci/check-next-bundled-react.mjs "/app/$APP"
+      - name: Trivy image scan (HIGH/CRITICAL)
+        run: >-
+          docker run --rm
+          -v /var/run/docker.sock:/var/run/docker.sock:ro
+          -v "$GITHUB_WORKSPACE/scripts/ci:/opt/evenfire-ci:ro"
+          "$TRIVY_IMAGE" image
+          --scanners vuln
+          --severity HIGH,CRITICAL
+          --ignorefile /opt/evenfire-ci/next-app-image.trivyignore.yaml
+          --exit-code 1
+          --no-progress
+          "$IMAGE"
+
   e2e-vitest-node-unit:
     name: E2E Vitest node-unit (tests/e2e)
     runs-on: ubuntu-latest
