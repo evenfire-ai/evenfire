@@ -314,29 +314,37 @@ function convertMessages(
 
 const STATUSES_WITH_OUTPUT = new Set(['completed', 'incomplete'])
 
+// `status` and `error.code` reach logs, the error message and `providerCode`
+// verbatim otherwise; every documented value is a short identifier.
+const PROVIDER_LABEL = /^[a-z][a-z0-9_.-]{0,63}$/i
+const UNRECOGNIZED_LABEL = 'unrecognized'
+
+function providerLabel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  return PROVIDER_LABEL.test(value) ? value : UNRECOGNIZED_LABEL
+}
+
 function assertDecodable(raw: ResponsesResult, ctx: DecodeContext): void {
-  const status = (raw as { status?: unknown } | null)?.status
-  if (typeof status === 'string' && STATUSES_WITH_OUTPUT.has(status)) return
+  const rawStatus = (raw as { status?: unknown } | null)?.status
+  if (typeof rawStatus === 'string' && STATUSES_WITH_OUTPUT.has(rawStatus)) return
+  const status = providerLabel(rawStatus)
   const error = (raw as { error?: { code?: unknown } | null } | null)?.error
-  const providerCode = typeof error?.code === 'string' ? error.code : undefined
-  const usage = (raw as { usage?: Partial<OpenAI.Responses.ResponseUsage> | null } | null)?.usage
+  const providerCode = providerLabel(error?.code)
+  const usage = (raw as { usage?: Record<string, unknown> | null } | null)?.usage
+  const count = (value: unknown) => (typeof value === 'number' ? value : null)
   // Keys avoid "token": the logger redacts every key that contains it.
   logger.warn(
     {
       provider: ctx.provider,
-      status: typeof status === 'string' ? status : null,
+      status: status ?? null,
       providerCode: providerCode ?? null,
-      inputUsage: usage?.input_tokens ?? null,
-      outputUsage: usage?.output_tokens ?? null,
-      totalUsage: usage?.total_tokens ?? null,
+      inputUsage: count(usage?.input_tokens),
+      outputUsage: count(usage?.output_tokens),
+      totalUsage: count(usage?.total_tokens),
     },
     'OpenAI response did not complete'
   )
-  throw new OpenAIResponseFailedError(
-    ctx.provider,
-    typeof status === 'string' ? status : undefined,
-    providerCode
-  )
+  throw new OpenAIResponseFailedError(ctx.provider, status, providerCode)
 }
 
 function finishReason(raw: ResponsesResult, hasToolCalls: boolean): FinishReason {
