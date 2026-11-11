@@ -11,6 +11,8 @@ describe('GFS Markdown adapter', () => {
   })
 
   it('sanitizes raw HTML and blocks active content and unsafe URLs', () => {
+    const fetchRequest = vi.fn()
+    vi.stubGlobal('fetch', fetchRequest)
     const source = [
       '# Safe heading',
       '',
@@ -40,6 +42,7 @@ describe('GFS Markdown adapter', () => {
     expect(container.querySelector('[onfocus], [onclick], [onerror]')).toBeNull()
     expect(container.querySelector('img')).toBeNull()
     expect(within(article).queryByRole('link', { name: /Unsafe/ })).toBeNull()
+    expect(fetchRequest).not.toHaveBeenCalled()
   })
 
   it('keeps GFM tables keyboard-scrollable and preserves safe links', () => {
