@@ -9,8 +9,8 @@ import { type ArmId, type FixtureReply, arm, cleanupTransports } from './provide
 // Issue #1433: a provider's own HTTP 400 refusal reads the same on every
 // makeProvider arm — LLM_UPSTREAM_REJECTED, not retryable, never a failover
 // trigger — while the provider-specific 400s (quota, retired model, credit)
-// keep their codes. Each arm runs its real SDK or proxy client; only the last
-// hop is local (see providerTransportFixtures).
+// keep their codes. Each arm runs its real SDK or proxy client against a local
+// endpoint (see providerTransportFixtures for what else is stubbed).
 
 const OPENAI_400: FixtureReply = {
   status: 400,

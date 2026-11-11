@@ -12,12 +12,16 @@ import type { SingleTurnProvider } from '../types'
 
 /**
  * Test-only transports for the eight `makeProvider` arms (#1433). Every arm
- * runs its real SDK or proxy client; only the last hop is local: a loopback
+ * runs its real SDK or proxy client against a local endpoint: a loopback
  * HTTP/1.1 or HTTP/2 server, or the injectable `fetch` of a client whose
  * endpoint cannot be loopback (Azure requires https; Z.ai's base URL is a
  * descriptor constant; the subscription proxy clients take `fetchFn`).
- * Callers install `installLoopbackOnlyNetwork()` so a seam that fails to
- * intercept throws instead of reaching a real endpoint.
+ * Three arms stub more than the endpoint. The subscription arms replace the
+ * control-api authorizer with a stub that echoes the request hash, and use
+ * constants for the attempt context and the platform JWT; their proxy client
+ * is real. Vertex stubs the token hop. Callers install
+ * `installLoopbackOnlyNetwork()` so a seam that fails to intercept throws
+ * instead of reaching a real endpoint.
  */
 
 export type FixtureReply = {

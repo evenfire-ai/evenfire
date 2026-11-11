@@ -317,8 +317,11 @@ export function classifyGoogleError(err: unknown): ClassifiedError {
       return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
     if (httpStatus >= 500 && httpStatus < 600)
       return { code: LlmErrorCode.ModelOverloaded, retryable: true, message, ...diag }
-    // #1433: Vertex refused the request itself; the same request gets the
-    // same answer. Same label as the other providers' HTTP 400.
+    // #1433: an HTTP 400 on the call. Either Vertex refused the request, or
+    // Google's token endpoint refused the service-account credential
+    // (`invalid_grant`) and no request reached Vertex (#1437). Both are
+    // reported as a rejected request, not retryable. Same label as the other
+    // providers' HTTP 400.
     if (httpStatus === 400)
       return { code: LlmErrorCode.UpstreamRejected, retryable: false, message, ...diag }
   }

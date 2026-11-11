@@ -46,13 +46,15 @@ export enum LlmErrorCode {
   /**
    * Issue #720 — a subscription proxy reported `upstream_rejected`: the
    * provider answered a 4xx the proxy has no specific code for (400, Grok
-   * 402/403 entitlement, 404, 409, 422). #1433 — also a provider's own HTTP
-   * 400 refusal that no body code maps elsewhere: an OpenAI-family or
-   * Anthropic API-key 400 (`errorClassification.ts`), a Vertex HTTP 400,
-   * `INVALID_ARGUMENT` or `FAILED_PRECONDITION`
-   * (`drivers/googleGenerative.ts`), and a Bedrock `ValidationException` or
-   * unmodeled HTTP 400 (`drivers/bedrockConverse.ts`). The same request gets
-   * the same answer, so it is not retryable and never fails over.
+   * 402/403 entitlement, 404, 409, 422). #1433 — also an HTTP 400 on a
+   * provider call that no body code maps elsewhere: an OpenAI-family or
+   * Anthropic API-key 400 (`errorClassification.ts`); any numeric HTTP 400
+   * the Vertex SDK surfaces, which includes the Google token endpoint's
+   * `invalid_grant` for a bad service-account key (#1437), and the statuses
+   * `INVALID_ARGUMENT` and `FAILED_PRECONDITION`
+   * (`drivers/googleGenerative.ts`); and a Bedrock `ValidationException` or
+   * unmodeled HTTP 400 (`drivers/bedrockConverse.ts`). Not retryable, and
+   * never a failover trigger.
    */
   UpstreamRejected = 'LLM_UPSTREAM_REJECTED',
   /**

@@ -16,7 +16,8 @@ import { ARMS, cleanupTransports } from './providerTransportFixtures'
 
 // Issue #1433, owner requirement: every provider arm makeProvider builds sends
 // only well-formed text on its real transport. Each arm runs its real SDK or
-// proxy client; only the last hop is local (see providerTransportFixtures).
+// proxy client against a local endpoint (see providerTransportFixtures for
+// what else is stubbed).
 
 const HIGH = '\uD83D'
 const LONE_ESCAPE = /\\ud[89a-f][0-9a-f]{2}/i

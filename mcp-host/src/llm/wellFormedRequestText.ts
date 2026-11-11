@@ -13,10 +13,14 @@
  * The repair is never silent: each repaired message, tool definition or system
  * prompt emits one `warn` line (provider, role, tool name, count, never the
  * text) and increments `clerum_llm_request_text_repaired_total`, once the
- * whole request has been repaired and right before it is sent. A repair that
- * would make two keys of one object equal is not done: the request is refused
- * before dispatch with {@link RequestTextKeyCollisionError}, which the
- * provider classifies as `LLM_REQUEST_TEXT_REJECTED`.
+ * whole request has been repaired and before the provider method is called.
+ * A repair that would make two keys of one object equal is not done: the
+ * request is refused before dispatch with
+ * {@link RequestTextKeyCollisionError}, which the provider classifies as
+ * `LLM_REQUEST_TEXT_REJECTED`, and no repair is reported for it. The provider
+ * can still refuse or fail a repaired request before dispatch (over-deep or
+ * cyclic input, see `repairDeep`); its repairs are then already logged and
+ * counted.
  *
  * The wrap runs in the provider's public methods, before any request is built,
  * so the subscription providers hash the repaired request and control-api and
@@ -135,9 +139,18 @@ function finishFrame(frame: Frame, tally: Tally): unknown {
  * `skipKeys` names keys whose values are left untouched at the top level only.
  *
  * The walk uses an explicit stack, so no nesting depth makes it fail; the
- * parsers behind the providers keep their own depth limits. A container that
- * is already on the current path (a cycle) is kept as is and not entered.
- * Each property is read once.
+ * parsers behind the providers keep their own depth limits.
+ *
+ * Most input is JSON-decoded data, which is a tree. A container that is
+ * already on the current path (a cycle) is kept as is, unrepaired, and not
+ * entered; every provider arm then refuses or fails the request before
+ * dispatch. A container reachable along several paths is walked once per path
+ * and its lone units are counted once per path. For objects that all
+ * reference each other the number of paths grows factorially with their
+ * count. Code-built tool schemas do reuse sub-objects (for example
+ * `workflow/toolSchemas/dashboard.ts`); each reuse is walked once per path. No
+ * producer of cyclic input, or of objects that all reference each other, is
+ * known, so the walk does not guard against it (#1433).
  */
 function repairDeep<T>(root: T, tally: Tally, skipKeys?: ReadonlySet<string>): T {
   if (typeof root === 'string') return repairString(root, tally) as T
