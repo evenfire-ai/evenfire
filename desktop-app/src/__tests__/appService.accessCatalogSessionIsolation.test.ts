@@ -170,7 +170,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     ['listWorkflows', 'refreshAccessCatalog'],
     ['listPendingWorkflowApprovals', 'getAccessCatalog'],
   ] as const)(
-    'T-R1: a catalog requested while a %s hop is open is built from the home session (%s)',
+    'a catalog requested while a %s hop is open is built from the home session (%s)',
     async (hopSource, entry) => {
       const { app, hopOperation, hopStarted, teamAgentsTokens } = await setup()
       const hop =
@@ -195,7 +195,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     }
   )
 
-  it('T-R2: a catalog requested while a hop commit is half applied is built from the home session', async () => {
+  it('a catalog requested while a hop commit is half applied is built from the home session', async () => {
     const { app, hopOperation, teamBGetMe, teamBGetMeStarted, teamAgentsTokens } = await setup({
       pauseTeamBGetMe: true,
     })
@@ -217,7 +217,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     expect(catalog.agentNames).toEqual(['direct-agent', 'team-a-agent'])
   })
 
-  it('T-R2b: a catalog requested while the hop restore is half applied is built from the home session', async () => {
+  it('a catalog requested while the hop restore is half applied is built from the home session', async () => {
     const { app, hopOperation, hopStarted, restoreGetMe, restoreGetMeStarted, teamAgentsTokens } =
       await setup({ pauseRestoreGetMe: true })
     const approvals = app.listPendingWorkflowApprovals(20)
@@ -239,7 +239,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
     expect(catalog.agentNames).toEqual(['direct-agent', 'team-a-agent'])
   })
 
-  it('T-R3: a catalog requested while a deliberate switch is half applied is built from the new session', async () => {
+  it('a catalog requested while a deliberate switch is half applied is built from the new session', async () => {
     const { app, teamBGetMe, teamBGetMeStarted, teamAgentsTokens } = await setup({
       pauseTeamBGetMe: true,
     })
@@ -263,7 +263,7 @@ describe('access catalog: the session is read while it is being replaced', () =>
 })
 
 describe('access catalog: a build in flight delays nothing else', () => {
-  it('T-R4: a hop that opens and closes during a build does not wait for it, and the catalog is published for the home session', async () => {
+  it('a hop that opens and closes during a build does not wait for it, and the catalog is published for the home session', async () => {
     const { app, hopOperation, hopStarted, teamAgentsTokens, holdNextBuild } = await setup()
     const { gate, started } = holdNextBuild()
     const pending = app.refreshAccessCatalog()
@@ -290,7 +290,7 @@ describe('access catalog: a build in flight delays nothing else', () => {
     expect(app.accessCatalog?.teamId).toBe('team-a')
   })
 
-  it('T-R4b: a build that finishes while a hop is open is published once, after the restore', async () => {
+  it('a build that finishes while a hop is open is published once, after the restore', async () => {
     const { app, hopOperation, hopStarted, teamAgentsTokens, holdNextBuild } = await setup()
     const { gate, started } = holdNextBuild()
     const pending = app.refreshAccessCatalog()
@@ -309,7 +309,7 @@ describe('access catalog: a build in flight delays nothing else', () => {
     expect(app.accessCatalog?.teamId).toBe('team-a')
   })
 
-  it('T-R5 rpc-token: issuance for a team agent runs while a build is held', async () => {
+  it('rpc-token issuance for a team agent runs while a build is held', async () => {
     const { app, holdNextBuild } = await setup()
     const issued: string[] = []
     app.rpcTokenManager = {
@@ -331,7 +331,7 @@ describe('access catalog: a build in flight delays nothing else', () => {
     expect(catalog.teamId).toBe('team-a')
   })
 
-  it('T-R5 switchTeam: a deliberate switch completes while a build is held', async () => {
+  it('a deliberate switch completes while a build is held', async () => {
     const { app, holdNextBuild, switchCalls } = await setup()
     const { gate, started } = holdNextBuild()
     const pending = settled(app.refreshAccessCatalog())
@@ -340,10 +340,10 @@ describe('access catalog: a build in flight delays nothing else', () => {
     expect(switchCalls).toEqual(['team-b'])
     expect(app.me?.teamId).toBe('team-b')
     gate.resolve()
-    await pending // what the request answers after the switch is T-R6's subject
+    await pending // what the request answers after the switch is tested below
   })
 
-  it('T-R5 logout: logout completes while a build is held', async () => {
+  it('logout completes while a build is held', async () => {
     const { app, holdNextBuild } = await setup()
     const generationBefore = app.sessionGeneration
     const { gate, started } = holdNextBuild()
@@ -353,10 +353,10 @@ describe('access catalog: a build in flight delays nothing else', () => {
     expect(app.sessionToken).toBeNull()
     expect(app.sessionGeneration).toBeGreaterThan(generationBefore)
     gate.resolve()
-    await pending // what the request answers after the logout is T-R7's subject
+    await pending // what the request answers after the logout is tested below
   })
 
-  it('T-R10: hops from a session with no team move the team without a new generation, and the build is discarded', async () => {
+  it('hops from a session with no team move the team without a new generation, and the build is discarded', async () => {
     const { app, hopOperation, hopStarted, userAgentsTokens, holdNextBuild } = await setup({
       homeWithoutTeam: true,
     })
@@ -390,7 +390,7 @@ describe('access catalog: a build in flight delays nothing else', () => {
 })
 
 describe('access catalog: the session is replaced during a build', () => {
-  it('T-R6: a deliberate switch during a build discards it, and the request answers with the new session', async () => {
+  it('a deliberate switch during a build discards it, and the request answers with the new session', async () => {
     const { app, holdNextBuild, teamAgentsTokens } = await setup()
     const { gate, started } = holdNextBuild()
     const pending = app.refreshAccessCatalog()
@@ -406,7 +406,7 @@ describe('access catalog: the session is replaced during a build', () => {
     expect(app.accessCatalog?.teamId).toBe('team-b')
   })
 
-  it('T-R7: a logout during a build publishes nothing, and the request fails', async () => {
+  it('a logout during a build publishes nothing, and the request fails', async () => {
     const { app, holdNextBuild, teamAgentsTokens } = await setup()
     const { gate, started } = holdNextBuild()
     const pending = settled(app.refreshAccessCatalog())
@@ -421,7 +421,7 @@ describe('access catalog: the session is replaced during a build', () => {
     expect(app.accessCatalog).toBeNull()
   })
 
-  it('T-R7b: another user signing in during a build gets nothing from it, and the request fails', async () => {
+  it('another user signing in during a build gets nothing from it, and the request fails', async () => {
     const { app, holdNextBuild, teamAgentsTokens } = await setup()
     const { gate, started } = holdNextBuild()
     const pending = settled(app.refreshAccessCatalog())
@@ -440,7 +440,7 @@ describe('access catalog: the session is replaced during a build', () => {
     expect(app.accessCatalog).toBeNull()
   })
 
-  it('T-R8: a second session change during the rebuild fails loud after exactly two builds', async () => {
+  it('a second session change during the rebuild fails loud after exactly two builds', async () => {
     const { app, holdNextBuild, teamAgentsTokens } = await setup()
     const first = holdNextBuild()
     const second = holdNextBuild()
@@ -457,7 +457,7 @@ describe('access catalog: the session is replaced during a build', () => {
     expect(app.accessCatalog).toBeNull()
   })
 
-  it('T-R9: the same user signing in again during a build gets a rebuild with the new session', async () => {
+  it('the same user signing in again during a build gets a rebuild with the new session', async () => {
     const { app, holdNextBuild, teamAgentsTokens } = await setup()
     const { gate, started } = holdNextBuild()
     const pending = app.refreshAccessCatalog()
