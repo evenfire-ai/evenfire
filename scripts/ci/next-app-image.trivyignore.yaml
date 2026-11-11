@@ -1,0 +1,82 @@
+# Reviewed HIGH/CRITICAL findings accepted by the Next.js image scan (Trivy) in CI.
+# Every entry is scoped to exact package paths in the image and expires; an
+# expired entry fails the scan again. Remove entries once fixed. See
+# docs/testing/dependency-scanning.md.
+vulnerabilities:
+  - id: CVE-2026-102276
+    # brace-expansion@5.0.9
+    paths:
+      - "usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json"
+    expired_at: 2027-02-28
+    statement: "npm CLI bundled in the node:24.22.1-alpine base image; at runtime npm only launches next start and makes no registry requests. Clears with a base image bump. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-102278
+    # brace-expansion@5.0.9
+    paths:
+      - "usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json"
+    expired_at: 2027-02-28
+    statement: "npm CLI bundled in the node:24.22.1-alpine base image; at runtime npm only launches next start and makes no registry requests. Clears with a base image bump. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-109383
+    # undici@6.28.0, undici@7.29.0, undici@7.29.1
+    paths:
+      - "app/control-ui/node_modules/undici/package.json"
+      - "app/profile-ui/node_modules/undici/package.json"
+      - "usr/local/lib/node_modules/npm/node_modules/undici/package.json"
+    expired_at: 2027-02-28
+    statement: "npm CLI bundled in the node:24.22.1-alpine base image; at runtime npm only launches next start and makes no registry requests. Clears with a base image bump. https://github.com/evenfire-ai/evenfire/issues/1431 devDependency (jsdom) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-109829
+    # undici@7.29.0, undici@7.29.1
+    paths:
+      - "app/control-ui/node_modules/undici/package.json"
+      - "app/profile-ui/node_modules/undici/package.json"
+    expired_at: 2027-02-28
+    statement: "devDependency (jsdom) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-109869
+    # undici@6.28.0, undici@7.29.0, undici@7.29.1
+    paths:
+      - "app/control-ui/node_modules/undici/package.json"
+      - "app/profile-ui/node_modules/undici/package.json"
+      - "usr/local/lib/node_modules/npm/node_modules/undici/package.json"
+    expired_at: 2027-02-28
+    statement: "npm CLI bundled in the node:24.22.1-alpine base image; at runtime npm only launches next start and makes no registry requests. Clears with a base image bump. https://github.com/evenfire-ai/evenfire/issues/1431 devDependency (jsdom) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-112942
+    # vite@8.3.0
+    paths:
+      - "app/control-ui/node_modules/vite/package.json"
+      - "app/profile-ui/node_modules/vite/package.json"
+    expired_at: 2027-02-28
+    statement: "devDependency (vitest) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-19534
+    # undici@6.28.0, undici@7.29.0
+    paths:
+      - "app/profile-ui/node_modules/undici/package.json"
+      - "usr/local/lib/node_modules/npm/node_modules/undici/package.json"
+    expired_at: 2027-02-28
+    statement: "npm CLI bundled in the node:24.22.1-alpine base image; at runtime npm only launches next start and makes no registry requests. Clears with a base image bump. https://github.com/evenfire-ai/evenfire/issues/1431 devDependency (jsdom) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-84961
+    # undici@7.29.0
+    paths:
+      - "app/profile-ui/node_modules/undici/package.json"
+    expired_at: 2027-02-28
+    statement: "devDependency (jsdom) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-87018
+    # undici@6.28.0, undici@7.29.0, undici@7.29.1
+    paths:
+      - "app/control-ui/node_modules/undici/package.json"
+      - "app/profile-ui/node_modules/undici/package.json"
+      - "usr/local/lib/node_modules/npm/node_modules/undici/package.json"
+    expired_at: 2027-02-28
+    statement: "npm CLI bundled in the node:24.22.1-alpine base image; at runtime npm only launches next start and makes no registry requests. Clears with a base image bump. https://github.com/evenfire-ai/evenfire/issues/1431 devDependency (jsdom) copied into the runtime image with the full npm ci tree; not loaded by next start. Clears by pruning dev dependencies from the runtime stage. https://github.com/evenfire-ai/evenfire/issues/1431"
+  - id: CVE-2026-93749
+    # source-map-js@1.2.1
+    paths:
+      - "app/control-ui/node_modules/source-map-js/package.json"
+      - "app/profile-ui/node_modules/source-map-js/package.json"
+    expired_at: 2027-02-28
+    statement: "Production dependency of next, also accepted in scripts/ci/dependency-audit-baseline.json. https://github.com/evenfire-ai/evenfire/issues/939"
+  - id: GHSA-wq5f-xc86-pv6w
+    # sharp@0.35.4
+    paths:
+      - "app/control-ui/node_modules/sharp/package.json"
+      - "app/profile-ui/node_modules/sharp/package.json"
+    expired_at: 2027-02-28
+    statement: "Production dependency of next, also accepted in scripts/ci/dependency-audit-baseline.json. https://github.com/evenfire-ai/evenfire/issues/939"
