@@ -448,19 +448,42 @@ export function FilesPage({
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const lastHandledResourceActionIdRef = useRef<number | null>(null)
   const pendingResourceActionRef = useRef(pendingResourceAction)
-  pendingResourceActionRef.current =
+  const previousPendingResourceAction = pendingResourceActionRef.current
+  const currentPendingResourceAction =
     pendingResourceAction?.id === lastHandledResourceActionIdRef.current
       ? null
       : pendingResourceAction
   const pendingActionSeedRef = useRef<{ id: number; path: string | null | undefined } | null>(null)
-  if (!pendingResourceActionRef.current) {
-    pendingActionSeedRef.current = null
-  } else if (pendingActionSeedRef.current?.id !== pendingResourceActionRef.current.id) {
+  const isActionOwnedFileSeed = (
+    request: typeof pendingResourceAction,
+    path: string | null | undefined
+  ) =>
+    Boolean(
+      request &&
+      request.targetResource?.kind === 'file' &&
+      request.targetUri ===
+        (request.navigationUri === undefined ? request.targetUri : request.navigationUri) &&
+      path === request.targetUri
+    )
+  if (
+    currentPendingResourceAction &&
+    pendingActionSeedRef.current?.id !== currentPendingResourceAction.id
+  ) {
     pendingActionSeedRef.current = {
-      id: pendingResourceActionRef.current.id,
+      id: currentPendingResourceAction.id,
       path: pendingGfsUri,
     }
+  } else if (
+    !currentPendingResourceAction &&
+    previousPendingResourceAction &&
+    pendingActionSeedRef.current?.id === previousPendingResourceAction.id
+  ) {
+    lastHandledResourceActionIdRef.current = previousPendingResourceAction.id
+    if (!isActionOwnedFileSeed(previousPendingResourceAction, pendingActionSeedRef.current.path)) {
+      pendingActionSeedRef.current = null
+    }
   }
+  pendingResourceActionRef.current = currentPendingResourceAction
   // The FULL verdict is stored — not just its state — so the deny reason
   // reaches the row (`data-drop-reason`), the tooltip and the announcements
   // (UX matrix §5.1); a same-state reason change must still repaint.
@@ -510,8 +533,18 @@ export function FilesPage({
   const seedPendingRef = useRef(false)
   const beginExplicitFilesNavigation = useCallback(() => {
     seedPendingRef.current = false
+    pendingActionSeedRef.current = null
     onExplicitNavigationIntent?.()
   }, [onExplicitNavigationIntent])
+  const pendingActionForSeed = pendingResourceActionRef.current
+  const pendingFilesActionSeedId =
+    pendingActionForSeed &&
+    isActionOwnedFileSeed(pendingActionForSeed, pendingActionSeedRef.current?.path) &&
+    pendingActionSeedRef.current?.id === pendingActionForSeed.id &&
+    pendingActionSeedRef.current?.path === pendingGfsUri
+      ? pendingActionForSeed.id
+      : null
+
   useEffect(() => {
     pageActiveRef.current = true
     return () => {
@@ -1735,8 +1768,23 @@ export function FilesPage({
       filesActionOwnsSeed && request
         ? () => pendingResourceActionRef.current?.id === request.id
         : undefined
-    // Re-arm on every non-null seed so a deep-link onto an already-mounted page
-    // suppresses the pre-open location the same way the initial mount does.
+    if (!filesActionOwnsSeed) {
+      if (
+        request &&
+        pendingActionSeedRef.current?.id === request.id &&
+        pendingActionSeedRef.current.path !== pendingGfsUri
+      ) {
+        lastHandledResourceActionIdRef.current = request.id
+        pendingResourceActionRef.current = null
+        if (!isActionOwnedFileSeed(request, pendingActionSeedRef.current.path)) {
+          pendingActionSeedRef.current = null
+        }
+        onPendingResourceActionHandled?.(request.id)
+      }
+      pendingActionSeedRef.current = null
+    }
+    // Re-arm on every non-null seed and newly accepted action receipt so a
+    // same-URI successor is resolved under its own request identity.
     seedPendingRef.current = true
     onPendingGfsUriHandled?.()
     void handleOpenGfsLink(
@@ -1748,7 +1796,7 @@ export function FilesPage({
       filesActionOwnsSeed ? request?.id : undefined
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingGfsUri])
+  }, [pendingGfsUri, pendingFilesActionSeedId])
 
   const deepLinkRetryRequest =
     pendingGfsDeepLink && gfsDeepLinkRetry?.id === pendingGfsDeepLink.id
@@ -1841,6 +1889,12 @@ export function FilesPage({
   const currentGfsUri = current?.gfsUri ?? null
   const currentName = current?.name ?? null
   useEffect(() => {
+    if (
+      pendingActionSeedRef.current?.id === lastHandledResourceActionIdRef.current &&
+      pendingActionSeedRef.current.path === currentGfsUri
+    ) {
+      return
+    }
     if (seedPendingRef.current) {
       // Seed still resolving: suppress the pre-seed root (null) that would clobber
       // the tab's persisted path. Once the stack lands (`current` non-null), the
@@ -3231,6 +3285,9 @@ export function FilesPage({
     const markHandled = () => {
       lastHandledResourceActionIdRef.current = request.id
       pendingResourceActionRef.current = null
+      if (!isActionOwnedFileSeed(request, pendingActionSeedRef.current?.path)) {
+        pendingActionSeedRef.current = null
+      }
       onPendingResourceActionHandled?.(request.id)
     }
     if (
