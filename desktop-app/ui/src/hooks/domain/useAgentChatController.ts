@@ -3807,6 +3807,22 @@ export function useAgentChatController({
           transcriptMemo.delete(chatTranscriptMemoKey(sendAgent, chatId))
         }
       }
+      // Keeps the turn of a failed send that is not withdrawn: marks it so that a
+      // reconcile does not evict it, and stores it.
+      const keepUndeliveredTurn = async () => {
+        if (!sendChatId) return
+        try {
+          const failedUserMessage: AgentChatMessage = { ...userMessage, preserveLocal: true }
+          if (sendChatIsVisible()) {
+            setChatMessages(prev =>
+              prev.map(message => (message.id === userMessageId ? failedUserMessage : message))
+            )
+          }
+          await chatStore.upsertMessages(sendAgent, sendChatId, [failedUserMessage])
+        } catch {
+          // persistence is best-effort; the in-memory view still shows it
+        }
+      }
       // Another path held the agent while this send was pending (D-4): the
       // input is kept as for a loss of access, and nothing new is shown.
       const sendHeldByAnotherPath = () =>
@@ -4191,23 +4207,7 @@ export function useAgentChatController({
             : `Message failed (${kind}).`,
           'error'
         )
-        // Durability: the POST threw before either success branch persisted the
-        // user message (post-D.3 persists once, after the taskId is known). Write
-        // it now so a transient send failure doesn't silently drop the user's
-        // typed input on reload — matches pre-D.3 eager-persist. Best-effort.
-        if (sendChatId) {
-          try {
-            const failedUserMessage: AgentChatMessage = { ...userMessage, preserveLocal: true }
-            if (sendChatIsVisible()) {
-              setChatMessages(prev =>
-                prev.map(message => (message.id === userMessageId ? failedUserMessage : message))
-              )
-            }
-            await chatStore.upsertMessages(sendAgent, sendChatId, [failedUserMessage])
-          } catch {
-            // persistence is best-effort; the in-memory view still shows it
-          }
-        }
+        await keepUndeliveredTurn()
         // The POST failed — no background task exists, so retire the activity
         // stream now. (For a started task, onTrackerTerminal does this instead.)
         activityInFlightByAgentRef.current[sendAgent] = (
