@@ -3637,6 +3637,37 @@ describe('App → Files action lifecycle integration', () => {
     ).toBeNull()
   })
 
+  it('closes a video preview without entering Markdown close authorization', async () => {
+    const { gfs } = installClerum([])
+    const video = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'video-preview-tab',
+      title: 'clip.mp4',
+      gfsUri: 'gfs://video/clip',
+      fileKind: 'video',
+      mimeType: 'video/mp4',
+      byteLength: 128,
+    })
+    appHarness.controller = makeController(video)
+    const requestMarkdownClose = vi.spyOn(
+      appHarness.markdownOwners[appHarness.markdownOwners.length - 1] as MarkdownDraftOwner,
+      'requestClose'
+    )
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close clip.mp4' }))
+
+    await waitFor(() =>
+      expect(
+        appHarness.controller.workspaceTabs.tabs.some(tab => tab.id === 'video-preview-tab')
+      ).toBe(false)
+    )
+    expect(screen.queryByRole('dialog', { name: 'Discard unsaved Markdown changes?' })).toBeNull()
+    expect(requestMarkdownClose).not.toHaveBeenCalled()
+    expect(window.clerum.auth.authorizeMarkdownTabClose).not.toHaveBeenCalled()
+    expect(window.clerum.auth.consumeMarkdownTabClosePermit).not.toHaveBeenCalled()
+    expect(gfs.resolve).not.toHaveBeenCalled()
+  })
+
   it('keeps the in-memory draft through ordinary tab switching and preview remount', async () => {
     const markdown = await resolveResource(
       resolvedFile('68686868686868686868686868686868', 'switch-retained.md')

@@ -1070,6 +1070,11 @@ export function App() {
 
   const handleCloseWorkspaceTab = React.useCallback(
     (id: string) => {
+      const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
+      if (tab?.kind !== 'preview' || tab.preview?.fileKind !== 'markdown') {
+        closeWorkspaceTabNow(id)
+        return
+      }
       const result = markdownDraftOwner.requestClose(id)
       if (result === 'blocked') return
       if (result === 'confirm') {
