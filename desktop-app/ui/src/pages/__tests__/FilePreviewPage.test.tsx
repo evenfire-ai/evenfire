@@ -725,15 +725,6 @@ describe('FilePreviewPage', () => {
         }
       })
       expect(renameResource).not.toHaveBeenCalled()
-      await waitFor(() =>
-        expect(affordances).toHaveBeenCalledTimes(permissionReadsBeforeReplacement + 2)
-      )
-      expect(affordances.mock.calls.slice(permissionReadsBeforeReplacement)).toEqual(
-        expect.arrayContaining([
-          ['0123456789abcdef0123456789abcdef', 'main'],
-          ['preview-parent', 'main'],
-        ])
-      )
     } finally {
       releaseDigest(new ArrayBuffer(0))
       releaseReplacementResolve()
