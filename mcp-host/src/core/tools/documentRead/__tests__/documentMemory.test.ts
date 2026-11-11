@@ -156,9 +156,9 @@ describe('document reader cgroup-v2 memory', () => {
   it('calibrates the child virtual reserve per architecture and reserves the drift', () => {
     expect(DOCUMENT_IPC_RESERVE_BYTES).toBe(113 * MIB)
     expect(DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES).toBe(128 * MIB)
-    // Measured idle worker VmData minus resident in the pinned Alpine image:
-    // x64 2052 - 89 = 1963 MiB, arm64 1348 - 66 = 1282 MiB; both plus drift.
-    expect(childVirtualReserveBytes('x64')).toBe((1_963 + 128) * MIB)
+    // Non-resident child VmData measured natively: x64 1534 MiB (glibc CI
+    // runner), arm64 1348 - 66 = 1282 MiB (Alpine); both plus drift.
+    expect(childVirtualReserveBytes('x64')).toBe((1_534 + 128) * MIB)
     expect(childVirtualReserveBytes('arm64')).toBe((1_282 + 128) * MIB)
     // Liveness: an architecture without a measurement gets no reserve.
     expect(childVirtualReserveBytes('ia32')).toBeNull()

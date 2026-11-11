@@ -5,6 +5,7 @@ import { serialize } from 'node:v8'
 import { logger } from '../../../logger'
 import {
   DOCUMENT_CGROUP_MARGIN_BYTES,
+  type DocumentCgroupMemory,
   childVirtualReserveBytes,
   documentCgroupSampler,
   documentCgroupWorkingSetBytes,
@@ -350,9 +351,11 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
     let sampleResidentMemory: ReturnType<typeof residentMemorySampler>
     let sampleCgroupMemory: ReturnType<typeof documentCgroupSampler>
     let markOomVictim: ReturnType<typeof oomVictimMarker>
-    let caps: ReturnType<typeof effectiveDocumentMemoryCaps>
+    let caps: ReturnType<typeof effectiveDocumentMemoryCaps> = null
     let rlimitEnforced: boolean
     let dataReserveSupported: boolean
+    let cgroup: DocumentCgroupMemory | null = null
+    let cgroupReadable = true
     try {
       sampleResidentMemory = residentMemorySampler(process.platform)
       sampleCgroupMemory = documentCgroupSampler(process.platform)
@@ -362,10 +365,16 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
       // spawns directly and does not use one.
       dataReserveSupported =
         process.platform !== 'linux' || childVirtualReserveBytes(process.arch) !== null
-      caps =
-        rlimitEnforced && dataReserveSupported
-          ? effectiveDocumentMemoryCaps(job.limits, await sampleCgroupMemory())
-          : null
+      if (rlimitEnforced && dataReserveSupported) {
+        try {
+          cgroup = await sampleCgroupMemory()
+        } catch {
+          // cgroup v1, or a missing or malformed v2 controller: a property of
+          // the Host configuration, refused below like the other premises.
+          cgroupReadable = false
+        }
+        if (cgroupReadable) caps = effectiveDocumentMemoryCaps(job.limits, cgroup)
+      }
     } catch {
       release()
       throw workerFailed()
@@ -374,16 +383,28 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
       release()
       throw signal.reason
     }
-    if (!rlimitEnforced || !dataReserveSupported) {
+    // Never run unbounded and never guess. Every refusal happens before any
+    // document byte is parsed and names its condition for operators: the
+    // model only sees host_memory_unavailable.
+    const refuse = (condition: string, details: Record<string, number | null> = {}) => {
       release()
-      // Linux would ignore the hard ceiling, or the architecture has no
-      // calibrated reserve: never run unbounded and never guess.
+      logger.warn(
+        { component: 'DocumentReader', condition, ...details },
+        'Document reader refused to start'
+      )
       return { ok: false, reason: 'host_memory_unavailable' } as DocumentJobOutcome<J>
     }
+    // Linux would ignore the hard ceiling.
+    if (!rlimitEnforced) return refuse('rlimit_data_ignored')
+    // The architecture has no calibrated RLIMIT_DATA reserve.
+    if (!dataReserveSupported) return refuse('uncalibrated_architecture')
+    if (!cgroupReadable) return refuse('cgroup_unavailable')
     if (!caps) {
-      release()
-      // The Host lacks headroom before any document byte is parsed.
-      return { ok: false, reason: 'host_memory_unavailable' } as DocumentJobOutcome<J>
+      // The Host lacks headroom for the minimum reader.
+      return refuse('host_headroom', {
+        cgroupMaxBytes: cgroup?.maxBytes ?? null,
+        workingSetBytes: cgroup === null ? null : documentCgroupWorkingSetBytes(cgroup),
+      })
     }
     const memoryCaps = caps
     return new Promise<DocumentJobOutcome<J>>((resolve, reject) => {

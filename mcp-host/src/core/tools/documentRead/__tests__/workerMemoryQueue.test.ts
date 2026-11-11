@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type ChildProcess, spawn } from 'node:child_process'
 import { EventEmitter, once } from 'node:events'
+import { logger } from '../../../../logger'
 import * as documentMemory from '../documentMemory'
 import * as oomScore from '../oomScore'
 import * as residentMemory from '../residentMemory'
@@ -184,6 +185,34 @@ describe('document reader Host memory admission and queue', () => {
     expect((await admitted).ok).toBe(true)
   })
 
+  it('refuses an unreadable cgroup as host_memory_unavailable and names each refusal in a warning', async () => {
+    const warn = vi.spyOn(logger, 'warn')
+    let readable = false
+    samplers(async () => {
+      if (!readable) throw new Error('Document reader cgroup memory unavailable')
+      return { maxBytes: 640 * MIB, currentBytes: 400 * MIB, inactiveFileBytes: 0 }
+    })
+    // cgroup v1 or a missing controller: a property of the Host, not a defect.
+    expect(await runDocumentJob(job)).toEqual({ ok: false, reason: 'host_memory_unavailable' })
+    expect(warn).toHaveBeenLastCalledWith(
+      { component: 'DocumentReader', condition: 'cgroup_unavailable' },
+      'Document reader refused to start'
+    )
+    // Readable, but without headroom: the warning names the numbers to size by.
+    readable = true
+    expect(await runDocumentJob(job)).toEqual({ ok: false, reason: 'host_memory_unavailable' })
+    expect(warn).toHaveBeenLastCalledWith(
+      {
+        component: 'DocumentReader',
+        condition: 'host_headroom',
+        cgroupMaxBytes: 640 * MIB,
+        workingSetBytes: 400 * MIB,
+      },
+      'Document reader refused to start'
+    )
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
   it('admits on the working set when the same current is reclaimable cache', async () => {
     let memory: documentMemory.DocumentCgroupMemory = {
       maxBytes: 640 * MIB,
@@ -208,13 +237,15 @@ describe('document reader Host memory admission and queue', () => {
     expect((await admitted).ok).toBe(true)
   })
 
-  it('rejects unreadable Linux headroom as a defect and admits a measured control', async () => {
+  it('refuses unreadable Linux headroom without spawning and admits a measured control', async () => {
     const sample = vi
       .fn<() => Promise<documentMemory.DocumentCgroupMemory | null>>()
       .mockRejectedValueOnce(new Error('unreadable cgroup'))
       .mockResolvedValue({ maxBytes: 640 * MIB, currentBytes: 128 * MIB, inactiveFileBytes: 0 })
     samplers(sample)
-    await expect(runDocumentJob(job)).rejects.toThrow('Document reader worker failed')
+    // MEMORY_MODEL.md: cgroup v1 or a missing controller fails closed as
+    // host_memory_unavailable, a Host property rather than a reader defect.
+    expect(await runDocumentJob(job)).toEqual({ ok: false, reason: 'host_memory_unavailable' })
     expect(sample).toHaveBeenCalledTimes(1)
     expect(spawn).toHaveBeenCalledTimes(0)
     const child = childFixture()

@@ -23,23 +23,26 @@ export const DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES = 128 * MIB
 /**
  * The non-resident part of the child's base VmData that RLIMIT_DATA must also
  * admit: V8's code-range/pointer-cage reservations, native mappings and shared
- * libraries, measured with the worker idle after loading its modules in the
- * pinned `node:24.16.0-alpine@sha256:21f403…` image:
+ * libraries (V = VmData - RSS), measured natively:
  *
- * - x64: VmData 2052 MiB, RSS 89 MiB, so V = 1963 MiB.
- * - arm64: VmData 1348 MiB, RSS 66 MiB, so V = 1282 MiB.
+ * - x64: V = 1534 MiB, the median of 175 reader jobs (1526-1602 MiB) on the
+ *   glibc x64 CI runner, Node 24.22.1. The earlier 1963 MiB was measured
+ *   through Rosetta and was about 430 MiB too large.
+ * - arm64: V = 1282 MiB with the worker idle after loading its modules in the
+ *   pinned `node:24.16.0-alpine@sha256:21f403…` image (VmData 1348 MiB, RSS
+ *   66 MiB); glibc and musl measured 1287 and 1282 MiB on Node 24.22.1.
  *
- * `DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES` is added to both. The amd64 figure
- * was measured through Rosetta, so CI amd64 (G1) is the durable confirmation
- * of this reserve. Too small starves legitimate reads with allocation
- * failures; too large weakens the resident bound by the excess. An
- * uncalibrated architecture has no reserve, and Linux refuses to spawn rather
- * than guess one.
+ * `DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES` is added to both. Every Linux test
+ * run re-measures V on its own architecture and fails when it leaves that
+ * drift (workerRunner.test.ts), so CI x64 confirms the x64 figure. Too small
+ * starves legitimate reads with allocation failures; too large weakens the
+ * resident bound by the excess. An uncalibrated architecture has no reserve,
+ * and Linux refuses to spawn rather than guess one.
  */
 export function childVirtualReserveBytes(arch: string): number | null {
   switch (arch) {
     case 'x64':
-      return (1_963 + 128) * MIB
+      return (1_534 + 128) * MIB
     case 'arm64':
       return (1_282 + 128) * MIB
     default:

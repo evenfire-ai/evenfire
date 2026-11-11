@@ -45,7 +45,7 @@ resident, and then bounds nothing useful. `RLIMIT_DATA` counts private writable
 mappings, which is what Buffers, ArrayBuffers and malloc'd native memory are,
 and it includes the same V8 reservations. They are a constant, so the limit is
 set as `resident cap + V`, where `V` is the child's idle VmData measured per
-architecture (x64 1963 MiB, arm64 1282 MiB, plus a 128 MiB drift reserve).
+architecture (x64 1534 MiB, arm64 1282 MiB, plus a 128 MiB drift reserve).
 An architecture without a measurement refuses to spawn rather than guess.
 `ignore_rlimit_data=Y` (a kernel module parameter) would silently disable the
 limit, so it is read on every job and an unreadable value fails closed.
@@ -70,11 +70,14 @@ Not covered by `RLIMIT_DATA`:
   than what is left of those reserves while the child is at its cap, the
   container reaches `memory.max`. Layer 5 then helps only if its sample lands
   in time.
-- a wrong calibration. `V` was measured in one pinned image
-  (`node:24.16.0-alpine`) and on arm64 (amd64 through Rosetta). A changed Node,
-  libc or `@napi-rs/canvas` build can move idle VmData. Too small: legitimate
-  reads fail with a `heap` outcome. Too large: the resident bound is weaker by
-  the excess. CI on amd64 (G1) is the durable check; the
+- a wrong calibration. `V` was measured natively: arm64 idle in the pinned
+  `node:24.16.0-alpine` image, x64 from 175 reader jobs on the glibc CI runner
+  (an earlier x64 figure measured through Rosetta was about 430 MiB too large).
+  A changed Node, libc or `@napi-rs/canvas` build can move idle VmData. Too
+  small: legitimate reads fail with a `heap` outcome. Too large: the resident
+  bound is weaker by the excess. Every Linux test run re-measures `V` on its
+  own architecture and fails outside the drift reserve (`workerRunner.test.ts`),
+  so CI on x64 is the durable check; the
   `childVmDataBytes` field of the `document reader job finished` log line is the
   production signal to watch.
 
@@ -125,6 +128,12 @@ container with its own memory limit so that its OOM is a container OOM.
    steady working set plus the reserves above; admission refuses reads rather
    than starting them in a tight container, so a small container shows up as
    `host_memory_unavailable`, not as an OOM.
+
+Every refusal of items 1-3 and 5 returns the same `host_memory_unavailable` to
+the model and logs one warning, `Document reader refused to start`, whose
+`condition` names the cause: `rlimit_data_ignored`, `uncalibrated_architecture`,
+`cgroup_unavailable`, or `host_headroom` (with `cgroupMaxBytes` and
+`workingSetBytes`, the numbers to size the container by).
 
 ## Claim for the PR description
 

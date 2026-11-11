@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { logger } from '../../../../logger'
-import { childVirtualReserveBytes } from '../documentMemory'
+import { DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES, childVirtualReserveBytes } from '../documentMemory'
 import * as oomScore from '../oomScore'
 import { oomVictimMarker } from '../oomScore'
 import * as residentMemory from '../residentMemory'
@@ -80,6 +80,25 @@ async function liveChild(): Promise<ChildProcess> {
   expect(child.exitCode).toBeNull()
   expect(child.signalCode).toBeNull()
   return child
+}
+
+/**
+ * On Linux the runner spawns `/bin/sh -c 'ulimit -d … && exec node …'`. During
+ * each execve the status shows resident argument pages but no data mappings
+ * yet (VmData 0 kB), and the kernel renames the process to `node` before
+ * node's own segments are mapped, so the name alone does not end that
+ * window. Node starts its platform threads only once it runs, so a second
+ * thread means the child is node with its data segment mapped.
+ */
+async function nodeRunning(pid: number): Promise<void> {
+  const deadline = Date.now() + 10_000
+  for (;;) {
+    const status = await readFile(`/proc/${pid}/status`, 'utf8')
+    const threads = Number(/^Threads:\s+(\d+)$/m.exec(status)?.[1] ?? '0')
+    if (threads > 1) return
+    if (Date.now() > deadline) throw new Error('The document reader child never started node')
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
 }
 
 // Valid content, so each malformed case below fails only on the property it names.
@@ -288,6 +307,8 @@ describe('document reader child runner', () => {
     )
     const pending = runDocumentJob(job(await valuesWorkbook(witnessCode())))
     const child = await liveChild()
+    // Sampling inside the shell-to-node exec window read VmData 0 kB in CI.
+    if (process.platform === 'linux') await nodeRunning(child.pid!)
     const sample = await residentMemorySampler(process.platform)(child.pid!)
     expect(sample.rssBytes).toBeGreaterThan(0)
     if (process.platform === 'linux') {
@@ -728,7 +749,7 @@ describe('document reader child runner', () => {
 
   it('spawns through a data-limited shell only on Linux and reserves per architecture', () => {
     const residentBytes = 130 * MIB + 1
-    const x64KiB = Math.ceil((residentBytes + (1_963 + 128) * MIB) / 1_024)
+    const x64KiB = Math.ceil((residentBytes + (1_534 + 128) * MIB) / 1_024)
     const arm64KiB = Math.ceil((residentBytes + (1_282 + 128) * MIB) / 1_024)
     const linux = workerSpawnCommand('linux', residentBytes, 256, 'x64')
     const linuxArm64 = workerSpawnCommand('linux', residentBytes, 256, 'arm64')
@@ -750,10 +771,10 @@ describe('document reader child runner', () => {
   })
 
   it('fails loud instead of guessing a reserve for an uncalibrated architecture', () => {
-    expect(childVirtualReserveBytes('x64')).toBe((1_963 + 128) * MIB)
+    expect(childVirtualReserveBytes('x64')).toBe((1_534 + 128) * MIB)
     expect(childVirtualReserveBytes('arm64')).toBe((1_282 + 128) * MIB)
     expect(childVirtualReserveBytes('ia32')).toBeNull()
-    expect(dataLimitKiB(1, 'x64')).toBe(Math.ceil(((1_963 + 128) * MIB + 1) / 1_024))
+    expect(dataLimitKiB(1, 'x64')).toBe(Math.ceil(((1_534 + 128) * MIB + 1) / 1_024))
     expect(() => dataLimitKiB(1, 'riscv64')).toThrow(
       'Unsupported document reader virtual reserve architecture'
     )
@@ -761,6 +782,67 @@ describe('document reader child runner', () => {
       'Unsupported document reader virtual reserve architecture'
     )
   })
+
+  // The reserve constants are measurements. This re-measures them on every
+  // Linux run (CI is native x64): the idle child's non-resident VmData must
+  // stay within the drift reserve of the calibrated value, in either
+  // direction. Too small starves reads; too large loosens RLIMIT_DATA.
+  it.runIf(process.platform === 'linux')(
+    'measures the idle child non-resident VmData within the drift of the calibrated reserve',
+    async () => {
+      const reserve = childVirtualReserveBytes(process.arch)
+      expect(reserve).not.toBeNull()
+      const calibrated = reserve! - DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES
+      const command = workerSpawnCommand('linux', 768 * MIB, 512)
+      const child = spawn(command.file, command.args, {
+        env: {},
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        serialization: 'advanced',
+      })
+      try {
+        await nodeRunning(child.pid!)
+        // Idle: the worker has loaded its modules and waits for a job, so
+        // VmData stops changing.
+        const kib = (status: string, field: string): number =>
+          Number(new RegExp(`^${field}:\\s+(\\d+) kB$`, 'm').exec(status)?.[1] ?? NaN)
+        const deadline = Date.now() + 30_000
+        let status = ''
+        let lastVmData = -1
+        let stableSince = Date.now()
+        for (;;) {
+          status = await readFile(`/proc/${child.pid}/status`, 'utf8')
+          const vmData = kib(status, 'VmData')
+          if (vmData !== lastVmData) {
+            lastVmData = vmData
+            stableSince = Date.now()
+          } else if (Date.now() - stableSince >= 1_000) {
+            break
+          }
+          if (Date.now() > deadline) throw new Error('The idle reader child never settled')
+          await new Promise(resolve => setTimeout(resolve, 25))
+        }
+        const nonResident = (kib(status, 'VmData') - kib(status, 'VmRSS')) * 1_024
+        process.stdout.write(
+          'RLIMIT_DATA reserve witness ' +
+            JSON.stringify({
+              arch: process.arch,
+              nonResidentMiB: Math.round(nonResident / MIB),
+              calibratedMiB: calibrated / MIB,
+              driftMiB: DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES / MIB,
+            }) +
+            '\n'
+        )
+        expect(Number.isFinite(nonResident)).toBe(true)
+        expect(Math.abs(nonResident - calibrated)).toBeLessThanOrEqual(
+          DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES
+        )
+      } finally {
+        child.kill('SIGKILL')
+        if (child.exitCode === null && child.signalCode === null) await once(child, 'exit')
+      }
+    },
+    60_000
+  )
 
   it('requires exactly N in ignore_rlimit_data and fails closed otherwise', async () => {
     const root = await mkdtemp(join(tmpdir(), 'document-rlimit-'))
@@ -783,6 +865,7 @@ describe('document reader child runner', () => {
     const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
     const premiseRead = vi.mocked(readFile)
     premiseRead.mockResolvedValueOnce('Y' as never).mockResolvedValueOnce('Y' as never)
+    const warn = vi.spyOn(logger, 'warn')
     Object.defineProperty(process, 'platform', { ...descriptor, value: 'linux' })
     try {
       expect(await runDocumentJob(job(bytes))).toEqual({
@@ -793,6 +876,12 @@ describe('document reader child runner', () => {
         ok: false,
         reason: 'host_memory_unavailable',
       })
+      // A permanent Host condition, named for operators on every refusal.
+      expect(warn).toHaveBeenCalledTimes(2)
+      expect(warn).toHaveBeenLastCalledWith(
+        { component: 'DocumentReader', condition: 'rlimit_data_ignored' },
+        'Document reader refused to start'
+      )
       // No cache: two jobs read the parameter twice.
       expect(premiseRead).toHaveBeenCalledTimes(2)
       expect(premiseRead).toHaveBeenCalledWith(
@@ -812,6 +901,7 @@ describe('document reader child runner', () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
     const arch = Object.getOwnPropertyDescriptor(process, 'arch')!
     vi.mocked(readFile).mockResolvedValueOnce('N' as never)
+    const warn = vi.spyOn(logger, 'warn')
     Object.defineProperty(process, 'platform', { ...platform, value: 'linux' })
     Object.defineProperty(process, 'arch', { ...arch, value: 'ia32' })
     try {
@@ -819,6 +909,10 @@ describe('document reader child runner', () => {
         ok: false,
         reason: 'host_memory_unavailable',
       })
+      expect(warn).toHaveBeenLastCalledWith(
+        { component: 'DocumentReader', condition: 'uncalibrated_architecture' },
+        'Document reader refused to start'
+      )
       // The premise is enforced, but the uncalibrated reserve still refuses.
       expect(vi.mocked(readFile)).toHaveBeenCalledWith(
         '/sys/module/kernel/parameters/ignore_rlimit_data',
