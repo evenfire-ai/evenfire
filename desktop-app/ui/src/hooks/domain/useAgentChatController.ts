@@ -3834,8 +3834,9 @@ export function useAgentChatController({
         } catch {
           // Persistence is best-effort. When the chat is visible, the in-memory
           // view still shows the marked turn. When it is not (for example the
-          // agent was held and deselected), neither memory nor the store keeps
-          // the mark, and the input survives only in the retained snapshot.
+          // agent was held and deselected), the mark is lost: the store keeps
+          // the optimistic copy written before the send, without the mark. The
+          // input is kept in the retained snapshot either way.
         }
       }
       // Another path held the agent while this send was pending, and the scope and
