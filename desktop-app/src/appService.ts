@@ -1647,13 +1647,16 @@ export class AppService {
 
   private reserveSessionPreclear(reason: SessionPreclearReason): PendingSessionPreclear | null {
     if (!this.sessionToken || !this.me) return null
-    const current = this.pendingSessionPreclear
+    let current = this.pendingSessionPreclear
     if (current) {
       if (current.notice.sessionGeneration !== this.sessionGeneration) {
-        throw new Error('stale_session_generation')
+        this.cancelStaleSessionPreclear(current)
+        current = this.pendingSessionPreclear
       }
-      if (reason === 'logout') current.logoutQueued = true
-      return current
+      if (current) {
+        if (reason === 'logout') current.logoutQueued = true
+        return current
+      }
     }
 
     let resolve!: (acknowledged: boolean) => void
@@ -1692,21 +1695,48 @@ export class AppService {
     return pending
   }
 
-  private async awaitSessionPreclear(pending: PendingSessionPreclear): Promise<boolean> {
+  private async awaitSessionPreclear(
+    pending: PendingSessionPreclear,
+    rearmFor?: { reason: SessionPreclearReason; principalId: string }
+  ): Promise<PendingSessionPreclear> {
+    let current = pending
     let timeoutId: ReturnType<typeof setTimeout> | undefined
-    const timeout = new Promise<boolean>(resolve => {
-      timeoutId = setTimeout(() => resolve(false), 3000)
-    })
-    const acknowledged = await Promise.race([pending.promise, timeout])
-    if (timeoutId !== undefined) clearTimeout(timeoutId)
-    if (!acknowledged) {
-      pending.settled = true
-      this.onSessionPreclearTimeout?.(pending.notice)
+    while (true) {
+      const timeout = new Promise<boolean>(resolve => {
+        timeoutId = setTimeout(() => resolve(false), 3000)
+      })
+      const acknowledged = await Promise.race([current.promise, timeout])
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+      timeoutId = undefined
+      if (this.sessionGeneration !== current.notice.sessionGeneration) {
+        this.cancelStaleSessionPreclear(current)
+        if (rearmFor && this.sessionToken && this.me?.id === rearmFor.principalId) {
+          const replacement = this.reserveSessionPreclear(rearmFor.reason)
+          if (replacement) {
+            current = replacement
+            continue
+          }
+        }
+        throw new Error('stale_session_generation')
+      }
+      if (!acknowledged) {
+        current.settled = true
+        this.onSessionPreclearTimeout?.(current.notice)
+      }
+      return current
     }
-    if (this.sessionGeneration !== pending.notice.sessionGeneration) {
-      throw new Error('stale_session_generation')
-    }
-    return acknowledged
+  }
+
+  private cancelStaleSessionPreclear(pending: PendingSessionPreclear): void {
+    if (
+      this.pendingSessionPreclear !== pending ||
+      pending.notice.sessionGeneration === this.sessionGeneration
+    )
+      return
+    this.pendingSessionPreclear = null
+    pending.settled = true
+    pending.resolve(false)
+    this.onSessionPreclearCancelled?.(pending.notice)
   }
 
   private releaseSessionPreclear(
@@ -1716,6 +1746,8 @@ export class AppService {
     if (this.pendingSessionPreclear !== pending) return
     if (pending.logoutQueued && releasingReason !== 'logout') return
     this.pendingSessionPreclear = null
+    pending.settled = true
+    pending.resolve(false)
     this.onSessionPreclearCancelled?.(pending.notice)
   }
 
@@ -1733,8 +1765,11 @@ export class AppService {
   async prepareSessionClear(): Promise<SessionPreclearNotice | null> {
     const pending = this.reserveSessionPreclear('logout')
     if (!pending) return null
-    await this.awaitSessionPreclear(pending)
-    return pending.notice
+    const principalId = this.me?.id
+    const current = principalId
+      ? await this.awaitSessionPreclear(pending, { reason: 'logout', principalId })
+      : await this.awaitSessionPreclear(pending)
+    return current.notice
   }
 
   acknowledgeSessionPreclear(notice: SessionPreclearNotice): boolean {
@@ -3011,9 +3046,17 @@ export class AppService {
     if (this.pendingLogout) return this.pendingLogout
     // Reserve before entering the native auth queue: a queued team/environment
     // operation must not leave the outgoing renderer visible while logout waits.
-    const preclear = this.reserveSessionPreclear('logout')
+    let preclear = this.reserveSessionPreclear('logout')
+    const logoutPrincipalId = this.me?.id
     const operation = this.withNativeAuthEnvironmentCommit(async () => {
-      if (preclear) await this.awaitSessionPreclear(preclear)
+      if (preclear) {
+        preclear = logoutPrincipalId
+          ? await this.awaitSessionPreclear(preclear, {
+              reason: 'logout',
+              principalId: logoutPrincipalId,
+            })
+          : await this.awaitSessionPreclear(preclear)
+      }
       const logoutGeneration = this.sessionGeneration
       const logoutToken = this.sessionToken
       const logoutMe = this.me

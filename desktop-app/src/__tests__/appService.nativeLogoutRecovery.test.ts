@@ -3,11 +3,86 @@ import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
-import { testLoginResult } from '../../testSupport/authTestFixtures.js'
+import { deferred } from '../../testSupport/appService.nativeCommitTestHarness.js'
+import {
+  testLoginResult,
+  testSessionMe,
+  testTeamSwitchResult,
+} from '../../testSupport/authTestFixtures.js'
 
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService logout recovery ownership', () => {
+  it('re-arms logout preclear after a queued team switch advances the session generation', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const switchResponse = deferred<ReturnType<typeof testTeamSwitchResult>>()
+    const switchStarted = deferred<void>()
+    const meA = testSessionMe()
+    const meB = testSessionMe({ teamId: 'team-b', teamName: 'Team B' })
+    const app = service as unknown as {
+      authClient: unknown
+      onSessionPreclear: (notice: {
+        transitionId: number
+        sessionGeneration: number
+        reason: string
+      }) => boolean
+      acknowledgeSessionPreclear(notice: {
+        transitionId: number
+        sessionGeneration: number
+        reason: string
+      }): boolean
+      pendingSessionPreclear: unknown
+    }
+    app.authClient = {
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult('synthetic-session-a', meA)),
+      switchTeam: vi.fn(() => {
+        switchStarted.resolve()
+        return switchResponse.promise
+      }),
+      getMe: vi.fn().mockResolvedValue(meB),
+    }
+    const notices: Array<{ transitionId: number; sessionGeneration: number; reason: string }> = []
+    app.onSessionPreclear = notice => {
+      notices.push(notice)
+      return true
+    }
+    await service.googleLogin('synthetic-google-token')
+    const initialSession = (await service.getSessionState()) as {
+      sessionGeneration: number
+    }
+
+    const switching = service.switchTeam('team-b')
+    await switchStarted.promise
+    const logout = service.logout()
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toMatchObject({
+      sessionGeneration: initialSession.sessionGeneration,
+      reason: 'logout',
+    })
+    expect(app.acknowledgeSessionPreclear(notices[0])).toBe(true)
+
+    switchResponse.resolve(testTeamSwitchResult('team-b'))
+    await expect(switching).resolves.toMatchObject({
+      authenticated: true,
+      me: { teamId: 'team-b' },
+      sessionGeneration: initialSession.sessionGeneration + 1,
+    })
+
+    await vi.waitFor(() => expect(notices).toHaveLength(2))
+    expect(notices[1]).toMatchObject({
+      sessionGeneration: initialSession.sessionGeneration + 1,
+      reason: 'logout',
+    })
+    expect(service.sessionToken).toBe('session-team-b')
+    expect(app.acknowledgeSessionPreclear(notices[0])).toBe(false)
+    expect(app.acknowledgeSessionPreclear(notices[1])).toBe(true)
+    await expect(logout).resolves.toBe(initialSession.sessionGeneration + 2)
+    expect(notices).toHaveLength(2)
+    expect(app.acknowledgeSessionPreclear(notices[1])).toBe(false)
+    expect(service.sessionToken).toBeNull()
+    expect(app.pendingSessionPreclear).toBeNull()
+  })
+
   it('keeps the current session when token removal fails on the same runtime boundary', async () => {
     const { service } = await createNativeCommitTestHarness()
     const login = testLoginResult()
