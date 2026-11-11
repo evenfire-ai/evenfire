@@ -219,6 +219,7 @@ assert_db_migration_job_uses_ci_suffix() {
 #!/usr/bin/env bash
 set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
+JOB_CAPTURE="${TEST_JOB_CAPTURE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
 if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
@@ -295,6 +296,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
+  if [[ "$args" == *"-o json"* && -s "$JOB_CAPTURE" ]]; then
+    cat "$JOB_CAPTURE"
+    exit 0
+  fi
   if [[ "$args" == *"jsonpath={.status.active}"* ]]; then
     exit 1
   fi
@@ -307,8 +312,13 @@ fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   manifest="$(cat)"
+  printf '%s' "$manifest" >"$JOB_CAPTURE"
   printf '%s\n' "$manifest" >>"$LOG_FILE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -333,7 +343,8 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  if TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
+  if TEST_LOG_FILE="$log_file" TEST_JOB_CAPTURE="$tmp/job.json" \
+    GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
     CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" >/dev/null 2>&1; then
     if grep -q 'control-api-db-migrate-123456' "$log_file" && \
@@ -347,14 +358,18 @@ STUB
     fail "db migration script failed in CI suffix test"
   fi
 
-  if TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
+  # The policy fixes the Job deadline (300s); a wait budget below the policy
+  # client wait would let the Job outlive the caller, so it is refused.
+  local short_wait_output
+  short_wait_output="$(TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
     CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" --timeout 180s \
-    >/dev/null 2>&1 && grep -q '"activeDeadlineSeconds":180' "$log_file"; then
-    pass "db migration Job deadline follows the configured wait budget"
+    2>&1 || true)"
+  if [[ "$short_wait_output" == *'timeout must be at least 360s'* ]]; then
+    pass "db migration Job cannot outlive the configured wait budget"
   else
-    fail "db migration Job can outlive the configured wait budget"
-    cat "$log_file"
+    fail "db migration accepted a wait budget shorter than the policy client wait"
+    printf '%s\n' "$short_wait_output"
   fi
 
   rm -rf "$tmp"
@@ -371,6 +386,7 @@ assert_db_migration_handles_concurrent_create_race() {
 #!/usr/bin/env bash
 set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
+JOB_CAPTURE="${TEST_JOB_CAPTURE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
 if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
@@ -447,6 +463,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
+  if [[ "$args" == *"-o json"* && -s "$JOB_CAPTURE" ]]; then
+    cat "$JOB_CAPTURE"
+    exit 0
+  fi
   if [[ "$args" == *"jsonpath={.status.active}"* ]]; then
     exit 1
   fi
@@ -458,7 +478,7 @@ if [[ "${1:-}" == "delete" && "${2:-}" == "job" ]]; then
 fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
-  cat >/dev/null
+  cat >"$JOB_CAPTURE"
   echo 'Error from server (AlreadyExists): jobs.batch "control-api-db-migrate-999" already exists' >&2
   exit 1
 fi
@@ -484,10 +504,11 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  if TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=999 PATH="$tmp:$PATH" \
+  if TEST_LOG_FILE="$log_file" TEST_JOB_CAPTURE="$tmp/job.json" \
+    GITHUB_RUN_ID=999 PATH="$tmp:$PATH" \
     CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" >/dev/null 2>&1; then
-    if grep -q 'wait --for=condition=complete --timeout=300s job/control-api-db-migrate-999 -n control-plane' "$log_file"; then
+    if grep -q 'wait --for=condition=complete --timeout=360s job/control-api-db-migrate-999 -n control-plane' "$log_file"; then
       pass "db migration script tolerates concurrent create AlreadyExists race"
     else
       fail "db migration script did not wait for concurrently-created job"
@@ -537,6 +558,7 @@ assert_db_migration_reports_missing_migrate_artifact() {
   cat > "$tmp/kubectl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+JOB_CAPTURE="${TEST_JOB_CAPTURE:?}"
 args="$*"
 if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
 
@@ -608,6 +630,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
+  if [[ "$args" == *"-o json"* && -s "$JOB_CAPTURE" ]]; then
+    cat "$JOB_CAPTURE"
+    exit 0
+  fi
   if [[ "$args" == *"jsonpath={.status.active}"* ]]; then
     exit 1
   fi
@@ -615,8 +641,12 @@ if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
 fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
-  cat >/dev/null
-  echo "job.batch/control-api-db-migrate created"
+  cat >"$JOB_CAPTURE"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -625,7 +655,12 @@ if [[ "${1:-}" == "describe" ]]; then
 fi
 
 if [[ "${1:-}" == "wait" ]]; then
-  exit 1
+  [[ "$args" == *"--for=condition=complete"* ]] && exit 1
+  exit 0
+fi
+
+if [[ "${1:-}" == "delete" && "${2:-}" == "job" ]]; then
+  exit 0
 fi
 
 if [[ "${1:-}" == "logs" ]]; then
@@ -640,7 +675,8 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(PATH="$tmp:$PATH" CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+  out="$(TEST_JOB_CAPTURE="$tmp/job.json" PATH="$tmp:$PATH" \
+    CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
   if [[ "$out" == *"is missing dist/migrate.js"* ]] && [[ "$out" == *"example/control-api:broken"* ]]; then
     pass "db migration script emits a direct error for images missing dist/migrate.js"
@@ -663,6 +699,7 @@ assert_db_migration_verifies_db_after_success() {
 #!/usr/bin/env bash
 set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
+JOB_CAPTURE="${TEST_JOB_CAPTURE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
 if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
@@ -742,6 +779,10 @@ if [[ "${1:-}" == "get" && "${2:-}" == "secret" ]]; then
 fi
 
 if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
+  if [[ "$args" == *"-o json"* && -s "$JOB_CAPTURE" ]]; then
+    cat "$JOB_CAPTURE"
+    exit 0
+  fi
   if [[ "$args" == *"jsonpath={.status.active}"* ]]; then
     exit 1
   fi
@@ -750,8 +791,13 @@ fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
   job_manifest="$(cat)"
+  printf '%s' "$job_manifest" >"$JOB_CAPTURE"
   printf 'JOB_MANIFEST %s\n' "$job_manifest" >>"$LOG_FILE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -776,7 +822,8 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+  out="$(TEST_LOG_FILE="$log_file" TEST_JOB_CAPTURE="$tmp/job.json" PATH="$tmp:$PATH" \
+    CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
   if [[ "$out" == *"Using control-api image for migration: example/control-api:test"* ]] && \
      [[ "$out" == *"Verifying DB-first schema in control-postgres"* ]] && \
@@ -808,7 +855,8 @@ STUB
      grep -q "relation.relkind IN ('r', 'p', 'v', 'm')" "$log_file" && \
      grep -q 'JOB_MANIFEST.*DATABASE_URL' "$log_file" && \
      grep -q 'JOB_MANIFEST.*control-api-config' "$log_file" && \
-     grep -q 'JOB_MANIFEST.*CONTROL_API_PG_CONNECTION_STRING.*"value":""' "$log_file" && \
+     grep -q 'JOB_MANIFEST.*{"name":"CONTROL_API_PG_CONNECTION_STRING"}' "$log_file" && \
+     ! grep -q 'JOB_MANIFEST.*{"name":"CONTROL_API_PG_CONNECTION_STRING","value"' "$log_file" && \
      grep -q 'JOB_MANIFEST.*CONTROL_API_MIGRATION_PG_HOST' "$log_file" && \
      grep -q 'JOB_MANIFEST.*control-postgres.*POSTGRES_PASSWORD' "$log_file" && \
      grep -q -- '--context=fake-context get secret control-postgres -n control-plane' "$log_file" && \
@@ -930,7 +978,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
     echo "unexpected pvc create" >&2
     exit 98
   fi
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -1075,7 +1127,11 @@ if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
     exit 0
   fi
   printf 'JOB_CREATE\n%s\n' "$manifest" >>"$LOG_FILE"
-  echo "job.batch/control-api-db-migrate created"
+  if [[ "$args" == *"jsonpath={.metadata.uid}"* ]]; then
+    echo "11111111-1111-1111-1111-111111111111"
+  else
+    echo "job.batch/control-api-db-migrate created"
+  fi
   exit 0
 fi
 
@@ -1461,7 +1517,7 @@ assert_db_migration_context_fails_closed() {
 
   if [[ "$missing_context" == *'set CONTEXT to the target kube-context'* ]] && \
      [[ "$denied_context" == *'CONTEXT=denied is not in ALLOWED_CONTEXTS'* ]] && \
-     [[ "$invalid_timeout" == *'migration timeout must be 1s..1800s'* ]]; then
+     [[ "$invalid_timeout" == *'timeout must be at least 360s'* ]]; then
     pass "db migration context and deadline authority fail closed"
   else
     fail "db migration context or deadline validation did not fail closed"
@@ -1500,39 +1556,57 @@ assert_trace_maintenance_runtime_access_contract_is_exact() {
 }
 
 assert_control_api_runtime_access_contract_is_exact() {
-  local profile_file sequence_profile_file migration_script
-  local relation_count duplicate_count invalid_count sequence_count sequence_duplicate_count sequence_invalid_count
+  local profile_file peer_file sequence_profile_file migration_script
+  local relation_count peer_count duplicate_count invalid_count sequence_count sequence_duplicate_count sequence_invalid_count
+  local name_diff sentinel missing_sentinels=""
   profile_file="deploy/scripts/control-api-runtime-access-profiles.tsv"
+  peer_file="deploy/scripts/workflow-recipes-runtime-access-profiles.tsv"
   sequence_profile_file="deploy/scripts/control-api-runtime-sequence-access-profiles.tsv"
   migration_script="$(cat deploy/scripts/run-control-api-db-migration.sh)"
 
   relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$profile_file")"
+  peer_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$peer_file")"
   duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$profile_file")"
   invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_delete|none)$/) { count++ } END { print count + 0 }' "$profile_file")"
+  name_diff="$(comm -3 \
+    <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$profile_file" | sort) \
+    <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$peer_file" | sort))"
+  local -a sentinels=(
+    $'dynamic_clients\tlegacy_dml'
+    $'entity_change_feed\tnone'
+    $'entity_change_outbox\tnone'
+    $'entity_change_watermark\tnone'
+    $'gfs_upload_parts\tnone'
+    $'gfs_upload_sessions\tnone'
+    $'llm_allowed_models\tlegacy_dml'
+    $'member_registration_credentials\tupsert'
+    $'mcp_secret_rollback_permits\tlegacy_dml'
+    $'llm_allowed_models_audit\tappend'
+    $'llm_catalog_sync_runs\tappend'
+    $'llm_catalog_dismissed\tappend'
+    $'llm_provider_catalog_settings\tupsert'
+    $'plugin_workload_sdk_spend_outcomes\tappend'
+    $'gfs_desktop_operator_links\tlink_lifecycle'
+    $'desktop_user_retirement_operations\tlink_lifecycle'
+    $'password_identifier_state\tlegacy_dml'
+    $'password_admission_rollout_state\tnone'
+    $'password_verification_pace\tlegacy_dml'
+    $'password_verification_work\tinsert_delete'
+    $'oidc_protocol_attempts\tlegacy_dml'
+    $'external_user_sessions\tlegacy_dml'
+    $'external_user_session_security_epochs\tupsert'
+    $'external_v1_session_revocations\tappend'
+  )
+  for sentinel in "${sentinels[@]}"; do
+    if ! grep -qx "$sentinel" "$profile_file"; then
+      missing_sentinels+="${missing_sentinels:+$'\n'}${sentinel}"
+    fi
+  done
   sequence_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$sequence_profile_file")"
   sequence_duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$sequence_profile_file")"
   sequence_invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_rw|consume|none)$/) { count++ } END { print count + 0 }' "$sequence_profile_file")"
 
-  if [[ "$relation_count" == "102" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
-     grep -qx $'dynamic_clients\tlegacy_dml' "$profile_file" && \
-     grep -qx $'entity_change_feed\tnone' "$profile_file" && \
-     grep -qx $'entity_change_outbox\tnone' "$profile_file" && \
-     grep -qx $'entity_change_watermark\tnone' "$profile_file" && \
-     grep -qx $'gfs_upload_parts\tnone' "$profile_file" && \
-     grep -qx $'gfs_upload_sessions\tnone' "$profile_file" && \
-     grep -qx $'llm_allowed_models\tlegacy_dml' "$profile_file" && \
-     grep -qx $'member_registration_credentials\tupsert' "$profile_file" && \
-     grep -qx $'mcp_secret_rollback_permits\tlegacy_dml' "$profile_file" && \
-     grep -qx $'llm_allowed_models_audit\tappend' "$profile_file" && \
-     grep -qx $'llm_catalog_sync_runs\tappend' "$profile_file" && \
-     grep -qx $'plugin_workload_sdk_spend_outcomes\tappend' "$profile_file" && \
-     grep -qx $'gfs_desktop_operator_links\tlink_lifecycle' "$profile_file" && \
-     grep -qx $'desktop_user_retirement_operations\tlink_lifecycle' "$profile_file" && \
-     grep -qx $'password_identifier_state\tlegacy_dml' "$profile_file" && \
-     grep -qx $'password_admission_rollout_state\tnone' "$profile_file" && \
-     grep -qx $'password_verification_pace\tlegacy_dml' "$profile_file" && \
-     grep -qx $'oidc_protocol_attempts\tlegacy_dml' "$profile_file" && \
-     grep -qx $'password_verification_work\tinsert_delete' "$profile_file" && \
+  if [[ "$relation_count" -gt 0 && "$relation_count" == "$peer_count" && -z "$name_diff" && -z "$missing_sentinels" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
      [[ "$sequence_count" == "9" && "$sequence_duplicate_count" == "0" && "$sequence_invalid_count" == "0" ]] && \
      grep -qx $'dynamic_clients_id_seq\tlegacy_rw' "$sequence_profile_file" && \
      grep -qx $'entity_change_outbox_id_seq\tnone' "$sequence_profile_file" && \
@@ -1549,9 +1623,15 @@ assert_control_api_runtime_access_contract_is_exact() {
      [[ "$migration_script" == *"('TRUNCATE', false)"* ]] && \
      [[ "$migration_script" == *"('REFERENCES', false)"* ]] && \
      [[ "$migration_script" == *"('TRIGGER', false)"* ]]; then
-    pass "control-api runtime access contract rejects missing and excessive relation privileges"
+    pass "control-api runtime access contract rejects missing and excessive relation privileges (${profile_file} has ${relation_count} relations, ${peer_file} has ${peer_count} relations)"
   else
-    fail "control-api runtime access contract is incomplete or not exact"
+    fail "control-api runtime access contract is incomplete or not exact: ${profile_file} has ${relation_count} relations, ${peer_file} has ${peer_count} relations; duplicates=${duplicate_count} invalid=${invalid_count}"
+    if [[ -n "$name_diff" ]]; then
+      printf 'relation name sets differ:\n%s\n' "$name_diff" >&2
+    fi
+    if [[ -n "$missing_sentinels" ]]; then
+      printf 'missing sentinel rows:\n%s\n' "$missing_sentinels" >&2
+    fi
   fi
 }
 

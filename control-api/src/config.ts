@@ -7,6 +7,7 @@ import {
 import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
 import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
 import { rootLogger } from './observability/logger.js'
+import { assertSafeCatalogUrl, resolveModelsDevApiUrl } from './services/modelsDevCatalogUrl.js'
 
 function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
   const parsed = Number(process.env[name])
@@ -129,6 +130,20 @@ type Config = {
   // seconds after start and then one every llmCatalogSyncIntervalMs (default
   // 24h), cross-replica-deduped by a session advisory lock inside the cron.
   llmCatalogSyncCronEnabled: boolean
+  // Default ON. With the cron off, still run one catalog sync shortly after
+  // start (retried with backoff until it decides): without seeded models a
+  // fresh installation has nothing to serve until a sync decides. With the cron
+  // on, its first tick is that boot sync whatever this says. Always validated
+  // at boot: only 'true' or 'false' are accepted.
+  llmCatalogBootSyncEnabled: boolean
+  // How many models one catalog sync run may insert enabled, per provider and
+  // in total. They bound what a single run adds to the allowlist ConfigMap,
+  // whose 1 MiB limit makes every later publication fail once crossed. Models
+  // over the cap are not inserted at all, so a later run can still enable them;
+  // a large legitimate catalog completes over several runs. With the cron off
+  // (the code default) a later run is only a manual sync or a boot sync.
+  llmCatalogAutoEnableMaxPerProviderPerRun: number
+  llmCatalogAutoEnableMaxPerRun: number
   // Default OFF. Codex subscription management/admission stays dark until
   // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
   codexSubscriptionEnabled: boolean
@@ -159,8 +174,10 @@ type Config = {
   llmCatalogImageEvidenceTtlMs: number
   // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
-  // (a flappy/truncated external catalog must not mass-stale the allowlist);
-  // the inert `enabled=false` inserts still proceed. Calibrated off the vendored
+  // (a flappy/truncated external catalog must not mass-stale the allowlist)
+  // and cannot enable anything on insert, so it also skips new models of
+  // providers whose auto-enable policy is on (llmCatalogSync.ts header).
+  // Calibrated off the vendored
   // snapshot (~1058 mapped models across 22 providers) — a conservative <10%
   // floor catches a catastrophic collapse without tripping on normal variation.
   modelsDevMinPlausibleLiveTotal: number
@@ -334,8 +351,8 @@ type Config = {
   gfscWriteBaseUrl: string
   // Timeout (ms) for the control-api→gfsc proxied fetch. Homologous with the browser
   // client (GFS_UPLOAD_TIMEOUT_MS, 300s) and the control-ui server proxy
-  // (CONTROL_API_PROXY_TIMEOUT_MS, set to 300s in the deployment; its route.ts code
-  // fallback is 30s). This one defaults to 300s in code. Raise all three together.
+  // (CONTROL_API_PROXY_TIMEOUT_MS, 300s in deploy/base and as its route.ts code
+  // default). This one defaults to 300s in code. Raise all three together.
   gfscProxyTimeoutMs: number
   // Upload-v2 edge admission. These are transport-abuse budgets, separate
   // from the 200 MiB product/file limit and GFSC's 4/16 stream authority.
@@ -520,6 +537,9 @@ const REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS = 10_000
 const OAUTH_SHARED_GRANT_SWEEP_MIN_INTERVAL_MS = 10_000
 // A 24h-default cron should never be dialed below a minute — refuse a hot loop.
 const LLM_CATALOG_SYNC_MIN_INTERVAL_MS = 60_000
+// Ceiling for both auto-enable caps. At most ~640 bytes per auto-enabled entry,
+// 1000 new entries stay below the ConfigMap's 1 MiB in a single run.
+const LLM_CATALOG_AUTO_ENABLE_MAX_CAP = 1000
 // Image-input evidence written by a sync expires this long after the capture it
 // came from. The floor is two sync intervals: anything shorter would expire the
 // evidence before the cron could possibly renew it.
@@ -597,6 +617,18 @@ const externalRateLimitConfig = (() => {
     clientIp: clientIp.value,
   }
 })()
+
+// Only validated here, not stored: modelsDevClient resolves the URL itself.
+// Refusing a non-https or internal MODELS_DEV_API_URL at boot keeps a boot sync
+// from retrying forever against a URL the loader will never fetch.
+assertSafeCatalogUrl(resolveModelsDevApiUrl())
+
+function defaultOnBooleanFromEnv(name: string): boolean {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '' || raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`${name} must be 'true' or 'false' (got '${raw}')`)
+}
 
 function failClosedBooleanFromEnv(name: string): boolean {
   const raw = process.env[name]
@@ -889,7 +921,7 @@ export const config: Config = {
   // desktopGfsOperatorLinkingEnabled. Missing/'false' → OFF; only 'true' enables.
   mcpOauthBrokerEnabled: failClosedBooleanFromEnv('MCP_OAUTH_BROKER_ENABLED'),
   userApprovalRequestDefaultTtlSec: Number(process.env.WORKFLOW_APPROVAL_DEFAULT_TTL_SEC || 86400),
-  userApprovalRequestMaxTtlSec: Number(process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC || 604800),
+  userApprovalRequestMaxTtlSec: Number(process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC || 172800),
   userApprovalRequestExpiryIntervalMs: Number(
     process.env.WORKFLOW_APPROVAL_EXPIRY_INTERVAL_MS || 60000
   ),
@@ -907,6 +939,7 @@ export const config: Config = {
   // idiom used by the other crons. This one stays dark until an operator turns
   // it on deliberately.
   llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
+  llmCatalogBootSyncEnabled: defaultOnBooleanFromEnv('LLM_CATALOG_BOOT_SYNC_ENABLED'),
   // Default OFF. Absent or any value other than the exact token `true` keeps
   // Codex subscription management and admission dark.
   codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',
@@ -938,6 +971,16 @@ export const config: Config = {
     100
   ),
   llmCatalogSyncProviderMinLive: nonNegativeIntegerFromEnv('LLM_CATALOG_SYNC_PROVIDER_MIN_LIVE', 0),
+  llmCatalogAutoEnableMaxPerProviderPerRun: boundedIntegerFromEnv(
+    'LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN',
+    100,
+    LLM_CATALOG_AUTO_ENABLE_MAX_CAP
+  ),
+  llmCatalogAutoEnableMaxPerRun: boundedIntegerFromEnv(
+    'LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN',
+    300,
+    LLM_CATALOG_AUTO_ENABLE_MAX_CAP
+  ),
   // How often to re-assert the platform image-pull credential. This is a standing
   // invariant, not a fast path: a WorkflowRecipe created by `kubectl apply` or the WRC
   // `deploy_recipe` tool never touches control-api, so the credential has to be there
@@ -1236,7 +1279,7 @@ export const config: Config = {
   // handler, and the hostWakeCoalesceWindowMs coalescer runs INSIDE the
   // handler (it coalesces annotation projections, not calls) — coalesced
   // calls therefore still consume rate-limit budget, so this budget must
-  // cover RAW calls (the arithmetic above counts raw calls). 30/min is >=3x
+  // cover RAW calls (the arithmetic above counts raw calls). 150/min is >=3x
   // the single-hold mechanism volume and covers one held wake plus prewarm
   // bursts from a few concurrent devices (4 x 3 = 12) plus a real message.
   // Derivation is regression-guarded by test/config.hostWakeRateLimit.test.ts.
@@ -1402,9 +1445,9 @@ export const config: Config = {
   wfcServiceUrlTemplate:
     process.env.CONTROL_API_WFC_SERVICE_URL_TEMPLATE ||
     'http://wfc-{hash}.mcp-host.svc.cluster.local:8086',
-  // Plugin image-host allowlist (Phase 2.3). Permissive default = current
-  // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit
-  // mode). NOT parseCsvList — that lowercases, which would corrupt prefixes.
+  // Plugin image-host allowlist (Phase 2.3). Default from @clerum/image-policy:
+  // the deploy/base list plus registry.evenfire.ai/; enforce defaults to false
+  // (audit mode). NOT parseCsvList — that lowercases, which would corrupt prefixes.
   allowedPluginImagePrefixes: (
     process.env.CONTROL_API_ALLOWED_IMAGE_PREFIXES ??
     [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES].join(',')

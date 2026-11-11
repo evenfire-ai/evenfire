@@ -2,11 +2,17 @@ import { Router } from 'express'
 import type { NextFunction, Request, Response } from 'express'
 import { type AugmentedRequest, ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
+import { STATUS_CODES } from 'node:http'
 import { isIP } from 'node:net'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { config } from '../config.js'
-import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
+import {
+  ControlApiError,
+  ControlApiPathError,
+  controlApiRequest,
+  controlApiStreamRequest,
+} from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
 type GfsRouterOptions = {
@@ -31,6 +37,15 @@ type GfsRouterOptions = {
 // explicit; every 5xx is safe to forward because it is already a ControlApiError
 // produced by the authenticated control-plane request.
 const PROPAGATED = new Set([400, 401, 403, 404, 408, 409, 410, 411, 412, 413, 422, 425, 429, 507])
+const CONTROL_API_ERROR_HEADERS = [
+  'retry-after',
+  'ratelimit',
+  'ratelimit-policy',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+  'x-request-id',
+] as const
 const STREAM_HEADERS = [
   'content-type',
   'content-length',
@@ -53,15 +68,6 @@ const STREAM_HEADERS = [
   'x-ratelimit-remaining',
   'x-gfs-ratelimit-scope',
 ]
-const CONTROL_API_ERROR_HEADERS = [
-  'retry-after',
-  'ratelimit',
-  'ratelimit-policy',
-  'x-ratelimit-limit',
-  'x-ratelimit-remaining',
-  'x-ratelimit-reset',
-  'x-request-id',
-] as const
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const EXTERNAL_GFS_EDGE_WINDOW_MS = 60_000
 
@@ -139,6 +145,12 @@ function gfsControlApiRequest<T>(
 }
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
+  // A caller-influenced path stays the edge's own 400 envelope (rule 1 of the
+  // global handler) instead of the flat `{error:'invalid_request'}` body.
+  if (error instanceof ControlApiPathError) {
+    next(error)
+    return
+  }
   const shouldPropagate =
     error instanceof ControlApiError &&
     (PROPAGATED.has(error.status) || (error.status >= 500 && error.status <= 599))
@@ -151,7 +163,9 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
       if (value) res.setHeader(name, value)
     }
     const body =
-      error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
+      error.body && typeof error.body === 'object'
+        ? error.body
+        : { error: STATUS_CODES[error.status] }
     for (const header of STREAM_HEADERS) {
       const value = error.headers?.[header]
       if (value) res.setHeader(header, value)

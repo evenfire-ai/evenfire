@@ -4,7 +4,7 @@ import { rootLogger } from './observability/logger.js'
 import { HostEnvService } from './services/hostEnvService.js'
 import { HostOverviewService } from './services/hostOverviewService.js'
 import {
-  type AllowedModelsConfigMapMaterializer,
+  type AllowedModelsConfigMapPublisher,
   LlmAllowedModelsConfigMapWriter,
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
@@ -219,7 +219,7 @@ export class K8sGateway {
     return this.hostEnvSvc
   }
 
-  llmAllowedModelsConfigMap(): AllowedModelsConfigMapMaterializer {
+  llmAllowedModelsConfigMap(): AllowedModelsConfigMapPublisher {
     return this.llmAllowedModelsCmWriter
   }
 

@@ -25,6 +25,12 @@ export function readCookie(req: Request, name: string): string {
   return ''
 }
 
+// True when the Cookie header carries an entry with this name, even an empty one.
+export function hasCookie(req: Request, name: string): boolean {
+  const raw = String(req.header('cookie') || '')
+  return raw.split(';').some(part => part.trim().split('=')[0] === name)
+}
+
 export function setProfileSessionCookie(req: Request, res: Response, token: string): void {
   res.cookie(PROFILE_SESSION_COOKIE, token, {
     httpOnly: true,

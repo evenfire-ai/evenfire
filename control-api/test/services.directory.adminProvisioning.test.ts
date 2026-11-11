@@ -5,6 +5,7 @@ import { ensureDefaultTeamAndGrants } from '../src/services/directory/adminProvi
 
 const dbMocks = vi.hoisted(() => ({ txQuery: vi.fn() }))
 const traceMocks = vi.hoisted(() => ({ appendPermissionEvents: vi.fn() }))
+const userSessionMocks = vi.hoisted(() => ({ revokeAll: vi.fn() }))
 const operatorLinkMocks = vi.hoisted(() => ({ linkInTransaction: vi.fn() }))
 vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn() },
@@ -13,6 +14,9 @@ vi.mock('../src/db.js', () => ({
 }))
 vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
   appendControlApiPermissionEventsInTransaction: traceMocks.appendPermissionEvents,
+}))
+vi.mock('../src/services/auth/userSessionService.js', () => ({
+  revokeAllUserSessions: userSessionMocks.revokeAll,
 }))
 vi.mock('../src/services/gfsDesktopOperatorLinkService.js', () => ({
   gfsDesktopOperatorLinkService: {
@@ -76,6 +80,8 @@ describe('ensureDefaultTeamAndGrants', () => {
 describe('provisionAdminDesktopWorkspace', () => {
   beforeEach(() => {
     dbMocks.txQuery.mockReset()
+    userSessionMocks.revokeAll.mockReset()
+    userSessionMocks.revokeAll.mockResolvedValue(1)
     operatorLinkMocks.linkInTransaction.mockReset()
     operatorLinkMocks.linkInTransaction.mockResolvedValue({
       created: true,
@@ -93,7 +99,7 @@ describe('provisionAdminDesktopWorkspace', () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SELECT users by email → none
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 }) // INSERT users
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // UPDATE users password
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '1' }], rowCount: 1 }) // UPDATE users password
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SELECT admin team → none
       .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 }) // INSERT teams
       .mockResolvedValue({ rows: [], rowCount: 1 }) // membership + grants
@@ -116,18 +122,20 @@ describe('provisionAdminDesktopWorkspace', () => {
     expect(dbMocks.txQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE users'), [
       'user-1',
       'HASH',
+      false,
     ])
     expect(dbMocks.txQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO team_agents'),
       ['team-1', 'chatllm']
     )
+    expect(userSessionMocks.revokeAll).not.toHaveBeenCalled()
   })
 
   it('reuses an existing user (no INSERT INTO users) and still sets the password', async () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: 'user-9' }], rowCount: 1 }) // SELECT users by email → found
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // UPDATE password
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '8' }], rowCount: 1 }) // UPDATE password
       .mockResolvedValueOnce({ rows: [{ id: 'team-x' }], rowCount: 1 }) // SELECT admin team → found
       .mockResolvedValue({ rows: [], rowCount: 1 })
 
@@ -149,7 +157,15 @@ describe('provisionAdminDesktopWorkspace', () => {
     expect(dbMocks.txQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE users'), [
       'user-9',
       'H',
+      true,
     ])
+    expect(userSessionMocks.revokeAll).toHaveBeenCalledWith(
+      'user-9',
+      'password_changed',
+      expect.objectContaining({ query: dbMocks.txQuery }),
+      undefined,
+      '8'
+    )
   })
 
   it('seedPassword:false leaves an existing user password untouched', async () => {
@@ -171,6 +187,10 @@ describe('provisionAdminDesktopWorkspace', () => {
       seedPassword: false,
     })
 
+    // Lock order: the existing user row is locked before its team_members rows.
+    expect(String(dbMocks.txQuery.mock.calls[0]?.[0])).toBe(
+      'SELECT id FROM users WHERE email = $1 LIMIT 1 FOR NO KEY UPDATE'
+    )
     expect(dbMocks.txQuery).not.toHaveBeenCalledWith(
       expect.stringContaining('UPDATE users'),
       expect.anything()
@@ -212,7 +232,7 @@ describe('provisionAdminDesktopWorkspace', () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '8' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 })
 
     const mod = await import('../src/services/directory/adminProvisioning.js')
@@ -242,7 +262,7 @@ describe('provisionAdminDesktopWorkspace', () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '8' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 })
     operatorLinkMocks.linkInTransaction.mockRejectedValueOnce(new Error('link conflict'))
 
@@ -266,6 +286,8 @@ describe('provisionMemberFromAdmin', () => {
     dbMocks.txQuery.mockReset()
     traceMocks.appendPermissionEvents.mockReset()
     traceMocks.appendPermissionEvents.mockResolvedValue(null)
+    userSessionMocks.revokeAll.mockReset()
+    userSessionMocks.revokeAll.mockResolvedValue(1)
   })
 
   it('creates a password-seeded member without creating a team when no teams are selected', async () => {
@@ -287,7 +309,7 @@ describe('provisionMemberFromAdmin', () => {
         rowCount: 1,
       }) // INSERT users
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // UPDATE users password
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '1' }], rowCount: 1 }) // UPDATE users password
 
     const mod = await import('../src/services/directory/adminProvisioning.js')
     const result = await mod.provisionMemberFromAdmin({
@@ -322,6 +344,59 @@ describe('provisionMemberFromAdmin', () => {
           }),
         ],
       })
+    )
+    expect(userSessionMocks.revokeAll).not.toHaveBeenCalled()
+  })
+
+  it('revokes existing member sessions in the password-write transaction', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'admin-1',
+            username: 'ada',
+            email: 'ada@example.com',
+            password_hash: 'HASH',
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'user-1', email: 'ada@example.com', name: 'ada' }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '8' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+
+    const mod = await import('../src/services/directory/adminProvisioning.js')
+    await mod.provisionMemberFromAdmin({
+      adminId: 'admin-1',
+      operatorSub: 'operator-admin-1',
+      teamAssignments: [],
+      seedPassword: true,
+    })
+
+    // Users before profiles, the order Google login uses: the existing user is
+    // locked before the profile upsert, which precedes the password write.
+    const statements = dbMocks.txQuery.mock.calls.map(([sql]) => String(sql))
+    const userRead = statements.findIndex(
+      sql => sql.includes('FROM users') && sql.includes('lower(email) = lower($1)')
+    )
+    const profileUpsert = statements.findIndex(sql => sql.includes('INSERT INTO profiles'))
+    const passwordWrite = statements.findIndex(
+      sql => sql.includes('UPDATE users') && sql.includes('SET password_hash = $2')
+    )
+    expect(userRead).toBeGreaterThanOrEqual(0)
+    expect(statements[userRead]).toContain('FOR NO KEY UPDATE')
+    expect(profileUpsert).toBeGreaterThan(userRead)
+    expect(passwordWrite).toBeGreaterThan(profileUpsert)
+    expect(userSessionMocks.revokeAll).toHaveBeenCalledWith(
+      'user-1',
+      'password_changed',
+      expect.objectContaining({ query: dbMocks.txQuery }),
+      undefined,
+      '8'
     )
   })
 

@@ -34,6 +34,291 @@ expect_code() {
 
 "$ROOT/scripts/tests/test-minikube-profile-owner.sh"
 
+# #733: T0 restores the tracked next-env.d.ts files that its own `next build`
+# rewrote, and the t2_repo_metadata dirty check fails closed when git status
+# fails. Every case builds a fresh fixture. The fixtures must never touch this
+# repository: inherited Git location variables are cleared, and every fixture
+# root is asserted non-empty, canonical, inside $tmp and owning its own .git
+# before T0 or t2-common.sh runs against it (both fall back to the real
+# repository when their project directory is empty) and before any
+# destructive command.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
+tmp_canonical="$(cd "$tmp" && pwd -P)"
+next_env_dev="$tmp/next-env-dev.d.ts"
+next_env_build="$tmp/next-env-build.d.ts"
+next_env_mixed="$tmp/next-env-mixed.d.ts"
+next_env_build_crlf="$tmp/next-env-build-crlf.d.ts"
+# The `next dev` form tracked on dev and the form `next build` (Next 16.3.5)
+# writes; the two differ only in the distDir of the two imports.
+printf '%s\n' \
+  '/// <reference types="next" />' \
+  '/// <reference types="next/image-types/global" />' \
+  'import "./.next/dev/types/routes.d.ts";' \
+  'import "./.next/dev/types/root-params.d.ts";' \
+  '' \
+  '// NOTE: This file should not be edited' \
+  '// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.' \
+  >"$next_env_dev"
+printf '%s\n' \
+  '/// <reference types="next" />' \
+  '/// <reference types="next/image-types/global" />' \
+  'import "./.next/types/routes.d.ts";' \
+  'import "./.next/types/root-params.d.ts";' \
+  '' \
+  '// NOTE: This file should not be edited' \
+  '// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.' \
+  >"$next_env_build"
+printf '%s\n' \
+  '/// <reference types="next" />' \
+  '/// <reference types="next/image-types/global" />' \
+  'import "./.next/types/routes.d.ts";' \
+  'import "./.next/dev/types/root-params.d.ts";' \
+  '' \
+  '// NOTE: This file should not be edited' \
+  '// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.' \
+  >"$next_env_mixed"
+awk '{ printf "%s\r\n", $0 }' "$next_env_build" >"$next_env_build_crlf"
+[ "$(git hash-object --stdin <"$next_env_dev")" = a419cbe4e3a5e8d4b481b851dbf4ac767de069e6 ] ||
+  fail 'the next-env dev-form literal is not the blob tracked on dev'
+[ "$(git hash-object --stdin <"$next_env_build")" = ce4e94a6b10f160ee021fe18939af160d2927dcf ] ||
+  fail 'the next-env build-form literal is not the blob next build wrote'
+
+assert_fixture_root() {
+  local fx="$1" canonical git_dir
+  [ -n "$fx" ] || fail 'next-env fixture root is empty'
+  case "$fx" in
+    "$tmp_canonical"/*) ;;
+    *) fail "next-env fixture root $fx is outside $tmp_canonical" ;;
+  esac
+  canonical="$(cd "$fx" && pwd -P)" || fail "next-env fixture root $fx is not a directory"
+  [ "$canonical" = "$fx" ] || fail "next-env fixture root $fx is not canonical ($canonical)"
+  git_dir="$(git -C "$fx" rev-parse --absolute-git-dir)" || fail "next-env fixture $fx has no Git directory"
+  [ "$git_dir" = "$fx/.git" ] || fail "next-env fixture $fx resolves its Git directory to $git_dir"
+}
+
+# Sets fx to the canonical root of a fresh fixture: origin/dev holds control-ui and
+# profile-ui with the dev-form next-env.d.ts and a fake `next build`; the
+# feature branch changes a source file in each, so T0 lists both packages.
+# Each package's fake build reads its own variables:
+# FAKE_NEXT_OUTPUT_<PKG> (a file copied over next-env.d.ts) and
+# FAKE_NEXT_EXIT_<PKG> (the build's exit code, 0 when unset), with <PKG>
+# CONTROL_UI or PROFILE_UI.
+make_next_env_fixture() {
+  local dir="$1" package suffix
+  mkdir "$dir"
+  fx="$(cd "$dir" && pwd -P)"
+  git init -q -b dev "$fx"
+  assert_fixture_root "$fx"
+  git -C "$fx" config user.email test@example.invalid
+  git -C "$fx" config user.name scenario-test
+  git -C "$fx" remote add origin https://github.com/evenfire-ai/evenfire.git
+  printf 'base\n' >"$fx/README.md"
+  for package in control-ui profile-ui; do
+    case "$package" in
+      control-ui) suffix=CONTROL_UI ;;
+      profile-ui) suffix=PROFILE_UI ;;
+    esac
+    mkdir "$fx/$package"
+    cp "$next_env_dev" "$fx/$package/next-env.d.ts"
+    printf '%s\n' '{"scripts":{"test":"node -e 0","build":"node fake-next-build.mjs"}}' >"$fx/$package/package.json"
+    cat >"$fx/$package/fake-next-build.mjs" <<EOF_FAKE_NEXT
+import { copyFileSync } from 'node:fs'
+const output = process.env.FAKE_NEXT_OUTPUT_${suffix}
+if (output) copyFileSync(output, 'next-env.d.ts')
+process.exit(Number(process.env.FAKE_NEXT_EXIT_${suffix} || 0))
+EOF_FAKE_NEXT
+  done
+  git -C "$fx" add -A
+  git -C "$fx" commit -q -m base
+  git -C "$fx" update-ref refs/remotes/origin/dev HEAD
+  git -C "$fx" switch -q -c feat/next-env
+  printf 'feature\n' >"$fx/control-ui/src.txt"
+  printf 'feature\n' >"$fx/profile-ui/src.txt"
+  git -C "$fx" add control-ui/src.txt profile-ui/src.txt
+  git -C "$fx" commit -q -m feature
+}
+
+fixture_t0_env_for() {
+  local fx="$1" origin_dev head
+  assert_fixture_root "$fx"
+  origin_dev="$(git -C "$fx" rev-parse --verify origin/dev)"
+  head="$(git -C "$fx" rev-parse --verify HEAD)"
+  fixture_t0_env=(T0_PROJECT_DIR="$fx" T0_ORIGIN_DEV="$origin_dev" T0_HEAD="$head")
+}
+
+# run_fixture_t0 <fixture> <output> [NAME=VALUE...]: runs this checkout's t0.sh
+# against the fixture and sets fixture_t0_exit.
+run_fixture_t0() {
+  local fx="$1" out="$2"
+  shift 2
+  fixture_t0_env_for "$fx"
+  if env "$@" "${fixture_t0_env[@]}" bash "$ROOT/scripts/minikube/t0.sh" >"$out" 2>&1 </dev/null; then
+    fixture_t0_exit=0
+  else
+    fixture_t0_exit=$?
+  fi
+}
+
+next_env_fail() {
+  local out="$1"
+  shift
+  sed -n '1,60p' "$out" >&2
+  fail "$*"
+}
+
+expect_line() {
+  local out="$1" line="$2" label="$3"
+  grep -Fqx -- "$line" "$out" || next_env_fail "$out" "$label: missing line: $line"
+}
+
+expect_no_line_containing() {
+  local out="$1" text="$2" label="$3"
+  if grep -Fq -- "$text" "$out"; then next_env_fail "$out" "$label: unexpected output containing: $text"; fi
+}
+
+expect_tree_clean() {
+  local fx="$1" label="$2" status_out
+  status_out="$(git -C "$fx" status --porcelain=v1)" || fail "$label: git status failed in $fx"
+  [ -z "$status_out" ] || fail "$label: fixture worktree is dirty: $status_out"
+}
+
+expect_file_equals_head() {
+  local fx="$1" path="$2" label="$3"
+  git -C "$fx" show "HEAD:$path" | cmp -s - "$fx/$path" || fail "$label: $path differs from HEAD"
+}
+
+restored_line() { printf 'T0_GENERATED_NEXT_ENV path=%s/next-env.d.ts action=restored' "$1"; }
+unchanged_line() { printf 'T0_GENERATED_NEXT_ENV path=%s/next-env.d.ts action=unchanged' "$1"; }
+
+# E1: both builds write the build form; T0 passes and restores both files.
+make_next_env_fixture "$tmp/next-env-e1"
+out="$tmp/next-env-e1.out"
+run_fixture_t0 "$fx" "$out" FAKE_NEXT_OUTPUT_CONTROL_UI="$next_env_build" FAKE_NEXT_OUTPUT_PROFILE_UI="$next_env_build"
+[ "$fixture_t0_exit" -eq 0 ] || next_env_fail "$out" "E1: T0 exited $fixture_t0_exit"
+expect_line "$out" '[minikube-t0] affected package: control-ui build/typecheck' E1
+expect_line "$out" '[minikube-t0] affected package: profile-ui build/typecheck' E1
+expect_line "$out" "$(restored_line control-ui)" E1
+expect_line "$out" "$(restored_line profile-ui)" E1
+expect_line "$out" 'T0_AFFECTED_CHECKS=PASS' E1
+expect_tree_clean "$fx" E1
+expect_file_equals_head "$fx" control-ui/next-env.d.ts E1
+expect_file_equals_head "$fx" profile-ui/next-env.d.ts E1
+
+# E2: the control-ui build writes the build form and fails; the EXIT trap
+# restores it. The profile-ui build never runs, so profile-ui is unchanged.
+# Not covered here: a SIGTERM sent only to the T0 bash while `next build`
+# runs can leave an orphaned build that rewrites the file after the restore;
+# the next gate's dirty check then refuses the tree loudly.
+make_next_env_fixture "$tmp/next-env-e2"
+out="$tmp/next-env-e2.out"
+run_fixture_t0 "$fx" "$out" FAKE_NEXT_OUTPUT_CONTROL_UI="$next_env_build" FAKE_NEXT_EXIT_CONTROL_UI=1 \
+  FAKE_NEXT_OUTPUT_PROFILE_UI="$next_env_build"
+[ "$fixture_t0_exit" -ne 0 ] || next_env_fail "$out" 'E2: T0 passed although the control-ui build failed'
+expect_line "$out" '[minikube-t0] affected package: control-ui build/typecheck' E2
+expect_line "$out" "$(restored_line control-ui)" E2
+expect_line "$out" "$(unchanged_line profile-ui)" E2
+expect_no_line_containing "$out" 'T0_AFFECTED_CHECKS=PASS' E2
+expect_tree_clean "$fx" E2
+
+# E3: a mixed form (only the routes import converted) is not the build form
+# of HEAD: T0 fails naming #733, before PASS, and leaves the bytes in place.
+make_next_env_fixture "$tmp/next-env-e3"
+out="$tmp/next-env-e3.out"
+run_fixture_t0 "$fx" "$out" FAKE_NEXT_OUTPUT_CONTROL_UI="$next_env_mixed"
+[ "$fixture_t0_exit" -ne 0 ] || next_env_fail "$out" 'E3: T0 accepted a mixed next-env.d.ts'
+expect_line "$out" 'T0_GENERATED_NEXT_ENV=FAIL path=control-ui/next-env.d.ts reason=unrecognized-change (not the next build form of HEAD; see #733)' E3
+expect_line "$out" "$(unchanged_line profile-ui)" E3
+expect_no_line_containing "$out" 'T0_AFFECTED_CHECKS=PASS' E3
+cmp -s "$next_env_mixed" "$fx/control-ui/next-env.d.ts" || fail 'E3: the mixed control-ui/next-env.d.ts was not left in place'
+
+# E4: the build form with CRLF line endings is not the build form of HEAD.
+make_next_env_fixture "$tmp/next-env-e4"
+out="$tmp/next-env-e4.out"
+run_fixture_t0 "$fx" "$out" FAKE_NEXT_OUTPUT_CONTROL_UI="$next_env_build_crlf"
+[ "$fixture_t0_exit" -ne 0 ] || next_env_fail "$out" 'E4: T0 accepted a CRLF next-env.d.ts'
+expect_line "$out" 'T0_GENERATED_NEXT_ENV=FAIL path=control-ui/next-env.d.ts reason=unrecognized-change (not the next build form of HEAD; see #733)' E4
+expect_line "$out" "$(unchanged_line profile-ui)" E4
+expect_no_line_containing "$out" 'T0_AFFECTED_CHECKS=PASS' E4
+cmp -s "$next_env_build_crlf" "$fx/control-ui/next-env.d.ts" || fail 'E4: the CRLF control-ui/next-env.d.ts was not left in place'
+
+# E5: control-ui/next-env.d.ts carries an uncommitted developer edit before T0,
+# so T0 never records or touches it; profile-ui is restored, which proves the
+# restore ran.
+make_next_env_fixture "$tmp/next-env-e5"
+out="$tmp/next-env-e5.out"
+printf '// local edit\n' >>"$fx/control-ui/next-env.d.ts"
+run_fixture_t0 "$fx" "$out" FAKE_NEXT_OUTPUT_CONTROL_UI="$next_env_build" FAKE_NEXT_OUTPUT_PROFILE_UI="$next_env_build"
+[ "$fixture_t0_exit" -eq 0 ] || next_env_fail "$out" "E5: T0 exited $fixture_t0_exit"
+expect_line "$out" "$(restored_line profile-ui)" E5
+expect_no_line_containing "$out" 'path=control-ui/next-env.d.ts' E5
+cmp -s "$next_env_build" "$fx/control-ui/next-env.d.ts" || fail 'E5: T0 changed the bytes the build left in a file that was dirty before T0'
+[ "$(git -C "$fx" status --porcelain=v1)" = ' M control-ui/next-env.d.ts' ] ||
+  fail 'E5: only the control-ui file that was dirty before T0 may differ from HEAD'
+expect_file_equals_head "$fx" profile-ui/next-env.d.ts E5
+
+# E6: builds that write nothing leave both files unchanged.
+make_next_env_fixture "$tmp/next-env-e6"
+out="$tmp/next-env-e6.out"
+run_fixture_t0 "$fx" "$out"
+[ "$fixture_t0_exit" -eq 0 ] || next_env_fail "$out" "E6: T0 exited $fixture_t0_exit"
+expect_line "$out" "$(unchanged_line control-ui)" E6
+expect_line "$out" "$(unchanged_line profile-ui)" E6
+expect_tree_clean "$fx" E6
+
+# E7: --list-packages exits before the record and the trap, and mutates nothing.
+make_next_env_fixture "$tmp/next-env-e7"
+out="$tmp/next-env-e7.out"
+fixture_t0_env_for "$fx"
+env "${fixture_t0_env[@]}" bash "$ROOT/scripts/minikube/t0.sh" --list-packages >"$out" 2>&1 </dev/null ||
+  next_env_fail "$out" 'E7: t0.sh --list-packages failed'
+expect_line "$out" control-ui E7
+expect_line "$out" profile-ui E7
+expect_no_line_containing "$out" T0_GENERATED_NEXT_ENV E7
+expect_tree_clean "$fx" E7
+
+# run_fixture_repo_metadata <fixture> <output>: runs t2_repo_metadata against
+# the fixture outside any T2 lease and sets fixture_metadata_exit.
+run_fixture_repo_metadata() {
+  local fx="$1" out="$2"
+  assert_fixture_root "$fx"
+  if env -u T2_PINNED_ORIGIN_DEV -u T2_SKIP_LOCK T2_PROJECT_DIR="$fx" \
+      bash -c 'source "$1"; t2_repo_metadata; printf "WORKTREE_ID=%s\n" "$T2_WORKTREE_ID"' bash "$COMMON" \
+      >"$out" 2>&1 </dev/null; then
+    fixture_metadata_exit=0
+  else
+    fixture_metadata_exit=$?
+  fi
+}
+
+# D1: a clean fixture passes the dirty check.
+make_next_env_fixture "$tmp/next-env-d1"
+out="$tmp/next-env-d1.out"
+run_fixture_repo_metadata "$fx" "$out"
+[ "$fixture_metadata_exit" -eq 0 ] || next_env_fail "$out" "D1: t2_repo_metadata refused a clean fixture ($fixture_metadata_exit)"
+grep -Eqx 'WORKTREE_ID=[0-9a-f]{40}' "$out" || next_env_fail "$out" 'D1: t2_repo_metadata did not reach the worktree ID'
+
+# D2: a modified README is refused, and the refusal lists the entry.
+make_next_env_fixture "$tmp/next-env-d2"
+out="$tmp/next-env-d2.out"
+printf 'changed\n' >"$fx/README.md"
+run_fixture_repo_metadata "$fx" "$out"
+[ "$fixture_metadata_exit" -ne 0 ] || next_env_fail "$out" 'D2: t2_repo_metadata accepted a dirty fixture'
+expect_line "$out" 'DEVELOPMENT_SCOPE_REQUIRED: worktree is dirty' D2
+expect_line "$out" ' M README.md' D2
+expect_no_line_containing "$out" 'WORKTREE_ID=' D2
+
+# D3 (last; own fixture): a corrupt index makes git status fail, and the dirty
+# check refuses instead of reading the empty output as clean.
+make_next_env_fixture "$tmp/next-env-d3"
+out="$tmp/next-env-d3.out"
+assert_fixture_root "$fx"
+printf 'garbage\n' >"$fx/.git/index"
+run_fixture_repo_metadata "$fx" "$out"
+[ "$fixture_metadata_exit" -ne 0 ] || next_env_fail "$out" 'D3: t2_repo_metadata accepted a worktree whose git status fails'
+expect_line "$out" 'DEVELOPMENT_SCOPE_REQUIRED: git status failed; the worktree state is unknown' D3
+expect_no_line_containing "$out" 'WORKTREE_ID=' D3
+printf 'PASS: T0 next-env.d.ts restore and fail-closed dirty check (E1-E7, D1-D3)\n'
+
 repo="$tmp/evenfire"
 mkdir -p "$repo"
 repo="$(cd "$repo" && pwd -P)"

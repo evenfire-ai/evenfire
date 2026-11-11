@@ -694,7 +694,7 @@ export function recordGovernedTraceOperationalError(
 export const llmAllowlistConfigMapWriteFailuresTotal = getOrCreateCounter({
   name: 'clerum_llm_allowlist_configmap_write_failures_total',
   help: 'Count of failed clerum-llm-allowed-models ConfigMap writes, labelled by phase.',
-  labelNames: ['phase'] as const as Array<'phase'>, // mutation | boot | sync
+  labelNames: ['phase'] as const as Array<'phase'>, // mutation | boot | sync | sync_retry
 })
 
 export type PasswordAdmissionDenialReason =

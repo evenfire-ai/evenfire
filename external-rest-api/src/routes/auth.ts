@@ -1,17 +1,21 @@
 import { Request, Response, Router } from 'express'
-import { OAuth2Client } from 'google-auth-library'
-import { config } from '../config.js'
-import { ControlApiError } from '../controlApiClient.js'
+import { ControlApiError, isControlApiInvalidSession } from '../controlApiClient.js'
 import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
   loginWithGoogle,
   loginWithPassword,
+  logoutUserSession,
+  renewUserSession,
   requestPasswordReset,
 } from '../services/authService.js'
-import { clearProfileSessionCookie, setProfileSessionCookie } from '../sessionCookie.js'
+import {
+  PROFILE_SESSION_COOKIE,
+  clearProfileSessionCookie,
+  readCookie,
+  setProfileSessionCookie,
+} from '../sessionCookie.js'
 
-const googleClient = new OAuth2Client(config.googleClientId)
 const passwordResetRateLimit = createRateLimiter({
   windowMs: 60_000,
   maxRequests: 5,
@@ -27,10 +31,13 @@ function isControlApiStatus(error: unknown, status: number): error is ControlApi
   return error instanceof ControlApiError && error.status === status
 }
 
-type GooglePayload = {
-  email: string
-  name?: string
-  picture?: string
+// control-api answers 401 Unauthorized when it refuses the Google identity itself
+// (no email, or an unverified email).
+function isRejectedGoogleIdentity(error: unknown): error is ControlApiError {
+  if (!isControlApiStatus(error, 401) || !error.body || typeof error.body !== 'object') {
+    return false
+  }
+  return 'error' in error.body && error.body.error === 'Unauthorized'
 }
 
 type LoginResponse = {
@@ -49,28 +56,16 @@ function shouldExposeBearerToken(req: { header: (name: string) => string | undef
   return !origin && !fetchSite
 }
 
+function requestedSessionContract(req: Request): 'v2' | undefined {
+  return req.header('x-evenfire-session-contract') === 'v2' ? 'v2' : undefined
+}
+
 function sendLoginResponse(req: Request, res: Response, result: LoginResponse): void {
   setProfileSessionCookie(req, res, result.token)
   const body = shouldExposeBearerToken(req)
     ? { token: result.token, me: result.me }
     : { me: result.me }
   res.status(200).json(body)
-}
-
-async function verifyGoogleToken(idToken: string): Promise<GooglePayload> {
-  const ticket = await googleClient.verifyIdToken({
-    idToken,
-    audience: config.googleClientId,
-  })
-  const payload = ticket.getPayload()
-  if (!payload?.email) {
-    throw new Error('Google token has no email')
-  }
-  return {
-    email: payload.email.toLowerCase(),
-    name: payload.name,
-    picture: payload.picture,
-  }
 }
 
 export function createAuthRouter(): Router {
@@ -84,8 +79,10 @@ export function createAuthRouter(): Router {
         return
       }
 
-      await verifyGoogleToken(idToken)
-      const result = await loginWithGoogle({ idToken })
+      const result = await loginWithGoogle({
+        idToken,
+        ...(requestedSessionContract(req) ? { sessionContract: 'v2' as const } : {}),
+      })
       sendLoginResponse(req, res, result)
     } catch (error) {
       if (isControlApiStatus(error, 404)) {
@@ -94,6 +91,10 @@ export function createAuthRouter(): Router {
       }
       if (isControlApiStatus(error, 403)) {
         res.status(403).json({ error: 'membership_not_found' })
+        return
+      }
+      if (isRejectedGoogleIdentity(error)) {
+        res.status(401).json({ error: 'Unauthorized' })
         return
       }
       next(error)
@@ -108,7 +109,7 @@ export function createAuthRouter(): Router {
         res.status(400).json({ error: 'invalid_request' })
         return
       }
-      const result = await loginWithPassword(email, password)
+      const result = await loginWithPassword(email, password, requestedSessionContract(req))
       sendLoginResponse(req, res, result)
     } catch (error) {
       if (error instanceof ControlApiError && [401, 403, 409].includes(error.status)) {
@@ -132,9 +133,55 @@ export function createAuthRouter(): Router {
     }
   })
 
-  router.post('/auth/logout', (req, res) => {
-    clearProfileSessionCookie(req, res)
-    res.status(200).json({ ok: true })
+  router.post('/auth/session/renew', async (req, res, next) => {
+    try {
+      const bearer = String(req.header('authorization') || '')
+        .replace(/^bearer\s+/i, '')
+        .trim()
+      const token = bearer || readCookie(req, PROFILE_SESSION_COOKIE)
+      if (!token || token.length > 4096) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const renewed = await renewUserSession(token)
+      setProfileSessionCookie(req, res, renewed.token)
+      const body = shouldExposeBearerToken(req)
+        ? { token: renewed.token, expiresInSeconds: renewed.expiresInSeconds }
+        : { expiresInSeconds: renewed.expiresInSeconds }
+      res.status(200).json(body)
+    } catch (error) {
+      // control-api renews V2 sessions only, so a 401 can be a still-valid V1
+      // cookie: answer it without clearing the caller's session.
+      if (isControlApiStatus(error, 401)) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      next(error)
+    }
+  })
+
+  router.post('/auth/logout', async (req, res, next) => {
+    try {
+      const bearer = String(req.header('authorization') || '')
+        .replace(/^bearer\s+/i, '')
+        .trim()
+      const token = bearer || readCookie(req, PROFILE_SESSION_COOKIE)
+      if (token) await logoutUserSession(token)
+      clearProfileSessionCookie(req, res)
+      // sessionPresented says whether this request carried a session, so a client can
+      // tell a revocation from a request that arrived after its cookie had expired.
+      res.status(200).json({ ok: true, sessionPresented: Boolean(token) })
+    } catch (error) {
+      // Only control-api's `invalid_session` envelope proves the session is already
+      // gone; a bare 401 is a rejection of this edge's own service credential.
+      if (isControlApiInvalidSession(error)) {
+        clearProfileSessionCookie(req, res)
+        res.status(200).json({ ok: true, sessionPresented: true })
+        return
+      }
+      clearProfileSessionCookie(req, res)
+      next(error)
+    }
   })
 
   return router

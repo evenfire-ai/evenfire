@@ -579,6 +579,14 @@ export function getProviderDisplayLabel(provider: string): string {
   return isKnownProvider(provider) ? getProviderLabel(provider) : provider
 }
 
+// Renders a server timestamp in the operator's locale. An unparseable value is
+// shown verbatim rather than hidden; an absent one renders as ''.
+export function formatLocalTimestamp(value: string | null | undefined): string {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
+
 // Renders a model's context window for display. Falls back to an em dash when
 // the value is unknown (NULL in the catalog) or not a finite number. Shared by
 // the allowlist catalog table and the discovery review surfaces.

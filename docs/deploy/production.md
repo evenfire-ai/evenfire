@@ -197,14 +197,15 @@ of copying minikube's choices.
 
 **Environment-specific values base hard-codes or leaves unset.**
 
-| Setting                                                                             | Base value                | What to do                                                                                                                                                                                                                                   |
-| ----------------------------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| API server `cidr` in `allow-k8s-api-egress-control-plane`, `-mcp-host`, `-channels` | `10.109.0.1/32`           | Patch to your API server endpoint IP (`kubectl --context "$KCTX" get endpoints kubernetes -n default`). The minikube template [`k8s-api-ip.yaml.template`](../../deploy/overlays/minikube/patches/k8s-api-ip.yaml.template) explains why this is an `ipBlock`. |
-| `CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS` (HCC)                                 | `do-block-storage-retain` | Set to a block StorageClass in your cluster.                                                                                                                                                                                                 |
-| `storageClassName` on `control-postgres-data` and `clerum-workflow-output`          | unset                     | Patch, or rely on your default StorageClass.                                                                                                                                                                                                 |
-| `CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET` (HCC)                                       | `clerum`                  | Name your pull Secret in `mcp-host`, or set `""` if none is needed (minikube sets `""`).                                                                                                                                                     |
-| `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST` (HCC)                                      | `"false"` (audit)         | Set `"true"`, and narrow `CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES` (base includes `clerum/`).                                                                                                                                                  |
-| `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST` (control-api) | `"false"` (audit) | Set `"true"` so control-api refuses non-allowlisted connector images up front, not only HCC at reconcile. |
+| Setting                                                                             | Base value        | What to do                                                                                                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| API server `cidr` in `allow-k8s-api-egress-control-plane`, `-mcp-host`, `-channels` | `10.109.0.1/32`   | Patch to your API server endpoint IP (`kubectl --context "$KCTX" get endpoints kubernetes -n default`). The minikube template [`k8s-api-ip.yaml.template`](../../deploy/overlays/minikube/patches/k8s-api-ip.yaml.template) explains why this is an `ipBlock`. |
+| `CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS` (HCC)                                 | unset             | Unset uses your cluster's default StorageClass. Set a block StorageClass to choose another one, for example `do-block-storage-retain` on DigitalOcean to keep `Retain`.                                                                                        |
+| `storageClassName` on `control-postgres-data` and `clerum-workflow-output`          | unset             | Patch, or rely on your default StorageClass.                                                                                                                                                                                                                   |
+| `CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET` (HCC)                                       | unset (no Secret) | Name your pull Secret in `mcp-host` if your Host images need one.                                                                                                                                                                                              |
+| `CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET` (HCC)                                        | unset (no Secret) | Name your pull Secret in `mcp-host` if your workspace-files-controller image needs one; without it that Deployment ends in `ImagePullBackOff` on a private registry.                                                                                           |
+| `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST` (HCC)                                      | `"false"` (audit) | Set `"true"`, and narrow `CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES` (base includes `clerum/`).                                                                                                                                                                    |
+| `CONTROL_API_ENFORCE_IMAGE_ALLOWLIST` (control-api)                                 | `"false"` (audit) | Set `"true"` so control-api refuses non-allowlisted connector images up front, not only HCC at reconcile.                                                                                                                                                      |
 
 For a read-only check of API-server and DNS egress before you rely on
 enforcement, see [`deploy/scripts/np-enforce-preflight.sh`](../../deploy/scripts/np-enforce-preflight.sh).
@@ -254,7 +255,11 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    Control UI CSRF secret, the prompt-history encryption key, and the
    Secrets and public-key ConfigMaps that carry them. Then run
    [`deploy/scripts/apply-inter-service-tokens.sh`](../../deploy/scripts/apply-inter-service-tokens.sh)
-   for the service-to-service tokens. Know these before you run them:
+   for the service-to-service tokens with the same explicit context:
+   ```bash
+   CONTEXT="$KCTX" bash deploy/scripts/apply-inter-service-tokens.sh
+   ```
+   Know these before you run them:
    - `gen-jwt-keys.sh` generates **new** keys on every run. Running it again
      rotates every key, including the OAuth encryption key. Run it once and
      keep the output.

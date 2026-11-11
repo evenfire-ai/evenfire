@@ -1322,13 +1322,43 @@ describe('App deep-link orchestration', () => {
     })
   })
 
+  // A mounted real controller defers its menu data to a post-paint task
+  // (refreshAuthenticatedData → scheduleAfterFirstPaintForSession). Unmounting does
+  // not retire it: it later resolves `window.clerum` and reaches the next test's
+  // bridge. End the session the way main does, so the controller's own identity
+  // guard drops every post-paint task this test scheduled.
+  function retireRealControllerSession(): void {
+    if (!realController) return
+    // A bridge without auth reaches the throw below, not a bare TypeError.
+    const onExternalLogout = window.clerum.auth?.onExternalLogout
+    const listeners = onExternalLogout
+      ? vi.mocked(onExternalLogout).mock.calls.map(([listener]) => listener)
+      : []
+    if (listeners.length === 0) {
+      throw new Error('a real App controller mounted without an external-logout listener')
+    }
+    act(() => {
+      for (const listener of listeners) listener()
+    })
+  }
+
   async function cleanupAppDeepLinkSuite(): Promise<void> {
-    cleanup()
-    unmountRealApp = null
-    const bodyChildElementCount = document.body.childElementCount
-    vi.useRealTimers()
-    resetComposerDraftStore()
-    await main.dispose()
+    let bodyChildElementCount = 0
+    try {
+      try {
+        retireRealControllerSession()
+      } finally {
+        // Unmount even when retirement throws, so its error is the one reported.
+        cleanup()
+      }
+    } finally {
+      // Reset even when unmounting or retirement throws, so the next test starts clean.
+      unmountRealApp = null
+      bodyChildElementCount = document.body.childElementCount
+      vi.useRealTimers()
+      resetComposerDraftStore()
+      await main.dispose()
+    }
     expect(bodyChildElementCount, 'App deep-link suite body-empty postcondition').toBe(0)
   }
 
@@ -6613,7 +6643,10 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(getController().isAuthenticated).toBe(true))
     await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
     await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
-    await waitFor(() => expect(handle.teamDirectory).toHaveBeenCalledOnce())
+    // The post-paint bootstrap has published this App's directory; by then it
+    // has read the bridge exactly once.
+    await waitFor(() => expect(getController().teamDirectoryHydrated).toBe(true))
+    expect(handle.teamDirectory).toHaveBeenCalledOnce()
 
     act(() => {
       getController().handleSelectChatAgent('agent-x', {
@@ -7768,6 +7801,31 @@ describe('App deep-link orchestration', () => {
       expect(dispose).toHaveBeenCalledOnce()
     } finally {
       leakedChild.remove()
+      if (vi.isFakeTimers()) vi.useRealTimers()
+      resetComposerDraftStore()
+      if (dispose.mock.calls.length === 0) await main.dispose()
+    }
+  })
+
+  it('resets suite state even when retiring the real controller session fails', async () => {
+    const dispose = vi.spyOn(main, 'dispose')
+    const chatId = 'teardown-retire-failure-chat'
+    const agentRef = 'teardown-retire-failure-agent'
+    setComposerDraft(chatId, 'draft that teardown must clear', agentRef)
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // The harness bridge has no auth and no real controller mounted its listener.
+    realController = currentController
+
+    try {
+      await expect(cleanupAppDeepLinkSuite()).rejects.toThrow(
+        'a real App controller mounted without an external-logout listener'
+      )
+      expect(vi.isFakeTimers()).toBe(false)
+      expect(getComposerDraft(chatId, agentRef)).toBe('')
+      expect(dispose).toHaveBeenCalledOnce()
+    } finally {
+      // Otherwise the afterEach teardown retires it again and reports the same error.
+      realController = null
       if (vi.isFakeTimers()) vi.useRealTimers()
       resetComposerDraftStore()
       if (dispose.mock.calls.length === 0) await main.dispose()

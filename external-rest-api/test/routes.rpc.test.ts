@@ -16,6 +16,17 @@ function buildApp() {
   return app
 }
 
+const rpcDenialReasons = [
+  'invalid_host_refs',
+  'sandbox_ui_host_ref_required',
+  'sandbox_ui_scope_required',
+  'sandbox_ui_host_ref_exclusive',
+  'host_access_denied',
+  'direct_host_access_required',
+  'desktop_requires_team',
+  'no_permitted_scopes',
+] as const
+
 describe('routes/rpc /rpc/token', () => {
   beforeEach(() => {
     rpcServiceMock.issueRpcAccessToken.mockReset()
@@ -29,17 +40,20 @@ describe('routes/rpc /rpc/token', () => {
     })
   })
 
-  it('relays the control-api denial reason instead of a generic 403', async () => {
-    rpcServiceMock.issueRpcAccessToken.mockResolvedValue({ error: 'desktop_requires_team' })
+  it.each(rpcDenialReasons)(
+    'relays the control-api denial reason %s instead of a generic 403',
+    async reason => {
+      rpcServiceMock.issueRpcAccessToken.mockResolvedValue({ error: reason })
 
-    const res = await request(buildApp())
-      .post('/rpc/token')
-      .set('authorization', 'Bearer session-xyz')
-      .send({ scopes: ['desktop:view'], hostRefs: ['pro-agent'] })
+      const res = await request(buildApp())
+        .post('/rpc/token')
+        .set('authorization', 'Bearer session-xyz')
+        .send({ scopes: ['desktop:view'], hostRefs: ['pro-agent'] })
 
-    expect(res.status).toBe(403)
-    expect(res.body).toEqual({ error: 'desktop_requires_team' })
-  })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ error: reason })
+    }
+  )
 
   it('returns the issued token on success', async () => {
     rpcServiceMock.issueRpcAccessToken.mockResolvedValue({
@@ -58,5 +72,10 @@ describe('routes/rpc /rpc/token', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.token).toBe('t')
+    expect(rpcServiceMock.issueRpcAccessToken).toHaveBeenCalledWith(
+      'session-xyz',
+      ['host:message:invoke'],
+      ['pro-agent']
+    )
   })
 })
