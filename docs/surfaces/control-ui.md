@@ -142,7 +142,8 @@ admin create or replace a value, but never displays one back.
 The browser only ever calls same-origin `/control-api/*`. A Next.js route
 handler (`app/control-api/[...path]/route.ts`) proxies those requests
 server-side to `CONTROL_API_INTERNAL_URL`, stripping hop-by-hop headers, with
-a 30 s upstream timeout. The browser never holds a `control-api` bearer token
+an upstream timeout set by `CONTROL_API_PROXY_TIMEOUT_MS` (default 300 s). The
+browser never holds a `control-api` bearer token
 and never learns its internal address — the admin session is an HttpOnly
 cookie that page JavaScript cannot read, forwarded upstream by the route
 handler.

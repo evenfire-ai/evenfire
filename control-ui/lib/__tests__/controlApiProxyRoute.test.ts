@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { GET, POST } from '../../app/control-api/[...path]/route'
 
 describe('control-ui control-api proxy route', () => {
@@ -189,7 +191,8 @@ describe('control-ui control-api proxy route', () => {
     })
 
     it('arms the abort timeout with the env value for body-bearing methods', async () => {
-      process.env[ENV_KEY] = '300000'
+      // Differs from the default, so this case still proves the env value is read.
+      process.env[ENV_KEY] = '45000'
       const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
 
       const req = new NextRequest(
@@ -205,10 +208,34 @@ describe('control-ui control-api proxy route', () => {
         params: { path: ['api', 'v1', 'gfs', 'proxy', 'v1', 'resources', 'r1', 'children'] },
       })
 
-      expect(timeoutSpy).toHaveBeenCalledWith(300000)
+      expect(timeoutSpy).toHaveBeenCalledWith(45000)
     })
 
-    it('falls back to 30000ms when the env value is absent, NaN, non-positive, non-integer, or out-of-range', async () => {
+    it('defaults to the CONTROL_API_PROXY_TIMEOUT_MS value deploy/base sets', async () => {
+      const manifest = readFileSync(
+        resolve(__dirname, '../../../deploy/base/control-plane/control-ui.yaml'),
+        'utf8'
+      )
+      const entries = [
+        ...manifest.matchAll(/- name: CONTROL_API_PROXY_TIMEOUT_MS\n\s+value: "(\d+)"/g),
+      ]
+      expect(entries).toHaveLength(1)
+      const baseValue = Number(entries[0][1])
+
+      delete process.env[ENV_KEY]
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+      const req = new NextRequest('http://localhost:3000/control-api/api/v1/admin/x', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ a: 1 }),
+      })
+
+      await POST(req, { params: { path: ['api', 'v1', 'admin', 'x'] } })
+
+      expect(timeoutSpy).toHaveBeenCalledWith(baseValue)
+    })
+
+    it('falls back to 300000ms when the env value is absent, NaN, non-positive, non-integer, or out-of-range', async () => {
       const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
 
       // Includes non-integer and out-of-range values: AbortSignal.timeout throws
@@ -227,7 +254,7 @@ describe('control-ui control-api proxy route', () => {
 
         await POST(req, { params: { path: ['api', 'v1', 'admin', 'x'] } })
 
-        expect(timeoutSpy).toHaveBeenCalledWith(30000)
+        expect(timeoutSpy).toHaveBeenCalledWith(300000)
       }
     })
 
