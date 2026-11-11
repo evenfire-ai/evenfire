@@ -26,7 +26,6 @@ import {
   resetComposerDraftStore,
   setComposerDraft,
 } from '@lib/composerDraftStore'
-import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import { readGfsOpenLocations } from '@lib/gfsOpenLocations'
 import {
   type GfsResourceNavigationRequest,
@@ -50,6 +49,7 @@ import {
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import type { FilesPageProps } from '@pages/FilesPage.types'
+import type { SandboxUiPageProps } from '@pages/SandboxUiPage.types'
 import { App } from '@/App'
 import type { GfsResourceDeepLinkEnvelope, SandboxUiDeepLinkEnvelope } from '@/App.types'
 import { USER_SCOPE_INVALIDATED } from '@/gfs/__fixtures__/entityChangeFixtures'
@@ -143,6 +143,7 @@ function useReactiveController(controller: AppController): AppController {
 
 const confirmDialogHarness = vi.hoisted(() => ({
   rendered: vi.fn(),
+  renderActual: false,
   // Counts how many ConfirmDialogs are actually on screen right now,
   // independently of the overlay signal, so the signal<->dialog invariant can
   // be asserted without reading a stale `props` snapshot after unmount. A count
@@ -190,13 +191,8 @@ const sidebarHarness = vi.hoisted(() => ({
 }))
 
 const sandboxUiPageHarness = vi.hoisted(() => ({
-  props: null as null | {
-    embed: EmbedOwnershipMachine
-    activeAppRef?: string | null
-    headerShellOverlayOpen?: boolean
-    deepLinkShellOverlayOpen?: boolean
-    localSearchRequestId?: number
-  },
+  renderActual: false,
+  props: null as null | SandboxUiPageProps,
 }))
 const filesPageHarness = vi.hoisted(() => ({
   showAuthorityProbe: false,
@@ -289,24 +285,32 @@ vi.mock('@components/WorkspaceTabStrip', () => ({
     )
   },
 }))
-vi.mock('@components/ConfirmDialog', () => ({
-  ConfirmDialog: (props: {
-    title: string
-    body?: ReactNode
-    onCancel: () => void
-    onConfirm: () => void
-  }) => {
-    confirmDialogHarness.rendered(props)
-    confirmDialogHarness.props = props
-    useEffect(() => {
-      confirmDialogHarness.mountedCount += 1
-      return () => {
-        confirmDialogHarness.mountedCount -= 1
-      }
-    }, [])
-    return null
-  },
-}))
+vi.mock('@components/ConfirmDialog', async () => {
+  const actual = await vi.importActual<typeof import('@components/ConfirmDialog')>(
+    '@components/ConfirmDialog'
+  )
+  return {
+    ConfirmDialog: (props: {
+      title: string
+      body: ReactNode
+      cancelLabel?: string
+      confirmLabel?: string
+      onCancel: () => void
+      onConfirm: () => void
+      tone?: 'danger' | 'primary'
+    }) => {
+      confirmDialogHarness.rendered(props)
+      confirmDialogHarness.props = props
+      useEffect(() => {
+        confirmDialogHarness.mountedCount += 1
+        return () => {
+          confirmDialogHarness.mountedCount -= 1
+        }
+      }, [])
+      return confirmDialogHarness.renderActual ? createElement(actual.ConfirmDialog, props) : null
+    },
+  }
+})
 vi.mock('@components/SidebarNav', () => ({
   SidebarNav: (props: NonNullable<typeof sidebarHarness.props>) => {
     sidebarHarness.props = props
@@ -364,14 +368,23 @@ vi.mock('@pages/FilesPage', async () => {
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
 // The page is stubbed, but like the real one it measures the slot for every
 // launch while it is mounted, so launches reach main.
-vi.mock('@pages/SandboxUiPage', () => ({
-  SandboxUiPage: (props: NonNullable<typeof sandboxUiPageHarness.props>) => {
-    sandboxUiPageHarness.props = props
+vi.mock('@pages/SandboxUiPage', async () => {
+  const actual =
+    await vi.importActual<typeof import('@pages/SandboxUiPage')>('@pages/SandboxUiPage')
+  function SandboxUiPageStub(props: SandboxUiPageProps) {
     const { embed } = props
     useLayoutEffect(() => embed.registerMeasurer(async () => SLOT_BOUNDS), [embed])
     return null
-  },
-}))
+  }
+  return {
+    SandboxUiPage: (props: SandboxUiPageProps) => {
+      sandboxUiPageHarness.props = props
+      return sandboxUiPageHarness.renderActual
+        ? createElement(actual.SandboxUiPage, props)
+        : createElement(SandboxUiPageStub, props)
+    },
+  }
+})
 const settingsPageHarness = vi.hoisted(() => ({
   props: null as null | { shortcutsFocusRequestId?: number },
 }))
@@ -464,12 +477,29 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       }
     }
   )
+  const beginConfirmedGfsResourceNavigation = vi.fn(
+    (id: number, uri: string, principalGeneration: number): GfsResourceNavigationRequest | null => {
+      const intentSequence = beginNavigationIntent()
+      const userNavigationGenerationAtActivation =
+        window.clerum.gfs.advanceUserNavigationGeneration?.() ?? 0
+      const owner = assignGfsResourceNavigationOwner(controller.workspaceTabs, uri)
+      return {
+        id,
+        uri,
+        ownerTabId: owner.createDestination ? nextWorkspaceTabId() : owner.ownerTabId,
+        createDestination: owner.createDestination,
+        intentSequence,
+        principalGeneration,
+        userNavigationGenerationAtActivation,
+      }
+    }
+  )
   const isGfsResourceNavigationCurrent = vi.fn(
     (request: GfsResourceNavigationRequest, principalGeneration: number) =>
       canCompleteGfsResourceNavigation(request, {
         intentSequence: navigationIntentSequence,
         principalGeneration,
-        userNavigationGeneration: 0,
+        userNavigationGeneration: window.clerum.gfs.getUserNavigationGeneration?.() ?? 0,
         activeTabId: controller.workspaceTabs.activeTabId,
         tabs: controller.workspaceTabs.tabs,
       })
@@ -479,7 +509,8 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       if (
         request.intentSequence !== navigationIntentSequence ||
         request.principalGeneration !== principalGeneration ||
-        request.userNavigationGenerationAtActivation !== 0
+        request.userNavigationGenerationAtActivation !==
+          (window.clerum.gfs.getUserNavigationGeneration?.() ?? 0)
       ) {
         return false
       }
@@ -666,6 +697,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     setPendingDesktopEnvironmentSetup: noop,
     setDesktopEnvironmentSetupComplete: noop,
     beginGfsResourceNavigation,
+    beginConfirmedGfsResourceNavigation,
     isGfsResourceNavigationCurrent,
     activateGfsResourceNavigation,
     completeGfsResourceNavigationPreview,
@@ -737,6 +769,7 @@ describe('App deep-link orchestration', () => {
       return accepted
     }
   )
+  let restoreActualSandboxUiEnvironment: (() => void) | null = null
   function expectNoAppAcknowledgment(id: number): void {
     expect(acknowledgeDeepLink.mock.calls.some(([calledId]) => calledId === id)).toBe(false)
     expect(acknowledgeHeldAppDeepLink.mock.calls.some(([calledId]) => calledId === id)).toBe(false)
@@ -812,11 +845,13 @@ describe('App deep-link orchestration', () => {
     vi.clearAllMocks()
     confirmDialogHarness.props = null
     confirmDialogHarness.mountedCount = 0
+    confirmDialogHarness.renderActual = false
     appHeaderHarness.props = null
     chatLocalSearchHarness.rendered.mockReset()
     commandPaletteHarness.props = null
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
+    sandboxUiPageHarness.renderActual = false
     filesPageHarness.props = null
     filesPageHarness.renderActual = false
     filesPageHarness.showAuthorityProbe = false
@@ -1354,10 +1389,18 @@ describe('App deep-link orchestration', () => {
     } finally {
       // Reset even when unmounting or retirement throws, so the next test starts clean.
       unmountRealApp = null
-      bodyChildElementCount = document.body.childElementCount
-      vi.useRealTimers()
-      resetComposerDraftStore()
-      await main.dispose()
+      try {
+        bodyChildElementCount = document.body.childElementCount
+        vi.useRealTimers()
+        resetComposerDraftStore()
+        await main.dispose()
+      } finally {
+        try {
+          restoreActualSandboxUiEnvironment?.()
+        } finally {
+          restoreActualSandboxUiEnvironment = null
+        }
+      }
     }
     expect(bodyChildElementCount, 'App deep-link suite body-empty postcondition').toBe(0)
   }
@@ -1372,6 +1415,14 @@ describe('App deep-link orchestration', () => {
 
   async function confirmPendingAppLink(): Promise<void> {
     await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+  }
+
+  async function confirmPendingGfsLink(): Promise<void> {
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
     await act(async () => {
       confirmDialogHarness.props?.onConfirm()
       await Promise.resolve()
@@ -3450,6 +3501,258 @@ describe('App deep-link orchestration', () => {
     return gfsQueue.enqueue(target, 0)
   }
 
+  it('deduplicates a GFS protocol link delivered by event and initial listing', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const link = produceGfsResourceDeepLink(uri)
+    main.useDeepLinkQueues(new SandboxUiDeepLinkQueue(), gfsQueue, mainNavigationGeneration)
+    let releaseInitialListing!: (value: { links: ReturnType<typeof gfsQueue.list> }) => void
+    const initialListing = new Promise<{ links: ReturnType<typeof gfsQueue.list> }>(resolve => {
+      releaseInitialListing = resolve
+    })
+    listPendingGfsDeepLinks.mockImplementationOnce(async () => initialListing)
+    renderApp(<App />)
+
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+    await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalled())
+    act(() => emitGfsDeepLink?.(link))
+    releaseInitialListing({ links: gfsQueue.list() })
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expectNoResourceAcknowledgment(link.id)
+    expect(currentController.activateGfsResourceNavigation).not.toHaveBeenCalled()
+    await confirmPendingGfsLink()
+    await waitFor(() =>
+      expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri })
+    )
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: null },
+    })
+    expectNoResourceAcknowledgment(link.id)
+
+    act(() => {
+      filesPageHarness.props?.onLocationChange?.(uri, 'Shared document.md')
+      filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(link.id, 'opened')
+    })
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeGfsDeepLink.mock.calls.filter(([id]) => id === link.id)).toHaveLength(1)
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: uri },
+    })
+    expect(gfsQueue.list()).toEqual([])
+  })
+
+  it('deduplicates an app protocol link delivered by event and initial listing', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+    }
+    sessionAuthority.sessionGeneration = 1
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/cold-start',
+          title: 'Cold Start',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'cold-start',
+        path: '/requested-resource',
+        teamId: 'team-a',
+      })
+    )
+    if (!target) throw new Error('The shared App producer rejected the cold-start fixture')
+
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
+    let releaseInitialListing!: (value: { links: ReturnType<typeof appQueue.list> }) => void
+    let markInitialListingStarted!: () => void
+    const initialListingStarted = new Promise<void>(resolve => {
+      markInitialListingStarted = resolve
+    })
+    const initialListing = new Promise<{ links: ReturnType<typeof appQueue.list> }>(resolve => {
+      releaseInitialListing = resolve
+    })
+    listPendingDeepLinks.mockImplementationOnce(async () => {
+      markInitialListingStarted()
+      return initialListing
+    })
+    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
+    const link = appQueue.enqueue(target, mainNavigationGeneration.current())
+    const { getController, queryClient } = await mountSessionBackedApp(userA)
+
+    await initialListingStarted
+    releaseInitialListing({ links: appQueue.list() })
+    await waitFor(() => expect(listPendingDeepLinks).toHaveBeenCalled())
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(listApps).toHaveBeenCalled())
+    await waitForAppOpen()
+    await main.settle()
+    expect(main.live()).toMatchObject({
+      appRef: 'ns/cold-start',
+      routePath: '/requested-resource',
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === link.id)).toHaveLength(1)
+    expect(appQueue.list()).toEqual([])
+    expect(getController().workspaceTabs.tabs.some(tab => tab.kind === 'app')).toBe(true)
+    queryClient.clear()
+  })
+
+  it('delivers a queued GFS protocol link using only the initial renderer listing', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+    }
+    sessionAuthority.sessionGeneration = 1
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
+    main.setSessionInvalidationCleanup(() => ({
+      appDeepLinkMinimumId: appQueue.clear(),
+      gfsDeepLinkMinimumId: gfsQueue.clear(),
+    }))
+    let releaseInitialGfsListing!: (value: { links: ReturnType<typeof gfsQueue.list> }) => void
+    listPendingGfsDeepLinks.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          releaseInitialGfsListing = resolve
+        })
+    )
+    const resource = {
+      ...resolvedFile('0123456789abcdef0123456789abcdef', 'Shared document.md', {
+        gfsUri: uri,
+      }),
+      pathCache: '/Shared document.md',
+    }
+    window.clerum.gfs.resolve = vi.fn(async () => resource)
+    window.clerum.gfs.listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    window.clerum.gfs.listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    window.clerum.gfs.affordances = vi.fn(async () => ({
+      held: [],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    const link = produceGfsResourceDeepLink(uri)
+    const { getController, queryClient } = await mountSessionBackedApp(userA)
+    filesPageHarness.renderActual = true
+
+    await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalled())
+    releaseInitialGfsListing({ links: gfsQueue.list() })
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(window.clerum.gfs.resolve).not.toHaveBeenCalled()
+    await confirmPendingGfsLink()
+    await waitFor(() => expect(window.clerum.gfs.resolve).toHaveBeenCalledWith(uri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(getController().workspaceTabs)).toMatchObject({
+        kind: 'preview',
+        preview: { gfsUri: uri },
+      })
+    )
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeGfsDeepLink.mock.calls.filter(([id]) => id === link.id)).toHaveLength(1)
+    expect(gfsQueue.list()).toEqual([])
+    queryClient.clear()
+  })
+
+  it('opens an app protocol link using only the initial renderer listing', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+    }
+    sessionAuthority.sessionGeneration = 1
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/cold-start',
+          title: 'Cold Start',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'cold-start',
+        path: '/requested-resource',
+        teamId: 'team-a',
+      })
+    )
+    if (!target) throw new Error('The shared App producer rejected the cold-start fixture')
+
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
+    listPendingDeepLinks.mockImplementationOnce(async () => ({ links: appQueue.list() }))
+    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
+    const link = appQueue.enqueue(target, mainNavigationGeneration.current())
+    const { getController, queryClient } = await mountSessionBackedApp(userA)
+
+    await waitFor(() => expect(listPendingDeepLinks).toHaveBeenCalled())
+    await confirmPendingAppLink()
+    await waitFor(() => expect(listApps).toHaveBeenCalled())
+    await waitForAppOpen()
+    await main.settle()
+    expect(main.live()).toMatchObject({
+      appRef: 'ns/cold-start',
+      routePath: '/requested-resource',
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === link.id)).toHaveLength(1)
+    expect(appQueue.list()).toEqual([])
+    expect(getController().workspaceTabs.tabs.some(tab => tab.kind === 'app')).toBe(true)
+    queryClient.clear()
+  })
+
   it('routes a shared GFS producer link to Files and acknowledges its resolved owner', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     renderApp(<App />)
@@ -3460,6 +3763,11 @@ describe('App deep-link orchestration', () => {
     const link = produceGfsResourceDeepLink(uri)
     act(() => emitGfsDeepLink?.(link))
 
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(filesPageHarness.props?.pendingGfsDeepLink ?? null).toBeNull()
+    expect(currentController.activateGfsResourceNavigation).not.toHaveBeenCalled()
+    expectNoResourceAcknowledgment(link.id)
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri })
     )
@@ -3527,6 +3835,7 @@ describe('App deep-link orchestration', () => {
 
     const link = produceGfsResourceDeepLink(uri)
     act(() => emitGfsDeepLink?.(link))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(resolveGfs).toHaveBeenCalledTimes(1))
 
     const ownerTabId = currentController.workspaceTabs.activeTabId
@@ -3744,6 +4053,90 @@ describe('App deep-link orchestration', () => {
     await waitForAppOpen()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
+  })
+
+  it('hides the live App embed behind the external GFS confirmation dialog', async () => {
+    const resizeObserverBefore = Object.getOwnPropertyDescriptor(globalThis, 'ResizeObserver')
+    const requestAnimationFrameBefore = globalThis.requestAnimationFrame
+    Object.defineProperty(globalThis, 'ResizeObserver', {
+      configurable: true,
+      value: class {
+        observe = vi.fn()
+        unobserve = vi.fn()
+        disconnect = vi.fn()
+      },
+    })
+    Object.defineProperty(globalThis, 'requestAnimationFrame', {
+      configurable: true,
+      value: (callback: FrameRequestCallback) => {
+        callback(0)
+        return 1
+      },
+    })
+    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 12,
+      left: 16,
+      right: 416,
+      bottom: 312,
+      width: 400,
+      height: 300,
+      toJSON: () => ({}),
+    } as DOMRect)
+    restoreActualSandboxUiEnvironment = () => {
+      if (resizeObserverBefore) {
+        Object.defineProperty(globalThis, 'ResizeObserver', resizeObserverBefore)
+      } else {
+        Reflect.deleteProperty(globalThis, 'ResizeObserver')
+      }
+      Object.defineProperty(globalThis, 'requestAnimationFrame', {
+        configurable: true,
+        writable: true,
+        value: requestAnimationFrameBefore,
+      })
+      rectSpy.mockRestore()
+    }
+    sandboxUiPageHarness.renderActual = true
+    confirmDialogHarness.renderActual = true
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    renderApp(<App />)
+    await launchAppFromSidebar()
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false)
+    await waitFor(() => expect(main.live()).not.toBeNull())
+    await waitFor(() => expect(main.liveVisibilityCalls()).toContain(true))
+    const visibilityCallsBeforeOverlay = main.liveVisibilityCalls().length
+
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const target = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
+    if (!target) throw new Error('the shared GFS producer rejected the overlay fixture')
+    const link = gfsQueue.enqueue(target, mainNavigationGeneration.current())
+    act(() => emitGfsDeepLink?.(link))
+
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(confirmDialogHarness.mountedCount).toBe(1)
+    expect(
+      within(document.body)
+        .getByRole('dialog', { name: 'Open EvenDrive link?' })
+        .getAttribute('aria-modal')
+    ).toBe('true')
+    await waitFor(() =>
+      expect(main.liveVisibilityCalls().slice(visibilityCallsBeforeOverlay)).toEqual([false])
+    )
+    expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(true)
+    expectNoResourceAcknowledgment(link.id)
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+    await waitFor(() => expect(confirmDialogHarness.mountedCount).toBe(0))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(false))
+    await waitFor(() =>
+      expect(main.liveVisibilityCalls().slice(visibilityCallsBeforeOverlay)).toEqual([false, true])
+    )
   })
 
   it('keeps the deep-link overlay signal raised while the failure dialog is open', async () => {
@@ -6110,7 +6503,11 @@ describe('App deep-link orchestration', () => {
     sessionAuthority.sessionGeneration = 7
     sessionAuthority.sessionToken = 'session-a'
     sessionAuthority.me = userA
-    sessionAuthority.restoreSavedSession = async () => ({ authenticated: false, me: null })
+    sessionAuthority.restoreSavedSession = async () => ({
+      authenticated: false,
+      me: null,
+      sessionGeneration: sessionAuthority.sessionGeneration,
+    })
 
     const appQueue = new SandboxUiDeepLinkQueue()
     main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
@@ -6465,6 +6862,9 @@ describe('App deep-link orchestration', () => {
     await act(async () => {
       await getController().loadSession()
     })
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(resolveUri).not.toHaveBeenCalled()
+    await confirmPendingGfsLink()
     await waitFor(() => expect(resolveUri.mock.calls.length).toBeGreaterThanOrEqual(1))
     expect(resolveUri).toHaveBeenCalledWith(uri, 'session-b')
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
@@ -6474,7 +6874,7 @@ describe('App deep-link orchestration', () => {
     queryClient.clear()
   })
 
-  it('drains resource links added while replacement-team authorization is pending', async () => {
+  it('retains a GFS request during replacement-session directory hydration until Open', async () => {
     const userA: NonNullable<AppController['me']> = {
       id: 'user-a',
       email: 'a@example.test',
@@ -6563,8 +6963,13 @@ describe('App deep-link orchestration', () => {
     expect(gfsQueue.list()).toEqual([resourceLink])
     expect(resolveUri).not.toHaveBeenCalled()
     expectNoResourceAcknowledgment(resourceLink.id)
+    expect(within(document.body).queryByRole('dialog', { name: 'Open EvenDrive link?' })).toBeNull()
 
     releaseDirectory()
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(resolveUri).not.toHaveBeenCalled()
+    expectNoResourceAcknowledgment(resourceLink.id)
+    await confirmPendingGfsLink()
     await waitFor(() => expect(resolveUri).toHaveBeenCalledWith(uri, 'session-b'))
     await waitFor(() => expect(acceptedHeldAppIds).toContain(appLink.id))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(resourceLink.id))
@@ -6575,6 +6980,110 @@ describe('App deep-link orchestration', () => {
       1
     )
     expect(resolveUri.mock.calls.every(([, token]) => token === 'session-b')).toBe(true)
+    expect(getController().activeWorkspaceTab?.kind).toBe('preview')
+    expect(gfsQueue.list()).toEqual([])
+    queryClient.clear()
+  })
+  it('waits to offer a GFS link until the confirmed App link settles', async () => {
+    const userA: NonNullable<AppController['me']> = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const sessionAuthority = main.service as unknown as {
+      sessionGeneration: number
+      sessionToken: string | null
+      me: typeof userA | null
+      resolveGfsUri(uri: string): Promise<Awaited<ReturnType<typeof window.clerum.gfs.resolve>>>
+      gfsClient: { resolveUri: (uri: string, token: string) => Promise<unknown> }
+    }
+    sessionAuthority.sessionGeneration = 7
+    sessionAuthority.sessionToken = 'session-a'
+    sessionAuthority.me = userA
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const resolvedResource: Awaited<ReturnType<typeof window.clerum.gfs.resolve>> = {
+      drive: 'main',
+      resourceId: '0123456789abcdef0123456789abcdef',
+      parentResourceId: null,
+      gfsUri: uri,
+      name: 'Late shared document.md',
+      kind: 'file',
+      pathCache: '/Late shared document.md',
+      version: 5,
+    }
+    const resolveUri = vi.fn(async (_uri: string, _token: string) => resolvedResource)
+    sessionAuthority.gfsClient.resolveUri = resolveUri
+    const appQueue = new SandboxUiDeepLinkQueue()
+    main.useDeepLinkQueues(appQueue, gfsQueue, mainNavigationGeneration)
+    main.setSessionInvalidationCleanup(() => ({
+      appDeepLinkMinimumId: appQueue.clear(),
+      gfsDeepLinkMinimumId: gfsQueue.clear(),
+    }))
+    listPendingDeepLinks.mockImplementation(async () => ({ links: appQueue.list() }))
+    clearPendingDeepLinks.mockImplementation(async () => appQueue.clear())
+    acknowledgeDeepLink.mockImplementation(async id => appQueue.acknowledge(id))
+
+    const { getController, queryClient } = await mountSessionBackedApp(userA)
+    filesPageHarness.renderActual = true
+    window.clerum.gfs.resolve = vi.fn(uri => sessionAuthority.resolveGfsUri(uri))
+    listApps.mockClear()
+    let releaseAppListing!: (value: { apps: [] }) => void
+    let markAppListingStarted!: () => void
+    const appListingStarted = new Promise<void>(resolve => (markAppListingStarted = resolve))
+    const appListing = new Promise<{ apps: [] }>(resolve => (releaseAppListing = resolve))
+    listApps.mockImplementationOnce(() => {
+      markAppListingStarted()
+      return appListing
+    })
+    const appTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'app',
+        path: '/requested-resource',
+        teamId: 'team-a',
+      })
+    )
+    const resourceTarget = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
+    if (!appTarget || !resourceTarget) throw new Error('a production parser rejected the fixture')
+
+    const appNavigationGeneration = window.clerum.gfs.getUserNavigationGeneration?.() ?? 0
+    const appLink = appQueue.enqueue(appTarget, appNavigationGeneration)
+    expect(emitDeepLink).not.toBeNull()
+    act(() => emitDeepLink?.(appLink))
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
+
+    const resourceNavigationGeneration = window.clerum.gfs.getUserNavigationGeneration?.() ?? 0
+    const resourceLink = gfsQueue.enqueue(resourceTarget, resourceNavigationGeneration)
+    act(() => emitGfsDeepLink?.(resourceLink))
+    await waitFor(() => expect(gfsQueue.list()).toEqual([resourceLink]))
+    expect(confirmDialogHarness.props?.title).toBe('Open app link?')
+    expect(confirmDialogHarness.mountedCount).toBe(1)
+    expect(resolveUri).not.toHaveBeenCalled()
+    expectNoResourceAcknowledgment(resourceLink.id)
+
+    await confirmPendingAppLink()
+    await appListingStarted
+    expect(gfsQueue.list()).toEqual([resourceLink])
+    expect(resolveUri).not.toHaveBeenCalled()
+    expectNoResourceAcknowledgment(resourceLink.id)
+    expect(confirmDialogHarness.mountedCount).toBe(0)
+
+    releaseAppListing({ apps: [] })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(appLink.id))
+    expect(acknowledgeDeepLink.mock.calls.filter(([id]) => id === appLink.id)).toHaveLength(1)
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(resolveUri).not.toHaveBeenCalled()
+    await confirmPendingGfsLink()
+    await waitFor(() => expect(resolveUri).toHaveBeenCalledWith(uri, 'session-a'))
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(resourceLink.id))
+    expect(acknowledgeGfsDeepLink.mock.calls.filter(([id]) => id === resourceLink.id)).toHaveLength(
+      1
+    )
+    expect(resolveUri.mock.calls.every(([, token]) => token === 'session-a')).toBe(true)
     expect(getController().activeWorkspaceTab?.kind).toBe('preview')
     expect(gfsQueue.list()).toEqual([])
     queryClient.clear()

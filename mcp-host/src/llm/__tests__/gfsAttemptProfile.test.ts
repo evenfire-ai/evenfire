@@ -3,6 +3,7 @@ import type { ChatMessage } from '../../core/types'
 import { ClaudeProvider } from '../claude'
 import { OpenAIProvider } from '../openai'
 import { OpenAICompatibleProvider } from '../openaiCompatible'
+import { recordedResponse } from '../openaiFamily/__tests__/responsesFixtures'
 import { JPEG_2X2_BASE64, PNG_2X2_BASE64 } from './codexImageFixtures'
 
 const { compatibleCreate } = vi.hoisted(() => ({ compatibleCreate: vi.fn() }))
@@ -46,6 +47,17 @@ function messages(gfs = true): ChatMessage[] {
     },
   ]
 }
+/** The image URLs of the `input_image` parts of a Responses request. */
+function inputImages(request: unknown): string[] {
+  return (request as { input: Array<{ content?: unknown }> }).input.flatMap(item =>
+    Array.isArray(item.content)
+      ? (item.content as Array<{ type?: string; image_url?: string }>)
+          .filter(part => part.type === 'input_image')
+          .map(part => part.image_url!)
+      : []
+  )
+}
+
 const parts = {
   stable: 'stable',
   context: 'context',
@@ -86,7 +98,12 @@ describe('physical GFS image profile gates', () => {
     'rejects profile-less %s pixels through plain and tool methods before the SDK',
     async type => {
       const create = type === 'openai' ? vi.fn() : compatibleCreate
-      const client = { baseURL: 'https://unit-only.invalid', chat: { completions: { create } } }
+      // The same spy on both protocols, so "never reached the SDK" covers whichever the profile speaks.
+      const client = {
+        baseURL: 'https://unit-only.invalid',
+        chat: { completions: { create } },
+        responses: { create },
+      }
       const provider =
         type === 'openai'
           ? new OpenAIProvider(client as never, 'unit-model')
@@ -125,7 +142,11 @@ describe('physical GFS image profile gates', () => {
 
   it('rechecks the OpenAI instance endpoint at physical dispatch', async () => {
     const create = vi.fn()
-    const client = { baseURL: 'https://api.openai.com/v1', chat: { completions: { create } } }
+    const client = {
+      baseURL: 'https://api.openai.com/v1',
+      chat: { completions: { create } },
+      responses: { create },
+    }
     const provider = new OpenAIProvider(client as never, 'unit-model')
     expect(provider.getVisualDeliveryLimits('completeWithTools')).not.toBeNull()
     client.baseURL = 'https://unit-only.invalid/v1'
@@ -191,12 +212,9 @@ describe('physical GFS image profile gates', () => {
   })
 
   it('keeps official OpenAI GFS pixels without measured geometry because its profile imposes no shape bound', async () => {
-    const create = vi.fn(async (_request: unknown) => ({
-      choices: [{ message: { content: 'done' }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }))
+    const create = vi.fn(async (_request: unknown) => recordedResponse('v1-text-gpt-4.1'))
     const provider = new OpenAIProvider(
-      { baseURL: 'https://api.openai.com/v1', chat: { completions: { create } } } as never,
+      { baseURL: 'https://api.openai.com/v1', responses: { create } } as never,
       'unit-model'
     )
     const original = messages()
@@ -205,7 +223,9 @@ describe('physical GFS image profile gates', () => {
     delete image.width
     delete image.height
     await provider.completeSingleTurnWithTools(original, [])
-    expect(JSON.stringify(create.mock.calls[0]![0])).toContain(PNG_2X2_BASE64)
+    expect(inputImages(create.mock.calls[0]![0])).toEqual([
+      `data:image/png;base64,${PNG_2X2_BASE64}`,
+    ])
   })
 
   it('keeps ordinary Claude pixels without measured geometry when there are no GFS pixels', async () => {
@@ -228,15 +248,14 @@ describe('physical GFS image profile gates', () => {
   })
 
   it('keeps the OpenAI image wire behavior for ordinary non-GFS input', async () => {
-    const create = vi.fn(async () => ({
-      choices: [{ message: { content: 'done' }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }))
+    const create = vi.fn(async (_request: unknown) => recordedResponse('v1-text-gpt-4.1'))
     const provider = new OpenAIProvider(
-      { baseURL: 'https://unit-only.invalid', chat: { completions: { create } } } as never,
+      { baseURL: 'https://unit-only.invalid', responses: { create } } as never,
       'unit-model'
     )
     await provider.completeSingleTurnWithTools(messages(false), [])
-    expect(JSON.stringify(create.mock.calls[0])).toContain(PNG_2X2_BASE64)
+    expect(inputImages(create.mock.calls[0]![0])).toEqual([
+      `data:image/png;base64,${PNG_2X2_BASE64}`,
+    ])
   })
 })
