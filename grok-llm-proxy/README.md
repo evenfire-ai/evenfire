@@ -5,8 +5,9 @@ sign-ins used as an LLM. It streams model calls from an agent to the Grok
 subscription endpoint. The OAuth tokens stay in control-api's database; the
 proxy receives an access token for a single operation and does not store it.
 
-Off by default: `GROK_LLM_PROXY_EXECUTION_ENABLED` is `"false"` in
-`deploy/base`. To turn the feature on, follow
+On by default: `GROK_LLM_PROXY_EXECUTION_ENABLED` is on when unset and
+`"true"` in `deploy/base`; `"false"` is the kill switch (see below). To sign in
+and use the subscription, follow
 [Connect an LLM subscription](../docs/how-to/connect-llm-subscription.md).
 
 ## Where it runs
@@ -69,12 +70,13 @@ records this gap.
 
 ## Kill switch
 
-`GROK_LLM_PROXY_EXECUTION_ENABLED` accepts only the exact string `true`. Any
-other value, including the `"false"` in `deploy/base`, makes the completions
-route and both admin routes answer `404 {"error":"disabled"}` after
-authentication. Probes and metrics keep working. The minikube overlay sets it
-to `"true"` (`deploy/overlays/minikube/configmaps/grok-llm-proxy-config.yaml`).
-Restart the Deployment after changing it.
+`GROK_LLM_PROXY_EXECUTION_ENABLED` is on when unset, empty or `true`, which is
+the `deploy/base` value. `false` makes the completions route and both admin
+routes answer `404 {"error":"disabled"}` after authentication; probes and
+metrics keep working. Any other value stops the proxy at startup. The minikube
+overlay also sets it to `"true"`
+(`deploy/overlays/minikube/configmaps/grok-llm-proxy-config.yaml`). Restart the
+Deployment after changing it.
 
 ## Configuration
 
@@ -94,7 +96,7 @@ proxy refuses to start when a value is invalid.
 | `GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS`    | `15000`          | SSE keepalive interval after a successful redeem. Values above `60000` are refused.                                                                           |
 | `GROK_LLM_PROXY_JWT_ISSUER`               | `control-api`    | Expected `iss` of platform JWTs, tickets and admin permits                                                                                                    |
 | `GROK_LLM_PROXY_JWT_PUBLIC_KEY`           | — (required)     | control-api's PEM public key. `deploy/base` reads it from ConfigMap `control-api-public-key`.                                                                 |
-| `GROK_LLM_PROXY_EXECUTION_ENABLED`        | off              | Kill switch, see above. Only `true` enables.                                                                                                                  |
+| `GROK_LLM_PROXY_EXECUTION_ENABLED`        | on               | Kill switch, see above. Unset, empty or `true` is on; `false` is off; another value stops startup.                                                            |
 | `GROK_LLM_PROXY_CONTROL_API_URL`          | — (required)     | Absolute http(s) base URL for redeem/finalize. `deploy/base`: `http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1`                    |
 | `GROK_LLM_PROXY_CONTROL_API_SERVICE`      | `grok-llm-proxy` | Service name sent to control-api with the inter-service token                                                                                                 |
 | `GROK_LLM_PROXY_CONTROL_API_TOKEN`        | — (required)     | Inter-service token. `deploy/base` reads it from Secret `grok-llm-proxy-secrets`, created by `deploy/scripts/apply-inter-service-tokens.sh`.                  |
@@ -133,6 +135,6 @@ npm start          # node dist/main.js (needs the required env vars)
 
 ## Related
 
-- [Connect an LLM subscription](../docs/how-to/connect-llm-subscription.md): enable flags, sign in, troubleshoot
+- [Connect an LLM subscription](../docs/how-to/connect-llm-subscription.md): switches, sign in, troubleshoot
 - [Grok subscription transport contract](../docs/architecture/grok-subscription-transport-contract.md)
 - [codex-llm-proxy](../codex-llm-proxy/README.md): the Codex sibling

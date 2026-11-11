@@ -978,14 +978,17 @@ and nothing else from the error. When both finalize tries fail, the `err` of
 
 ## Feature flags
 
-All flags default to off.
+All flags default to on: unset or empty means on, and `false` turns a flag off.
+control-api and grok-llm-proxy refuse to start on any other value, and mcp-host
+refuses to build the `grok-subscription` provider. `WRC_GROK_SUBSCRIPTION_ENABLED`
+treats `true` in any case or `1` as on and any other non-empty value as off.
 
 | Flag | Owner | Gates |
 | --- | --- | --- |
 | `CONTROL_API_GROK_SUBSCRIPTION_ENABLED` | control-api ConfigMap | Admin Grok routes, Host/recipe acceptance of `grok-subscription`, and the `clerum.io/grok-enabled` annotation that control-api publishes on `clerum-llm-allowed-models`. |
 | `WRC_GROK_SUBSCRIPTION_ENABLED` | workflow-recipes Deployment | Folded into the recipe verdict. Gates the `llm:grok:execute` scope, the `<recipe>-mcp-host-to-grok-proxy` egress NetworkPolicy, the bootstrap binding, the pod env, and `grantRedeemable`. |
 | `GROK_LLM_PROXY_EXECUTION_ENABLED` | grok-llm-proxy ConfigMap | Kill switch: while it is off, runtime and admin requests return 404 `disabled`, even with a valid JWT, ticket or permit. |
-| `MCP_HOST_GROK_SUBSCRIPTION_ENABLED` | **injected, not a manual key** | HCC injects it on Host pods whose Grok projection mints `llm:grok:execute`. WRC injects it, with `GROK_LLM_PROXY_RUNTIME_URL`, on recipe pods that declare Grok when `WRC_GROK_SUBSCRIPTION_ENABLED` is on. Do not add it to `mcp-host-config`. |
+| `MCP_HOST_GROK_SUBSCRIPTION_ENABLED` | mcp-host; injected by HCC and WRC | Whether mcp-host builds the `grok-subscription` provider; on when unset. HCC injects `true` on Host pods whose Grok projection mints `llm:grok:execute`. WRC injects it, with `GROK_LLM_PROXY_RUNTIME_URL`, on recipe pods that declare Grok when `WRC_GROK_SUBSCRIPTION_ENABLED` is on. To limit Grok provider construction to those Hosts, set it to `false` in `mcp-host-config`; the injected value overrides the ConfigMap. |
 
 HCC has no local Grok switch. Its Grok projection follows the
 `clerum.io/grok-enabled` annotation together with the Host's own Grok
@@ -1021,8 +1024,8 @@ Grok annotations. A new control-api also republishes on boot.
 
 ## Rollout order
 
-1. **evenfire-infra first.** Pin the `grok-llm-proxy` image for `gcp-dev` and
-   `gcp-prod`. Provision `grok-llm-proxy-secrets`
+1. **The deployment repository first.** Pin the `grok-llm-proxy` image for
+   each environment. Provision `grok-llm-proxy-secrets`
    (`GROK_LLM_PROXY_CONTROL_API_TOKEN`) with
    `deploy/scripts/apply-inter-service-tokens.sh`. Both must be in place before
    the merge to `dev` triggers the automatic deploy.
@@ -1034,7 +1037,7 @@ Grok annotations. A new control-api also republishes on boot.
    therefore break token issuance for every pod they mint for, not only Grok
    pods (C-RP-016).
 3. **HCC, WRC and every mcp-host image**, before `grok-llm-proxy`. Grok flags
-   stay off. The four Host images — `mcp-host`, `mcp-host-slim`,
+   stay `false` (see step 6). The four Host images — `mcp-host`, `mcp-host-slim`,
    `mcp-host-full` and `mcp-host-desktop` — each copy
    `packages/grok-provider-attempt-contract` at build time, and
    `.github/workflows/build-publish.yml` builds them in one matrix without
@@ -1044,17 +1047,19 @@ Grok annotations. A new control-api also republishes on boot.
    then discards it as a retryable outage (see *Limits*); the reverse order
    has no such window.
 5. Republish `clerum-llm-allowed-models` (see above).
-6. Turn on the flags only after the control-api rollout is complete:
+6. The flags default to on. To stage this rollout, set
    `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`, `WRC_GROK_SUBSCRIPTION_ENABLED` and
-   `GROK_LLM_PROXY_EXECUTION_ENABLED`. `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`
-   follows automatically through HCC and WRC.
+   `GROK_LLM_PROXY_EXECUTION_ENABLED` to `false` before step 2, and set them to
+   `true` (or remove them) only after the control-api rollout is complete.
+   `MCP_HOST_GROK_SUBSCRIPTION_ENABLED` needs no step: HCC and WRC inject it,
+   and it is on when unset.
 
 Image input (#784) on a deployment where the Grok flags are already on. The
 safe order is `grok-llm-proxy` and `codex-llm-proxy` first (#784 also changes
 the Codex non-image measurement; see the Codex transport contract, Rollout),
 then control-api with the control-plane ConfigMap and a restart of
 `nginx-workflow-approval-gateway`, then the four Host images, each fully
-rolled out before the next. The GKE pipeline in `evenfire-infra`
+rolled out before the next. The GKE pipeline in the deployment repository
 (`deploy-clerum-{dev,prod}.yml` with `codex-validator-rollout.py`) does not
 follow that order for Grok. It runs three phases:
 
@@ -1099,7 +1104,7 @@ three show an error for an image turn that succeeds after the rollout. #784
 accepts that window. A deployment that needs no window must hold the Host
 images in HCC until phase 3 is done, or move `grok-llm-proxy`, the
 control-plane ConfigMap and the gateway restart into phase 1 in
-`evenfire-infra`; this PR changes neither. The safe order, proxy first, keeps
+the deployment repository; this PR changes neither. The safe order, proxy first, keeps
 a V2 request from being authorized against a proxy that will refuse it,
 because an old control-api refuses V2 before any attempt is recorded. Step 4's
 Host-before-proxy rule protects a response-side bound, `maxToolCalls`, whose
@@ -1110,7 +1115,7 @@ adds `maxRequestContainers` and `maxRequestMembers` (262144 each) and lowers
 the element bound from 8388608 to `maxRequestElements` (1048576). A request
 over them is refused by control-api at authorize or by the proxy before
 redeem, so no upstream call is made and nothing is billed. On a fresh rollout
-the flags stay off until step 6, and steps 1-6 apply as written.
+the flags stay `false` until step 6, and steps 1-6 apply as written.
 
 ## Rollback order
 

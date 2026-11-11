@@ -49,8 +49,9 @@ Be careful with any single number:
   evaluation footprint, not a production recommendation.
 - The static Deployments in `deploy/base` (18 of them, with no agents running)
   **request** about 0.9 CPU and 2.7 GiB of memory in total. Requests are not
-  real usage. `codex-llm-proxy` and `grok-llm-proxy` each request 768Mi even
-  though both subscriptions are off by default.
+  real usage. `codex-llm-proxy` and `grok-llm-proxy` each request 768Mi
+  whether or not a subscription account is connected (both subscriptions are on
+  by default).
 - Most load comes from pods that the controllers create at runtime. These are
   not in `deploy/base`.
 

@@ -428,7 +428,7 @@ const MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE_PATH = `${WORKFLOW_TOKEN_MOUNT_PATH}/
 const MCP_HOST_RUNTIME_AUTH_STATE_PATH = '/var/run/clerum/workflow-auth'
 /**
  * Restricted-PSA-compliant container securityContext shared by the mcp-host
- * container and the workspace-layout-merge initContainer. MCC shared-tenant
+ * container and the workspace-layout-merge initContainer. Shared-tenant
  * namespaces (mcp-host-<slug>) enforce the `restricted` PodSecurity standard;
  * without these fields the ReplicaSet gets FailedCreate and never schedules a
  * pod. UID/GID 1001 = the image's baked-in `nodejs` user; it must match the
@@ -3190,7 +3190,7 @@ export class HostReconciler {
                   // Inject the pod's own namespace via the downward API so the
                   // channel-reader always discovers CommunicationChannels and
                   // credential Secrets in its own namespace (channels-<slug>
-                  // under MCC, or "channels" in the default stack). This explicit
+                  // on a shared-tenant install, or "channels" in the default stack). This explicit
                   // env wins over any envFrom ConfigMap value, making the
                   // namespace correct by construction regardless of the ConfigMap.
                   {
@@ -3198,7 +3198,7 @@ export class HostReconciler {
                     valueFrom: { fieldRef: { fieldPath: 'metadata.namespace' } },
                   },
                   // The mcp-host Service (buildService) is named host.name in
-                  // host.namespace (mcp-host-<slug> under MCC), type ClusterIP,
+                  // host.namespace (mcp-host-<slug> on a shared-tenant install), type ClusterIP,
                   // exposing the `http` port = config.hostPort. The channel-reader
                   // lives in channels-<slug>, so the URL MUST cross namespaces and
                   // use host.namespace — not config.channelsNamespace.
@@ -3227,7 +3227,7 @@ export class HostReconciler {
                   runAsNonRoot: true,
                   runAsUser: 1000,
                   runAsGroup: 1000,
-                  // Restricted-PSA-compliant: MCC shared-tenant namespaces
+                  // Restricted-PSA-compliant: shared-tenant namespaces
                   // (channels-<slug>) enforce the `restricted` PodSecurity
                   // standard, which requires capabilities.drop=[ALL] and
                   // seccompProfile=RuntimeDefault.
@@ -3662,11 +3662,12 @@ export class HostReconciler {
       },
       { name: 'MCP_HOST_GATEWAY_URL', value: config.mcpHostGatewayUrl },
     ]
-    // mcp-host refuses to construct the grok-subscription provider unless this
-    // switch is on. Emit it only when this Host's Grok projection mints
-    // llm:grok:execute (same gate as the scope and grok-proxy egress policy),
-    // so an eligibility flip changes the pod template and rolls the Host.
-    // Non-Grok Hosts keep a byte-identical template.
+    // mcp-host builds the grok-subscription provider unless this switch is
+    // `false` (unset is on). Emit it only when this Host's Grok projection
+    // mints llm:grok:execute (same gate as the scope and grok-proxy egress
+    // policy). This env entry overrides a `false` in the shared Host ConfigMap
+    // (envFrom) for eligible Hosts, and an eligibility flip changes the pod
+    // template and rolls the Host. Non-Grok Hosts keep a byte-identical template.
     if (grokExecutionEnabled) {
       env.push({ name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED', value: 'true' })
     }
@@ -3734,7 +3735,7 @@ export class HostReconciler {
 
     // Security context — desktop needs runAsNonRoot: false for s6-overlay init,
     // which is fundamentally incompatible with the `restricted` PodSecurity
-    // standard. Desktop Hosts therefore won't schedule in MCC shared-tenant
+    // standard. Desktop Hosts therefore won't schedule in shared-tenant
     // namespaces under restricted PSA — a separate known limitation, out of
     // scope here. Non-desktop hosts emit a restricted-PSA-compliant pod-level
     // securityContext so the ReplicaSet schedules in restricted namespaces.

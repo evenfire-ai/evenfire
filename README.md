@@ -195,8 +195,8 @@ environment variable; setup infers the matching provider).
 | Novita AI                    | `novita`             | OpenAI-compatible                     |
 | MiniMax                      | `minimax`            | OpenAI-compatible                     |
 | Azure OpenAI                 | `azure`              | Light driver                          |
-| ChatGPT (Codex) subscription | `codex-subscription` | Subscription sign-in (off by default) |
-| Grok subscription            | `grok-subscription`  | Subscription sign-in (off by default) |
+| ChatGPT (Codex) subscription | `codex-subscription` | Subscription sign-in (on by default)  |
+| Grok subscription            | `grok-subscription`  | Subscription sign-in (on by default)  |
 
 Most providers are OpenAI-compatible and plug in as config with no custom code;
 only a few (`claude`, `vertex`, `bedrock`, `azure`) need a dedicated integration.
@@ -270,8 +270,8 @@ Contributor loop: [CONTRIBUTING.md](CONTRIBUTING.md).
 | [webhook-gateway](webhook-gateway/README.md)                                   | Per-recipe webhook signature verifier                 |
 | [webhook-proxy](webhook-proxy/README.md)                                       | Stateless public webhook router                       |
 | [workflow-approval-request-reader](workflow-approval-request-reader/README.md) | Inbound Telegram/Slack approval callbacks             |
-| [codex-llm-proxy](codex-llm-proxy/README.md)                                   | ChatGPT/Codex subscription broker (off by default)    |
-| [grok-llm-proxy](grok-llm-proxy/README.md)                                     | Grok subscription broker (off by default)             |
+| [codex-llm-proxy](codex-llm-proxy/README.md)                                   | ChatGPT/Codex subscription broker                     |
+| [grok-llm-proxy](grok-llm-proxy/README.md)                                     | Grok subscription broker                              |
 
 Ops & platform directories:
 

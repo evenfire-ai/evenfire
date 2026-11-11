@@ -344,6 +344,52 @@ describe('HostReconciler Grok Host runtime gating', () => {
     }
   )
 
+  // Subscriptions are on by default, so an install that never connected an
+  // account sees clerum.io/{codex,grok}-enabled flip from "false" to "true" at
+  // the first publish after the upgrade. With no grant nothing is eligible, so
+  // no Host may restart because of that flip.
+  function freshInstallAllowlist(enabled: boolean): ReturnType<typeof allowlistConfigMap> {
+    return {
+      metadata: {
+        resourceVersion: '1',
+        annotations: {
+          'clerum.io/content-hash': 'aa',
+          'clerum.io/codex-enabled': String(enabled),
+          'clerum.io/grok-enabled': String(enabled),
+          'clerum.io/codex-connection-status': 'disconnected',
+        },
+      },
+      data: { 'codex-subscription': JSON.stringify([]) },
+    }
+  }
+
+  it.each([
+    ['static-provider', staticHost],
+    ['Codex', codexHost],
+    ['Grok', grokHost],
+  ] as const)(
+    'keeps the %s Host pod template unchanged when the subscription switches turn on with no grant',
+    async (_label, hostFactory) => {
+      const off = createReconciler()
+      wireAllowlist(off.coreApi, freshInstallAllowlist(false))
+      await off.reconciler.reconcile(hostFactory())
+      const before = lastDeployment(off.appsApi, hostFactory().name)
+      const scopesOff = issuedScopes()
+
+      const on = createReconciler()
+      wireAllowlist(on.coreApi, freshInstallAllowlist(true))
+      await on.reconciler.reconcile(hostFactory())
+      const after = lastDeployment(on.appsApi, hostFactory().name)
+
+      // Witness: both reconciles reached the token issuer with the runtime
+      // scopes only, so the projection ran and derived nothing.
+      expect(scopesOff).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES])
+      expect(issuedScopes()).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES])
+      expect(JSON.stringify(after.spec?.template)).toBe(JSON.stringify(before.spec?.template))
+      expect(mcpHostEnv(after).map(env => env.name)).not.toContain(GROK_FLAG_ENV)
+    }
+  )
+
   it('revalidates Host authority between the Codex and Grok proxy egress policy writes', async () => {
     const { reconciler, coreApi, networkingApi } = createReconciler()
     wireAllowlist(

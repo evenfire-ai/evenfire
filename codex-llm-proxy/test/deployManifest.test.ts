@@ -109,9 +109,9 @@ describe('codex-llm-proxy base manifest', () => {
     expect(limit).toBeGreaterThanOrEqual(Math.ceil(CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
   })
 
-  it('T-DEP-3 keeps the Codex subscription off in base, as keyper-labs/evenfire-infra CI requires', () => {
-    expect(scalar(MANIFEST, 'CODEX_LLM_PROXY_EXECUTION_ENABLED')).toBe('false')
-    expect(scalar(CONTROL_PLANE_CONFIG, 'CONTROL_API_CODEX_SUBSCRIPTION_ENABLED')).toBe('false')
+  it('T-DEP-3 ships the Codex subscription on in base, and the deployment repository CI checks the same', () => {
+    expect(scalar(MANIFEST, 'CODEX_LLM_PROXY_EXECUTION_ENABLED')).toBe('true')
+    expect(scalar(CONTROL_PLANE_CONFIG, 'CONTROL_API_CODEX_SUBSCRIPTION_ENABLED')).toBe('true')
     // Witness for the absence below: the file is the control-plane config that
     // carries the MCP Host settings.
     expect(scalar(CONTROL_PLANE_CONFIG, 'MCP_HOST_JWT_CONTROL_TTL_SEC')).toBe('600')

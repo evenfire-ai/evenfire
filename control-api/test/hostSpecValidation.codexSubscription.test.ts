@@ -12,15 +12,45 @@ afterEach(() => {
 })
 
 describe('codex-subscription Host admission', () => {
-  it('rejects a Codex target when the management flag is absent or false', async () => {
+  it('accepts a Codex-only Host when the management flag is unset (on by default)', async () => {
+    delete process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED
     const isModelAllowed = vi.fn().mockResolvedValue(true)
     const res = await validateHostSpec(
-      { model: { provider: 'codex-subscription', name: 'gpt-5.1' } },
+      { model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'team-codex' } },
       { isModelAllowed }
     )
+    expect(res).toBeNull()
+    expect(isModelAllowed).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a Codex target when the management flag is false', async () => {
+    const spec = {
+      model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'team-codex' },
+    }
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'false'
+    const isModelAllowed = vi.fn().mockResolvedValue(true)
+    const res = await validateHostSpec(spec, { isModelAllowed })
     expect(res).not.toBeNull()
-    expect(res!.errors[0].message).toMatch(/disabled|not enabled/i)
+    expect(res!.errors[0].message).toMatch(/disabled/i)
+    expect(res!.errors[0].message).toMatch(/CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=false/)
     expect(isModelAllowed).not.toHaveBeenCalled()
+
+    // Witness: the same spec reaches the model check once the flag is on, so
+    // the call count above is not zero just because the stub is unreachable.
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    expect(await validateHostSpec(spec, { isModelAllowed })).toBeNull()
+    expect(isModelAllowed).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a management flag that is neither true nor false', async () => {
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'TRUE'
+    const isModelAllowed = vi.fn().mockResolvedValue(true)
+    await expect(
+      validateHostSpec(
+        { model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'team-codex' } },
+        { isModelAllowed }
+      )
+    ).rejects.toThrow(/CONTROL_API_CODEX_SUBSCRIPTION_ENABLED must be 'true' or 'false'/)
   })
 
   it('allows a Codex-only Host without secretRef when the flag is on', async () => {

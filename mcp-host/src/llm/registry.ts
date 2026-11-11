@@ -51,6 +51,17 @@ export {
   PROVIDERS,
 } from './registryCore'
 
+// Subscription provider switch, read when the provider is built (not at boot,
+// so one bad value in the shared Host ConfigMap does not stop every Host).
+// Unset, empty and `true` mean on; `false` means off; any other value refuses
+// to build the provider.
+function subscriptionSwitchOn(name: string): boolean {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '' || raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`[LLM] makeProvider: ${name} must be 'true' or 'false'`)
+}
+
 /**
  * Construct the concrete provider for `provider` from its credential bag (+
  * optional model). Direct-SDK providers (openai, claude), the own-SDK newcomers
@@ -99,7 +110,7 @@ export function makeProvider(
         env
       )
     case 'codex-subscription':
-      if (process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true') {
+      if (!subscriptionSwitchOn('MCP_HOST_CODEX_SUBSCRIPTION_ENABLED')) {
         throw new Error('[LLM] makeProvider: codex-subscription is disabled')
       }
       if (!model?.trim() || !options?.codex) {
@@ -109,7 +120,7 @@ export function makeProvider(
       }
       return new CodexSubscriptionProvider(model, options.codex)
     case 'grok-subscription':
-      if (process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED !== 'true') {
+      if (!subscriptionSwitchOn('MCP_HOST_GROK_SUBSCRIPTION_ENABLED')) {
         throw new Error('[LLM] makeProvider: grok-subscription is disabled')
       }
       if (!model?.trim() || !options?.grok) {

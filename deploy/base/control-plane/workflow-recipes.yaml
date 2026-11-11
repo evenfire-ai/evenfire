@@ -73,7 +73,7 @@ spec:
         - name: WRC_ENABLE_SNIPPET_RUNTIME
           value: "false"
         - name: WRC_GROK_SUBSCRIPTION_ENABLED
-          value: "false"
+          value: "true"
         - name: WRC_MAX_WORKFLOW_STEPS
           value: "100"
         # issue #299: external-egress accumulator knobs. Declared explicitly so

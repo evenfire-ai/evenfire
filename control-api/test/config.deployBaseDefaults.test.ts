@@ -37,6 +37,41 @@ describe('control-api code defaults against deploy/base', () => {
     )
   })
 
+  for (const [flag, field] of [
+    ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'codexSubscriptionEnabled'],
+    ['CONTROL_API_GROK_SUBSCRIPTION_ENABLED', 'grokSubscriptionEnabled'],
+  ] as const) {
+    it(`${flag} defaults to the deploy/base value (on)`, async () => {
+      delete process.env[flag]
+      const { config } = await import('../src/config.js')
+      expect(config[field]).toBe(true)
+      expect(String(config[field])).toBe(baseValue(flag))
+    })
+
+    it(`${flag} accepts empty, true and false`, async () => {
+      for (const [raw, expected] of [
+        ['', true],
+        ['true', true],
+        ['false', false],
+      ] as const) {
+        vi.resetModules()
+        process.env[flag] = raw
+        const { config } = await import('../src/config.js')
+        expect(config[field], `${flag}='${raw}'`).toBe(expected)
+      }
+    })
+
+    it(`${flag} refuses any other value at startup`, async () => {
+      for (const raw of ['TRUE', '0', 'off', 'true\n']) {
+        vi.resetModules()
+        process.env[flag] = raw
+        await expect(import('../src/config.js'), `${flag}=${JSON.stringify(raw)}`).rejects.toThrow(
+          new RegExp(`${flag} must be 'true' or 'false'`)
+        )
+      }
+    })
+  }
+
   it('the plugin image allowlist default is the deploy/base list plus the Evenfire registry', async () => {
     const { config } = await import('../src/config.js')
     expect(config.allowedPluginImagePrefixes).toEqual([

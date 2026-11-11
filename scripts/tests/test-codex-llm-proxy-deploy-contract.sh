@@ -224,13 +224,13 @@ if "clerum/codex-llm-proxy" not in active(ghcr):
 if "clerum/codex-llm-proxy" not in active(minikube):
     errors.append("minikube overlay images: missing codex-llm-proxy")
 
-# The public base ships Codex subscriptions off and each environment's overlay
-# turns them on; keyper-labs/evenfire-infra CI asserts the base half on every
-# dev commit. The minikube overlay turns both switches on (#739).
-if "CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'false'" not in cm:
-    errors.append("base control-api config must keep Codex subscriptions disabled")
-if 'CODEX_LLM_PROXY_EXECUTION_ENABLED: "false"' not in text:
-    errors.append("base codex-llm-proxy config must keep execution disabled")
+# The public base ships Codex subscriptions on, matching the code default; the
+# deployment repository's CI checks the same values. The minikube overlay also
+# states both switches (#739).
+if "CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'true'" not in cm:
+    errors.append("base control-api config must ship Codex subscriptions enabled")
+if 'CODEX_LLM_PROXY_EXECUTION_ENABLED: "true"' not in text:
+    errors.append("base codex-llm-proxy config must ship execution enabled")
 # The proxy derives its body limit from the contract plus the envelope
 # allowance; a literal in base would freeze it at a stale value.
 if "CODEX_LLM_PROXY_MAX_BODY_BYTES" in text:

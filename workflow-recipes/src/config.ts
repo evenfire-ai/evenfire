@@ -367,7 +367,7 @@ export function loadConfig(): OperatorConfig {
     enableCustomCoordinatorImage: getEnvBool('WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE', false),
     enableSnippetRuntime: getEnvBool('WRC_ENABLE_SNIPPET_RUNTIME', false),
     pluginWorkloadSdkEnabled: getEnvBool('PLUGIN_WORKLOAD_SDK_ENABLED', false),
-    grokSubscriptionEnabled: getEnvBool('WRC_GROK_SUBSCRIPTION_ENABLED', false),
+    grokSubscriptionEnabled: getEnvBool('WRC_GROK_SUBSCRIPTION_ENABLED', true),
     maxWorkflowSteps: workflowMaxSteps,
     workflowMaxWorkloadsPerRecipe,
     workflowUiEgressInternalMaxItems,

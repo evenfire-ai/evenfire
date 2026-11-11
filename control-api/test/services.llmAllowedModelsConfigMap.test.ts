@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { config } from '../src/config.js'
 import type { DbClient } from '../src/db.js'
 import type { CodexSubscriptionSafeConnection } from '../src/services/codexSubscriptionConnection.js'
 import { listEnabledGroupedByProvider } from '../src/services/llmAllowedModels.js'
@@ -199,11 +200,25 @@ describe('LlmAllowedModelsConfigMapWriter', () => {
     expect(cm.metadata!.name).toBe(ALLOWED_MODELS_CONFIGMAP_NAME)
     expect(cm.metadata!.namespace).toBe('mcp-host')
     expect(cm.metadata!.annotations![CONTENT_HASH_ANNOTATION]).toMatch(/^[0-9a-f]{64}$/)
-    expect(cm.metadata!.annotations![CODEX_ENABLED_ANNOTATION]).toBe('false')
+    // The Codex subscription is on by default (CONTROL_API_CODEX_SUBSCRIPTION_ENABLED unset).
+    expect(cm.metadata!.annotations![CODEX_ENABLED_ANNOTATION]).toBe('true')
     expect(cm.metadata!.annotations![CODEX_CONNECTION_STATUS_ANNOTATION]).toBe('disconnected')
     expect(cm.metadata!.annotations![CATALOG_REVISION_ANNOTATION]).toBeUndefined()
     expect(cm.metadata!.annotations![CONNECTION_REVISION_ANNOTATION]).toBeUndefined()
     expect(JSON.parse(cm.data!.zai)[0].model).toBe('glm-4.7')
+  })
+
+  it('publishes codex-enabled "false" when the Codex subscription is turned off', async () => {
+    const previous = config.codexSubscriptionEnabled
+    config.codexSubscriptionEnabled = false
+    try {
+      const cluster = new FakeConfigMapApi()
+      await writerOver(cluster, fakeDb(rows)).materialize()
+      expect(cluster.writes).toBe(1)
+      expect(cluster.current!.metadata!.annotations![CODEX_ENABLED_ANNOTATION]).toBe('false')
+    } finally {
+      config.codexSubscriptionEnabled = previous
+    }
   })
 
   it('reads the database on the lock connection, inside one bounded transaction', async () => {
