@@ -484,7 +484,10 @@ async function buildCorpus(): Promise<Record<string, unknown>> {
         const client = (provider as unknown as { client: unknown }).client
         corpus[`missing-credential|${id}`] = { constructed: true, clientType: typeof client }
       } catch (err) {
-        corpus[`missing-credential|${id}`] = { error: (err as Error).message }
+        // The SDK's message goes on to embed a sample `apiKey: '...'` literal,
+        // which the public-boundary secret scanner rejects; the first sentence
+        // alone still pins where and why construction fails.
+        corpus[`missing-credential|${id}`] = { error: (err as Error).message.split('; ')[0] }
       }
     }
   } finally {
