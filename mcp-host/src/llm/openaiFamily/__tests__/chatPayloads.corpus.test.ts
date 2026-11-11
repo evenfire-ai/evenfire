@@ -16,9 +16,14 @@
  *
  * The official endpoint now speaks Responses, so its `call|openai|…` rows run
  * against the official profile pinned to Chat (same parameter rows, identity
- * and visual limits): the recorded corpus keeps guarding the Chat serializer
- * byte for byte. Its identity, classification and credential rows still come
- * from the real factory.
+ * and visual limits). Production never builds that combination: the rows are
+ * kept because Azure still serializes through the same Chat code, and they
+ * guard it byte for byte with the richest parameter rows. Its identity,
+ * classification and credential rows still come from the real factory.
+ *
+ * The Responses wire has no byte-for-byte corpus: its payloads are asserted
+ * field by field in the Responses protocol tests, so a field reorder or a
+ * dropped explicit `undefined` on that wire goes unnoticed.
  *
  * Serialization keeps key order and marks `undefined`-valued keys, so a
  * refactor that reorders fields or drops an explicit `undefined` shows up here
