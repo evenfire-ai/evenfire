@@ -42,6 +42,7 @@ import {
   ExecuteStepRequest,
   ExecuteStepResponse,
   PluginWorkloadSdkBootstrapRequest,
+  SuspiciousOutputRule,
   ToolCallRecord,
 } from './types'
 import { type McpHostRuntimeAuth, gateStep, refreshWithRecovery } from './userApprovalRequester'
@@ -830,15 +831,19 @@ export class WorkflowService {
 
   /**
    * Detect suspicious LLM outputs that look like malformed tool calls or
-   * truncated responses rather than genuine analysis content.
+   * truncated responses rather than genuine analysis content, and name the
+   * rule that matched (null when none did).
    *
    * Patterns detected:
    * 1. Contains XML-like tool call fragments (model tried to call tool as text)
    * 2. Very short output after many tool calls (model lost context)
    * 3. Output is just a URL or code fragment
    */
-  private static isSuspiciousOutput(content: string, toolCallCount: number): boolean {
-    if (!content || content.length === 0) return true
+  private static isSuspiciousOutput(
+    content: string,
+    toolCallCount: number
+  ): SuspiciousOutputRule | null {
+    if (!content || content.length === 0) return 'empty'
 
     // Pattern 1: XML-like tool call fragments
     const hasToolCallFragment =
@@ -847,16 +852,77 @@ export class WorkflowService {
       /<\/tool_call>/.test(content) ||
       /^Tool call:\s/i.test(content.trim())
 
-    if (hasToolCallFragment) return true
+    if (hasToolCallFragment) return 'tool-call-fragment'
 
     // Pattern 2: Extremely short output after substantial tool usage
     // If the model made 5+ tool calls but produced < 100 chars, it likely lost context
-    if (toolCallCount >= 5 && content.length < 100) return true
+    if (toolCallCount >= 5 && content.length < 100) return 'short-after-tools'
 
     // Pattern 3: Output is just a URL
-    if (/^https?:\/\/\S+$/.test(content.trim())) return true
+    if (/^https?:\/\/\S+$/.test(content.trim())) return 'bare-url'
 
-    return false
+    return null
+  }
+
+  /**
+   * A tool call written as text: call markup outside quoted code, bare `Tool call:` lines, or a
+   * JSON call left after a server stripped the opening tag.
+   */
+  private static isToolCallText(content: string): boolean {
+    // Markup inside code spans or blocks is quoted, not a call.
+    const outsideCode = content.replace(/```[\s\S]*?```|`[^`\n]*`/g, ' ')
+    return (
+      /<tool_call[\s>]|<arg_key>|<arg_value>|<function=|<parameter=/.test(outsideCode) ||
+      // History-style `Tool call:` lines, unless real prose surrounds them.
+      (/^Tool call:\s/im.test(outsideCode) &&
+        outsideCode.replace(/^Tool call:\s.*$/gim, '').trim().length < 100) ||
+      WorkflowService.isToolCallJson(content.replace(/<\/tool_call>/g, ''))
+    )
+  }
+
+  /** Not a tool call, and unflagged when judged whole without stray or quoted tool-call markup. */
+  private static isRealAnswer(content: string, toolCallCount: number): boolean {
+    const plain = content.replace(/<\/?(?:tool_call|arg_key|arg_value)>/g, '')
+    return (
+      !WorkflowService.isToolCallText(content) &&
+      plain.trim() !== '' &&
+      WorkflowService.isSuspiciousOutput(plain, toolCallCount) === null
+    )
+  }
+
+  /** A tool call written as JSON: an object, or a list of them, with a `name` and its arguments. */
+  private static isToolCallJson(text: string): boolean {
+    const trimmed = text.trim()
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return false
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      return false
+    }
+    return (Array.isArray(parsed) ? parsed : [parsed]).some(
+      call =>
+        typeof call === 'object' &&
+        call !== null &&
+        typeof (call as { name?: unknown }).name === 'string' &&
+        ('arguments' in call || 'parameters' in call)
+    )
+  }
+
+  /** The one corrective a flagged answer gets. Tools stay offered while iterations remain. */
+  private static suspiciousOutputCorrective(rule: SuspiciousOutputRule): string {
+    if (rule === 'tool-call-fragment') {
+      return (
+        '[SYSTEM] Your last reply looked like a tool call written as text. ' +
+        'To call a tool, use the tool-calling interface. If that reply was your final answer, ' +
+        'send it again in full without tool-call markup.'
+      )
+    }
+    return (
+      '[SYSTEM] Your previous response appears to be a malformed tool call or truncated output. ' +
+      'Instead, produce a comprehensive final response that summarizes ALL the information ' +
+      'you have gathered from your previous tool calls. Write the full analysis now.'
+    )
   }
 
   async executeStep(
@@ -945,6 +1011,56 @@ export class WorkflowService {
     let lengthContinuationAttempted = false
     let lengthPartialOutput = ''
     let providerOutputLengthExceeded = false
+    // One corrective per step; the flagged answer is kept as a fallback (see the precedence below).
+    let correctiveRule: SuspiciousOutputRule | null = null
+    let keptOutput: string | null = null
+    let keptIsRealAnswer = false
+    let keptIsToolCall = false
+    let toolsResumedAfterCorrective = false
+    let outputRecovery: ExecuteStepResponse['outputRecovery']
+    let iterationsUsed = 0
+
+    /**
+     * A failed retry (timeout, provider error, output limit) returns a real kept answer instead,
+     * unless the caller left or a required tool call never succeeded.
+     */
+    const keptAnswerOnFailure = (reason: string): ExecuteStepResponse | null => {
+      const rule = correctiveRule
+      const kept = keptOutput
+      if (
+        rule === null ||
+        kept === null ||
+        !keptIsRealAnswer ||
+        options.signal?.aborted ||
+        (req.toolChoice === 'required' && !toolsCalled.some(toolCallSucceeded))
+      ) {
+        return null
+      }
+      logger.info(
+        {
+          component: LOG_COMPONENT,
+          stepId: req.stepId,
+          rule,
+          outputLength: kept.length,
+          reason: sanitizeErrorMessage(reason),
+        },
+        'Step failed after the corrective; returning the kept answer'
+      )
+      return {
+        stepId: req.stepId,
+        status: 'completed',
+        output: kept,
+        toolsCalled,
+        tokensUsed: {
+          input: totalInputTokens,
+          output: totalOutputTokens,
+          total: totalInputTokens + totalOutputTokens,
+        },
+        completedAt: new Date().toISOString(),
+        durationMs: Date.now() - startTime,
+        outputRecovery: { rule, keptOriginal: true },
+      }
+    }
     const workflowExecutionId = WorkflowService.getWorkflowExecutionId(req.contextVars)
     const workflowTeamId = WorkflowService.getWorkflowTeamId(req.contextVars)
     const workflowUserId = WorkflowService.getWorkflowUserId(req.contextVars)
@@ -1209,13 +1325,17 @@ export class WorkflowService {
       const requiresToolCall = req.toolChoice === 'required'
 
       for (let i = 0; i < MAX_ITERATIONS; i++) {
+        iterationsUsed = i + 1
         onProgress?.({ iteration: i + 1 })
 
         if (abortController.signal.aborted) {
+          const reason = abortReason(abortController.signal)
+          const kept = keptAnswerOnFailure(reason)
+          if (kept) return kept
           return {
             stepId: req.stepId,
             status: 'failed',
-            error: abortReason(abortController.signal),
+            error: reason,
             toolsCalled,
             durationMs: Date.now() - startTime,
           }
@@ -1297,6 +1417,7 @@ export class WorkflowService {
           )
 
           if (response.tool_calls && response.tool_calls.length > 0) {
+            if (correctiveRule !== null) toolsResumedAfterCorrective = true
             // Process tool calls
             for (const call of response.tool_calls) {
               onProgress?.({ iteration: i + 1, toolCall: call.name })
@@ -1375,34 +1496,85 @@ export class WorkflowService {
             providerOutputLengthExceeded = true
             break
           }
-          const isSuspicious = WorkflowService.isSuspiciousOutput(
-            candidateOutput,
+          // First answer: judged by its last part, as before. Later answers: judged whole.
+          const answer = [lengthPartialOutput, candidateOutput].filter(Boolean).join('\n')
+          const suspiciousRule = WorkflowService.isSuspiciousOutput(
+            correctiveRule === null ? candidateOutput : answer,
             toolsCalled.length
           )
 
-          if (isSuspicious && i < MAX_ITERATIONS - 1) {
+          if (suspiciousRule && correctiveRule === null && i < MAX_ITERATIONS - 1) {
+            correctiveRule = suspiciousRule
+            if (answer.trim()) {
+              keptOutput = answer
+              keptIsRealAnswer = WorkflowService.isRealAnswer(answer, toolsCalled.length)
+              keptIsToolCall = WorkflowService.isToolCallText(answer)
+            }
+            // A later continuation belongs to the retry.
+            lengthPartialOutput = ''
             logger.info(
               {
                 component: LOG_COMPONENT,
                 stepId: req.stepId,
                 iteration: i + 1,
-                outputLength: candidateOutput.length,
+                outputLength: answer.length,
+                rule: suspiciousRule,
               },
               'Step response looks suspicious; requesting proper summary'
             )
             messages.push({ role: 'assistant', content: candidateOutput })
             messages.push({
               role: 'user',
-              content:
-                '[SYSTEM] Your previous response appears to be a malformed tool call or truncated output. ' +
-                'Do NOT attempt to call any more tools. Instead, produce a comprehensive final response ' +
-                'that summarizes ALL the information you have gathered from your previous tool calls. ' +
-                'Write the full analysis now.',
+              content: WorkflowService.suspiciousOutputCorrective(suspiciousRule),
             })
             continue // Retry with corrective prompt
           }
 
-          finalOutput = [lengthPartialOutput, candidateOutput].filter(Boolean).join('\n')
+          // After the corrective, a blank answer or a flagged textual tool call is no answer, and a
+          // kept tool call is never the output. A later real answer beats a kept non-answer. A real
+          // kept answer yields only to a clean, non-call answer of 100+ characters or to a real
+          // answer written after more tool use. Once tools resume, a non-real kept answer gives
+          // way; no answer on the last iteration means they ran out (note first).
+          const blank = answer.trim() === ''
+          const shieldsKept =
+            correctiveRule !== null && keptIsRealAnswer && suspiciousRule === null && !blank
+          const laterIsToolCall =
+            correctiveRule !== null &&
+            (suspiciousRule !== null || shieldsKept) &&
+            WorkflowService.isToolCallText(answer)
+          const laterIsNoAnswer = blank || laterIsToolCall
+          const laterIsShortNote = shieldsKept && !laterIsToolCall && answer.trim().length < 100
+          const laterIsRealAnswer =
+            suspiciousRule !== null && WorkflowService.isRealAnswer(answer, toolsCalled.length)
+          const keptLoses =
+            keptIsToolCall ||
+            (toolsResumedAfterCorrective
+              ? !keptIsRealAnswer ||
+                laterIsRealAnswer ||
+                (laterIsNoAnswer && i === MAX_ITERATIONS - 1)
+              : laterIsRealAnswer && !keptIsRealAnswer)
+          const kept =
+            (suspiciousRule !== null || laterIsNoAnswer || laterIsShortNote) &&
+            keptOutput !== null &&
+            !keptLoses
+              ? keptOutput
+              : null
+          if (kept !== null) {
+            logger.info(
+              {
+                component: LOG_COMPONENT,
+                stepId: req.stepId,
+                iteration: i + 1,
+                outputLength: answer.length,
+                rule: suspiciousRule,
+              },
+              'Step answer after the corrective is no better; keeping the first answer'
+            )
+          }
+          finalOutput = kept ?? (correctiveRule !== null && laterIsNoAnswer ? '' : answer)
+          if (correctiveRule) {
+            outputRecovery = { rule: correctiveRule, keptOriginal: kept !== null }
+          }
           break
         } else {
           // No tools — single LLM call
@@ -1448,6 +1620,8 @@ export class WorkflowService {
       }
 
       if (providerOutputLengthExceeded) {
+        const kept = keptAnswerOnFailure(PROVIDER_LENGTH_ERROR)
+        if (kept) return kept
         return {
           stepId: req.stepId,
           status: 'failed',
@@ -1481,17 +1655,32 @@ export class WorkflowService {
       // than failing the entire workflow — the collected tool results are still valuable.
       if (!finalOutput) {
         const toolSummary = toolsCalled.map(t => `${t.serverName}__${t.toolName}`).join(', ')
+        // Only the corrective can end the loop early without an answer; any other empty end
+        // keeps the iteration-limit note.
+        const endedEarly = correctiveRule !== null && iterationsUsed < MAX_ITERATIONS
+        const ranOut = !endedEarly
         finalOutput =
-          `[Note: Research reached the iteration limit (${MAX_ITERATIONS} iterations, ${toolsCalled.length} tool calls: ${toolSummary}). ` +
+          (ranOut
+            ? `[Note: Research reached the iteration limit (${MAX_ITERATIONS} iterations, ${toolsCalled.length} tool calls: ${toolSummary}). `
+            : `[Note: The model returned no final answer (${iterationsUsed} of ${MAX_ITERATIONS} iterations, ${toolsCalled.length} tool calls: ${toolSummary}). `) +
           `The information gathered above represents partial results. A follow-up step can synthesize these findings.]`
+        // The note stays first so consumers still treat the output as incomplete. A kept tool
+        // call is never appended, and an early end never has a real kept answer.
+        const appendKept =
+          correctiveRule !== null && keptOutput !== null && ranOut && !keptIsToolCall
+        if (appendKept) finalOutput += `\n\n${keptOutput}`
+        if (correctiveRule) outputRecovery = { rule: correctiveRule, keptOriginal: appendKept }
         logger.info(
           {
             component: LOG_COMPONENT,
             stepId: req.stepId,
             maxIterations: MAX_ITERATIONS,
+            iteration: iterationsUsed,
             toolCallCount: toolsCalled.length,
           },
-          'Step reached max iterations; returning partial results'
+          ranOut
+            ? 'Step reached max iterations; returning partial results'
+            : 'Step ended without a final answer; returning partial results'
         )
       }
 
@@ -1507,6 +1696,9 @@ export class WorkflowService {
         },
         completedAt: new Date().toISOString(),
         durationMs: Date.now() - startTime,
+        ...(correctiveRule
+          ? { outputRecovery: outputRecovery ?? { rule: correctiveRule, keptOriginal: false } }
+          : {}),
       }
     } catch (err) {
       const rawError = err instanceof Error ? err.message : String(err)
@@ -1525,6 +1717,8 @@ export class WorkflowService {
         },
         'Step caught error'
       )
+      const kept = keptAnswerOnFailure(rawError)
+      if (kept) return kept
       // F-9 fix: surface timeout errors with canonical error code (matches abort-check at loop top)
       if (rawError === 'step-timeout') {
         return {

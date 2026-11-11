@@ -12,9 +12,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { WorkflowService } from '../workflowService'
 
-// Access private static method via bracket notation for testing
+// Access private static method via bracket notation for testing; it returns the rule or null.
 const isSuspicious = (content: string, toolCallCount: number): boolean => {
-  return (WorkflowService as any).isSuspiciousOutput(content, toolCallCount)
+  return (WorkflowService as any).isSuspiciousOutput(content, toolCallCount) !== null
 }
 
 describe('isSuspiciousOutput — Pattern 1: XML tool call fragments', () => {
@@ -178,7 +178,7 @@ describe('WorkflowService corrective retry integration', () => {
     const fs = require('fs')
     const path = require('path')
     const content = fs.readFileSync(path.resolve(__dirname, '../workflowService.ts'), 'utf-8')
-    // Guard: only retry if not on last iteration
-    expect(content).toMatch(/isSuspicious && i < MAX_ITERATIONS - 1/)
+    // Guard: at most one corrective, never on the last iteration
+    expect(content).toMatch(/suspiciousRule && correctiveRule === null && i < MAX_ITERATIONS - 1/)
   })
 })

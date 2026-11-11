@@ -57,6 +57,9 @@ export interface ExecuteStepRequest {
   requiresApproval?: ApprovalRequest
 }
 
+/** The rule that flagged a step's final answer as suspicious. */
+export type SuspiciousOutputRule = 'tool-call-fragment' | 'short-after-tools' | 'bare-url' | 'empty'
+
 export interface ExecuteStepResponse {
   stepId: string
   status: 'completed' | 'failed'
@@ -66,6 +69,11 @@ export interface ExecuteStepResponse {
   tokensUsed?: TokenUsage
   completedAt?: string
   durationMs: number
+  /**
+   * Set only when a suspicious answer got the corrective: keptOriginal says the
+   * output is (or ends with) that first answer rather than a later one.
+   */
+  outputRecovery?: { rule: SuspiciousOutputRule; keptOriginal: boolean }
 }
 
 export interface ToolCallRecord {
