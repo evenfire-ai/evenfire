@@ -1167,6 +1167,71 @@ describe('FilePreviewPage', () => {
     markdownDraftOwner.quit()
   })
 
+  it('hides Edit immediately while a previously positive capability is revalidating', async () => {
+    const uri = 'gfs://main/abababababababababababababababce'
+    const resource = await resolvePreviewResource(uri)
+    let resolveAgain!: (value: typeof resource) => void
+    let resolveCalls = 0
+    let holdResolves = false
+    const secondResolve = new Promise<typeof resource>(resolve => {
+      resolveAgain = resolve
+    })
+    const { resolve } = stubGfs({
+      downloadPreview: async () => ({ bytes: new TextEncoder().encode('# Saved').buffer }),
+      resolve: async () => {
+        resolveCalls += 1
+        return holdResolves ? secondResolve : resource
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller(),
+      principalScope: 'principal-owner-1',
+    })
+    const markdownDraftOwner = new MarkdownDraftOwner()
+    render(
+      <FilePreviewPage
+        byteLength={7}
+        fileKind="markdown"
+        fileName="README.md"
+        gfsUri={uri}
+        markdownDraftOwner={markdownDraftOwner}
+        tabId="preview-tab-capability-refresh"
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Saved' })
+    await waitFor(() =>
+      expect(
+        markdownDraftOwner.get({
+          principalOwner: 'principal-owner-1',
+          scopeKey: 'preview-test-user:main',
+          tabId: 'preview-tab-capability-refresh',
+          gfsUri: uri,
+        })?.capability
+      ).toBe('positive')
+    )
+    const menu = openPreviewActions('README.md')
+    expect(within(menu).getByRole('menuitem', { name: 'Edit' })).toBeTruthy()
+
+    const resolveCallsBeforeFocus = resolve.mock.calls.length
+    vi.spyOn(markdownDraftOwner, 'beginCapabilityRefresh').mockReturnValue(null)
+    holdResolves = true
+    fireEvent.focus(window)
+    await waitFor(() => expect(resolve.mock.calls.length).toBeGreaterThan(resolveCallsBeforeFocus))
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull()
+    expect(
+      markdownDraftOwner.get({
+        principalOwner: 'principal-owner-1',
+        scopeKey: 'preview-test-user:main',
+        tabId: 'preview-tab-capability-refresh',
+        gfsUri: uri,
+      })?.capability
+    ).toBe('positive')
+
+    await act(async () => resolveAgain(resource))
+    markdownDraftOwner.quit()
+  })
+
   it('keeps Markdown readable but unavailable for editing when permission lookup fails', async () => {
     const uri = 'gfs://main/abababababababababababababababcd'
     const replaceFile = vi.fn()
@@ -2367,6 +2432,48 @@ describe('FilePreviewPage', () => {
     // A per-resource 403 is NOT a session-authority failure: it was routed
     // through handleAuthorityFailure (which declined) and did not revoke.
     expect(controllerState.handleAuthorityFailure).toHaveReturnedWith(false)
+  })
+
+  it('clears a resource denial when the same preview moves to a different session scope', async () => {
+    const uri = 'gfs://main/scope-recovered-resource'
+    const deniedMessage = await resolveDeniedMessage(uri)
+    let scope = 'preview-test-user:team-a'
+    let allowed = false
+    hookMock.useGfsBrowserController.mockImplementation(() => ({
+      ...controller(),
+      sessionScope: scope,
+    }))
+    const { resolve } = stubGfs({
+      downloadPreview: async () => {
+        if (!allowed) throw new Error(deniedMessage)
+        return { bytes: new Uint8Array([1, 2, 3]).buffer }
+      },
+      resolve: async () => resolvePreviewResource(uri),
+    })
+    const element = () => (
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="shared.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={3}
+        tabId="same-preview-tab"
+      />
+    )
+    const { rerender } = render(element())
+
+    expect(
+      await screen.findByText(/403 Forbidden.*not authorized to read this resource/)
+    ).toBeTruthy()
+    expect(resolve).toHaveBeenCalledTimes(1)
+
+    scope = 'preview-test-user:team-b'
+    allowed = true
+    rerender(element())
+
+    expect(await screen.findByAltText('Preview of shared.png')).toBeTruthy()
+    expect(resolve.mock.calls.length).toBeGreaterThan(1)
+    expect(screen.queryByRole('heading', { name: 'File unavailable', level: 3 })).toBeNull()
   })
 
   // H2 no-regress: a SESSION-authority failure discovered by the focus re-check

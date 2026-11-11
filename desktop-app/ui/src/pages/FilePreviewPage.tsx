@@ -296,6 +296,7 @@ export function FilePreviewPage({
       !markdownDraftOwner ||
       !draftBinding ||
       !markdownEligible ||
+      !previewResourceActions.canWrite ||
       byteLength > MARKDOWN_DRAFT_MAX_BYTES
     )
       return
@@ -308,6 +309,7 @@ export function FilePreviewPage({
     draftBinding?.tabId,
     markdownDraftOwner,
     markdownEligible,
+    previewResourceActions.canWrite,
   ])
 
   const handleSaveMarkdown = useCallback(async () => {
@@ -417,6 +419,7 @@ export function FilePreviewPage({
   const editAvailable = Boolean(
     markdownEligible &&
     byteLength <= MARKDOWN_DRAFT_MAX_BYTES &&
+    previewResourceActions.canWrite &&
     visibleDraftRecord?.readReady &&
     !visibleDraftRecord.readPending &&
     Boolean(visibleDraftRecord.savedSnapshot) &&
@@ -472,7 +475,7 @@ export function FilePreviewPage({
   // Each previewed resource starts from a clean per-resource verdict.
   useEffect(() => {
     setDenied(null)
-  }, [gfsUri])
+  }, [capturedSessionGeneration, capturedSessionScope, ctrl.principalScope, gfsUri])
 
   useEffect(() => {
     if (unavailable) setDenied(null)
