@@ -19,6 +19,7 @@ export function GfsVideoPreviewBody({
   onDownloadError,
   titleId,
   titleActions,
+  permissionProgress,
   headerActions,
   headingLevel = 3,
 }: GfsVideoPreviewBodyProps) {
@@ -81,6 +82,7 @@ export function GfsVideoPreviewBody({
           <HeadingTag className="da-gfs-preview-title" id={headingId}>
             {fileName}
           </HeadingTag>
+          {permissionProgress}
           {titleActions}
         </div>
         {headerActions}

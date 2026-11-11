@@ -89,6 +89,7 @@ export function GfsMarkdownPreviewBody({
   onCopyContentReady,
   titleId,
   titleActions,
+  permissionProgress,
   headerActions,
   headingLevel = 3,
 }: GfsMarkdownPreviewBodyProps) {
@@ -176,6 +177,7 @@ export function GfsMarkdownPreviewBody({
           <HeadingTag className="da-gfs-preview-title" id={headingId}>
             {fileName}
           </HeadingTag>
+          {permissionProgress}
           {titleActions}
         </div>
         <div className="da-gfs-markdown-preview-dialog__header-actions">{headerActions}</div>
