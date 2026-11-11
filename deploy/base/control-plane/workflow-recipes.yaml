@@ -76,6 +76,14 @@ spec:
           value: "false"
         - name: WRC_MAX_WORKFLOW_STEPS
           value: "100"
+        # issue #299: external-egress accumulator knobs. Declared explicitly so
+        # the production values are reviewable; both equal the code defaults.
+        # The overlap must stay at least twice the refresh interval (60s), and
+        # the entry cap bounds the FQDN provenance annotation.
+        - name: WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS
+          value: "3600"
+        - name: WRC_EXTERNAL_EGRESS_MAX_ENTRIES
+          value: "256"
         - name: CLERUM_WORKFLOW_MAX_WORKLOADS_PER_RECIPE
           valueFrom:
             configMapKeyRef:

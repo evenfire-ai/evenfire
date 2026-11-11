@@ -156,6 +156,9 @@ TRANSPORT_PORT=3000
 UPSTREAM_PORT=443
 OVERRIDE_ANNOTATION="clerum.io/e2e-temporary-override"
 OVERRIDE_VALUE="e2e-egress-cdn-rotation"
+# Phase 1's accelerated overlap. deploy/base declares the key with its production
+# value, so only this value marks a leftover override.
+HCC_TEST_OVERLAP_SEC=60
 STATE_ANNOTATION="clerum.io/egress-fqdn-state"
 
 # ── Bounded waits (seconds unless the suffix says otherwise) ───────────
@@ -1123,7 +1126,7 @@ phase0() {
   # Leftovers from an aborted run are a precondition failure, never adopted.
   # Both annotation checks read the JSON saved above, so a failed read cannot
   # leave the annotation empty and pass as "no override".
-  if printf '%s' "$HCC_ENV_ORIGINAL" | jq -e 'any(.[]?; .name == "HCC_EXTERNAL_EGRESS_OVERLAP_SEC")' >/dev/null ||
+  if hcc_env_has_test_overlap "$HCC_ENV_ORIGINAL" ||
      jq -e --arg key "$OVERRIDE_ANNOTATION" --arg value "$OVERRIDE_VALUE" \
        '.metadata.annotations[$key] == $value' \
        "${EVIDENCE_DIR}/hcc-deployment-original.json" >/dev/null ||
@@ -1233,7 +1236,7 @@ phase1() {
     finish 2 hcc-env-not-applied
   }
   kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -c "$HCC_CONTAINER" \
-    HCC_EXTERNAL_EGRESS_OVERLAP_SEC=60 HCC_EXTERNAL_EGRESS_RESYNC_SEC=10 >/dev/null || {
+    "HCC_EXTERNAL_EGRESS_OVERLAP_SEC=${HCC_TEST_OVERLAP_SEC}" HCC_EXTERNAL_EGRESS_RESYNC_SEC=10 >/dev/null || {
     fail "could not set the HCC egress window environment"
     finish 2 hcc-env-not-applied
   }
@@ -1241,8 +1244,8 @@ phase1() {
     fail "HCC did not become Ready with the accelerated window"
     finish 2 hcc-env-not-applied
   fi
-  if ! hcc_env_json | jq -e '
-    any(.[]?; .name == "HCC_EXTERNAL_EGRESS_OVERLAP_SEC" and .value == "60") and
+  if ! hcc_env_json | jq -e --arg overlap "$HCC_TEST_OVERLAP_SEC" '
+    any(.[]?; .name == "HCC_EXTERNAL_EGRESS_OVERLAP_SEC" and .value == $overlap) and
     any(.[]?; .name == "HCC_EXTERNAL_EGRESS_RESYNC_SEC" and .value == "10")' >/dev/null; then
     fail "HCC does not carry OVERLAP=60 and RESYNC=10"
     finish 2 hcc-env-not-applied
@@ -1886,6 +1889,12 @@ capture_proxy_logs() {
     kctl logs "$CONTROL_POD" -n "$RECIPE_NS" -c egress-proxy --tail=200 --request-timeout=30s \
       >"${EVIDENCE_DIR}/control-proxy.log" 2>&1 || :
   fi
+}
+
+# hcc_env_has_test_overlap <env-json>: 0 when the HCC env carries phase 1's overlap.
+hcc_env_has_test_overlap() {
+  printf '%s' "$1" | jq -e --arg value "$HCC_TEST_OVERLAP_SEC" \
+    'any(.[]?; .name == "HCC_EXTERNAL_EGRESS_OVERLAP_SEC" and .value == $value)' >/dev/null
 }
 
 # ── Main ───────────────────────────────────────────────────────────────

@@ -1,9 +1,11 @@
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { isDeepStrictEqual } from 'node:util'
 import {
   type AdministrativeOutcomeReporter,
   BoundedAdministrativeOutcomeReporter,
 } from '../src/administrativeOutcomeReporter'
+import { config } from '../src/config'
 import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
@@ -2796,5 +2798,344 @@ describe('HostReconciler.observeFrontsOAuthServer transient-blip retry (R4-M9)',
     })
     // Retried up to the bounded ceiling (3 total attempts).
     expect(calls).toBe(3)
+  })
+})
+
+describe('Host Deployment pull Secret from config', () => {
+  it('sets imagePullSecrets on the Host Deployment only for a non-empty Secret name', () => {
+    const original = config.hostImagePullSecretName
+    onTestFinished(() => {
+      config.hostImagePullSecretName = original
+    })
+    const { reconciler } = createReconciler()
+
+    config.hostImagePullSecretName = ''
+    const none = reconciler.buildDeployment(makeHost()).spec!.template!.spec!
+    expect(none.imagePullSecrets).toBeUndefined()
+    // Witness: the Deployment was built from this config.
+    expect(none.containers.find(c => c.name === 'mcp-host')?.image).toBe('clerum/mcp-host:0.6.0')
+
+    config.hostImagePullSecretName = 'regcred'
+    const named = reconciler.buildDeployment(makeHost()).spec!.template!.spec!
+    expect(named.imagePullSecrets).toEqual([{ name: 'regcred' }])
+  })
+})
+
+describe('Host workspace PVC StorageClass from config', () => {
+  // Like the apiserver's ValidatePersistentVolumeClaimUpdate for a claim with no volumeName: the
+  // spec is immutable, apart from volumeName and a nil class moving to a class, "" included. Only
+  // the class a beta annotation names can replace a nil one. The apiserver defaults volumeMode
+  // before it compares. This mock also refuses dropping the annotation, which upstream allows in
+  // that upgrade: it can only refuse more than the apiserver, and ensurePvc keeps annotations.
+  const BETA_CLASS_ANNOTATION = 'volume.beta.kubernetes.io/storage-class'
+  const immutablePvcSpec = ({
+    storageClassName: _class,
+    volumeName: _volume,
+    volumeMode,
+    ...rest
+  }: k8s.V1PersistentVolumeClaimSpec) => ({ ...rest, volumeMode: volumeMode ?? 'Filesystem' })
+  const apiserverPvcReplace =
+    (live: k8s.V1PersistentVolumeClaim) =>
+    async ({ body }: { body: k8s.V1PersistentVolumeClaim }) => {
+      const liveClass = live.spec!.storageClassName
+      const sentClass = body.spec!.storageClassName
+      const betaClass = live.metadata?.annotations?.[BETA_CLASS_ANNOTATION]
+      const classAllowed =
+        sentClass === liveClass ||
+        (liveClass === undefined && (betaClass === undefined || sentClass === betaClass))
+      const allowed =
+        classAllowed &&
+        body.metadata?.annotations?.[BETA_CLASS_ANNOTATION] === betaClass &&
+        isDeepStrictEqual(immutablePvcSpec(body.spec!), immutablePvcSpec(live.spec!))
+      if (!allowed) {
+        throw Object.assign(new Error('spec is immutable after creation'), { code: 422 })
+      }
+      return body
+    }
+
+  it('omits storageClassName from the workspace PVC when no class is configured', () => {
+    const original = config.hostWorkspaceStorageClassName
+    onTestFinished(() => {
+      config.hostWorkspaceStorageClassName = original
+    })
+    const { reconciler } = createReconciler()
+    const buildPvc = (host: HostCRD): k8s.V1PersistentVolumeClaim =>
+      (reconciler as unknown as { buildPvc(h: HostCRD): k8s.V1PersistentVolumeClaim }).buildPvc(
+        host
+      )
+
+    config.hostWorkspaceStorageClassName = undefined
+    const unset = buildPvc(makeHost()).spec!
+    expect(unset).not.toHaveProperty('storageClassName')
+    // Witness: the claim was built and inspected.
+    expect(unset.accessModes).toEqual(['ReadWriteOnce'])
+    expect(unset.resources?.requests?.storage).toBe('10Gi')
+
+    config.hostWorkspaceStorageClassName = 'standard-rwo'
+    expect(buildPvc(makeHost()).spec!.storageClassName).toBe('standard-rwo')
+  })
+
+  it('keeps an explicit empty storageClassName on the workspace PVC', () => {
+    const original = config.hostWorkspaceStorageClassName
+    onTestFinished(() => {
+      config.hostWorkspaceStorageClassName = original
+    })
+    const { reconciler } = createReconciler()
+
+    config.hostWorkspaceStorageClassName = ''
+    const spec = (
+      reconciler as unknown as { buildPvc(h: HostCRD): k8s.V1PersistentVolumeClaim }
+    ).buildPvc(makeHost()).spec!
+    // "" disables dynamic provisioning; it must not be dropped like an unset class.
+    expect(spec).toHaveProperty('storageClassName', '')
+  })
+
+  // 'standard-rwo' is the class the DefaultStorageClass admission plugin set on a claim created
+  // without one. "" is a claim an earlier CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS="" left
+  // behind: the apiserver refuses "" -> nil as it refuses any other class change.
+  it.each(['standard-rwo', ''])(
+    'keeps the live class %j when it replaces an unbound PVC and no class is configured',
+    async liveClass => {
+      const original = config.hostWorkspaceStorageClassName
+      onTestFinished(() => {
+        config.hostWorkspaceStorageClassName = original
+      })
+      config.hostWorkspaceStorageClassName = undefined
+      const { reconciler, coreApi } = createReconciler()
+      // Pending (WaitForFirstConsumer, or a suspended Host), so it has no volumeName.
+      const live: k8s.V1PersistentVolumeClaim = {
+        metadata: {
+          name: 'alpha-host-workspace',
+          namespace: 'mcp-host',
+          uid: 'pvc-uid',
+          labels: {
+            'clerum.io/host': 'alpha-host',
+            'clerum.io/managed-by': 'host-context-controller',
+          },
+          resourceVersion: '7',
+        },
+        spec: {
+          storageClassName: liveClass,
+          volumeMode: 'Filesystem',
+          accessModes: ['ReadWriteOnce'],
+          resources: { requests: { storage: '10Gi' } },
+        },
+        status: { phase: 'Pending' },
+      }
+      coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
+      coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(apiserverPvcReplace(live))
+
+      await expect(
+        (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
+      ).resolves.toBe(true)
+      expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+      const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
+      expect(body.spec.storageClassName).toBe(liveClass)
+      expect(body.metadata.resourceVersion).toBe('7')
+    }
+  )
+
+  it.each([undefined, 'standard-rwo'])(
+    'keeps the live annotations and finalizers when it replaces an unbound PVC (configured class %s)',
+    async configuredClass => {
+      const original = config.hostWorkspaceStorageClassName
+      onTestFinished(() => {
+        config.hostWorkspaceStorageClassName = original
+      })
+      config.hostWorkspaceStorageClassName = configuredClass
+      const { reconciler, coreApi } = createReconciler()
+      // A Pending claim as other controllers leave it: the scheduler's
+      // selected-node, the provisioner annotation and the pvc-protection finalizer.
+      const liveAnnotations = {
+        'volume.kubernetes.io/selected-node': 'node-a',
+        'volume.kubernetes.io/storage-provisioner': 'pd.csi.storage.gke.io',
+      }
+      const live: k8s.V1PersistentVolumeClaim = {
+        metadata: {
+          name: 'alpha-host-workspace',
+          namespace: 'mcp-host',
+          uid: 'pvc-uid',
+          labels: {
+            'clerum.io/host': 'alpha-host',
+            'clerum.io/managed-by': 'host-context-controller',
+          },
+          annotations: { ...liveAnnotations },
+          finalizers: ['kubernetes.io/pvc-protection'],
+          resourceVersion: '7',
+        },
+        spec: {
+          storageClassName: 'standard-rwo',
+          volumeMode: 'Filesystem',
+          accessModes: ['ReadWriteOnce'],
+          resources: { requests: { storage: '10Gi' } },
+        },
+        status: { phase: 'Pending' },
+      }
+      coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
+      coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(apiserverPvcReplace(live))
+
+      await expect(
+        (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
+      ).resolves.toBe(true)
+      // Liveness witness: the unbound-claim replace ran.
+      expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+      const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
+      expect(body.metadata.annotations).toEqual(liveAnnotations)
+      expect(body.metadata.finalizers).toEqual(['kubernetes.io/pvc-protection'])
+      expect(body.metadata.labels).toEqual({
+        'clerum.io/managed-by': 'host-context-controller',
+        'clerum.io/host': 'alpha-host',
+      })
+      expect(body.metadata.resourceVersion).toBe('7')
+      expect(body.spec.storageClassName).toBe('standard-rwo')
+    }
+  )
+
+  it.each([
+    { configuredClass: undefined, sentClass: undefined },
+    { configuredClass: 'class-a', sentClass: 'class-a' },
+  ])(
+    'replaces an unbound PVC that has no live class (configured class $configuredClass)',
+    async ({ configuredClass, sentClass }) => {
+      const original = config.hostWorkspaceStorageClassName
+      onTestFinished(() => {
+        config.hostWorkspaceStorageClassName = original
+      })
+      config.hostWorkspaceStorageClassName = configuredClass
+      const { reconciler, coreApi } = createReconciler()
+      // A claim the cluster left without a class: no default StorageClass when it
+      // was created, so the apiserver still allows nil -> class on update.
+      const live: k8s.V1PersistentVolumeClaim = {
+        metadata: {
+          name: 'alpha-host-workspace',
+          namespace: 'mcp-host',
+          uid: 'pvc-uid',
+          labels: {
+            'clerum.io/host': 'alpha-host',
+            'clerum.io/managed-by': 'host-context-controller',
+          },
+          resourceVersion: '7',
+        },
+        spec: {
+          volumeMode: 'Filesystem',
+          accessModes: ['ReadWriteOnce'],
+          resources: { requests: { storage: '10Gi' } },
+        },
+        status: { phase: 'Pending' },
+      }
+      coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
+      coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(apiserverPvcReplace(live))
+
+      await expect(
+        (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
+      ).resolves.toBe(true)
+      expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+      const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
+      expect(body.spec.storageClassName).toBe(sentClass)
+      expect(body.metadata.resourceVersion).toBe('7')
+    }
+  )
+
+  it('sends the configured class, not the live one, and fails the pass when the apiserver refuses it (#1310)', async () => {
+    const original = config.hostWorkspaceStorageClassName
+    onTestFinished(() => {
+      config.hostWorkspaceStorageClassName = original
+    })
+    config.hostWorkspaceStorageClassName = 'class-a'
+    const { reconciler, coreApi } = createReconciler()
+    const live: k8s.V1PersistentVolumeClaim = {
+      metadata: {
+        name: 'alpha-host-workspace',
+        namespace: 'mcp-host',
+        uid: 'pvc-uid',
+        labels: {
+          'clerum.io/host': 'alpha-host',
+          'clerum.io/managed-by': 'host-context-controller',
+        },
+        resourceVersion: '7',
+      },
+      spec: {
+        storageClassName: 'class-b',
+        volumeMode: 'Filesystem',
+        accessModes: ['ReadWriteOnce'],
+        resources: { requests: { storage: '10Gi' } },
+      },
+      status: { phase: 'Pending' },
+    }
+    coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
+    coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(apiserverPvcReplace(live))
+
+    await expect(
+      (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
+    ).resolves.toBe(false)
+    // Liveness witness: the unbound-claim replace ran. Overwriting the configured
+    // class with the live one would hide the configured/live mismatch (#1310).
+    expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+    const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
+    expect(body.spec.storageClassName).toBe('class-a')
+  })
+
+  it.each<{
+    name: string
+    spec: k8s.V1PersistentVolumeClaimSpec
+    annotations: Record<string, string>
+    resolves: boolean
+  }>([
+    {
+      name: 'a size the Pending claim does not have',
+      spec: { resources: { requests: { storage: '5Gi' } } },
+      annotations: {},
+      resolves: false,
+    },
+    {
+      name: 'a class that differs from the beta annotation',
+      spec: {},
+      annotations: { [BETA_CLASS_ANNOTATION]: 'class-b' },
+      resolves: false,
+    },
+    {
+      name: 'the class the beta annotation names',
+      spec: {},
+      annotations: { [BETA_CLASS_ANNOTATION]: 'class-a' },
+      resolves: true,
+    },
+  ])('sends $name and the pass follows the apiserver', async ({ spec, annotations, resolves }) => {
+    const original = config.hostWorkspaceStorageClassName
+    onTestFinished(() => {
+      config.hostWorkspaceStorageClassName = original
+    })
+    config.hostWorkspaceStorageClassName = 'class-a'
+    const { reconciler, coreApi } = createReconciler()
+    const live: k8s.V1PersistentVolumeClaim = {
+      metadata: {
+        name: 'alpha-host-workspace',
+        namespace: 'mcp-host',
+        uid: 'pvc-uid',
+        labels: {
+          'clerum.io/host': 'alpha-host',
+          'clerum.io/managed-by': 'host-context-controller',
+        },
+        annotations,
+        resourceVersion: '7',
+      },
+      spec: {
+        volumeMode: 'Filesystem',
+        accessModes: ['ReadWriteOnce'],
+        resources: { requests: { storage: config.hostWorkspaceStorageSize } },
+        ...spec,
+      },
+      status: { phase: 'Pending' },
+    }
+    coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(live)
+    coreApi.replaceNamespacedPersistentVolumeClaim.mockImplementation(apiserverPvcReplace(live))
+
+    await expect(
+      (reconciler as unknown as { ensurePvc(h: HostCRD): Promise<boolean> }).ensurePvc(makeHost())
+    ).resolves.toBe(resolves)
+    // Liveness witness: the unbound-claim replace ran, with what buildPvc sends.
+    expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+    const [{ body }] = coreApi.replaceNamespacedPersistentVolumeClaim.mock.calls[0]
+    expect(body.spec.storageClassName).toBe('class-a')
+    expect(body.spec.resources.requests.storage).toBe(config.hostWorkspaceStorageSize)
   })
 })
