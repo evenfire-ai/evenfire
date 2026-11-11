@@ -13,7 +13,7 @@ import { openaiApiError } from '../../__tests__/sdkErrorFixtures'
 import { createLLMProvider } from '../../index'
 import { OpenAIProvider } from '../../openai'
 import { OpenAICompatibleProvider } from '../../openaiCompatible'
-import type { LlmProvider } from '../../registryCore'
+import { type LlmProvider, descriptorFor } from '../../registryCore'
 import type { SingleTurnProvider } from '../../types'
 import {
   CHAT_FAMILY,
@@ -132,6 +132,26 @@ describe('OpenAICompatibleProvider is a constructor-only alias', () => {
   it('declares no members besides its constructor', () => {
     expect(Object.getOwnPropertyNames(OpenAICompatibleProvider.prototype)).toEqual(['constructor'])
     expect(Object.getPrototypeOf(OpenAICompatibleProvider.prototype)).toBe(OpenAIProvider.prototype)
+  })
+
+  // The prototype alone misses members assigned in the constructor and statics.
+  // The reference is the registry's own composition, so the alias may carry
+  // exactly the fields the factory output carries and nothing more.
+  it('instances carry the same own fields as the registry-built driver and no statics', () => {
+    const d = descriptorFor('groq')
+    const alias = new OpenAICompatibleProvider(
+      { id: d.id, baseURL: d.baseURL!, defaultModel: d.defaultModel! },
+      'unit-groq-key'
+    )
+    const registryBuilt = buildFamilyProvider('groq')
+    expect(Object.keys(alias).sort()).toEqual(Object.keys(registryBuilt).sort())
+    expect(Object.getOwnPropertySymbols(alias)).toEqual([])
+    expect(Object.getOwnPropertyNames(OpenAICompatibleProvider).sort()).toEqual([
+      'length',
+      'name',
+      'prototype',
+    ])
+    expect(Object.getOwnPropertySymbols(OpenAICompatibleProvider)).toEqual([])
   })
 })
 
