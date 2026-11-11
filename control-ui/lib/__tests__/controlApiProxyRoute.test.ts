@@ -259,7 +259,7 @@ describe('control-ui control-api proxy route', () => {
     })
 
     it('does not arm the proxy timeout for GET, so SSE streams are never cut', async () => {
-      process.env[ENV_KEY] = '300000'
+      process.env[ENV_KEY] = '45000'
       const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
 
       const req = new NextRequest(
@@ -271,6 +271,8 @@ describe('control-ui control-api proxy route', () => {
         params: { path: ['api', 'v1', 'admin', 'notifications', 'stream'] },
       })
 
+      // Witness: the handler proxied the GET, so the missing timeout is not a skipped path.
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1)
       expect(timeoutSpy).not.toHaveBeenCalled()
     })
   })

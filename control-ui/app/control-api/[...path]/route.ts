@@ -4,7 +4,7 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 const CONTROL_API_INTERNAL_URL = process.env.CONTROL_API_INTERNAL_URL || 'http://127.0.0.1:8090'
-// Equals deploy/base/control-plane/control-ui.yaml, which every deployment inherits.
+// Equals the value deploy/base/control-plane/control-ui.yaml sets.
 const DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS = 300_000
 const DEFAULT_GFS_UPLOAD_PROXY_TIMEOUT_MS = 600_000
 

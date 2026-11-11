@@ -351,8 +351,8 @@ type Config = {
   gfscWriteBaseUrl: string
   // Timeout (ms) for the control-api→gfsc proxied fetch. Homologous with the browser
   // client (GFS_UPLOAD_TIMEOUT_MS, 300s) and the control-ui server proxy
-  // (CONTROL_API_PROXY_TIMEOUT_MS, set to 300s in the deployment; its route.ts code
-  // fallback is 30s). This one defaults to 300s in code. Raise all three together.
+  // (CONTROL_API_PROXY_TIMEOUT_MS, 300s in deploy/base and as its route.ts code
+  // default). This one defaults to 300s in code. Raise all three together.
   gfscProxyTimeoutMs: number
   // Upload-v2 edge admission. These are transport-abuse budgets, separate
   // from the 200 MiB product/file limit and GFSC's 4/16 stream authority.
