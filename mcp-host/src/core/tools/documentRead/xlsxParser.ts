@@ -24,7 +24,11 @@
  * match.
  *
  * Rows preserve null gaps and stop at their last non-empty computed cell.
- * Interior empty rows remain; trailing empty rows do not. Paging returns
+ * Interior empty rows remain; trailing empty rows do not. A run of empty rows
+ * is returned whole or not at all: one that does not fit the rest of the call
+ * ends the window at the next row with a value (or starts the window there
+ * when nothing was returned yet), so a sparse sheet never spends calls on
+ * empty rows and `startRow` names the first returned row. Paging returns
  * complete rows and charges their full width, including null gaps. A row
  * whose full width alone exceeds `maxExtractedChars` is not returned: it
  * keeps its slot as `[]` and is listed in `skippedRows` (the complete list
@@ -37,6 +41,9 @@
  * them so); a non-increasing row number is `document_parse_failed`. A row
  * without `r` takes the row number of its first cell reference, when that
  * cell has one; otherwise it is the next row after the previous one.
+ * Elements are matched by local name, so prefixed SpreadsheetML (`x:row`)
+ * reads like the default namespace, and the sheet relationship id is found by
+ * its namespace rather than by the literal `r:` prefix. CDATA is text.
  *
  * Known divergences from that reader, deliberately accepted here (this is not
  * full ExcelJS parity):
@@ -245,6 +252,47 @@ function tagAttribute(node: SaxesTag, name: string): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
+/**
+ * An element's local name. Writers may bind SpreadsheetML and package
+ * relationships to any prefix (the Open XML SDK writes `x:row` when given
+ * one), and every part element here is matched by its local name.
+ */
+function localName(node: SaxesTag): string {
+  const colon = node.name.indexOf(':')
+  return colon === -1 ? node.name : node.name.slice(colon + 1)
+}
+
+/** Records the `xmlns:prefix` declarations of one element. */
+function recordPrefixes(node: SaxesTag, prefixes: Map<string, string>): void {
+  for (const [name, value] of Object.entries(node.attributes)) {
+    if (typeof value === 'string' && name.startsWith('xmlns:')) prefixes.set(name.slice(6), value)
+  }
+}
+
+const OFFICE_RELATIONSHIP_NAMESPACES = new Set([
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+  'http://purl.oclc.org/ooxml/officeDocument/relationships',
+])
+
+/**
+ * The sheet's relationship id: the `id` attribute in the office-document
+ * relationships namespace, whatever its prefix. An undeclared `r:` keeps the
+ * conventional meaning so files that omit the declaration still read.
+ */
+function relationshipId(node: SaxesTag, prefixes: ReadonlyMap<string, string>): string | undefined {
+  for (const [name, value] of Object.entries(node.attributes)) {
+    if (typeof value !== 'string') continue
+    const colon = name.indexOf(':')
+    if (colon === -1 || name.slice(colon + 1) !== 'id') continue
+    const prefix = name.slice(0, colon)
+    const namespace = prefixes.get(prefix)
+    if (namespace === undefined ? prefix === 'r' : OFFICE_RELATIONSHIP_NAMESPACES.has(namespace)) {
+      return value
+    }
+  }
+  return undefined
+}
+
 function columnLetters(column: number): string {
   let letters = ''
   let remaining = column
@@ -324,22 +372,27 @@ function sheetPartPath(target: string): string {
 async function parseWorkbookMeta(zip: JSZip, counter: InflatedCounter): Promise<WorkbookMeta> {
   let date1904 = false
   const relationBySheet: Array<{ name: string; relationId: string | undefined }> = []
+  // Prefix declarations sit on the root element in every writer seen; they
+  // are recorded as they stream, without per-element scoping.
+  const prefixes = new Map<string, string>()
   await streamXmlPart(zip, 'xl/workbook.xml', counter, parser => {
     parser.on('opentag', node => {
-      if (node.name === 'workbookPr') {
+      recordPrefixes(node, prefixes)
+      const name = localName(node)
+      if (name === 'workbookPr') {
         const flag = tagAttribute(node, 'date1904')
         if (flag === '1' || flag === 'true') date1904 = true
-      } else if (node.name === 'sheet') {
-        const name = tagAttribute(node, 'name')
-        if (name === undefined) throw new UnreadablePartError()
-        relationBySheet.push({ name, relationId: tagAttribute(node, 'r:id') })
+      } else if (name === 'sheet') {
+        const sheetName = tagAttribute(node, 'name')
+        if (sheetName === undefined) throw new UnreadablePartError()
+        relationBySheet.push({ name: sheetName, relationId: relationshipId(node, prefixes) })
       }
     })
   })
   const targetByRelation = new Map<string, string>()
   await streamXmlPart(zip, 'xl/_rels/workbook.xml.rels', counter, parser => {
     parser.on('opentag', node => {
-      if (node.name !== 'Relationship') return
+      if (localName(node) !== 'Relationship') return
       const id = tagAttribute(node, 'Id')
       const target = tagAttribute(node, 'Target')
       if (id !== undefined && target !== undefined) targetByRelation.set(id, target)
@@ -377,25 +430,27 @@ async function parseStyles(zip: JSZip, counter: InflatedCounter): Promise<StyleT
     let inCellXfs = false
     await streamXmlPart(zip, 'xl/styles.xml', counter, parser => {
       parser.on('opentag', node => {
-        if (node.name === 'numFmts') {
+        const name = localName(node)
+        if (name === 'numFmts') {
           inNumFmts = true
-        } else if (node.name === 'numFmt' && inNumFmts) {
+        } else if (name === 'numFmt' && inNumFmts) {
           const id = Number(tagAttribute(node, 'numFmtId'))
           const code = tagAttribute(node, 'formatCode')
           // ExcelJS unescapes backslash-escaped characters in format codes.
           if (Number.isSafeInteger(id) && code !== undefined) {
             customFormats.set(id, code.replace(/\\(.)/g, '$1'))
           }
-        } else if (node.name === 'cellXfs') {
+        } else if (name === 'cellXfs') {
           inCellXfs = true
-        } else if (node.name === 'xf' && inCellXfs) {
+        } else if (name === 'xf' && inCellXfs) {
           const id = Number(tagAttribute(node, 'numFmtId') ?? '0')
           cellFormatIds.push(Number.isSafeInteger(id) ? id : 0)
         }
       })
       parser.on('closetag', node => {
-        if (node.name === 'numFmts') inNumFmts = false
-        else if (node.name === 'cellXfs') inCellXfs = false
+        const name = localName(node)
+        if (name === 'numFmts') inNumFmts = false
+        else if (name === 'cellXfs') inCellXfs = false
       })
     })
   }
@@ -421,22 +476,27 @@ async function parseSharedStrings(zip: JSZip, counter: InflatedCounter): Promise
   let textBuffer = ''
   await streamXmlPart(zip, 'xl/sharedStrings.xml', counter, parser => {
     parser.on('opentag', node => {
-      if (node.name === 'si') current = ''
-      else if (node.name === 'rPh') inPhonetic = true
-      else if (node.name === 't' && current !== null && !inPhonetic) {
+      const name = localName(node)
+      if (name === 'si') current = ''
+      else if (name === 'rPh') inPhonetic = true
+      else if (name === 't' && current !== null && !inPhonetic) {
         inText = true
         textBuffer = ''
       }
     })
-    parser.on('text', text => {
+    const onText = (text: string): void => {
       if (inText) textBuffer += text
-    })
+    }
+    parser.on('text', onText)
+    // A distinct function: see the worksheet's CDATA handler.
+    parser.on('cdata', text => onText(text))
     parser.on('closetag', node => {
-      if (node.name === 't') {
+      const name = localName(node)
+      if (name === 't') {
         if (inText && current !== null) current += decodeTextXform(textBuffer)
         inText = false
-      } else if (node.name === 'rPh') inPhonetic = false
-      else if (node.name === 'si' && current !== null) {
+      } else if (name === 'rPh') inPhonetic = false
+      else if (name === 'si' && current !== null) {
         strings.push(current)
         current = null
       }
@@ -651,6 +711,23 @@ class SheetWindow {
     return true
   }
 
+  /**
+   * The limit `count` empty gap rows would pass if returned whole after the
+   * rows already charged, or undefined when the whole gap fits. Each `[]`
+   * costs one row and its two serialized characters.
+   */
+  gapLimit(count: number): StoppedBy | undefined {
+    if (this.rowCount + count > this.limits.maxRowsPerCall) return 'max_rows'
+    if (this.rowCount > 0 && this.cellCount > this.limits.maxCellsPerCall) return 'max_cells'
+    if (this.charCount + 2 * count > this.limits.maxExtractedChars) return 'max_extracted_chars'
+    return undefined
+  }
+
+  /** Stops the window before `rowNumber`, which the continuation names. */
+  stopBefore(sheet: MutableSheet, sheetIndex: number, rowNumber: number, reason: StoppedBy): void {
+    this.stop(sheet, sheetIndex, rowNumber, reason)
+  }
+
   private stop(
     sheet: MutableSheet,
     sheetIndex: number,
@@ -782,8 +859,10 @@ async function streamSheet(
   let inPhonetic = false
   let textBuffer = ''
   // A row without `r` takes the row number of its first cell reference,
-  // when that cell has one; until then it is simply the next row.
+  // when that cell has one; until then it is simply the next row. The
+  // reference must pass the row before it, not the provisional number.
   let rowNumberPending = false
+  let rowBeforePending = 0
 
   const closeCell = (): void => {
     const cell = currentCell
@@ -798,8 +877,25 @@ async function streamSheet(
     rowPairs.push({ column: cell.column, value })
   }
 
+  // A gap is returned whole or not at all, so no continuation ever lands
+  // inside one: a gap that does not fit ends the window at the next valued
+  // row, or, when the sheet has returned nothing yet, the window starts there.
+  // Either way a gap costs at most one call instead of one call per
+  // `maxRowsPerCall` empty rows.
   const addEmptyRowsUntil = (end: number): void => {
-    while (nextEmitRow < end && !window.stopped) {
+    const gap = end - nextEmitRow
+    if (gap <= 0 || window.stopped) return
+    const limit = window.gapLimit(gap)
+    if (limit !== undefined) {
+      if (sheet.rows.length === 0) {
+        sheet.startRow = end
+        nextEmitRow = end
+      } else {
+        window.stopBefore(sheet, sheetIndex, end, limit)
+      }
+      return
+    }
+    while (nextEmitRow < end) {
       const emptyRow = nextEmitRow
       if (!window.add(sheet, sheetIndex, emptyRow, [])) return
       nextEmitRow = emptyRow + 1
@@ -829,7 +925,7 @@ async function streamSheet(
 
   await streamXmlPart(zip, sheetMeta.path, counter, parser => {
     parser.on('opentag', node => {
-      const name = node.name
+      const name = localName(node)
       if (name === 'sheetData') {
         inSheetData = true
         return
@@ -851,6 +947,7 @@ async function streamSheet(
         const raw = tagAttribute(node, 'r')
         let next: number
         if (raw === undefined) {
+          rowBeforePending = previousRow
           next = previousRow + 1
           rowNumberPending = true
         } else {
@@ -886,7 +983,7 @@ async function streamSheet(
           if (rowNumberPending) {
             // The row omitted `r`; its first explicit cell reference names the
             // row. Growth must still be strict.
-            if (parsed.row <= previousRow) throw new UnreadablePartError()
+            if (parsed.row <= rowBeforePending) throw new UnreadablePartError()
             previousRow = parsed.row
             rowNumber = parsed.row
             collectRow = rowNumber >= nextEmitRow && !window.stopped
@@ -946,14 +1043,20 @@ async function streamSheet(
         textBuffer = ''
       }
     })
-    parser.on('text', text => {
+    const onText = (text: string): void => {
       if (currentCell === undefined) return
       if (inValue) currentCell.valueText += text
       else if (inFormula) currentCell.formulaText = (currentCell.formulaText ?? '') + text
       else if (inInline && inText && !inPhonetic) textBuffer += text
-    })
+    }
+    parser.on('text', onText)
+    // CDATA carries text like `text` does, through a distinct function. Giving
+    // saxes the same function object for both handlers measured about 130 MiB
+    // more child RSS on the 150k-row streaming witness (2.6 MiB with the
+    // wrapper); the footprint test in xlsxParser.test.ts guards it.
+    parser.on('cdata', text => onText(text))
     parser.on('closetag', node => {
-      const name = node.name
+      const name = localName(node)
       if (name === 'sheetData') {
         inSheetData = false
         return

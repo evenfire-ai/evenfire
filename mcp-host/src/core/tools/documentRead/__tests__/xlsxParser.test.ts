@@ -15,6 +15,7 @@ import {
   escapedTextWorkbook,
   longRunningWorkbook,
   mergedWorkbook,
+  namespaceDialectWorkbook,
   outOfRangeNumberWorkbook,
   richHyperlinkWorkbook,
   sheetXmlWorkbook,
@@ -910,5 +911,123 @@ describe('XLSX allocation failures from a part stream', () => {
       vi.doUnmock('jszip')
       vi.resetModules()
     }
+  })
+})
+
+describe('XLSX parser fixes from the PR #1424 review', () => {
+  const plainWorksheet = (rows: string): string =>
+    '<?xml version="1.0"?><worksheet ' +
+    'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+    rows +
+    '</sheetData></worksheet>'
+
+  it('M5: a row without r takes the next row number from its first cell reference', async () => {
+    const outcome = await parseDirect(
+      await sheetXmlWorkbook(
+        plainWorksheet(
+          '<row r="1"><c r="A1"><v>1</v></c></row>' + '<row><c r="A2"><v>2</v></c></row>'
+        )
+      )
+    )
+    expect(outcome).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [{ name: 'Sheet1', startRow: 1, rows: [[1], [2]], truncated: false, lastRow: 2 }],
+    })
+    // The reference still cannot repeat the previous row.
+    const repeated = await parseDirect(
+      await sheetXmlWorkbook(
+        plainWorksheet(
+          '<row r="2"><c r="A2"><v>2</v></c></row>' + '<row><c r="A2"><v>3</v></c></row>'
+        )
+      )
+    )
+    expect(repeated).toEqual({ ok: false, reason: 'document_parse_failed' })
+  })
+
+  it('M3: reads prefixed SpreadsheetML exactly like the default-namespace control', async () => {
+    const expected = {
+      ok: true,
+      sheetNames: ['Data'],
+      sheets: [
+        {
+          name: 'Data',
+          startRow: 1,
+          rows: [
+            ['shared', '2026-01-01T00:00:00.000Z', 'inline'],
+            ['rich', 2, 'master'],
+          ],
+          truncated: false,
+          lastRow: 2,
+        },
+      ],
+    }
+    expect(await parseDirect(await namespaceDialectWorkbook(false))).toEqual(expected)
+    expect(await parseDirect(await namespaceDialectWorkbook(true))).toEqual(expected)
+  })
+
+  it('M6: a gap that does not fit the row budget ends the window at the next valued row', async () => {
+    const bytes = await sheetXmlWorkbook(
+      plainWorksheet(
+        '<row r="1"><c r="A1"><v>1</v></c></row>' +
+          '<row r="20"><c r="A20"><v>20</v></c></row>' +
+          '<row r="21"><c r="A21"><v>21</v></c></row>'
+      )
+    )
+    const limits = documentLimits({ maxCellsPerCall: 100_000, maxRowsPerCall: 5 })
+    const first = await parseDirect(bytes, { limits })
+    expect(first).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [{ name: 'Sheet1', startRow: 1, rows: [[1]], truncated: true, lastRow: 21 }],
+      next: { sheetIndex: 0, row: 20 },
+      stoppedBy: 'max_rows',
+    })
+    const second = await parseDirect(bytes, { limits, start: { sheetIndex: 0, row: 20 } })
+    expect(second).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [{ name: 'Sheet1', startRow: 20, rows: [[20], [21]], truncated: false, lastRow: 21 }],
+    })
+  })
+
+  it('M6: a window that starts inside a gap that does not fit starts at the next valued row', async () => {
+    const bytes = await sheetXmlWorkbook(
+      plainWorksheet(
+        '<row r="1"><c r="A1"><v>1</v></c></row>' +
+          '<row r="200000"><c r="A200000"><v>200000</v></c></row>'
+      )
+    )
+    const limits = documentLimits({ maxCellsPerCall: 100_000, maxRowsPerCall: 5 })
+    expect(await parseDirect(bytes, { limits, start: { sheetIndex: 0, row: 2 } })).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [
+        { name: 'Sheet1', startRow: 200000, rows: [[200000]], truncated: false, lastRow: 200000 },
+      ],
+    })
+    // A gap that fits the budget is still returned in place.
+    expect(
+      await parseDirect(
+        await sheetXmlWorkbook(
+          plainWorksheet(
+            '<row r="1"><c r="A1"><v>1</v></c></row>' + '<row r="4"><c r="A4"><v>4</v></c></row>'
+          )
+        ),
+        { limits }
+      )
+    ).toMatchObject({ ok: true, sheets: [{ startRow: 1, rows: [[1], [], [], [4]] }] })
+  })
+
+  it('reads CDATA text in inline strings and values', async () => {
+    const outcome = await parseDirect(
+      await sheetXmlWorkbook(
+        plainWorksheet(
+          '<row r="1"><c r="A1" t="inlineStr"><is><t><![CDATA[a<b]]></t></is></c>' +
+            '<c r="B1" t="str"><v><![CDATA[c&d]]></v></c><c r="C1"><v><![CDATA[42]]></v></c></row>'
+        )
+      )
+    )
+    expect(outcome).toMatchObject({ ok: true, sheets: [{ rows: [['a<b', 'c&d', 42]] }] })
   })
 })

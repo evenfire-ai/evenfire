@@ -412,6 +412,99 @@ export async function sheetXmlWorkbook(sheetXml: string, sheetName = 'Sheet1'): 
 }
 
 /**
+ * One workbook written twice: with default namespaces, and with every part
+ * prefixed as the Open XML SDK writes it when given a prefix (`x:` for
+ * SpreadsheetML, `pr:` for package relationships, `rel:` for the sheet's
+ * relationship id). The prefixed variant also binds `r` to another namespace
+ * and gives the sheet an `r:id` that names a decoy worksheet, so only
+ * namespace resolution picks the real sheet.
+ */
+export async function namespaceDialectWorkbook(prefixed: boolean): Promise<Buffer> {
+  const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+  const officeRelationships = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+  const packageRelationships = 'http://schemas.openxmlformats.org/package/2006/relationships'
+  const x = prefixed ? 'x:' : ''
+  const pr = prefixed ? 'pr:' : ''
+  const mainNs = prefixed ? `xmlns:x="${main}"` : `xmlns="${main}"`
+  const relsNs = prefixed ? `xmlns:pr="${packageRelationships}"` : `xmlns="${packageRelationships}"`
+  const sheetRelationship = prefixed
+    ? `xmlns:rel="${officeRelationships}" xmlns:r="urn:example:not-relationships"`
+    : `xmlns:r="${officeRelationships}"`
+  const sheetIds = prefixed ? 'rel:id="rId7" r:id="rId1"' : 'r:id="rId7"'
+  const worksheet = (cells: string): string =>
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><${x}worksheet ${mainNs}>` +
+    `<${x}sheetData>${cells}</${x}sheetData>` +
+    `<${x}mergeCells count="1"><${x}mergeCell ref="C2:D2"/></${x}mergeCells>` +
+    `</${x}worksheet>`
+  const zip = new JSZip()
+  zip.file(
+    '[Content_Types].xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ' +
+      'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '</Types>'
+  )
+  zip.file(
+    '_rels/.rels',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><${pr}Relationships ${relsNs}>` +
+      `<${pr}Relationship Id="rId1" ` +
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" ' +
+      `Target="xl/workbook.xml"/></${pr}Relationships>`
+  )
+  zip.file(
+    'xl/workbook.xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><${x}workbook ${mainNs} ` +
+      `${sheetRelationship}><${x}workbookPr date1904="0"/><${x}sheets>` +
+      `<${x}sheet name="Data" sheetId="1" ${sheetIds}/></${x}sheets></${x}workbook>`
+  )
+  zip.file(
+    'xl/_rels/workbook.xml.rels',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><${pr}Relationships ${relsNs}>` +
+      `<${pr}Relationship Id="rId7" ` +
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" ' +
+      `Target="worksheets/sheet1.xml"/>` +
+      `<${pr}Relationship Id="rId1" ` +
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" ' +
+      `Target="worksheets/sheet2.xml"/></${pr}Relationships>`
+  )
+  zip.file(
+    'xl/styles.xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><${x}styleSheet ${mainNs}>` +
+      `<${x}numFmts count="1"><${x}numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></${x}numFmts>` +
+      `<${x}cellXfs count="2"><${x}xf numFmtId="0"/><${x}xf numFmtId="164"/></${x}cellXfs>` +
+      `</${x}styleSheet>`
+  )
+  zip.file(
+    'xl/sharedStrings.xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><${x}sst ${mainNs}>` +
+      `<${x}si><${x}t>shared</${x}t></${x}si>` +
+      `<${x}si><${x}r><${x}t>ri</${x}t></${x}r><${x}r><${x}t>ch</${x}t></${x}r>` +
+      `<${x}rPh sb="0" eb="1"><${x}t>phonetic</${x}t></${x}rPh></${x}si>` +
+      `</${x}sst>`
+  )
+  zip.file(
+    'xl/worksheets/sheet1.xml',
+    worksheet(
+      `<${x}row r="1"><${x}c r="A1" t="s"><${x}v>0</${x}v></${x}c>` +
+        `<${x}c r="B1" s="1"><${x}v>46023</${x}v></${x}c>` +
+        `<${x}c r="C1" t="inlineStr"><${x}is><${x}t>inline</${x}t></${x}is></${x}c></${x}row>` +
+        `<${x}row r="2"><${x}c r="A2" t="s"><${x}v>1</${x}v></${x}c>` +
+        `<${x}c r="B2"><${x}f>1+1</${x}f><${x}v>2</${x}v></${x}c>` +
+        `<${x}c r="C2" t="str"><${x}v>master</${x}v></${x}c>` +
+        `<${x}c r="D2" t="str"><${x}v>slave</${x}v></${x}c></${x}row>`
+    )
+  )
+  zip.file(
+    'xl/worksheets/sheet2.xml',
+    worksheet(`<${x}row r="1"><${x}c r="A1" t="str"><${x}v>decoy</${x}v></${x}c></${x}row>`)
+  )
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+}
+
+/**
  * A date cell and a number cell whose styles collide with a differential
  * format: the workbook-global `numFmtId` 164 is `yyyy-mm-dd`, while `<dxfs>`
  * declares the same id as `0.00` for conditional formatting. Only the global
