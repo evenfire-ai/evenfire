@@ -63,7 +63,8 @@ function context(
 function tool(
   file: Attachment,
   limits: DocumentReadLimits = documentLimits(),
-  runJob = runDocumentJob
+  runJob = runDocumentJob,
+  ledger = new AttachmentReadLedger()
 ): DocumentReadTool {
   const message: IncomingMessage = {
     content: 'Read the document',
@@ -77,7 +78,7 @@ function tool(
   }
   return new DocumentReadTool(message, {
     contextWindowTokens: 100_000,
-    ledger: new AttachmentReadLedger(),
+    ledger,
     redactor: { toolOutputRedactionRanges: () => [] },
     runJob,
     limits,
@@ -437,4 +438,26 @@ describe('document reader Tool outcomes through real child readers', () => {
     const control = await tool(small, limits).execute({ attachmentId: small.id }, measuring())
     expect(JSON.parse(control.content)).toMatchObject({ status: 'ok', format: 'xlsx' })
   }, 90_000)
+})
+
+describe('document reader admission order (zach88 R2-L5)', () => {
+  it('throws for a visual read without request image usage before it spends a read', async () => {
+    const file = admittedFile('scan', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const ledger = new AttachmentReadLedger()
+    const reader = tool(file, documentLimits(), runDocumentJob, ledger)
+    const withoutUsage: ExecutionContext = { ...context(profile) }
+    delete withoutUsage.requestImages
+    // A wiring defect, not a model error: it must not cost the turn a read.
+    await expect(
+      reader.execute({ attachmentId: file.id, mode: 'visual' }, withoutUsage)
+    ).rejects.toThrow('Document visual read requires the request image usage')
+    expect(ledger.snapshot().reads).toBe(0)
+    // Witness: the same read with its usage spends one.
+    const rendered = await reader.execute(
+      { attachmentId: file.id, mode: 'visual' },
+      context(profile)
+    )
+    expect(rendered.attachments).toHaveLength(1)
+    expect(ledger.snapshot().reads).toBe(1)
+  }, 30_000)
 })

@@ -352,6 +352,11 @@ export class DocumentReadTool implements Tool {
       return this.accessError('attachment_not_found', start, { attachmentId })
     }
     const identity: Identity = { attachmentId: attachment.id, referenceId: reference.id }
+    // A visual read without the request's image usage is a wiring defect, not
+    // a model error: fail before the read is charged to the turn.
+    if (params.mode === 'visual' && !context?.requestImages) {
+      throw new Error('Document visual read requires the request image usage')
+    }
     if (!this.ledger.beginRead())
       return this.exhausted(identity.attachmentId, identity.referenceId, cursorParam)
 
