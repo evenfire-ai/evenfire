@@ -16,6 +16,7 @@ import {
   FAMILY,
   RECORDED_TEXT_RESPONSE,
   RECORDED_TOOLS_RESPONSE,
+  azureEnv,
   buildFamilyProvider,
 } from './familyHarness'
 
@@ -71,12 +72,16 @@ describe('only the official endpoint accepts a ready-built client', () => {
   const groq = descriptorFor('groq')
 
   it.each([
-    ['azure', () => azureProfile(name => ({ AZURE_OPENAI_ENDPOINT: AZURE_ENDPOINT })[name])],
-    ['groq', () => compatibleProfile({ id: groq.id, baseURL: groq.baseURL! })],
-  ] as const)('%s refuses a client object instead of a key', (id, profile) => {
+    [
+      'azure',
+      () => azureProfile(azureEnv({ AZURE_OPENAI_ENDPOINT: AZURE_ENDPOINT })),
+      new URL(AZURE_ENDPOINT).host,
+    ],
+    ['groq', () => compatibleProfile({ id: groq.id, baseURL: groq.baseURL! }), groq.baseURL!],
+  ] as const)('%s refuses a client object instead of a key', (id, profile, expectedURL) => {
     expect(() => profile().createClient(ready)).toThrow(TypeError)
     expect(() => profile().createClient(ready)).toThrow(`[LLM] ${id}: expected an API key string`)
-    expect(profile().createClient(`unit-${id}-key`).baseURL).not.toBe('https://unit.invalid/v1')
+    expect(profile().createClient(`unit-${id}-key`).baseURL).toContain(expectedURL)
   })
 })
 
