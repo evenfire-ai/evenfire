@@ -710,6 +710,8 @@ describe('routes/admin/workflows', () => {
       txQuery
         .mockResolvedValueOnce({ rows: [], rowCount: null })
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        // createApprovedRun locks the approval row before the run key.
+        .mockResolvedValueOnce({ rows: [{ id: row.approval_request_id }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValueOnce({
@@ -729,6 +731,11 @@ describe('routes/admin/workflows', () => {
               targetTeamAllowed: false,
             },
           ],
+          rowCount: 1,
+        })
+        // The consume locks the decider's grant rows (FOR SHARE) before it reads them.
+        .mockResolvedValueOnce({
+          rows: [{ recipe_namespace: RECIPE_NS, recipe_name: 'test-recipe' }],
           rowCount: 1,
         })
         .mockResolvedValueOnce({ rows: [{}], rowCount: 1 })
@@ -896,6 +903,8 @@ describe('routes/admin/workflows', () => {
       txQuery
         .mockResolvedValueOnce({ rows: [], rowCount: null })
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        // createApprovedRun locks the approval row before the run key.
+        .mockResolvedValueOnce({ rows: [{ id: approvalRequestId }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValueOnce({
@@ -917,6 +926,8 @@ describe('routes/admin/workflows', () => {
           ],
           rowCount: 1,
         })
+        // The consume locks the decider's grant rows (FOR SHARE) before it checks the target.
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValueOnce({ rows: [], rowCount: null })
       const release = vi.fn()
       mockPoolConnect.mockResolvedValueOnce({ query: txQuery, release })

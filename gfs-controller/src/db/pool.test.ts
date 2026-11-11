@@ -6,7 +6,8 @@ import { DeadlineRollbackOutcomeUnknownError, withDeadlineTransaction } from "./
 import { createGfsPool } from "./pool";
 import { PgTransactor, RollbackOutcomeUnknownError } from "./writeStore";
 
-const DSN = "postgres://gfs_controller:s3cret-password@db.invalid:5432/gfs";
+// No client in this file connects; db.invalid (RFC 2606) never resolves.
+const DSN = "postgres://gfs_controller@db.invalid:5432/gfs";
 
 type QueryResult = { rows: Record<string, unknown>[] };
 type QueryCallback = (err: Error | undefined, result?: QueryResult) => void;
@@ -136,7 +137,8 @@ describe("createGfsPool: idle client connection errors", () => {
       "[gfsc] pg pool discarded an idle client after a connection error: " +
         "57P01 terminating connection due to administrator command"
     );
-    expect(log.mock.calls[0][0]).not.toContain("s3cret-password");
+    // pg-pool attaches the client, whose options carry the DSN, to the error.
+    expect(log.mock.calls[0][0]).not.toContain("db.invalid");
     expect(idle.ended).toBe(true);
     expect(pool.totalCount).toBe(0);
 

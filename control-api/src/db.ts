@@ -6604,8 +6604,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: backfillLegacyPasswordSecurityEpochs,
   },
   {
-    // PR2 follows dev's last migration, 0138, in consecutive slots. No shared
-    // database recorded an earlier PR2 name, so none is carried as an alias.
+    // PR2 follows dev's last migration, 0138_legacy_password_security_epoch_backfill,
+    // in consecutive slots. No shared database recorded an earlier PR2 name, so
+    // none is carried as an alias.
     version: '0139_workflow_authority_bindings',
     apply: applyWorkflowAuthorityBindingsSchema,
   },

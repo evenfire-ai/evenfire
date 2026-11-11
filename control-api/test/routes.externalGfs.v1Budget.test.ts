@@ -118,7 +118,9 @@ beforeEach(() => {
     .mockImplementation(async (work: (db: { query: typeof mocks.query }) => Promise<unknown>) =>
       work({ query: mocks.query })
     )
-  mocks.signGfsToken.mockReset().mockReturnValue({ token: 'gfs-user-token', expiresInSeconds: 300 })
+  mocks.signGfsToken
+    .mockReset()
+    .mockReturnValue({ token: 'synthetic-signed-gfs-token', expiresInSeconds: 300 })
   mocks.signCurrentExternalGfsUserToken
     .mockReset()
     .mockImplementation(async (_authentication: unknown, input: Record<string, unknown>) =>
@@ -148,7 +150,7 @@ describe('external GFS V1 plane: no request-scoped action budget (T-W2)', () => 
 
     // Witness: the V1 token handler answered with its body.
     expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(res.body.token).toBe('gfs-user-token')
+    expect(res.body.token).toBe('synthetic-signed-gfs-token')
     expect(mocks.signGfsToken).toHaveBeenCalledTimes(1)
     expect(finished).toHaveLength(1)
     expect(finished[0]?.accessExecutionBudget).toBeUndefined()

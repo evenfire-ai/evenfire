@@ -191,6 +191,10 @@ function routeApprovalQueries(triggerAuthorityBindingId: string | null) {
     if (sql.includes('SELECT * FROM workflow_runs')) {
       return { rows: [], rowCount: 0 }
     }
+    // An approve decision locks the run row of its run key; no run exists yet.
+    if (sql.includes('SELECT run_id FROM workflow_runs')) {
+      return { rows: [], rowCount: 0 }
+    }
     if (sql.includes('FOR UPDATE OF war')) {
       return {
         rows: [
@@ -215,6 +219,16 @@ function routeApprovalQueries(triggerAuthorityBindingId: string | null) {
     }
     if (sql.includes('SELECT 1 FROM user_workflow_triggers')) {
       return { rows: [{ '?column?': 1 }], rowCount: 1 }
+    }
+    // The consume locks the decider's grant rows before it reads them.
+    if (sql.includes('SELECT recipe_namespace, recipe_name') && sql.includes('FOR SHARE')) {
+      return {
+        rows: [
+          { recipe_namespace: 'sandbox-recipes', recipe_name: 'source-recipe' },
+          { recipe_namespace: 'sandbox-recipes', recipe_name: 'target-recipe' },
+        ],
+        rowCount: 2,
+      }
     }
     if (sql.includes("SET status = 'consumed'")) {
       return { rows: [{ teamId: null }], rowCount: 1 }
