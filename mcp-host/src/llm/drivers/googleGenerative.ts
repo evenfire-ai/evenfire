@@ -317,8 +317,10 @@ export function classifyGoogleError(err: unknown): ClassifiedError {
       return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
     if (httpStatus >= 500 && httpStatus < 600)
       return { code: LlmErrorCode.ModelOverloaded, retryable: true, message, ...diag }
+    // #1433: Vertex refused the request itself; the same request gets the
+    // same answer. Same label as the other providers' HTTP 400.
     if (httpStatus === 400)
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
+      return { code: LlmErrorCode.UpstreamRejected, retryable: false, message, ...diag }
   }
 
   switch (statusString) {
@@ -334,9 +336,10 @@ export function classifyGoogleError(err: unknown): ClassifiedError {
     case 'NOT_FOUND':
       // gRPC equivalent of a 404 — retired/inaccessible model.
       return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
+    // gRPC equivalents of the HTTP 400 above (#1433).
     case 'INVALID_ARGUMENT':
     case 'FAILED_PRECONDITION':
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
+      return { code: LlmErrorCode.UpstreamRejected, retryable: false, message, ...diag }
   }
 
   return classifyUnknown(err)
