@@ -6,7 +6,10 @@
  * snapshot of that behavior, not an equivalence oracle against older code.
  *
  * The base corpus was generated from the pre-composition drivers by running
- * this same file with UPDATE_CHAT_CORPUS=1. Every provider is built through the
+ * this same file with UPDATE_CHAT_CORPUS=1, except the `missing-credential|*`
+ * entries: they were regenerated from the composed drivers once only the SDK
+ * error's first sentence was recorded, and that sentence is the same one the
+ * pre-composition drivers raise. Every provider is built through the
  * real factory (`makeProvider`) and its SDK client is swapped for a recorder
  * after construction, so what is compared is exactly what the driver hands to
  * `chat.completions.create` (payload + request options), plus the decoded core
@@ -481,7 +484,7 @@ async function buildCorpus(): Promise<Record<string, unknown>> {
 }
 
 describe('OpenAI wire family — byte-identical chat corpus', () => {
-  it('matches the corpus recorded from the pre-composition drivers', async () => {
+  it('matches the recorded chat corpus', async () => {
     const corpus = await buildCorpus()
     if (UPDATE) {
       // Regenerating rewrites the oracle and skips every comparison, so in CI it
