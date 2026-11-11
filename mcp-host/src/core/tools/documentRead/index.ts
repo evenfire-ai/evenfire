@@ -127,8 +127,11 @@ const IMAGE_EXHAUSTED_MESSAGE =
  * 1M-token context can hold several MB of snapshot text, so 2 MB left the
  * admitted images and the real text above the provider's serialized bound;
  * 4 MB covers a 1M-token context at roughly four UTF-8 bytes per token and the
- * measured 2.1 MB case. Every byte here is unavailable to images, and the
- * provider request asserter downstream remains the typed backstop.
+ * measured 2.1 MB case. Every byte here is unavailable to images. The
+ * provider request asserter downstream is a typed backstop only when the
+ * request also carries GFS images or sets `verifyImageInput`; page images are
+ * tool images, so a request whose only images come from this Tool relies on
+ * this reserve alone (VISUAL_BUDGET.md, residual risks).
  */
 const VISUAL_REQUEST_TEXT_RESERVE_BYTES = 4_000_000
 
@@ -697,6 +700,13 @@ export class DocumentReadTool implements Tool {
       ),
       Math.floor((visualInput.budget.remainingResidentBytes * 3) / 8)
     )
+    // What an empty request in a fresh turn would allow: rows 6 and 7 with no
+    // usage, and no turn memory spent. Below it, earlier images shrank this
+    // call, so a new message can help; at it, nothing can.
+    const freshTotalImageBytes = Math.min(
+      callImageBytes,
+      Math.floor(((profile.maxVisualRequestBytes - VISUAL_REQUEST_TEXT_RESERVE_BYTES) * 3) / 4)
+    )
     if (maxVisualPagesPerCall < 1 || maxTotalImageBytes < 1) return imageNotice()
     const outcome = await this.runJob(
       {
@@ -716,9 +726,12 @@ export class DocumentReadTool implements Tool {
       !outcome.ok &&
       outcome.reason === 'document_limits_exceeded' &&
       outcome.limit === 'image_bytes' &&
-      maxTotalImageBytes < callImageBytes
+      maxTotalImageBytes < freshTotalImageBytes
     ) {
       // The page did not fit what the request has left, not the model's bound.
+      // Comparing with callImageBytes instead made every image_bytes failure a
+      // pause on Codex and Claude, whose request bound (row 7) is below it even
+      // in an empty request, so a page too large for any request looped.
       return imageNotice()
     }
     if (!outcome.ok) return this.failure(identity, outcome, start, contentMismatch)

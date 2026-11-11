@@ -637,6 +637,36 @@ describe('document visual reads and the request image bounds', () => {
     expect(full.attachments).toHaveLength(1)
   }, 15_000)
 
+  it('reports a page too large for a fresh request as image_bytes, not a reattach pause', async () => {
+    const file = admittedFile('scan', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    // The child could not fit the page in the bytes it was given.
+    const tooLarge: RunDocumentJob = async () =>
+      ({ ok: false, reason: 'document_limits_exceeded', limit: 'image_bytes' }) as never
+    for (const profile of [CODEX, ANTHROPIC]) {
+      // An empty request and a fresh turn: reattaching cannot give more bytes,
+      // so a pause would loop. Row 7 alone is below callImageBytes on both.
+      const fresh = await documentTool(file, tooLarge).execute(
+        { attachmentId: file.id, mode: 'visual' },
+        context(profile, { images: 0, bytes: 0, maxSide: 0 })
+      )
+      expect(JSON.parse(fresh.content)).toMatchObject({
+        status: 'error',
+        reason: 'document_limits_exceeded',
+        limit: 'image_bytes',
+      })
+      // Witness: earlier images in the request shrank the bytes, so the same
+      // failure is the pause that a new message can resolve.
+      const crowded = await documentTool(file, tooLarge).execute(
+        { attachmentId: file.id, mode: 'visual' },
+        context(profile, { images: 1, bytes: 1_000_000, maxSide: 100 })
+      )
+      expect(JSON.parse(crowded.content)).toMatchObject({
+        status: 'read_budget_exhausted',
+        message: IMAGE_MESSAGE,
+      })
+    }
+  })
+
   it('refuses a visual read without the request image usage', async () => {
     const file = admittedFile('scan', await imageOnlyPdf(witnessCode()), 'application/pdf')
     const { runJob, jobs } = countingRunner()
