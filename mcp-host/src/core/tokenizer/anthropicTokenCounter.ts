@@ -96,7 +96,7 @@ export class AnthropicTokenCounter implements TokenCounter {
       const reason = classifyFallbackReason(err)
       this.incrementFallback(reason)
       logger.warn(
-        { provider: 'claude', reason, error: (err as Error)?.message ?? String(err) },
+        { provider: 'claude', reason, err },
         'countTokens failed, falling back to heuristic'
       )
       return Math.ceil(heuristicCount(messages) * 1.5)

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { logger, redactUnknown } from '../../../logger'
 import type { ChatMessage, ToolDefinition } from '../../types'
 import { AnthropicTokenCounter } from '../anthropicTokenCounter'
 import { heuristicCount } from '../heuristic'
@@ -41,6 +42,33 @@ describe('AnthropicTokenCounter', () => {
     const msgs: ChatMessage[] = [{ role: 'user', content: 'one two three four five' }]
     const heuristic = heuristicCount(msgs)
     expect(await counter.count(msgs)).toBe(Math.ceil(heuristic * 1.5))
+  })
+
+  it('logs the countTokens failure through the Error redaction, not its message text', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      const client = makeClient(() => {
+        throw Object.assign(new Error('provider echoed sk-ant-payload-secret'), {
+          name: 'RateLimitError',
+          status: 429,
+        })
+      })
+      const counter = new AnthropicTokenCounter(client, 'claude-opus-4-7')
+      await counter.count([{ role: 'user', content: 'hi' }])
+
+      const call = warn.mock.calls.find(([, msg]) => String(msg).includes('countTokens failed'))
+      expect(call).toBeDefined()
+      // The structured logger writes JSON.stringify(redactUnknown(fields)).
+      const line = JSON.stringify(redactUnknown(call![0]))
+      expect(line).not.toContain('sk-ant-payload-secret')
+      expect(JSON.parse(line)).toMatchObject({
+        provider: 'claude',
+        reason: 'rate_limit',
+        err: { name: 'RateLimitError', status: 429 },
+      })
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('offline mode skips the network', async () => {
