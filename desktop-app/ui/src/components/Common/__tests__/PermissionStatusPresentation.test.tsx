@@ -78,7 +78,7 @@ describe('EvenDrive permission status presentation', () => {
     expect(document.activeElement).toBe(
       screen.getByRole('button', { name: 'Retry permission check' })
     )
-    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.keyDown(close, { key: 'Escape' })
     expect(onDismiss).toHaveBeenCalledWith(['query-1'])
   })
 

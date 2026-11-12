@@ -65,11 +65,6 @@ export function PermissionErrorDialog({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!latestRef.current.errors.length || latestRef.current.suspended) return
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        acknowledgePermissionErrors(latestRef.current.errors)
-        latestRef.current.onDismiss(latestRef.current.errors.map(error => error.id))
-      }
       if (event.key === 'Tab') {
         const dialog = dialogRef.current
         if (!dialog) return
@@ -101,6 +96,13 @@ export function PermissionErrorDialog({
         aria-describedby={messagesId}
         aria-modal="true"
         className="confirm-dialog da-permission-error-dialog"
+        onKeyDown={event => {
+          if (event.key !== 'Escape' || !latestRef.current.errors.length) return
+          event.preventDefault()
+          event.stopPropagation()
+          acknowledgePermissionErrors(latestRef.current.errors)
+          latestRef.current.onDismiss(latestRef.current.errors.map(error => error.id))
+        }}
         ref={dialogRef}
         role="alertdialog"
       >
