@@ -5,7 +5,7 @@ import {
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
 import { canonicalRefusalCode } from './imageSource'
 import { rateLimitedCode, retryAfterMs } from './retryAfter'
-import { upstreamRejectedStatus } from './upstreamRejected'
+import { upstreamRejectedStatus, upstreamRequestRejectedMessage } from './upstreamRejected'
 
 export const CODEX_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
 
@@ -13,7 +13,13 @@ export const CODEX_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/codex/completi
  * Operator-facing text for a proxy denial. The three local-capacity codes say
  * what the caller can do; they are not upstream outage diagnostics.
  */
-export function codexProxyErrorMessage(code: string, status?: number): string {
+export function codexProxyErrorMessage(
+  code: string,
+  status?: number,
+  upstreamStatus?: number
+): string {
+  const rejected = upstreamRequestRejectedMessage(code, upstreamStatus)
+  if (rejected) return rejected
   if (
     code === 'visual_host_share' ||
     code === 'visual_gate' ||
@@ -200,10 +206,15 @@ export class CodexLlmProxyClient {
             : typeof payload.error === 'string'
               ? payload.error
               : 'provider_unavailable'
-      throw new CodexProxyError(code, codexProxyErrorMessage(code, response.status), {
-        retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined,
-        upstreamStatus: upstreamRejectedStatus(code, payload.upstreamStatus),
-      })
+      const upstreamStatus = upstreamRejectedStatus(code, payload.upstreamStatus)
+      throw new CodexProxyError(
+        code,
+        codexProxyErrorMessage(code, response.status, upstreamStatus),
+        {
+          retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined,
+          upstreamStatus,
+        }
+      )
     }
     if (!response.body) {
       throw new CodexProxyError('provider_unavailable', 'proxy stream had no body')
@@ -237,9 +248,12 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<CodexProx
       if (!line) continue
       const frame = JSON.parse(line.slice(6)) as CodexProxyFrame
       if (frame.type === 'error') {
-        throw new CodexProxyError(frame.code, codexProxyErrorMessage(frame.code), {
-          upstreamStatus: upstreamRejectedStatus(frame.code, frame.upstreamStatus),
-        })
+        const upstreamStatus = upstreamRejectedStatus(frame.code, frame.upstreamStatus)
+        throw new CodexProxyError(
+          frame.code,
+          codexProxyErrorMessage(frame.code, undefined, upstreamStatus),
+          { upstreamStatus }
+        )
       }
       if (frame.type === 'text') text += frame.text
       if (frame.type === 'tool_call') toolCalls.push(frame)
