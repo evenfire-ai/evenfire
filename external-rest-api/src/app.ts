@@ -13,6 +13,7 @@ import { createDesktopRouter } from './routes/desktop.js'
 import { createDirectoryRouter } from './routes/directory.js'
 import { createEntityChangesRouter } from './routes/entityChanges.js'
 import { createGfsRouter } from './routes/gfs.js'
+import { createGfsWatchRouter } from './routes/gfsWatch.js'
 import { createHealthRouter } from './routes/health.js'
 import { createInvitationsRouter } from './routes/invitations.js'
 import { createMeRouter } from './routes/me.js'
@@ -117,6 +118,8 @@ export function createApp() {
   api.use(createMeRouter())
   api.use(createMembersRouter())
   api.use(createContextSharedFilesystemsRouter())
+  // Ahead of the GFS router so the watch keeps its own edge buckets.
+  api.use(createGfsWatchRouter())
   api.use(createGfsRouter())
   api.use(createTeamRouter())
   const invitationsRouter = createInvitationsRouter()

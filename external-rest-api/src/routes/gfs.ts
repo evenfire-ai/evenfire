@@ -10,6 +10,7 @@ import { config } from '../config.js'
 import {
   ControlApiError,
   ControlApiPathError,
+  type ControlApiQuery,
   controlApiRequest,
   controlApiStreamRequest,
 } from '../controlApiClient.js'
@@ -45,6 +46,7 @@ const CONTROL_API_ERROR_HEADERS = [
   'x-ratelimit-remaining',
   'x-ratelimit-reset',
   'x-request-id',
+  'x-watch-error',
 ] as const
 const STREAM_HEADERS = [
   'content-type',
@@ -100,15 +102,17 @@ const DEFAULT_EXTERNAL_GFS_EDGE_LIMITS: ExternalGfsEdgeLimits = {
   tokenIpPerMin: config.externalGfsEdgeTokenIpRlPerMin,
 }
 
-type GfsAuthedRequest = AuthedRequest & { gfsRequestId?: string }
+export type GfsAuthedRequest = AuthedRequest & { gfsRequestId?: string }
 type GfsRequestOptions = {
-  query?: Record<string, string | undefined>
+  query?: ControlApiQuery
   body?: unknown
   userSessionToken?: string
   extraHeaders?: Record<string, string>
+  signal?: AbortSignal
+  redirect?: RequestRedirect
 }
 
-function attachGfsRequestId(req: Request, res: Response, next: NextFunction): void {
+export function attachGfsRequestId(req: Request, res: Response, next: NextFunction): void {
   const raw = req.header('x-request-id')?.trim()
   const requestId = raw && UUID_ANY_RE.test(raw) ? raw.toLowerCase() : randomUUID()
   ;(req as GfsAuthedRequest).gfsRequestId = requestId
@@ -116,7 +120,10 @@ function attachGfsRequestId(req: Request, res: Response, next: NextFunction): vo
   next()
 }
 
-function withGfsRequestId(req: GfsAuthedRequest, options: GfsRequestOptions): GfsRequestOptions {
+export function withGfsRequestId(
+  req: GfsAuthedRequest,
+  options: GfsRequestOptions
+): GfsRequestOptions {
   // The control-api is behind profile-control-funnel, which appends its own
   // peer to X-Forwarded-For. Preserve the external-rest API's proxy-attested
   // client address as the first value so the control-api's pre-resolution
@@ -144,6 +151,26 @@ function gfsControlApiRequest<T>(
   return controlApiRequest<T>(method, path, withGfsRequestId(req, options))
 }
 
+/** Answers with control-api's status, body and allowlisted headers. */
+export function relayControlApiError(error: ControlApiError, res: Response): void {
+  // The internal client has already filtered this map. Keep the allowlist at
+  // this last hop too so a hand-constructed/mocked ControlApiError cannot
+  // accidentally turn arbitrary internal response headers into public ones.
+  for (const name of CONTROL_API_ERROR_HEADERS) {
+    const value = error.headers?.[name]
+    if (value) res.setHeader(name, value)
+  }
+  const body =
+    error.body && typeof error.body === 'object'
+      ? error.body
+      : { error: STATUS_CODES[error.status] }
+  for (const header of STREAM_HEADERS) {
+    const value = error.headers?.[header]
+    if (value) res.setHeader(header, value)
+  }
+  res.status(error.status).json(body)
+}
+
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
   // A caller-influenced path stays the edge's own 400 envelope (rule 1 of the
   // global handler) instead of the flat `{error:'invalid_request'}` body.
@@ -155,53 +182,45 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
     error instanceof ControlApiError &&
     (PROPAGATED.has(error.status) || (error.status >= 500 && error.status <= 599))
   if (shouldPropagate) {
-    // The internal client has already filtered this map. Keep the allowlist at
-    // this last hop too so a hand-constructed/mocked ControlApiError cannot
-    // accidentally turn arbitrary internal response headers into public ones.
-    for (const name of CONTROL_API_ERROR_HEADERS) {
-      const value = error.headers?.[name]
-      if (value) res.setHeader(name, value)
-    }
-    const body =
-      error.body && typeof error.body === 'object'
-        ? error.body
-        : { error: STATUS_CODES[error.status] }
-    for (const header of STREAM_HEADERS) {
-      const value = error.headers?.[header]
-      if (value) res.setHeader(header, value)
-    }
-    res.status(error.status).json(body)
+    relayControlApiError(error, res)
     return
   }
   next(error)
+}
+
+/**
+ * One per-process edge bucket. Each call builds its own counter, so two
+ * routers that share a bucket name still charge separate budgets.
+ */
+export function createGfsEdgeLimiter(
+  limit: number,
+  bucket: string,
+  options?: { keyGenerator?: (req: Request) => string }
+) {
+  return rateLimit({
+    windowMs: EXTERNAL_GFS_EDGE_WINDOW_MS,
+    limit,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    identifier: `gfs-edge-${bucket}`,
+    ...(options?.keyGenerator ? { keyGenerator: options.keyGenerator } : {}),
+    handler: (_req, res) => {
+      const retryAfterSeconds = retryAfterSecondsFromHeader(res.getHeader('Retry-After'))
+      res.status(429).json({
+        error: 'Too Many Requests',
+        rateLimitLayer: 'external-rest-edge',
+        rateLimitBucket: bucket,
+        retryAfterSeconds,
+      })
+    },
+  })
 }
 
 export function createGfsRouter(options: GfsRouterOptions = {}): Router {
   const router = Router()
   const edgeLimits = options?.edgeLimits ?? DEFAULT_EXTERNAL_GFS_EDGE_LIMITS
 
-  const edgeLimiter = (
-    limit: number,
-    bucket: string,
-    options?: { keyGenerator?: (req: Request) => string }
-  ) =>
-    rateLimit({
-      windowMs: EXTERNAL_GFS_EDGE_WINDOW_MS,
-      limit,
-      standardHeaders: 'draft-7',
-      legacyHeaders: false,
-      identifier: `gfs-edge-${bucket}`,
-      ...(options?.keyGenerator ? { keyGenerator: options.keyGenerator } : {}),
-      handler: (_req, res) => {
-        const retryAfterSeconds = retryAfterSecondsFromHeader(res.getHeader('Retry-After'))
-        res.status(429).json({
-          error: 'Too Many Requests',
-          rateLimitLayer: 'external-rest-edge',
-          rateLimitBucket: bucket,
-          retryAfterSeconds,
-        })
-      },
-    })
+  const edgeLimiter = createGfsEdgeLimiter
 
   // Keep direct, recognised edge guards at this service as well as the
   // cross-replica Control API buckets. They run before JWT work and prevent a
