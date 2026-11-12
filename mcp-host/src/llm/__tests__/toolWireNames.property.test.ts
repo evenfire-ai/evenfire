@@ -345,6 +345,25 @@ describe('T-W1 · alias function properties', () => {
     expect(w.slice(0, w.indexOf('__'))).toBe('srv')
   })
 
+  it('keeps the server prefix up to a 50-character server and drops it at 51', () => {
+    // Cut from the longest real slot, so each server keeps the producer's shape.
+    const longest = serverNames.registry.map(e => e.name).sort((a, b) => b.length - a.length)[0]
+    for (const [length, withPrefix] of [
+      [49, true],
+      [50, true],
+      [51, false],
+    ] as const) {
+      const S = longest.slice(0, length)
+      expect(S).toMatch(/^[a-z][a-z0-9-]*$/)
+      for (const key of ['W', 'W_g'] as const) {
+        const w = wireToolAlias(`${S}__notion-query-multiple-data-sources`, key)
+        expect(w).toMatch(LITERAL_ENVELOPES[key])
+        expect(w.startsWith(`${S}__`)).toBe(withPrefix)
+        expect(w.includes('__')).toBe(withPrefix)
+      }
+    }
+  })
+
   it('P6b: distinct lone surrogates give distinct base aliases', () => {
     const surrogate = fc.integer({ min: 0xd800, max: 0xdfff })
     fc.assert(
