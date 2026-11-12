@@ -98,7 +98,10 @@ function candidate(head: AliasHead, hash: string, k: number | null): string {
   return head.withPrefix ? raw : collapse(raw)
 }
 
-/** Identity if `c` fits the envelope; otherwise the base alias (no collision suffix). */
+/**
+ * Identity if `c` fits the envelope; otherwise the base alias (no collision suffix).
+ * Test seam, no production caller: tests check the map sends it whenever the base is free.
+ */
 export function wireToolAlias(c: string, envelope: ToolNameEnvelopeKey): string {
   if (TOOL_NAME_ENVELOPES[envelope].test(c)) return c
   return candidate(aliasHead(c), defaultHash(c), null)
@@ -117,6 +120,7 @@ export class ToolWireNameMap {
   constructor(
     names: Iterable<string>,
     envelope: ToolNameEnvelopeKey,
+    // Test seam, no production caller: a weak hash is how tests force alias collisions.
     options?: { hash?: (c: string) => string }
   ) {
     this.envelope = TOOL_NAME_ENVELOPES[envelope]
