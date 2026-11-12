@@ -374,7 +374,11 @@ assert_a_refused_image_means_zero_copies() {
   : > "$d/registry.tsv"
   stub_image "$d" widget-a latest "$DIGEST_A" "$HEAD_SHA"
   local out rc; run_promote "$d" false v0.2.0
-  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] && grep -q 'promoted nothing' <<< "$out"; then
+  # Exactly one image failed, and it is widget-b: a resolver that failed every
+  # image would also leave the copy log empty.
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] \
+      && grep -q '^::error::widget-b: no release candidate passed' <<< "$out" \
+      && grep -qxF '::error::1 image(s) failed; promoted nothing' <<< "$out"; then
     pass "an image the resolver refuses blocks every copy"
   else
     fail "expected rc=1, empty copy-log, 'promoted nothing'; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
@@ -412,9 +416,13 @@ assert_an_existing_version_tag_with_another_digest_blocks_every_copy() {
 
 assert_any_other_version_tag_lookup_error_blocks_every_copy() {
   local d; d="$(mktemp -d)"; stub_two_images "$d"
-  stub_error "$d" "$PROMOTE_SRC/widget-b:v0.2.0" "Error: GET https://ghcr.io: DENIED: denied"
+  # Call 1 is the resolver's own-tag candidate, which finds nothing; call 2 is
+  # promote's version-tag check, the one under test here.
+  stub_error_from_call "$d" digest "$PROMOTE_SRC/widget-b:v0.2.0" 2 "Error: GET https://ghcr.io: DENIED: denied"
   local out rc; run_promote "$d" false v0.2.0
-  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] && grep -q 'promoted nothing' <<< "$out"; then
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] \
+      && grep -qF '::error::widget-b:v0.2.0: could not check the existing version tag: Error: GET https://ghcr.io: DENIED: denied' <<< "$out" \
+      && grep -qxF '::error::1 image(s) failed; promoted nothing' <<< "$out"; then
     pass "a version-tag lookup error other than MANIFEST_UNKNOWN fails the image and blocks every copy"
   else
     fail "expected rc=1 and empty copy-log; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
@@ -476,8 +484,9 @@ assert_stable_does_not_move_backwards() {
   local d; d="$(mktemp -d)"; stub_two_images "$d"
   ( cd "$d" && git tag v0.3.0 )
   local out rc; run_promote "$d" false v0.2.0
-  if [ "$rc" -eq 0 ] && grep -q ':v0.2.0$' "$d/copy-log" && ! grep -q ':stable$' "$d/copy-log"; then
-    pass "promoting a version below the highest published tag does not move :stable"
+  if [ "$rc" -eq 0 ] && grep -q ':v0.2.0$' "$d/copy-log" && ! grep -q ':stable$' "$d/copy-log" \
+      && grep -qxF ':stable stays where it is: v0.2.0 is below v0.3.0, the highest release tag' <<< "$out"; then
+    pass "promoting a version below the highest published tag does not move :stable, and says why"
   else
     fail "expected version copies and no :stable; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
   fi
@@ -495,6 +504,290 @@ assert_a_raw_sha_rehearsal_names_candidates_and_never_moves_stable() {
     fail "expected 'would promote widget-a@sha256:... via latest -> :v' and no copies; got rc=$rc out='$out'"
   fi
   rm -rf "$d"
+}
+
+# --- A copy pass that fails midway, and the re-run ---------------------------
+
+DIGEST_A2='sha256:a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2'
+
+# tag_state <d>: what each widget tag points at after the runs so far.
+tag_state() {
+  local name tag
+  for name in widget-a widget-b; do
+    for tag in v0.2.0 stable; do
+      printf '%s:%s=%s ' "$name" "$tag" "$(stub_tag_digest "$1" "$PROMOTE_SRC/$name:$tag")"
+    done
+  done
+}
+
+assert_a_failed_version_tag_copy_exits_non_zero_and_never_moves_stable() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  stub_copy_error "$d" "$PROMOTE_SRC/widget-b:v0.2.0" "Error: PUT https://ghcr.io/v2/evenfire-ai/widget-b/manifests/v0.2.0: 503 Service Unavailable"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -ne 0 ] && grep -q 'widget-a:v0.2.0$' "$d/copy-log" && ! grep -q ':stable$' "$d/copy-log" \
+      && grep -qF '503 Service Unavailable' <<< "$out"; then
+    pass "a failed :v0.2.0 copy stops the run with a non-zero exit before any :stable copy"
+  else
+    fail "expected rc!=0, widget-a:v0.2.0 copied, no :stable; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_failed_stable_copy_exits_non_zero_and_stops() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # widget-a's :stable copy fails. Carrying on would move widget-b:stable and
+  # report success with :stable pointing at two releases.
+  stub_copy_error "$d" "$PROMOTE_SRC/widget-a:stable" "Error: PUT https://ghcr.io/v2/evenfire-ai/widget-a/manifests/stable: 503 Service Unavailable"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -ne 0 ] && [ "$(grep -c ':v0.2.0$' "$d/copy-log")" -eq 2 ] \
+      && ! grep -q 'widget-b:stable$' "$d/copy-log" && grep -qF '503 Service Unavailable' <<< "$out"; then
+    pass "a failed :stable copy stops the run with a non-zero exit"
+  else
+    fail "expected rc!=0, both :v0.2.0 copies and no widget-b:stable copy; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_rerun_after_a_copy_pass_failed_midway_converges() {
+  # Run 1 fails at one copy: first at widget-b:v0.2.0 (only widget-a:v0.2.0
+  # written), then at widget-b:stable (both version tags written, :stable
+  # mixed). Before the re-run widget-a's :latest moves to a rebuild of the same
+  # commit with another digest, as every dev push does. The re-run takes each
+  # image's own :v0.2.0 first where run 1 wrote it, so it finishes the SAME
+  # release instead of refusing to move widget-a:v0.2.0.
+  local failing d out rc rc1 bad=''
+  for failing in widget-b:v0.2.0 widget-b:stable; do
+    d="$(mktemp -d)"; stub_two_images "$d"; stub_copy_writes_tags "$d"
+    stub_copy_error "$d" "$PROMOTE_SRC/$failing" "Error: PUT $PROMOTE_SRC/$failing: 503 Service Unavailable"
+    run_promote "$d" false v0.2.0; rc1=$rc
+    stub_copy_errors_clear "$d"
+    stub_image "$d" widget-a latest "$DIGEST_A2" "$HEAD_SHA"
+    run_promote "$d" false v0.2.0
+    if ! { [ "$rc1" -ne 0 ] && [ "$rc" -eq 0 ] \
+        && [ "$(tag_state "$d")" = "widget-a:v0.2.0=$DIGEST_A widget-a:stable=$DIGEST_A widget-b:v0.2.0=$DIGEST_B widget-b:stable=$DIGEST_B " ] \
+        && grep -qF "promoted widget-a@$DIGEST_A via v0.2.0 -> :v0.2.0" <<< "$out"; }; then
+      bad="$bad [$failing: rc1=$rc1 rc=$rc tags='$(tag_state "$d")' out='$out']"
+    fi
+    rm -rf "$d"
+  done
+  if [ -z "$bad" ]; then
+    pass "a re-run after a copy pass failed midway converges on the digests already published, with one :stable"
+  else
+    fail "expected run 2 to exit 0 with every :v0.2.0 and :stable on DIGEST_A/DIGEST_B, widget-a via v0.2.0;$bad"
+  fi
+}
+
+# --- Guards the cases above do not reach ---------------------------------------
+
+assert_promote_passes_every_source_path_to_the_resolver() {
+  local d; d="$(mktemp -d)"; make_repo_two_images "$d"
+  # widget-b lists two source paths, and only the second changes after the
+  # commit both images were built at. promote must hand the resolver both.
+  cat > "$d/deploy/images.json" <<'JSON'
+{
+  "images": [
+    { "name": "widget-a", "path": "widget-a", "source_paths": ["widget-a/**"], "published": true, "deployed_to_minikube": false },
+    { "name": "widget-b", "path": "widget-b", "source_paths": ["widget-a/**", "widget-b/**"], "published": true, "deployed_to_minikube": false }
+  ]
+}
+JSON
+  local built
+  built="$( cd "$d" && git tag -d v0.2.0 >/dev/null && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm manifest && git rev-parse HEAD )"
+  ( cd "$d" && echo two > widget-b/a.ts && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm two && git tag v0.2.0 )
+  stub_install "$d"
+  stub_image "$d" widget-a latest "$DIGEST_A" "$built"
+  stub_image "$d" widget-b latest "$DIGEST_B" "$built"
+  local out rc; run_promote "$d" true v0.2.0
+  if [ "$rc" -eq 1 ] && grep -q 'would promote widget-a@' <<< "$out" \
+      && ! grep -q 'would promote widget-b@' <<< "$out" && grep -q 'source changed' <<< "$out"; then
+    pass "promote hands the resolver every source path, so drift in widget-b's second path refuses it"
+  else
+    fail "expected widget-a promoted and widget-b refused for 'source changed'; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+# crane 0.22.1's HEAD-fallback warning for a missing tag, captured from
+# ghcr.io on 2026-11-13. It shows a bare 404 whatever the GET then says.
+PROMOTE_HEAD_FALLBACK_404='2026/11/13 02:10:53 HEAD request failed, falling back on GET: HEAD https://ghcr.io/v2/evenfire-ai/control-api/manifests/no-such-tag-fixture: unexpected status code 404 Not Found (HEAD responses have no body, use GET for details)'
+
+assert_a_bare_not_found_on_the_version_tag_check_fails_the_image() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # The resolver's own-tag lookup (call 1) finds no widget-b:v0.2.0. promote's
+  # check (call 2) gets the HEAD-fallback 404 and then a GET error that is not
+  # MANIFEST_UNKNOWN, which is not "not found".
+  stub_error_from_call "$d" digest "$PROMOTE_SRC/widget-b:v0.2.0" 2 \
+    "$PROMOTE_HEAD_FALLBACK_404\nError: GET https://ghcr.io/v2/evenfire-ai/widget-b/manifests/v0.2.0: unexpected status code 404 Not Found"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] \
+      && grep -qF '::error::widget-b:v0.2.0: could not check the existing version tag' <<< "$out"; then
+    pass "a bare 404 without MANIFEST_UNKNOWN on the version-tag check fails the image"
+  else
+    fail "expected rc=1, no copies and 'could not check the existing version tag'; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_failing_crane_manifest_in_the_arch_check_fails_the_image() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # promote's own read of widget-b's index (the second one) prints the whole
+  # index and then exits 1. Only pipefail sees that exit through the pipe.
+  # shellcheck disable=SC2016 # the wrapper expands $1, $2, $* and $state at run time
+  stub_wrap "$d" 'if [ "$1" = manifest ] && [ "$2" = '"$PROMOTE_SRC/widget-b@$DIGEST_B"' ] \
+    && [ "$(grep -cxF -- "$*" "$state/crane-calls")" -ge 1 ]; then
+  "$stub" "$@"; echo "crane stub: connection reset after the body" >&2; exit 1
+fi'
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] \
+      && grep -qF "::error::widget-b: could not verify the multi-arch manifest at $DIGEST_B" <<< "$out"; then
+    pass "a crane manifest that prints the index and then fails still fails the arch check"
+  else
+    fail "expected rc=1, no copies and 'could not verify the multi-arch manifest'; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+# --- :stable only moves forward -----------------------------------------------
+
+assert_a_higher_tag_pushed_to_origin_meanwhile_keeps_stable() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # Another release pushed v0.3.0 to origin after this checkout was made. The
+  # run fetches the tags right before :stable and leaves it alone.
+  local origin; origin="$(mktemp -d)"
+  git clone -q --bare "$d" "$origin/repo.git"
+  git -C "$origin/repo.git" tag v0.3.0 "$HEAD_SHA"
+  git -C "$d" remote add origin "$origin/repo.git"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 0 ] && [ "$(grep -c ':v0.2.0$' "$d/copy-log")" -eq 2 ] && ! grep -q ':stable$' "$d/copy-log" \
+      && grep -qxF ':stable stays where it is: v0.2.0 is below v0.3.0, the highest release tag' <<< "$out"; then
+    pass "a higher tag pushed to origin while the run copied keeps :stable where it is, and says why"
+  else
+    fail "expected two :v0.2.0 copies, no :stable and the reason line; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d" "$origin"
+}
+
+assert_a_failed_tag_fetch_stops_before_stable() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  git -C "$d" remote add origin "$d/no-such-origin.git"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 1 ] && [ "$(grep -c ':v0.2.0$' "$d/copy-log")" -eq 2 ] && ! grep -q ':stable$' "$d/copy-log" \
+      && grep -qF '::error::could not fetch the release tags from origin, so :stable was not moved' <<< "$out"; then
+    pass "a failed tag fetch stops the run after the version tags and before :stable"
+  else
+    fail "expected rc=1, two :v0.2.0 copies, no :stable and the fetch error; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_higher_version_tagged_at_an_older_commit_does_not_move_stable() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # v0.2.1 is the next commit. v0.2.2 is then tagged at the OLDER commit: the
+  # higher version, without v0.2.1's changes. Moving :stable would roll it back.
+  mkdir -p "$d/prep"; echo x > "$d/prep/x"
+  ( cd "$d" && git add prep && git -c user.email=t@t -c user.name=t commit -qm two && git tag v0.2.1 \
+    && git tag v0.2.2 "$HEAD_SHA" )
+  local want=":stable stays where it is: v0.2.1, the highest other release tag, is not an ancestor of the release commit $HEAD_SHA"
+  local out rc dry_out; run_promote "$d" true v0.2.2; dry_out=$out
+  run_promote "$d" false v0.2.2
+  if [ "$rc" -eq 0 ] && [ "$(grep -c ':v0.2.2$' "$d/copy-log")" -eq 2 ] && ! grep -q ':stable$' "$d/copy-log" \
+      && grep -qxF "$want" <<< "$out" && grep -qxF "$want" <<< "$dry_out"; then
+    pass "a higher version tagged at a commit that lacks the highest release does not move :stable, and says why"
+  else
+    fail "expected :v0.2.2 copies, no :stable and '$want' in the real and dry runs; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out' dry='$dry_out'"
+  fi
+  rm -rf "$d"
+}
+
+# --- Refs, exit codes and output -----------------------------------------------
+
+assert_a_dry_run_from_a_ref_that_is_not_an_image_tag_skips_the_version_tag_check() {
+  # HEAD~0 and refs/tags/v0.2.0 are refs git accepts, but :vHEAD~0 is not an
+  # image tag: real crane answers "could not parse reference" for it, as
+  # stubbed here. The dry run still rehearses every image.
+  local ref d out rc bad=''
+  for ref in 'HEAD~0' 'refs/tags/v0.2.0'; do
+    d="$(mktemp -d)"; stub_two_images "$d"
+    stub_error "$d" "$PROMOTE_SRC/widget-a:v$ref" "Error: parsing reference \"$PROMOTE_SRC/widget-a:v$ref\": could not parse reference: $PROMOTE_SRC/widget-a:v$ref"
+    stub_error "$d" "$PROMOTE_SRC/widget-b:v$ref" "Error: parsing reference \"$PROMOTE_SRC/widget-b:v$ref\": could not parse reference: $PROMOTE_SRC/widget-b:v$ref"
+    run_promote "$d" true "$ref"
+    if ! { [ "$rc" -eq 0 ] && grep -qF "would promote widget-a@$DIGEST_A via latest -> :v$ref" <<< "$out" \
+        && grep -qF "would promote widget-b@$DIGEST_B via latest -> :v$ref" <<< "$out" \
+        && grep -qxF ":v$ref is not a valid image tag, so this dry run skips the existing-version-tag check and the release's own tag candidate" <<< "$out" \
+        && ! grep -qF ":v$ref" "$d/crane-calls"; }; then
+      bad="$bad [$ref: rc=$rc out='$out' calls='$(tr '\n' ';' < "$d/crane-calls")']"
+    fi
+    rm -rf "$d"
+  done
+  if [ -z "$bad" ]; then
+    pass "a dry run from a ref that makes no valid image tag skips every :vREF lookup and still rehearses"
+  else
+    fail "expected exit 0, both 'would promote' lines, the skip line and no :vREF lookup;$bad"
+  fi
+}
+
+assert_a_real_run_from_a_ref_that_is_not_an_image_tag_fails() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  local out rc; run_promote "$d" false 'HEAD~0'
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] && [ ! -s "$d/crane-calls" ] \
+      && grep -qF '::error::HEAD~0 does not make a valid image tag (:vHEAD~0); refusing to promote' <<< "$out"; then
+    pass "a real run from a ref that makes no valid image tag fails before any registry call"
+  else
+    fail "expected rc=1, no crane call and the invalid-tag error; got rc=$rc calls='$(cat "$d/crane-calls")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_dry_run_with_several_refused_images_exits_one() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # Both images refused. The status is 1, not the count of failures: a count
+  # wraps at 256, and 256 refused images would exit 0.
+  : > "$d/registry.tsv"
+  local out rc; run_promote "$d" true v0.2.0
+  if [ "$rc" -eq 1 ] && [ "$(grep -c 'no release candidate passed' <<< "$out")" -eq 2 ]; then
+    pass "a dry run with two refused images exits 1, not the failure count"
+  else
+    fail "expected rc=1 with two refusals; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_real_run_copy_lines_name_the_candidate() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 0 ] \
+      && grep -qxF "promoted widget-a@$DIGEST_A via latest -> :v0.2.0" <<< "$out" \
+      && grep -qxF "promoted widget-b@$DIGEST_B via latest -> :v0.2.0" <<< "$out" \
+      && grep -qxF "promoted widget-a@$DIGEST_A via latest -> :stable" <<< "$out"; then
+    pass "a real run's copy lines name the candidate each digest came from"
+  else
+    fail "expected 'promoted <name>@<digest> via latest -> :v0.2.0' and '-> :stable' lines; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_malformed_resolver_line_fails_the_image() {
+  # The resolver is replaced by one that prints a malformed line for every
+  # image: a second tab, no tab at all, a digest that is not sha256 hex. Each
+  # fails the image rather than being spliced into a crane ref.
+  local line d out rc bad=''
+  for line in "$DIGEST_A\\tlatest\\textra" "$DIGEST_A" 'sha256:XYZ\tlatest'; do
+    d="$(mktemp -d)"; stub_two_images "$d"
+    printf 'process.stdout.write("%s\\n")\n' "$line" > "$d/scripts/release/resolve-release-images.mjs"
+    run_promote "$d" true v0.2.0
+    if ! { [ "$rc" -eq 1 ] && ! grep -q 'would promote' <<< "$out" \
+        && [ "$(grep -c '^::error::widget-[ab]: the resolver printed ' <<< "$out")" -eq 2 ]; }; then
+      bad="$bad [$line: rc=$rc out='$out']"
+    fi
+    rm -rf "$d"
+  done
+  if [ -z "$bad" ]; then
+    pass "a resolver line that is not exactly <sha256 digest><TAB><candidate> fails the image"
+  else
+    fail "expected rc=1, no 'would promote' and a 'the resolver printed' error per image;$bad"
+  fi
 }
 
 assert_every_defined_case_is_invoked() {
@@ -528,6 +821,20 @@ assert_the_full_registry_refs_are_pinned
 assert_every_version_tag_is_copied_before_any_stable
 assert_stable_does_not_move_backwards
 assert_a_raw_sha_rehearsal_names_candidates_and_never_moves_stable
+assert_a_failed_version_tag_copy_exits_non_zero_and_never_moves_stable
+assert_a_failed_stable_copy_exits_non_zero_and_stops
+assert_a_rerun_after_a_copy_pass_failed_midway_converges
+assert_promote_passes_every_source_path_to_the_resolver
+assert_a_bare_not_found_on_the_version_tag_check_fails_the_image
+assert_a_failing_crane_manifest_in_the_arch_check_fails_the_image
+assert_a_higher_tag_pushed_to_origin_meanwhile_keeps_stable
+assert_a_failed_tag_fetch_stops_before_stable
+assert_a_higher_version_tagged_at_an_older_commit_does_not_move_stable
+assert_a_dry_run_from_a_ref_that_is_not_an_image_tag_skips_the_version_tag_check
+assert_a_real_run_from_a_ref_that_is_not_an_image_tag_fails
+assert_a_dry_run_with_several_refused_images_exits_one
+assert_real_run_copy_lines_name_the_candidate
+assert_a_malformed_resolver_line_fails_the_image
 assert_every_defined_case_is_invoked
 
 exit $FAIL

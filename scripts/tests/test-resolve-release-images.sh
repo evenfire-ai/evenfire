@@ -52,12 +52,16 @@ assert_a_revision_that_is_an_ancestor_resolves() {
   local d; d="$(mktemp -d)"; make_repo "$d"
   local old; old="$( cd "$d" && git rev-parse HEAD~1 )"
   make_stub "$d" "sha256:abc" "$old"
-  # No source change after $old on the paths we ask about, so this must resolve.
-  if ( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
-        --image control-api --source-paths 'unrelated/**' --tag-sha HEAD >/dev/null 2>&1 ); then
-    pass "an ancestor revision with no later source change resolves"
+  # No source change after $old on the paths we ask about, so this must
+  # resolve, and print the digest and the candidate: an exit status alone is
+  # also what a resolver that printed nothing would give.
+  local out rc
+  out="$( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
+        --image control-api --source-paths 'unrelated/**' --tag-sha HEAD 2>/dev/null )" && rc=0 || rc=1
+  if [ "$rc" -eq 0 ] && [ "$out" = "$(printf 'sha256:abc\tlatest')" ]; then
+    pass "an ancestor revision with no later source change resolves to its digest via latest"
   else
-    fail "a valid ancestor revision was rejected"
+    fail "expected exit 0 and stdout 'sha256:abc<TAB>latest'; got rc=$rc out='$out'"
   fi
   rm -rf "$d"
 }
@@ -239,14 +243,15 @@ STUB
   rm -rf "$d"
 }
 
-# resolve_in <d> <image> <source-paths> <tag-sha>
+# resolve_in <d> <image> <source-paths> <tag-sha> [release-tag]
 # Runs the resolver inside <d> with "$d/bin" first on PATH, keeping stdout
 # ("$d/stdout") apart from stderr ("$d/stderr"): stdout is the contract the
-# promote script parses, so it is checked on its own. Returns the exit status.
+# promote script parses, so it is checked on its own. A fifth argument is
+# passed as --release-tag. Returns the exit status.
 resolve_in() {
   local d=$1
   ( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
-      --image "$2" --source-paths "$3" --tag-sha "$4" >"$d/stdout" 2>"$d/stderr" )
+      --image "$2" --source-paths "$3" --tag-sha "$4" ${5:+--release-tag "$5"} >"$d/stdout" 2>"$d/stderr" )
 }
 
 # load_shas <d>
@@ -1002,6 +1007,246 @@ assert_non_latest_reasons_give_no_latest_or_dev_advice() {
   rm -rf "$d"
 }
 
+# --- The release's own tag (--release-tag) ------------------------------------
+#
+# promote-release-images.sh passes the version tag it promotes to. It is the
+# first candidate, so a re-run after a copy pass that failed midway converges
+# on what the first run already published.
+
+assert_the_release_own_tag_wins_before_latest() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  # An earlier run copied other:v0.2.0 from an image built at C0, and :latest
+  # has since moved to another build that would pass too. The own tag wins,
+  # with no exact-revision rule (C0 is not T), and :latest is never queried.
+  git -C "$d" tag v0.2.0 "$T"
+  stub_image "$d" other v0.2.0 sha256:own "$C0"
+  stub_image "$d" other latest sha256:lat "$C0"
+  local rc=0; resolve_in "$d" other 'other/**' "$T" v0.2.0 || rc=$?
+  if [ "$rc" -eq 0 ] && cmp -s "$d/stdout" <(printf 'sha256:own\tv0.2.0\n') \
+      && ! grep -qF ':latest' "$d/crane-calls"; then
+    pass "the release's own existing tag wins before :latest, which is never queried"
+  else
+    fail "expected 'sha256:own<TAB>v0.2.0' and no :latest lookup; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_missing_release_own_tag_is_rejected_without_the_failed_tag_hint() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  # On a first run the own tag does not exist yet. That is normal, so its
+  # reason says so and gives none of the "delete the tag" advice that the
+  # previous release's missing tag still gets.
+  git -C "$d" tag v0.1.0 "$C0"
+  git -C "$d" tag v0.2.0 "$T"
+  stub_image "$d" other latest sha256:lat "$D3"
+  local rc=0; resolve_in "$d" other 'other/**' "$T" v0.2.0 || rc=$?
+  local own; own="$(candidate_line "$d" v0.2.0)"
+  if [ "$rc" -eq 1 ] && grep -q "no release candidate passed" "$d/stderr" \
+      && grep -qF 'ghcr.io/evenfire-ai/other:v0.2.0 does not exist' <<< "$own" \
+      && grep -qF 'this release has not promoted other yet' <<< "$own" \
+      && ! grep -qF 'delete the' <<< "$own" \
+      && candidate_line "$d" v0.1.0 | grep -qF 'delete the v0.1.0 tag'; then
+    pass "a missing own tag is rejected as not promoted yet, without the failed-tag advice"
+  else
+    fail "expected a '  v0.2.0: ' line saying it was not promoted yet, with no 'delete the' advice; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_release_own_tag_that_fails_a_check_is_rejected_and_the_chain_continues() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  # The own tag goes through the same checks as any candidate. Built at M1,
+  # widget/** has changed since (F1), so it is rejected and :latest is tried.
+  git -C "$d" tag v0.2.0 "$T"
+  stub_image "$d" widget v0.2.0 sha256:own "$M1"
+  stub_image "$d" widget latest sha256:lat "$D3"
+  local rc=0; resolve_in "$d" widget 'widget/**' "$T" v0.2.0 || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] \
+      && candidate_line "$d" v0.2.0 | grep -q 'source changed' \
+      && ! candidate_line "$d" v0.2.0 | grep -q 'Push to dev' \
+      && candidate_line "$d" latest | grep -q 'diverged history'; then
+    pass "an own tag that fails a check is rejected like any candidate, and the chain goes on to :latest"
+  else
+    fail "expected '  v0.2.0: source changed' (no 'Push to dev') then a '  latest: ' rejection; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_registry_error_on_the_release_own_tag_fails_the_image() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  # A rate limit says nothing about whether the own tag exists, so it fails
+  # the image; :latest, which would pass, is never queried.
+  git -C "$d" tag v0.2.0 "$T"
+  stub_error "$d" "ghcr.io/evenfire-ai/other:v0.2.0" "TOOMANYREQUESTS: slow down"
+  stub_image "$d" other latest sha256:lat "$C0"
+  local rc=0; resolve_in "$d" other 'other/**' "$T" v0.2.0 || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] \
+      && error_line "$d" | grep -q '^::error::other: v0\.2\.0: .*TOOMANYREQUESTS' \
+      && ! grep -q "no release candidate passed" "$d/stderr" && ! grep -qF ':latest' "$d/crane-calls"; then
+    pass "a registry error on the own tag fails the image without trying :latest"
+  else
+    fail "expected '::error::other: v0.2.0: ...TOOMANYREQUESTS' and no :latest lookup; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+# --- Guards the cases above do not reach ---------------------------------------
+
+assert_drift_in_the_second_source_path_rejects_the_candidate() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  # Many published images list several source paths. widget/** changed after
+  # M1 (F1, via H1) and other/** did not, so drift in the SECOND path alone
+  # must reject the candidate.
+  stub_image "$d" widget latest sha256:lat "$M1"
+  local rc=0; resolve_in "$d" widget 'other/**,widget/**' "$T" || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] \
+      && candidate_line "$d" latest | grep -q 'source changed' \
+      && grep -qx '    widget/a.ts' "$d/stderr"; then
+    pass "drift in the second of two source paths rejects the candidate"
+  else
+    fail "expected '  latest: source changed' listing widget/a.ts; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_transient_error_on_a_sha_candidate_fails_the_image() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  git -C "$d" tag v0.1.0 "$C0"
+  # A rate limit on the hotfix image's tag, and on its index read by digest.
+  # Either one fails the image; the previous release, which would pass, is
+  # never queried.
+  local ref rc bad=''
+  for ref in "ghcr.io/evenfire-ai/other:sha-${H1:0:7}" ghcr.io/evenfire-ai/other@sha256:hot; do
+    stub_install "$d"
+    stub_image "$d" other v0.1.0 sha256:prev "$C0"
+    stub_image "$d" other latest sha256:lat "$D3"
+    stub_image "$d" other "sha-${H1:0:7}" sha256:hot "$H1"
+    stub_error "$d" "$ref" "TOOMANYREQUESTS: slow down"
+    rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+    if ! { [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] \
+        && error_line "$d" | grep -q "^::error::other: sha-${H1:0:7}: .*TOOMANYREQUESTS" \
+        && ! grep -q "no release candidate passed" "$d/stderr" \
+        && ! grep -qF ':v0.1.0' "$d/crane-calls"; }; then
+      bad="$bad [$ref: $(run_summary "$d" "$rc")]"
+    fi
+  done
+  if [ -z "$bad" ]; then
+    pass "a transient error on a sha- candidate (tag or index) fails the image and never reaches the previous release"
+  else
+    fail "expected '::error::other: sha-${H1:0:7}: ...TOOMANYREQUESTS' and no :v0.1.0 lookup;$bad"
+  fi
+  rm -rf "$d"
+}
+
+# crane 0.22.1's stderr for a missing tag, captured from ghcr.io on 2026-11-13
+# (`crane digest ghcr.io/evenfire-ai/control-api:no-such-tag-fixture`): the
+# HEAD-fallback warning, which shows a bare 404, then the GET error.
+CRANE_HEAD_FALLBACK_404='2026/11/13 02:10:53 HEAD request failed, falling back on GET: HEAD https://ghcr.io/v2/evenfire-ai/control-api/manifests/no-such-tag-fixture: unexpected status code 404 Not Found (HEAD responses have no body, use GET for details)'
+CRANE_GET_MANIFEST_UNKNOWN='Error: GET https://ghcr.io/v2/evenfire-ai/control-api/manifests/no-such-tag-fixture: MANIFEST_UNKNOWN: manifest unknown'
+
+assert_a_head_fallback_not_found_counts_only_with_manifest_unknown() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  git -C "$d" tag v0.1.0 "$C0"
+  # The captured stderr as is: :latest does not exist, so it is rejected and
+  # the previous release wins. The same HEAD line followed by any other GET
+  # error fails the image: the 404 on the HEAD line alone is not "not found".
+  local get rc bad=''
+  for get in "$CRANE_GET_MANIFEST_UNKNOWN" \
+      'Error: GET https://ghcr.io/v2/evenfire-ai/control-api/manifests/no-such-tag-fixture: unexpected status code 404 Not Found' \
+      'Error: GET https://ghcr.io/v2/evenfire-ai/control-api/manifests/no-such-tag-fixture: unexpected status code 502 Bad Gateway'; do
+    stub_install "$d"
+    stub_image "$d" other v0.1.0 sha256:prev "$C0"
+    printf '%s\n%s\n' "$CRANE_HEAD_FALLBACK_404" "$get" > "$d/crane-stderr"
+    stub_error_file "$d" ghcr.io/evenfire-ai/other:latest "$d/crane-stderr"
+    rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+    if [ "$get" = "$CRANE_GET_MANIFEST_UNKNOWN" ]; then
+      { [ "$rc" -eq 0 ] && cmp -s "$d/stdout" <(printf 'sha256:prev\tv0.1.0\n'); } \
+        || bad="$bad [MANIFEST_UNKNOWN should reject: $(run_summary "$d" "$rc")]"
+    else
+      failed_at_latest "$d" "$rc" "${get##*: }" || bad="$bad [${get##*: } should fail: $(run_summary "$d" "$rc")]"
+    fi
+  done
+  if [ -z "$bad" ]; then
+    pass "crane's HEAD-fallback 404 rejects a candidate only with MANIFEST_UNKNOWN from the GET; any other GET error fails the image"
+  else
+    fail "expected MANIFEST_UNKNOWN to reject and every other GET error to fail the image at :latest;$bad"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_two_part_tag_is_never_the_previous_release() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  # v0.2 is reachable and above v0.1.0 on its first two parts, and its image
+  # would pass. It is not a strict vX.Y.Z tag, so it is not a release.
+  with_passing_previous_release "$d"
+  git -C "$d" tag v0.2 "$M1"
+  stub_image "$d" other v0.2 sha256:two "$C0"
+  stub_image "$d" other latest sha256:lat "$D3"
+  local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+  if [ "$rc" -eq 0 ] && cmp -s "$d/stdout" <(printf 'sha256:prev\tv0.1.0\n') \
+      && ! grep -qxF 'digest ghcr.io/evenfire-ai/other:v0.2' "$d/crane-calls"; then
+    pass "a two-part v0.2 tag is never taken as the previous release"
+  else
+    fail "expected v0.1.0 to win with no :v0.2 lookup; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_an_empty_revision_annotation_is_rejected_and_the_next_wins() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  # An annotation that is present but empty names no commit: the candidate
+  # is rejected like one with no annotation, not failed as a git error.
+  with_passing_previous_release "$d"
+  stub_image "$d" other latest sha256:lat ""
+  local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+  if [ "$rc" -eq 0 ] && cmp -s "$d/stdout" <(printf 'sha256:prev\tv0.1.0\n'); then
+    pass "an empty revision annotation is rejected and the next candidate wins"
+  else
+    fail "expected 'sha256:prev<TAB>v0.1.0'; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_crane_killed_by_a_signal_fails_the_image_whatever_it_printed() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  # crane printed MANIFEST_UNKNOWN, then was killed. A process that did not
+  # exit says nothing reliable, so this is not "not found".
+  with_passing_previous_release "$d"
+  # shellcheck disable=SC2016 # the wrapper expands $1, $2 and $$ at run time
+  stub_wrap "$d" 'if [ "$1" = digest ] && [ "$2" = ghcr.io/evenfire-ai/other:latest ]; then
+  echo "Error: GET https://ghcr.io/v2/evenfire-ai/other/manifests/latest: MANIFEST_UNKNOWN: manifest unknown" >&2
+  kill -KILL $$
+fi'
+  local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && grep -q 'signal SIGKILL' "$d/stderr" \
+      && ! grep -q "no release candidate passed" "$d/stderr"; then
+    pass "a crane killed by a signal fails the image even after printing MANIFEST_UNKNOWN"
+  else
+    fail "expected rc=1 naming 'signal SIGKILL', not a fall-through; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   # comm -23 over sorted lists. An earlier draft used a `while read` loop fed by
   # `grep -oE ... -P`, which mixes two incompatible matcher flags: the loop body
@@ -1061,6 +1306,16 @@ assert_a_mislabelled_sha_tag_that_would_otherwise_pass_does_not_win
 assert_a_git_rev_list_error_fails_the_image
 assert_latest_passing_skips_every_other_candidate
 assert_non_latest_reasons_give_no_latest_or_dev_advice
+assert_the_release_own_tag_wins_before_latest
+assert_a_missing_release_own_tag_is_rejected_without_the_failed_tag_hint
+assert_a_release_own_tag_that_fails_a_check_is_rejected_and_the_chain_continues
+assert_a_registry_error_on_the_release_own_tag_fails_the_image
+assert_drift_in_the_second_source_path_rejects_the_candidate
+assert_a_transient_error_on_a_sha_candidate_fails_the_image
+assert_a_head_fallback_not_found_counts_only_with_manifest_unknown
+assert_a_two_part_tag_is_never_the_previous_release
+assert_an_empty_revision_annotation_is_rejected_and_the_next_wins
+assert_a_crane_killed_by_a_signal_fails_the_image_whatever_it_printed
 assert_every_defined_case_is_invoked
 
 exit $FAIL

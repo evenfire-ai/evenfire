@@ -9,17 +9,27 @@
 #
 #   <ref>\t<kind>\t<payload>
 #
-#   kind digest    `crane digest <ref>` prints <payload> on stdout, exits 0
-#   kind manifest  `crane manifest <ref>` prints <payload> on stdout, exits 0
-#   kind error     either subcommand on <ref> prints <payload> on stderr, exits 1
+#   kind digest     `crane digest <ref>` prints <payload> on stdout, exits 0
+#   kind manifest   `crane manifest <ref>` prints <payload> on stdout, exits 0
+#   kind error      either subcommand on <ref> prints <payload> on stderr, exits 1
+#   kind errorfile  like error, but <payload> is a file whose (multi-line)
+#                   contents are printed on stderr
+#   kind error-from-<subcommand>  payload <n>\t<text>: the <n>th and every
+#                   later `crane <subcommand> <ref>` call prints <text> on
+#                   stderr (a "\n" in it is a line break) and exits 1,
+#                   whatever the other rows say; earlier calls answer from
+#                   the other rows
+#   kind copyerror  `crane copy <src> <ref>` prints <payload> on stderr, exits 1
 #
 # The LAST row matching the ref and subcommand wins, so a later row overrides
 # an earlier one: `stub_image` then `stub_error` on the same ref makes that ref
 # fail. A ref with no matching row fails the way real crane does for a missing
 # tag (`MANIFEST_UNKNOWN`), so "not in the table" means "not in the registry".
 #
-# Every call is appended to "$d/crane-calls" ("$*", one line per call), and
-# `crane copy <src> <dst>` appends "<src> <dst>" to "$d/copy-log".
+# Every call is appended to "$d/crane-calls" ("$*", one line per call), and a
+# successful `crane copy <src> <dst>` appends "<src> <dst>" to "$d/copy-log".
+# After stub_copy_writes_tags it also points <dst> at <src>'s digest, so a
+# later run reads back what an earlier one copied.
 
 RELEASE_STUB_REGISTRY='ghcr.io/evenfire-ai'
 
@@ -38,12 +48,20 @@ printf '%s\n' "$*" >> "$state/crane-calls"
 case "${1:-}" in
   digest|manifest)
     cmd=$1 ref=${2:-}
-    row="$(awk -v ref="$ref" -v cmd="$cmd" '
+    # Calls made with exactly these arguments so far, this one included.
+    n=$(grep -cxF -- "$*" "$state/crane-calls")
+    row="$(awk -v ref="$ref" -v cmd="$cmd" -v n="$n" '
       BEGIN { FS = "\t" }
-      $1 == ref && ($2 == cmd || $2 == "error") {
+      $1 == ref && ($2 == cmd || $2 == "error" || $2 == "errorfile") {
         kind = $2; payload = substr($0, length($1) + length($2) + 3); found = 1
       }
-      END { if (found) printf "%s\t%s", kind, payload }
+      $1 == ref && $2 == "error-from-" cmd && n >= $3 + 0 {
+        late = substr($0, length($1) + length($2) + length($3) + 4); late_found = 1
+      }
+      END {
+        if (late_found) printf "late\t%s", late
+        else if (found) printf "%s\t%s", kind, payload
+      }
     ' "$state/registry.tsv")"
     if [ -z "$row" ]; then
       printf 'Error: GET https://%s: MANIFEST_UNKNOWN: manifest unknown\n' "$ref" >&2
@@ -54,10 +72,31 @@ case "${1:-}" in
       printf '%s\n' "$payload" >&2
       exit 1
     fi
+    if [ "$kind" = errorfile ]; then
+      cat "$payload" >&2
+      exit 1
+    fi
+    if [ "$kind" = late ]; then
+      printf '%b\n' "$payload" >&2
+      exit 1
+    fi
     printf '%s\n' "$payload"
     ;;
   copy)
-    printf '%s %s\n' "${2:-}" "${3:-}" >> "$state/copy-log"
+    src=${2:-} dst=${3:-}
+    copy_error="$(awk -v ref="$dst" '
+      BEGIN { FS = "\t" }
+      $1 == ref && $2 == "copyerror" { payload = substr($0, length($1) + length($2) + 3); found = 1 }
+      END { if (found) printf "x%s", payload }
+    ' "$state/registry.tsv")"
+    if [ -n "$copy_error" ]; then
+      printf '%s\n' "${copy_error#x}" >&2
+      exit 1
+    fi
+    printf '%s %s\n' "$src" "$dst" >> "$state/copy-log"
+    if [ -e "$state/copy-writes-tags" ]; then
+      printf '%s\t%s\t%s\n' "$dst" digest "${src#*@}" >> "$state/registry.tsv"
+    fi
     ;;
   *)
     printf 'crane stub: unsupported command: %s\n' "$*" >&2
@@ -104,6 +143,71 @@ stub_error() {
 # JSON, or JSON that is not an object.
 stub_manifest() {
   printf '%s\t%s\t%s\n' "$2" manifest "$3" >> "$1/registry.tsv"
+}
+
+# stub_error_file <d> <ref> <file>
+# Both `crane digest <ref>` and `crane manifest <ref>` print the contents of
+# <file> on stderr and exit 1: a multi-line stderr, such as crane's
+# HEAD-fallback warning followed by the GET error.
+stub_error_file() {
+  printf '%s\t%s\t%s\n' "$2" errorfile "$3" >> "$1/registry.tsv"
+}
+
+# stub_error_from_call <d> <digest|manifest> <ref> <n> <text>
+# The <n>th and every later `crane <digest|manifest> <ref>` call prints <text>
+# on stderr (a "\n" in it is a line break) and exits 1; the calls before it
+# answer from the other rows. Two
+# callers that ask the same question (the resolver, then the promote script)
+# can then get different answers.
+stub_error_from_call() {
+  printf '%s\t%s\t%s\t%s\n' "$3" "error-from-$2" "$4" "$5" >> "$1/registry.tsv"
+}
+
+# stub_copy_error <d> <dst-ref> <text>
+# `crane copy <src> <dst-ref>` prints <text> on stderr, exits 1 and copies
+# nothing, until stub_copy_errors_clear.
+stub_copy_error() {
+  printf '%s\t%s\t%s\n' "$2" copyerror "$3" >> "$1/registry.tsv"
+}
+
+# stub_copy_errors_clear <d>: every copy succeeds again.
+stub_copy_errors_clear() {
+  awk 'BEGIN { FS = "\t" } $2 != "copyerror"' "$1/registry.tsv" > "$1/registry.tsv.next" \
+    && mv "$1/registry.tsv.next" "$1/registry.tsv"
+}
+
+# stub_copy_writes_tags <d>
+# From now on a successful `crane copy <name>@<digest> <dst>` also points
+# <dst> at <digest>, as a registry would, so a re-run sees the tags an
+# earlier run wrote. Off by default: most cases assert on the copy log alone.
+stub_copy_writes_tags() {
+  : > "$1/copy-writes-tags"
+}
+
+# stub_tag_digest <d> <ref>
+# The digest the last digest row gives <ref> (empty when there is none): what
+# a tag points at after the copies a run made.
+stub_tag_digest() {
+  awk -v ref="$2" 'BEGIN { FS = "\t" } $1 == ref && $2 == "digest" { p = $3 } END { print p }' "$1/registry.tsv"
+}
+
+# stub_wrap <d> <bash>
+# Runs <bash> at the start of every crane call, before the table stub, with
+# the call's arguments in "$@", $state set to <d> and $stub to the table stub.
+# It can answer the call itself and exit, or fall through to the table. Call
+# it once, after stub_install, for behaviour the table cannot express (a
+# signal, or output followed by a failing exit).
+stub_wrap() {
+  local d=$1 body=$2
+  mv "$d/bin/crane" "$d/bin/crane.table"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'state=%q\nstub=%q\n' "$d" "$d/bin/crane.table"
+    printf '%s\n' "$body"
+    # shellcheck disable=SC2016 # the wrapper expands $stub and $@ at run time, not here
+    printf 'exec "$stub" "$@"\n'
+  } > "$d/bin/crane"
+  chmod +x "$d/bin/crane"
 }
 
 # git_shim_install <d> <code>
