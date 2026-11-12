@@ -151,7 +151,7 @@ export function createStepSpillover(opts: {
 
   const spillRoot = path.join(outputDir, SPILL_DIR)
   const storeRoot = path.join(spillRoot, STORE_ROOT)
-  const stepDir = path.join(storeRoot, stepId)
+  const storeRootAbs = path.resolve(storeRoot)
   const storage = new SpilloverStorage({
     workspacePath: spillRoot,
     thresholdBytes,
@@ -266,6 +266,10 @@ export function createStepSpillover(opts: {
 
   async function cleanup(): Promise<void> {
     if (!attemptedWrite) return
+    // The recursive delete must stay inside this store: the step id is already
+    // restricted to one path segment, and this re-checks the resolved path.
+    const stepDir = path.resolve(storeRootAbs, stepId)
+    if (!stepDir.startsWith(storeRootAbs + path.sep)) return
     try {
       await fs.rm(stepDir, { recursive: true, force: true })
     } catch (err) {
