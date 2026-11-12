@@ -29,7 +29,7 @@ describe('loadConfig: control-api service token', () => {
     expect(() => loadConfig()).toThrow(/WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN must be set/)
   })
 
-  it('refuses to start with the base Secret placeholder', () => {
+  it('refuses to start with a replace-with-* placeholder left by an earlier release', () => {
     vi.stubEnv(TOKEN_VAR, 'replace-with-real-webhook-proxy-token')
 
     expect(() => loadConfig()).toThrow(/placeholder value.*apply-inter-service-tokens\.sh/)

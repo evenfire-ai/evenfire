@@ -42,7 +42,7 @@ All configuration is via environment variables (`src/config.ts`):
 | `WEBHOOK_PROXY_METRICS_PORT`                      | `9090`                                                                    | Health port (`/healthz`, `/readyz`)                                                                                      |
 | `WEBHOOK_PROXY_CONTROL_API_BASE_URL`              | `http://control-api.control-plane.svc.cluster.local:8090/api/v1`          | Registry lookup endpoint                                                                                                 |
 | `WEBHOOK_PROXY_WORKFLOW_APPROVAL_READER_BASE_URL` | `http://workflow-approval-request-reader.channels.svc.cluster.local:8098` | Upstream for `/webhooks/telegram` and `/webhooks/slack/:id`                                                              |
-| `WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN`         | required, no default                                                      | Service token registered in control-api; startup fails when unset, empty or a `replace-with-*` placeholder               |
+| `WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN`         | required, no default                                                      | Service token registered in control-api; startup fails when unset, empty or a `replace-with-*` placeholder. The base Secret ships empty; `apply-inter-service-tokens.sh` writes it |
 | `WEBHOOK_PROXY_SANDBOX_NAMESPACE`                 | `sandbox-recipes`                                                         | Namespace pin — `:recipeNs` must equal this                                                                              |
 | `WEBHOOK_PROXY_REGISTRY_CACHE_TTL_MS`             | `5000`                                                                    | TTL for cached registry results (positive and negative)                                                                  |
 | `WEBHOOK_PROXY_UPSTREAM_TIMEOUT_MS`               | `30000`                                                                   | Timeout for the gateway/reader forward                                                                                   |
@@ -104,9 +104,13 @@ npm test
 Kubernetes manifests live in
 [`deploy/base/webhook-ingress/`](../deploy/base/webhook-ingress/)
 (Deployment, Service, ConfigMap, Secret, NetworkPolicies — namespace
-`webhook-ingress`, 2 replicas). The base Secret ships a `replace-with-*`
-placeholder for `WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN`, and the service
-refuses to start with it. Run `deploy/scripts/apply-inter-service-tokens.sh`
-after applying the manifests: it writes the token, which must match the
-`webhook-proxy` entry in control-api's `CONTROL_API_INTERNAL_SERVICE_TOKENS`,
-and restarts the Deployment. For `npm run dev`, export the token yourself.
+`webhook-ingress`, 2 replicas). The base Secret ships empty
+(`stringData: {}`), so the service stops at startup with
+`WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN must be set` until
+`deploy/scripts/apply-inter-service-tokens.sh` has run. The script may run
+before or after the manifests are applied: it writes the token with
+`kubectl patch`, which must match the `webhook-proxy` entry in control-api's
+`CONTROL_API_INTERNAL_SERVICE_TOKENS`, and restarts the Deployment. A later
+`kubectl apply -k` does not reset the token. A `replace-with-*` value left in
+the Secret by an earlier release is refused at startup too; the script
+replaces it. For `npm run dev`, export the token yourself.

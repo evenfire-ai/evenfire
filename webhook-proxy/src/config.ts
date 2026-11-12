@@ -44,8 +44,10 @@ function requiredNonEmpty(name: string, raw: string | undefined): string {
 }
 
 function assertNotPlaceholder(label: string, value: string): void {
-  // The base Secret ships a `replace-with-*` value; refuse it at startup instead of
-  // sending it as the bearer token on every registry lookup.
+  // The base Secret now ships empty, but clusters deployed before this release may
+  // still hold the earlier `replace-with-*` value until apply-inter-service-tokens.sh
+  // runs; refuse it at startup instead of sending it as the bearer token on every
+  // registry lookup.
   if (/^replace-with-/.test(value)) {
     throw new Error(
       `${label} has placeholder value "${value}". Run deploy/scripts/apply-inter-service-tokens.sh before deploying.`
