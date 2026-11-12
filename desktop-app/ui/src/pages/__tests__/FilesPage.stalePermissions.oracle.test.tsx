@@ -749,7 +749,7 @@ describe('FilesPage stale permission action oracle', () => {
     }
   )
 
-  it('shows a new Files row error generation after a same-Query remount', async () => {
+  it('keeps a dismissed Files row failure acknowledged after a same-Query remount', async () => {
     const folder = await resolveResource(
       resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
     )
@@ -828,7 +828,7 @@ describe('FilesPage stale permission action oracle', () => {
         await remountRefresh.catch(() => undefined)
       })
       await waitFor(() => expect(client.getQueryState(rowKey)?.status).toBe('error'))
-      await screen.findByRole('alertdialog')
+      expect(screen.queryByRole('alertdialog')).toBeNull()
       expect(client.getQueryCache().find({ queryKey: rowKey, exact: true })).toBe(queryIdentity)
       expect(client.getQueryState(rowKey)?.errorUpdateCount).toBeGreaterThan(errorGeneration ?? 0)
       expect(reportReads).toBe(3)

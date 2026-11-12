@@ -1,7 +1,10 @@
-import { useEffect, useId, useRef } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '../Button'
-import { acknowledgePermissionErrors } from '../permissionErrorAcknowledgement'
+import {
+  acknowledgePermissionErrors,
+  recordPermissionRetry,
+} from '../permissionErrorAcknowledgement'
 import type { PermissionErrorDialogProps } from './types'
 
 export function PermissionErrorDialog({
@@ -29,7 +32,9 @@ export function PermissionErrorDialog({
   })
   const presentedErrorSignature = presentedErrors.map(error => error.id).join('|')
   const latestRef = useRef({ errors, onDismiss, suspended })
-  latestRef.current = { errors, onDismiss, suspended }
+  useLayoutEffect(() => {
+    latestRef.current = { errors, onDismiss, suspended }
+  }, [errors, onDismiss, suspended])
   useEffect(() => {
     if (!visible) return
     const previouslyFocused =
@@ -133,6 +138,7 @@ export function PermissionErrorDialog({
                   onClick={() => {
                     const attempt = error.retry?.()
                     if (!attempt) return
+                    recordPermissionRetry(error, attempt.admitted)
                     if (attempt.admitted) acknowledgePermissionErrors([error])
                     void attempt.completion?.catch(() => undefined)
                   }}
@@ -149,8 +155,9 @@ export function PermissionErrorDialog({
           <Button
             ref={closeRef}
             onClick={() => {
-              acknowledgePermissionErrors(errors)
-              onDismiss(errors.map(error => error.id))
+              const committed = latestRef.current
+              acknowledgePermissionErrors(committed.errors)
+              committed.onDismiss(committed.errors.map(error => error.id))
             }}
             variant="outline"
           >

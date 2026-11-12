@@ -11,6 +11,7 @@ export type PermissionErrorItem = {
   retry?: () => PermissionRetryAttempt
   queryIdentity?: Query
   errorUpdateCount?: number
+  token?: symbol
 }
 
 export type PermissionErrorDialogProps = {

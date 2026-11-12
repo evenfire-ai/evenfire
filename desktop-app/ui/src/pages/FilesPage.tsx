@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -28,7 +29,15 @@ import {
   StatusBanner,
   TextInput,
 } from '@components/Common'
-import { isPermissionErrorAcknowledged } from '@components/Common/permissionErrorAcknowledgement'
+import {
+  commitPermissionQueryBinding,
+  deactivatePermissionQueryBinding,
+  installPermissionErrorTracking,
+  isPermissionErrorAcknowledged,
+  permissionErrorToken,
+  preservePermissionQueryBinding,
+  usePermissionErrorAcknowledgementSnapshot,
+} from '@components/Common/permissionErrorAcknowledgement'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
@@ -48,6 +57,7 @@ import {
 import { GFS_DRIVE_MAIN, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
 import {
   desktopQueryKeys,
+  hasGfsSessionGeneration,
   isGfsSessionAuthorityCurrent,
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
@@ -399,7 +409,6 @@ export function FilesPage({
   const [refreshingCurrent, setRefreshingCurrent] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
-  const [dismissedPermissionErrors, setDismissedPermissionErrors] = useState<string[]>([])
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
   // Pending parent-folder confirmation (role change or removal) for a member
   // whose file access is inherited from ancestor folders. change-role carries
@@ -492,6 +501,8 @@ export function FilesPage({
   const createFolderDescriptionId = useId()
   const createFolderInputId = useId()
   const queryClient = useQueryClient()
+  installPermissionErrorTracking(queryClient)
+  usePermissionErrorAcknowledgementSnapshot()
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
   const seedPendingRef = useRef(false)
   const beginExplicitFilesNavigation = useCallback(() => {
@@ -510,6 +521,9 @@ export function FilesPage({
     sessionScope,
     accessibleResources,
     items,
+    permissionBindingFolderId,
+    permissionBindingChildResourceIds,
+    permissionBindingComplete,
     affordances,
     affordancesError,
     loadingAffordances,
@@ -525,6 +539,45 @@ export function FilesPage({
     () => new Set(accessibleResources.map(resource => resource.resourceId)),
     [accessibleResources]
   )
+  const permissionBindingResourceIds = [
+    ...permissionBindingChildResourceIds,
+    ...(current ? [current.resourceId] : []),
+    ...Object.keys(ctrl.moveSourceParentStatusById ?? {}),
+  ]
+  const permissionBindingKey = JSON.stringify([
+    sessionScope,
+    ctrl.sessionGeneration,
+    permissionBindingFolderId,
+    current?.resourceId ?? null,
+  ])
+  const permissionBindingQueries = queryClient
+    .getQueryCache()
+    .getAll()
+    .filter(
+      query =>
+        query.queryKey[0] === 'desktop-app' &&
+        query.queryKey[1] === 'gfs' &&
+        query.queryKey[2] === sessionScope &&
+        query.queryKey[3] === 'affordances' &&
+        typeof query.queryKey[5] === 'string' &&
+        permissionBindingResourceIds.includes(query.queryKey[5]) &&
+        (ctrl.sessionGeneration === null ||
+          hasGfsSessionGeneration(query.queryKey, ctrl.sessionGeneration))
+    )
+  useLayoutEffect(() => {
+    if (
+      current === null &&
+      !pendingGfsDeepLink &&
+      (seedPendingRef.current || Boolean(pendingGfsUri))
+    ) {
+      preservePermissionQueryBinding('files')
+      return () => deactivatePermissionQueryBinding('files')
+    }
+    commitPermissionQueryBinding('files', permissionBindingKey, permissionBindingQueries, {
+      complete: permissionBindingComplete,
+    })
+    return () => deactivatePermissionQueryBinding('files')
+  })
   const rowActionContextRef = useRef({
     sessionScope,
     sessionGeneration: ctrl.sessionGeneration,
@@ -3208,15 +3261,9 @@ export function FilesPage({
       message: `Could not verify permissions for ${itemNames.get(resourceId)}: ${status.message}`,
     })
   }
-  const permissionErrorSignature = permissionErrorItems.map(item => item.id).join('|')
-  useEffect(() => {
-    setDismissedPermissionErrors(current =>
-      current.filter(id => permissionErrorItems.some(item => item.id === id))
-    )
-  }, [permissionErrorSignature])
-  const visiblePermissionErrorItems = permissionErrorItems.filter(
-    item => !dismissedPermissionErrors.includes(item.id) && !isPermissionErrorAcknowledged(item)
-  )
+  const visiblePermissionErrorItems = permissionErrorItems
+    .map(item => ({ ...item, token: permissionErrorToken(item) }))
+    .filter(item => !isPermissionErrorAcknowledged(item))
   const activeMovePermissionQueries = Object.entries(ctrl.moveSourceParentStatusById ?? {}).filter(
     ([, status]) => status.isFetching
   )
@@ -3358,9 +3405,7 @@ export function FilesPage({
       <PermissionErrorDialog
         errors={visiblePermissionErrorItems}
         progress={visiblePermissionErrorItems.length > 0 ? activePermissionProgressLabels : []}
-        onDismiss={ids =>
-          setDismissedPermissionErrors(current => [...new Set([...current, ...ids])])
-        }
+        onDismiss={() => undefined}
         suspended={actionDialogOpen}
         title="Could not verify EvenDrive permissions"
       />

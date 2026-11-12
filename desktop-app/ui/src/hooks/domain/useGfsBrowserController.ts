@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import type { Query } from '@tanstack/react-query'
@@ -956,6 +956,33 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // stay behind `authorityPending` regardless, so the rows arrive without
   // per-row actions until discovery lands.
   const childrenFetchedThisEpoch = childrenQuery.dataUpdatedAt >= authorityEpochRef.current
+  const permissionBindingFolderId = currentIsDirectory ? (current?.resourceId ?? null) : null
+  const permissionBindingContextKey = JSON.stringify([
+    sessionScope,
+    sessionGeneration,
+    permissionBindingFolderId,
+  ])
+  const permissionBindingSnapshotsRef = useRef(new Map<string, string[]>())
+  const childPages = childrenQuery.data?.pages ?? []
+  const childCursorChainComplete = Boolean(
+    permissionBindingFolderId &&
+    childrenFetchedThisEpoch &&
+    childPages.length > 0 &&
+    childPages[childPages.length - 1]?.nextCursor === null
+  )
+  useLayoutEffect(() => {
+    if (!childCursorChainComplete) return
+    permissionBindingSnapshotsRef.current.set(
+      permissionBindingContextKey,
+      childPages.flatMap(page => page.items.map(item => item.resourceId))
+    )
+  }, [childCursorChainComplete, childPages, permissionBindingContextKey])
+  const permissionBindingChildResourceIds = permissionBindingFolderId
+    ? (permissionBindingSnapshotsRef.current.get(permissionBindingContextKey) ??
+      (childCursorChainComplete
+        ? childPages.flatMap(page => page.items.map(item => item.resourceId))
+        : []))
+    : []
   const items = useMemo<GfsBrowserChild[]>(
     () =>
       accessState === 'revoked' || (authorityPending && !childrenFetchedThisEpoch)
@@ -1897,6 +1924,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     handleAuthorityFailure,
     accessibleResources,
     items,
+    permissionBindingFolderId,
+    permissionBindingChildResourceIds,
+    permissionBindingComplete: childCursorChainComplete,
     affordances:
       authorityPending || accessState === 'revoked'
         ? null

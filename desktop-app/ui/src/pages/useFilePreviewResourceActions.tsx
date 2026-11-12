@@ -1,8 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import type { QueryKey } from '@tanstack/react-query'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { hashKey, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { Query, QueryClient, QueryKey } from '@tanstack/react-query'
 import { normalizeGfsResourceName } from '@clerum/gfs-interaction-policy'
 import { Button, IconButton, TextInput } from '@components/Common'
+import type { PermissionErrorItem } from '@components/Common'
+import {
+  commitPermissionQueryBinding,
+  deactivatePermissionQueryBinding,
+  permissionErrorToken,
+} from '@components/Common/permissionErrorAcknowledgement'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { IconClose, IconShare } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
@@ -40,6 +46,21 @@ import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { AgentWithMcpServers, TeamDirectoryResult } from '../../../src/types'
 
 type ResourceAffordances = Awaited<ReturnType<typeof window.clerum.gfs.affordances>>
+type ResolvedPreviewResource = Awaited<ReturnType<typeof window.clerum.gfs.resolve>>
+
+const committedPreviewContexts = new WeakMap<QueryClient, Map<string, ResolvedPreviewResource>>()
+const committedPreviewPermissionNotices = new WeakMap<
+  QueryClient,
+  Map<string, Array<PermissionErrorItem & { pending?: boolean }>>
+>()
+
+function previewContextKey(
+  gfsUri: string,
+  sessionScope: string,
+  generation: number | null
+): string {
+  return JSON.stringify([gfsUri, sessionScope, generation])
+}
 
 type FilePreviewResourceActionsProps = {
   gfsUri: string
@@ -183,7 +204,38 @@ export function useFilePreviewResourceActions({
     refetchOnMount: 'always',
     refetchOnWindowFocus: 'always',
   })
+  const presentationContextKey = previewContextKey(gfsUri, sessionScope, sessionGeneration)
+  const retainedPresentationResource = committedPreviewContexts
+    .get(queryClient)
+    ?.get(presentationContextKey)
+  useLayoutEffect(() => {
+    const contexts = committedPreviewContexts.get(queryClient) ?? new Map()
+    committedPreviewContexts.set(queryClient, contexts)
+    if (!resourceQuery.isError && resourceQuery.data) {
+      contexts.set(presentationContextKey, resourceQuery.data)
+    } else if (
+      resourceQuery.isError &&
+      (isGfsSessionAuthorityFailure(errorMessage(resourceQuery.error), 'operation') ||
+        [401, 403, 404].includes(httpErrorStatus(resourceQuery.error) ?? 0))
+    ) {
+      contexts.delete(presentationContextKey)
+    }
+  }, [
+    presentationContextKey,
+    queryClient,
+    resourceQuery.data,
+    resourceQuery.error,
+    resourceQuery.isError,
+  ])
   const resource = resourceQuery.isError ? undefined : resourceQuery.data
+  const presentationResource = resource ?? retainedPresentationResource
+  const previewNoticeContextKey = JSON.stringify([
+    gfsUri,
+    sessionScope,
+    sessionGeneration,
+    presentationResource?.resourceId ?? null,
+    presentationResource?.parentResourceId ?? null,
+  ])
   const resourceId = resource?.resourceId ?? ''
   const drive = resource?.drive ?? GFS_DRIVE_MAIN
   const affordancesQuery = useQuery({
@@ -269,7 +321,7 @@ export function useFilePreviewResourceActions({
     : null
   const retryPermissionCheck = (
     queryKey: QueryKey,
-    refetch: () => Promise<{ isError: boolean; error: unknown }>
+    queryFn: () => Promise<ResourceAffordances>
   ) => {
     const captured = moveContextRef.current
     if (
@@ -277,6 +329,11 @@ export function useFilePreviewResourceActions({
       !hasGfsSessionGeneration(queryKey, captured.sessionGeneration)
     )
       return { admitted: false }
+    const query = queryClient.getQueryCache().find({ queryKey, exact: true }) as
+      | Query<ResourceAffordances, Error>
+      | undefined
+    if (!query) return { admitted: false }
+    const queryDataUpdateCount = query.state.dataUpdateCount
     try {
       assertGfsAuthorityRetryAllowed(queryClient, queryKey)
     } catch (error) {
@@ -295,15 +352,17 @@ export function useFilePreviewResourceActions({
     }
     const completion = (async () => {
       try {
-        const result = await refetch()
-        if (result.isError) throw result.error
+        await queryClient.fetchQuery({ queryKey, queryFn, ...gfsAuthorityQueryPolicy })
         if (
           !isGfsSessionAuthorityCurrent(
             captured.sessionScope,
             captured.sessionGeneration,
             moveContextRef.current.sessionScope,
             moveContextRef.current.sessionGeneration
-          )
+          ) ||
+          queryClient.getQueryCache().find({ queryKey, exact: true }) !== query ||
+          query.state.status !== 'success' ||
+          query.state.dataUpdateCount <= queryDataUpdateCount
         )
           return
       } catch (error) {
@@ -321,7 +380,23 @@ export function useFilePreviewResourceActions({
     })()
     return { admitted: true, completion }
   }
-  const permissionNotices = [
+  const presentationParentId =
+    presentationResource?.kind === 'file' ? presentationResource.parentResourceId : null
+  const retainedParentKey = presentationParentId
+    ? desktopQueryKeys.gfsAffordances(
+        sessionScope,
+        presentationParentId,
+        presentationResource?.drive ?? GFS_DRIVE_MAIN,
+        sessionGeneration
+      )
+    : null
+  const retainedParentQuery = retainedParentKey
+    ? queryClient
+        .getQueryCache()
+        .getAll()
+        .find(query => query.queryHash === hashKey(retainedParentKey))
+    : undefined
+  const observedPermissionNotices = [
     affordancesQuery.isFetching && affordancesQuery.data
       ? {
           id: 'resource-permissions',
@@ -335,7 +410,7 @@ export function useFilePreviewResourceActions({
                 drive,
                 sessionGeneration
               ),
-              () => affordancesQuery.refetch()
+              () => window.clerum.gfs.affordances(resourceId, drive)
             ),
         }
       : affordancesQuery.error &&
@@ -367,7 +442,7 @@ export function useFilePreviewResourceActions({
                   drive,
                   sessionGeneration
                 ),
-                () => affordancesQuery.refetch()
+                () => window.clerum.gfs.affordances(resourceId, drive)
               ),
           }
         : null,
@@ -395,7 +470,7 @@ export function useFilePreviewResourceActions({
                   drive,
                   sessionGeneration
                 ),
-                () => sourceParentAffordancesQuery.refetch()
+                () => window.clerum.gfs.affordances(sourceParentId, drive)
               ),
           }
         : sourceParentAffordancesQuery.error &&
@@ -427,12 +502,92 @@ export function useFilePreviewResourceActions({
                     drive,
                     sessionGeneration
                   ),
-                  () => sourceParentAffordancesQuery.refetch()
+                  () => window.clerum.gfs.affordances(sourceParentId, drive)
                 ),
             }
           : null
       : null,
+    !sourceParentId &&
+    presentationParentId &&
+    retainedParentQuery?.state.status === 'error' &&
+    !isGfsSessionAuthorityFailure(errorMessage(retainedParentQuery.state.error), 'operation')
+      ? {
+          id: `move-source-permissions:${sessionScope}:${sessionGeneration}:${presentationParentId}:${retainedParentQuery.state.errorUpdateCount}`,
+          queryIdentity: retainedParentQuery,
+          errorUpdateCount: retainedParentQuery.state.errorUpdateCount,
+          message: `Could not verify move permissions: ${describeGfsReadError(retainedParentQuery.state.error).message}`,
+          pending: false,
+          retry: () =>
+            retainedParentKey
+              ? retryPermissionCheck(retainedParentKey, () =>
+                  window.clerum.gfs.affordances(
+                    presentationParentId,
+                    presentationResource?.drive ?? GFS_DRIVE_MAIN
+                  )
+                )
+              : { admitted: false },
+        }
+      : null,
   ].filter((notice): notice is NonNullable<typeof notice> => notice !== null)
+  useLayoutEffect(() => {
+    const committed = committedPreviewPermissionNotices.get(queryClient) ?? new Map()
+    committedPreviewPermissionNotices.set(queryClient, committed)
+    const failed = observedPermissionNotices.filter(
+      notice => !notice.pending && notice.queryIdentity
+    )
+    if (failed.length > 0) committed.set(previewNoticeContextKey, failed)
+  }, [observedPermissionNotices, previewNoticeContextKey, queryClient])
+  const rememberedPreviewNotices =
+    committedPreviewPermissionNotices.get(queryClient)?.get(previewNoticeContextKey) ?? []
+  const retainedPreviewNotices = rememberedPreviewNotices.filter(
+    notice =>
+      notice.queryIdentity &&
+      queryClient.getQueryCache().getAll().includes(notice.queryIdentity) &&
+      permissionErrorToken(notice) !== undefined
+  )
+  const permissionNotices = [
+    ...observedPermissionNotices,
+    ...retainedPreviewNotices.filter(
+      retained =>
+        !observedPermissionNotices.some(current => current.queryIdentity === retained.queryIdentity)
+    ),
+  ]
+  const previewPermissionQueryKeys = [
+    desktopQueryKeys.gfsAffordances(
+      sessionScope,
+      presentationResource?.resourceId ?? gfsUri,
+      presentationResource?.drive ?? GFS_DRIVE_MAIN,
+      sessionGeneration
+    ),
+    ...(presentationParentId
+      ? [
+          desktopQueryKeys.gfsAffordances(
+            sessionScope,
+            presentationParentId,
+            presentationResource?.drive ?? GFS_DRIVE_MAIN,
+            sessionGeneration
+          ),
+        ]
+      : []),
+  ]
+  const previewPermissionQueries = new Set<Query>([
+    ...permissionNotices.flatMap(notice => (notice.queryIdentity ? [notice.queryIdentity] : [])),
+    ...previewPermissionQueryKeys.flatMap(key => {
+      const queryHash = hashKey(key)
+      const query = queryClient
+        .getQueryCache()
+        .getAll()
+        .find(candidate => candidate.queryHash === queryHash)
+      return query ? [query] : []
+    }),
+  ])
+  const previewPermissionBindingKey =
+    previewContextKey(gfsUri, sessionScope, sessionGeneration) +
+    JSON.stringify([presentationResource?.resourceId, presentationParentId])
+  useLayoutEffect(() => {
+    commitPermissionQueryBinding('preview', previewPermissionBindingKey, previewPermissionQueries)
+    return () => deactivatePermissionQueryBinding('preview')
+  }, [previewPermissionBindingKey, previewPermissionQueries])
   const permissionProgress = [
     affordancesQuery.isEnabled && affordancesQuery.isFetching ? 'file permissions' : null,
     sourceParentId &&
@@ -1807,6 +1962,8 @@ export function useFilePreviewResourceActions({
     dialogs,
     permissionNotices,
     permissionProgress,
+    presentationResource,
+    resourceResolutionFailed: resourceQuery.isError,
     actionDialogOpen: shareOpen || renameOpen || moveOpen || deleteOpen,
     canShare,
     canRename,

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { EmptyState, PermissionErrorDialog, PermissionStatusIndicator } from '@components/Common'
-import { isPermissionErrorAcknowledged } from '@components/Common/permissionErrorAcknowledgement'
+import {
+  installPermissionErrorTracking,
+  isPermissionErrorAcknowledged,
+  permissionErrorToken,
+  usePermissionErrorAcknowledgementSnapshot,
+} from '@components/Common/permissionErrorAcknowledgement'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
@@ -75,12 +80,13 @@ export function FilePreviewPage({
   titlebarLeadingTarget,
 }: FilePreviewPageProps) {
   const queryClient = useQueryClient()
+  installPermissionErrorTracking(queryClient)
+  usePermissionErrorAcknowledgementSnapshot()
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
   const [denied, setDenied] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [copyContentReady, setCopyContentReady] = useState(false)
-  const [dismissedPermissionErrors, setDismissedPermissionErrors] = useState<string[]>([])
   const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
   const accessRevoked = ctrl.accessState === 'revoked'
   const liveAuthorityRef = useRef({
@@ -290,9 +296,12 @@ export function FilePreviewPage({
   const permissionErrors = permissionPresentationAvailable
     ? previewResourceActions.permissionNotices.filter(notice => !notice.pending)
     : []
-  const activePermissionErrorSignature = permissionErrors.map(error => error.id).join('|')
-  const visiblePermissionErrors = permissionErrors.filter(
-    error => !dismissedPermissionErrors.includes(error.id) && !isPermissionErrorAcknowledged(error)
+  const tokenizedPermissionErrors = permissionErrors.map(error => ({
+    ...error,
+    token: permissionErrorToken(error),
+  }))
+  const visiblePermissionErrors = tokenizedPermissionErrors.filter(
+    error => !isPermissionErrorAcknowledged(error)
   )
   const permissionProgressLabel = !permissionPresentationAvailable
     ? ''
@@ -303,10 +312,6 @@ export function FilePreviewPage({
         : previewResourceActions.permissionProgress.length > 0
           ? 'Checking move permissions'
           : ''
-  useEffect(() => {
-    if (!activePermissionErrorSignature) setDismissedPermissionErrors([])
-  }, [activePermissionErrorSignature])
-
   const revalidateAccess = useCallback(async () => {
     if (denied || accessRevoked || !isGfsSessionGeneration(ctrl.sessionGeneration)) return
     const capturedScope = ctrl.sessionScope
@@ -395,9 +400,7 @@ export function FilePreviewPage({
               ? [permissionProgressLabel]
               : []
           }
-          onDismiss={ids =>
-            setDismissedPermissionErrors(current => [...new Set([...current, ...ids])])
-          }
+          onDismiss={() => undefined}
           title="Could not verify permissions"
         />
         <div className="da-gfs-preview-content">

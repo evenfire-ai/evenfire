@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { useState } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { type Query, QueryClient } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
@@ -9,7 +8,9 @@ import { affordancesApiError } from '@/gfs/__fixtures__/permissionProducerFixtur
 import type { PermissionErrorItem, PermissionRetryAttempt } from '../PermissionErrorDialog/types'
 import {
   acknowledgePermissionErrors,
+  installPermissionErrorTracking,
   isPermissionErrorAcknowledged,
+  usePermissionErrorAcknowledgementSnapshot,
 } from '../permissionErrorAcknowledgement'
 
 afterEach(cleanup)
@@ -30,16 +31,20 @@ function permissionError(
 }
 
 function Presenter({
+  queryClient,
   queryIdentity,
   retry,
 }: {
+  queryClient: QueryClient
   queryIdentity: PermissionQuery
   retry?: () => PermissionRetryAttempt
 }) {
-  const [locallyDismissed, setLocallyDismissed] = useState(false)
-  const error = permissionError(queryIdentity, retry)
-  const errors = locallyDismissed || isPermissionErrorAcknowledged(error) ? [] : [error]
-  return <PermissionErrorDialog errors={errors} onDismiss={() => setLocallyDismissed(true)} />
+  installPermissionErrorTracking(queryClient)
+  usePermissionErrorAcknowledgementSnapshot()
+  const error =
+    queryIdentity.state.status === 'error' ? permissionError(queryIdentity, retry) : null
+  const errors = error && !isPermissionErrorAcknowledged(error) ? [error] : []
+  return <PermissionErrorDialog errors={errors} onDismiss={() => undefined} />
 }
 
 describe('permission error acknowledgement with real Query state', () => {
@@ -81,12 +86,16 @@ describe('permission error acknowledgement with real Query state', () => {
         return { admitted: false }
       }
     }
-    const view = render(<Presenter queryIdentity={queryIdentity} retry={retry} />)
+    const view = render(
+      <Presenter queryClient={queryClient} queryIdentity={queryIdentity} retry={retry} />
+    )
     expect(screen.getByRole('alertdialog')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
     expect(retryAdmissions).toBe(0)
     expect(queryIdentity.state.fetchStatus).toBe('fetching')
-    view.rerender(<Presenter queryIdentity={queryIdentity} retry={retry} />)
+    view.rerender(
+      <Presenter queryClient={queryClient} queryIdentity={queryIdentity} retry={retry} />
+    )
     const dialog = screen.getByRole('alertdialog')
     expect(within(dialog).getByText(/Could not verify permissions for report.txt/)).toBeTruthy()
 
@@ -128,12 +137,16 @@ describe('permission error acknowledgement with real Query state', () => {
       return { admitted: true, completion: retryPromise }
     }
 
-    const view = render(<Presenter queryIdentity={queryIdentity} retry={retry} />)
+    const view = render(
+      <Presenter queryClient={queryClient} queryIdentity={queryIdentity} retry={retry} />
+    )
     expect(screen.getByRole('alertdialog')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
 
     expect(queryIdentity.state.fetchStatus).toBe('fetching')
-    view.rerender(<Presenter queryIdentity={queryIdentity} retry={retry} />)
+    view.rerender(
+      <Presenter queryClient={queryClient} queryIdentity={queryIdentity} retry={retry} />
+    )
     expect(screen.queryByRole('alertdialog')).toBeNull()
 
     await act(async () => {
@@ -164,10 +177,11 @@ describe('permission error acknowledgement with real Query state', () => {
     const retainedQuery = queryIdentity
 
     function RemountingPresenter() {
-      const [locallyDismissed, setLocallyDismissed] = useState(false)
-      const error = permissionError(retainedQuery)
-      const errors = locallyDismissed || isPermissionErrorAcknowledged(error) ? [] : [error]
-      return <PermissionErrorDialog errors={errors} onDismiss={() => setLocallyDismissed(true)} />
+      installPermissionErrorTracking(queryClient)
+      usePermissionErrorAcknowledgementSnapshot()
+      const error = retainedQuery.state.status === 'error' ? permissionError(retainedQuery) : null
+      const errors = error && !isPermissionErrorAcknowledged(error) ? [error] : []
+      return <PermissionErrorDialog errors={errors} onDismiss={() => undefined} />
     }
 
     const firstMount = render(<RemountingPresenter />)
@@ -179,6 +193,66 @@ describe('permission error acknowledgement with real Query state', () => {
     render(<RemountingPresenter />)
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(isPermissionErrorAcknowledged(permissionError(retainedQuery))).toBe(true)
+    queryClient.clear()
+  })
+
+  it('keeps dismissal across same-projection refetch and presenter remount', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const queryKey = ['permission-refetch-remount', 'resource-a'] as const
+    const failure = new Error('permission service unavailable')
+    const fail = async () => Promise.reject(failure)
+    await expect(queryClient.fetchQuery({ queryKey, queryFn: fail })).rejects.toBe(failure)
+    const queryIdentity = queryClient.getQueryCache().find({ queryKey, exact: true })
+    if (!queryIdentity) throw new Error('QueryClient did not retain the failed permission Query')
+
+    const firstMount = render(<Presenter queryClient={queryClient} queryIdentity={queryIdentity} />)
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    firstMount.unmount()
+
+    await expect(queryClient.fetchQuery({ queryKey, queryFn: fail })).rejects.toBe(failure)
+    expect(queryIdentity.state.errorUpdateCount).toBe(2)
+    render(<Presenter queryClient={queryClient} queryIdentity={queryIdentity} />)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    queryClient.clear()
+  })
+
+  it('reports failures after recovery, reset, and A-to-B-to-A projection changes', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const queryKey = ['permission-episode-boundaries', 'resource-a'] as const
+    const firstFailure = new Error('permission service unavailable')
+    const secondFailure = new Error('permission service timed out')
+    const failWith = (error: Error) =>
+      queryClient.fetchQuery({ queryKey, queryFn: async () => Promise.reject(error) })
+    await expect(failWith(firstFailure)).rejects.toBe(firstFailure)
+    const queryIdentity = queryClient.getQueryCache().find({ queryKey, exact: true })
+    if (!queryIdentity) throw new Error('QueryClient did not retain the failed permission Query')
+    const view = render(<Presenter queryClient={queryClient} queryIdentity={queryIdentity} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    await expect(failWith(secondFailure)).rejects.toBe(secondFailure)
+    expect(await screen.findByRole('alertdialog')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    await expect(failWith(firstFailure)).rejects.toBe(firstFailure)
+    expect(await screen.findByRole('alertdialog')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    await queryClient.fetchQuery({ queryKey, queryFn: async () => ({ permission: true }) })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    await expect(failWith(firstFailure)).rejects.toBe(firstFailure)
+    expect(await screen.findByRole('alertdialog')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    await queryClient.resetQueries({ queryKey, exact: true })
+    await expect(failWith(firstFailure)).rejects.toBe(firstFailure)
+    expect(await screen.findByRole('alertdialog')).toBeTruthy()
+    view.unmount()
     queryClient.clear()
   })
 })
