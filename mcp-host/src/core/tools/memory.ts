@@ -1,9 +1,14 @@
+import { createHash } from 'crypto'
+import { logger } from '../../logger'
 import { memoryNotePath } from '../../workspace/memoryNotePath'
+import type { MemoryWriteEntry, MemoryWriteLog } from '../../workspace/memoryWriteLog'
+import { memoryWriteRecordFailuresTotal } from '../../workspace/memoryWriteLog'
 import {
   ProtectedWorkspacePathError,
   isProtectedWorkspacePath,
   protectedWorkspacePathMessage,
 } from '../../workspace/protectedPaths'
+import { isCollectivePath, normalizeRel } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
 import { adminManagedIdentityFileMessage, isLockedPath } from '../../workspace/service'
 import { Tool } from '../interfaces'
@@ -87,7 +92,14 @@ export class MemorySearchTool implements Tool {
 }
 
 export class PersistentMemoryWriteTool implements Tool {
-  constructor(private readonly workspace: Workspace) {}
+  /**
+   * `record`: where successful writes are recorded, and for which user key.
+   * Absent when the Host has no session database (D76): writes are not recorded.
+   */
+  constructor(
+    private readonly workspace: Workspace,
+    private readonly record?: { log: MemoryWriteLog; userKey: string }
+  ) {}
 
   name() {
     return 'memory_write'
@@ -168,14 +180,16 @@ export class PersistentMemoryWriteTool implements Tool {
     // Private (per-user) memory (F5): dedicated methods, not a path — 'MEMORY.md'
     // routes to the collective and 'users/...' is denied by the workspace guard.
     if (target === 'memory_private') {
+      let resulting: string
       try {
-        if (append) await this.workspace.appendPrivateMemory(content)
-        else await this.workspace.writePrivateMemory(content)
+        if (append) resulting = await this.workspace.appendPrivateMemory(content)
+        else resulting = await this.workspace.writePrivateMemory(content)
       } catch (err) {
         const out = this.rejectionOutput(err, startTime)
         if (out) return out
         throw err
       }
+      await this.recordWrite('user', 'MEMORY.md', append, resulting)
       return {
         content: `Written to private memory (${append ? 'append' : 'replace'})`,
         duration_ms: Date.now() - startTime,
@@ -217,24 +231,72 @@ export class PersistentMemoryWriteTool implements Tool {
       }
     }
 
+    let resulting: string
     try {
       if (target === 'daily_log' && append) {
-        await this.workspace.append(filePath, `[${nowTime()}] ${content}`)
+        resulting = await this.workspace.append(filePath, `[${nowTime()}] ${content}`)
       } else if (append) {
-        await this.workspace.append(filePath, content)
+        resulting = await this.workspace.append(filePath, content)
       } else {
-        await this.workspace.write(filePath, content)
+        resulting = await this.workspace.write(filePath, content)
       }
     } catch (err) {
       const out = this.rejectionOutput(err, startTime)
       if (out) return out
       throw err
     }
+    await this.recordWrite(
+      isCollectivePath(filePath) ? 'collective' : 'user',
+      normalizeRel(filePath),
+      append,
+      resulting
+    )
 
     return {
       content: `Written to ${filePath} (${append ? 'append' : 'replace'})`,
       duration_ms: Date.now() - startTime,
       is_error: false,
+    }
+  }
+
+  /**
+   * Record a write that succeeded (the only write point of `memory_writes`).
+   * The entry, hash included, is built before the `try`: an error building it
+   * is a defect and is thrown like any other tool error. A rejection of
+   * `record` (worker error, worker exit, sync timeout) never fails the write
+   * (D93): it is logged once and counted, and the tool returns its normal
+   * success result. The log line carries no path, content or user key.
+   */
+  private async recordWrite(
+    scope: MemoryWriteEntry['scope'],
+    relativePath: string,
+    append: boolean,
+    resulting: string
+  ): Promise<void> {
+    if (!this.record) return
+    const entry: MemoryWriteEntry = {
+      userKey: this.record.userKey,
+      scope,
+      relativePath,
+      mode: append ? 'append' : 'replace',
+      contentSha256: createHash('sha256').update(resulting, 'utf8').digest('hex'),
+      writtenAt: Date.now() / 1000,
+    }
+    try {
+      await this.record.log.record(entry)
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err))
+      logger.error(
+        {
+          component: 'MemoryWrite',
+          scope,
+          mode: entry.mode,
+          errorName: error.name,
+          errorMessage: error.message,
+        },
+        'memory write record failed'
+      )
+      memoryWriteRecordFailuresTotal.inc({ scope })
     }
   }
 }

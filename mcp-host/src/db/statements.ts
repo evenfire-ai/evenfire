@@ -57,6 +57,9 @@ export interface PreparedStatements {
   /** T3.1 — deletes up to `@limit` sessions closed before the cutoff. */
   sweepClosedSessionsEmpty: Statement
 
+  /** Migration 018 — one row per successful memory_write. */
+  insertMemoryWrite: Statement
+
   integrityCheck: Statement
 }
 
@@ -547,6 +550,13 @@ export function prepareStatements(db: Database): PreparedStatements {
             AND ended_at IS NOT NULL
             AND ended_at < @cutoff
           LIMIT @limit)
+    `),
+    insertMemoryWrite: db.prepare(`
+      INSERT INTO memory_writes (
+        user_key, scope, relative_path, mode, content_sha256, written_at
+      ) VALUES (
+        @user_key, @scope, @relative_path, @mode, @content_sha256, @written_at
+      )
     `),
     integrityCheck: db.prepare(`PRAGMA integrity_check`),
   }

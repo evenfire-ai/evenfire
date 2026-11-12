@@ -42,6 +42,22 @@ describe('WorkspaceService', () => {
     expect(content).toBe('hello world')
   })
 
+  it('write and append resolve with the full content now in the file (D73)', async () => {
+    await expect(workspace.write('notes/a.md', 'first')).resolves.toBe('first')
+    await expect(workspace.append('notes/a.md', 'second')).resolves.toBe('first\nsecond')
+    await expect(workspace.append('notes/b.md', 'only')).resolves.toBe('only')
+    await expect(fs.readFile(path.join(workspaceDir, 'notes/a.md'), 'utf-8')).resolves.toBe(
+      'first\nsecond'
+    )
+  })
+
+  it('appendMemory and the private memory methods resolve with the MEMORY.md content', async () => {
+    await expect(workspace.appendMemory('one')).resolves.toBe('one')
+    await expect(workspace.appendPrivateMemory('two')).resolves.toBe('one\ntwo')
+    await expect(workspace.writePrivateMemory('three')).resolves.toBe('three')
+    await expect(workspace.readMemory()).resolves.toBe('three')
+  })
+
   it('read returns null for missing file', async () => {
     const content = await workspace.read('missing.md')
     expect(content).toBeNull()
@@ -372,9 +388,9 @@ describe('WorkspaceService', () => {
   })
 
   it('locked-file check is case-sensitive and does not match sub-paths', async () => {
-    await expect(workspace.write('agents.md', 'ok')).resolves.toBeUndefined()
-    await expect(workspace.write('daily/AGENTS.md', 'ok')).resolves.toBeUndefined()
-    await expect(workspace.write('AGENTS.md.bak', 'ok')).resolves.toBeUndefined()
+    await expect(workspace.write('agents.md', 'ok')).resolves.toBe('ok')
+    await expect(workspace.write('daily/AGENTS.md', 'ok')).resolves.toBe('ok')
+    await expect(workspace.write('AGENTS.md.bak', 'ok')).resolves.toBe('ok')
   })
 
   it('write/append/delete still works for non-locked files', async () => {
@@ -444,13 +460,15 @@ describe('WorkspaceService', () => {
     ).rejects.toMatchObject({ name: 'MemoryScanRejectionError', reason: 'sensitive_path' })
 
     const big = 'a'.repeat(9000) // > MEMORY.md cap, fine for a daily log
-    await expect(workspace.write('daily/2026-05-23.md', big)).resolves.toBeUndefined()
+    await expect(workspace.write('daily/2026-05-23.md', big)).resolves.toBe(big)
   })
 
   it('does NOT scan arbitrary (non-prompt-feeding) paths', async () => {
     // Arbitrary files (not MEMORY/memories/daily) never reach the prompt, so
     // they are not scanned.
-    await expect(workspace.write('notes.md', 'see credentials.json')).resolves.toBeUndefined()
+    await expect(workspace.write('notes.md', 'see credentials.json')).resolves.toBe(
+      'see credentials.json'
+    )
   })
 
   it('does NOT scan the compaction-archive path (appendDailyLog) — F3', async () => {

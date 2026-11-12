@@ -121,10 +121,10 @@ export class ScopedWorkspace implements Workspace {
   async read(relativePath: string): Promise<string | null> {
     return this.route(relativePath).read(relativePath)
   }
-  async write(relativePath: string, content: string): Promise<void> {
+  async write(relativePath: string, content: string): Promise<string> {
     return this.route(relativePath).write(relativePath, content)
   }
-  async append(relativePath: string, content: string): Promise<void> {
+  async append(relativePath: string, content: string): Promise<string> {
     return this.route(relativePath).append(relativePath, content)
   }
   async delete(relativePath: string): Promise<void> {
@@ -138,7 +138,7 @@ export class ScopedWorkspace implements Workspace {
   readMemory(): Promise<string> {
     return this.collective.readMemory()
   }
-  appendMemory(entry: string): Promise<void> {
+  appendMemory(entry: string): Promise<string> {
     return this.collective.appendMemory(entry)
   }
   // Private memory (F5) → the per-user instance's MEMORY.md. Bypasses route()
@@ -149,10 +149,10 @@ export class ScopedWorkspace implements Workspace {
   readPrivateMemory(): Promise<string> {
     return this.user.readMemory()
   }
-  appendPrivateMemory(entry: string): Promise<void> {
+  appendPrivateMemory(entry: string): Promise<string> {
     return this.user.appendMemory(entry)
   }
-  writePrivateMemory(content: string): Promise<void> {
+  writePrivateMemory(content: string): Promise<string> {
     return this.user.write('MEMORY.md', content)
   }
   readHeartbeatChecklist(): Promise<string | null> {

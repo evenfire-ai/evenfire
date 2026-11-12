@@ -1,8 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'crypto'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
+import { logger } from '../../../logger'
+import type { MemoryWriteEntry, MemoryWriteLog } from '../../../workspace/memoryWriteLog'
+import { memoryWriteRecordFailuresTotal } from '../../../workspace/memoryWriteLog'
 import { ScopedWorkspaceProvider } from '../../../workspace/scopedWorkspace'
+import type { Workspace } from '../../../workspace/service'
 import { WorkspaceService } from '../../../workspace/service'
 import {
   MemorySearchTool,
@@ -436,5 +441,312 @@ describe('memory tool texts (D79, D83, D91, D92, D99, D104, V2-L6)', () => {
     }
     expect(tree.description()).toContain('can list MEMORY.md twice')
     expect(tree.description()).toContain("scope 'private'")
+  })
+})
+
+// ─── Record of every successful memory_write (PR C: D64, D72, D73, D93) ─────────
+
+class CapturingLog implements MemoryWriteLog {
+  readonly entries: MemoryWriteEntry[] = []
+  async record(entry: MemoryWriteEntry): Promise<void> {
+    this.entries.push(entry)
+  }
+}
+
+class RejectingLog implements MemoryWriteLog {
+  constructor(private readonly error: Error) {}
+  async record(): Promise<void> {
+    throw this.error
+  }
+}
+
+const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
+
+async function failureCount(scope: 'collective' | 'user'): Promise<number> {
+  const metric = await memoryWriteRecordFailuresTotal.get()
+  return metric.values.find(v => v.labels.scope === scope)?.value ?? 0
+}
+
+describe('memory_write records every successful write', () => {
+  let baseRoot: string
+  let provider: ScopedWorkspaceProvider
+  let log: CapturingLog
+  let write: PersistentMemoryWriteTool
+
+  const userFile = (rel: string) => path.join(baseRoot, 'users', 'alice', rel)
+
+  beforeEach(async () => {
+    baseRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-record-'))
+    provider = new ScopedWorkspaceProvider(baseRoot)
+    log = new CapturingLog()
+    write = new PersistentMemoryWriteTool(provider.forUser('alice'), { log, userKey: 'alice' })
+  })
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await fs.rm(baseRoot, { recursive: true, force: true })
+  })
+
+  const cases: Array<{
+    row: string
+    params: Record<string, unknown>
+    scope: 'collective' | 'user'
+    relativePath: string
+    mode: 'append' | 'replace'
+    file: () => string
+  }> = [
+    {
+      row: '1',
+      params: { target: 'memory' },
+      scope: 'collective',
+      relativePath: 'MEMORY.md',
+      mode: 'append',
+      file: () => path.join(baseRoot, 'MEMORY.md'),
+    },
+    {
+      row: '2 append',
+      params: { target: 'memory_private' },
+      scope: 'user',
+      relativePath: 'MEMORY.md',
+      mode: 'append',
+      file: () => userFile('MEMORY.md'),
+    },
+    {
+      row: '2 replace',
+      params: { target: 'memory_private', append: false },
+      scope: 'user',
+      relativePath: 'MEMORY.md',
+      mode: 'replace',
+      file: () => userFile('MEMORY.md'),
+    },
+    {
+      row: '3 append',
+      params: { target: 'daily_log' },
+      scope: 'user',
+      relativePath: `daily/${today}.md`,
+      mode: 'append',
+      file: () => userFile(`daily/${today}.md`),
+    },
+    {
+      row: '3 replace',
+      params: { target: 'daily_log', append: false },
+      scope: 'user',
+      relativePath: `daily/${today}.md`,
+      mode: 'replace',
+      file: () => userFile(`daily/${today}.md`),
+    },
+    {
+      row: '4',
+      params: { target: 'heartbeat' },
+      scope: 'collective',
+      relativePath: 'HEARTBEAT.md',
+      mode: 'append',
+      file: () => path.join(baseRoot, 'HEARTBEAT.md'),
+    },
+    {
+      row: '5 MEMORY.md',
+      params: { target: 'MEMORY.md' },
+      scope: 'collective',
+      relativePath: 'MEMORY.md',
+      mode: 'append',
+      file: () => path.join(baseRoot, 'MEMORY.md'),
+    },
+    {
+      row: '5 memories/x.md',
+      params: { target: 'memories/x.md' },
+      scope: 'collective',
+      relativePath: 'memories/x.md',
+      mode: 'append',
+      file: () => path.join(baseRoot, 'memories/x.md'),
+    },
+    {
+      row: '5 HEARTBEAT.md',
+      params: { target: 'HEARTBEAT.md' },
+      scope: 'collective',
+      relativePath: 'HEARTBEAT.md',
+      mode: 'append',
+      file: () => path.join(baseRoot, 'HEARTBEAT.md'),
+    },
+    {
+      row: '11',
+      params: { target: 'daily/2026-11-10.md' },
+      scope: 'user',
+      relativePath: 'daily/2026-11-10.md',
+      mode: 'append',
+      file: () => userFile('daily/2026-11-10.md'),
+    },
+    {
+      row: '12',
+      params: { target: 'memory/x.md' },
+      scope: 'user',
+      relativePath: 'memory/x.md',
+      mode: 'append',
+      file: () => userFile('memory/x.md'),
+    },
+    {
+      row: '13',
+      params: { target: 'notes.md' },
+      scope: 'user',
+      relativePath: 'memory/notes.md',
+      mode: 'append',
+      file: () => userFile('memory/notes.md'),
+    },
+    {
+      row: 'D92',
+      params: { target: 'memories/team-conventions.md' },
+      scope: 'collective',
+      relativePath: 'memories/team-conventions.md',
+      mode: 'append',
+      file: () => path.join(baseRoot, 'memories/team-conventions.md'),
+    },
+  ]
+
+  for (const c of cases) {
+    it(`row ${c.row}: one entry with scope ${c.scope}, path ${c.relativePath}, mode ${c.mode}`, async () => {
+      const content = `zzrecord ${c.row}`
+      const out = await write.execute({ content, ...c.params })
+      expect(out.is_error).toBe(false)
+      const onDisk = await fs.readFile(c.file(), 'utf-8')
+      expect(onDisk).toContain(content)
+      expect(log.entries).toHaveLength(1)
+      expect(log.entries[0]).toMatchObject({
+        userKey: 'alice',
+        scope: c.scope,
+        relativePath: c.relativePath,
+        mode: c.mode,
+        contentSha256: sha256(onDisk),
+      })
+      expect(typeof log.entries[0].writtenAt).toBe('number')
+    })
+  }
+
+  it('hash: an append records the sha256 of the whole file, not of the fragment', async () => {
+    await write.execute({ content: 'first fragment', target: 'notes.md' })
+    await write.execute({ content: 'second fragment', target: 'notes.md' })
+    expect(log.entries).toHaveLength(2)
+    const bytes = await fs.readFile(userFile('memory/notes.md'), 'utf-8')
+    expect(bytes).toBe('first fragment\nsecond fragment')
+    expect(log.entries[1].contentSha256).toBe(sha256(bytes))
+    expect(log.entries[1].contentSha256).not.toBe(sha256('second fragment'))
+  })
+
+  it('scope: collective and private MEMORY.md share the path and differ in scope', async () => {
+    await write.execute({ content: 'team fact', target: 'memory' })
+    await write.execute({ content: 'personal fact', target: 'memory_private' })
+    expect(log.entries.map(e => [e.relativePath, e.scope])).toEqual([
+      ['MEMORY.md', 'collective'],
+      ['MEMORY.md', 'user'],
+    ])
+  })
+
+  it('rows 6 to 8, 10, 23: refused writes add no entry', async () => {
+    await write.execute({ content: 'witness', target: 'witness.md' })
+    expect(log.entries).toHaveLength(1)
+    expect(log.entries[0].relativePath).toBe('memory/witness.md')
+    for (const target of ['IDENTITY.md', 'state.db', 'users/bob/x.md']) {
+      const out = await write.execute({ content: 'x', target })
+      expect(out.is_error).toBe(true)
+    }
+    await expect(write.execute({ content: 'x', target: '/etc/x' })).rejects.toThrow()
+    await expect(write.execute({ content: 'x', target: 'a/../b' })).rejects.toThrow()
+    const scan = await write.execute({ content: 'see .env for the key', target: 'memory' })
+    expect(scan.is_error).toBe(true)
+    expect(log.entries).toHaveLength(1)
+  })
+
+  const failures: Array<[string, Error]> = [
+    ['a plain Error', new Error('SQLITE_IOERR: disk I/O error')],
+    [
+      "the persist queue's timeout error",
+      new Error('db worker timeout (2000ms) for op=insert_memory_write'),
+    ],
+  ]
+  const targets: Array<[string, Record<string, unknown>, 'collective' | 'user', string, string]> = [
+    [
+      'user target notes.md',
+      { target: 'notes.md' },
+      'user',
+      'Written to memory/notes.md (append)',
+      'memory/notes.md',
+    ],
+    [
+      'collective target memory',
+      { target: 'memory' },
+      'collective',
+      'Written to MEMORY.md (append)',
+      'MEMORY.md',
+    ],
+  ]
+  for (const [failureLabel, error] of failures) {
+    for (const [targetLabel, params, scope, successText, relativePath] of targets) {
+      it(`D93: a record that rejects with ${failureLabel} keeps the write's success (${targetLabel})`, async () => {
+        const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+        const before = await failureCount(scope)
+        const failing = new PersistentMemoryWriteTool(provider.forUser('alice'), {
+          log: new RejectingLog(error),
+          userKey: 'alice',
+        })
+        const content = `zzd93 ${scope} ${failureLabel}`
+        const out = await failing.execute({ content, ...params })
+        expect(out.is_error).toBe(false)
+        expect(out.content).toBe(successText)
+        expect(out.content).not.toContain('record')
+        // Witnesses: the file is written, one log line, the counter rose by one.
+        const file = scope === 'user' ? userFile(relativePath) : path.join(baseRoot, relativePath)
+        await expect(fs.readFile(file, 'utf-8')).resolves.toContain(content)
+        expect(errorSpy).toHaveBeenCalledTimes(1)
+        const [fields, message] = errorSpy.mock.calls[0]
+        expect(message).toBe('memory write record failed')
+        expect(fields).toMatchObject({
+          component: 'MemoryWrite',
+          scope,
+          mode: 'append',
+          errorName: 'Error',
+          errorMessage: error.message,
+        })
+        const payload = JSON.stringify(fields)
+        expect(payload).not.toContain(relativePath)
+        expect(payload).not.toContain('notes')
+        expect(payload).not.toContain(content)
+        expect(payload).not.toContain('alice')
+        expect(await failureCount(scope)).toBe(before + 1)
+      })
+    }
+  }
+
+  it('D93: with a working log the counter does not move and nothing is logged', async () => {
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+    const before = await failureCount('user')
+    await write.execute({ content: 'fine', target: 'notes.md' })
+    expect(log.entries).toHaveLength(1)
+    expect(errorSpy).not.toHaveBeenCalled()
+    expect(await failureCount('user')).toBe(before)
+  })
+
+  it('no port: the write succeeds and the file exists', async () => {
+    const bare = new PersistentMemoryWriteTool(provider.forUser('alice'))
+    const out = await bare.execute({ content: 'no record', target: 'notes.md' })
+    expect(out.is_error).toBe(false)
+    await expect(fs.readFile(userFile('memory/notes.md'), 'utf-8')).resolves.toBe('no record')
+  })
+
+  it('V2-L1: an error building the entry is thrown, not logged as a record failure', async () => {
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+    const before = await failureCount('user')
+    // Witness: the same call with a real workspace records one entry.
+    await write.execute({ content: 'real', target: 'notes.md', append: false })
+    expect(log.entries).toHaveLength(1)
+
+    const brokenLog = new CapturingLog()
+    const double = {
+      write: async () => undefined,
+    } as unknown as Workspace
+    const broken = new PersistentMemoryWriteTool(double, { log: brokenLog, userKey: 'alice' })
+    await expect(
+      broken.execute({ content: 'x', target: 'notes.md', append: false })
+    ).rejects.toThrow()
+    expect(brokenLog.entries).toHaveLength(0)
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.anything(), 'memory write record failed')
+    expect(await failureCount('user')).toBe(before)
   })
 })

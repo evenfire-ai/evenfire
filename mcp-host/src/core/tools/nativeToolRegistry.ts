@@ -31,8 +31,10 @@ import {
   callerOutputUnavailableMessage,
   resolveCallerOutputDir,
 } from '../../workspace/callerOutputs'
+import type { MemoryWriteLog } from '../../workspace/memoryWriteLog'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
+import { deriveUserKeyFromSource } from '../../workspace/userKey'
 import type { AttachmentReadLedger } from '../attachments/attachmentReadBudget'
 import { attachmentSaveAvailable } from '../attachments/attachmentSave'
 import { type ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../interfaces'
@@ -294,7 +296,11 @@ export class NativeToolRegistry implements ToolRegistry {
     // generators write under its reserved outputs directory; without it they
     // refuse to write, never falling back to a folder shared by the Host.
     // Trailing optional; only taskExecutor passes it.
-    callerOutputRoot?: string
+    callerOutputRoot?: string,
+    // Record of successful memory_write calls (migration 018). Absent when the
+    // Host has no session database: memory writes are then not recorded.
+    // Trailing optional; only taskExecutor passes it.
+    memoryWriteLog?: MemoryWriteLog
   ) {
     // A Host-owned GFS store establishes a trusted caller binding even when
     // memory is disabled. In that mode file tools never fall back to the shared
@@ -336,7 +342,14 @@ export class NativeToolRegistry implements ToolRegistry {
     // Memory tools: persistent (filesystem), requires workspace.
     if (workspace) {
       this.register(new MemorySearchTool(workspace))
-      this.register(new PersistentMemoryWriteTool(workspace))
+      this.register(
+        new PersistentMemoryWriteTool(
+          workspace,
+          memoryWriteLog
+            ? { log: memoryWriteLog, userKey: deriveUserKeyFromSource(sourceMessage) }
+            : undefined
+        )
+      )
       this.register(new PersistentMemoryReadTool(workspace))
       this.register(new MemoryTreeTool(workspace))
     }

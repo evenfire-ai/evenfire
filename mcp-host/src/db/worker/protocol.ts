@@ -207,6 +207,16 @@ export interface RehydratedSnapshot {
   sourceMessage: Record<string, unknown> | null
 }
 
+/** One row of `memory_writes` (migration 018): a successful `memory_write`. */
+export interface MemoryWriteRow {
+  user_key: string
+  scope: 'collective' | 'user'
+  relative_path: string
+  mode: 'append' | 'replace'
+  content_sha256: string
+  written_at: number
+}
+
 // ─── Operations ───────────────────────────────────────────────────────
 
 export type WorkerOp =
@@ -332,6 +342,7 @@ export type WorkerOp =
     }
   /** Deletes at most `limit` rows; the caller repeats until a batch deletes nothing. */
   | { kind: 'sweep_closed_sessions'; cutoffEpoch: number; limit: number }
+  | { kind: 'insert_memory_write'; payload: MemoryWriteRow }
   | { kind: 'integrity_check' }
   | { kind: 'checkpoint' }
   | { kind: 'shutdown' }
@@ -392,6 +403,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'reap_awaiting_approval_sessions':
     case 'sweep_expired':
     case 'sweep_closed_sessions':
+    case 'insert_memory_write':
       return true
     default:
       return false

@@ -5,7 +5,9 @@ import { runMigrations } from '../../migrate'
 import { applyPragmas } from '../../pragmas'
 import { prepareStatements } from '../../statements'
 import { createDispatcher, dispatch } from '../dispatcher'
+import { isWriteOp } from '../protocol'
 import type {
+  MemoryWriteRow,
   MessageRow,
   PendingApprovalRow,
   PersistedSession,
@@ -1030,6 +1032,59 @@ describe('dbWorker dispatcher', () => {
       deps
     )
     expect(Array.isArray(rows)).toBe(true)
+  })
+})
+
+describe('dbWorker dispatcher — insert_memory_write (migration 018)', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = new Database(':memory:')
+    applyPragmas(db)
+    runMigrations(db)
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  const row: MemoryWriteRow = {
+    user_key: 'a1b2c3d4e5f60718',
+    scope: 'user',
+    relative_path: 'memory/notes.md',
+    mode: 'append',
+    content_sha256: 'f'.repeat(64),
+    written_at: 1_700_000_000.5,
+  }
+
+  it('stores the six fields', async () => {
+    const deps = createDispatcher(db)
+    await expect(dispatch({ kind: 'insert_memory_write', payload: row }, deps)).resolves.toEqual({
+      ok: true,
+    })
+    expect(
+      db
+        .prepare(
+          'SELECT user_key, scope, relative_path, mode, content_sha256, written_at FROM memory_writes'
+        )
+        .all()
+    ).toEqual([row])
+  })
+
+  it('rejects a row that violates a CHECK constraint and stores nothing for it', async () => {
+    const deps = createDispatcher(db)
+    // Witness: a valid row is stored first.
+    await dispatch({ kind: 'insert_memory_write', payload: row }, deps)
+    await expect(
+      dispatch({ kind: 'insert_memory_write', payload: { ...row, content_sha256: 'short' } }, deps)
+    ).rejects.toThrow(/CHECK constraint failed/)
+    expect(db.prepare('SELECT COUNT(*) AS n FROM memory_writes').get()).toEqual({ n: 1 })
+  })
+
+  it('is a write operation (counted for the WAL checkpoint)', () => {
+    expect(isWriteOp({ kind: 'insert_memory_write', payload: row })).toBe(true)
+    // Witness: a read operation is not.
+    expect(isWriteOp({ kind: 'ping' })).toBe(false)
   })
 })
 
