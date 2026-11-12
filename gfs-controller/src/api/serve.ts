@@ -636,7 +636,7 @@ export class GfsServingHandler {
       );
     } catch (err) {
       if (err instanceof GfsSubjectResolutionDeniedError) {
-        throw new GfsError("forbidden", "principal is not authorized for GFS");
+        throw new GfsError("forbidden", "principal is not authorized for GFS", "principal_denied");
       }
       throw new GfsError(
         "not_mounted",

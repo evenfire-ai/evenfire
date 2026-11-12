@@ -106,6 +106,19 @@ function required(name: string, devMode: boolean, devDefault?: string): string {
   throw new Error(`[gfsc] required environment variable ${name} is not set`)
 }
 
+// HCC injects this same value and seeds it as the drive of every resource row, so it ends up
+// inside every canonical URI (gfs://<drive>/<rid>) and every watch key. Checking it here too
+// fails a hand-deployed gfsc at boot instead of serving URIs that clients reject.
+const DRIVE_NAME_PATTERN = /^[a-z0-9-]{1,63}$/
+
+function driveName(): string {
+  const value = process.env.GFS_DRIVE_NAME || 'main'
+  if (DRIVE_NAME_PATTERN.test(value)) return value
+  throw new Error(
+    `[gfsc] GFS_DRIVE_NAME must match ${DRIVE_NAME_PATTERN.source}, got: ${JSON.stringify(value)}`
+  )
+}
+
 function tuningMs(name: string, defaultMs: number): number {
   const raw = process.env[name]
   if (raw === undefined || raw === '') return defaultMs
@@ -388,7 +401,7 @@ export function loadConfig(): GfsConfig {
     pgConnectionString: required('GFS_PG_CONNECTION_STRING', devMode, ''),
     tokenAudience: process.env.GFS_TOKEN_AUDIENCE || 'gfs-controller',
     publicKey: process.env.GFS_JWT_PUBLIC_KEY || '',
-    driveName: process.env.GFS_DRIVE_NAME || 'main',
+    driveName: driveName(),
     decisionCacheTtlMs: Number(process.env.GFS_DECISION_CACHE_TTL_MS || 5000),
     credentialProbeIntervalMs: tuningMs('GFS_CREDENTIAL_PROBE_INTERVAL_MS', 60000),
     blobCleanupSafetyWindowMs: positiveInteger(
