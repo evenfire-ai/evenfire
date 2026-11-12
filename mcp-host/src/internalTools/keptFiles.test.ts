@@ -163,7 +163,8 @@ describe('scanForSecrets', () => {
       state: 'not_scanned',
       reason: 'office_package_unreadable',
     })
-  })
+    // Building and compressing 70 MiB takes seconds on a loaded runner.
+  }, 30_000)
 
   it('never decodes bytes that start like a PDF as text', () => {
     const body = `BT (${SYNTHETIC}) Tj ET\n`
@@ -207,7 +208,7 @@ describe('scanForSecrets', () => {
     expect(bigDocx.length).toBeGreaterThan(SCAN_TEXT_MAX_BYTES)
     expect(scanForSecrets(bigDocx, entries)).toEqual({ state: 'secret_found' })
     expect(readers.officeCalls).toBe(1)
-  })
+  }, 30_000)
 
   it('reports its own failure as not scanned instead of throwing', async () => {
     readers.officeThrows = true

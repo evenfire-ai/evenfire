@@ -40,6 +40,7 @@ import {
   isSourceRefusal,
   listKeptFiles,
   resolveGeneratedFile,
+  resolveKeptUpload,
   resolveSourcePath,
 } from './keptFiles'
 import { decodeTextContent } from './textContent'
@@ -909,9 +910,9 @@ function isValidIfMatch(value: unknown): value is number {
 }
 
 /** The file sources a chat caller may save from, besides text the model wrote. */
-const FILE_SOURCE_FIELDS = ['generatedFile', 'sourcePath'] as const
+const FILE_SOURCE_FIELDS = ['generatedFile', 'sourcePath', 'uploadedFileId'] as const
 const SOURCE_FIELDS = ['content', ...FILE_SOURCE_FIELDS] as const
-const EXACTLY_ONE_SOURCE = 'give exactly one of content, generatedFile, sourcePath'
+const EXACTLY_ONE_SOURCE = 'give exactly one of content, generatedFile, sourcePath, uploadedFileId'
 
 const SOURCE_PROPERTIES = {
   generatedFile: {
@@ -929,15 +930,21 @@ const SOURCE_PROPERTIES = {
     description:
       'Relative path of a file in your workspace, such as outputs/report.csv; the Host uploads its bytes. Reserved folders and a path whose first part starts with a dot are refused. To save a changed copy of a download, write it outside .gfs-downloads and pass that path. Not for memory notes (MEMORY.md, daily/, the notes in memory/): use the memory tools.',
   },
+  uploadedFileId: {
+    type: 'string',
+    description:
+      'The id of a file or image the user attached in chat, from clerum__kept_files_list (kind upload); it works in a later turn or conversation. Unlike clerum__gfs_save_attachment in the same turn, this save scans the file and refuses one that holds a protected value of this Host.',
+  },
 } as const
 
 const FILE_SOURCE_NOTICE =
-  ' Exactly one source: content (short text you wrote, never a whole file), generatedFile with generatedFileId, or sourcePath. The result has source and secretScan. When source is source_path or kept_upload, or generated_file with no Save id, and secretScan is not_scanned, tell the user the file was saved without a secret scan. A generated file with a Save id passed its check when it was generated and needs no such notice.'
+  ' Exactly one source: content (short text you wrote, never a whole file), generatedFile with generatedFileId, sourcePath, or uploadedFileId. The result has source and secretScan. When source is source_path or kept_upload, or generated_file with no Save id, and secretScan is not_scanned, tell the user the file was saved without a secret scan. A generated file with a Save id passed its check when it was generated and needs no such notice.'
 
 type ChosenSource =
   | { kind: 'content'; content: string }
   | { kind: 'generatedFile'; name: string; id?: string }
   | { kind: 'sourcePath'; path: string }
+  | { kind: 'uploadedFileId'; id: string }
 
 /** The one source of a write call, or the argument error that refuses the call. */
 function chosenSource(args: Record<string, unknown>): ChosenSource | InternalToolResult {
@@ -963,6 +970,10 @@ function chosenSource(args: Record<string, unknown>): ChosenSource | InternalToo
         name: args.generatedFile,
         ...(args.generatedFileId === undefined ? {} : { id: args.generatedFileId }),
       }
+    case 'uploadedFileId':
+      return typeof args.uploadedFileId === 'string'
+        ? { kind: 'uploadedFileId', id: args.uploadedFileId }
+        : invalidArgs('uploadedFileId must be a string')
     default:
       return typeof args.sourcePath === 'string' && args.sourcePath !== ''
         ? { kind: 'sourcePath', path: args.sourcePath }
@@ -983,7 +994,9 @@ function resolvedFileSource(
   const resolved =
     chosen.kind === 'generatedFile'
       ? resolveGeneratedFile(sources, chosen.name, chosen.id, createName)
-      : resolveSourcePath(sources, chosen.path)
+      : chosen.kind === 'uploadedFileId'
+        ? resolveKeptUpload(sources, chosen.id)
+        : resolveSourcePath(sources, chosen.path)
   if (isSourceRefusal(resolved)) {
     return resolved.argument
       ? invalidArgs(resolved.error)
@@ -1259,7 +1272,8 @@ export function buildGfsAttachmentSaveTools(
         }
         if (typeof attachment.dataBase64 !== 'string') {
           return invalidArgs(
-            'bytes_unavailable_after_restart: ask the user to attach the file again in a new message'
+            'bytes_unavailable_after_restart: ask the user to attach the file again in a new message. ' +
+              `Files attached earlier are kept for ${Math.round(GFS_FILE_LIMITS.retentionMs / 3_600_000)} hours, see clerum__kept_files_list`
           )
         }
         const name = attachmentSaveName(attachment)
@@ -1299,8 +1313,8 @@ export function buildKeptFilesListTool(callerRoot: string | undefined): Internal
   return {
     name: 'clerum__kept_files_list',
     description:
-      'List the files this Host keeps for this user: files the document generators made in chat, with their Save id. ' +
-      'Save one with clerum__gfs_create_file or clerum__gfs_write and generatedFile plus generatedFileId; an entry without id is saved by generatedFile alone; canSave false means it cannot be saved (reason). ' +
+      'List the files this Host keeps for this user: files the document generators made in chat, with their Save id, and files the user attached in chat (kind upload). ' +
+      'Save one with clerum__gfs_create_file or clerum__gfs_write: a generated file with generatedFile plus generatedFileId, an entry without id by generatedFile alone, an upload with uploadedFileId; canSave false means it cannot be saved (reason). ' +
       'The list starts with the oldest files and the newest file is the last entry; at most 100 entries. ' +
       'When truncated is true and the user asks for a recent file, ask the user for part of its name and pass it as nameContains, or use the Save id of the generation. ' +
       `Each file is deleted ${hours} hours after its createdAt; tell the user the date when they say they will save a file later. ` +

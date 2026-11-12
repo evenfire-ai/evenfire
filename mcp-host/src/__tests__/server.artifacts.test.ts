@@ -152,6 +152,28 @@ describe('RPCServer runtime artifact routes', () => {
     }
   })
 
+  it('neither lists nor serves a kept attachment', async () => {
+    outputDir = makeOutputDir()
+    fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
+    fs.mkdirSync(path.join(outputDir, '.uploads'), { mode: 0o700 })
+    fs.writeFileSync(path.join(outputDir, '.uploads', 'abcdefabcdef.bin'), 'attached')
+    const { server, baseUrl } = await startServer(outputDir)
+
+    try {
+      const res = await fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: rpcEdgeHeaders })
+      const body = (await res.json()) as { artifacts: Array<{ name: string }> }
+      expect(body.artifacts.map(artifact => artifact.name)).toEqual(['report.md'])
+      for (const name of ['.uploads', '.uploads%2Fabcdefabcdef.bin']) {
+        const download = await fetch(`${baseUrl}/v1/runtime/artifacts/${name}/download`, {
+          headers: rpcEdgeHeaders,
+        })
+        expect(download.status, name).not.toBe(200)
+      }
+    } finally {
+      await server.stop()
+    }
+  })
+
   it('lists a generated file without its save record folder', async () => {
     outputDir = makeOutputDir()
     fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')

@@ -258,6 +258,26 @@ describe('generated documents are private to their caller', () => {
     }
   )
 
+  it("does not count a caller's kept attachments against the generation quota", () => {
+    const a = rootOf('user-a')
+    const out = outputsOf(a)
+    fs.mkdirSync(path.join(out, '.uploads'), { recursive: true, mode: 0o700 })
+    const MB = 1024 * 1024
+    const previous = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
+    process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '2'
+    try {
+      fs.writeFileSync(path.join(out, '.uploads', 'aaaaaaaaaaaa.bin'), Buffer.alloc(1.5 * MB))
+      // 1.5 MB of attachments plus a 1 MB file: under 2 MB with the attachments left out.
+      expect(() => enforceQuota(out, MB)).not.toThrow()
+      // Witness: the same bytes at the folder's top level count.
+      fs.renameSync(path.join(out, '.uploads', 'aaaaaaaaaaaa.bin'), path.join(out, 'big.md'))
+      expect(() => enforceQuota(out, MB)).toThrow(/Output quota exceeded/)
+    } finally {
+      if (previous === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
+      else process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = previous
+    }
+  })
+
   it('keeps the free space of the Host volume, and removes nothing to make room', async () => {
     const a = rootOf('user-a')
     await markdown(a, 'kept.md', '# kept\n')

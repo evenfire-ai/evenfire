@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { logger } from '../logger'
 import type { GfsImageSource } from '../visualInput/policy'
-import { CALLER_OUTPUTS_DIR } from '../workspace/callerOutputs'
+import { CALLER_OUTPUTS_DIR, KEPT_UPLOADS_DIR } from '../workspace/callerOutputs'
 import {
   GFS_DOWNLOADS_TRASH_PREFIX,
   RETIRED_GFS_DOWNLOAD_STORE_PREFIX,
@@ -1494,8 +1494,9 @@ export class GfsDownloadStore {
 
   /**
    * Expires and recounts the kept folder of every caller:
-   * `users/<key>/.clerum-outputs`, its top level (generated files) and
-   * `.save-ledger/` (their records). No other folder of the caller root is
+   * `users/<key>/.clerum-outputs`, its top level (generated files),
+   * `.save-ledger/` (their records) and `.uploads/` (kept chat attachments,
+   * `<id>.bin` with its record `<id>.json`). No other folder of the caller root is
    * read: the Host expires only files it created. Every regular file there
    * expires at the later of its readable record's `createdAt` and its own
    * `mtime`, each counted as now when ahead of now, plus the retention; a file
@@ -1533,6 +1534,13 @@ export class GfsDownloadStore {
             ledgerReal ? path.join(ledger, ledgerRecordFileName(name)) : undefined
           )
           if (ledgerReal) await this.sweepKeptPlace(ledger, now, tally, () => undefined)
+          // Kept attachments: `<id>.bin` with its record `<id>.json`.
+          const uploads = path.join(outputs, KEPT_UPLOADS_DIR)
+          if (await this.isRealDirectory(uploads))
+            await this.sweepKeptPlace(uploads, now, tally, name => {
+              const id = /^([0-9a-f]{12})\.bin$/.exec(name)?.[1]
+              return id === undefined ? undefined : path.join(uploads, `${id}.json`)
+            })
         }
       } catch (error) {
         this.reportKeptSweepFailure(error)

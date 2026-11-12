@@ -480,6 +480,26 @@ describe('attached_image lines', () => {
     fileReference,
   }
 
+  it('says when the attachments could not be kept for a later turn, and only then', () => {
+    const refused = buildTurnContextBlock({
+      date: new Date('2026-10-30T00:00:00Z'),
+      channel: { type: 'rpc', sender: null },
+      attachmentSave: { images: attachedImagesForTurnContext([image]) },
+      keepRefusal: { code: 'host_quota_exceeded' },
+    })
+    expect(refused).toContain('attachments_not_kept: code=host_quota_exceeded')
+    expect(refused).toContain('cannot be saved to EvenDrive in a later turn; tell the user so')
+    // Witness: a kept message has the save instruction and no such line.
+    const kept = buildTurnContextBlock({
+      date: new Date('2026-10-30T00:00:00Z'),
+      channel: { type: 'rpc', sender: null },
+      attachmentSave: { images: attachedImagesForTurnContext([image]) },
+    })
+    expect(kept).toContain(ATTACHMENT_SAVE_INSTRUCTION)
+    expect(kept).toContain('see clerum__kept_files_list')
+    expect(kept).not.toContain('attachments_not_kept')
+  })
+
   it('lists images with quoted names and no data', () => {
     const block = buildTurnContextBlock({
       date: new Date('2026-10-30T00:00:00Z'),

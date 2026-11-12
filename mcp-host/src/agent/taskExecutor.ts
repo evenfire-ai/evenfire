@@ -1309,6 +1309,9 @@ export class TaskExecutor {
           this.task.sourceMessage?.fileReferenceResolutions
         ),
         preparedGfsFiles: this.preparedGfsFiles,
+        ...(this.task.sourceMessage?.keepRefusal
+          ? { keepRefusal: { code: this.task.sourceMessage.keepRefusal.code } }
+          : {}),
       })
       const isCron = this.task.cronJobId !== undefined
       if (m.contentParts && m.contentParts.length > 0) {

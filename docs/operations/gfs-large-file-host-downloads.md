@@ -346,8 +346,9 @@ affected.
 The store has one retained-storage limit: Host bytes. Usage is the sum of
 complete copies, the reservations of active transfers and the duplicates a
 sweep could not remove, in every caller's directory, plus the files the Host
-keeps for each caller in `users/<key>/.clerum-outputs` (generated files and
-their save records). Kept files are never evicted: each leaves once the
+keeps for each caller in `users/<key>/.clerum-outputs` (generated files, their
+save records, and chat attachments kept in `.uploads/` for a later save). Kept
+files are never evicted: each leaves once the
 retention period has passed since the later of its record's time and its own
 modification time. The budget is
 `floor(volume bytes × MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT / 100)`, where the
@@ -468,8 +469,11 @@ is removed. A `.gfs-downloads` that is a symlink or not a directory is removed
 by the sweep without following it and recreated on the next admission.
 
 The same sweep walks each caller's kept folder, `users/*/.clerum-outputs`: its
-top level (generated files) and `.save-ledger/` (their save records), and no
-other folder of the caller. A regular file there expires once the retention
+top level (generated files), `.save-ledger/` (their save records) and
+`.uploads/` (kept chat attachments, `<id>.bin` with its record `<id>.json`),
+and no other folder of the caller. A keep of a message's attachments is
+refused when one caller's kept bytes would pass half the budget or every
+caller's three quarters. A regular file there expires once the retention
 period has passed since the later of its record's `createdAt` and its own
 modification time, each taken as now when it is in the future; a file with no
 readable record (a record itself, a temporary file) ages by its modification

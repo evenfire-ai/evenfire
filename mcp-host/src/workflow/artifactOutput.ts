@@ -6,7 +6,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { FREE_SPACE_FLOOR_MIN_BYTES, freeSpaceFloor } from '../internalTools/gfsDownloadStore'
 import { logger } from '../logger'
-import { CALLER_OUTPUTS_DIR } from '../workspace/callerOutputs'
+import { CALLER_OUTPUTS_DIR, KEPT_UPLOADS_DIR } from '../workspace/callerOutputs'
 import type { ArtifactMetadata, InternalToolResult } from './types'
 
 const MAX_STEM_LENGTH = 120
@@ -356,9 +356,16 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
   const quotaMB = outputQuotaMB(process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB)
   const quotaBytes = quotaMB * 1024 * 1024
 
+  const callerFolder = path.basename(outputDir) === CALLER_OUTPUTS_DIR
   let size: number
   try {
     size = getDirectorySize(outputDir)
+    // A chat caller's kept attachments live in the same folder but never
+    // limit a generation: they have their own bounds in the download store.
+    // Only a real subfolder is subtracted; a link was never counted above.
+    const uploads = path.join(outputDir, KEPT_UPLOADS_DIR)
+    if (callerFolder && fs.existsSync(uploads) && fs.lstatSync(uploads).isDirectory())
+      size -= getDirectorySize(uploads)
   } catch (err) {
     throw storageError(err, 'Could not measure the output folder')
   }
@@ -373,8 +380,7 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
         'raise CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
     )
   }
-  if (path.basename(outputDir) === CALLER_OUTPUTS_DIR)
-    enforceFreeSpaceFloor(outputDir, incomingBytes)
+  if (callerFolder) enforceFreeSpaceFloor(outputDir, incomingBytes)
 }
 
 /**

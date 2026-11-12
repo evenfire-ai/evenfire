@@ -67,8 +67,9 @@ import {
   resolveGuardrailHookDescriptors,
   withResolvedHookDescriptors,
 } from './guardrailHookResolver'
-import { createGfscClient, inspectGfsToolScopes } from './internalTools/gfsClient'
+import { createGfscClient, getGfsToolScopes, inspectGfsToolScopes } from './internalTools/gfsClient'
 import { GfsDownloadStore } from './internalTools/gfsDownloadStore'
+import { keepIncomingAttachments } from './internalTools/keptFiles'
 import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
@@ -2123,6 +2124,20 @@ const prepareIncomingMessage = createIncomingAdmission({
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
   fileReferenceGfs: fileReferenceGfsGate,
+  // A message's attachments are kept for a later save only where a GFS write
+  // tool could save them; elsewhere nothing is kept and nothing is said.
+  keepAttachments: message => {
+    const canWriteGfs = getGfsToolScopes(fileReferenceGfsEnv)?.has('gfs.write') === true
+    return keepIncomingAttachments({
+      message,
+      canWriteGfs,
+      callerRoot:
+        canWriteGfs && message.sender
+          ? resolveCallerRootBinding(gfsWorkspaceProvider, message).root
+          : undefined,
+      store: gfsDownloadStore,
+    })
+  },
   gfsSurfaceRuntimeCapability: message => {
     const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
     if (callerRootBinding.failureCode) {

@@ -652,3 +652,68 @@ describe('#666 file attachments at admission', () => {
     expect(admittedLogs(spies)).toHaveLength(0)
   })
 })
+
+describe('keeping attachments for a later save', () => {
+  it('keeps a message with bytes right before dispatch, and dispatches it unchanged when all are kept', async () => {
+    const order: string[] = []
+    const keepAttachments = vi.fn<NonNullable<IncomingAdmissionDeps['keepAttachments']>>(
+      async () => {
+        order.push('keep')
+        return undefined
+      }
+    )
+    const { admit, spies } = makeAdmission({
+      keepAttachments,
+      dispatch: vi.fn<IncomingAdmissionDeps['dispatch']>(() => {
+        order.push('dispatch')
+        return { success: true, taskId: 't-1', status: 'pending' }
+      }),
+    })
+    const response = await admit(imageMessage())
+    expect(response).toMatchObject({ success: true, taskId: 't-1' })
+    expect(order).toEqual(['keep', 'dispatch'])
+    expect(keepAttachments.mock.calls[0]![0].attachments).toHaveLength(1)
+    expect(spies.dispatch.mock.calls[0]![0]).not.toHaveProperty('keepRefusal')
+  })
+
+  it('processes the message anyway and passes the refusal on when nothing can be kept', async () => {
+    const keepAttachments = vi.fn(async () => ({
+      code: 'host_quota_exceeded',
+      neededBytes: 5,
+    }))
+    const { admit, spies } = makeAdmission({ keepAttachments })
+    const response = await admit(imageMessage())
+    expect(response).toMatchObject({ success: true, taskId: 't-1' })
+    expect(spies.dispatch).toHaveBeenCalledTimes(1)
+    expect(spies.dispatch.mock.calls[0]![0].keepRefusal).toEqual({
+      code: 'host_quota_exceeded',
+      neededBytes: 5,
+    })
+  })
+
+  it('does not keep a text-only message, which takes the dispatch path as before', async () => {
+    const keepAttachments = vi.fn(async () => undefined)
+    const { admit, spies } = makeAdmission({ keepAttachments })
+    const dispatched = { success: true, taskId: 't-9', status: 'pending' } as MessageResponse
+    spies.dispatch.mockReturnValueOnce(dispatched)
+    const response = await admit(message())
+    expect(keepAttachments).not.toHaveBeenCalled()
+    expect(response).toBe(dispatched)
+    // Witness: the message with bytes keeps once.
+    await admit(imageMessage())
+    expect(keepAttachments).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not keep a message admission refuses', async () => {
+    const keepAttachments = vi.fn(async () => undefined)
+    const refused = makeAdmission({ keepAttachments, queueReady: () => false })
+    const response = await refused.admit(imageMessage())
+    expect(response.success).toBe(false)
+    expect(keepAttachments).not.toHaveBeenCalled()
+    expect(refused.spies.dispatch).not.toHaveBeenCalled()
+    // Witness: the same message on a ready queue keeps once.
+    const ready = makeAdmission({ keepAttachments })
+    await ready.admit(imageMessage())
+    expect(keepAttachments).toHaveBeenCalledTimes(1)
+  })
+})

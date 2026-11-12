@@ -497,6 +497,36 @@ describe('kept files expire after the retention period', () => {
     expect(exists(real.file)).toBe(false)
   })
 
+  it('expires a kept attachment with its record and keeps an unexpired one', async () => {
+    const store = await openStore()
+    const oldBin = keepFile(A, 'aaaaaaaaaaaa.bin', 10, '.uploads')
+    const oldRecord = keepFile(A, 'aaaaaaaaaaaa.json', 0, '.uploads')
+    syncFs.writeFileSync(
+      oldRecord,
+      JSON.stringify({
+        id: 'aaaaaaaaaaaa',
+        name: 'a.txt',
+        createdAt: new Date(Date.now() - TTL - HOUR).toISOString(),
+      })
+    )
+    age(oldBin, TTL + HOUR)
+    age(oldRecord, TTL + HOUR)
+    const freshBin = keepFile(A, 'bbbbbbbbbbbb.bin', 10, '.uploads')
+    age(freshBin, HOUR)
+    await store.cleanupExpired()
+    expect([exists(oldBin), exists(oldRecord)]).toEqual([false, false])
+    expect(exists(freshBin)).toBe(true)
+  })
+
+  it('counts kept attachments in the bounds of a keep', async () => {
+    const store = await openStore()
+    const bin = keepFile(A, 'cccccccccccc.bin', 69 * MIB, '.uploads')
+    age(bin, 0)
+    expect((await refusal(store.reserveKept({ callerIdentity: A, sizeBytes: 2 * MIB }))).code).toBe(
+      'host_quota_exceeded'
+    )
+  })
+
   it('expires the next folder when one cannot be read', async () => {
     if (process.getuid?.() === 0) return
     const store = await openStore()

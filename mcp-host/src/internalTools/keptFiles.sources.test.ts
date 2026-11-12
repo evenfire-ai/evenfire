@@ -769,7 +769,7 @@ describe('choosing the source of a write', () => {
     fs.writeFileSync(path.join(root, 'a.txt'), 'a\n')
     const client = recordingClient()
     const tools = writeTools(root, client)
-    const one = 'give exactly one of content, generatedFile, sourcePath'
+    const one = 'give exactly one of content, generatedFile, sourcePath, uploadedFileId'
     expect((await create(tools, {})).error).toBe(one)
     expect((await create(tools, { content: 'x', sourcePath: 'a.txt' })).error).toBe(one)
     expect(
@@ -1032,7 +1032,10 @@ describe('fixed texts', () => {
       ],
       [FILE_CONTAINS_SECRET, 'it was not saved'],
       [nameFormatMismatch('docx').error, 'give it a name that ends in .docx'],
-      ['give exactly one of content, generatedFile, sourcePath', 'give exactly one of'],
+      [
+        'give exactly one of content, generatedFile, sourcePath, uploadedFileId',
+        'give exactly one of',
+      ],
     ]
     for (const [text, instruction] of texts) {
       expect(text, text).not.toMatch(/[<>]/)

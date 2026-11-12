@@ -19,14 +19,16 @@ import {
   isOoxmlPackage,
   officePackageHasText,
 } from '../artifacts/officePackageText'
+import { attachmentSaveName } from '../core/attachments/attachmentSave'
 import { textContainsRedactableSecretEntry } from '../core/tools/generatedArtifactAttachments'
 import { validatePath } from '../core/tools/pathValidation'
+import type { Attachment } from '../core/types'
 import { logger } from '../logger'
 import { isPartialArtifactName } from '../workflow/artifactOutput'
 import { ArtifactPathError, openExistingArtifactFile } from '../workflow/artifactPaths'
 import { withoutWriteTimes } from '../workflow/officeBoilerplate'
 import { printedForms } from '../workflow/toolText'
-import { resolveCallerOutputDir } from '../workspace/callerOutputs'
+import { KEPT_UPLOADS_DIR, resolveCallerOutputDir } from '../workspace/callerOutputs'
 import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 import { decodeTextContent } from './textContent'
 
@@ -533,9 +535,232 @@ export function listKeptFiles(callerRoot: string): KeptFileEntry[] {
       })
     }
   }
+  entries.push(...listKeptUploads(callerRoot))
   return entries.sort(
     (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.name.localeCompare(b.name)
   )
+}
+
+/**
+ * The caller's kept attachments: an upload is listed only when both its
+ * `<id>.bin` and a readable `<id>.json` exist; a half-written or leftover half
+ * is not shown and leaves by its own time.
+ */
+function listKeptUploads(callerRoot: string): KeptFileEntry[] {
+  const lookup = resolveCallerOutputDir(callerRoot, { create: false, subfolder: KEPT_UPLOADS_DIR })
+  if ('missing' in lookup) return []
+  if (!('dir' in lookup)) throw new KeptFilesUnavailableError()
+  const entries: KeptFileEntry[] = []
+  for (const dirent of fs.readdirSync(lookup.dir, { withFileTypes: true })) {
+    const match = UPLOAD_BYTES_NAME.exec(dirent.name)
+    if (!dirent.isFile() || !match) continue
+    const id = match[1]!
+    let info: fs.Stats
+    try {
+      info = fs.lstatSync(path.join(lookup.dir, dirent.name))
+    } catch {
+      continue
+    }
+    const record = readUploadRecord(lookup.dir, id)
+    if (!info.isFile() || !record) continue
+    entries.push({
+      kind: 'upload',
+      name: record.name,
+      id,
+      format: extensionOf(record.name),
+      createdAt: record.createdAt,
+      sizeBytes: info.size,
+      canSave: true,
+    })
+  }
+  return entries
+}
+
+const UPLOAD_ID = /^[0-9a-f]{12}$/
+const UPLOAD_BYTES_NAME = /^([0-9a-f]{12})\.bin$/
+
+interface UploadRecord {
+  id: string
+  name: string
+  createdAt: string
+}
+
+function readUploadRecord(dir: string, id: string): UploadRecord | undefined {
+  let raw: Buffer
+  try {
+    raw = readKeptFile(dir, `${id}.json`, MAX_RECORD_BYTES)
+  } catch {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(raw.toString('utf8')) as Record<string, unknown>
+    return parsed.id === id &&
+      typeof parsed.name === 'string' &&
+      typeof parsed.createdAt === 'string' &&
+      Number.isFinite(Date.parse(parsed.createdAt))
+      ? { id, name: parsed.name, createdAt: parsed.createdAt }
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * A kept attachment of the caller, by its id: its record and its bytes, then
+ * the scan. Uploads are scanned like every other file source, so a later save
+ * of a file the user attached can be refused for a protected value it holds.
+ */
+export function resolveKeptUpload(
+  sources: KeptFileSources,
+  uploadedFileId: string
+): SourceResolution {
+  if (!UPLOAD_ID.test(uploadedFileId)) {
+    return {
+      error: 'uploadedFileId must be the 12-character id clerum__kept_files_list gives',
+      argument: true,
+    }
+  }
+  if (!sources.callerRoot) return { error: KEPT_FILES_UNAVAILABLE }
+  const lookup = resolveCallerOutputDir(sources.callerRoot, {
+    create: false,
+    subfolder: KEPT_UPLOADS_DIR,
+  })
+  if ('missing' in lookup) return keptFileNotFound()
+  if (!('dir' in lookup)) return { error: KEPT_FILES_UNAVAILABLE }
+  if (!readUploadRecord(lookup.dir, uploadedFileId)) return keptFileNotFound()
+  let bytes: Buffer
+  try {
+    bytes = readKeptFile(lookup.dir, `${uploadedFileId}.bin`)
+  } catch (err) {
+    return readFailure(err, keptFileNotFound)
+  }
+  return {
+    source: 'kept_upload',
+    bytes,
+    secretScan: scanForSecrets(bytes, sources.secretEntries()),
+  }
+}
+
+/** Why a message's attachments were not kept, and for a space refusal the bytes short. */
+export interface KeepRefusal {
+  code: string
+  neededBytes?: number
+}
+
+/**
+ * The guards of a keep at admission, then the keep. A Host whose token cannot
+ * write to GFS has no tool that could save a kept file, so it keeps nothing
+ * and says nothing (undefined). Otherwise a message with no sender, a caller
+ * root that does not verify or no download store is refused with its code.
+ */
+export async function keepIncomingAttachments(input: {
+  message: { sender?: string; attachments?: readonly Attachment[] }
+  canWriteGfs: boolean
+  callerRoot: string | undefined
+  store: KeptReservations | null | undefined
+}): Promise<KeepRefusal | undefined> {
+  if (!input.canWriteGfs) return undefined
+  if (!input.message.sender) return { code: 'no_sender' }
+  if (!input.callerRoot) return { code: 'caller_root_unavailable' }
+  if (!input.store) return { code: 'store_unavailable' }
+  return keepMessageAttachments({
+    attachments: input.message.attachments ?? [],
+    callerRoot: input.callerRoot,
+    store: input.store,
+  })
+}
+
+/** The store side of a keep: one reservation for the message's bytes. */
+export interface KeptReservations {
+  reserveKept(input: { callerIdentity: string; sizeBytes: number }): Promise<() => void>
+}
+
+/**
+ * Keeps the attachments of one message that carry bytes (files and images) in
+ * the caller's `.clerum-outputs/.uploads/`, so they can be saved in a later
+ * turn: one reservation for their total, then, outside the store's section,
+ * per attachment `<id>.bin` and its record `<id>.json`, both created
+ * exclusively and owner-only. All or nothing: a write error removes what this
+ * call wrote. Returns the refusal, or undefined when every attachment is kept.
+ */
+export async function keepMessageAttachments(input: {
+  attachments: readonly Attachment[]
+  callerRoot: string
+  store: KeptReservations
+}): Promise<KeepRefusal | undefined> {
+  const withBytes = input.attachments.filter(
+    attachment => typeof attachment.dataBase64 === 'string'
+  )
+  if (withBytes.length === 0) return undefined
+  const lookup = resolveCallerOutputDir(input.callerRoot, {
+    create: true,
+    subfolder: KEPT_UPLOADS_DIR,
+  })
+  if (!('dir' in lookup)) {
+    return { code: 'kept_files_unavailable' }
+  }
+  const dir = lookup.dir
+  const decoded: Array<{ name: string; bytes: Buffer }> = []
+  for (const attachment of withBytes) {
+    // Admission lets no file through without a usable name; one that has none is refused here.
+    const name = attachmentSaveName(attachment)
+    if (name === null) return { code: 'attachment_name_missing' }
+    decoded.push({ name, bytes: Buffer.from(attachment.dataBase64!, 'base64') })
+  }
+  const total = decoded.reduce((sum, item) => sum + item.bytes.byteLength, 0)
+  let release: () => void
+  try {
+    release = await input.store.reserveKept({
+      callerIdentity: path.basename(input.callerRoot),
+      sizeBytes: total,
+    })
+  } catch (err) {
+    const code = (err as { code?: unknown })?.code
+    const neededBytes = (err as { neededBytes?: unknown })?.neededBytes
+    return {
+      code: typeof code === 'string' ? code : 'store_unavailable',
+      ...(typeof neededBytes === 'number' ? { neededBytes } : {}),
+    }
+  }
+  const written: string[] = []
+  try {
+    for (const { name, bytes } of decoded) {
+      const id = newSaveId()
+      const createdAt = new Date().toISOString()
+      for (const [file, data] of [
+        [`${id}.bin`, bytes],
+        [`${id}.json`, Buffer.from(JSON.stringify({ id, name, createdAt }))],
+      ] as const) {
+        const target = path.join(dir, file)
+        const handle = await fs.promises.open(
+          target,
+          fs.constants.O_WRONLY |
+            fs.constants.O_CREAT |
+            fs.constants.O_EXCL |
+            (fs.constants.O_NOFOLLOW ?? 0),
+          0o600
+        )
+        written.push(target)
+        try {
+          await handle.writeFile(data)
+        } finally {
+          await handle.close()
+        }
+      }
+    }
+    return undefined
+  } catch (err) {
+    for (const file of written) {
+      try {
+        await fs.promises.unlink(file)
+      } catch {
+        // Left behind, it is not listed and expires by its own time.
+      }
+    }
+    return { code: `write_failed_${errorCode(err).toLowerCase()}` }
+  } finally {
+    release()
+  }
 }
 
 /** The caller's kept folder exists but cannot be verified. */

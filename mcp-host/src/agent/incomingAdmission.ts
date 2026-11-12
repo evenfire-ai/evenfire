@@ -78,6 +78,14 @@ export interface IncomingAdmissionDeps {
   fileReferenceGfs: () => FileReferenceGfsAccess
   /** Host-owned surface capability; omitted means every optional surface fails closed. */
   gfsSurfaceRuntimeCapability?: (message: IncomingMessage) => GfsSurfaceRuntimeCapability
+  /**
+   * Keeps the message's attachments that carry bytes for a later save, right
+   * before dispatch and after every admission refusal. Undefined means
+   * nothing to say (all kept, or the Host keeps nothing, as without
+   * `gfs.write`); a refusal is passed on with the message. Called only for a
+   * message with at least one attachment that carries bytes.
+   */
+  keepAttachments?: (message: IncomingMessage) => Promise<IncomingMessage['keepRefusal']>
   logger: {
     info: (obj: Record<string, unknown>, msg: string) => void
     warn: (obj: Record<string, unknown>, msg: string) => void
@@ -249,11 +257,25 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           }
         : response
     }
-    const dispatchMessage = (): MessageResponse | Promise<MessageResponse> => {
-      const response = deps.dispatch(normalizedMessage, options)
+    const dispatchNow = (message: IncomingMessage): MessageResponse | Promise<MessageResponse> => {
+      const response = deps.dispatch(message, options)
       return response instanceof Promise
         ? response.then(withAcceptedAttachments)
         : withAcceptedAttachments(response)
+    }
+    const dispatchMessage = (): MessageResponse | Promise<MessageResponse> => {
+      // A message with no attachment that carries bytes takes the same path as before.
+      const keep = deps.keepAttachments
+      if (
+        !keep ||
+        !normalizedMessage.attachments?.some(
+          attachment => typeof attachment.dataBase64 === 'string'
+        )
+      )
+        return dispatchNow(normalizedMessage)
+      return keep(normalizedMessage).then(keepRefusal =>
+        dispatchNow(keepRefusal ? { ...normalizedMessage, keepRefusal } : normalizedMessage)
+      )
     }
 
     /** Decide whether the model a task resolved to can read this message's
