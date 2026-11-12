@@ -242,8 +242,18 @@ export class MockGateway {
     this.resourceCreateFault = fault
   }
 
-  llmAllowedModelsConfigMap(): { materialize: () => Promise<void> } {
-    return { materialize: () => this.llmAllowedModelsMaterialize() }
+  llmAllowedModelsConfigMap(): {
+    materialize: () => Promise<void>
+    materializeIfChanged: () => Promise<'written' | 'unchanged'>
+  } {
+    return {
+      materialize: () => this.llmAllowedModelsMaterialize(),
+      // Same injected outcome: a failure reaches both entry points alike.
+      materializeIfChanged: async () => {
+        await this.llmAllowedModelsMaterialize()
+        return 'written'
+      },
+    }
   }
 
   private key(name: string, namespace?: string): string {

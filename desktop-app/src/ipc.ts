@@ -42,6 +42,7 @@ import {
   type DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfig,
   EntityChangeStreamEvent,
+  GfsResourceDeepLinkEnvelope,
   HostActivityStreamEvent,
   HostMessageAttachment,
   HostMessageRequest,
@@ -400,6 +401,16 @@ export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): v
   }
 }
 
+/** Register the trusted renderer's read-only snapshot of the native GFS inbox. */
+export function registerGfsDeepLinkListHandler(queue: {
+  list(): GfsResourceDeepLinkEnvelope[]
+}): void {
+  ipcMain.handle('gfs:listPendingDeepLinks', event => {
+    assertTrustedSender(event)
+    return { links: queue.list() }
+  })
+}
+
 /**
  * The identity of the window that owns a ZIP job (R3-M2). A job is opened by
  * one window and may only be driven by that window: without this, any renderer
@@ -701,7 +712,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
-    clipboard.writeText(result.url)
+    await clipboard.writeText(result.url)
     return result
   })
   ipcMain.handle(
@@ -2410,7 +2421,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     const teamId = sanitizeString(payload?.teamId)
     const result = await service.createSandboxUiDeepLink(teamId || undefined)
-    clipboard.writeText(result.url)
+    await clipboard.writeText(result.url)
     return result
   })
 

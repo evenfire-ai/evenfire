@@ -260,22 +260,22 @@ describe('loadConfig', () => {
     delete process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS
     delete process.env.WRC_EXTERNAL_EGRESS_MAX_ENTRIES
     const config = loadConfig()
-    expect(config.externalEgressOverlapSeconds).toBe(300)
+    expect(config.externalEgressOverlapSeconds).toBe(3600)
     expect(config.externalEgressRefreshFloorSeconds).toBe(5)
     expect(config.externalEgressRefreshIntervalSeconds).toBe(60)
-    expect(config.externalEgressMaxEntries).toBe(128)
+    expect(config.externalEgressMaxEntries).toBe(256)
   })
 
   it('reads external egress accumulator overrides', () => {
     process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS = '600'
     process.env.WRC_EXTERNAL_EGRESS_REFRESH_FLOOR_SECONDS = '7'
     process.env.WRC_EXTERNAL_EGRESS_REFRESH_INTERVAL_SECONDS = '30'
-    process.env.WRC_EXTERNAL_EGRESS_MAX_ENTRIES = '256'
+    process.env.WRC_EXTERNAL_EGRESS_MAX_ENTRIES = '512'
     const config = loadConfig()
     expect(config.externalEgressOverlapSeconds).toBe(600)
     expect(config.externalEgressRefreshFloorSeconds).toBe(7)
     expect(config.externalEgressRefreshIntervalSeconds).toBe(30)
-    expect(config.externalEgressMaxEntries).toBe(256)
+    expect(config.externalEgressMaxEntries).toBe(512)
   })
 
   it.each([

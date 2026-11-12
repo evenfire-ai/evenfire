@@ -63,8 +63,9 @@ wrong):
 ### Group A — OpenAI-compatible, pure data (17)
 
 These speak an OpenAI-compatible `/chat/completions` API. Integrating them is a
-`baseURL` + one API key, **no driver code**. They are all handled by one shared
-class, `OpenAICompatibleProvider`.
+`baseURL` + one API key, **no driver code**. They are all handled by the shared
+OpenAI-family driver (`OpenAIProvider`) composed with the compatible endpoint
+profile (`compatibleProfile`).
 
 | Provider      | id           | Credential slot      | Default model                                       |
 | ------------- | ------------ | -------------------- | --------------------------------------------------- |
@@ -86,7 +87,9 @@ class, `OpenAICompatibleProvider`.
 | Novita AI     | `novita`     | `novita-api-key`     | `deepseek/deepseek-v3.2`                            |
 | MiniMax       | `minimax`    | `minimax-api-key`    | `MiniMax-M2`                                        |
 
-`openai` itself also speaks this protocol but uses the official SDK (Group B).
+`openai` itself does not: the official endpoint is called over the Responses API
+(`/responses`) with the official SDK (Group B). Azure OpenAI and these compatible
+third parties are the providers that stay on Chat Completions.
 
 ### Group B — own SDK / bespoke wire protocol (4)
 
@@ -250,13 +253,83 @@ slots are all present and uses that provider's default model;
 The default models are the `defaultModel` values in
 `mcp-host/src/llm/registryCore.ts`. Any other provider needs both variables.
 
-Before applying the Host, setup checks the pair against `llm_allowed_models`
-in the profile's control-postgres (after migrations) and exits 1 on
-`HOST_MODEL_UNKNOWN` (no row), `HOST_MODEL_DISABLED` (row disabled) or
-`HOST_MODEL_CHECK_FAILED` (the query could not run). A name without a provider
-is refused because a model id belongs to one provider: pairing
-`CLERUM_MODEL_NAME=glm-4.7` with whichever key is present produced
-`openai/glm-4.7`, which no catalog serves.
+A name without a provider is refused because a model id belongs to one
+provider: pairing `CLERUM_MODEL_NAME=glm-4.7` with whichever key is present
+produced `openai/glm-4.7`, which no catalog serves.
+
+No model catalog is seeded, so a fresh database's allowlist holds only what
+control-api's catalog sync enabled (section 5). Setup therefore needs egress to
+models.dev, and it handles the Host model in three steps:
+
+1. **Step 6f waits for the first catalog sync.** It reads
+   `llm_catalog_sync_runs` until a run used the live catalog, for up to
+   `CLERUM_CATALOG_WAIT_SECONDS` (default 180; `0` checks once). It warns and
+   continues on `CATALOG_SYNC_VENDORED_ONLY` (only the offline snapshot was
+   used: no egress, or `MODELS_DEV_API_URL` unreachable) or
+   `CATALOG_SYNC_PENDING` (no run yet). It then classifies the pair as
+   enabled, disabled or not in the allowlist. It writes nothing: there is no
+   admin yet, and an admin login before step 10 would consume the one-shot
+   `/admin/auth/setup`.
+2. **Step 10 adds or enables the model through the admin API**, with the
+   seed's own admin session (`scripts/e2e/llm-model-ensure.sh`). A missing pair
+   is created as a manual row, enabled. A disabled row is enabled when this run
+   created the database, or when the catalog sync inserted it during this run
+   (after the seed's first read, for example a `409` on the create). Each pair
+   logs `LLM_MODEL_ENSURED <created|enabled|present|skipped-reuse> provider/model`,
+   and setup prints every such line after the seed. This happens only on the
+   minikube profile setup is running (any profile name, including
+   pre-hash branch profiles such as `clerum-oauth19`); a direct
+   `seed-test-data.sh` run accepts only `clerum-test` and hashed branch
+   profiles.
+
+   If 6f did not see a live catalog run, the seed checks again for up to
+   `LLM_ENSURE_CATALOG_WAIT_SECONDS` (default 60) before creating rows. If the
+   catalog is still undecided it creates them anyway and warns
+   `LLM_MODEL_ENSURE_BEFORE_CATALOG`: such rows stay manual, with no catalog
+   price or lifecycle status, even for models models.dev lists.
+
+3. **After step 10 the pair must be an enabled row**, or setup exits 1 with
+   `HOST_MODEL_UNKNOWN` (no row), `HOST_MODEL_DISABLED` (row disabled) or
+   `HOST_MODEL_CHECK_FAILED` (the query could not run).
+
+Why step 10 has work to do on a fresh install:
+
+- models.dev does not list the zai default `glm-5.1`, so no sync creates it;
+- `bailian` ships with auto-enable OFF, so with only `BAILIAN_API_KEY` nothing
+  of Bailian's is enabled, and `qwen3-coder-plus` is also deprecated in the
+  catalog;
+- models the catalog marks deprecated (for example `zai/glm-4.7`) are
+  inserted disabled.
+
+A row setup creates this way has no catalog price, so `cost` budgets do not
+limit it until an admin prices it under **Cost → LLM prices** (the
+[upgrade note](../deploy/llm-catalog-seed-retirement-upgrade.md) explains how
+unpriced models count).
+
+On a **reused database** (`REUSE_DB=true` / `--keep-db`) setup does not
+re-enable a row that was already disabled when the seed read it, and never
+re-creates a pair an operator removed: either may be an operator's decision.
+(A row the catalog sync inserts during the run is enabled, as above.) A
+disabled Host model stops setup at step 6f with `HOST_MODEL_DISABLED`, and a
+removed one with `HOST_MODEL_DISMISSED`; other pairs log
+`LLM_MODEL_ENSURE_SKIPPED_REUSE`. Enable them under **LLM models** in the
+Control UI.
+
+With **`--defer-bootstrap-seed`** step 10 does not run, so setup only warns
+`HOST_MODEL_PENDING`, whether the Host model is missing or disabled and even on
+a reused database, and the agent does not reply until an admin adds or enables
+the model in the Control UI after the browser setup.
+
+The **e2e seed profile** also enables every pair in
+`scripts/e2e/e2e-llm-models.txt` (the models the E2E specs and lanes use), the
+`E2E_WORKFLOW_MODEL_PROVIDER`/`E2E_WORKFLOW_MODEL_NAME` pair when both are set,
+and the Plugin Workload SDK demo model.
+`scripts/tests/test-e2e-llm-models-manifest.sh` fails when an E2E file names a
+pair the manifest lacks.
+
+Outside minikube nothing provisions models for you. On any other installation
+an admin adds or enables the Host's model under **LLM models** (or with
+`POST`/`PUT /admin/llm-models`) when the catalog did not.
 
 ---
 
@@ -267,10 +340,24 @@ lives in the control-api Postgres table `llm_allowed_models`, is managed at
 `/llm-models`, is fully audited (`llm_allowed_models_audit`), and is materialized
 to the `clerum-llm-allowed-models` ConfigMap for the runtime.
 
-In short: it is **fail-closed** (a model needs an enabled row), catalog sync
-only proposes disabled rows, models already deployed are never interrupted,
-and a missing ConfigMap degrades to "only the configured model". Operator
-details (propagation, metrics, degraded mode, discovery review) are in the
+In short: it is **fail-closed** (a model needs an enabled row), models already
+deployed are never interrupted, and a missing ConfigMap degrades to "only the
+configured model". The catalog sync inserts new models and enables them when
+the provider's catalog policy is ON (direct vendors by default), the model is
+eligible (text output, `tool_call`, no catalog `status` of any kind, an id the
+runtime can execute) and the run fetched models.dev live; at most
+`LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` per provider and
+`LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` in total per run (newest releases first
+within a provider; the total is handed out in the fixed order of
+`PROVIDER_IDS`, so later providers wait for earlier ones), and a large catalog
+completes over several runs. It also loads the catalog price of each model it
+inserts. It never changes `enabled` on an existing row. Without egress
+(`vendored` runs) providers whose policy is ON get no discovered rows, and
+since nothing is seeded, a fresh installation without egress has no enabled
+model at all until an admin adds one (local minikube setup adds the Host's
+model itself, section 4.7). Operator
+details (policy, caps, offline installations, emergency brake, propagation,
+metrics, degraded mode) are in the
 [operator guide](../deploy/llm-providers.md#5-the-model-allowlist).
 
 ### Image input capability (`image_input`)
@@ -302,8 +389,10 @@ family, or an "OpenAI-compatible" request shape.
   pair), and editing capability never changes `enabled`.
 - A capability change re-materializes the ConfigMap `imageInput` field, so
   running Hosts pick it up without a redeploy. The sync re-materializes
-  `clerum-llm-allowed-models` when it changed `image_input` on an enabled row; it
-  still never enables, disables or edits any other served column.
+  `clerum-llm-allowed-models` whenever its content differs from Postgres (an
+  `image_input` change on an enabled row, a model it enabled on insert); it
+  never enables or disables an existing row, nor edits any other served column
+  of one.
 
 #### Rollout and refresh cadence
 
@@ -311,9 +400,14 @@ family, or an "OpenAI-compatible" request shape.
   nullable column and its `CHECK`; it seeds no evidence. Existing rows stay `unknown` (images refused, text unaffected) until a
   catalog sync runs, on demand or from the cron. With the cron enabled (the
   base deploy enables it) the first sync runs a few seconds after control-api
-  starts, not one interval later, and fills every pair models.dev lists (29 of
-  the 44 seeded pairs). The 15 seeded pairs models.dev does not list stay
-  `unknown` until an operator curates them through the admin API
+  starts, not one interval later, and fills every row whose pair models.dev
+  lists (on an installation upgraded from a release that seeded a default
+  catalog, 28 of the 44 seeded pairs). Rows models.dev does not list (ids an
+  operator added by hand and, on such an upgraded installation, the other 16
+  seeded pairs, which stay `manual`; see the
+  [upgrade note](../deploy/llm-catalog-seed-retirement-upgrade.md)) stay
+  `unknown` until an operator
+  curates them through the admin API
   (`PUT /admin/llm-models/:id` with an `image_input` field; see
   [adding-a-provider.md](adding-a-provider.md)).
 - Discovery evidence expires `LLM_CATALOG_IMAGE_EVIDENCE_TTL_MS` after the
@@ -323,7 +417,14 @@ family, or an "OpenAI-compatible" request shape.
 - With `LLM_CATALOG_SYNC_CRON_ENABLED=true` (code default off; set to `true` in
   `deploy/base/control-plane/configmaps.yaml`) the refresh is automatic: one
   sync shortly after start, then one every `LLM_CATALOG_SYNC_INTERVAL_MS`; the config refuses a TTL shorter than twice
-  `LLM_CATALOG_SYNC_INTERVAL_MS`. Without the cron, run
+  `LLM_CATALOG_SYNC_INTERVAL_MS`. Each run enables at most
+  `LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` (default 100) new models
+  per provider and `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` (default 300) in total;
+  both accept 1–1000 and the rest wait for the next sync run (with the cron off,
+  a manual sync or a restart), the providers further
+  down `PROVIDER_IDS` after the ones ahead of them. Without the cron, one boot
+  sync still runs a few seconds after start (`LLM_CATALOG_BOOT_SYNC_ENABLED`,
+  default `true`), so run
   `POST /admin/llm-models/discovery/sync` at least once per TTL (monthly at the
   default; every two weeks leaves margin). The endpoint runs the same code path
   as the cron.
@@ -390,7 +491,7 @@ failing over on those would just mask bugs.
 | `502 mcp_host configure failed/unreachable`              | WRC resolved the credential but couldn't configure mcp-host.                                                                                                                                                                           |
 | Model dropdown empty in the wizard                       | No enabled allowlist rows for that provider.                                                                                                                                                                                           |
 | Context-window indicator looks wrong                     | `context_window_tokens` unset on the allowlist row → falls back to `CLERUM_CONTEXT_MAX_TOKENS`.                                                                                                                                        |
-| Cost report shows a model as unpriced                    | No row in `llm_model_prices`; only 8 models are seeded. Add one under **Cost → LLM prices**.                                                                                                                                           |
+| Cost report shows a model as unpriced                    | No row in `llm_model_prices`. The catalog sync prices a model only when it inserts it and models.dev has a cost; nothing is seeded. Add one under **Cost → LLM prices**.                                                               |
 
 ### Known sharp edge: workflow steps and the secret mapping
 

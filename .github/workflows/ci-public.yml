@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The merge commit and its parents: the version step below reads HEAD^1.
+          fetch-depth: 2
       - name: No superpowers docs may be tracked
         # docs/superpowers/ holds per-developer working artifacts (brainstorm
         # specs, implementation plans) that are gitignored by convention. The
@@ -35,6 +38,22 @@ jobs:
             echo "$bad"
             exit 1
           fi
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+        with:
+          node-version-file: .nvmrc
+      # In this job because dev's ruleset requires it, and it runs on every pull request with no
+      # path filter. dev also requires branches to be up to date, so HEAD, the pull request's
+      # merge result, contains dev's tip. HEAD^1 is that tip, so this also sees a version line
+      # that merged cleanly into the same number on both sides.
+      - name: Validate service versions against the merge base (pull requests into dev)
+        if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+        run: node scripts/release/validate-release-version-bumps.mjs --previous HEAD^1 --all-services
+      # Also here because the ruleset requires this job: this test pins the step above and the
+      # service list against the pre-commit hook's roots, so a red pin blocks the merge.
+      - name: Test the service version bump validator (pull requests into dev)
+        if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+        run: bash scripts/tests/test-validate-release-version-bumps.sh
 
   node-runtime-images:
     name: Node image runtime (${{ matrix.variant.name }}, ${{ matrix.arch }})
@@ -146,7 +165,7 @@ jobs:
             pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts passwordRecovery.http.contract.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/control-api.json
           - service: external-rest-api
-            pinned_suites: invitations.passwordRecovery.public.test.ts
+            pinned_suites: invitations.passwordRecovery.public.test.ts mixedVersion.baseControlApi.test.ts
           - service: codex-llm-proxy
             pinned_suites: originPolicy.test.ts server.security.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/codex-llm-proxy.json
@@ -178,6 +197,11 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
+      # keytar is a native Desktop dependency. When its prebuild is unavailable,
+      # node-gyp requires libsecret development metadata on Linux.
+      - name: Install Desktop native build prerequisite
+        if: matrix.service == 'desktop-app' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libsecret-1-dev
       # profile-ui consumes the source-only shared frontend package through a file
       # link. Install the package's own React type dependencies before Next follows
       # that link to its real path; a consumer-only install cannot resolve them from
@@ -189,6 +213,13 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
+        run: npm ci
+
+      # Cross-service integration tests import RPC Proxy source directly, whose
+      # config now loads the shared JWT policy package from its own node_modules.
+      - name: Install RPC Proxy dependencies for Control API tests
+        if: matrix.service == 'control-api'
+        working-directory: rpc-proxy
         run: npm ci
 
       # The seed loads control-api's TypeScript sources with Node itself (type
@@ -252,6 +283,11 @@ jobs:
         if: matrix.service == 'desktop-app'
         working-directory: desktop-app
         run: npm run verify:electron
+
+      - name: Validate declared test inputs
+        env:
+          CERTIFICATION_SERVICE: ${{ matrix.service }}
+        run: node scripts/ci/certification-inputs.mjs check --scope matrix --service "$CERTIFICATION_SERVICE"
 
       - name: Build
         working-directory: ${{ matrix.service }}
@@ -463,6 +499,24 @@ jobs:
           cache: npm
           cache-dependency-path: control-api/package-lock.json
 
+      # The same validated pin declaration is consumed by local preflight and
+      # the real-PostgreSQL tests; these checkouts stay read-only producers.
+      - name: Resolve historical producer pins
+        id: certification_inputs
+        run: node scripts/ci/certification-inputs.mjs pins >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.certification_inputs.outputs.observed_commit }}
+          path: r61-b1-producers/observed-dev
+          persist-credentials: false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.certification_inputs.outputs.latest_commit }}
+          path: r61-b1-producers/latest-dev
+          persist-credentials: false
+
       - name: Install dependencies
         working-directory: control-api
         run: npm ci
@@ -475,6 +529,40 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
+      - name: Install observed DEV producer dependencies
+        working-directory: r61-b1-producers/observed-dev/packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build observed DEV producer dependency
+        working-directory: r61-b1-producers/observed-dev/packages/workflow-runtime-core
+        run: npm run build
+
+      - name: Install observed DEV Control API dependencies
+        working-directory: r61-b1-producers/observed-dev/control-api
+        run: npm ci
+
+      - name: Build observed DEV producer with provenance
+        env:
+          TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
+        run: node scripts/ci/certification-inputs.mjs build-producer --producer observedDev
+
+      - name: Install latest DEV producer dependencies
+        working-directory: r61-b1-producers/latest-dev/packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build latest DEV producer dependency
+        working-directory: r61-b1-producers/latest-dev/packages/workflow-runtime-core
+        run: npm run build
+
+      - name: Install latest DEV Control API dependencies
+        working-directory: r61-b1-producers/latest-dev/control-api
+        run: npm ci
+
+      - name: Build latest DEV producer with provenance
+        env:
+          TASK106_R61_B1_LATEST_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/latest-dev
+        run: node scripts/ci/certification-inputs.mjs build-producer --producer latestDev
+
       - name: Install External REST contract-test dependencies
         working-directory: external-rest-api
         run: npm ci
@@ -483,16 +571,28 @@ jobs:
         working-directory: external-rest-api
         run: npm run build
 
-      - name: Validate recovery suite selection contract
+      - name: Validate Real PostgreSQL certification inputs
+        env:
+          TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
+          TASK106_R61_B1_LATEST_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/latest-dev
+        run: node scripts/ci/certification-inputs.mjs check --scope ci-t1
+
+      - name: Validate recovery suite selection, certification input and T1 evidence contracts
         env:
           CODEX_SCRATCH_ROOT: ${{ runner.temp }}
-        run: node --test scripts/tests/password-recovery-suite-contract.test.mjs
+        run: >-
+          node scripts/tests/run-node-test-files.mjs
+          scripts/tests/password-recovery-suite-contract.test.mjs
+          scripts/tests/certification-inputs.test.mjs
+          scripts/tests/t1-reporter-projection.test.mjs
 
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
           CONTROL_API_REAL_PG_REQUIRED: '1'
+          TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
+          TASK106_R61_B1_LATEST_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/latest-dev
           FORCE_COLOR: '0'
           NO_COLOR: '1'
         # The `realPostgres` filter matches every control-api
@@ -536,9 +636,8 @@ jobs:
             echo 'real-Postgres control-api lane reported skipped tests' >&2
             exit 1
           fi
-          # Pinned suites (Codex/Grok subscription, provider attempts, and the
-          # external GFS rate-limit suites) must stay inside the real-Postgres
-          # filter and run. The check reads the JSON report, not the console:
+          # Pinned suites must stay inside the real-Postgres filter and run.
+          # The check reads the JSON report, not the console:
           # a file whose tests are all skipped is still printed by name.
           node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report" \
             db.codexSubscriptionConnection.realPostgres.integration.test.ts \
@@ -581,7 +680,30 @@ jobs:
             oauth.legacyGrantLaneFence.realPostgres.integration.test.ts \
             routes.mcpOauth.legacyGrantLaneFence.realPostgres.integration.test.ts \
             oauth.dcrCredential.installIdentity.realPostgres.integration.test.ts \
-            db.realPostgresMigration.integration.test.ts
+            db.realPostgresMigration.integration.test.ts \
+            directoryManagedWriterLockOrder.realPostgres.integration.test.ts \
+            externalSessionSingleTouch.realPostgres.integration.test.ts \
+            invitationAcceptedOnboarding.realPostgres.integration.test.ts \
+            legacyPasswordEpochBackfill.realPostgres.integration.test.ts \
+            legacySessionExchangeRace.realPostgres.integration.test.ts \
+            migrationExecutionPolicy.realPostgres.integration.test.ts \
+            migrationPreviousImageCompatibility.realPostgres.integration.test.ts \
+            pr1MigrationLocks.realPostgres.integration.test.ts \
+            routes.externalTeamsFinalAuthority.realPostgres.integration.test.ts \
+            routes.externalTeamsLegacyAdminRevocation.realPostgres.integration.test.ts \
+            userAccessRuntimeContract.realPostgres.integration.test.ts \
+            userSessionDatabaseClock.realPostgres.integration.test.ts \
+            userSessionUserLockMode.realPostgres.integration.test.ts \
+            workflowRunReadAndApprovalV1Compatibility.realPostgres.integration.test.ts \
+            contracts.llmAttention.wire.realPostgres.integration.test.ts \
+            db.llmRetireSeededCatalog.realPostgres.integration.test.ts \
+            routes.adminLlmProviderCatalogPolicy.realPostgres.integration.test.ts \
+            routes.llmCatalogDismissed.realPostgres.integration.test.ts \
+            services.llmAllowlistPublication.realPostgres.integration.test.ts \
+            services.llmCatalogAutoEnable.realPostgres.integration.test.ts \
+            services.llmCatalogSyncFakeDb.concurrency.realPostgres.integration.test.ts \
+            services.llmCatalogSyncFakeDb.differential.realPostgres.integration.test.ts \
+            services.llmProviderCatalogSettings.realPostgres.integration.test.ts
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller
@@ -653,6 +775,82 @@ jobs:
         # to dev, so build the same context here to fail the PR instead.
         run: timeout 900s docker build --target builder -f control-ui/Dockerfile .
 
+  # ─── Dependency advisories — every committed npm lockfile ─────────────────
+  # npm audit (production dependencies, high/critical) per lockfile, gated by
+  # scripts/ci/dependency-audit-baseline.json: findings missing from it, expired
+  # entries and entries that no longer match all fail. Reads only the lockfile
+  # and the registry advisory endpoint, so nothing is installed. See
+  # docs/testing/dependency-scanning.md.
+  dependency-audit:
+    name: Dependency audit (all lockfiles)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Test the dependency scanning scripts
+        run: >-
+          node scripts/tests/run-node-test-files.mjs
+          scripts/ci/audit-lockfiles.test.mjs
+          scripts/ci/check-next-bundled-react.test.mjs
+      - name: npm audit every lockfile against the reviewed baseline
+        run: node scripts/ci/audit-lockfiles.mjs
+
+  # ─── React bundled inside next — lockfile scanners cannot see it ──────────
+  # The App Router runs the React build compiled into the next package
+  # (next/dist/compiled), which no lockfile lists, so npm audit / Dependabot
+  # only ever report advisories filed against next itself (#1431). Check the
+  # installed tree and the built runtime image for the fix of every advisory in
+  # scripts/ci/next-bundled-react-advisories.json, then Trivy-scan the image
+  # (node_modules contents, not the lockfile) against a reviewed ignore file.
+  next-app-supply-chain:
+    name: Next.js supply chain (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [control-ui, profile-ui]
+    env:
+      APP: ${{ matrix.app }}
+      IMAGE: next-app-scan/${{ matrix.app }}:ci
+      # Trivy 0.76.1, pinned by index digest.
+      TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+      - name: Install dependencies
+        # Only the installed next tree is inspected, so lifecycle scripts are
+        # not needed here; the image build below runs the real npm ci.
+        working-directory: ${{ matrix.app }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check the React bundled inside next (installed tree)
+        run: node scripts/ci/check-next-bundled-react.mjs "$APP"
+      - name: Build the runtime image
+        run: timeout 1200s docker build -f "$APP/Dockerfile" -t "$IMAGE" .
+      - name: Check the React bundled inside next (runtime image)
+        # Runs with the image's own node and file layout, without network.
+        run: >-
+          docker run --rm --network none --entrypoint node
+          -v "$GITHUB_WORKSPACE/scripts/ci:/opt/evenfire-ci:ro"
+          "$IMAGE" /opt/evenfire-ci/check-next-bundled-react.mjs "/app/$APP"
+      - name: Trivy image scan (HIGH/CRITICAL)
+        run: >-
+          docker run --rm
+          -v /var/run/docker.sock:/var/run/docker.sock:ro
+          -v "$GITHUB_WORKSPACE/scripts/ci:/opt/evenfire-ci:ro"
+          "$TRIVY_IMAGE" image
+          --scanners vuln
+          --severity HIGH,CRITICAL
+          --ignorefile /opt/evenfire-ci/next-app-image.trivyignore.yaml
+          --exit-code 1
+          --no-progress
+          "$IMAGE"
+
   e2e-vitest-node-unit:
     name: E2E Vitest node-unit (tests/e2e)
     runs-on: ubuntu-latest
@@ -670,8 +868,10 @@ jobs:
       - name: Audit live Profile UI recovery Playwright spec
         run: >-
           python3 tools/e2e_static_audit.py
-          tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts
-          tests/e2e/playwright/profile-ui-recovery/ordinary-invitation-onboarding.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/j1-invitation-onboarding.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/j2-password-recovery.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/j3-logout.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/negative-routes.spec.ts
 
   # ─── Registry contract — boot evenfire-registry and drive the real client ──
   # Catches wire-format drift in clerumRegistryClient.ts before merge. Requires
@@ -866,6 +1066,12 @@ jobs:
       - name: Test WRC egress oracle, DNS and lifecycle (unit/integration, cluster-free)
         run: bash scripts/tests/test-wrc-egress-degradation-gate.sh
 
+      - name: Test NP enforcement preflight namespace inventory (HCC env defaults, cluster-free)
+        run: bash scripts/tests/test-np-preflight-inventory.sh
+
+      - name: Test E2E credentials stay out of argv (RPC gateway journey)
+        run: bash scripts/tests/test-e2e-credential-argv.sh
+
       - name: Test Minikube mutation and WRC recovery admission (hermetic, cluster-free)
         run: bash scripts/tests/test-minikube-mutation-boundary.sh
 
@@ -898,6 +1104,12 @@ jobs:
 
       - name: Test single-writer validator fails loud on an absent local deploy
         run: bash scripts/tests/test-postgres-single-writer-strategy.sh
+
+      - name: Test control-api migration bounds and Job ownership contract
+        run: bash scripts/tests/test-control-api-migration-bounds.sh
+
+      - name: Test GCP deploy scripts (migration and runtime access contracts)
+        run: bash scripts/tests/test-gcp-scripts.sh
 
       - name: Test post-reset convergence isolates DB-dependent controllers
         run: bash scripts/tests/test-converge-control-db-after-reset.sh
@@ -1028,6 +1240,15 @@ jobs:
       - name: Test full-setup Host model resolution and catalog check
         run: bash scripts/tests/test-minikube-host-model.sh
 
+      - name: Test the seed's LLM model ensure through the admin API
+        run: bash scripts/tests/test-e2e-llm-model-ensure.sh
+
+      - name: Test the workflow-trigger E2E team helper adds the member
+        run: bash scripts/tests/test-e2e-workflow-triggers-team-helper.sh
+
+      - name: Test the E2E LLM model manifest covers every E2E model literal
+        run: bash scripts/tests/test-e2e-llm-models-manifest.sh
+
       - name: Test release image resolution
         run: bash scripts/tests/test-resolve-release-images.sh
 
@@ -1146,6 +1367,14 @@ jobs:
       - name: Shipped overlays keep the HCC workspace layout merge on (#825)
         run: |
           bash scripts/tests/test-hcc-layout-merge-flag-render.sh \
+            minikube=/tmp/clerum-minikube.yaml \
+            minikube-no-uis=/tmp/clerum-minikube-no-uis.yaml \
+            minikube-ghcr=/tmp/clerum-minikube-ghcr.yaml \
+            minikube-no-uis-ghcr=/tmp/clerum-minikube-no-uis-ghcr.yaml
+
+      - name: Minikube overlays keep the WRC egress overlap within the E2E gate bound
+        run: |
+          bash scripts/tests/test-wrc-egress-gate-overlap-render.sh \
             minikube=/tmp/clerum-minikube.yaml \
             minikube-no-uis=/tmp/clerum-minikube-no-uis.yaml \
             minikube-ghcr=/tmp/clerum-minikube-ghcr.yaml \

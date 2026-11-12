@@ -11,6 +11,35 @@ const BINDING = {
 }
 
 describe('control-api canonical host access client', () => {
+  it('resolves an ordinary send with one GET to the parent host-access URL', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            userId: 'user-1',
+            hostRef: 'host-a',
+            url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+    )
+
+    await expect(
+      fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).resolves.toEqual({
+      name: 'host-a',
+      url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+      headers: {},
+    })
+
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    const [url, init] = fetchImpl.mock.calls[0]!
+    expect(String(url)).toMatch(/\/rpc\/access\/users\/user-1\/mcp-hosts\/host-a$/)
+    expect(init).toMatchObject({ method: 'GET' })
+  })
+
   it('resolves and binds with one POST to the existing host-access URL', async () => {
     const fetchImpl = vi.fn(
       async () =>
@@ -153,7 +182,7 @@ describe('control-api canonical host access client', () => {
     expect(fetchImpl).toHaveBeenCalledOnce()
   })
 
-  it('a non-direct-run 404 resolves to host_access_denied', async () => {
+  it('a non-direct-run 404 resolves to host_access_denied on the parent path', async () => {
     const fetchImpl = jsonResponse(404, { error: 'not found' })
 
     await expect(
@@ -162,6 +191,30 @@ describe('control-api canonical host access client', () => {
       })
     ).resolves.toEqual({ denied: true, code: 'host_access_denied' })
     expect(fetchImpl).toHaveBeenCalledOnce()
+    const [url, init] = fetchImpl.mock.calls[0]!
+    expect(String(url)).toMatch(/\/rpc\/access\/users\/user-1\/mcp-hosts\/host-a$/)
+    expect(init).toMatchObject({ method: 'GET' })
+  })
+
+  it('a direct-run-bound 404 is a lookup failure and posts the binding to the parent path', async () => {
+    const fetchImpl = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) =>
+        new Response(JSON.stringify({ error: 'not found' }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+
+    const rejection = fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+      directRunBinding: BINDING,
+      fetchImpl: fetchImpl as typeof fetch,
+    })
+
+    await expect(rejection).rejects.toThrow('Control API MCP host lookup failed (404)')
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    const [url, init] = fetchImpl.mock.calls[0]!
+    expect(String(url)).toMatch(/\/rpc\/access\/users\/user-1\/mcp-hosts\/host-a$/)
+    expect(init).toMatchObject({ method: 'POST', body: JSON.stringify(BINDING) })
   })
 
   it.each([

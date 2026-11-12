@@ -213,7 +213,7 @@ It selects exactly
 `control-api/test/passwordRecovery.memberRegistration.realPostgres.integration.test.ts`
 through the strict suite manifest. Expect one physical suite and one passing
 scenario, containing admission-denial, real stored signed proof, preview/row
-binding, wrong-email/row negatives, reset session and later-login assertions.
+binding, wrong-email/row negatives, pre-reset session revocation and later-login assertions.
 Require process exit zero, nonzero passing collection and **zero skipped tests**.
 The runner rejects missing files/environment and skipped/zero-test results.
 The configured suite does not start or replace the producer, and does not prove
@@ -250,13 +250,16 @@ revisions, and ensure no unrelated account uses the synthetic address.
    Separately exercise invalid proof and mismatched email/row input using only
    synthetic records: they must not update credentials, create a cookie or expose
    another account. Avoid modifying or probing an unrelated invitation.
-4. Submit an approved valid replacement password once. Confirm the correct
-   account identity and authenticated session. Inspect cookie **attributes**
-   privately: `profile_session`, HttpOnly, expected Path/SameSite and Secure for
-   the intended HTTPS environment. Do not record cookie or token values.
-5. Confirm session hydration and navigation to the authenticated view, including
-   a refresh. The UI must not automatically replay the reset after a hydration
-   failure. Record the displayed account identity in sanitized form.
+4. Submit an approved valid replacement password once. Confirm Control API
+   returns no session and External REST clears any previous `profile_session`
+   cookie instead of issuing a new session. Confirm Profile UI shows the
+   password-updated screen with a link to sign in. Inspect the cleared cookie
+   **attributes** privately: `profile_session`, HttpOnly, expected Path/SameSite
+   and Secure for the intended HTTPS environment. Do not record cookie or token
+   values.
+5. Sign in with the new password and confirm navigation to the authenticated
+   view, including a refresh. The UI must not automatically replay the reset.
+   Record the displayed account identity in sanitized form.
 6. Reuse the consumed proof once deliberately: completion must be rejected,
    credentials must stay unchanged and no new authenticated session may be
    published from that replay. Confirm sibling reset invalidation using only
@@ -292,7 +295,7 @@ Physical suites / passed / failed / skipped counts:
 Manual email receipt and timestamp (redacted):
 Link origin and trusted account/token binding (no URL/proof):
 Reset / invalid / mismatch / consumed-proof results:
-Cookie attributes / session identity / hydration / navigation:
+Post-reset session absence / cookie clearing / sign-in navigation:
 New-password login under ordinary admission:
 Unrelated synthetic account/invitation state:
 Flow-row cleanup / temporary database drop:

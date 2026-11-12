@@ -1,5 +1,12 @@
 import type { NextFunction, Request, Response } from 'express'
+import { type GfsPathBinding, type GfsScope, signGfsToken } from '../auth/gfsToken.js'
 import { config } from '../config.js'
+import { withTransaction } from '../db.js'
+import type { ExternalSessionAuthentication } from '../services/auth/externalSessionAuthentication.js'
+import {
+  externalSessionDatabaseFailure,
+  isExternalSessionBackendUnavailableError,
+} from '../services/auth/sessionDatabaseFailure.js'
 import {
   type GfsDesktopOperatorLink,
   GfsDesktopOperatorLinkError,
@@ -27,6 +34,156 @@ export type ExternalGfsLinkedAdminAuthority = {
 }
 
 export type ExternalGfsAuthority = ExternalGfsUserAuthority | ExternalGfsLinkedAdminAuthority
+
+type AuthenticatedExternalSession = Extract<
+  ExternalSessionAuthentication,
+  { status: 'authenticated' }
+>
+
+export type ExternalGfsUserTokenInput = Readonly<{
+  subject: string
+  drive: string
+  scopes: readonly GfsScope[]
+  pathBindings?: readonly GfsPathBinding[]
+}>
+
+/**
+ * Sign a user-plane GFS token for the session this request authenticated. The
+ * signing read compares that session's generation (V1 `authGeneration`, V2
+ * `session_version`) with the current row and refuses on any difference; GFSC
+ * re-reads users.lifecycle_version on every request, so a change after signing
+ * fails closed there.
+ *
+ * The V1 read also checks external_v1_session_revocations for the
+ * authenticated token hash (same predicate as the V1 session validator), so a
+ * single-token V1 logout that commits between the session middleware and this
+ * read refuses the mint. The V2 read joins the authenticated session row and
+ * detects a per-session revocation the same way.
+ *
+ * The signed bytes remain private to this function until COMMIT succeeds, so a
+ * lost/uncertain commit cannot be reported as a usable GFS credential.
+ */
+export async function signCurrentExternalGfsUserToken(
+  authentication: AuthenticatedExternalSession | undefined,
+  input: ExternalGfsUserTokenInput
+): Promise<{ token: string; expiresInSeconds: number } | null> {
+  if (!authentication) return null
+  const context = authentication.authorityContext
+  const tokenClaims = authentication.tokenClaims
+  const hasLegacySubject = 'userId' in tokenClaims
+  const tokenSubject = hasLegacySubject ? tokenClaims.userId : tokenClaims.sub
+  const expiresAt = authentication.tokenClaims.exp
+  if (
+    context.contract !== authentication.contract ||
+    (authentication.contract === 'v1') !== hasLegacySubject ||
+    context.userId !== input.subject ||
+    tokenSubject !== context.userId ||
+    typeof expiresAt !== 'number' ||
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt < 1
+  ) {
+    return null
+  }
+
+  try {
+    return await withTransaction(
+      async transaction => {
+        // One unlocked statement per mint (M-30). V1 reads the token's
+        // revocation and V2 the authenticated session row in the same snapshot
+        // as the user row.
+        const result =
+          context.contract === 'v1'
+            ? await transaction.query(
+                `SELECT lifecycle_state, lifecycle_version, clock_timestamp() AS db_now,
+                        EXISTS (
+                          SELECT 1
+                            FROM external_v1_session_revocations r
+                           WHERE r.token_hash = $2
+                             AND r.user_id = $1
+                             AND r.expires_at > clock_timestamp()
+                        ) AS token_revoked
+                   FROM users
+                  WHERE id = $1`,
+                [context.userId, context.tokenHash]
+              )
+            : await transaction.query(
+                `SELECT u.lifecycle_state, u.lifecycle_version, clock_timestamp() AS db_now,
+                        s.revoked_at, s.session_version,
+                        s.absolute_expires_at, s.idle_expires_at
+                   FROM users u
+                   JOIN external_user_sessions s ON s.sid = $2 AND s.user_id = u.id
+                  WHERE u.id = $1`,
+                [context.userId, context.sid]
+              )
+        const row = result.rows[0] as
+          | {
+              lifecycle_state?: unknown
+              lifecycle_version?: unknown
+              db_now?: Date | string
+              token_revoked?: unknown
+              revoked_at?: unknown
+              session_version?: unknown
+              absolute_expires_at?: unknown
+              idle_expires_at?: unknown
+            }
+          | undefined
+        if (!row) return null
+        const generation = Number(row.lifecycle_version)
+        const dbNow = timestampOf(row.db_now)
+        if (
+          row.lifecycle_state !== 'active' ||
+          !Number.isSafeInteger(generation) ||
+          generation < 1 ||
+          !Number.isFinite(dbNow.getTime()) ||
+          expiresAt * 1000 <= dbNow.getTime()
+        ) {
+          return null
+        }
+        if (context.contract === 'v1') {
+          // Only an explicit false from the EXISTS proves the token is not revoked.
+          if (row.token_revoked !== false || generation !== context.authGeneration) return null
+        } else {
+          // Same expiry rules as the V2 session validator
+          // (userSessionService.ts validateLoadedSession), judged against the
+          // one db_now read above. Mint stays read-only: it refuses and leaves
+          // the revocation write to the validator.
+          const absoluteExpiresAt = timestampOf(row.absolute_expires_at)
+          const idleExpiresAt = timestampOf(row.idle_expires_at)
+          if (
+            row.revoked_at !== null ||
+            Number(row.session_version) !== context.sessionVersion ||
+            !Number.isFinite(absoluteExpiresAt.getTime()) ||
+            !Number.isFinite(idleExpiresAt.getTime()) ||
+            dbNow.getTime() >= absoluteExpiresAt.getTime() ||
+            dbNow.getTime() >= idleExpiresAt.getTime()
+          ) {
+            return null
+          }
+        }
+
+        return signGfsToken({
+          subject: input.subject,
+          drive: input.drive,
+          scopes: input.scopes,
+          ...(input.pathBindings === undefined ? {} : { pathBindings: input.pathBindings }),
+          authGeneration: generation,
+          principalType: 'user',
+        })
+      },
+      undefined,
+      { onDatabaseFailure: externalSessionDatabaseFailure }
+    )
+  } catch (error) {
+    if (isExternalSessionBackendUnavailableError(error)) {
+      throw new ExternalGfsAuthorityError(503, 'gfs_authority_unavailable', { cause: error })
+    }
+    throw error
+  }
+}
+
+function timestampOf(value: unknown): Date {
+  return value instanceof Date ? value : new Date(String(value ?? ''))
+}
 
 export class ExternalGfsAuthorityError extends Error {
   constructor(

@@ -29,7 +29,7 @@ import { bpeTokenEstimate } from '../tokenizer/bpeEstimate'
 import { heuristicCount, heuristicCountTools } from '../tokenizer/heuristic'
 import { tokenizerDryrunDelta, tokenizerDryrunTierMismatchTotal } from '../tokenizer/metrics'
 import type { TokenCounter } from '../tokenizer/tokenCounter'
-import { ChatMessage, CompactionState, Conversation, ToolDefinition } from '../types'
+import { ChatMessage, CompactionState, Conversation, FinishReason, ToolDefinition } from '../types'
 import { type PrePruneOptions, clerumPrePruneSavingsTokensTotal, prePrune } from './prePrune'
 import { buildStructuredSummaryPrompt } from './structuredSummaryTemplate'
 
@@ -721,6 +721,7 @@ export class PressureContextManager implements ContextManager {
     ]
 
     let rawSummary: string
+    let finishReason: FinishReason
     try {
       const response = await this.llmPort.complete({
         messages: summarizationMessages,
@@ -728,6 +729,7 @@ export class PressureContextManager implements ContextManager {
         temperature: 0.3,
       })
       rawSummary = response.content
+      finishReason = response.finish_reason
       logger.info(
         {
           component: 'ContextManager',
@@ -740,6 +742,24 @@ export class PressureContextManager implements ContextManager {
       logger.error(
         { component: 'ContextManager', err },
         'Summarize: LLM call failed, falling back to MoveToWorkspace'
+      )
+      return this.moveToWorkspace(systemMsgs, nonSystemMsgs, keepRecent)
+    }
+
+    // Reasoning models can spend the whole output budget thinking and return
+    // an empty or cut-off body with a successful status. Persisting it would
+    // replace the archived turns with nothing (or half a summary), so archive
+    // them verbatim instead — and before the structured block, so an unusable
+    // body never becomes the base of the next delta summary.
+    if (rawSummary.trim() === '' || finishReason === FinishReason.Length) {
+      logger.warn(
+        {
+          component: 'ContextManager',
+          finishReason,
+          summaryChars: rawSummary.length,
+          archivedTurns: archivedTurns.length,
+        },
+        'Summarize: summary empty or truncated, falling back to MoveToWorkspace'
       )
       return this.moveToWorkspace(systemMsgs, nonSystemMsgs, keepRecent)
     }

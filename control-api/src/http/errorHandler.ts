@@ -3,11 +3,13 @@ import { ApiException } from '@kubernetes/client-node'
 import { STATUS_CODES } from 'node:http'
 import { clearRateLimitHeaders } from '../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../observability/logger.js'
+import { ExternalSessionIssuanceUnavailableError } from '../services/auth/externalSessionIssuanceError.js'
 import {
   PasswordMutationInternalError,
   passwordMutationCauseKind,
 } from '../services/auth/passwordAdmissionError.js'
 import { memberRegistrationErrorResponse } from '../services/memberRegistrationErrors.js'
+import { sendPublicApiError } from './publicApiError.js'
 
 // Only errors we construct with these codes are ever forwarded verbatim by the
 // global handler. Keeps the blast radius tight: every other status-less or
@@ -126,7 +128,7 @@ function clientErrorMessage(err: unknown, status: number): string {
  * status text, never headers); non-K8s errors keep their author-controlled
  * detail. Used for EVERY branch that logs an error message, not just the 4xx one.
  */
-function safeErrorLogMessage(err: unknown): string {
+export function safeErrorLogMessage(err: unknown): string {
   if (isK8sApiException(err)) return clientErrorMessage(err, extractErrorStatus(err) ?? 500)
   return err instanceof Error ? err.message : String(err)
 }
@@ -135,7 +137,7 @@ function safeErrorLogMessage(err: unknown): string {
  * Log-safe stack: a K8s ApiException's `.stack` begins with its `.message`, so it
  * leaks the same headers — drop it for K8s exceptions and keep it otherwise.
  */
-function safeErrorLogStack(err: unknown): string | undefined {
+export function safeErrorLogStack(err: unknown): string | undefined {
   if (isK8sApiException(err)) return undefined
   return err instanceof Error ? err.stack : undefined
 }
@@ -177,6 +179,24 @@ export function clerumErrorHandler(
     res.removeHeader('Retry-After')
     res.setHeader('Cache-Control', 'no-store')
     res.status(500).json({ error: err.code, correlationId })
+    return
+  }
+
+  if (err instanceof ExternalSessionIssuanceUnavailableError) {
+    log.warn(
+      { event: err.code, correlationId },
+      'external session issuance deferred by current security cutoff'
+    )
+    res.setHeader('Retry-After', '2')
+    res.setHeader('Cache-Control', 'no-store')
+    sendPublicApiError(
+      req,
+      res,
+      503,
+      err.code,
+      'A session could not be issued right now. Try again in two seconds.',
+      true
+    )
     return
   }
 

@@ -1,0 +1,27 @@
+# provider/model pairs the E2E specs, lanes and fixtures run against a live
+# control-api. The e2e seed profile (scripts/e2e/seed-e2e-data.sh, through
+# scripts/e2e/llm-model-ensure.sh) enables each on minikube, because a fresh DB
+# holds only what the catalog sync enabled: some of these are not listed by
+# models.dev (zai/glm-5.1, zai/glm-5) and some enter disabled as deprecated
+# (zai/glm-4.7, zai/glm-5-turbo).
+#
+# scripts/tests/test-e2e-llm-models-manifest.sh fails when an E2E file names a
+# pair that is missing here. Pairs it cannot read (chosen by a ternary or
+# spread over several lines) are listed by hand and marked "by hand".
+
+zai/glm-4.7
+zai/glm-5.1
+zai/glm-5
+zai/glm-5-turbo
+openai/gpt-5.4-mini
+openai/gpt-4o
+claude/claude-opus-4-6
+
+# by hand: session-tool-approval-scope picks gpt-5.4 from the composer menu.
+openai/gpt-5.4
+# by hand: Plugin Workload SDK lanes pick these by a ternary on the provider.
+claude/claude-sonnet-4-6
+
+# tests/e2e/benchmark: the provider comparison runs each of these.
+claude/claude-sonnet-4-20250514
+bailian/qwen3-coder-plus

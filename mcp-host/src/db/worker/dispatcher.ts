@@ -428,7 +428,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         // fire-and-forget lie this change removes.
         const tx = db.transaction((): ModelSelectionWriteOutcome => {
           const row = s.selectSessionModelSelectionRevision.get({ id: op.sessionId }) as
-            { model_selection_revision: number; model_selections: string | null } | undefined
+            | { model_selection_revision: number; model_selections: string | null }
+            | undefined
           if (!row) {
             const err: Error & { code?: string } = new Error(
               `update_session_model_selections: no session row for id=${op.sessionId}`
@@ -717,7 +718,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           }
         | undefined
       const pendingRow = s.selectPendingApprovalBySession.get(sessionRow.id) as
-        PendingApprovalRow | undefined
+        | PendingApprovalRow
+        | undefined
       return {
         session: sessionRow,
         messages: messageRows as PersistedSessionMessagePage['messages'],

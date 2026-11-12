@@ -271,9 +271,17 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
     ).toBe(true)
     // Two enabled rows changed evidence (claude-opus-4-6 on the discovery branch
     // and the manual claude-fable-5-1); the other enabled rows are curated or
-    // newer → the ConfigMap is republished once, after COMMIT.
+    // newer. The counter is observability only: the run publishes by state, so
+    // the CM now holds exactly what the table projects.
     expect(result.enabledImageInputChanged).toBe(2)
     expect(result.materialized).toBe(true)
-    expect(db.materializer.materialize).toHaveBeenCalledTimes(1)
+    expect(db.materializer.materializeIfChanged).toHaveBeenCalledTimes(1)
+    const expected = await db.expectedConfigMap()
+    expect(db.cluster.data).toEqual(expected.data)
+    expect(
+      JSON.parse(db.cluster.data!.claude).find(
+        (e: { model: string }) => e.model === 'claude-opus-4-6'
+      ).imageInput
+    ).toEqual(discovered('unsupported'))
   })
 })
