@@ -5,17 +5,24 @@ import { ProcessMemoryRateLimiter } from '../src/middleware/processMemoryRateLim
 import type { GfsKey, Uuid } from '../src/services/gfsWatch/keys.js'
 import type { WatchConnection } from '../src/services/gfsWatch/registry.js'
 import { registryTestDatabase } from './helpers/gfsWatchRegistryEnv.js'
-import {
-  type BuiltRegistry,
-  type FakeSocket,
-  type RegistryHarness,
-  type TestUser,
-  createRegistryHarness,
-  quoteIdent,
-  restInvariantViolations,
-  sleep,
+import type {
+  BuiltRegistry,
+  FakeSocket,
+  RegistryHarness,
+  TestUser,
 } from './helpers/gfsWatchRegistryHarness.js'
+import { type Loaded, loadHelpers } from './helpers/gfsWatchRegistryLoad.js'
 import './realPostgres.requirement.ts'
+
+// src/db.ts reads its connection string when first evaluated, and the
+// harness and clock reach it through their static imports. They are loaded
+// only after the static import of the env helper above has pointed the core
+// pool at this suite's database; a static import would let the import sorter
+// place them ahead of it.
+let createRegistryHarness!: Loaded['createRegistryHarness'],
+  quoteIdent!: Loaded['quoteIdent'],
+  restInvariantViolations!: Loaded['restInvariantViolations'],
+  sleep!: Loaded['sleep']
 
 // Scenario tests of the GFS watch registry on the real stack described in the
 // harness. Every assertion is on frames the client sees or on the open's
@@ -32,6 +39,7 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
   const onUnhandled = (e: unknown) => unhandled.push(e)
 
   beforeAll(async () => {
+    ;({ createRegistryHarness, quoteIdent, restInvariantViolations, sleep } = await loadHelpers())
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(registryTestDatabase)}`)
     h = await createRegistryHarness(adminUrl!)

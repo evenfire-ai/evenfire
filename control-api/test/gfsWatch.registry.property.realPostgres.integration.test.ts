@@ -4,21 +4,28 @@ import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import type { GfsKey, Uuid } from '../src/services/gfsWatch/keys.js'
 import type { WatchConnection, WatchOpenOutcome } from '../src/services/gfsWatch/registry.js'
-import { flushMicrotasks } from './helpers/gfsWatchClock.js'
 import { registryTestDatabase } from './helpers/gfsWatchRegistryEnv.js'
-import {
-  type BuiltRegistry,
-  type FakeSocket,
-  type GfscDecision,
-  type RegistryHarness,
-  type TestUser,
-  createRegistryHarness,
-  nextEv,
-  quoteIdent,
-  restInvariantViolations,
-  sleep,
+import type {
+  BuiltRegistry,
+  FakeSocket,
+  GfscDecision,
+  RegistryHarness,
+  TestUser,
 } from './helpers/gfsWatchRegistryHarness.js'
+import { type Loaded, loadHelpers } from './helpers/gfsWatchRegistryLoad.js'
 import './realPostgres.requirement.ts'
+
+// src/db.ts reads its connection string when first evaluated, and the
+// harness and clock reach it through their static imports. They are loaded
+// only after the static import of the env helper above has pointed the core
+// pool at this suite's database; a static import would let the import sorter
+// place them ahead of it.
+let flushMicrotasks!: Loaded['flushMicrotasks'],
+  createRegistryHarness!: Loaded['createRegistryHarness'],
+  nextEv!: Loaded['nextEv'],
+  quoteIdent!: Loaded['quoteIdent'],
+  restInvariantViolations!: Loaded['restInvariantViolations'],
+  sleep!: Loaded['sleep']
 
 // Model-based test of the GFS watch registry (§2–§3) on the real stack: real
 // Postgres with the dedicated LISTEN and the real resource trigger, real
@@ -84,6 +91,14 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
   const onUnhandled = (e: unknown) => unhandled.push(e)
 
   beforeAll(async () => {
+    ;({
+      flushMicrotasks,
+      createRegistryHarness,
+      nextEv,
+      quoteIdent,
+      restInvariantViolations,
+      sleep,
+    } = await loadHelpers())
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(registryTestDatabase)}`)
     h = await createRegistryHarness(adminUrl!)
