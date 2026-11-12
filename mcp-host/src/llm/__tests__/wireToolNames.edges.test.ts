@@ -4,6 +4,7 @@
  * proxied providers, which must keep sending canonical names.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { OpenAITokenCounter, createTokenCounter } from '../../core/tokenizer'
 import type { ChatMessage, ToolDefinition } from '../../core/types'
 import type { ClaudeProvider } from '../claude'
 import { makeProvider } from '../registry'
@@ -112,6 +113,30 @@ describe('T-W8 · Claude token counter (offline=false)', () => {
     expect(params.tools).toEqual(sent.tools)
     expect(params.messages).toEqual(sent.messages)
   })
+})
+
+describe('tiktoken counter of the providers that use it', () => {
+  // The counter of `openai` and `azure` comes from the factory, not from the provider.
+  it.each(['openai', 'azure'] as const)(
+    '%s: aliased tools are counted as the declarations that are sent',
+    async id => {
+      const cap = buildCapturingProvider(id)
+      const counter = createTokenCounter(cap.provider, 'gpt-4o-mini')
+      expect(counter).toBeInstanceOf(OpenAITokenCounter)
+      await counter.warmup()
+      const tools = [QUERY, OVER_128, 'srv__ok'].map(toolDef)
+      const messages: ChatMessage[] = [{ role: 'user', content: 'q' }]
+      cap.respondWith(null)
+      await cap.provider.completeSingleTurnWithTools(messages, tools)
+      const family = id === 'openai' ? 'responses' : 'chat'
+      const sent = (cap.bodies[0] as { tools: Array<Record<string, any>> }).tools.map(t => {
+        const decl = family === 'chat' ? t.function : t
+        return { name: decl.name, description: decl.description, parameters: decl.parameters }
+      })
+      expect(sent.map(t => t.name)).not.toContain(QUERY)
+      expect(counter.countSync(messages, tools)).toBe(counter.countSync(messages, sent))
+    }
+  )
 })
 
 describe('Responses continuation across an aliased tool turn', () => {
