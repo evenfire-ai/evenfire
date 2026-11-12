@@ -21,11 +21,16 @@ import {
 
 const W = /^[A-Za-z0-9_-]{1,64}$/
 const W_C = /^[A-Za-z0-9_-]{1,128}$/
+const W_G = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
 
 const NOTION_CANONICALS = NOTION_TOOLS.map(t => `${NOTION_SERVER}__${t.name}`)
 const WITH_DOT = 'notion.v2__search'
 const OVER_128 = `${NOTION_SERVER}__${'x'.repeat(129 - NOTION_SERVER.length - 2)}`
 const QUERY = `${NOTION_SERVER}__notion-query-multiple-data-sources`
+// Fits `W`, the envelope of the openai and azure profiles, but not `W_g`,
+// which needs a letter or `_` first. The twin fits every envelope.
+const FITS_W_NOT_W_G = '1srv__ok'
+const FITS_EVERY_ENVELOPE = 'asrv__ok'
 // Varied words on purpose: `'x'.repeat` tokenizes to about as many tokens as its alias.
 const OVER_128_WORDS = `${NOTION_SERVER}__${['retrieve', 'quarterly', 'revenue', 'breakdown', 'grouped', 'by', 'region', 'product', 'line', 'and', 'currency', 'adjusted', 'for', 'seasonal', 'trends'].join('-')}`
 
@@ -206,6 +211,23 @@ describe('tiktoken counter of the providers that use it', () => {
       const cost = (names: string[]) => names.reduce((sum, n) => sum + tokens(n), 0)
       expect(cost(sentCallNames)).not.toBe(cost(canonicalCalls))
       expect(counter.countSync(history, tools)).toBe(counter.countSync(sentHistory, sent))
+    }
+  )
+
+  it.each(['openai', 'azure'] as const)(
+    '%s: a name that fits W but not W_g is counted as sent, without an alias',
+    async id => {
+      const tools = [FITS_W_NOT_W_G, FITS_EVERY_ENVELOPE].map(toolDef)
+      const { counter, sent } = await sendThrough(id, [{ role: 'user', content: 'q' }], tools)
+      expect(sent).toEqual(tools)
+      expect(FITS_EVERY_ENVELOPE).toMatch(W_G)
+      expect(FITS_W_NOT_W_G).not.toMatch(W_G)
+
+      // An alias would add its annotation to the description, about 20 tokens
+      // more than the twin, whose name differs by one character.
+      const toolCost = (name: string) =>
+        counter.countSync([], [toolDef(name)]) - counter.countSync([])
+      expect(Math.abs(toolCost(FITS_W_NOT_W_G) - toolCost(FITS_EVERY_ENVELOPE))).toBeLessThan(5)
     }
   )
 })
