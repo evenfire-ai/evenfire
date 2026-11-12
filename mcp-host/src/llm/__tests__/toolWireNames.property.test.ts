@@ -6,6 +6,7 @@ import * as wireNames from '../toolWireNames'
 import {
   TOOL_NAME_ENVELOPES,
   ToolNameEnvelopeKey,
+  ToolWireNameError,
   ToolWireNameMap,
   fromWireResponse,
   toWireRequest,
@@ -432,6 +433,15 @@ describe('T-W1b · forced collisions with an injected hash', () => {
     expect(map.toWire(U)).toBe(expected)
     expect(map.fromWire(expected)).toBe(U)
     for (const r of reserved) expect(map.toWire(r)).toBe(r)
+  })
+
+  it('toWire rejects a name outside the set instead of lending it another tool’s wire name', () => {
+    const outside = 'srv__' + 'y'.repeat(80)
+    const sharesItsAlias = wireToolAlias(outside, 'W')
+    const map = new ToolWireNameMap([sharesItsAlias, 'srv__other'], 'W')
+    expect(map.fromWire(sharesItsAlias)).toBe(sharesItsAlias)
+    expect(() => map.toWire(outside)).toThrow(ToolWireNameError)
+    expect(() => map.toWire('srv__short')).toThrow(ToolWireNameError)
   })
 
   it('rejects a hash outside 12 lowercase hex digits', () => {

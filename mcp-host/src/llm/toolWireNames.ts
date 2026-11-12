@@ -27,7 +27,7 @@ export const TOOL_NAME_ENVELOPES: Readonly<Record<ToolNameEnvelopeKey, RegExp>> 
   W_g: /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/,
 })
 
-/** Invariant assertion: the candidate walk ran out. Unreachable by construction. */
+/** Invariant assertion: the candidate walk ran out, or `toWire` got a name outside the set. */
 export class ToolWireNameError extends Error {
   constructor(message: string) {
     super(message)
@@ -157,12 +157,17 @@ export class ToolWireNameMap {
     }
   }
 
-  /** Total: a name outside the set maps to identity if it fits, else to its base alias. */
+  /**
+   * Only for names of the set. A name outside it has no reserved wire name: its
+   * base alias may be the wire name of another canonical, which `fromWire` would
+   * then resolve to that other tool.
+   */
   toWire(c: string): string {
     const mapped = this.outbound.get(c)
-    if (mapped !== undefined) return mapped
-    if (this.envelope.test(c)) return c
-    return candidate(aliasHead(c), this.hash(c), null)
+    if (mapped === undefined) {
+      throw new ToolWireNameError(`tool ${JSON.stringify(c)} is not in this request's name set`)
+    }
+    return mapped
   }
 
   /** Alias → canonical, exact canonical of the set → itself, anything else → undefined. */
