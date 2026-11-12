@@ -3725,13 +3725,13 @@ export class McpServerWatcher implements McpServerProvider {
               ...this.currentDesiredInventoryRevision(),
             }
             this.pendingNetworkPolicyCauses.clear()
-            this.activeNetworkPolicyPass = pass
-            this.startNetworkPolicyPassWatchdog()
-            hccLogger.info('[K8s] NetworkPolicy pass started', {
-              event: 'networkpolicy-pass-start',
-              ...pass,
-            })
             try {
+              this.activeNetworkPolicyPass = pass
+              this.startNetworkPolicyPassWatchdog()
+              hccLogger.info('[K8s] NetworkPolicy pass started', {
+                event: 'networkpolicy-pass-start',
+                ...pass,
+              })
               await this.runInitialNetworkPolicyConvergenceCore()
             } finally {
               this.stopNetworkPolicyPassWatchdog()

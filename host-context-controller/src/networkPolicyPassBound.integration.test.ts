@@ -17,6 +17,7 @@ import * as http from 'http'
 import { NETPOL_PASS_OVERRUN_WARN_MS } from './constants'
 import { K8sRequestTimeoutError } from './k8s/k8sRequestDeadline'
 import { McpServerWatcher } from './k8sClient'
+import { hccLogger } from './logger'
 import { registry } from './metrics'
 import {
   resolveHostAuthoritativeFn,
@@ -452,6 +453,39 @@ describe('#1338: a NetworkPolicy pass that outlives its bound', () => {
     expect(events(logs, 'networkpolicy-pass-overrun')).toEqual([])
     expect(events(logs, 'networkpolicy-pass-hard-limit')).toEqual([])
     expect(exitProcess).not.toHaveBeenCalled()
+  })
+
+  it('disarms the bound when the pass-start log throws', async () => {
+    const logs = captureLogs()
+    const info = hccLogger.info.bind(hccLogger)
+    const startLog = vi
+      .spyOn(hccLogger, 'info')
+      .mockImplementation((message: string, fields?: Record<string, unknown>) => {
+        if (fields?.event === 'networkpolicy-pass-start') throw new Error('log sink failed')
+        info(message, fields)
+      })
+
+    await expect(
+      watcher.runInitialNetworkPolicyConvergence({ cause: 'periodic-resync' })
+    ).rejects.toThrow('log sink failed')
+    // Witness: the pass reached its start log.
+    expect(startLog).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ event: 'networkpolicy-pass-start', passId: 1 })
+    )
+    expect(watcher.networkPolicyPassWatchdog).toBeNull()
+    expect(watcher.activeNetworkPolicyPass).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(HARD_LIMIT_MS + NETPOL_PASS_OVERRUN_WARN_MS)
+    expect(events(logs, 'networkpolicy-pass-hard-limit')).toEqual([])
+    expect(exitProcess).not.toHaveBeenCalled()
+
+    // The next request starts a new pass instead of finding the bound armed.
+    startLog.mockRestore()
+    await watcher.runInitialNetworkPolicyConvergence({ cause: 'periodic-resync' })
+    expect(events(logs, 'networkpolicy-pass-result')).toEqual([
+      expect.objectContaining({ passId: 2, result: 'certified' }),
+    ])
   })
 
   it('reports every stage of an authoritative pass, in order', async () => {
