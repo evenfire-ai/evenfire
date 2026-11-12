@@ -6,6 +6,7 @@ import type OpenAI from 'openai'
 import type { VisualDeliveryLimits } from '../../visualInput/deliveryLimits'
 import type { ImageTransportOperation } from '../imageInput'
 import type { LlmProvider } from '../registryCore'
+import type { ToolNameEnvelopeKey } from '../toolWireNames'
 import type { ClassifiedError } from '../types'
 import type { ModelParamPolicy } from './modelParamPolicy'
 import type { WireProtocolId } from './protocols/types'
@@ -30,6 +31,8 @@ export interface EndpointProfile {
   /** `null` passes caller options through untouched. */
   readonly options: OptionPolicy | null
   readonly reasoningContent: boolean
+  /** Tool-name pattern the endpoint accepts; names outside it travel aliased. */
+  readonly toolNameEnvelope: ToolNameEnvelopeKey
   /** Endpoint-native error codes; `null` (or a `null` result) falls back to the shared chain. */
   readonly classify: ((err: unknown) => ClassifiedError | null) | null
   /** Evaluated per call against the driver's current client base URL. */
