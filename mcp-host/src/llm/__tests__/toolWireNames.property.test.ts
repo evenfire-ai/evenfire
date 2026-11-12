@@ -74,7 +74,7 @@ function oracleCand(c: string, j: number | null, hash: Hash = oracleHash): strin
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 
-/** P8 guard: the base alias of `c` is not taken by a reserved name or an earlier aliased name. */
+/** True when the base alias of `c` is not taken by a reserved name or an earlier aliased name. */
 function baseIsFree(c: string, set: string[], E: RegExp, hash: Hash = oracleHash): boolean {
   const base = oracleCand(c, null, hash)
   const unique = [...new Set(set)].sort(cmp)
@@ -201,30 +201,30 @@ describe.each(HASHES)('map properties (%s hash)', (_label, hash) => {
     const E = LITERAL_ENVELOPES[key]
     const h = hash ?? oracleHash
 
-    it(`P1/P2/P3/P3b/P5 under ${key}`, () => {
+    it(`keeps fitting names, fits every wire name, never shares one and round-trips under ${key}`, () => {
       fc.assert(
         fc.property(adversarialSet(E, h), set => {
-          const map = mapOf(set, key, hash) // P3b: never throws
+          const map = mapOf(set, key, hash) // building the map never throws
           const unique = [...new Set(set)]
           const wires = new Map<string, string>()
           for (const c of unique) {
             const w = map.toWire(c)
             if (E.test(c))
-              expect(w).toBe(c) // P1
-            else expect(W_G.test(w)).toBe(true) // P2
-            expect(E.test(w)).toBe(true) // P2
+              expect(w).toBe(c) // a name inside the envelope is sent as is
+            else expect(W_G.test(w)).toBe(true) // an alias fits the narrowest envelope
+            expect(E.test(w)).toBe(true) // every wire name fits the requested envelope
             const prev = wires.get(w)
-            expect(prev === undefined || prev === c).toBe(true) // P3
+            expect(prev === undefined || prev === c).toBe(true) // no two names share a wire name
             wires.set(w, c)
-            expect(map.fromWire(w)).toBe(c) // P5
-            expect(map.fromWire(c)).toBe(c) // P5
+            expect(map.fromWire(w)).toBe(c) // the wire name maps back to its name
+            expect(map.fromWire(c)).toBe(c) // so does the name itself
           }
         }),
         RUNS
       )
     })
 
-    it(`P3c: input order never changes the result under ${key}`, () => {
+    it(`input order never changes the result under ${key}`, () => {
       fc.assert(
         fc.property(
           adversarialSet(E, h).chain(set =>
@@ -240,7 +240,7 @@ describe.each(HASHES)('map properties (%s hash)', (_label, hash) => {
       )
     })
 
-    it(`P3c: localeCompare-equal pairs resolve by code unit under ${key}`, () => {
+    it(`localeCompare-equal pairs resolve by code unit under ${key}`, () => {
       // A fixed hash makes each pair share its base, so only the order decides who gets it.
       const fixed: Hash = () => 'bbbbbbbbbbbb'
       for (const [x, y] of LOCALE_EQUAL_PAIRS) {
@@ -259,7 +259,7 @@ describe.each(HASHES)('map properties (%s hash)', (_label, hash) => {
       }
     })
 
-    it(`P8: the map sends wireToolAlias whenever the base is free under ${key}`, () => {
+    it(`the map sends wireToolAlias whenever the base is free under ${key}`, () => {
       fc.assert(
         fc.property(adversarialSet(E, h), set => {
           const map = mapOf(set, key, hash)
@@ -282,7 +282,7 @@ describe('alias function properties', () => {
   for (const key of ENVELOPE_KEYS) {
     const E = LITERAL_ENVELOPES[key]
 
-    it(`P4: idempotent, and a map of aliases is the identity, under ${key}`, () => {
+    it(`aliasing is idempotent, and a map of aliases is the identity, under ${key}`, () => {
       fc.assert(
         fc.property(fc.array(nameArb, { maxLength: 20 }), set => {
           for (const c of set) {
@@ -298,7 +298,7 @@ describe('alias function properties', () => {
       )
     })
 
-    it(`P6: a non-colliding name gets the same wire name in any request under ${key}`, () => {
+    it(`a non-colliding name gets the same wire name in any request under ${key}`, () => {
       fc.assert(
         fc.property(
           nameArb,
@@ -317,7 +317,7 @@ describe('alias function properties', () => {
       )
     })
 
-    it(`P7: an alias only claims the callTool server segment under ${key}`, () => {
+    it(`an alias only claims the callTool server segment under ${key}`, () => {
       fc.assert(
         fc.property(fc.array(nameArb, { maxLength: 20 }), set => {
           const map = new ToolWireNameMap(set, key)
@@ -336,7 +336,7 @@ describe('alias function properties', () => {
     })
   }
 
-  it('P7: servers outside the prefix shape never produce `__`', () => {
+  it('servers outside the prefix shape never produce `__` in an alias', () => {
     for (const s of NON_DNS_SERVERS.filter(x => x !== 'srv___x')) {
       const w = wireToolAlias(`${s}__${'t'.repeat(80)}`, 'W')
       expect(w.includes('__')).toBe(false)
@@ -365,7 +365,7 @@ describe('alias function properties', () => {
     }
   })
 
-  it('P6b: distinct lone surrogates give distinct base aliases', () => {
+  it('distinct lone surrogates give distinct base aliases', () => {
     const surrogate = fc.integer({ min: 0xd800, max: 0xdfff })
     fc.assert(
       fc.property(

@@ -1,5 +1,5 @@
 /**
- * T1 fixtures — real `tools/list` results of two hosted remote MCP servers.
+ * Captured fixtures — real `tools/list` results of two hosted remote MCP servers.
  *
  * Captured on 2026-11-11 (local; timestamps below are UTC) against the live
  * servers, NOT hand-authored: a tool name the real server cannot publish would

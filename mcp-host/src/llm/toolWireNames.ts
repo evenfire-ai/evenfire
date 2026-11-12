@@ -228,7 +228,7 @@ function annotate(c: string): string {
  * not mutated; unchanged entries are returned as the same objects.
  *
  * A `tool_choice` naming a specific tool would also have to go through `toWire`;
- * today only modes (`auto`, `none`) are sent.
+ * today only modes (`auto`, `none`, `required`) are sent, and none names a tool.
  */
 export function toWireRequest<M extends ChatMessage, T extends ToolDefinition>(
   messages: readonly M[],
