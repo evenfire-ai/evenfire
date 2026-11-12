@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import crypto from 'node:crypto'
 import { Readable } from 'node:stream'
 import { config } from './config'
 import { DevMcpServerProvider, McpServerProvider } from './k8sClient'
@@ -1370,5 +1371,183 @@ describe('desktop status service-token auth', () => {
     vi.stubEnv('LOG_LEVEL', 'info')
     await request('wrong')
     expect(denialLines()).toHaveLength(1)
+  })
+
+  describe('comparison of the Authorization header', () => {
+    const EXPECTED = `Bearer ${DESKTOP_TOKEN}`
+    const DENIED_AND_COMPARED = { reason: 'token_mismatch', compared: true } as const
+    const DENIED_BY_LENGTH = { reason: 'token_mismatch', compared: false } as const
+    let timingSafeEqual: MockInstance<typeof crypto.timingSafeEqual>
+
+    beforeEach(() => {
+      // Calls through to the real function unless a test overrides the return value.
+      timingSafeEqual = vi.spyOn(crypto, 'timingSafeEqual')
+    })
+
+    function send(authorization: string | undefined) {
+      return invoke(server as ContextMapperServer, '/api/v1/desktop/host-a', {
+        headers: authorization === undefined ? {} : { authorization },
+      })
+    }
+
+    type HeaderRow = {
+      name: string
+      header: string | undefined
+      // The denial reason, or null when the request reaches the handler.
+      reason: string | null
+      // True when the header has the length of the expected value, so the two are compared.
+      compared: boolean
+    }
+    // Outcomes with DESKTOP_TOKEN configured; they are the same in dev mode and outside it.
+    const headerRows: HeaderRow[] = [
+      { name: 'exact value', header: EXPECTED, reason: null, compared: true },
+      {
+        name: 'last character differs',
+        header: `${EXPECTED.slice(0, -1)}X`,
+        ...DENIED_AND_COMPARED,
+      },
+      { name: 'first character differs', header: `X${EXPECTED.slice(1)}`, ...DENIED_AND_COMPARED },
+      { name: 'lowercase scheme', header: `bearer ${DESKTOP_TOKEN}`, ...DENIED_AND_COMPARED },
+      { name: 'uppercase scheme', header: `BEARER ${DESKTOP_TOKEN}`, ...DENIED_AND_COMPARED },
+      { name: 'tab instead of space', header: `Bearer\t${DESKTOP_TOKEN}`, ...DENIED_AND_COMPARED },
+      {
+        name: 'non-ASCII character, same length',
+        header: `${EXPECTED.slice(0, -1)}${String.fromCharCode(0xe9)}`,
+        ...DENIED_AND_COMPARED,
+      },
+      { name: 'longer token', header: `Bearer not-the-${DESKTOP_TOKEN}`, ...DENIED_BY_LENGTH },
+      { name: 'shorter token', header: `Bearer ${DESKTOP_TOKEN.slice(1)}`, ...DENIED_BY_LENGTH },
+      { name: 'two spaces', header: `Bearer  ${DESKTOP_TOKEN}`, ...DENIED_BY_LENGTH },
+      { name: 'trailing space', header: `${EXPECTED} `, ...DENIED_BY_LENGTH },
+      { name: 'leading space', header: ` ${EXPECTED}`, ...DENIED_BY_LENGTH },
+      { name: 'token without scheme', header: DESKTOP_TOKEN, ...DENIED_BY_LENGTH },
+      { name: 'scheme without token', header: 'Bearer ', ...DENIED_BY_LENGTH },
+      { name: 'another scheme', header: `Basic ${DESKTOP_TOKEN}`, ...DENIED_BY_LENGTH },
+      { name: 'empty header', header: '', reason: 'missing_authorization', compared: false },
+      { name: 'no header', header: undefined, reason: 'missing_authorization', compared: false },
+    ]
+    type Row = HeaderRow & { devMode: boolean; token: string }
+    const rows: Row[] = [
+      ...[true, false].flatMap(devMode =>
+        headerRows.map(row => ({ devMode, token: DESKTOP_TOKEN, ...row }))
+      ),
+      // With no token the expected value would be the bare scheme; it must never be accepted
+      // as a match.
+      {
+        devMode: false,
+        token: '',
+        name: 'no token configured, scheme without token',
+        header: 'Bearer ',
+        reason: 'token_not_configured',
+        compared: false,
+      },
+      {
+        devMode: true,
+        token: '',
+        name: 'no token configured, scheme without token',
+        header: 'Bearer ',
+        reason: null,
+        compared: false,
+      },
+      // Two different unpaired surrogates: different strings with the same UTF-8 encoding.
+      {
+        devMode: false,
+        token: `a${String.fromCharCode(0xd800)}b`,
+        name: 'unpaired surrogate differs',
+        header: `Bearer a${String.fromCharCode(0xd801)}b`,
+        ...DENIED_AND_COMPARED,
+      },
+    ]
+
+    it.each(rows)('devMode=$devMode: $name -> reason $reason', async row => {
+      config.devMode = row.devMode
+      config.desktopApiToken = row.token
+
+      const response = await send(row.header)
+
+      if (row.reason === null) {
+        expect(response.statusCode).toBe(200)
+        expect(JSON.parse(response.body)).toEqual({ status: 'running', hostRef: 'host-a' })
+        expect(getStatus).toHaveBeenCalledTimes(1)
+        expect(denialLines()).toEqual([])
+      } else {
+        expect(response.statusCode).toBe(401)
+        expect(JSON.parse(response.body)).toEqual(DENIED_BODY)
+        expect(getStatus).not.toHaveBeenCalled()
+        // The denial line is the witness that the auth check ran and chose this reason.
+        expect(denialLines().map(line => line.reason)).toEqual([row.reason])
+      }
+      for (const line of emittedLines()) {
+        if (row.token) expect(line).not.toContain(row.token)
+        expect(line.toLowerCase()).not.toContain('bearer')
+      }
+
+      // Liveness witness on the same server: with a token configured outside dev mode, a
+      // wrong header is denied and logged, and the exact header reaches the handler.
+      config.devMode = false
+      config.desktopApiToken = DESKTOP_TOKEN
+      const before = denialLines().length
+      const calls = getStatus.mock.calls.length
+      expect((await send(`${EXPECTED}-wrong`)).statusCode).toBe(401)
+      expect(denialLines()).toHaveLength(before + 1)
+      expect((await send(EXPECTED)).statusCode).toBe(200)
+      expect(getStatus).toHaveBeenCalledTimes(calls + 1)
+    })
+
+    it.each(rows)('devMode=$devMode: $name -> timingSafeEqual called: $compared', async row => {
+      config.devMode = row.devMode
+      config.desktopApiToken = row.token
+
+      await send(row.header)
+
+      if (row.compared) {
+        expect(timingSafeEqual).toHaveBeenCalledTimes(1)
+        const [left, right] = timingSafeEqual.mock.calls[0]
+        expect(Buffer.isBuffer(left) && Buffer.isBuffer(right)).toBe(true)
+        expect(left.byteLength).toBe(right.byteLength)
+        expect(timingSafeEqual.mock.results[0]).toEqual({
+          type: 'return',
+          value: row.reason === null,
+        })
+      } else {
+        expect(timingSafeEqual).not.toHaveBeenCalled()
+        // Witness: the auth check ran (it logged this reason, or let the request through to
+        // the handler), and the spy observes the comparison on this server.
+        expect(denialLines().map(line => line.reason)).toEqual(
+          row.reason === null ? [] : [row.reason]
+        )
+        expect(getStatus).toHaveBeenCalledTimes(row.reason === null ? 1 : 0)
+        config.devMode = false
+        config.desktopApiToken = DESKTOP_TOKEN
+        await send(EXPECTED)
+        expect(timingSafeEqual).toHaveBeenCalledTimes(1)
+      }
+    })
+
+    it('denies the exact header when timingSafeEqual returns false', async () => {
+      config.devMode = false
+      config.desktopApiToken = DESKTOP_TOKEN
+      timingSafeEqual.mockReturnValue(false)
+
+      const response = await send(EXPECTED)
+
+      expect(response.statusCode).toBe(401)
+      expect(getStatus).not.toHaveBeenCalled()
+      // Witness: the comparison ran once and the denial carries its reason.
+      expect(timingSafeEqual).toHaveBeenCalledTimes(1)
+      expect(denialLines().map(line => line.reason)).toEqual(['token_mismatch'])
+    })
+
+    it('accepts a same-length wrong header when timingSafeEqual returns true', async () => {
+      config.devMode = false
+      config.desktopApiToken = DESKTOP_TOKEN
+      timingSafeEqual.mockReturnValue(true)
+
+      const response = await send(`${EXPECTED.slice(0, -1)}X`)
+
+      expect(response.statusCode).toBe(200)
+      expect(getStatus).toHaveBeenCalledTimes(1)
+      expect(timingSafeEqual).toHaveBeenCalledTimes(1)
+    })
   })
 })

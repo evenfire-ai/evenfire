@@ -2,6 +2,7 @@
  * HTTP REST API server for Context Mapper.
  */
 import * as http from 'http'
+import crypto from 'node:crypto'
 import { config } from './config'
 import { HostReconciler } from './hostReconciler'
 import { McpServerProvider } from './k8sClient'
@@ -31,6 +32,21 @@ const MCP_SELECTOR_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/
 const MCP_REQUEST_BODY_LIMIT = 1024
 const mcpApiLog = hccLogger.child({ module: 'mcp-host-api' })
 const desktopAuthLog = hccLogger.child({ module: 'desktop-auth' })
+
+/**
+ * String equality for secrets. Two strings of the same length are compared with
+ * crypto.timingSafeEqual, so the time taken does not depend on where they differ. Strings
+ * of different lengths return false before that comparison, so timing can reveal whether
+ * the lengths match. UTF-16LE keeps every code unit, so two different strings never produce
+ * equal buffers.
+ */
+function safeEqual(a: string, b: string): boolean {
+  const aBytes = Buffer.from(a, 'utf16le')
+  const bBytes = Buffer.from(b, 'utf16le')
+  if (aBytes.length !== bBytes.length) return false
+  return crypto.timingSafeEqual(aBytes, bBytes)
+}
+
 type McpHostApiAction = 'inventory' | 'credential'
 
 type RateLimitEntry = { windowStartMs: number; count: number }
@@ -404,7 +420,7 @@ export class ContextMapperServer {
     const token = config.desktopApiToken
     if (!token && config.devMode) return true
     const authHeader = req.headers.authorization
-    if (token && authHeader === `Bearer ${token}`) return true
+    if (token && authHeader && safeEqual(authHeader, `Bearer ${token}`)) return true
     const reason = !token
       ? 'token_not_configured'
       : !authHeader
