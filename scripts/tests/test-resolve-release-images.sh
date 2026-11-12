@@ -16,6 +16,11 @@ FAIL=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+# Per-tag crane stub, git shim and the release-line fixture repo. The cases
+# below that predate it keep their own one-answer-for-every-ref make_stub.
+# shellcheck source=scripts/tests/lib/release-registry-stub.sh
+source "$REPO_ROOT/scripts/tests/lib/release-registry-stub.sh"
+
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
@@ -234,6 +239,91 @@ STUB
   rm -rf "$d"
 }
 
+# resolve_in <d> <image> <source-paths> <tag-sha>
+# Runs the resolver inside <d> with "$d/bin" first on PATH, keeping stdout
+# ("$d/stdout") apart from stderr ("$d/stderr"): stdout is the contract the
+# promote script parses, so it is checked on its own. Returns the exit status.
+resolve_in() {
+  local d=$1
+  ( cd "$d" && PATH="$d/bin:$PATH" node "$REPO_ROOT/scripts/release/resolve-release-images.mjs" \
+      --image "$2" --source-paths "$3" --tag-sha "$4" >"$d/stdout" 2>"$d/stderr" )
+}
+
+assert_success_prints_digest_tab_candidate() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # shas.env sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; . "$d/shas.env"
+  # other/** is untouched between C0 and T, so a :latest built at C0 passes
+  # every check. Compared byte for byte, trailing newline included: the
+  # promote script splits this line on the tab.
+  stub_image "$d" other latest sha256:aaa "$C0"
+  local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+  if [ "$rc" -eq 0 ] && cmp -s "$d/stdout" <(printf 'sha256:aaa\tlatest\n'); then
+    pass "a passing candidate prints <digest><TAB><candidate tag> and nothing else on stdout"
+  else
+    fail "expected stdout 'sha256:aaa<TAB>latest'; got rc=$rc stdout='$(cat "$d/stdout")' stderr='$(cat "$d/stderr")'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_missing_latest_is_refused_not_crashed() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # shas.env sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; . "$d/shas.env"
+  # No rows at all: :latest answers MANIFEST_UNKNOWN, which rejects that
+  # candidate rather than failing the image. With every candidate rejected,
+  # the image is refused with the per-candidate reasons and the remedy.
+  local rc=0; resolve_in "$d" widget 'widget/**' "$T" || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] \
+      && grep -q "no release candidate passed" "$d/stderr" \
+      && grep -q "hotfix_images=widget" "$d/stderr"; then
+    pass "a missing :latest is refused with the candidate list and the remedy, not crashed on"
+  else
+    fail "expected rc=1, empty stdout and a refusal naming the remedy; got rc=$rc stdout='$(cat "$d/stdout")' stderr='$(cat "$d/stderr")'"
+  fi
+  rm -rf "$d"
+}
+
+assert_an_is_ancestor_error_fails_the_image() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # shas.env sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; . "$d/shas.env"
+  # Without the shim this candidate passes (see the success case above).
+  # `git merge-base --is-ancestor` exits 1 for "not an ancestor" and 128 for
+  # an error. Reading 128 as "not an ancestor" would report diverged history
+  # (or, in a longer chain, move on to the next candidate) on a checkout that
+  # never answered the question.
+  stub_image "$d" other latest sha256:aaa "$C0"
+  git_shim_install "$d" 128
+  local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && grep -q "exit 128" "$d/stderr" \
+      && ! grep -qi "diverged history" "$d/stderr" \
+      && ! grep -q "no release candidate passed" "$d/stderr"; then
+    pass "an --is-ancestor error (exit 128) fails the image instead of reading as not-an-ancestor"
+  else
+    fail "expected rc=1 naming 'exit 128', without 'diverged history' or a refusal; got rc=$rc stdout='$(cat "$d/stdout")' stderr='$(cat "$d/stderr")'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_registry_error_on_latest_fails_the_image() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # shas.env sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; . "$d/shas.env"
+  # Only MANIFEST_UNKNOWN means "this tag does not exist". A rate limit says
+  # nothing about the tag, so it fails the image: it is not reported as a
+  # refusal, and (once there are later candidates) never falls through.
+  stub_error "$d" "ghcr.io/evenfire-ai/other:latest" "TOOMANYREQUESTS: slow down"
+  local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && grep -q "TOOMANYREQUESTS" "$d/stderr" \
+      && ! grep -q "no release candidate passed" "$d/stderr"; then
+    pass "a registry error other than MANIFEST_UNKNOWN on :latest fails the image"
+  else
+    fail "expected rc=1 naming TOOMANYREQUESTS, not a refusal; got rc=$rc stdout='$(cat "$d/stdout")' stderr='$(cat "$d/stderr")'"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   # comm -23 over sorted lists. An earlier draft used a `while read` loop fed by
   # `grep -oE ... -P`, which mixes two incompatible matcher flags: the loop body
@@ -259,6 +349,10 @@ assert_a_descendant_revision_is_rejected_with_accurate_advice
 assert_a_source_change_after_the_revision_is_rejected
 assert_a_missing_revision_annotation_fails_loudly
 assert_the_digest_is_resolved_once_and_reused
+assert_success_prints_digest_tab_candidate
+assert_a_missing_latest_is_refused_not_crashed
+assert_an_is_ancestor_error_fails_the_image
+assert_a_registry_error_on_latest_fails_the_image
 assert_every_defined_case_is_invoked
 
 exit $FAIL
