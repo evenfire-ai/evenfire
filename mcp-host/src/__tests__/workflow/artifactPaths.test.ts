@@ -148,9 +148,11 @@ describe('artifact path resolution', () => {
     } finally {
       peer.kill()
     }
-    // The same name as a regular file opens.
-    fs.rmSync(fifo)
-    fs.writeFileSync(fifo, 'text')
+    // The same name as a regular file opens: a regular sibling replaces the
+    // FIFO by rename, as artifact writers replace a file.
+    const regular = path.join(outputDir, 'regular.md')
+    fs.writeFileSync(regular, 'text')
+    fs.renameSync(regular, fifo)
     const opened = openExistingArtifactFile(outputDir, 'pipe.md')
     fs.closeSync(opened.fd)
     expect(opened.stat.size).toBe(4)

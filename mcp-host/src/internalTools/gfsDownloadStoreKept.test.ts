@@ -430,9 +430,12 @@ describe('kept files expire after the retention period', () => {
     const raced = generated(A, 'raced.md', TTL * 2)
     // The store works under the Host root's real path.
     race.target = syncFs.realpathSync(raced.file)
+    // Regenerated the way generators write: a sibling file renamed over the
+    // name, so the old file is still linked while the new one is created.
     race.run = () => {
-      syncFs.rmSync(raced.file)
-      syncFs.writeFileSync(raced.file, 'regenerated')
+      const sibling = path.join(path.dirname(raced.file), '.raced-replacement')
+      syncFs.writeFileSync(sibling, 'regenerated')
+      syncFs.renameSync(sibling, raced.file)
     }
     await store.cleanupExpired()
     expect(race.run).toBeUndefined()

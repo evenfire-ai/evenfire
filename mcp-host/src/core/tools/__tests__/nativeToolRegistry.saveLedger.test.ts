@@ -288,9 +288,13 @@ describe('save records of chat generations', () => {
   it('removes only the file it generated: a file that replaced it meanwhile stays', async () => {
     const root = rootOf('user-a')
     const target = path.join(outputsOf(root), 'race.md')
+    // Another writer replaces the file the way generators write: a sibling
+    // file renamed over the name, so the old file is still linked while the
+    // new one is created.
     ledgerHook.beforeFail = () => {
-      fs.rmSync(target)
-      fs.writeFileSync(target, '# replaced by another writer\n')
+      const sibling = path.join(outputsOf(root), '.race-replacement')
+      fs.writeFileSync(sibling, '# replaced by another writer\n')
+      fs.renameSync(sibling, target)
     }
     const result = await registryFor(root)
       .get('clerum__generate_markdown')!
