@@ -84,8 +84,10 @@ describe('NativeToolRegistry GFS scope visibility', () => {
     expect(gfsNames(['gfs.read'])).toEqual(readTools)
     expect(gfsNames(['gfs.write'])).toEqual(writeTools)
     expect(gfsNames(['gfs.read', 'gfs.write'])).toEqual(
-      [...readTools, ...writeTools, 'clerum__gfs_copy'].sort()
+      [...readTools, ...writeTools, 'clerum__gfs_copy', 'clerum__gfs_edit_text'].sort()
     )
+    // The partial edit reads and writes, so it needs both scopes.
+    expect(gfsNames(['gfs.write'])).not.toContain('clerum__gfs_edit_text')
   })
 
   it('offers clerum__gfs_save_attachment only with gfs.write and current-message bytes', () => {

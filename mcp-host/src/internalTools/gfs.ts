@@ -1373,6 +1373,176 @@ export function buildKeptFilesListTool(callerRoot: string | undefined): Internal
   }
 }
 
+/** Bounds of one partial edit; a call past them is refused before anything is read. */
+const EDIT_LIMITS = { maxEdits: 50, maxOldTextBytes: 4096, maxNewTextBytes: 65_536 }
+/** The largest diff returned; a longer one is cut and marked truncated. */
+const EDIT_DIFF_MAX_CHARS = 16_384
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf])
+
+export const EDIT_SCOPE_SENTENCE =
+  'for small changes; to rewrite or translate a whole file, write the new file with an approved shell command outside .gfs-downloads and save it with clerum__gfs_write and sourcePath'
+
+interface TextEdit {
+  oldText: string
+  newText: string
+  replaceAll?: boolean
+}
+
+function occurrences(text: string, needle: string): number[] {
+  const at: number[] = []
+  for (
+    let index = text.indexOf(needle);
+    index !== -1;
+    index = text.indexOf(needle, index + needle.length)
+  )
+    at.push(index)
+  return at
+}
+
+/**
+ * `clerum__gfs_edit_text`: replaces parts of a text file in GFS and returns a
+ * diff built from the edits themselves. Edits apply in order, each to the
+ * result of the previous one; each must match exactly once (at least once
+ * with `replaceAll`) in that intermediate text, or nothing is written. A
+ * leading byte order mark is kept and line endings are untouched.
+ */
+export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefinition[] {
+  return [
+    {
+      name: 'clerum__gfs_edit_text',
+      description:
+        `Replace parts of a text file in gfs and get a diff, ${EDIT_SCOPE_SENTENCE}. ` +
+        'A small change (a typo, a sentence, a paragraph) is one or more edits; for a file above 8 KiB take oldText from a bounded excerpt of the downloaded copy with an approved shell command, and pass the downloaded version as ifMatch. ' +
+        'Edits apply in order, each to the result of the previous one; each oldText must match exactly once unless replaceAll. dryRun returns the diff without writing.',
+      parameters: {
+        type: 'object',
+        required: ['drive', 'resourceId', 'ifMatch', 'edits'],
+        properties: {
+          drive: { type: 'string', description: 'gfs drive name.' },
+          resourceId: { type: 'string', description: 'Resource id (32-hex rid).' },
+          ifMatch: { type: 'number', description: 'The version being edited.' },
+          edits: {
+            type: 'array',
+            description: '1 to 50 edits; each oldText at most 4,096 bytes.',
+            items: {
+              type: 'object',
+              required: ['oldText', 'newText'],
+              properties: {
+                oldText: { type: 'string', description: 'Exact text to replace.' },
+                newText: { type: 'string', description: 'Replacement text.' },
+                replaceAll: { type: 'boolean', description: 'Replace every match.' },
+              },
+            },
+          },
+          dryRun: { type: 'boolean', description: 'Return the diff only; write nothing.' },
+        },
+      },
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        options?: InternalToolExecutionOptions
+      ): Promise<InternalToolResult> => {
+        if (!isValidIfMatch(args.ifMatch)) {
+          return invalidArgs('clerum__gfs_edit_text requires a non-negative safe-integer ifMatch')
+        }
+        const edits = args.edits
+        const valid =
+          Array.isArray(edits) &&
+          edits.length >= 1 &&
+          edits.length <= EDIT_LIMITS.maxEdits &&
+          edits.every(
+            (edit): edit is TextEdit =>
+              typeof edit === 'object' &&
+              edit !== null &&
+              typeof (edit as TextEdit).oldText === 'string' &&
+              typeof (edit as TextEdit).newText === 'string' &&
+              ((edit as TextEdit).replaceAll === undefined ||
+                typeof (edit as TextEdit).replaceAll === 'boolean') &&
+              Buffer.byteLength((edit as TextEdit).oldText) >= 1 &&
+              Buffer.byteLength((edit as TextEdit).oldText) <= EDIT_LIMITS.maxOldTextBytes
+          ) &&
+          (edits as TextEdit[]).reduce((sum, edit) => sum + Buffer.byteLength(edit.newText), 0) <=
+            EDIT_LIMITS.maxNewTextBytes
+        if (!valid) {
+          return invalidArgs(
+            `edits must be 1 to 50, each oldText 1 to 4096 bytes and all newText at most 65536 bytes: this tool is ${EDIT_SCOPE_SENTENCE}`
+          )
+        }
+        const target = { drive: args.drive as string, resourceId: args.resourceId as string }
+        let file: GfsFileContent | undefined
+        try {
+          file = await client.read(target, {
+            ...callOptions(options),
+            timeoutMs: options?.timeoutMs,
+            budget: options?.readBudget ?? options?.visualInput?.budget,
+            expectedVersion: args.ifMatch,
+          })
+          const decoded = decodeTextContent(file.bytes)
+          if (decoded === null) {
+            return {
+              success: false,
+              error: 'not_a_text_file: this file is not text, so it cannot be edited in parts',
+            }
+          }
+          const bom = file.bytes.subarray(0, 3).equals(UTF8_BOM)
+          let text = decoded
+          const hunks: Array<{ edit: number; line: number; removed: string[]; added: string[] }> =
+            []
+          for (const [index, edit] of (edits as TextEdit[]).entries()) {
+            const found = occurrences(text, edit.oldText)
+            if (edit.replaceAll ? found.length < 1 : found.length !== 1) {
+              return {
+                success: false,
+                error: `edit ${index} matched ${found.length} times; it must match ${
+                  edit.replaceAll ? 'at least once' : 'exactly once'
+                }. Nothing was written`,
+              }
+            }
+            hunks.push({
+              edit: index,
+              line: text.slice(0, found[0]).split('\n').length,
+              removed: edit.oldText.split('\n'),
+              added: edit.newText.split('\n'),
+            })
+            text = edit.replaceAll
+              ? text.split(edit.oldText).join(edit.newText)
+              : text.slice(0, found[0]) + edit.newText + text.slice(found[0]! + edit.oldText.length)
+          }
+          const content = (bom ? '﻿' : '') + text
+          let diff = hunks
+            .map(
+              hunk =>
+                `@@ edit ${hunk.edit} line ${hunk.line}\n` +
+                hunk.removed.map(line => `-${line}`).join('\n') +
+                '\n' +
+                hunk.added.map(line => `+${line}`).join('\n')
+            )
+            .join('\n')
+          const truncated = diff.length > EDIT_DIFF_MAX_CHARS
+          if (truncated) diff = diff.slice(0, EDIT_DIFF_MAX_CHARS)
+          const summary = {
+            bytesBefore: file.bytes.byteLength,
+            bytesAfter: Buffer.byteLength(content),
+            diff,
+            truncated,
+          }
+          if (args.dryRun === true) return ok({ dryRun: true, version: args.ifMatch, ...summary })
+          const written = (await client.write(
+            { ...target, content, ifMatch: args.ifMatch },
+            callOptions(options)
+          )) as { version?: unknown } | undefined
+          return ok({ version: written?.version, ...summary })
+        } catch (err) {
+          if (err instanceof GfscHttpError) return mutationFail(err)
+          return fail(err)
+        } finally {
+          file?.reservation.release()
+        }
+      },
+    },
+  ]
+}
+
 export const KEPT_FILES_DELETE_TOOL = 'clerum__kept_files_delete'
 
 /** The sentence a delete adds when this turn's attachments could not be kept. */

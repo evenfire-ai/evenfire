@@ -12,6 +12,7 @@ import {
 import {
   buildGfsAttachmentSaveTools,
   buildGfsCopyTools,
+  buildGfsEditTools,
   buildGfsReadTools,
   buildGfsWriteTools,
   buildKeptFilesDeleteTool,
@@ -498,7 +499,7 @@ export class NativeToolRegistry implements ToolRegistry {
           ? buildGfsAttachmentSaveTools(gfsClient, sourceMessage?.attachments ?? [])
           : []),
         ...(gfsScopes.has('gfs.read') && gfsScopes.has('gfs.write')
-          ? buildGfsCopyTools(gfsClient)
+          ? [...buildGfsCopyTools(gfsClient), ...buildGfsEditTools(gfsClient)]
           : []),
       ]
       for (const tool of gfsTools) {
