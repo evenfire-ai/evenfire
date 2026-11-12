@@ -2385,7 +2385,8 @@ describe('FileExplorerTree — resource action menus', () => {
         }),
         'copy-route',
         undefined,
-        7
+        7,
+        undefined
       )
     }
 
@@ -2539,7 +2540,8 @@ describe('FileExplorerTree — resource action menus', () => {
       expect.objectContaining({ resourceId: 'second', gfsUri: second.gfsUri }),
       'copy-route',
       undefined,
-      7
+      7,
+      undefined
     )
     expect(firstRow.getAttribute('aria-selected')).toBe('true')
     expect(secondRow.getAttribute('aria-selected')).toBe('false')
@@ -2742,7 +2744,8 @@ describe('FileExplorerTree — resource action menus', () => {
           expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
           'copy-route',
           undefined,
-          7
+          7,
+          undefined
         )
       } else {
         expect(onResourceAction).toHaveBeenCalledWith(
@@ -2813,7 +2816,8 @@ describe('FileExplorerTree — resource action menus', () => {
       expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
       'copy-route',
       undefined,
-      7
+      7,
+      undefined
     )
   })
 
@@ -2845,7 +2849,8 @@ describe('FileExplorerTree — resource action menus', () => {
       expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
       'copy-route',
       undefined,
-      7
+      7,
+      undefined
     )
     expect(document.activeElement).not.toBe(trigger)
   })
@@ -3049,7 +3054,8 @@ describe('FileExplorerTree — resource action menus', () => {
       expect.objectContaining({ resourceId: 'nested', gfsUri: nested.gfsUri }),
       'copy-route',
       undefined,
-      7
+      7,
+      undefined
     )
     expect(nestedRow.getAttribute('aria-expanded')).toBe('false')
     expect(onOpenFolder).not.toHaveBeenCalled()

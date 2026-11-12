@@ -1,7 +1,7 @@
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import type { SidebarResizeControls } from '@hooks/useSidebarResize'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
-import type { GfsResourceActionId } from '@lib/gfsResourceActions'
+import type { CopyIdFocusRecovery, GfsResourceActionId } from '@lib/gfsResourceActions'
 import type { ActiveSandboxUiApp, NavItem, Tone } from '@/uiTypes'
 
 export type CompactMenuCloseFocus = 'preserve-destination-focus'
@@ -32,8 +32,13 @@ export type SidebarNavProps = {
     resource: GfsBrowserChild,
     actionId: GfsResourceActionId,
     file?: File,
-    renderedSessionGeneration?: number | null
+    renderedSessionGeneration?: number | null,
+    copyIdFocusRecovery?: CopyIdFocusRecovery
   ) => void
+  getCopyIdFocusOwner?: (
+    resource: GfsBrowserChild,
+    sessionGeneration: number | null
+  ) => { isCurrent: () => boolean } | undefined
   /** Transient feedback for the file explorer's download fallback. */
   pushToast: (message: string, tone: Tone) => void
   toggleRequestId?: number

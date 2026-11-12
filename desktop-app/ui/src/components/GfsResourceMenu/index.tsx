@@ -15,6 +15,7 @@ import {
   IconTrash,
   IconUpload,
 } from '@components/SidebarNav/icons'
+import type { GfsResourceActionContext } from '@lib/gfsResourceActions'
 import type { GfsResourceMenuProps } from './types'
 
 type GfsResourceMenuAction = {
@@ -22,7 +23,7 @@ type GfsResourceMenuAction = {
   icon: ReactNode
   key: string
   label: string
-  onClick: () => void
+  onClick: (context?: GfsResourceActionContext) => void
   submenu?: boolean
   disabled?: boolean
 }
@@ -31,7 +32,7 @@ function menuAction(
   key: string,
   label: string,
   icon: ReactNode,
-  onClick: (() => void) | undefined,
+  onClick: ((context?: GfsResourceActionContext) => void) | undefined,
   options: Pick<GfsResourceMenuAction, 'color' | 'submenu' | 'disabled'> = {}
 ): GfsResourceMenuAction | null {
   return onClick ? { ...options, icon, key, label, onClick } : null
@@ -80,6 +81,7 @@ export function GfsResourceMenu({
   triggerMode = 'button',
   contextTargetRef,
   contextOpenRequest,
+  onActionStart,
   actions,
   onManage,
   onCopyLink,
@@ -350,13 +352,18 @@ export function GfsResourceMenu({
     items[nextIndex]?.focus()
   }
 
-  const runAction = (action: () => void, keyboardActivated: boolean, actionKey: string) => {
+  const runAction = (action: GfsResourceMenuAction, keyboardActivated: boolean) => {
+    const actionContext = onActionStart?.(
+      action.key,
+      keyboardActivated,
+      triggerMode === 'context' ? (contextTargetRef?.current ?? null) : triggerRef.current
+    )
     restoreTriggerAfterActionRef.current =
       triggerMode === 'context' &&
       keyboardActivated &&
-      !ACTIONS_WITH_FOCUS_DESTINATION.has(actionKey)
+      !ACTIONS_WITH_FOCUS_DESTINATION.has(action.key)
     closeMenu()
-    action()
+    action.onClick(actionContext)
   }
 
   const fallbackShareChildren = [
@@ -402,13 +409,16 @@ export function GfsResourceMenu({
     icon: action.icon,
     key: action.id,
     label: action.label,
-    onClick:
-      action.id === 'replace'
-        ? () =>
-            action.run(undefined, {
+    onClick: context =>
+      action.run(
+        undefined,
+        action.id === 'replace'
+          ? {
+              ...context,
               requestFileSelection: () => replaceInputRef.current?.click(),
-            })
-        : () => action.run(),
+            }
+          : context
+      ),
   }))
   const shareMenuChildren =
     actions !== undefined
@@ -508,7 +518,7 @@ export function GfsResourceMenu({
                           if (action.submenu) {
                             action.onClick()
                           } else {
-                            runAction(action.onClick, event.detail === 0, action.key)
+                            runAction(action, event.detail === 0)
                           }
                         }}
                       >
@@ -538,7 +548,7 @@ export function GfsResourceMenu({
                       key={action.key}
                       leadingIcon={action.icon}
                       role="menuitem"
-                      onClick={event => runAction(action.onClick, event.detail === 0, action.key)}
+                      onClick={event => runAction(action, event.detail === 0)}
                     >
                       {action.label}
                     </MenuItem>

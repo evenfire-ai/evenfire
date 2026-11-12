@@ -1,7 +1,7 @@
 import type { DragEvent as ReactDragEvent } from 'react'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
-import type { GfsResourceActionId } from '@lib/gfsResourceActions'
+import type { CopyIdFocusRecovery, GfsResourceActionId } from '@lib/gfsResourceActions'
 import type { GfsDropVerdict } from '@/gfs/dragSession'
 import type { Tone } from '@/uiTypes'
 
@@ -20,8 +20,14 @@ export interface FileExplorerTreeProps {
     resource: GfsBrowserChild,
     actionId: GfsResourceActionId,
     file?: File,
-    renderedSessionGeneration?: number | null
+    renderedSessionGeneration?: number | null,
+    copyIdFocusRecovery?: CopyIdFocusRecovery
   ) => void
+  onCopyIdFocusStart?: (
+    resource: GfsBrowserChild,
+    opener: HTMLButtonElement,
+    sessionGeneration: number | null
+  ) => CopyIdFocusRecovery | undefined
   /** Transient success/error feedback for the download fallback. */
   pushToast: (message: string, tone: Tone) => void
 }
@@ -62,8 +68,14 @@ export interface FileExplorerNodeProps {
     resource: GfsBrowserChild,
     actionId: GfsResourceActionId,
     file?: File,
-    renderedSessionGeneration?: number | null
+    renderedSessionGeneration?: number | null,
+    copyIdFocusRecovery?: CopyIdFocusRecovery
   ) => void
+  onCopyIdFocusStart?: (
+    resource: GfsBrowserChild,
+    opener: HTMLButtonElement,
+    sessionGeneration: number | null
+  ) => CopyIdFocusRecovery | undefined
   /** Fail-closed hook: a listing authority error revokes the session. */
   onAuthorityFailure: (message: string, scope: string, sessionGeneration: number) => void
   onNodeDragStart: (

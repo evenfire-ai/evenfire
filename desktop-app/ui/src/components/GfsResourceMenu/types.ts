@@ -13,6 +13,11 @@ export type GfsResourceMenuProps = {
   triggerMode?: 'button' | 'context'
   contextTargetRef?: RefObject<HTMLElement | null>
   contextOpenRequest?: GfsResourceMenuOpenRequest | null
+  onActionStart?: (
+    actionId: string,
+    keyboardActivated: boolean,
+    opener: HTMLElement | null
+  ) => import('@lib/gfsResourceActions').GfsResourceActionContext | undefined
   actions?: GfsResourceAction[]
   onManage?: () => void
   onCopyLink?: () => void

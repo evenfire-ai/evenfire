@@ -106,6 +106,7 @@ function FileExplorerNode({
   onActivateFolder,
   onActivateFile,
   onResourceAction,
+  onCopyIdFocusStart,
   onAuthorityFailure,
   onNodeDragStart,
   onNodeDragEnd,
@@ -174,7 +175,14 @@ function FileExplorerNode({
             refresh:
               accessActive && !isUnreadable ? () => onResourceAction(node, 'refresh') : undefined,
             'copy-link': () => onResourceAction(node, 'copy-link'),
-            'copy-route': () => onResourceAction(node, 'copy-route', undefined, sessionGeneration),
+            'copy-route': (_file, context) =>
+              onResourceAction(
+                node,
+                'copy-route',
+                undefined,
+                sessionGeneration,
+                context?.copyIdFocusRecovery
+              ),
             'open-route': () => onResourceAction(node, 'open-route'),
             rename: () => onResourceAction(node, 'rename'),
             move: () => onResourceAction(node, 'move'),
@@ -601,6 +609,15 @@ function FileExplorerNode({
           actions={resourceActions}
           contextOpenRequest={menuOpenRequest}
           contextTargetRef={rowLabelRef}
+          onActionStart={(actionId, keyboardActivated, opener) => {
+            if (actionId !== 'copy-route' || !keyboardActivated || !opener) return undefined
+            const recovery = onCopyIdFocusStart?.(
+              node,
+              opener as HTMLButtonElement,
+              sessionGeneration
+            )
+            return recovery ? { copyIdFocusRecovery: recovery } : undefined
+          }}
           onOpenChange={setResourceMenuOpen}
           resourceName={label}
           triggerMode="context"
@@ -630,6 +647,7 @@ function FileExplorerNode({
               onActivateFile={onActivateFile}
               onActivateFolder={onActivateFolder}
               onResourceAction={onResourceAction}
+              onCopyIdFocusStart={onCopyIdFocusStart}
               onAuthorityFailure={onAuthorityFailure}
               onNodeDragEnd={onNodeDragEnd}
               onNodeDragLeave={onNodeDragLeave}
@@ -682,6 +700,7 @@ export function FileExplorerTree({
   onOpenFolder,
   onOpenPreview,
   onResourceAction,
+  onCopyIdFocusStart,
   pushToast,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
@@ -1309,6 +1328,7 @@ export function FileExplorerTree({
               onActivateFile={handleActivateFile}
               onActivateFolder={handleActivateFolder}
               onResourceAction={onResourceAction}
+              onCopyIdFocusStart={onCopyIdFocusStart}
               onAuthorityFailure={handleAuthorityFailure}
               onNodeDragEnd={clearDragState}
               onNodeDragLeave={handleNodeDragLeave}
