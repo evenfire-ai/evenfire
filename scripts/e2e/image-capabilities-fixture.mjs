@@ -52,6 +52,12 @@ export const playwrightLanes = {
     grep: 'attachment-gfs-save fixture: ',
     minimumExpected: 3,
   },
+  'memory-notes': {
+    config: 'desktop-app/test/e2e-playwright/playwright.memory-notes.config.ts',
+    label: 'memory-notes-playwright',
+    grep: 'memory-notes fixture: ',
+    minimumExpected: 3,
+  },
 }
 
 export function playwrightLaneConfig(env) {
