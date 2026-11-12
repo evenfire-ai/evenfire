@@ -64,6 +64,8 @@ export class SnippetRunnerClient {
       return { status: 'unhealthy' }
     } finally {
       clearTimeout(timer)
+      // Only the status matters: aborting releases the unread response body and its connection.
+      controller.abort()
     }
   }
 

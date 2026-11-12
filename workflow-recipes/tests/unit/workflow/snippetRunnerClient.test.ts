@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createServer } from 'node:http'
+import type { AddressInfo, Socket } from 'node:net'
 import { createStaticRuntimeTokenProvider } from '@clerum/workflow-runtime-core'
 import { SnippetRunnerClient } from '../../../src/workflow/snippetRunnerClient'
 
@@ -144,5 +146,108 @@ describe('SnippetRunnerClient', () => {
     )
 
     await expect(client.healthCheck()).resolves.toEqual({ status: 'unhealthy' })
+  })
+
+  it('reports unhealthy when GET /health does not answer within 5 seconds', async () => {
+    let signal: AbortSignal | undefined
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init: RequestInit) => {
+        signal = init.signal ?? undefined
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+          })
+        })
+      })
+    )
+    vi.useFakeTimers()
+
+    const client = new SnippetRunnerClient(
+      'http://snippet-runner:8095',
+      createStaticRuntimeTokenProvider({ snippetRunnerToken: 'jwt-a' })
+    )
+    let settled = false
+    const pending = client.healthCheck().then(result => {
+      settled = true
+      return result
+    })
+
+    await vi.advanceTimersByTimeAsync(4999)
+    expect(signal).toBeDefined()
+    expect(settled).toBe(false)
+    expect(signal?.aborted).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(settled).toBe(true)
+    await expect(pending).resolves.toEqual({ status: 'unhealthy' })
+    expect(signal?.aborted).toBe(true)
+  })
+
+  it('aborts the health request after reading the status so the response body is released', async () => {
+    let abortedAtCall: boolean | undefined
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      abortedAtCall = init.signal?.aborted
+      return { ok: true, status: 200 }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new SnippetRunnerClient(
+      'http://snippet-runner:8095',
+      createStaticRuntimeTokenProvider({ snippetRunnerToken: 'jwt-a' })
+    )
+    const result = await client.healthCheck()
+
+    expect(result).toEqual({ status: 'healthy' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(abortedAtCall).toBe(false)
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.signal?.aborted).toBe(true)
+  })
+
+  it('releases the connection when GET /health sends headers but never finishes the body', async () => {
+    const sockets = new Set<Socket>()
+    let resolveHealthSocketClosed: () => void = () => {}
+    const healthSocketClosed = new Promise<void>(resolve => {
+      resolveHealthSocketClosed = resolve
+    })
+    const server = createServer((req, res) => {
+      if (req.url !== '/health') {
+        res.writeHead(404)
+        res.end()
+        return
+      }
+      req.socket.once('close', () => resolveHealthSocketClosed())
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.write('{"status":')
+    })
+    server.on('connection', socket => {
+      sockets.add(socket)
+      socket.on('close', () => sockets.delete(socket))
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      const { port } = server.address() as AddressInfo
+      const client = new SnippetRunnerClient(
+        `http://127.0.0.1:${port}`,
+        createStaticRuntimeTokenProvider({ snippetRunnerToken: 'jwt-a' })
+      )
+
+      await expect(client.healthCheck()).resolves.toEqual({ status: 'healthy' })
+      await Promise.race([
+        healthSocketClosed,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('GET /health connection was not released within 1 s')),
+            1000
+          )
+        }),
+      ])
+    } finally {
+      clearTimeout(timeout)
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 })
