@@ -188,10 +188,16 @@ agent pod with `envFrom`, and `rpc-proxy` reads `rpc-proxy-config`. Neither is
 in base; without them those pods fail to start. Copy the minikube versions
 ([`mcp-host-config.yaml`](../../deploy/overlays/minikube/configmaps/mcp-host-config.yaml),
 [`rpc-proxy-config.yaml`](../../deploy/overlays/minikube/configmaps/rpc-proxy-config.yaml))
-and replace their values: the minikube `rpc-proxy-config` contains fixed
+and replace their values. The minikube `rpc-proxy-config` contains fixed
 development secrets (`RPC_PROXY_DESKTOP_COOKIE_SECRET`,
-`RPC_PROXY_DESKTOP_API_TOKEN`, `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`) and
-localhost URLs. Many features are off in base and on in minikube; decide each
+`RPC_PROXY_DESKTOP_API_TOKEN`, `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`): delete
+these three keys from your copy instead of replacing them.
+`gen-jwt-keys.sh` (step 3) writes all three to Secret `rpc-proxy-secrets`, and
+rpc-proxy reads that Secret after the ConfigMap (`envFrom` order in
+`deploy/base/rpc-proxy/rpc-proxy.yaml`), so a value left in the ConfigMap is
+dead configuration that looks live. Each cookie secret must be at least 32
+bytes (`openssl rand -hex 32` gives 64); a shorter value stops rpc-proxy at
+startup. The minikube copy also contains localhost URLs. Many features are off in base and on in minikube; decide each
 one with [the configuration reference](../reference/configuration.md) instead
 of copying minikube's choices.
 
@@ -277,6 +283,14 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
      from the minikube copy. `control-api-public-key` and
      `clerum-wrc-public-key` are not in base: `gen-jwt-keys.sh` creates them
      and `kubectl apply -k` leaves them alone.
+   - `gen-jwt-keys.sh` writes one desktop API token to both
+     `rpc-proxy-secrets` (`RPC_PROXY_DESKTOP_API_TOKEN`) and
+     `inter-service-tokens` in `control-plane` (`desktop-api-token`), which
+     base host-context-controller reads as `CONTEXT_MAPPER_DESKTOP_API_TOKEN`.
+     HCC and rpc-proxy refuse to start without it. Do not re-run
+     `gen-jwt-keys.sh` to add a missing token (it rotates every key); use the
+     check and repair commands in
+     [Releases and upgrades](releases-and-upgrades.md#required-secrets-without-code-defaults).
    - `apply-inter-service-tokens.sh` creates any missing Secret and then
      writes with `kubectl patch`, so later `kubectl apply -k` runs do not wipe
      the tokens. It keeps existing values. Minikube runs it again after every

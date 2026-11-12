@@ -344,30 +344,116 @@ the runner exits.
 
 ### Required secrets without code defaults
 
-The first release after v0.12.0 removes the built-in development values of five
-secrets. Each service now stops at startup when one of them is unset, empty or a
-`replace-with-*` placeholder.
+The first release after v0.12.0 removes the built-in development values of seven
+secrets. Each service now stops at startup when one of them is unset, empty, only
+whitespace or a `replace-with-*` placeholder. Surrounding whitespace is trimmed.
 
-| Service           | Variable                                      | Written in a cluster by                       |
-| ----------------- | --------------------------------------------- | --------------------------------------------- |
-| webhook-proxy     | `WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN`     | `deploy/scripts/apply-inter-service-tokens.sh` |
-| rpc-proxy         | `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`         | `deploy/scripts/apply-inter-service-tokens.sh` |
-| rpc-proxy         | `RPC_PROXY_DESKTOP_COOKIE_SECRET`             | `deploy/scripts/gen-jwt-keys.sh`              |
-| rpc-proxy         | `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`          | `deploy/scripts/gen-jwt-keys.sh`              |
-| external-rest-api | `EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN` | `deploy/scripts/apply-inter-service-tokens.sh` |
+| Service                 | Variable                                      | Written in a cluster by                                                          |
+| ----------------------- | --------------------------------------------- | -------------------------------------------------------------------------------- |
+| webhook-proxy           | `WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN`     | `deploy/scripts/apply-inter-service-tokens.sh`                                   |
+| rpc-proxy               | `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`         | `deploy/scripts/apply-inter-service-tokens.sh`                                   |
+| rpc-proxy               | `RPC_PROXY_DESKTOP_COOKIE_SECRET`             | `deploy/scripts/gen-jwt-keys.sh`                                                 |
+| rpc-proxy               | `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`          | `deploy/scripts/gen-jwt-keys.sh`                                                 |
+| rpc-proxy               | `RPC_PROXY_DESKTOP_API_TOKEN`                 | `deploy/scripts/gen-jwt-keys.sh`                                                 |
+| host-context-controller | `CONTEXT_MAPPER_DESKTOP_API_TOKEN`            | `deploy/scripts/gen-jwt-keys.sh` (Secret `inter-service-tokens`, key `desktop-api-token`) |
+| external-rest-api       | `EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN` | `deploy/scripts/apply-inter-service-tokens.sh`                                   |
 
-- **webhook-proxy** has no `NODE_ENV` in its image, so it used
-  `dev-webhook-proxy-token` in every cluster where the variable was unset. A base
-  install that applies the manifests without running
-  `apply-inter-service-tokens.sh` now leaves webhook-proxy crash-looping on the
-  Secret's `replace-with-*` value, where it used to start and fail every registry
-  lookup. Apply the manifests, then run `apply-inter-service-tokens.sh`, which
-  writes the token and restarts webhook-proxy. Before you upgrade, check that
-  `webhook-proxy-secrets` in `webhook-ingress` holds a real token.
+- **webhook-proxy** has no `NODE_ENV` in its image. Outside Kubernetes an unset
+  variable fell back to `dev-webhook-proxy-token`; in a cluster the pod received
+  the base Secret's `replace-with-*` value and failed every registry lookup.
+  Base now ships `webhook-proxy-secrets` empty (`stringData: {}`), like the other
+  token Secrets, so a `kubectl apply -k` no longer resets the token that
+  `apply-inter-service-tokens.sh` writes. Until the script has run,
+  webhook-proxy stops at startup with
+  `WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN must be set`, or with a placeholder
+  error when the Secret still holds the `replace-with-*` value of an earlier
+  release: the first apply of this release leaves the previous value in the
+  Secret. Run `apply-inter-service-tokens.sh` once after the first apply of this
+  release. It keeps a real token, replaces a placeholder, and restarts
+  webhook-proxy.
 - **rpc-proxy and external-rest-api** images set `NODE_ENV=production`, where
-  these variables were already required, so deployed pods do not change. The
-  change applies to processes run with another `NODE_ENV`, such as `npm run dev`
-  or a Deployment that overrides `NODE_ENV`: export the variables there.
+  the two service tokens and the two cookie secrets were already required. Deployed
+  rpc-proxy now also refuses a `replace-with-*` or whitespace-only secret, a
+  cookie secret shorter than 32 bytes, and a missing desktop API token;
+  `gen-jwt-keys.sh` writes 64-byte values. A secret with surrounding whitespace
+  is trimmed, so a cookie secret that ends in a newline gets a different HMAC key
+  once: sessions signed before the upgrade stop verifying and users sign in to
+  the desktop or sandbox UI again. Processes run with another `NODE_ENV`, such
+  as `npm run dev`, need the same variables exported.
+- **Desktop API token.** rpc-proxy sends `RPC_PROXY_DESKTOP_API_TOKEN` on desktop
+  status calls, and host-context-controller now requires the same value outside
+  `CLERUM_DEV_MODE`. Base HCC reads it from Secret `inter-service-tokens`, key
+  `desktop-api-token`, in `control-plane`. Without that key HCC cannot create its
+  pod (`CreateContainerConfigError`), and HCC uses the `Recreate` strategy, so
+  the old pod is already gone. `gen-jwt-keys.sh` has always written both copies;
+  do not re-run it to add a missing one, because it rotates every key. Before you
+  upgrade, run this read-only check (`KCTX` is your kube context; it needs `jq`)
+  and act on the word it prints:
+
+  ```bash
+  hcc=$(kubectl --context "$KCTX" -n control-plane get secret inter-service-tokens -o json \
+    | jq -r '.data["desktop-api-token"] // ""')
+  rpc=$(kubectl --context "$KCTX" -n rpc-proxy get secret rpc-proxy-secrets -o json \
+    | jq -r '.data["RPC_PROXY_DESKTOP_API_TOKEN"] // ""')
+  cm=$(kubectl --context "$KCTX" -n rpc-proxy get configmap rpc-proxy-config -o json \
+    | jq -r '.data["RPC_PROXY_DESKTOP_API_TOKEN"] // "" | @base64')
+  [ -n "$rpc" ] || rpc=$cm   # rpc-proxy reads the Secret after the ConfigMap, so the Secret wins
+  if   [ -z "$hcc" ];         then echo "HCC token: MISSING"
+  elif [ -z "$rpc" ];         then echo "rpc-proxy token: MISSING"
+  elif [ "$hcc" = "$rpc" ];   then echo "desktop API token: present on both sides and equal"
+  else                             echo "desktop API token: DIFFERENT on the two sides"; fi
+  unset hcc rpc cm
+  ```
+
+  The check compares stored bytes, so two values that differ only in a trailing
+  newline print `DIFFERENT` although both services trim; rewrite one side.
+
+  `HCC token: MISSING` and rpc-proxy has one: copy rpc-proxy's value. Nothing
+  rotates and nothing restarts. If `inter-service-tokens` does not exist, create
+  it empty first
+  (`kubectl --context "$KCTX" -n control-plane create secret generic inter-service-tokens`).
+
+  ```bash
+  set -o pipefail
+  kubectl --context "$KCTX" -n rpc-proxy get secret rpc-proxy-secrets -o json \
+    | jq -c '{data: {"desktop-api-token": (.data["RPC_PROXY_DESKTOP_API_TOKEN"]
+             // error("rpc-proxy-secrets has no RPC_PROXY_DESKTOP_API_TOKEN"))}}' \
+    | kubectl --context "$KCTX" -n control-plane patch secret inter-service-tokens \
+        --type=merge --patch-file=/dev/stdin
+  ```
+
+  `DIFFERENT on the two sides`, or `rpc-proxy token: MISSING`: copy HCC's value to
+  rpc-proxy and restart only rpc-proxy (rolling, no gap). The key written to
+  `rpc-proxy-secrets` also overrides a value left in `rpc-proxy-config`.
+
+  ```bash
+  set -o pipefail
+  kubectl --context "$KCTX" -n control-plane get secret inter-service-tokens -o json \
+    | jq -c '{data: {"RPC_PROXY_DESKTOP_API_TOKEN": (.data["desktop-api-token"]
+             // error("inter-service-tokens has no desktop-api-token"))}}' \
+    | kubectl --context "$KCTX" -n rpc-proxy patch secret rpc-proxy-secrets \
+        --type=merge --patch-file=/dev/stdin
+  kubectl --context "$KCTX" -n rpc-proxy rollout restart deployment/rpc-proxy
+  ```
+
+  Neither side has the token: write one new value to both. Use this only while
+  no running HCC reads the key; an HCC that already has a token keeps its old
+  value until it restarts, so use the previous command there instead.
+
+  ```bash
+  set -o pipefail
+  T=$(openssl rand -hex 32)
+  printf %s "$T" | jq -cR '{stringData: {"desktop-api-token": .}}' \
+    | kubectl --context "$KCTX" -n control-plane patch secret inter-service-tokens \
+        --type=merge --patch-file=/dev/stdin
+  printf %s "$T" | jq -cR '{stringData: {"RPC_PROXY_DESKTOP_API_TOKEN": .}}' \
+    | kubectl --context "$KCTX" -n rpc-proxy patch secret rpc-proxy-secrets \
+        --type=merge --patch-file=/dev/stdin
+  unset T
+  kubectl --context "$KCTX" -n rpc-proxy rollout restart deployment/rpc-proxy
+  ```
+
+  None of these commands prints a token value.
 - **control-api** no longer reads `CONTROL_API_INTERNAL_TOKENS`. It reads only
   `CONTROL_API_INTERNAL_SERVICE_TOKENS`. `apply-inter-service-tokens.sh` still
   writes both keys, so no action is needed.
