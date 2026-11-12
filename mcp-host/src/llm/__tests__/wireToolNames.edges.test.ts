@@ -12,6 +12,8 @@ import {
   NOTION_SERVER,
   buildCapturingProvider,
   toolDef,
+  toolTurn,
+  wireHistoryNames,
   wireToolDecls,
 } from './wireToolNamesHarness'
 
@@ -45,6 +47,30 @@ describe('Claude cache-aware method', () => {
     const aliasOfDot = sent.find(t => t.description.includes(JSON.stringify('notion.v2')))!.name
     const response = await call(aliasOfDot)
     expect(response.tool_calls?.[0]?.name).toBe(WITH_DOT)
+  })
+
+  it('projects tool_use names in the history onto the same W_c names as the tools', async () => {
+    const cap = buildCapturingProvider('claude')
+    const history = toolTurn(
+      [
+        { id: 'toolu_0', name: OVER_128 },
+        { id: 'toolu_1', name: WITH_DOT },
+      ],
+      [OVER_128, WITH_DOT]
+    )
+    cap.respondWith(null)
+    await cap.provider.completeSingleTurnWithToolsAndCache!(
+      { stable: 'stable', context: 'context' } as never,
+      history,
+      [toolDef(OVER_128), toolDef(WITH_DOT)]
+    )
+    const sentTools = wireToolDecls('claude', cap.bodies[0]).map(t => t.name)
+    const historyNames = wireHistoryNames('claude', cap.bodies[0])
+    expect(historyNames).toHaveLength(2)
+    for (const n of historyNames) {
+      expect(n).toMatch(W_C)
+      expect(sentTools).toContain(n)
+    }
   })
 })
 
