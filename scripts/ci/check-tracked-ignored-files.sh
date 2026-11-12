@@ -4,30 +4,33 @@
 # .gitignore files. A .gitignore cannot stop `git add -f`, so a private file
 # (a session handoff, a local note, run evidence) can be committed under an
 # ignored directory without any warning. This check lists every tracked file
-# that the committed .gitignore files exclude and fails on any that is not in
-# the allowlist below.
+# that the .gitignore files in the checkout exclude and fails on any that is
+# not in the allowlist below.
 #
-# Only the .gitignore files in the tree count. A developer's global
-# core.excludesFile and .git/info/exclude are ignored, so a local run gives
-# the same verdict as CI.
+# Only the .gitignore files in the checkout count, matched as on the Linux CI
+# runner: a developer's global core.excludesFile and .git/info/exclude are not
+# read, and core.ignorecase (true by default on macOS) is forced to false.
+# Uncommitted edits to a .gitignore still change a local run.
 #
 # Every allowlist entry must still be tracked and still be ignored; an entry
 # that is neither fails the check, so the list cannot go stale.
 #
-# Exit 0 when every tracked-and-ignored file is allowlisted, 1 otherwise.
+# Exit 0 when every tracked-and-ignored file is allowlisted, 1 on a finding,
+# and non-zero when git fails.
 
 set -euo pipefail
 
 # Tracked on purpose although an ignore rule covers them. One path per line.
 ALLOWED=(
-  # Development-only minikube Secrets applied from a fresh clone by
-  # scripts/minikube/setup.sh, scripts/minikube/full-setup.sh and the Makefile.
-  # deploy/.gitignore ignores overlays/*/secrets/ for every other overlay.
+  # Development-only minikube Secrets kept in a fresh clone; deploy/.gitignore
+  # ignores overlays/*/secrets/ for every other overlay.
+  # inter-service-tokens.yaml: applied by scripts/minikube/full-setup.sh and
+  # the Makefile's minikube-apply-secrets target.
+  # llm-api-keys.yaml: applied by scripts/minikube/full-setup.sh.
+  # search-api-keys.yaml: applied by scripts/minikube/full-setup.sh when present.
   'deploy/overlays/minikube/secrets/inter-service-tokens.yaml'
   'deploy/overlays/minikube/secrets/llm-api-keys.yaml'
   'deploy/overlays/minikube/secrets/search-api-keys.yaml'
-  # Keeps the Playwright output directory in the tree; **/test-results/ ignores it.
-  'tests/e2e/test-results/.gitignore'
 )
 
 cd "$(git rev-parse --show-toplevel)"
@@ -55,13 +58,14 @@ if [ "$tracked_count" -eq 0 ]; then
   exit 1
 fi
 
-# --exclude-per-directory reads only the .gitignore files in the tree;
-# core.excludesFile=/dev/null drops the developer's global ignore file.
+# --exclude-per-directory reads only the .gitignore files in the checkout,
+# not core.excludesFile or .git/info/exclude (--exclude-standard would read
+# both); core.ignorecase=false matches case-sensitively, as on the CI runner.
 # The listing goes to a file first so that a git failure stops the check
 # instead of reading as an empty list.
 listing="$(mktemp)"
 trap 'rm -f "$listing"' EXIT
-git -c core.excludesFile=/dev/null ls-files -z --cached --ignored --exclude-per-directory=.gitignore >"$listing"
+git -c core.ignorecase=false ls-files -z --cached --ignored --exclude-per-directory=.gitignore >"$listing"
 ignored=()
 while IFS= read -r -d '' path; do
   ignored+=("$path")
