@@ -196,10 +196,6 @@ interface VolumeSpace {
   bavail: bigint
 }
 
-/**
- * The retained-storage budget, `floor(volumeTotalBytes * percent / 100)`,
- * computed in bigint so no volume size loses precision.
- */
 /** The largest kept record read back. */
 const KEPT_RECORD_MAX_BYTES = 64 * 1024
 
@@ -249,6 +245,10 @@ function removeIfSame(file: string, judged: { dev: number; ino: number }): boole
   }
 }
 
+/**
+ * The retained-storage budget, `floor(volumeTotalBytes * percent / 100)`,
+ * computed in bigint so no volume size loses precision.
+ */
 function retainedBudget(volume: VolumeSpace): bigint {
   return (volume.blocks * volume.bsize * BigInt(GFS_FILE_LIMITS.storagePercent)) / 100n
 }
@@ -664,7 +664,8 @@ export class GfsDownloadStore {
   private held = new Map<string, HeldCopy>()
   /**
    * Bytes of every regular file left in each caller's kept folder
-   * (`users/<key>/.clerum-outputs`, its top level and `.save-ledger/`), by
+   * (`users/<key>/.clerum-outputs`: its top level, `.save-ledger/` and the
+   * kept chat attachments in `.uploads/`), by
    * caller key, recounted from disk by every sweep. They count in the budget;
    * they are never evicted.
    */
@@ -1633,7 +1634,7 @@ export class GfsDownloadStore {
    * admission: a sweep, one statfs, an eviction plan; `disk_full` when the
    * free-space need cannot be covered; the keep bounds (the caller's kept
    * bytes at most half the budget, every caller's at most three quarters,
-   * generated files and records included) and the budget refuse with
+   * generated files, records and kept attachments included) and the budget refuse with
    * `host_quota_exceeded`. Download copies are evicted for it; kept files
    * never are. A refusal carries `neededBytes`. On success the bytes stay
    * reserved until the returned release is called: the caller writes its

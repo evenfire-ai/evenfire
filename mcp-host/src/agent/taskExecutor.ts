@@ -195,12 +195,6 @@ export function executionModeForSource(source: TaskSource): 'interactive' | 'una
 }
 
 /**
- * The caller root generated files go under. A message with no sender would
- * share one folder with every other sender-less message on its channel, so it
- * gets none and the generators refuse to write. A task with no message at all
- * (cron, system) keeps the reserved system folder.
- */
-/**
  * Whether every call of the kept-files delete will ask the user first:
  * approval enabled, a channel task (never cron or internal, which run
  * unattended), and no Host override turning its approval off.
@@ -233,6 +227,12 @@ export function liveApprovalTools(
   return names.length > 0 ? new Set(names) : undefined
 }
 
+/**
+ * The caller root generated files go under. A message with no sender would
+ * share one folder with every other sender-less message on its channel, so it
+ * gets none and the generators refuse to write. A task with no message at all
+ * (cron, system) keeps the reserved system folder.
+ */
 export function generatedOutputsRoot(
   sourceMessage: Task['sourceMessage'],
   callerRoot: string | undefined
@@ -1319,13 +1319,6 @@ export class TaskExecutor {
   }
 
   /**
-   * T2.2 — prepend the `<turn-context>` block to the latest user message
-   * (mutates in place). The block carries date/channel/sender/cron; an empty
-   * cron source still produces a valid block. For cron-originated turns with
-   * no human user text we inject a synthetic `<cron task>` placeholder so the
-   * wire shape stays consistent (P1-004 §5.5).
-   */
-  /**
    * Whether every call of the kept-files delete will ask the user first:
    * approval enabled, a channel task, and no Host override turning its
    * approval off. The registry registers the delete only then (and only with
@@ -1360,6 +1353,13 @@ export class TaskExecutor {
     }
   }
 
+  /**
+   * T2.2 — prepend the `<turn-context>` block to the latest user message
+   * (mutates in place). The block carries date/channel/sender/cron; an empty
+   * cron source still produces a valid block. For cron-originated turns with
+   * no human user text we inject a synthetic `<cron task>` placeholder so the
+   * wire shape stays consistent (P1-004 §5.5).
+   */
   private prependTurnContextBlock(
     messages: ChatMessage[],
     saveAvailable: boolean,

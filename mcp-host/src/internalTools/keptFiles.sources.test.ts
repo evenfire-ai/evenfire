@@ -27,11 +27,14 @@ import {
   SCAN_TEXT_MAX_BYTES,
   SOURCE_PATH_INVALID,
   SOURCE_PATH_UNAVAILABLE,
+  WITHHELD_OTHER_SENTENCE,
   WITHHELD_SENTENCE,
   keptFileNotFound,
   ledgerRecordFileName,
   listKeptFiles,
   nameFormatMismatch,
+  resolveGeneratedFile,
+  writeSaveLedgerRecord,
 } from './keptFiles'
 
 // A roomy volume: the generators' free-space floor never refuses here.
@@ -1087,5 +1090,46 @@ describe('guidance for changing a file that is in EvenDrive', () => {
     expect(text).toContain('sourcePath uploads it')
     // The rule the model followed before stays.
     expect(text).toContain('Do not print, `file_read`, or paste the whole source.')
+  })
+})
+
+describe('texts of the kept-files listing and of a withheld file', () => {
+  it.each([
+    ['binary_redaction_unavailable', WITHHELD_SENTENCE],
+    ['binary_source_payload_unavailable', WITHHELD_SENTENCE],
+    ['text_redaction_unavailable', WITHHELD_SENTENCE],
+    ['office_package_unreadable', WITHHELD_SENTENCE],
+    ['unsafe_filename', WITHHELD_OTHER_SENTENCE],
+    ['mime_not_allowed', WITHHELD_OTHER_SENTENCE],
+    ['redacted_artifact_too_large', WITHHELD_OTHER_SENTENCE],
+    ['artifact_replaced_before_delivery', WITHHELD_OTHER_SENTENCE],
+  ])('a file withheld for %s says why it cannot be saved', (outcome, sentence) => {
+    const root = rootOf('user-a')
+    const out = outputsOf(root)
+    fs.mkdirSync(out, { recursive: true, mode: 0o700 })
+    fs.writeFileSync(path.join(out, 'w.md'), 'withheld')
+    writeSaveLedgerRecord(out, {
+      id: 'abcabcabcabc',
+      name: 'w.md',
+      format: 'md',
+      outcome,
+      createdAt: new Date().toISOString(),
+    })
+    const resolved = resolveGeneratedFile(
+      { callerRoot: root, secretEntries: () => [] },
+      'w.md',
+      'abcabcabcabc'
+    )
+    expect(resolved).toEqual({ error: `kept_file_withheld (${outcome}): ${sentence}` })
+  })
+
+  it('describes no_record entries and a truncated list as the listing returns them', () => {
+    const description = buildKeptFilesListTool(rootOf('user-a')).description
+    expect(description).toContain(
+      'reason no_record: a file with no save record, saved by generatedFile alone'
+    )
+    expect(description).toContain('when truncated is true the newest files are not in the list')
+    expect(description).not.toContain('the newest file is the last entry')
+    expect(description).not.toContain('canSave false means it cannot be saved (reason)')
   })
 })

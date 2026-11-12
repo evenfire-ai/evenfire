@@ -1,7 +1,8 @@
 /**
  * Files the Host keeps for a chat caller in `users/<key>/.clerum-outputs`:
- * the save record of each generated file, and the secret scan that runs on
- * every file the agent saves to GFS from the Host volume.
+ * the save record of each generated file, the chat attachments kept in
+ * `.uploads/` for a later save, and the secret scan that runs on every file
+ * the agent saves to GFS from the Host volume.
  *
  * Save records live in `.clerum-outputs/.save-ledger/`, one per generated
  * name, so a generated file can be saved later only when the chat delivered
@@ -268,6 +269,21 @@ export const HAS_SAVE_ID =
   'this file has a save id: call clerum__kept_files_list and pass its id as generatedFileId'
 export const WITHHELD_SENTENCE =
   'this file was not delivered to the chat because it holds a protected value or could not be checked, so it cannot be saved; generate it again without that value'
+/** For a withheld file whose outcome is not about a protected value or a failed check. */
+export const WITHHELD_OTHER_SENTENCE =
+  'this file was not delivered to the chat, so it cannot be saved; generate it again'
+
+/** Withheld outcomes about a protected value, or a check that could not run. */
+const PROTECTED_VALUE_OUTCOMES = new Set([
+  'binary_redaction_unavailable',
+  'binary_source_payload_unavailable',
+  'text_redaction_unavailable',
+  'office_package_unreadable',
+])
+
+function withheldSentence(outcome: string): string {
+  return PROTECTED_VALUE_OUTCOMES.has(outcome) ? WITHHELD_SENTENCE : WITHHELD_OTHER_SENTENCE
+}
 export const FILE_CONTAINS_SECRET =
   'file_contains_secret: the file holds a protected value of this Host, so it was not saved'
 
@@ -420,7 +436,7 @@ export function resolveGeneratedFile(
     }
   }
   if (record.outcome !== 'delivered' || record.deliveredSha256 === undefined) {
-    return { error: `kept_file_withheld (${record.outcome}): ${WITHHELD_SENTENCE}` }
+    return { error: `kept_file_withheld (${record.outcome}): ${withheldSentence(record.outcome)}` }
   }
   let bytes: Buffer
   try {

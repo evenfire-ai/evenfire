@@ -1056,7 +1056,8 @@ function resolvedFileSource(
  * bits (delete) stay default-denied for agents.
  *
  * With `sources` (the chat registry), the write and create tools also save a
- * file of the caller's own folders: a generated file, or a workspace file. The
+ * file of the caller's own folders: a generated file, a kept attachment, or a
+ * workspace file. The
  * Host reads and scans the bytes; the model never carries them. Without it
  * (the workflow runtime) only `content` exists, as before.
  */
@@ -1315,7 +1316,7 @@ export function buildGfsAttachmentSaveTools(
         if (typeof attachment.dataBase64 !== 'string') {
           return invalidArgs(
             'bytes_unavailable_after_restart: ask the user to attach the file again in a new message. ' +
-              `Files attached earlier are kept for ${Math.round(GFS_FILE_LIMITS.retentionMs / 3_600_000)} hours, see clerum__kept_files_list`
+              `If the Host kept this file, clerum__kept_files_list shows it (kept files stay ${Math.round(GFS_FILE_LIMITS.retentionMs / 3_600_000)} hours)`
           )
         }
         const name = attachmentSaveName(attachment)
@@ -1356,8 +1357,9 @@ export function buildKeptFilesListTool(callerRoot: string | undefined): Internal
     name: 'clerum__kept_files_list',
     description:
       'List the files this Host keeps for this user: files the document generators made in chat, with their Save id, and files the user attached in chat (kind upload). ' +
-      'Save one with clerum__gfs_create_file or clerum__gfs_write: a generated file with generatedFile plus generatedFileId, an entry without id by generatedFile alone, an upload with uploadedFileId; canSave false means it cannot be saved (reason). ' +
-      'The list starts with the oldest files and the newest file is the last entry; at most 100 entries. ' +
+      'Save one with clerum__gfs_create_file or clerum__gfs_write: a generated file with generatedFile plus generatedFileId, an entry without id by generatedFile alone, an upload with uploadedFileId; canSave false means it cannot be saved, and reason says why. ' +
+      'reason no_record: a file with no save record, saved by generatedFile alone. ' +
+      'The list is oldest first, at most 100 entries; when truncated is true the newest files are not in the list. ' +
       'When truncated is true and the user asks for a recent file, ask the user for part of its name and pass it as nameContains, or use the Save id of the generation. ' +
       `Each file is deleted ${hours} hours after its createdAt; tell the user the date when they say they will save a file later. ` +
       'Give every generated file its own descriptive file name; a file generated under an existing name replaces it.',

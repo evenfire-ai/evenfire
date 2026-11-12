@@ -9,7 +9,10 @@ import { AgentStateMachine } from '../agent/stateMachine'
 import { keptFilesDeleteAsks, liveApprovalTools } from '../agent/taskExecutor'
 import { ApprovalController } from '../core/extensions/approvalController'
 import { UnifiedApprovalGateController } from '../core/extensions/mcpApprovalGateController'
-import { buildTurnContextBlock } from '../core/orchestration/turnContext'
+import {
+  DELETE_OFFER_CAPPED_INSTRUCTION,
+  buildTurnContextBlock,
+} from '../core/orchestration/turnContext'
 import { MAKE_ROOM_SENTENCE, NativeToolRegistry } from '../core/tools/nativeToolRegistry'
 import { type Conversation, ConversationState, type PendingApproval } from '../core/types'
 import {
@@ -386,6 +389,42 @@ describe('the no-room offer', () => {
     })
     expect(block.match(/deletable_file:/g)).toHaveLength(10)
     expect(block).toContain('more_deletable_files: call clerum__kept_files_list')
+    expect(block).toContain(DELETE_OFFER_CAPPED_INSTRUCTION)
+    expect(block).not.toContain('which free needed_bytes')
+  })
+
+  it('says the named files free only part of the bytes when the offer is capped', () => {
+    const offer = (count: number, neededBytes: number) =>
+      buildTurnContextBlock({
+        date: at,
+        channel: { type: 'rpc', sender: null },
+        keepRefusal: {
+          code: 'host_quota_exceeded',
+          offer: {
+            neededBytes,
+            deletable: Array.from({ length: count }, (_, n) => ({
+              kind: 'generated' as const,
+              id: String(n).padStart(12, 'b'),
+              name: `g${n}.md`,
+              sizeBytes: 100,
+              ageHours: 30 - n,
+            })),
+          },
+        },
+      })
+    const capped = offer(12, 1100)
+    expect(capped).toContain('more_deletable_files: call clerum__kept_files_list')
+    expect(capped).toContain(DELETE_OFFER_CAPPED_INSTRUCTION)
+    expect(capped).toContain('free only part of needed_bytes')
+    expect(capped).not.toContain('which free needed_bytes')
+    expect(capped).toContain('ask the user to attach the files again')
+    // Witness: an offer whose files cover the need keeps the previous instruction.
+    const covered = offer(3, 250)
+    expect(covered).toContain(
+      'Propose to the user the deletable_file entries above, which free needed_bytes, oldest first. Call clerum__kept_files_delete only with the files the user agrees to delete: its approval card is the confirmation. Afterwards ask the user to attach the files again; that message keeps them.'
+    )
+    expect(covered).not.toContain('more_deletable_files')
+    expect(covered).not.toContain(DELETE_OFFER_CAPPED_INSTRUCTION)
   })
 
   it("offers only the caller's own files with an id, not a dashboard and not another user's", () => {

@@ -20,7 +20,8 @@ export interface GfsRuntimeOptions {
 
 /**
  * Every five minutes: each cycle sweeps expired copies and expired kept files
- * (generated files and their save records in users/<key>/.clerum-outputs) and
+ * (generated files, their save records and kept chat attachments in
+ * users/<key>/.clerum-outputs) and
  * restores the free-space floor, so a volume another writer filled is given
  * back within this window. A cycle costs one walk of users/<key>/.gfs-downloads,
  * one walk of each kept folder and one statfs; it removes files only when
