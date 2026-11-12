@@ -678,9 +678,16 @@ export function createAdminPluginWorkloadSdkRouter(
           // lock is never held across an external round-trip — cheap, defensive.
           await boundCarrierTransactionIdleTimeout(db)
           // Model-name locks FIRST, deduped + totally ordered, over EVERY incoming
-          // `allowed_models` name (the reductor matches by name across families).
-          // Empty list = no-op. Taken before the recipe lock (global order A5).
-          await advisoryLockModelNames(db, allowedModels)
+          // `allowed_models` name (the reductor matches by name across families)
+          // and every prompt-target model: the catalog prune checks prompt
+          // targets as consumers under the same per-name lock, and the
+          // enabled-ness check below must not read a row a disable is about to
+          // commit. Empty list = no-op. Taken before the recipe lock (global
+          // order A5).
+          await advisoryLockModelNames(db, [
+            ...allowedModels,
+            ...promptTargets.map(target => target.model),
+          ])
 
           if (capabilityFamily === 'promptBridge') {
             // Codex (oauth-broker) targets are validated against the chosen

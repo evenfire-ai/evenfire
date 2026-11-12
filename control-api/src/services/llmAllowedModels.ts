@@ -295,71 +295,179 @@ export async function listAllowedModels(db: DbClient = pool): Promise<LlmAllowed
 }
 
 /**
- * Stale AND enabled rows — models the Fase 4 sync flagged as vanished from the
- * external catalog (`stale=true`) while leaving `enabled` intact, so they still
- * ship in the runtime allowlist ConfigMap and keep working. The operator-
- * attention feed (Fase 5) is the sole consumer: it enumerates these and reports
- * the ones still referenced as `stale_model_referenced` — an ACTIONABLE item
- * whose remedy is the impact-gated PUT that disables the model.
- *
- * The `AND enabled` filter is load-bearing for that contract. A `stale` model
- * that is ALREADY disabled but still referenced (a dangling reference left after
- * a force-disable) is NOT actionable through this feed — its suggested action
- * ("disable it") is already done — so surfacing it would make the feed never
- * converge to zero after the very action it asked for. That "disabled + still
- * referenced" state is a distinct, diagnostic-only concern (a future
- * `dangling_reference` kind, designed separately); it is not lost here — it stays
- * derivable via `computeModelImpact`. Deterministic ordering keeps the feed
- * stable across calls.
+ * Providers fed by the public models.dev catalog. The subscription providers
+ * keep their own catalogs and their own `stale` semantics, so catalog-only
+ * rules (deprecation, the all-models Host consumer) are scoped to these.
  */
-export async function listStaleAllowedModels(db: DbClient = pool): Promise<LlmAllowedModel[]> {
-  const result = await db.query(
-    `SELECT ${MODEL_COLUMNS}
-       FROM llm_allowed_models
-      WHERE stale AND enabled
-      ORDER BY provider ASC, model ASC`
-  )
-  return (result.rows as Record<string, unknown>[]).map(rowToModel)
-}
+export const CATALOG_PROVIDERS: readonly string[] = Object.keys(PROVIDER_KEY_MAP)
 
 /**
- * Enabled rows the attention feed flags regardless of who references them:
- * the catalog calls them deprecated, or a discovered model vanished from the
- * catalog while still served. Shared with `llmAttention.ts`, which reads it.
+ * An enabled row the attention feed has to look at: it is `stale` (any
+ * provider), or the catalog calls it deprecated (catalog providers only). The
+ * feed decides from its consumers and acknowledgements whether it becomes an
+ * item. Disabled rows never reach the feed: the action every item suggests,
+ * disabling the model, is already done for them.
  */
-export interface CatalogAttentionRow {
+export interface AttentionCandidateRow {
   provider: string
   model: string
   display_name: string | null
+  stale: boolean
   deprecated: boolean
-  stale_discovery: boolean
+  /** Episode counters kept by the 0139 trigger; `integer`, so node-pg returns numbers. */
+  stale_episode: number
+  deprecated_episode: number
+  /** Raw `attention_ack` jsonb; the feed parses it defensively. */
+  attention_ack: unknown
 }
 
-const CATALOG_PROVIDERS: string[] = Object.keys(PROVIDER_KEY_MAP)
+// A non-integer here means the column type drifted (a `bigint` comes back as a
+// string, a timestamp as a Date): every acknowledgement would silently stop
+// matching, so the feed fails instead of hiding the drift.
+function episodeCounter(raw: unknown, column: string): number {
+  if (typeof raw === 'number' && Number.isSafeInteger(raw)) return raw
+  throw new Error(`llm_allowed_models.${column} is not an integer counter`)
+}
 
-export async function listCatalogAttentionModels(
+export async function listAttentionCandidates(
   db: DbClient = pool
-): Promise<CatalogAttentionRow[]> {
+): Promise<AttentionCandidateRow[]> {
   const result = await db.query(
-    `SELECT provider, model, display_name,
-            (catalog_status = 'deprecated') IS TRUE AS deprecated,
-            (stale AND source = 'discovery') AS stale_discovery
+    `SELECT provider, model, display_name, stale,
+            (catalog_status = 'deprecated' AND provider = ANY($1::text[])) IS TRUE AS deprecated,
+            stale_episode, deprecated_episode, attention_ack
        FROM llm_allowed_models
       WHERE enabled
-        AND provider = ANY($1::text[])
-        AND (catalog_status = 'deprecated' OR (stale AND source = 'discovery'))
+        AND (stale OR (catalog_status = 'deprecated' AND provider = ANY($1::text[])))
       ORDER BY provider ASC, model ASC`,
-    // Only providers fed by the public catalog: the subscription providers keep
-    // their own catalogs and their own `stale` semantics.
     [CATALOG_PROVIDERS]
   )
   return (result.rows as Record<string, unknown>[]).map(row => ({
     provider: String(row.provider),
     model: String(row.model),
     display_name: toNullableString(row.display_name),
+    stale: row.stale === true,
     deprecated: row.deprecated === true,
-    stale_discovery: row.stale_discovery === true,
+    stale_episode: episodeCounter(row.stale_episode, 'stale_episode'),
+    deprecated_episode: episodeCounter(row.deprecated_episode, 'deprecated_episode'),
+    attention_ack: row.attention_ack ?? null,
   }))
+}
+
+/**
+ * The attention kinds an operator can acknowledge, each with the episode
+ * counter its acknowledgement is bound to. Closed on purpose: the column name
+ * is interpolated into SQL, so it only ever comes from this map.
+ */
+export const ATTENTION_ACK_EPISODE_COLUMN = {
+  stale_model_referenced: 'stale_episode',
+  deprecated_model_enabled: 'deprecated_episode',
+} as const
+
+export type AckableAttentionKind = keyof typeof ATTENTION_ACK_EPISODE_COLUMN
+
+const ACKABLE_KINDS = Object.keys(ATTENTION_ACK_EPISODE_COLUMN) as [
+  AckableAttentionKind,
+  ...AckableAttentionKind[],
+]
+
+// Bounds: a key is `host:<ns>/<name>`, `grant:<uuid>` or `recipe:<ns>/<name>`
+// (namespace ≤ 63, name ≤ 253), and one model is never referenced by more
+// consumers than an admin can review.
+export const MAX_ATTENTION_CONSUMER_KEYS = 2_000
+const MAX_ATTENTION_CONSUMER_KEY_LENGTH = 400
+// int4 upper bound: the episode columns are `integer`.
+const MAX_EPISODE = 2_147_483_647
+
+const attentionPairShape = {
+  provider: z.string().trim().min(1).max(200),
+  model: z.string().trim().min(1).max(400),
+  kind: z.enum(ACKABLE_KINDS),
+}
+
+export const attentionAckSchema = z
+  .object({
+    ...attentionPairShape,
+    episode: z.number().int().min(0).max(MAX_EPISODE),
+    consumerKeys: z
+      .array(z.string().min(1).max(MAX_ATTENTION_CONSUMER_KEY_LENGTH))
+      .max(MAX_ATTENTION_CONSUMER_KEYS),
+  })
+  .strict()
+
+export const attentionUnackSchema = z.object(attentionPairShape).strict()
+
+export type AttentionAckInput = z.infer<typeof attentionAckSchema>
+export type AttentionUnackInput = z.infer<typeof attentionUnackSchema>
+
+/** One stored acknowledgement, as kept under its kind in `attention_ack`. */
+export interface AttentionAckEntry {
+  episode: number
+  consumerKeys: string[]
+  at: string
+  by: string
+}
+
+/**
+ * Record that the operator reviewed an attention item. Stores the consumer keys
+ * the CLIENT saw, not the current consumers: one that appeared between the feed
+ * and the click must reopen the item, not be accepted unseen. Returns null when
+ * the row is gone, disabled, or in another episode (the caller answers 409).
+ */
+export async function acknowledgeAttention(
+  input: AttentionAckInput,
+  actor: string,
+  db: DbTransactionClient
+): Promise<AttentionAckEntry | null> {
+  const column = ATTENTION_ACK_EPISODE_COLUMN[input.kind]
+  const entry: AttentionAckEntry = {
+    episode: input.episode,
+    consumerKeys: [...new Set(input.consumerKeys)].sort(),
+    at: new Date().toISOString(),
+    by: actor,
+  }
+  const result = await db.query(
+    `UPDATE llm_allowed_models
+        SET attention_ack = jsonb_set(coalesce(attention_ack, '{}'::jsonb), ARRAY[$3::text], $4::jsonb)
+      WHERE provider = $1 AND model = $2 AND enabled
+        AND ${column} = $5::int`,
+    [input.provider, input.model, input.kind, JSON.stringify(entry), input.episode]
+  )
+  if (result.rowCount !== 1) return null
+  await writeAudit(db, {
+    actor,
+    action: 'attention_ack',
+    provider: input.provider,
+    model: input.model,
+    detail: { kind: input.kind, episode: entry.episode, consumerKeys: entry.consumerKeys },
+  })
+  return entry
+}
+
+/**
+ * Drop an acknowledgement so its item is pending again. Idempotent: nothing to
+ * drop is not an error. Returns whether an entry was removed (and audited).
+ */
+export async function unacknowledgeAttention(
+  input: AttentionUnackInput,
+  actor: string,
+  db: DbTransactionClient
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE llm_allowed_models
+        SET attention_ack = attention_ack - $3::text
+      WHERE provider = $1 AND model = $2 AND attention_ack ? $3::text`,
+    [input.provider, input.model, input.kind]
+  )
+  if (result.rowCount !== 1) return false
+  await writeAudit(db, {
+    actor,
+    action: 'attention_unack',
+    provider: input.provider,
+    model: input.model,
+    detail: { kind: input.kind },
+  })
+  return true
 }
 
 export async function getAllowedModel(

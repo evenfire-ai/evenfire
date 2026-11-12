@@ -15,13 +15,16 @@ import { rootLogger } from '../../observability/logger.js'
 import { llmAllowlistConfigMapWriteFailuresTotal } from '../../observability/metrics.js'
 import {
   LlmAllowedModelConflictError,
+  acknowledgeAttention,
+  attentionAckSchema,
+  attentionUnackSchema,
   createAllowedModel,
   createLlmAllowedModelSchema,
   deleteAllowedModel,
   getAllowedModel,
   listAllowedModels,
-  listCatalogAttentionModels,
-  listStaleAllowedModels,
+  listAttentionCandidates,
+  unacknowledgeAttention,
   updateAllowedModel,
   updateLlmAllowedModelSchema,
 } from '../../services/llmAllowedModels.js'
@@ -31,6 +34,7 @@ import {
   getLastCatalogSyncRun,
   syncDiscoveredModels,
 } from '../../services/llmCatalogSync.js'
+import { modelConsumerSourcesFromGateway } from '../../services/llmModelConsumers.js'
 import {
   type ModelImpact,
   computeModelImpact,
@@ -85,6 +89,12 @@ function handleServiceError(res: Response, error: unknown): boolean {
 // param (array) all read as NOT forced — fail-safe toward SHOWING the impact.
 function isForced(req: Request): boolean {
   return req.query.force === 'true'
+}
+
+// Same exact-match rule as `?force`: only `includeAcknowledged=1` asks for the
+// acknowledged items too.
+function includesAcknowledged(req: Request): boolean {
+  return req.query.includeAcknowledged === '1'
 }
 
 // Admin identity for the audit row. Auth is enforced upstream by the control-ui
@@ -142,6 +152,14 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   // this single module (regla D4).
   const impactSources = modelImpactSourcesFromGateway(gateway, hostNamespaces)
 
+  // Every consumer of a pair (the impact references plus prompt targets,
+  // WorkflowRecipes and all-models Hosts), for the attention feed. Recipes
+  // live only in the sandbox namespace, where every recipe write places them.
+  const consumerSources = modelConsumerSourcesFromGateway(gateway, {
+    hostNamespaces,
+    recipeNamespaces: [config.sandboxNamespace],
+  })
+
   // Availability-reduction gate (Fase 3), now SERIALIZED (R1-H3 fase 1). A DELETE
   // (always), a PUT that flips `enabled` true→false, or a PUT that RENAMES an
   // enabled pair (its old identity leaves the ConfigMap on re-materialize) yanks
@@ -189,25 +207,65 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
     return true
   }
 
-  // ── Operator attention feed (Fase 5, Pieza C) ───────────────────────────────
-  // Persistent alert backing the non-destructive Fase 4 cron: every enabled
-  // `stale` catalog model that is STILL referenced by a Host/grant, so the
-  // operator can disable it through the impact-gated PUT. For that kind an
-  // unreferenced stale model — or one already disabled — yields nothing
-  // (`listStaleAllowedModels` filters `AND enabled`). Reuses `impactSources`
-  // (the same fail-loud enumeration the `?force` gate uses, regla D4): if any
-  // Host LIST fails, `computeAttention` propagates → asyncHandler → 500, never a
-  // partial feed that hides a live reference. Inherits the `/admin/*` control-ui
-  // admin auth gate (app.ts) — no new auth. Extensible: `items[].kind` is an
-  // open union; the deprecated / stale-discovery kinds list every enabled match,
-  // referenced or not (see llmAttention.ts).
+  // ── Operator attention feed ─────────────────────────────────────────────────
+  // Enabled stale or deprecated models that somebody uses, minus those the
+  // operator already reviewed (see llmAttention.ts). Fail-loud: a failed LIST
+  // or query propagates → asyncHandler → 500, never a partial feed. The ack
+  // routes inherit the same `/admin/*` control-ui admin auth gate (app.ts).
   router.get(
     '/admin/attention',
-    asyncHandler(async (_req: Request, res: Response) => {
-      const staleModels = await listStaleAllowedModels()
-      const catalogRows = await listCatalogAttentionModels()
-      const report = await computeAttention(staleModels, impactSources, catalogRows)
+    asyncHandler(async (req: Request, res: Response) => {
+      const rows = await listAttentionCandidates()
+      const report = await computeAttention(rows, consumerSources, {
+        includeAcknowledged: includesAcknowledged(req),
+      })
       res.status(200).json(report)
+    })
+  )
+
+  // Acknowledge an attention item with the `episode` and `consumerKeys` the feed
+  // returned for it. A 409 means the episode moved on (or the model is no longer
+  // enabled) since the operator loaded the feed: nothing is acknowledged and the
+  // client reloads. The keys are stored as sent, not checked against the live
+  // consumers: checking would need K8s LISTs on this route, and a consumer the
+  // operator did not see simply reopens the item on the next feed.
+  router.post(
+    '/admin/attention/ack',
+    asyncHandler(async (req: Request, res: Response) => {
+      const parsed = attentionAckSchema.safeParse(req.body)
+      if (!parsed.success) {
+        sendZodError(res, parsed.error)
+        return
+      }
+      const entry = await withTransaction(db => acknowledgeAttention(parsed.data, actorOf(req), db))
+      if (!entry) {
+        res.status(409).json({
+          error: 'attention_episode_changed',
+          message:
+            'the model changed since this attention item was loaded (new episode, or no longer enabled); reload the feed',
+        })
+        return
+      }
+      res.status(200).json({
+        provider: parsed.data.provider,
+        model: parsed.data.model,
+        kind: parsed.data.kind,
+        ...entry,
+      })
+    })
+  )
+
+  // Undo an acknowledgement. Idempotent: 204 whether or not one was stored.
+  router.delete(
+    '/admin/attention/ack',
+    asyncHandler(async (req: Request, res: Response) => {
+      const parsed = attentionUnackSchema.safeParse(req.body)
+      if (!parsed.success) {
+        sendZodError(res, parsed.error)
+        return
+      }
+      await withTransaction(db => unacknowledgeAttention(parsed.data, actorOf(req), db))
+      res.status(204).end()
     })
   )
 

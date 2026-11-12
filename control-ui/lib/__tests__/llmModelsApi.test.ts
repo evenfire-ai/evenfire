@@ -283,8 +283,9 @@ describe('getAdminAttention', () => {
         expect(item.hostsAffected).toEqual(raw.hostsAffected)
         expect(item.grantsAffected).toEqual(raw.grantsAffected)
       } else {
-        // The catalog-flagged kinds carry no references on the wire or here.
-        expect(raw).not.toHaveProperty('hostsAffected')
+        // The deprecated kind now carries references on the wire (only models
+        // someone uses are flagged); this client does not read them yet.
+        expect(raw).toHaveProperty('hostsAffected')
         expect(item).not.toHaveProperty('hostsAffected')
       }
     }

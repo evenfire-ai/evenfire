@@ -31,7 +31,7 @@ import './realPostgres.requirement.ts'
  * Every byte comes from the real producers against real PostgreSQL: the catalog
  * sync writes the rows (from the captured live models.dev fixture — a later run
  * deprecates one model and drops two), the real route reads them with its own
- * SQL, and the Host reference comes from the real gateway producer. The only
+ * SQL, and the Hosts are created through the real admin Host route. The only
  * stand-ins are the admin session and the Kubernetes API (MockGateway, fake
  * ConfigMap). `generatedAt` is the one value pinned after the fact, because it
  * is the request instant.
@@ -212,7 +212,7 @@ describeRealPostgres('attention wire contract (real PostgreSQL)', () => {
       .map(m => m.model_id)
       .sort()
     expect(eligible.length).toBeGreaterThanOrEqual(3)
-    const [deprecatedId, staleReferencedId, staleUnreferencedId] = eligible
+    const [deprecatedId, staleReferencedId, staleImplicitId] = eligible
     // The to-be-deprecated model's catalog name equals its id, so the wire carries
     // an item whose displayName === model. It goes in this run because the sync
     // freezes display_name on enabled rows: renaming it in the second run would
@@ -220,38 +220,55 @@ describeRealPostgres('attention wire contract (real PostgreSQL)', () => {
     await sync(patched(base, rawIdOf(base, deprecatedId), { name: deprecatedId }))
 
     // Second run: the catalog deprecates one model and drops two. The sync keeps
-    // all three enabled (it only informs); one of the dropped ones is still the
-    // primary model of a Host.
+    // all three enabled (it only informs).
     await sync(
       without(patched(base, rawIdOf(base, deprecatedId), { status: 'deprecated' }), [
         rawIdOf(base, staleReferencedId),
-        rawIdOf(base, staleUnreferencedId),
+        rawIdOf(base, staleImplicitId),
       ])
     )
+    // Only models somebody uses reach the feed. `agent-a` names one dropped
+    // model and, having no `allowedModels`, offers every enabled model of the
+    // provider: the other dropped model is an item only through that implicit
+    // offer (role `implicit`). `agent-b` names the deprecated model, which needs
+    // an explicit consumer to be an item.
     const gateway = new MockGateway(HOST_NAMESPACE)
-    await gateway.createResource(
-      'hosts',
+    const app = createApp(gateway as never)
+    const hosts = [
       {
         metadata: { name: 'agent-a' },
         spec: { model: { provider: PROVIDER, name: staleReferencedId } },
       },
-      HOST_NAMESPACE
-    )
+      {
+        metadata: { name: 'agent-b' },
+        spec: {
+          model: { provider: PROVIDER, name: deprecatedId },
+          allowedModels: [{ provider: PROVIDER, model: deprecatedId }],
+        },
+      },
+    ]
+    for (const host of hosts) {
+      await request(app).post('/api/v1/admin/hosts').set('Cookie', COOKIE).send(host).expect(201)
+    }
 
-    const res = await request(createApp(gateway as never))
-      .get('/api/v1/admin/attention')
-      .set('Cookie', COOKIE)
-      .expect(200)
-    const body = res.body as { items: Array<{ kind: string }>; generatedAt: string }
+    const res = await request(app).get('/api/v1/admin/attention').set('Cookie', COOKIE).expect(200)
+    const body = res.body as {
+      items: Array<{ kind: string; model: string; hostsAffected: Array<{ roles: string[] }> }>
+      generatedAt: string
+    }
     expect(Number.isNaN(Date.parse(body.generatedAt))).toBe(false)
-    // One item of each kind is what the consumer needs; the dropped referenced
-    // model also yields its stale-discovery item.
-    expect(body.items.map(i => i.kind).sort()).toEqual([
-      'deprecated_model_enabled',
-      'stale_discovery_enabled',
-      'stale_discovery_enabled',
-      'stale_model_referenced',
-    ])
+    // Both kinds with an explicit consumer, plus one item carried only by the
+    // implicit offer; the retired stale_discovery_enabled kind never appears.
+    expect(body.items.map(i => `${i.kind}:${i.model}`).sort()).toEqual(
+      [
+        `deprecated_model_enabled:${deprecatedId}`,
+        `stale_model_referenced:${staleReferencedId}`,
+        `stale_model_referenced:${staleImplicitId}`,
+      ].sort()
+    )
+    expect(
+      body.items.find(i => i.model === staleImplicitId)?.hostsAffected.flatMap(h => h.roles)
+    ).toEqual(['implicit'])
 
     const actual = { ...body, generatedAt: PINNED_GENERATED_AT }
     if (UPDATE) {

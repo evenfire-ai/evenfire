@@ -200,11 +200,12 @@ describe('catalog attention banner', () => {
   })
 })
 
-// The catalog-flagged kinds (deprecated / stale discovery) carry no references.
-// Their feed is the producer-generated wire body (control-api real-PG
-// generator), run through the real client parser exactly as getAdminAttention
-// does; only the allowlist rows the surface links to are built here, keyed by
-// the pairs the wire carries.
+// The deprecated kind. Its feed is the producer-generated wire body (control-api
+// real-PG generator), run through the real client parser exactly as
+// getAdminAttention does; only the allowlist rows the surface links to are built
+// here, keyed by the pairs the wire carries. The producer no longer emits
+// `stale_discovery_enabled` (a stale model nobody uses needs no decision), so
+// that group has no producer-derived feed left to render.
 describe('catalog attention banner — catalog-flagged kinds', () => {
   type WireItem = ReturnType<typeof attentionWireBody>['items'][number]
 
@@ -255,46 +256,12 @@ describe('catalog attention banner — catalog-flagged kinds', () => {
     expect(within(dialog).queryByRole('columnheader', { name: 'Used by' })).not.toBeInTheDocument()
   })
 
-  it('renders every stale discovery item with a count and a review link each', async () => {
-    const body = attentionWireBodyOf('stale_discovery_enabled')
-    expect(body.items).toHaveLength(2)
-    vi.mocked(getLlmModels).mockResolvedValue({
-      rows: body.items.map((item, index) => rowFor(item, `row-stale-${index}`)),
-    })
-    feed(body)
-
-    renderSurface()
-
-    const dialog = await openReview()
-    expect(dialog).toHaveTextContent(
-      /2 enabled discovered models are no longer listed in the provider catalog/
-    )
-    expect(dialog).toHaveTextContent(
-      /disable it, replace it, or keep it if the provider still serves it/
-    )
-    for (const [index, item] of body.items.entries()) {
-      const label = String(item.displayName ?? item.model)
-      const providerLabel = getProviderDisplayLabel(item.provider)
-      expect(within(dialog).getByText(label)).toBeInTheDocument()
-      const link = await within(dialog).findByRole('link', {
-        name: `Review ${label} (${providerLabel} · ${item.model})`,
-      })
-      expect(link).toHaveAttribute('href', CONTROL_ROUTES.llmModels.edit(`row-stale-${index}`))
-    }
-    expect(within(dialog).queryByRole('columnheader', { name: 'Used by' })).not.toBeInTheDocument()
-  })
-
-  it('renders all three kinds from the full feed, counting a referenced stale model once and linking it', async () => {
+  it('renders both kinds from the full feed, each stale item with its Hosts and a link', async () => {
     const body = attentionWireBody()
-    const referenced = body.items.find(item => item.kind === 'stale_model_referenced')!
-    // The generator's referenced model is also a stale discovery row, so the
-    // feed carries that pair twice; the banner must show it once.
+    const referenced = body.items.filter(item => item.kind === 'stale_model_referenced')
+    expect(referenced).toHaveLength(2)
+    expect(body.items.map(item => item.kind)).not.toContain('stale_discovery_enabled')
     const pair = (item: WireItem) => `${item.provider}/${item.model}`
-    expect(
-      body.items.filter(
-        item => item.kind === 'stale_discovery_enabled' && pair(item) === pair(referenced)
-      )
-    ).toHaveLength(1)
     const distinctPairs = [...new Set(body.items.map(pair))]
     vi.mocked(getLlmModels).mockResolvedValue({
       rows: distinctPairs.map((key, index) => {
@@ -308,22 +275,24 @@ describe('catalog attention banner — catalog-flagged kinds', () => {
 
     const dialog = await openReview()
     expect(dialog).toHaveTextContent(
-      /1 model disappeared from the provider catalog but is still referenced/
+      /2 models disappeared from the provider catalog but are still referenced/
     )
     expect(dialog).toHaveTextContent(/1 enabled model is marked deprecated/)
-    expect(dialog).toHaveTextContent(/1 enabled discovered model is no longer listed/)
-    const referencedLabel = String(referenced.displayName ?? referenced.model)
-    expect(within(dialog).getAllByText(referencedLabel)).toHaveLength(1)
-    const hosts = referenced.hostsAffected as Array<{ namespace: string; name: string }>
-    expect(within(dialog).getByText(`${hosts[0].namespace}/${hosts[0].name}`)).toBeInTheDocument()
-    const providerLabel = getProviderDisplayLabel(referenced.provider)
-    const link = await within(dialog).findByRole('link', {
-      name: `Review ${referencedLabel} (${providerLabel} · ${referenced.model})`,
-    })
-    expect(link).toHaveAttribute(
-      'href',
-      CONTROL_ROUTES.llmModels.edit(`row-${distinctPairs.indexOf(pair(referenced))}`)
-    )
+    expect(dialog).not.toHaveTextContent(/no longer listed/)
+    for (const item of referenced) {
+      const label = String(item.displayName ?? item.model)
+      const link = await within(dialog).findByRole('link', {
+        name: `Review ${label} (${getProviderDisplayLabel(item.provider)} · ${item.model})`,
+      })
+      expect(link).toHaveAttribute(
+        'href',
+        CONTROL_ROUTES.llmModels.edit(`row-${distinctPairs.indexOf(pair(item))}`)
+      )
+      const hosts = item.hostsAffected as Array<{ namespace: string; name: string }>
+      expect(
+        within(link.closest('tr')!).getByText(`${hosts[0].namespace}/${hosts[0].name}`)
+      ).toBeInTheDocument()
+    }
   })
 
   it('renders an item without a link while its allowlist row is not loaded', async () => {
@@ -478,7 +447,7 @@ describe('delete impact gate (409 model_in_use → force)', () => {
     renderSurface()
 
     // The stale item is counted in the banner before any mutation.
-    expect(await findBannerMessage()).toHaveTextContent('1 still referenced')
+    expect(await findBannerMessage()).toHaveTextContent('2 still referenced')
     // Exactly one feed fetch on mount — the banner re-fetches on demand only, so
     // no polling and no double-fetch (a mount-effect regression the observable
     // assertion below would not catch on its own).
@@ -517,7 +486,7 @@ describe('delete impact gate (409 model_in_use → force)', () => {
     renderSurface()
 
     // The stale item is counted in the banner before the mutation.
-    expect(await findBannerMessage()).toHaveTextContent('1 still referenced')
+    expect(await findBannerMessage()).toHaveTextContent('2 still referenced')
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
@@ -583,7 +552,7 @@ describe('catalog attention banner — one line plus review dialog', () => {
 
     const banner = (await findBannerMessage()).parentElement!
     expect(banner).toHaveAttribute('role', 'status')
-    expect(banner).toHaveTextContent('1 still referenced')
+    expect(banner).toHaveTextContent('2 still referenced')
     for (const item of body.items) {
       expect(banner).not.toHaveTextContent(item.model)
       if (item.displayName) expect(banner).not.toHaveTextContent(String(item.displayName))
@@ -600,7 +569,7 @@ describe('catalog attention banner — one line plus review dialog', () => {
     const { unmount } = renderSurface()
 
     expect((await findBannerMessage()).textContent).toBe(
-      'Models need review: 1 still referenced · 1 deprecated · 1 no longer listed'
+      'Models need review: 2 still referenced · 1 deprecated'
     )
     unmount()
 
@@ -639,21 +608,17 @@ describe('catalog attention banner — one line plus review dialog', () => {
     vi.mocked(getAdminAttention).mockResolvedValue(parseAdminAttentionReport(body))
     const referenced = body.items.find(item => item.kind === 'stale_model_referenced')!
     const deprecatedItem = body.items.find(item => item.kind === 'deprecated_model_enabled')!
-    const staleOnly = body.items.find(
-      item => item.kind === 'stale_discovery_enabled' && pair(item) !== pair(referenced)
-    )!
 
     renderSurface()
 
     const dialog = await openReview()
     const tables = within(dialog).getAllByRole('table')
-    expect(tables).toHaveLength(3)
+    expect(tables).toHaveLength(2)
     const ledes = [
-      /1 model disappeared from the provider catalog but is still referenced/,
+      /2 models disappeared from the provider catalog but are still referenced/,
       /1 enabled model is marked deprecated in the provider catalog/,
-      /1 enabled discovered model is no longer listed in the provider catalog/,
     ]
-    for (const [index, item] of [referenced, deprecatedItem, staleOnly].entries()) {
+    for (const [index, item] of [referenced, deprecatedItem].entries()) {
       const section = tables[index].parentElement!
       expect(section.querySelector('p')).toHaveTextContent(ledes[index])
       const link = await within(tables[index]).findByRole('link', { name: reviewLinkName(item) })
@@ -674,17 +639,20 @@ describe('catalog attention banner — one line plus review dialog', () => {
     renderSurface()
 
     const dialog = await openReview()
-    const [referencedTable, deprecatedTable, staleTable] = within(dialog).getAllByRole('table')
+    const [referencedTable, deprecatedTable] = within(dialog).getAllByRole('table')
     expect(
       within(referencedTable).getByRole('columnheader', { name: 'Used by' })
     ).toBeInTheDocument()
+    const row = within(referencedTable)
+      .getByRole('link', { name: reviewLinkName(referenced) })
+      .closest('tr')!
+    expect(within(row).getByText(`${hosts[0].namespace}/${hosts[0].name}`)).toBeInTheDocument()
+    expect(within(row).getByText('1 Host')).toBeInTheDocument()
+    // The deprecated item carries references on the wire too; this group does
+    // not render them yet.
     expect(
-      within(referencedTable).getByText(`${hosts[0].namespace}/${hosts[0].name}`)
-    ).toBeInTheDocument()
-    expect(within(referencedTable).getByText('1 Host')).toBeInTheDocument()
-    for (const table of [deprecatedTable, staleTable]) {
-      expect(within(table).queryByRole('columnheader', { name: 'Used by' })).not.toBeInTheDocument()
-    }
+      within(deprecatedTable).queryByRole('columnheader', { name: 'Used by' })
+    ).not.toBeInTheDocument()
   })
 
   it('T-6: shows the id under the name only when they differ', async () => {
@@ -694,9 +662,7 @@ describe('catalog attention banner — one line plus review dialog', () => {
     const deprecatedItem = body.items.find(item => item.kind === 'deprecated_model_enabled')!
     // The generator gives this model a catalog name equal to its id.
     expect(deprecatedItem.displayName).toBe(deprecatedItem.model)
-    const staleOnly = body.items.find(
-      item => item.kind === 'stale_discovery_enabled' && item.model === 'claude-haiku-4-5'
-    )!
+    const staleOnly = body.items.find(item => item.model === 'claude-haiku-4-5')!
     expect(staleOnly.displayName).not.toBe(staleOnly.model)
 
     renderSurface()
@@ -720,7 +686,7 @@ describe('catalog attention banner — one line plus review dialog', () => {
 
     renderSurface()
 
-    expect(await findBannerMessage()).toHaveTextContent('1 still referenced')
+    expect(await findBannerMessage()).toHaveTextContent('2 still referenced')
     fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
     await waitFor(() => expect(vi.mocked(deleteLlmModel)).toHaveBeenCalledTimes(1))
@@ -736,7 +702,7 @@ describe('catalog attention banner — one line plus review dialog', () => {
     // A second delete refetches a feed with items again.
     fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
-    expect(await findBannerMessage()).toHaveTextContent('1 still referenced')
+    expect(await findBannerMessage()).toHaveTextContent('2 still referenced')
     expect(vi.mocked(getAdminAttention)).toHaveBeenCalledTimes(3)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   }
