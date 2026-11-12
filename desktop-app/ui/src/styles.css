@@ -16091,6 +16091,12 @@ pre {
   line-height: 1;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .da-permission-status-spinner {
+    animation: none;
+  }
+}
+
 .da-permission-status-tooltip {
   position: absolute;
   z-index: 20;
