@@ -1302,6 +1302,9 @@ describe('switchToChat (unified, D.4)', () => {
       await pendingSend
     })
     expect(revoked.has('agent-x')).toBe(expectedRevoked)
+    // The text returns only in the scope that sent it; the same-scope row is
+    // the witness that the put-back runs at all.
+    expect(getComposerDraft('old-team-chat', 'agent-x')).toBe(expectedRevoked ? 'hello' : '')
   })
 
   it('ignores an older-message 403 from the prior team scope', async () => {
