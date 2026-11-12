@@ -16081,6 +16081,16 @@ pre {
   animation: da-permission-status-spin 700ms linear infinite;
 }
 
+.da-permission-status-complete {
+  display: inline-flex;
+  width: 0.75rem;
+  height: 0.75rem;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+}
+
 .da-permission-status-tooltip {
   position: absolute;
   z-index: 20;

@@ -33,6 +33,32 @@ describe('EvenDrive permission status presentation', () => {
     expect(container.querySelector('.da-permission-status-slot')).toBe(slot)
   })
 
+  it('keeps keyboard focus on the status owner when checking completes', () => {
+    const { rerender } = render(
+      <PermissionStatusIndicator active label="Checking file permissions" />
+    )
+    const activeIndicator = screen.getByRole('status', { name: 'Checking file permissions' })
+    activeIndicator.focus()
+
+    rerender(<PermissionStatusIndicator active={false} label="Checking file permissions" />)
+
+    const idleOwner = screen.getByRole('group', { name: 'Permission check complete' })
+    expect(idleOwner).toBe(activeIndicator)
+    expect(document.activeElement).toBe(idleOwner)
+    expect(idleOwner.getAttribute('tabindex')).toBe('-1')
+    expect(idleOwner.getAttribute('aria-live')).toBe('off')
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('does not create an idle keyboard stop when the status was not focused', () => {
+    const { container } = render(
+      <PermissionStatusIndicator active={false} label="Checking file permissions" />
+    )
+
+    expect(container.querySelector('.da-permission-status-slot')).toBeTruthy()
+    expect(container.querySelector('.da-permission-status-indicator')).toBeNull()
+  })
+
   it('traps keyboard focus, dismisses on Escape, and retains the exact Retry callback', () => {
     const retry = vi.fn(() => ({ admitted: false }))
     const onDismiss = vi.fn()
