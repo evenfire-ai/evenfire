@@ -82,7 +82,41 @@ vi.mock('@components/WorkspaceTabStrip', () => ({
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
-vi.mock('@pages/FilePreviewPage', () => ({ FilePreviewPage: () => <div data-testid="preview" /> }))
+vi.mock('@pages/FilePreviewPage', async () => {
+  const { MarkdownEditorSurface } =
+    await import('@components/GfsMarkdownPreview/MarkdownEditorSurface')
+  return {
+    FilePreviewPage: ({
+      fileName,
+      gfsUri,
+      tabId,
+    }: {
+      fileName: string
+      gfsUri: string
+      tabId: string
+    }) => {
+      const owner = harness.controller.markdownDraftOwner
+      const binding = {
+        principalOwner: harness.controller.markdownPrincipalOwner!,
+        scopeKey: 'integration-principal-owner/team-a/default',
+        tabId,
+        gfsUri,
+      }
+      const record = owner.get(binding)
+      if (!record) return <div data-testid="preview" />
+      return (
+        <MarkdownEditorSurface
+          binding={binding}
+          fileName={fileName}
+          mode="edit"
+          onChange={value => owner.type(binding, value)}
+          owner={owner}
+          value={record.draft}
+        />
+      )
+    },
+  }
+})
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
 vi.mock('@pages/OnboardingPage', () => ({ OnboardingPage: () => null }))
@@ -248,9 +282,15 @@ function installAuthBridge(overrides: Record<string, unknown> = {}) {
           return vi.fn()
         }),
         authorizeMarkdownTabClose: vi.fn(async () => 'granted'),
+        getMarkdownTabCloseDocumentEpoch: vi.fn(() => '11111111-1111-4111-8111-111111111111'),
         getMarkdownTabClosePermitStatus: vi.fn(async () => 'granted'),
         cancelMarkdownTabClosePermit: vi.fn(async () => 'cancelled'),
         consumeMarkdownTabClosePermit: vi.fn(async () => 'consumed'),
+        acknowledgeMarkdownTabClose: vi.fn(
+          async (binding: { sequence: number }) => binding.sequence + 1
+        ),
+        getRendererSessionView: vi.fn(async () => null),
+        commitRendererSessionView: vi.fn(async () => false),
         onExternalLogout: vi.fn(() => vi.fn()),
         ...overrides,
       },
@@ -362,6 +402,14 @@ describe('App Markdown close recovery', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close recovery.md' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Discard and Close' }))
     await waitFor(() => expect(authCalls.authorizeMarkdownTabClose).toHaveBeenCalledOnce())
+
+    const editor = await screen.findByRole('textbox', {
+      name: 'Edit Markdown source for recovery.md',
+    })
+    await waitFor(() => expect(editor.closest('[inert]')).not.toBeNull())
+    expect(screen.getByRole('status').textContent).toContain('Editing is paused')
+    fireEvent.change(editor, { target: { value: 'keystroke during close permit' } })
+    expect(owner.get(binding)?.draft).toBe('unsaved exact draft')
 
     const notice = {
       transitionId: 99,
