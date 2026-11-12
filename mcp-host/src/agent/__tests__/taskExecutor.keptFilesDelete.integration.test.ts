@@ -18,6 +18,7 @@ import {
   type Attachment,
   type ChatMessage,
   FinishReason,
+  type PendingApproval,
   type ToolCall,
   type ToolDefinition,
 } from '../../core/types'
@@ -29,12 +30,17 @@ import {
 } from '../../internalTools/keptFiles'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
+import {
+  KEPT_FILES_DELETE_APPROVAL_TOOL,
+  projectApprovalInputPreview,
+} from '../../progress/approvalInputPreview'
 import { MessageQueue } from '../../queue'
 import type { Task } from '../../queue/types'
 import { CALLER_OUTPUTS_DIR } from '../../workspace/callerOutputs'
 import { resolveCallerRootBinding } from '../../workspace/callerRootBinding'
 import { ScopedWorkspaceProvider } from '../../workspace/scopedWorkspace'
 import { CronScheduler } from '../cronScheduler'
+import { AgentStateMachine } from '../stateMachine'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 
 // statfs reports the volume sized to its free space, so the disk's occupancy
@@ -53,6 +59,8 @@ const HOUR = 3_600_000
 const KEPT_NAME = 'kept-report.md'
 const KEPT_BYTES = 321
 const KEPT_ID = 'a1b2c3d4e5f6'
+// The kept file's time, an hour before the run: its record and its listing say it.
+const KEPT_CREATED_AT = new Date(Date.now() - HOUR)
 
 const savedConfig = {
   enableApproval: appConfig.enableApproval,
@@ -100,7 +108,7 @@ interface Options {
 function keptGenerated(callerRoot: string): { id: string; file: string; record: string } {
   const outputs = join(callerRoot, CALLER_OUTPUTS_DIR)
   fs.mkdirSync(outputs, { recursive: true, mode: 0o700 })
-  const at = new Date(Date.now() - HOUR)
+  const at = KEPT_CREATED_AT
   const file = join(outputs, KEPT_NAME)
   fs.writeFileSync(file, Buffer.alloc(KEPT_BYTES, 0x61))
   fs.utimesSync(file, at, at)
@@ -119,7 +127,17 @@ function keptGenerated(callerRoot: string): { id: string; file: string; record: 
 const deleteCall: ToolCall = {
   id: 'delete-kept-file',
   name: DELETE,
-  arguments: { files: [{ kind: 'generated', id: KEPT_ID, name: KEPT_NAME }] },
+  arguments: {
+    files: [
+      {
+        kind: 'generated',
+        id: KEPT_ID,
+        name: KEPT_NAME,
+        createdAt: KEPT_CREATED_AT.toISOString(),
+        sizeBytes: KEPT_BYTES,
+      },
+    ],
+  },
 }
 
 const transformCall: ToolCall = {
@@ -399,3 +417,55 @@ function fileAttachment(): Attachment {
     sizeBytes: data.byteLength,
   }
 }
+
+describe('the delete card shows the file the call deletes', () => {
+  it('carries the listed size and date into the approval, the card and the channel text', async () => {
+    const s = await scenario({ calls: [deleteCall, null] })
+    await s.executor.run()
+    const approval = s.executor.pendingApproval!
+    expect(approval.parameters).toMatchObject(deleteCall.arguments)
+    const shown = `created ${KEPT_CREATED_AT.toISOString().slice(0, 19).replace('T', ' ')} UTC`
+    const line = `generated: "${KEPT_NAME}" — ${KEPT_BYTES} B (${KEPT_BYTES} bytes), ${shown}`
+    const desktop = projectApprovalInputPreview(
+      KEPT_FILES_DELETE_APPROVAL_TOOL,
+      approval.parameters,
+      text => text
+    )!
+    expect(desktop.text.split('\n')).toContain(line)
+    const channel = (
+      AgentStateMachine.prototype as unknown as {
+        buildApprovalNotification(a: PendingApproval, u: string, c?: string): string
+      }
+    ).buildApprovalNotification.call(
+      {
+        approvalConfig: { defaultPolicy: 'channel_users', channels: {}, tools: {} },
+        secretEntriesProvider: () => [],
+      },
+      approval,
+      'kept-files-caller',
+      'slack'
+    )
+    expect(channel.split('\n')).toContain(line)
+    expect(fs.existsSync(s.kept.file)).toBe(true)
+    await s.executor.resumeAfterApproval(false)
+    expect(s.onFail).not.toHaveBeenCalled()
+    expect(fs.existsSync(s.kept.file)).toBe(false)
+  })
+
+  it('deletes nothing for a call that names the file by kind, id and name only', async () => {
+    const oldShape: ToolCall = {
+      id: 'delete-old-shape',
+      name: DELETE,
+      arguments: { files: [{ kind: 'generated', id: KEPT_ID, name: KEPT_NAME }] },
+    }
+    const s = await scenario({ calls: [oldShape, null] })
+    await s.executor.run()
+    // Recorded: the card is asked first; the argument check refuses after approval.
+    expect(s.executor.pendingApproval).toMatchObject({ tool_name: DELETE })
+    await s.executor.resumeAfterApproval(false)
+    expect(s.onFail).not.toHaveBeenCalled()
+    // The registry's schema check refuses the call before the tool runs.
+    expect(toolResult(s, oldShape.id)).toContain('Invalid arguments')
+    expect(fs.existsSync(s.kept.file)).toBe(true)
+  })
+})

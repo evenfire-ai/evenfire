@@ -832,6 +832,7 @@ export function buildKeepOffer(
     id: string
     name: string
     sizeBytes: number
+    createdAt: string
     ageHours: number
   }>
 } {
@@ -842,6 +843,7 @@ export function buildKeepOffer(
       id: entry.id!,
       name: entry.name,
       sizeBytes: entry.sizeBytes,
+      createdAt: entry.createdAt,
       ageHours: Math.max(0, Math.floor((now - Date.parse(entry.createdAt)) / 3_600_000)),
     }))
   return { neededBytes, deletable }
@@ -852,6 +854,10 @@ export interface KeptFileToDelete {
   kind: 'generated' | 'upload'
   id: string
   name: string
+  /** The listing's `createdAt`; the approval card shows it. */
+  createdAt: string
+  /** The listing's `sizeBytes`; the approval card shows it. */
+  sizeBytes: number
 }
 
 export type KeptFileDeletion =
@@ -862,10 +868,25 @@ export type KeptFileDeletion =
       freedBytes: number
     }
 
+type KeptEntry = ReturnType<typeof listKeptFiles>[number]
+
+/** Whether `entry` is what a delete would remove now: recorded, and not newer than its record. */
+function deletableNow(entry: KeptEntry): boolean {
+  const location = entry.location
+  if (!location?.record || !location.recordIdentity) return false
+  return !(
+    entry.kind === 'generated' &&
+    Math.floor(location.fileIdentity.mtimeMs) > Date.parse(entry.createdAt)
+  )
+}
+
 /**
- * Deletes the caller's own recorded files named by kind, id and name, from
+ * Deletes the caller's own recorded files named by kind, id, name, creation
+ * date and size, from
  * the uncut list, so a file the listing tool's first entries do not show can
- * still be deleted. Every name must equal its entry's, or nothing is deleted.
+ * still be deleted. Every name must equal its entry's, and the creation date
+ * and size of every file the call would delete must equal the listed ones (the
+ * approval card showed them), or nothing is deleted.
  * Each removal is one synchronous block that removes only the file listed
  * (same dev and inode), file then record. A file with no record, a file that
  * expired or was regenerated since the listing, and another caller's id are
@@ -883,26 +904,27 @@ export function deleteKeptFiles(
     )
   for (const file of requested) {
     const entry = find(file)
-    if (entry && entry.name !== file.name) return { status: 'mismatch' }
+    if (!entry) continue
+    if (entry.name !== file.name) return { status: 'mismatch' }
+    if (deletableNow(entry) && entry.createdAt !== file.createdAt) return { status: 'mismatch' }
+    if (deletableNow(entry) && entry.sizeBytes !== file.sizeBytes) return { status: 'mismatch' }
   }
   let freedBytes = 0
   const files = requested.map(file => {
     const entry = find(file)
     const location = entry?.location
-    if (!entry || !location?.record || !location.recordIdentity) {
-      return { ...file, result: 'not_found' as const }
-    }
-    if (
-      entry.kind === 'generated' &&
-      Math.floor(location.fileIdentity.mtimeMs) > Date.parse(entry.createdAt)
-    ) {
+    if (!entry || !location || !deletableNow(entry)) {
       return { ...file, result: 'not_found' as const }
     }
     if (!unlinkIfSame(location.file, location.fileIdentity)) {
       return { ...file, result: 'not_found' as const }
     }
     freedBytes += entry.sizeBytes
-    if (unlinkIfSame(location.record, location.recordIdentity)) {
+    if (
+      location.record &&
+      location.recordIdentity &&
+      unlinkIfSame(location.record, location.recordIdentity)
+    ) {
       freedBytes += location.recordIdentity.size
     }
     return { ...file, result: 'deleted' as const }

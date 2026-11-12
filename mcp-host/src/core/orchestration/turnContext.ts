@@ -106,6 +106,8 @@ export interface KeepOffer {
     id: string
     name: string
     sizeBytes: number
+    /** ISO time as the listing gives it; the delete takes it back. */
+    createdAt: string
     ageHours: number
   }>
 }
@@ -146,7 +148,7 @@ function keepOfferLines(code: string, offer: KeepOffer): string[] {
   for (const file of offer.deletable) {
     if (covered >= offer.neededBytes || shown === OFFER_MAX_FILES) break
     lines.push(
-      `deletable_file: kind=${file.kind} id=${file.id} name=${quotePromptValue(file.name)} bytes=${file.sizeBytes} age_hours=${file.ageHours}`
+      `deletable_file: kind=${file.kind} id=${file.id} name=${quotePromptValue(file.name)} bytes=${file.sizeBytes} created_at=${file.createdAt} age_hours=${file.ageHours}`
     )
     covered += file.sizeBytes
     shown += 1

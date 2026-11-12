@@ -1,5 +1,5 @@
 // Deleting the files the Host keeps for a user, only after the user approves
-// the call on a card that names every file, and the no-room offer that
+// the call on a card that shows every file's name, size and date, and the no-room offer that
 // proposes them when a message's attachments could not be kept.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs'
@@ -115,12 +115,26 @@ function generated(
   return { id, file, record }
 }
 
+/**
+ * Deletes as the model does after a listing: each file's createdAt and
+ * sizeBytes, when a test does not give them, are the listed ones for its id
+ * (or placeholders for an id the listing does not have).
+ */
 async function del(
   root: string | undefined,
-  files: Array<{ kind: string; id: string; name: string }>,
+  files: Array<{ kind: string; id: string; name: string; createdAt?: string; sizeBytes?: number }>,
   keepRefused = false
 ) {
-  return buildKeptFilesDeleteTool(root, { keepRefused }).execute({ files }, '')
+  const listed = root ? listKeptFiles(root) : []
+  const complete = files.map(file => {
+    const entry = listed.find(item => item.id === file.id)
+    return {
+      ...file,
+      createdAt: file.createdAt ?? entry?.createdAt ?? '2026-01-01T00:00:00.000Z',
+      sizeBytes: file.sizeBytes ?? entry?.sizeBytes ?? 0,
+    }
+  })
+  return buildKeptFilesDeleteTool(root, { keepRefused }).execute({ files: complete }, '')
 }
 
 function payload(result: { success: boolean; content?: string; error?: string }) {
@@ -257,6 +271,70 @@ describe('clerum__kept_files_delete', () => {
     expect(buildKeepOffer(root, 1, Date.now()).deletable[0]!.name).toBe('f-000.md')
   })
 
+  it('deletes nothing when a creation date or a size differs from the listing', async () => {
+    const root = rootOf('user-a')
+    const first = generated(root, 'first.md', 10)
+    const second = generated(root, 'second.md', 20)
+    const listed = listKeptFiles(root)
+    const value = (id: string) => listed.find(entry => entry.id === id)!
+    const asListed = (kept: { id: string }, name: string) => ({
+      kind: 'generated',
+      id: kept.id,
+      name,
+      createdAt: value(kept.id).createdAt,
+      sizeBytes: value(kept.id).sizeBytes,
+    })
+    for (const wrong of [
+      { ...asListed(second, 'second.md'), createdAt: '2026-01-01T00:00:00.000Z' },
+      { ...asListed(second, 'second.md'), sizeBytes: 21 },
+    ]) {
+      const refused = await del(root, [asListed(first, 'first.md'), wrong])
+      expect(refused.error).toBe(
+        'kept_file_mismatch: a name, size or creation date does not match its id; nothing was deleted. Call clerum__kept_files_list and use its values'
+      )
+      expect([fs.existsSync(first.file), fs.existsSync(second.file)]).toEqual([true, true])
+    }
+    // Witness: the listed values delete both.
+    const result = payload(
+      await del(root, [asListed(first, 'first.md'), asListed(second, 'second.md')])
+    )
+    expect(result.files.map(file => file.result)).toEqual(['deleted', 'deleted'])
+  })
+
+  it('answers not found for a generated file changed in place after the listing, and deletes the other', async () => {
+    const root = rootOf('user-a')
+    const changed = generated(root, 'changed.md', 10)
+    const other = generated(root, 'other.md', 10)
+    const listed = listKeptFiles(root)
+    const values = (id: string) => {
+      const entry = listed.find(item => item.id === id)!
+      return { createdAt: entry.createdAt, sizeBytes: entry.sizeBytes }
+    }
+    // Rewritten in place: same record and id, a newer time and another size.
+    fs.writeFileSync(changed.file, 'rewritten with more bytes')
+    const result = payload(
+      await del(root, [
+        { kind: 'generated', id: changed.id, name: 'changed.md', ...values(changed.id) },
+        { kind: 'generated', id: other.id, name: 'other.md', ...values(other.id) },
+      ])
+    )
+    expect(result.files.map(file => file.result)).toEqual(['not_found', 'deleted'])
+    expect(fs.existsSync(changed.file)).toBe(true)
+  })
+
+  it('refuses a call without the creation date and size before touching any file', async () => {
+    const root = rootOf('user-a')
+    const kept = generated(root, 'a.md', 10)
+    const result = await buildKeptFilesDeleteTool(root, { keepRefused: false }).execute(
+      { files: [{ kind: 'generated', id: kept.id, name: 'a.md' }] },
+      ''
+    )
+    expect(result.error).toBe(
+      'files must be 1 to 20 entries of kind, id, name, createdAt and sizeBytes from clerum__kept_files_list'
+    )
+    expect(fs.existsSync(kept.file)).toBe(true)
+  })
+
   it('cannot delete a file with no record', async () => {
     const root = rootOf('user-a')
     fs.mkdirSync(outputsOf(root), { recursive: true, mode: 0o700 })
@@ -328,9 +406,30 @@ describe('the no-room offer', () => {
         offer: {
           neededBytes: 150,
           deletable: [
-            { kind: 'generated', id: 'aaaaaaaaaaaa', name: 'old.md', sizeBytes: 100, ageHours: 9 },
-            { kind: 'upload', id: 'bbbbbbbbbbbb', name: 'mid.pdf', sizeBytes: 100, ageHours: 5 },
-            { kind: 'generated', id: 'cccccccccccc', name: 'new.md', sizeBytes: 100, ageHours: 1 },
+            {
+              kind: 'generated',
+              id: 'aaaaaaaaaaaa',
+              name: 'old.md',
+              sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
+              ageHours: 9,
+            },
+            {
+              kind: 'upload',
+              id: 'bbbbbbbbbbbb',
+              name: 'mid.pdf',
+              sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
+              ageHours: 5,
+            },
+            {
+              kind: 'generated',
+              id: 'cccccccccccc',
+              name: 'new.md',
+              sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
+              ageHours: 1,
+            },
           ],
         },
       },
@@ -339,7 +438,7 @@ describe('the no-room offer', () => {
       'attachments_not_kept: code=host_quota_exceeded needed_bytes=150 your_deletable_bytes=300'
     )
     expect(block).toContain(
-      'deletable_file: kind=generated id=aaaaaaaaaaaa name="old.md" bytes=100 age_hours=9'
+      'deletable_file: kind=generated id=aaaaaaaaaaaa name="old.md" bytes=100 created_at=2026-10-31T00:00:00.000Z age_hours=9'
     )
     expect(block).toContain('deletable_file: kind=upload id=bbbbbbbbbbbb')
     expect(block).not.toContain('cccccccccccc')
@@ -358,7 +457,14 @@ describe('the no-room offer', () => {
         offer: {
           neededBytes: 500,
           deletable: [
-            { kind: 'generated', id: 'aaaaaaaaaaaa', name: 'old.md', sizeBytes: 100, ageHours: 9 },
+            {
+              kind: 'generated',
+              id: 'aaaaaaaaaaaa',
+              name: 'old.md',
+              sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
+              ageHours: 9,
+            },
           ],
         },
       },
@@ -382,6 +488,7 @@ describe('the no-room offer', () => {
             id: String(n).padStart(12, 'a'),
             name: `f${n}.md`,
             sizeBytes: 100,
+            createdAt: '2026-10-31T00:00:00.000Z',
             ageHours: 20 - n,
           })),
         },
@@ -407,6 +514,7 @@ describe('the no-room offer', () => {
               id: String(n).padStart(12, 'b'),
               name: `g${n}.md`,
               sizeBytes: 100,
+              createdAt: '2026-10-31T00:00:00.000Z',
               ageHours: 30 - n,
             })),
           },
@@ -532,19 +640,24 @@ describe('registration and approval of the delete', () => {
 describe('the delete approval names every file', () => {
   const SECRET = 'synthetic-delete-name-secret'
   const redact = (text: string) => text.split(SECRET).join('[REDACTED:P]')
+  type CardFile = { kind: string; name: string; createdAt?: string; sizeBytes?: number }
+  const withValues = (files: CardFile[]) =>
+    files.map((file, n) => ({
+      createdAt: '2026-11-10T09:12:45.123Z',
+      sizeBytes: 1_234_567,
+      ...file,
+      id: String(n).padStart(12, '0'),
+    }))
 
-  function preview(files: Array<{ kind: string; name: string }>) {
+  function preview(files: CardFile[]) {
     return projectApprovalInputPreview(
       KEPT_FILES_DELETE_APPROVAL_TOOL,
-      { files: files.map((file, n) => ({ ...file, id: String(n).padStart(12, '0') })) },
+      { files: withValues(files) },
       redact
     )!
   }
 
-  function notification(
-    files: Array<{ kind: string; name: string }>,
-    channelType = 'slack'
-  ): string {
+  function notification(files: CardFile[], channelType = 'slack'): string {
     const proto = AgentStateMachine.prototype as unknown as {
       buildApprovalNotification(a: PendingApproval, u: string, c?: string): string
     }
@@ -556,9 +669,7 @@ describe('the delete approval names every file', () => {
       {
         request_id: 'r',
         tool_name: KEPT_FILES_DELETE_APPROVAL_TOOL,
-        parameters: {
-          files: files.map((file, n) => ({ ...file, id: String(n).padStart(12, '0') })),
-        },
+        parameters: { files: withValues(files) },
         description: 'delete',
         tool_call_id: 'c',
         context_snapshot: [],
@@ -577,7 +688,7 @@ describe('the delete approval names every file', () => {
     expect(desktop[0]).toBe('Delete these files permanently:')
     expect(desktop.filter(line => line.startsWith('generated: '))).toHaveLength(20)
     expect(desktop).toContain('Total files: 20')
-    expect(desktop).not.toContain('Names ending in … are shortened')
+    expect(desktop.join('\n')).not.toContain('…')
     const channel = notification(files).split('\n')
     expect(channel[0]).toBe('Delete these files permanently:')
     expect(channel.filter(line => line.startsWith('generated: '))).toHaveLength(20)
@@ -602,7 +713,7 @@ describe('the delete approval names every file', () => {
     expect(generic).toMatch(/^Tool `other_tool` requires approval\. Parameters: /)
   })
 
-  it('cuts long names to 80 characters with an ellipsis and says so', () => {
+  it('shows twenty long names whole, on twenty distinct lines', () => {
     const files = Array.from({ length: 20 }, (_, n) => ({
       kind: 'upload',
       name: `${'x'.repeat(250)}${String(n).padStart(5, '0')}`,
@@ -610,15 +721,77 @@ describe('the delete approval names every file', () => {
     for (const lines of [preview(files).text.split('\n'), notification(files).split('\n')]) {
       const named = lines.filter(line => line.startsWith('upload: '))
       expect(named).toHaveLength(20)
-      for (const line of named) {
-        const name = line.slice('upload: '.length)
-        expect([...name]).toHaveLength(80)
-        expect(name.endsWith('…')).toBe(true)
-      }
+      expect(new Set(named).size).toBe(20)
+      named.forEach((line, n) => expect(line).toContain(`"${files[n]!.name}"`))
+      expect(lines.join('\n')).not.toContain('…')
       expect(lines).toContain('Total files: 20')
-      expect(lines).toContain('Names ending in … are shortened')
-      expect(lines.join('\n').length).toBeLessThan(2000)
     }
+    expect(preview(files).truncated).toBe(false)
+  })
+
+  it('tells apart files with the same name by size and creation date', () => {
+    const twins = [
+      { kind: 'upload', name: 'contract.pdf', createdAt: '2026-11-01T08:00:00.000Z' },
+      { kind: 'upload', name: 'contract.pdf', createdAt: '2026-11-09T17:30:05.000Z' },
+    ]
+    const lines = preview(twins)
+      .text.split('\n')
+      .filter(line => line.startsWith('upload: '))
+    expect(lines).toEqual([
+      'upload: "contract.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-01 08:00:00 UTC',
+      'upload: "contract.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-09 17:30:05 UTC',
+    ])
+    // Two names equal for 79 characters are both shown whole.
+    const stem = 'Board minutes of the quarterly review with the finance and legal teams, draft '
+    const pair = preview([
+      { kind: 'generated', name: `${stem}v1.docx` },
+      { kind: 'generated', name: `${stem}v2.docx` },
+    ]).text
+    expect(pair).toContain(`"${stem}v1.docx"`)
+    expect(pair).toContain(`"${stem}v2.docx"`)
+    const long = 'n'.repeat(251) + '.pdf'
+    expect(preview([{ kind: 'upload', name: long }]).text).toContain(`"${long}"`)
+    // Two redacted names differ by their sizes.
+    const redacted = preview([
+      { kind: 'generated', name: `a-${SECRET}.md`, sizeBytes: 10 },
+      { kind: 'generated', name: `a-${SECRET}.md`, sizeBytes: 20 },
+    ]).text.split('\n')
+    expect(redacted[1]).not.toBe(redacted[2])
+    expect(redacted.join('\n')).not.toContain(SECRET)
+  })
+
+  it('shows control and format characters of a name as escapes, on one line', () => {
+    const name = `in\u202Evoice\u200B\nnext\u001b[31m.pdf`
+    for (const text of [
+      preview([{ kind: 'upload', name }]).text,
+      notification([{ kind: 'upload', name }]),
+    ]) {
+      const line = text.split('\n').find(entry => entry.startsWith('upload: '))!
+      expect(line).toBe(
+        'upload: "in\\u{202E}voice\\u{200B}\\u{A}next\\u{1B}[31m.pdf" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC'
+      )
+      for (const raw of ['\u202E', '\u200B', '\u001b']) expect(text).not.toContain(raw)
+    }
+  })
+
+  it('shows no id on the card', () => {
+    const files = [
+      { kind: 'generated', name: 'a.md' },
+      { kind: 'upload', name: 'b.pdf' },
+    ]
+    const ids = withValues(files).map(file => file.id)
+    const text = preview(files).text
+    // Witness: the ids are in the parameters the card is built from.
+    expect(ids).toEqual(['000000000000', '000000000001'])
+    for (const id of ids) expect(text).not.toContain(id)
+    for (const id of ids) expect(notification(files)).not.toContain(id)
+  })
+
+  it('shows invalid for a size or a date that is not one', () => {
+    const text = preview([
+      { kind: 'upload', name: 'x.pdf', createdAt: 'yesterday', sizeBytes: -1 },
+    ]).text
+    expect(text).toContain('upload: "x.pdf" — invalid, created invalid')
   })
 
   it('redacts a protected value in a name in both', () => {
@@ -628,7 +801,7 @@ describe('the delete approval names every file', () => {
     expect(notification(files)).not.toContain(SECRET)
     // Witness: a name without it is shown as written.
     expect(preview([{ kind: 'generated', name: 'report.md' }]).text).toContain(
-      'generated: report.md'
+      'generated: "report.md"'
     )
   })
 })

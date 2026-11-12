@@ -1085,14 +1085,25 @@ const GFS_FILES_STEPS = {
     return finish('generated', { saveId: saveIdOf(results[0]) })
   },
 
-  // Delete a generated file by the kind, id and name the listing gives.
+  // Delete a generated file by the kind, id, name, createdAt and sizeBytes
+  // the listing gives; the Host verifies the last two against the file.
   delete: (p, results) => {
     const file = requiredParam(p, 'file')
     if (results.length === 0) return callTool(GFS_FILES_TOOL.list, { nameContains: file })
     const entry = listedEntry(keptListing(results[0]), 'generated', file)
+    if (typeof entry.createdAt !== 'string' || !isByteCount(entry.sizeBytes))
+      throw filesMalformed('the listing entry to delete carries no createdAt and sizeBytes')
     if (results.length === 1)
       return callTool(GFS_FILES_TOOL.delete, {
-        files: [{ kind: entry.kind, id: entry.id, name: entry.name }],
+        files: [
+          {
+            kind: entry.kind,
+            id: entry.id,
+            name: entry.name,
+            createdAt: entry.createdAt,
+            sizeBytes: entry.sizeBytes,
+          },
+        ],
       })
     const parsed = gfsFilesJson(results[1])
     if (parsed.error !== undefined) return finish('failed', { error: parsed.error })

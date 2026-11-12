@@ -1649,8 +1649,8 @@ export const ATTACH_AGAIN_SENTENCE =
 
 /**
  * `clerum__kept_files_delete`: deletes files the Host keeps for this user,
- * named by kind, id and name from the listing, after the user approves the
- * call. It cannot name a GFS file, a download copy, a workspace file, a file
+ * named by kind, id, name, creation date and size from the listing, after the
+ * user approves the call on a card that shows the name, size and date. It cannot name a GFS file, a download copy, a workspace file, a file
  * with no record or another user's file: it has no path and no GFS client.
  */
 export function buildKeptFilesDeleteTool(
@@ -1660,8 +1660,8 @@ export function buildKeptFilesDeleteTool(
   return {
     name: KEPT_FILES_DELETE_TOOL,
     description:
-      'Delete files this Host keeps for this user, to make room. Name each file by kind, id and name exactly as clerum__kept_files_list gives them; only files with an id can be deleted. ' +
-      'Call it only with the files the user agreed to delete; the user approves the call itself on an approval card that lists every name. Deleted files cannot be recovered.',
+      'Delete files this Host keeps for this user, to make room. Name each file by kind, id, name, createdAt and sizeBytes exactly as clerum__kept_files_list gives them; only files with an id can be deleted. ' +
+      'Call it only with the files the user agreed to delete; the user approves the call itself on an approval card that shows each file name, size and creation date. Deleted files cannot be recovered.',
     requiresApproval: true,
     parameters: {
       type: 'object',
@@ -1673,11 +1673,17 @@ export function buildKeptFilesDeleteTool(
           maxItems: 20,
           items: {
             type: 'object',
-            required: ['kind', 'id', 'name'],
+            required: ['kind', 'id', 'name', 'createdAt', 'sizeBytes'],
             properties: {
               kind: { type: 'string', enum: ['generated', 'upload'] },
               id: { type: 'string', pattern: '^[0-9a-f]{12}$' },
               name: { type: 'string', minLength: 1, maxLength: 255 },
+              createdAt: { type: 'string', description: 'As clerum__kept_files_list gives it.' },
+              sizeBytes: {
+                type: 'integer',
+                minimum: 0,
+                description: 'As clerum__kept_files_list gives it.',
+              },
             },
           },
         },
@@ -1697,11 +1703,14 @@ export function buildKeptFilesDeleteTool(
               (file as KeptFileToDelete).kind === 'upload') &&
             typeof (file as KeptFileToDelete).id === 'string' &&
             /^[0-9a-f]{12}$/.test((file as KeptFileToDelete).id) &&
-            typeof (file as KeptFileToDelete).name === 'string'
+            typeof (file as KeptFileToDelete).name === 'string' &&
+            typeof (file as KeptFileToDelete).createdAt === 'string' &&
+            Number.isSafeInteger((file as KeptFileToDelete).sizeBytes) &&
+            (file as KeptFileToDelete).sizeBytes >= 0
         )
       ) {
         return invalidArgs(
-          'files must be 1 to 20 entries of kind, id and name from clerum__kept_files_list'
+          'files must be 1 to 20 entries of kind, id, name, createdAt and sizeBytes from clerum__kept_files_list'
         )
       }
       if (!callerRoot) return { success: false, error: KEPT_FILES_UNAVAILABLE }
@@ -1718,7 +1727,7 @@ export function buildKeptFilesDeleteTool(
         return {
           success: false,
           error:
-            'kept_file_mismatch: a name does not match its id; nothing was deleted. Call clerum__kept_files_list and use its names and ids',
+            'kept_file_mismatch: a name, size or creation date does not match its id; nothing was deleted. Call clerum__kept_files_list and use its values',
         }
       }
       return ok({

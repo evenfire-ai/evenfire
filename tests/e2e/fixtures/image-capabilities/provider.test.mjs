@@ -2094,7 +2094,7 @@ test('listing: reports count, order and names, with and without a part of the na
   assert.equal(filesAnswers(h)[2].outcome.spilled, true)
 })
 
-test('delete: names the file by the kind, id and name the listing gave', async () => {
+test('delete: names the file by the kind, id, name, createdAt and sizeBytes the listing gave', async () => {
   const h = harness()
   const listing = [
     {
@@ -2102,6 +2102,7 @@ test('delete: names the file by the kind, id and name the listing gave', async (
       name: 'gone-1a.md',
       id: 'cccccccccccc',
       createdAt: '2026-11-12T00:00:00Z',
+      sizeBytes: 321,
     },
   ]
   const run = await runFilesStep(
@@ -2114,7 +2115,17 @@ test('delete: names the file by the kind, id and name the listing gave', async (
     { tool: 'clerum__kept_files_list', args: { nameContains: 'gone-1a.md' } },
     {
       tool: 'clerum__kept_files_delete',
-      args: { files: [{ kind: 'generated', id: 'cccccccccccc', name: 'gone-1a.md' }] },
+      args: {
+        files: [
+          {
+            kind: 'generated',
+            id: 'cccccccccccc',
+            name: 'gone-1a.md',
+            createdAt: '2026-11-12T00:00:00Z',
+            sizeBytes: 321,
+          },
+        ],
+      },
     },
   ])
 })
