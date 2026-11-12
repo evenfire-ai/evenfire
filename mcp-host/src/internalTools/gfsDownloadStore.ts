@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { logger } from '../logger'
 import type { GfsImageSource } from '../visualInput/policy'
+import { CALLER_OUTPUTS_DIR } from '../workspace/callerOutputs'
 import {
   GFS_DOWNLOADS_TRASH_PREFIX,
   RETIRED_GFS_DOWNLOAD_STORE_PREFIX,
@@ -19,6 +20,7 @@ import {
   openPrivateStoreObject,
   verifyPrivateStoreDirectory,
 } from './gfsStorePrivateFiles'
+import { SAVE_LEDGER_DIR } from './keptFiles'
 
 const GFS_DOWNLOAD_STORE_LOG_COMPONENT = 'GfsDownloadStore'
 
@@ -88,8 +90,19 @@ export type GfsDownloadStoreErrorCode =
   | 'workspace_unavailable'
 
 export class GfsDownloadStoreError extends Error {
-  constructor(readonly code: GfsDownloadStoreErrorCode) {
+  /**
+   * For a refused keep (reserveKept) only: the bytes short, the largest
+   * shortfall of the failed checks. Absent on every other refusal.
+   */
+  declare readonly neededBytes?: number
+
+  constructor(
+    readonly code: GfsDownloadStoreErrorCode,
+    neededBytes?: number
+  ) {
     super(`GFS download store failed (${code})`)
+    if (neededBytes !== undefined)
+      Object.defineProperty(this, 'neededBytes', { value: neededBytes, enumerable: true })
     this.name = 'GfsDownloadStoreError'
   }
 }
@@ -600,6 +613,19 @@ export class GfsDownloadStore {
   private readonly active = new Map<string, ActiveTransfer>()
   /** Duplicates the last sweep could not remove, by directory; see sweep(). */
   private held = new Map<string, HeldCopy>()
+  /**
+   * Bytes of every regular file left in each caller's kept folder
+   * (`users/<key>/.clerum-outputs`, its top level and `.save-ledger/`), by
+   * caller key, recounted from disk by every sweep. They count in the budget;
+   * they are never evicted.
+   */
+  private kept = new Map<string, number>()
+  /** Keeps admitted by reserveKept whose files are being written. */
+  private readonly keptReservations = new Map<
+    number,
+    { callerIdentity: string; sizeBytes: number }
+  >()
+  private nextKeptReservation = 0
   private readonly activeByCaller = new Map<string, number>()
   /** Keyed by `pinKey(callerIdentity, ownerId)`: callers never share or see a pin. */
   private readonly pins = new Map<string, Set<string>>()
@@ -1413,7 +1439,155 @@ export class GfsDownloadStore {
     for (const transfer of this.active.values()) counted.add(transfer.directory)
     for (const directory of held.keys()) if (counted.has(directory)) held.delete(directory)
     this.held = held
+    await this.sweepKept()
     return totals
+  }
+
+  /**
+   * Recounts the kept folder of every caller: `users/<key>/.clerum-outputs`,
+   * its top level (generated files) and `.save-ledger/` (their records). No
+   * other folder of the caller root is read. A folder that is not a real
+   * directory is not entered; a missing one is silent; any other failure is
+   * reported and the sweep goes on, the caller keeping its previous count.
+   */
+  private async sweepKept(): Promise<void> {
+    const counted = new Map<string, number>()
+    const usersRoot = path.join(this.hostRoot, USERS_DIRECTORY)
+    let users: import('node:fs').Dirent[]
+    try {
+      if (!(await fs.lstat(usersRoot)).isDirectory()) {
+        this.kept = counted
+        return
+      }
+      users = await fs.readdir(usersRoot, { withFileTypes: true })
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') this.reportKeptSweepFailure(error)
+      this.kept = counted
+      return
+    }
+    for (const user of users) {
+      if (!user.isDirectory()) continue
+      const outputs = path.join(usersRoot, user.name, CALLER_OUTPUTS_DIR)
+      let bytes = 0
+      try {
+        for (const place of [outputs, path.join(outputs, SAVE_LEDGER_DIR)])
+          bytes += await this.sweepKeptPlace(place)
+      } catch (error) {
+        this.reportKeptSweepFailure(error)
+        bytes = Math.max(bytes, this.kept.get(user.name) ?? 0)
+      }
+      if (bytes > 0) counted.set(user.name, bytes)
+    }
+    this.kept = counted
+  }
+
+  /** Bytes of the regular files directly in `place`; 0 for a missing or linked folder. */
+  private async sweepKeptPlace(place: string): Promise<number> {
+    let info: import('node:fs').Stats
+    try {
+      info = await fs.lstat(place)
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') return 0
+      throw error
+    }
+    if (!info.isDirectory()) return 0
+    let bytes = 0
+    for (const entry of await fs.readdir(place, { withFileTypes: true })) {
+      if (!entry.isFile()) continue
+      try {
+        const file = await fs.lstat(path.join(place, entry.name))
+        if (file.isFile()) bytes += file.size
+      } catch (error) {
+        if (errorCode(error) !== 'ENOENT') throw error
+      }
+    }
+    return bytes
+  }
+
+  private reportKeptSweepFailure(error: unknown): void {
+    recordGfsDownloadExpiry('sweep_failed')
+    logger.warn(
+      { component: GFS_DOWNLOAD_STORE_LOG_COMPONENT, code: errorCode(error) },
+      'GFS download store could not read a kept-files folder; the next sweep retries it'
+    )
+  }
+
+  /** Kept bytes on disk plus live keep reservations, of one caller or of every caller. */
+  private keptUsage(callerIdentity?: string): bigint {
+    let bytes = 0n
+    for (const [caller, size] of this.kept)
+      if (callerIdentity === undefined || caller === callerIdentity) bytes += BigInt(size)
+    for (const reservation of this.keptReservations.values())
+      if (callerIdentity === undefined || reservation.callerIdentity === callerIdentity)
+        bytes += BigInt(reservation.sizeBytes)
+    return bytes
+  }
+
+  /**
+   * Admits a keep of `sizeBytes` for one caller, with the steps of a download
+   * admission: a sweep, one statfs, an eviction plan; `disk_full` when the
+   * free-space need cannot be covered; the keep bounds (the caller's kept
+   * bytes at most half the budget, every caller's at most three quarters,
+   * generated files and records included) and the budget refuse with
+   * `host_quota_exceeded`. Download copies are evicted for it; kept files
+   * never are. A refusal carries `neededBytes`. On success the bytes stay
+   * reserved until the returned release is called: the caller writes its
+   * files outside the store's section and then releases, and the next sweep
+   * counts them from disk. No directory or file is created here.
+   */
+  async reserveKept(input: { callerIdentity: string; sizeBytes: number }): Promise<() => void> {
+    if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 0)
+      throw new RangeError('A kept size must be a non-negative safe integer')
+    if (typeof input.callerIdentity !== 'string' || input.callerIdentity.length === 0)
+      throw new GfsDownloadStoreError('caller_mismatch')
+    return this.serialize(async () => {
+      this.assertAdmitting()
+      await this.sweep(Date.now())
+      const volume = await this.measureVolume()
+      const budget = retainedBudget(volume)
+      const size = BigInt(input.sizeBytes)
+      const plan = this.planEviction(volume, input.sizeBytes)
+      if (!plan.physicalCovered) {
+        let freeable = 0n
+        for (const id of plan.ids)
+          freeable += blockBytes(volume, this.entries.get(id)?.sizeBytes ?? 0)
+        recordGfsDownloadQuota('host', 'free_space')
+        throw new GfsDownloadStoreError(
+          'disk_full',
+          Number(this.physicalDeficit(volume, input.sizeBytes) - freeable)
+        )
+      }
+      const callerShort = this.keptUsage(input.callerIdentity) + size - budget / 2n
+      const hostShort = this.keptUsage() + size - (budget * 3n) / 4n
+      if (callerShort > 0n || hostShort > 0n) {
+        recordGfsDownloadQuota(callerShort > 0n ? 'caller' : 'host', 'storage_bytes')
+        throw new GfsDownloadStoreError(
+          'host_quota_exceeded',
+          Number(callerShort > hostShort ? callerShort : hostShort)
+        )
+      }
+      if (plan.budgetCovered) await this.evict(plan.ids)
+      if (this.overBudget(input.sizeBytes, budget)) {
+        recordGfsDownloadQuota('host', 'storage_bytes')
+        throw new GfsDownloadStoreError(
+          'host_quota_exceeded',
+          Number(this.usageBytes() + size - budget)
+        )
+      }
+      const deficit = this.physicalDeficit(await this.measureVolume(), input.sizeBytes)
+      if (deficit > 0n) {
+        recordGfsDownloadQuota('host', 'free_space')
+        throw new GfsDownloadStoreError('disk_full', Number(deficit))
+      }
+      const key = this.nextKeptReservation++
+      this.keptReservations.set(key, {
+        callerIdentity: input.callerIdentity,
+        sizeBytes: input.sizeBytes,
+      })
+      return () => {
+        this.keptReservations.delete(key)
+      }
+    })
   }
 
   /**
@@ -1844,6 +2018,10 @@ export class GfsDownloadStore {
     // Use the full outstanding reservation of every active transfer rather
     // than crediting sparse, shared or concurrently written allocation.
     for (const transfer of this.active.values()) required += blockBytes(space, transfer.sizeBytes)
+    // A keep's files are not on disk yet; kept files already written are
+    // already missing from the free space statfs reports.
+    for (const reservation of this.keptReservations.values())
+      required += blockBytes(space, reservation.sizeBytes)
     const available = space.bavail * space.bsize
     return required > available ? required - available : 0n
   }
@@ -1921,14 +2099,14 @@ export class GfsDownloadStore {
     }
   }
 
-  /** Retained bytes: indexed copies, active reservations and held duplicates. */
+  /** Retained bytes: indexed copies, active reservations, held duplicates and kept files with their reservations. */
   private usageBytes(excluded: ReadonlySet<string> = new Set()): bigint {
     let bytes = 0n
     for (const entry of this.entries.values())
       if (!excluded.has(entry.id)) bytes += BigInt(entry.sizeBytes)
     for (const transfer of this.active.values()) bytes += BigInt(transfer.sizeBytes)
     for (const copy of this.held.values()) bytes += BigInt(copy.sizeBytes)
-    return bytes
+    return bytes + this.keptUsage()
   }
 
   /** The only retained-storage limit: Host bytes against the volume budget. */
