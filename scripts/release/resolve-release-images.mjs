@@ -30,14 +30,16 @@
 // evaluateCandidate() checks each one. Every outcome of that check is one of
 // two kinds, and a bare `catch` cannot tell them apart:
 //   - Reject the candidate, and try the next one. The tag does not exist
-//     (crane says MANIFEST_UNKNOWN), carries no revision annotation, was built
-//     from a commit that is not an ancestor of the release commit, or its
-//     source changed since. When every candidate is rejected the image is
+//     (crane says MANIFEST_UNKNOWN), carries no revision annotation, is a
+//     sha-<c7> tag built from a commit other than the one its tag names, was
+//     built from a commit that is not an ancestor of the release commit, or
+//     its source changed since. When every candidate is rejected the image is
 //     refused, with each candidate's reason and the remedy.
 //   - Fail the image (ImageFailure), with no further candidates. Any other
 //     registry error (auth, rate limit, unknown repository, network, an
-//     unparsable manifest), a revision this checkout does not have, or a git
-//     error. None of these says anything about the candidate itself, so
+//     unparsable manifest), a revision this checkout does not have (once the
+//     exact-revision check of a sha- tag has passed), a first-parent walk over
+//     the bound, or a git error. None of these says anything about the candidate itself, so
 //     falling through would let a transient error promote an older image.
 //     The candidates rejected before the error are listed with it.
 // Candidates are generated lazily, so a release whose first candidate passes

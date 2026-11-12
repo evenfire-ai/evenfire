@@ -839,8 +839,7 @@ assert_a_sha_candidate_with_a_different_revision_is_rejected() {
   local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
   git -C "$d" tag v0.1.0 "$C0"
   stub_image "$d" widget latest sha256:lat "$D3"
-  # The tag names H1 but the image says M1 (an ancestor with the same widget
-  # source it would otherwise pass for? no: M1 differs from T in widget/**).
+  # The tag names H1 but the image says M1.
   stub_image "$d" widget "sha-${H1:0:7}" sha256:odd "$M1"
   local rc=0; resolve_in "$d" widget 'widget/**' "$T" || rc=$?
   if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && grep -qF "expected $H1" "$d/stderr" \
@@ -870,23 +869,98 @@ assert_second_parent_commits_are_never_queried() {
   rm -rf "$d"
 }
 
-assert_a_walk_longer_than_the_bound_fails_the_image() {
+# walk_of <d> <n>: adds empty commits to main so v0.1.0..HEAD has exactly <n>
+# first-parent commits (T, H1 and M1 already make three), and prints the tip.
+walk_of() {
+  local i
+  for i in $(seq 1 $(( $2 - 3 ))); do
+    _release_stub_git "$1" commit -q --allow-empty -m "extra $i" || return 1
+  done
+  git -C "$1" rev-parse HEAD
+}
+
+assert_a_walk_of_exactly_the_bound_is_probed_and_one_more_fails_the_image() {
+  local n d tip rc
+  for n in 50 51; do
+    d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+    # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+    local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+    git -C "$d" tag v0.1.0 "$C0"
+    stub_image "$d" widget latest sha256:lat "$D3"
+    tip="$(walk_of "$d" "$n")" || return 1
+    rc=0; resolve_in "$d" widget 'widget/**' "$tip" || rc=$?
+    if [ "$n" -eq 50 ]; then
+      # At the bound: no bound failure, and every commit's sha- tag is probed.
+      if [ "$rc" -eq 1 ] && ! grep -qF "more than 50" "$d/stderr" \
+          && grep -q "no release candidate passed" "$d/stderr" \
+          && [ "$(grep -c ':sha-' "$d/crane-calls")" -eq 50 ]; then
+        pass "a walk of exactly 50 first-parent commits is probed, not refused for its length"
+      else
+        fail "expected 50 sha- probes and a normal refusal; got $(run_summary "$d" "$rc")"
+      fi
+    else
+      if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && grep -qF "more than 50" "$d/stderr" \
+          && ! grep -q "no release candidate passed" "$d/stderr" \
+          && ! grep -q ':sha-' "$d/crane-calls"; then
+        pass "a walk of 51 first-parent commits fails the image before any sha- tag is probed"
+      else
+        fail "expected 'more than 50' and no sha- probe; got $(run_summary "$d" "$rc")"
+      fi
+    fi
+    rm -rf "$d"
+  done
+}
+
+assert_the_sha_candidates_are_tried_before_the_previous_release() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  # Both the hotfix image and the previous release's image pass for `other`,
+  # so only the order decides.
+  with_passing_previous_release "$d"
+  stub_image "$d" other latest sha256:lat "$D3"
+  stub_image "$d" other "sha-${H1:0:7}" sha256:hot "$H1"
+  local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+  if [ "$rc" -eq 0 ] && cmp -s "$d/stdout" <(printf 'sha256:hot\tsha-%s\n' "${H1:0:7}"); then
+    pass "a passing sha- candidate is chosen before a passing previous release"
+  else
+    fail "expected 'sha256:hot<TAB>sha-${H1:0:7}'; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_mislabelled_sha_tag_that_would_otherwise_pass_does_not_win() {
   local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
   # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
   local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
   git -C "$d" tag v0.1.0 "$C0"
   stub_image "$d" widget latest sha256:lat "$D3"
-  local i
-  for i in $(seq 1 51); do
-    _release_stub_git "$d" commit -q --allow-empty -m "extra $i" || return 1
-  done
-  local tip; tip="$(git -C "$d" rev-parse HEAD)"
-  local rc=0; resolve_in "$d" widget 'widget/**' "$tip" || rc=$?
-  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && grep -qF "more than 50" "$d/stderr" \
-      && ! grep -q "no release candidate passed" "$d/stderr"; then
-    pass "a first-parent walk longer than the bound fails the image"
+  # :sha-T records H1: an ancestor of T with widget/** unchanged H1..T, so it
+  # would pass if the tag were taken at its word. Only the exact check stops it.
+  stub_image "$d" widget "sha-${T:0:7}" sha256:wrong "$H1"
+  stub_image "$d" widget "sha-${H1:0:7}" sha256:hot "$H1"
+  local rc=0; resolve_in "$d" widget 'widget/**' "$T" || rc=$?
+  if [ "$rc" -eq 0 ] && cmp -s "$d/stdout" <(printf 'sha256:hot\tsha-%s\n' "${H1:0:7}"); then
+    pass "a sha- tag recording another commit does not win even when that commit would pass"
   else
-    fail "expected a failure containing 'more than 50'; got $(run_summary "$d" "$rc")"
+    fail "expected sha-${H1:0:7} to win; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_git_rev_list_error_fails_the_image() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  with_passing_previous_release "$d"
+  stub_image "$d" other latest sha256:lat "$D3"
+  git_shim_fail_on "$d" 128 'rev-list *'
+  local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && error_line "$d" | grep -q 'rev-list.*exit 128' \
+      && ! grep -q "no release candidate passed" "$d/stderr" && only_latest_was_queried "$d"; then
+    pass "a git rev-list error fails the image instead of being a refusal"
+  else
+    fail "expected a 'rev-list ... exit 128' failure and no refusal; got $(run_summary "$d" "$rc")"
   fi
   rm -rf "$d"
 }
@@ -981,7 +1055,10 @@ assert_a_main_built_hotfix_image_wins_over_the_previous_release
 assert_the_newest_passing_sha_candidate_wins
 assert_a_sha_candidate_with_a_different_revision_is_rejected
 assert_second_parent_commits_are_never_queried
-assert_a_walk_longer_than_the_bound_fails_the_image
+assert_a_walk_of_exactly_the_bound_is_probed_and_one_more_fails_the_image
+assert_the_sha_candidates_are_tried_before_the_previous_release
+assert_a_mislabelled_sha_tag_that_would_otherwise_pass_does_not_win
+assert_a_git_rev_list_error_fails_the_image
 assert_latest_passing_skips_every_other_candidate
 assert_non_latest_reasons_give_no_latest_or_dev_advice
 assert_every_defined_case_is_invoked
