@@ -116,7 +116,7 @@ describe('waitForDbConnection against a fake Postgres', () => {
   let db: Db | null = null
 
   async function loadDb(port: number): Promise<Db> {
-    vi.stubEnv('CONTROL_API_PG_CONNECTION_STRING', `postgres://u:p@127.0.0.1:${port}/profiles`)
+    vi.stubEnv('CONTROL_API_PG_CONNECTION_STRING', `postgres://u@127.0.0.1:${port}/profiles`)
     vi.stubEnv('CORE_POOL_CONNECTION_TIMEOUT_MS', '300')
     vi.resetModules()
     db = await import('../src/db.js')
