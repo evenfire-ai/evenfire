@@ -15,7 +15,8 @@ beforeAll(async () => {
       res.writeHead(parsed.reason === 'too_large' ? 413 : 400, {
         'Content-Type': 'application/json',
       })
-      res.end(JSON.stringify({ error: parsed.reason, bytesRead: parsed.bytesRead }))
+      const bytesRead = parsed.reason === 'too_large' ? parsed.bytesRead : undefined
+      res.end(JSON.stringify({ error: parsed.reason, bytesRead }))
       return
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
