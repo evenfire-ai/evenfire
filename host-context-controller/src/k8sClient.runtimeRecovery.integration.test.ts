@@ -2503,5 +2503,29 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       )
       expect(fixture.deploymentGets).toBe(getsBefore + 1)
     })
+
+    it('P2-S5 a Deployment informer DELETED for a stuck server re-observes it and recreates the Deployment', async () => {
+      const { state, emit } = await startStuckCertified()
+      const reconciled = recordReconciledNames(state)
+      const info = vi.spyOn(hccLogger, 'info')
+      const writesBefore = fixture.writes.length
+
+      emit('DELETED', witness)
+      fixture.deployments.delete(witness)
+      await drain(state)
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          event: 'mcpserver-verdict-reobservation',
+          name: witness,
+          trigger: 'deployment-change',
+        })
+      )
+      expect(reconciled).toEqual([witness])
+      expect(
+        fixture.writes.slice(writesBefore).filter(write => write === `Deployment/${witness}`)
+      ).toHaveLength(1)
+    })
   })
 })
