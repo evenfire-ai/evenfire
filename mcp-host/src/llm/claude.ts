@@ -64,7 +64,11 @@ export class ClaudeProvider implements SingleTurnProvider {
     })
   }
 
-  /** The counter takes it from here so it counts exactly the names that are sent. */
+  /**
+   * The counter takes it from here so it counts the names that are sent. Only a
+   * name with lone surrogates differs: the counter sees it before
+   * `withWellFormedRequestText` repairs the request.
+   */
   protected toolNameEnvelope(): ToolNameEnvelopeKey {
     return 'W_c'
   }

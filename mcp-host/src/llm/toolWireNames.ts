@@ -51,7 +51,10 @@ const MAX_PREFIX_SERVER = 50
 const HEAD_BUDGET = 51
 
 // UTF-16LE keeps the hash input injective: UTF-8 would fold distinct lone
-// surrogates into U+FFFD and give two names the same base alias.
+// surrogates into U+FFFD and give two names the same base alias. Requests built
+// through `makeProvider` arrive with lone surrogates already repaired to U+FFFD
+// (`withWellFormedRequestText`), so there this only matters to direct callers
+// such as the token counters.
 function defaultHash(c: string): string {
   return createHash('sha256').update(Buffer.from(c, 'utf16le')).digest('hex').slice(0, 12)
 }
@@ -189,7 +192,7 @@ const ANNOTATION_FIELD_CODE_POINTS = 200
  * Cut to code points first, then escape: escaping first could split an escape
  * sequence or a surrogate pair at the cut. Controls become spaces instead of
  * being escaped, because `\uXXXX` would multiply their length by six.
- * `toWellFormed` is not used: the service targets ES2022.
+ * Lone surrogates become U+FFFD in the same code-point loop as the cut.
  */
 function annotationField(x: string): string {
   let out = ''
