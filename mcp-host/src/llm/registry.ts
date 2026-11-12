@@ -27,6 +27,7 @@ import { azureProfile, compatibleProfile } from './openaiFamily/endpointProfiles
 import { type ProviderEnvLookup, processEnvLookup } from './providerEnv'
 import { type LlmProvider, descriptorFor, primarySlot } from './registryCore'
 import type { SingleTurnProvider } from './types'
+import { withWellFormedRequestText } from './wellFormedRequestText'
 
 export type MakeProviderOptions = {
   codex?: CodexSubscriptionDeps
@@ -68,7 +69,7 @@ export {
  * primary slot via {@link primarySlot} (confined here — the exclusion boundary
  * uses the full slot set instead).
  */
-export function makeProvider(
+function constructProvider(
   provider: LlmProvider,
   credentials: ProviderCredentials,
   model?: string,
@@ -133,4 +134,21 @@ export function makeProvider(
     )
   }
   throw new Error(`[LLM] makeProvider: no factory registered for provider '${String(provider)}'`)
+}
+
+/**
+ * The single place that hands out LLM providers. Every provider it returns
+ * sends only well-formed text: lone UTF-16 surrogates in messages, tool
+ * definitions and system prompt parts are replaced with U+FFFD, with a `warn`
+ * log and a counter. A request whose repair would make two keys of one object
+ * equal is refused before dispatch with `LLM_REQUEST_TEXT_REJECTED` (see
+ * ./wellFormedRequestText, issue #1433).
+ */
+export function makeProvider(
+  provider: LlmProvider,
+  credentials: ProviderCredentials,
+  model?: string,
+  options?: MakeProviderOptions
+): SingleTurnProvider {
+  return withWellFormedRequestText(constructProvider(provider, credentials, model, options))
 }

@@ -23,10 +23,12 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../../core/types'
+import { logger } from '../../logger'
 import type { ProviderCredentials } from '../../types'
 import { classifyByHttpStatus, classifyUnknown } from '../errorClassification'
 import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
 import type { LlmProvider } from '../registryCore'
+import { type ToolNameEnvelopeKey, fromWireResponse, toWireRequest } from '../toolWireNames'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
 
 // ─── SDK-agnostic wire shapes (Converse API) ─────────────────────────────────
@@ -81,7 +83,7 @@ export class BedrockConverseDriver implements SingleTurnProvider {
   constructor(client: BedrockConverseClient, defaultModel: string) {
     this.client = client
     this.defaultModel = defaultModel
-    console.log(`[Bedrock] Initialized with model: ${defaultModel}`)
+    logger.info({ model: defaultModel }, 'Bedrock transport initialized')
   }
 
   getProviderType(): LlmProvider {
@@ -90,6 +92,13 @@ export class BedrockConverseDriver implements SingleTurnProvider {
 
   classifyError(err: unknown): ClassifiedError {
     return classifyBedrockError(err)
+  }
+
+  // AWS's Converse API reference caps a tool name at 64 characters whatever the
+  // model, so Claude on Bedrock does not get Anthropic's 128. The SDK's types do
+  // not encode the limit.
+  protected toolNameEnvelope(): ToolNameEnvelopeKey {
+    return 'W'
   }
 
   // ─── Single-Turn Methods ────────────────────────────────────────────────
@@ -127,11 +136,12 @@ export class BedrockConverseDriver implements SingleTurnProvider {
       signal?: AbortSignal
     }
   ): Promise<ToolCompletionResponse> {
-    const { system, converseMessages } = this.toBedrockMessages(messages)
+    const wire = toWireRequest(messages, tools, this.toolNameEnvelope())
+    const { system, converseMessages } = this.toBedrockMessages(wire.messages)
     const toolConfig =
-      tools.length > 0
+      wire.tools.length > 0
         ? {
-            tools: tools.map(t => ({
+            tools: wire.tools.map(t => ({
               toolSpec: {
                 name: t.name,
                 description: t.description,
@@ -161,12 +171,15 @@ export class BedrockConverseDriver implements SingleTurnProvider {
         arguments: (b.toolUse!.input ?? {}) as Record<string, unknown>,
       }))
 
-    return {
-      content: extractText(response),
-      tool_calls: toolCalls.length > 0 ? toolCalls : null,
-      usage: mapUsage(response),
-      finish_reason: mapStopReason(response.stopReason),
-    }
+    return fromWireResponse(
+      {
+        content: extractText(response),
+        tool_calls: toolCalls.length > 0 ? toolCalls : null,
+        usage: mapUsage(response),
+        finish_reason: mapStopReason(response.stopReason),
+      },
+      wire.names
+    )
   }
 
   // ─── Message translation ─────────────────────────────────────────────────
@@ -335,8 +348,10 @@ export function classifyBedrockError(err: unknown): ClassifiedError {
       // trigger (spec 02 §3.1). The $metadata 404 fallback below covers the
       // same case when the modeled name is absent.
       return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
+    // #1433: Bedrock's HTTP 400 for a request it refuses; the same request
+    // gets the same answer. Same label as the other providers' HTTP 400.
     case 'ValidationException':
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
+      return { code: LlmErrorCode.UpstreamRejected, retryable: false, message, ...diag }
     case 'ModelTimeoutException':
     case 'ModelNotReadyException':
     case 'ServiceUnavailableException':
