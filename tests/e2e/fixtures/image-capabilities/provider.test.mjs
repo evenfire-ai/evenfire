@@ -1543,6 +1543,9 @@ const EXPECTED_REJECTION_REASONS = [
   'document-tool-output-malformed',
   'document-tool-output-unreadable',
   'document-tool-result-count',
+  'gfs-files-step-unknown',
+  'gfs-files-tool-missing',
+  'gfs-files-tool-output-malformed',
   'image-not-png-data-uri',
   'image-part-count',
   'image-pixel-not-a-tile-color',
@@ -1689,4 +1692,451 @@ test('every rejected row records its closed-set reason and no request content', 
   assert.equal(accepted.getEvidence().attempts.length, 1)
   assert.equal(accepted.getEvidence().attempts[0].responseKind, 'text-only')
   assert.equal(Object.hasOwn(accepted.getEvidence().attempts[0], 'reason'), false)
+})
+
+// Generated and kept files: each step is driven to its answer by a fake Host
+// that runs every tool call the fixture asks for.
+const FILES_FOLDER = 'Files target 7c42'
+const FILES_FOLDER_RID = 'folder-rid-7c42'
+const FILES_TOOLS = [
+  'clerum__gfs_accessible',
+  'clerum__gfs_create_file',
+  'clerum__gfs_write',
+  'clerum__gfs_edit_text',
+  'clerum__kept_files_list',
+  'clerum__kept_files_delete',
+  'file_write',
+  ...providerModule.GFS_FILES_GENERATIONS.map(([tool]) => tool),
+]
+const SAVE_TOOLS = new Set(['clerum__gfs_create_file', 'clerum__gfs_write'])
+
+function filesUserText(step, params, context = []) {
+  const quoted = Object.entries(params)
+    .map(([key, value]) => ` ${key}="${value}"`)
+    .join('')
+  return [
+    '<turn-context>',
+    'date: 2026-11-12T00:00:00.000Z',
+    ...context,
+    '</turn-context>',
+    '',
+    `Do this. GFS_FILES step=${step}${quoted}`,
+  ].join('\n')
+}
+
+/** A Host that answers every tool the way the real one shapes its result. */
+function fakeFilesHost({ listing = [], spilled = false } = {}) {
+  let generated = 0
+  return (tool, args) => {
+    if (tool === 'clerum__gfs_accessible')
+      return accessibleToolResult({ items: [accessibleDirectory(FILES_FOLDER_RID, FILES_FOLDER)] })
+    if (tool.startsWith('clerum__generate_')) {
+      generated += 1
+      return `Generated ${args.filename}.\nSave id: ${generated.toString(16).padStart(12, '0')}`
+    }
+    if (SAVE_TOOLS.has(tool))
+      return JSON.stringify({
+        source: args.generatedFile
+          ? 'generated_file'
+          : args.uploadedFileId
+            ? 'kept_upload'
+            : 'source_path',
+        bytes: 10,
+        secretScan: { state: 'scanned' },
+        resource: { ok: true, data: { resourceId: `rid-${args.name}`, version: 2 } },
+      })
+    if (tool === 'clerum__kept_files_list') {
+      if (spilled) return JSON.stringify({ spillover_ref: 'spill-1', byte_size: 99 })
+      const files = listing.filter(
+        file =>
+          !args.nameContains || file.name.toLowerCase().includes(args.nameContains.toLowerCase())
+      )
+      return JSON.stringify({ files, truncated: false })
+    }
+    if (tool === 'clerum__gfs_edit_text')
+      return JSON.stringify({
+        version: 5,
+        bytesBefore: 100,
+        bytesAfter: 101,
+        diff: `@@ edit 0 line 50\n-${args.edits[0].oldText}\n+${args.edits[0].newText}`,
+        truncated: false,
+      })
+    if (tool === 'file_write') return '<tool_output tool="file_write">Wrote 12 bytes</tool_output>'
+    if (tool === 'clerum__kept_files_delete')
+      return JSON.stringify({
+        files: args.files.map(file => ({ ...file, result: 'deleted' })),
+        freedBytes: 10,
+      })
+    throw new Error(`the fake Host has no ${tool}`)
+  }
+}
+
+/** Runs one step to its answer; every call the fixture asks for is executed. */
+async function runFilesStep(h, userText, host, { tools = FILES_TOOLS } = {}) {
+  const messages = [{ role: 'user', content: userText }]
+  const calls = []
+  for (let round = 0; round < 250; round += 1) {
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, messages, { tools: tools.map(functionTool) })
+    )
+    const body = await response.json()
+    if (response.status !== 200) return { status: response.status, calls, body }
+    const choice = body.choices[0]
+    if (choice.finish_reason !== 'tool_calls')
+      return { status: 200, calls, answer: choice.message.content }
+    const [toolCall] = choice.message.tool_calls
+    const args = JSON.parse(toolCall.function.arguments)
+    calls.push({ tool: toolCall.function.name, args })
+    messages.push({ role: 'assistant', content: null, tool_calls: [toolCall] })
+    messages.push({
+      role: 'tool',
+      tool_call_id: toolCall.id,
+      content: host(toolCall.function.name, args),
+    })
+  }
+  throw new Error('the step did not answer within 250 rounds')
+}
+
+const filesAnswers = h =>
+  h.getEvidence().attempts.filter(row => row.responseKind === 'gfs-files-answer')
+const filesSaveArgs = h =>
+  h
+    .getEvidence()
+    .attempts.filter(row => row.responseKind === 'gfs-files-tool-requested' && row.saveArgs)
+    .map(row => row.saveArgs)
+
+test('generated files: generates the six formats and saves each by name and Save id', async () => {
+  const h = harness()
+  const run = await runFilesStep(
+    h,
+    filesUserText('generate-and-save', { drive: 'main', folder: FILES_FOLDER, name: 'report-1a' }),
+    fakeFilesHost()
+  )
+  assert.equal(run.answer, 'GFS-FILES generate-and-save saved')
+  const generations = providerModule.GFS_FILES_GENERATIONS
+  assert.deepEqual(
+    run.calls.map(item => item.tool),
+    [
+      'clerum__gfs_accessible',
+      ...generations.flatMap(([tool]) => [tool, 'clerum__gfs_create_file']),
+    ]
+  )
+  const saves = filesSaveArgs(h)
+  assert.equal(saves.length, 6)
+  saves.forEach((args, index) => {
+    const name = `report-1a.${generations[index][1]}`
+    assert.deepEqual(args, {
+      drive: 'main',
+      parentResourceId: FILES_FOLDER_RID,
+      name,
+      generatedFile: name,
+      generatedFileId: (index + 1).toString(16).padStart(12, '0'),
+    })
+  })
+  const [answer] = filesAnswers(h)
+  assert.equal(answer.verdict, 'saved')
+  assert.deepEqual(
+    answer.outcome.saves.map(save => [save.name, save.source, save.ok]),
+    generations.map(([, extension]) => [`report-1a.${extension}`, 'generated_file', true])
+  )
+})
+
+test('generated files: a generation without a Save id is refused, and nothing is saved', async () => {
+  const h = harness()
+  const host = fakeFilesHost()
+  const run = await runFilesStep(
+    h,
+    filesUserText('generate-and-save', { drive: 'main', folder: FILES_FOLDER, name: 'report-1b' }),
+    (tool, args) => (tool.startsWith('clerum__generate_') ? 'Generated.' : host(tool, args))
+  )
+  assert.equal(run.status, 400)
+  assert.deepEqual(
+    run.calls.map(item => item.tool),
+    ['clerum__gfs_accessible', 'clerum__generate_markdown']
+  )
+  assert.equal(filesSaveArgs(h).length, 0)
+  assert.equal(h.getEvidence().attempts.at(-1).reason, 'gfs-files-tool-output-malformed')
+})
+
+test('generated files: replaces the saved docx by its version with a second generation', async () => {
+  const h = harness()
+  const run = await runFilesStep(
+    h,
+    filesUserText('replace-docx', {
+      drive: 'main',
+      file: 'report-1a.docx',
+      body: 'Second version',
+      resource: 'rid-docx',
+      version: '3',
+    }),
+    fakeFilesHost()
+  )
+  assert.equal(run.answer, 'GFS-FILES replace-docx saved')
+  assert.deepEqual(run.calls[0], {
+    tool: 'clerum__generate_docx',
+    args: { filename: 'report-1a.docx', title: 'Report', body: 'Second version' },
+  })
+  assert.deepEqual(filesSaveArgs(h), [
+    {
+      drive: 'main',
+      resourceId: 'rid-docx',
+      ifMatch: 3,
+      generatedFile: 'report-1a.docx',
+      generatedFileId: '000000000001',
+    },
+  ])
+})
+
+test('kept files: lists, then saves a generated file by the id the listing gave', async () => {
+  const h = harness()
+  const listing = [
+    { kind: 'generated', name: 'other.md', id: 'aaaaaaaaaaaa', createdAt: '2026-11-12T00:00:00Z' },
+    {
+      kind: 'generated',
+      name: 'report-1a.md',
+      id: 'bbbbbbbbbbbb',
+      createdAt: '2026-11-12T00:01:00Z',
+    },
+  ]
+  const run = await runFilesStep(
+    h,
+    filesUserText('list-and-save', {
+      drive: 'main',
+      folder: FILES_FOLDER,
+      file: 'report-1a.md',
+      as: 'again-report-1a.md',
+    }),
+    fakeFilesHost({ listing })
+  )
+  assert.equal(run.answer, 'GFS-FILES list-and-save saved')
+  assert.deepEqual(filesSaveArgs(h), [
+    {
+      drive: 'main',
+      parentResourceId: FILES_FOLDER_RID,
+      name: 'again-report-1a.md',
+      generatedFile: 'report-1a.md',
+      generatedFileId: 'bbbbbbbbbbbb',
+    },
+  ])
+  assert.equal(filesAnswers(h)[0].outcome.listedId, 'bbbbbbbbbbbb')
+})
+
+test('kept attachments: an attachment turn is answered without a tool call or the image oracle', async () => {
+  const { png } = palettePng()
+  const h = harness()
+  const text = filesUserText('acknowledge', {}, [
+    'attached_file: id="file-1" name="notes.bin" class=binary bytes=4096 reader=binary',
+  ])
+  const response = await call(
+    h,
+    chatBody(
+      VISUAL_MODEL,
+      [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text },
+            {
+              type: 'image_url',
+              image_url: { url: `data:image/png;base64,${png.toString('base64')}` },
+            },
+          ],
+        },
+      ],
+      { tools: FILES_TOOLS.map(functionTool) }
+    )
+  )
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  assert.equal(body.choices[0].message.content, 'GFS-FILES acknowledge kept')
+  assert.equal(h.getEvidence().counters.imageAttempts, 0)
+  // A refused keep is reported with its code.
+  const refused = await runFilesStep(
+    h,
+    filesUserText('acknowledge', {}, ['attachments_not_kept: code=store_unavailable']),
+    fakeFilesHost()
+  )
+  assert.equal(refused.answer, 'GFS-FILES acknowledge not-kept')
+  assert.deepEqual(filesAnswers(h).at(-1).outcome, { code: 'store_unavailable' })
+})
+
+test('kept attachments: saves a file and an image of another conversation by their listed ids', async () => {
+  const h = harness()
+  const listing = [
+    { kind: 'upload', name: 'notes.bin', id: '111111111111', createdAt: '2026-11-12T00:00:00Z' },
+    { kind: 'upload', name: 'logo.png', id: '222222222222', createdAt: '2026-11-12T00:00:00Z' },
+  ]
+  const run = await runFilesStep(
+    h,
+    filesUserText('save-uploads', {
+      drive: 'main',
+      folder: FILES_FOLDER,
+      file: 'notes.bin',
+      image: 'logo.png',
+    }),
+    fakeFilesHost({ listing })
+  )
+  assert.equal(run.answer, 'GFS-FILES save-uploads saved')
+  assert.deepEqual(
+    filesSaveArgs(h).map(args => [args.name, args.uploadedFileId]),
+    [
+      ['notes.bin', '111111111111'],
+      ['logo.png', '222222222222'],
+    ]
+  )
+})
+
+test('partial edit: saves about 10 KB of Markdown, then edits it by the version given', async () => {
+  const source = providerModule.gfsFilesEditSource()
+  assert.ok(Buffer.byteLength(source) > 10_000)
+  const h = harness()
+  const prepared = await runFilesStep(
+    h,
+    filesUserText('edit-prepare', { drive: 'main', folder: FILES_FOLDER, file: 'notes-1a.md' }),
+    fakeFilesHost()
+  )
+  assert.equal(prepared.answer, 'GFS-FILES edit-prepare saved')
+  assert.equal(prepared.calls[0].args.content, source)
+  const applied = await runFilesStep(
+    h,
+    filesUserText('edit-apply', {
+      drive: 'main',
+      resource: 'rid-notes',
+      version: '2',
+      old: 'Paragraph 050 of the notes',
+      new: 'Paragraph 050, edited in place,',
+    }),
+    fakeFilesHost()
+  )
+  assert.equal(applied.answer, 'GFS-FILES edit-apply edited')
+  assert.deepEqual(applied.calls[0].args, {
+    drive: 'main',
+    resourceId: 'rid-notes',
+    ifMatch: 2,
+    edits: [{ oldText: 'Paragraph 050 of the notes', newText: 'Paragraph 050, edited in place,' }],
+  })
+  assert.equal(filesAnswers(h).at(-1).outcome.diffNamesEdit, true)
+})
+
+test('workspace file: writes it without a shell and saves it by its path, carrying no content', async () => {
+  const h = harness()
+  const run = await runFilesStep(
+    h,
+    filesUserText('workspace-file', {
+      drive: 'main',
+      folder: FILES_FOLDER,
+      path: 'notes/ws-1a.txt',
+      text: 'Workspace note 1a',
+      file: 'ws-1a.txt',
+    }),
+    fakeFilesHost()
+  )
+  assert.equal(run.answer, 'GFS-FILES workspace-file saved')
+  assert.deepEqual(run.calls[0], {
+    tool: 'file_write',
+    args: { path: 'notes/ws-1a.txt', content: 'Workspace note 1a' },
+  })
+  assert.deepEqual(filesSaveArgs(h), [
+    {
+      drive: 'main',
+      parentResourceId: FILES_FOLDER_RID,
+      name: 'ws-1a.txt',
+      sourcePath: 'notes/ws-1a.txt',
+    },
+  ])
+  assert.equal(filesAnswers(h)[0].outcome.saves[0].source, 'source_path')
+})
+
+test('seeding: generates the asked number of one-line files under distinct names', async () => {
+  const h = harness()
+  const run = await runFilesStep(
+    h,
+    filesUserText('seed', { prefix: 'seed-1a', count: '3' }),
+    fakeFilesHost()
+  )
+  assert.equal(run.answer, 'GFS-FILES seed seeded')
+  assert.deepEqual(
+    run.calls.map(item => item.args.filename),
+    ['seed-1a-001.md', 'seed-1a-002.md', 'seed-1a-003.md']
+  )
+  assert.equal(filesSaveArgs(h).length, 0)
+})
+
+test('listing: reports count, order and names, with and without a part of the name', async () => {
+  const h = harness()
+  const listing = [
+    { kind: 'generated', name: 'a.md', id: 'aaaaaaaaaaaa', createdAt: '2026-11-12T00:00:00Z' },
+    {
+      kind: 'generated',
+      name: 'seed-1a-001.md',
+      id: 'bbbbbbbbbbbb',
+      createdAt: '2026-11-12T00:01:00Z',
+    },
+  ]
+  await runFilesStep(h, filesUserText('list', {}), fakeFilesHost({ listing }))
+  assert.deepEqual(filesAnswers(h)[0].outcome, {
+    count: 2,
+    truncated: false,
+    spilled: false,
+    oldestFirst: true,
+    names: ['a.md', 'seed-1a-001.md'],
+  })
+  const filtered = await runFilesStep(
+    h,
+    filesUserText('list', { part: 'seed-1a' }),
+    fakeFilesHost({ listing })
+  )
+  assert.deepEqual(filtered.calls[0].args, { nameContains: 'seed-1a' })
+  assert.deepEqual(filesAnswers(h)[1].outcome.names, ['seed-1a-001.md'])
+  // A spilled listing is reported as spilled, not read.
+  await runFilesStep(h, filesUserText('list', {}), fakeFilesHost({ spilled: true }))
+  assert.equal(filesAnswers(h)[2].outcome.spilled, true)
+})
+
+test('delete: names the file by the kind, id and name the listing gave', async () => {
+  const h = harness()
+  const listing = [
+    {
+      kind: 'generated',
+      name: 'gone-1a.md',
+      id: 'cccccccccccc',
+      createdAt: '2026-11-12T00:00:00Z',
+    },
+  ]
+  const run = await runFilesStep(
+    h,
+    filesUserText('delete', { file: 'gone-1a.md' }),
+    fakeFilesHost({ listing })
+  )
+  assert.equal(run.answer, 'GFS-FILES delete deleted')
+  assert.deepEqual(run.calls, [
+    { tool: 'clerum__kept_files_list', args: { nameContains: 'gone-1a.md' } },
+    {
+      tool: 'clerum__kept_files_delete',
+      args: { files: [{ kind: 'generated', id: 'cccccccccccc', name: 'gone-1a.md' }] },
+    },
+  ])
+})
+
+test('generated files: an unknown step or a tool the Host did not offer is refused', async () => {
+  const h = harness()
+  const unknown = await runFilesStep(h, filesUserText('format-disk', {}), fakeFilesHost())
+  assert.equal(unknown.status, 400)
+  assert.equal(h.getEvidence().attempts.at(-1).reason, 'gfs-files-step-unknown')
+  const missing = await runFilesStep(
+    h,
+    filesUserText('generate-one', { file: 'one.md' }),
+    fakeFilesHost(),
+    { tools: ['clerum__gfs_accessible'] }
+  )
+  assert.equal(missing.status, 400)
+  assert.equal(h.getEvidence().attempts.at(-1).reason, 'gfs-files-tool-missing')
+  // Witness: the same step with the tool offered generates the file.
+  const offered = await runFilesStep(
+    h,
+    filesUserText('generate-one', { file: 'one.md' }),
+    fakeFilesHost()
+  )
+  assert.equal(offered.answer, 'GFS-FILES generate-one generated')
 })

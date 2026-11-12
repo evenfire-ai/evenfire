@@ -64,6 +64,10 @@ export const FIXTURE_RESPONSE_KIND = {
   attachmentSaveRequested: 'attachment-save-requested',
   attachmentSaveAnswer: 'attachment-save-answer',
   attachmentSaveToolAbsent: 'attachment-save-tool-absent',
+  // Generated and kept files: one row per tool the fixture asks for (with the
+  // arguments of each save call), and one verdict row per scripted step.
+  gfsFilesToolRequested: 'gfs-files-tool-requested',
+  gfsFilesAnswer: 'gfs-files-answer',
 } as const
 
 /**
@@ -97,6 +101,9 @@ export const FIXTURE_REJECTION_REASONS: readonly string[] = Object.freeze([
   'save-folder-beyond-first-page',
   'save-attachment-line-missing',
   'save-write-tools-missing',
+  'gfs-files-step-unknown',
+  'gfs-files-tool-missing',
+  'gfs-files-tool-output-malformed',
 ])
 
 /** The fixture's text-only answer. It names no image and no color. */
@@ -327,6 +334,20 @@ export interface FixtureProviderAttempt {
    * mutation failure the Host returned. Present only on the save-answer row.
    */
   saveOutcome?: string
+  /** The scripted step of a generated-files row. Present only on those rows. */
+  step?: string
+  /** The Host tool a generated-files row asked for. Tool-request rows only. */
+  tool?: string
+  /**
+   * The arguments of a save call (`clerum__gfs_create_file`, `clerum__gfs_write`)
+   * exactly as the fixture sent them: names and ids, so an oracle can prove no
+   * file content went through the model. Tool-request rows of a save only.
+   */
+  saveArgs?: Record<string, unknown>
+  /** The verdict of a step (`saved`, `listed`, ...). Generated-files answer rows only. */
+  verdict?: string
+  /** What the step read from the Host's tool results. Generated-files answer rows only. */
+  outcome?: Record<string, unknown>
   /** One of {@link FIXTURE_REJECTION_REASONS}. Present only on rejected rows. */
   reason?: string
 }
@@ -466,6 +487,51 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
       `${source}: attempts[${index}].saveOutcome is only valid on a ` +
         `${FIXTURE_RESPONSE_KIND.attachmentSaveAnswer} row`
     )
+  }
+
+  // Generated-files rows carry their step; a tool row names its tool (and a
+  // save its arguments), an answer row its verdict and outcome.
+  const filesRow =
+    responseKind === FIXTURE_RESPONSE_KIND.gfsFilesToolRequested ||
+    responseKind === FIXTURE_RESPONSE_KIND.gfsFilesAnswer
+  for (const field of ['step', 'tool', 'saveArgs', 'verdict', 'outcome'] as const) {
+    if (!filesRow && field in value) {
+      throw new Error(
+        `${source}: attempts[${index}].${field} is only valid on a generated-files row`
+      )
+    }
+  }
+  if (filesRow) {
+    if (typeof value.step !== 'string' || !value.step) {
+      throw new Error(`${source}: attempts[${index}].step must be a non-empty string`)
+    }
+    row.step = value.step
+    if (responseKind === FIXTURE_RESPONSE_KIND.gfsFilesToolRequested) {
+      if (typeof value.tool !== 'string' || !value.tool) {
+        throw new Error(`${source}: attempts[${index}].tool must be a non-empty string`)
+      }
+      row.tool = value.tool
+      if ('saveArgs' in value) {
+        if (!isRecord(value.saveArgs)) {
+          throw new Error(`${source}: attempts[${index}].saveArgs must be an object`)
+        }
+        row.saveArgs = value.saveArgs
+      }
+      if ('verdict' in value || 'outcome' in value) {
+        throw new Error(`${source}: attempts[${index}] is a tool request and carries no verdict`)
+      }
+    } else {
+      if (typeof value.verdict !== 'string' || !value.verdict || !isRecord(value.outcome)) {
+        throw new Error(
+          `${source}: attempts[${index}] must carry a verdict string and an outcome object`
+        )
+      }
+      if ('tool' in value || 'saveArgs' in value) {
+        throw new Error(`${source}: attempts[${index}] is an answer and names no tool`)
+      }
+      row.verdict = value.verdict
+      row.outcome = value.outcome
+    }
   }
 
   // Present only on document rows; an image row must not grow the field.

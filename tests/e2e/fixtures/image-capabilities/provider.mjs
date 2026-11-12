@@ -45,6 +45,15 @@
  * asks to save makes tool calls instead of entering the color oracle. Without
  * the directive the fixture behaves exactly as before.
  *
+ * Generated and kept files. A fixed `GFS_FILES step=<step>` directive selects
+ * one scripted turn of the generated-gfs-save lane: generate files, save them
+ * by their Save id, list and delete kept files, save a kept attachment or a
+ * workspace file, and edit a text file in parts. Each step is stateless: the
+ * number of tool results after the last user message is its stage, and every
+ * id it passes on is read from the tool result that gave it. The ledger
+ * records the tool asked for, the arguments of each save call (names and ids,
+ * never file content), and one verdict per step.
+ *
  * Determinism and sanitation. Responses carry a synthetic completion id derived
  * from the run id, a fixed test usage block, and `finish_reason: 'stop'` (or
  * `'tool_calls'` for the document read). Both accepted models answer a text-only
@@ -172,6 +181,9 @@ export const FIXTURE_REJECTION_REASONS = Object.freeze([
   'save-folder-not-unique',
   'save-tool-output-malformed',
   'save-write-tools-missing',
+  'gfs-files-step-unknown',
+  'gfs-files-tool-missing',
+  'gfs-files-tool-output-malformed',
 ])
 
 /** A refusal with a stable machine-readable reason code for the evidence tally. */
@@ -666,6 +678,434 @@ function parseAttachmentSaveResult(payload) {
   return { ok: true, result }
 }
 
+/** The Host tools the generated-files steps ask for. */
+const GFS_FILES_TOOL = Object.freeze({
+  accessible: GFS_ACCESSIBLE_TOOL,
+  create: GFS_CREATE_FILE_TOOL,
+  write: 'clerum__gfs_write',
+  edit: 'clerum__gfs_edit_text',
+  list: 'clerum__kept_files_list',
+  delete: 'clerum__kept_files_delete',
+  fileWrite: 'file_write',
+  markdown: 'clerum__generate_markdown',
+  docx: 'clerum__generate_docx',
+})
+
+/** Rendered answer of every generated-files step: `GFS-FILES <step> <verdict>`. */
+export const GFS_FILES_ANSWER_MARKER = 'GFS-FILES'
+
+/** One generated-files step and its quoted parameters; never file content. */
+const GFS_FILES_DIRECTIVE = /GFS_FILES step=([a-z-]+)((?: [a-z]+="[^"\n]*")*)/
+const GFS_FILES_PARAM = / ([a-z]+)="([^"\n]*)"/g
+const SAVE_ID_LINE = /^Save id: ([0-9a-f]{12})$/m
+const NOT_KEPT_LINE = /^attachments_not_kept: code=([a-z0-9_]+)/m
+
+/**
+ * The six generators, each with the smallest arguments that make a file. The
+ * file name is the step's `name` parameter plus the extension.
+ */
+export const GFS_FILES_GENERATIONS = Object.freeze([
+  ['clerum__generate_markdown', 'md', { content: '# Report\n\nGenerated for the save lane.\n' }],
+  ['clerum__generate_docx', 'docx', { title: 'Report', body: 'Generated for the save lane.' }],
+  ['clerum__generate_xlsx', 'xlsx', { sheets: [{ name: 'S', rows: [['Item'], ['One']] }] }],
+  [
+    'clerum__generate_pptx',
+    'pptx',
+    { slides: [{ layout: 'title-bullets', title: 'Report', bullets: ['One'] }] },
+  ],
+  ['clerum__generate_pdf', 'pdf', { body: 'Generated for the save lane.' }],
+  [
+    'clerum__generate_chart',
+    'png',
+    { type: 'bar', data: { labels: ['A'], datasets: [{ label: 'S', data: [1] }] } },
+  ],
+])
+
+/** About 10 KB of Markdown, one numbered paragraph per line, for the partial edit. */
+export function gfsFilesEditSource() {
+  const lines = []
+  for (let index = 1; index <= 140; index += 1)
+    lines.push(
+      `Paragraph ${String(index).padStart(3, '0')} of the notes for the partial edit, long enough to fill a line.`
+    )
+  return `${lines.join('\n')}\n`
+}
+
+class FixtureGfsFilesError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'FixtureGfsFilesError'
+    this.code = code
+  }
+}
+
+const filesMalformed = message =>
+  new FixtureGfsFilesError('gfs-files-tool-output-malformed', message)
+
+/** The step and parameters of the last user message, or null when absent. */
+function gfsFilesDirective(messages) {
+  const userIndex = lastUserIndex(messages)
+  if (userIndex < 0) return null
+  const match = GFS_FILES_DIRECTIVE.exec(messageText(messages[userIndex].content))
+  if (!match) return null
+  const params = {}
+  for (const [, key, value] of match[2].matchAll(GFS_FILES_PARAM)) params[key] = value
+  return { step: match[1], params }
+}
+
+function requiredParam(params, key) {
+  const value = params[key]
+  if (typeof value !== 'string' || value === '')
+    throw new FixtureGfsFilesError('gfs-files-step-unknown', `the step needs its ${key} parameter`)
+  return value
+}
+
+function versionParam(params) {
+  const value = requiredParam(params, 'version')
+  if (!POSITIVE_DECIMAL.test(value))
+    throw new FixtureGfsFilesError('gfs-files-step-unknown', 'the version must be a number')
+  return Number(value)
+}
+
+/** A native tool result as JSON, or the raw `Error:` message the Host sent. */
+function gfsFilesJson(result) {
+  if (result.content.startsWith('Error: ')) return { error: result.content.slice(7) }
+  try {
+    return { value: JSON.parse(result.content) }
+  } catch {
+    throw filesMalformed(`the ${result.tool} result is not JSON`)
+  }
+}
+
+/** The Save id line a generator adds to its result. */
+function saveIdOf(result) {
+  const line = SAVE_ID_LINE.exec(result.content)
+  if (!line) throw filesMalformed(`the ${result.tool} result carries no Save id`)
+  return line[1]
+}
+
+/** A save through clerum__gfs_create_file or clerum__gfs_write from a file source. */
+function savedFile(result) {
+  const parsed = gfsFilesJson(result)
+  if (parsed.error !== undefined) return { ok: false, error: parsed.error }
+  const value = parsed.value
+  const data = value?.resource?.data
+  if (
+    value?.resource?.ok !== true ||
+    typeof data?.resourceId !== 'string' ||
+    !Number.isSafeInteger(data?.version) ||
+    typeof value.source !== 'string' ||
+    !isByteCount(value.bytes) ||
+    typeof value.secretScan?.state !== 'string'
+  )
+    throw filesMalformed(`the ${result.tool} result does not carry a saved file`)
+  return {
+    ok: true,
+    source: value.source,
+    bytes: value.bytes,
+    scan: value.secretScan.state,
+    resourceId: data.resourceId,
+    version: data.version,
+  }
+}
+
+/** The kept-files listing; a spilled result is reported, not read. */
+function keptListing(result) {
+  const parsed = gfsFilesJson(result)
+  if (parsed.error !== undefined) throw filesMalformed('the kept files listing failed')
+  const value = parsed.value
+  if (typeof value?.spillover_ref === 'string') return { spilled: true, files: [], truncated: null }
+  if (!Array.isArray(value?.files) || typeof value.truncated !== 'boolean')
+    throw filesMalformed('the kept files listing does not carry files and truncated')
+  for (const file of value.files)
+    if (
+      typeof file?.kind !== 'string' ||
+      typeof file.name !== 'string' ||
+      typeof file.createdAt !== 'string' ||
+      (file.id !== undefined && typeof file.id !== 'string')
+    )
+      throw filesMalformed('a kept files entry does not carry kind, name and createdAt')
+  return { spilled: false, files: value.files, truncated: value.truncated }
+}
+
+/** The one listed entry of a kind with an exact name and an id. */
+function listedEntry(listing, kind, name) {
+  const matches = listing.files.filter(
+    file => file.kind === kind && file.name === name && typeof file.id === 'string'
+  )
+  if (matches.length !== 1)
+    throw filesMalformed(`the listing holds ${matches.length} ${kind} entries named as asked`)
+  return matches[0]
+}
+
+const callTool = (tool, args, save = false) => ({ call: { tool, args, save } })
+const finish = (verdict, outcome) => ({ answer: { verdict, outcome } })
+
+/** The folder of the step, read from the clerum__gfs_accessible result. */
+function stepFolder(result, params) {
+  return selectSaveFolder(
+    parseAccessibleSaveResult(result.content),
+    requiredParam(params, 'folder')
+  )
+}
+
+/**
+ * The scripted steps. Each receives its parameters and the tool results of the
+ * turn so far, in order, and returns the next tool call or the answer.
+ */
+const GFS_FILES_STEPS = {
+  // Generate the six formats and save each with its name and Save id.
+  'generate-and-save': (p, results) => {
+    const drive = requiredParam(p, 'drive')
+    const base = requiredParam(p, 'name')
+    if (results.length === 0) return callTool(GFS_FILES_TOOL.accessible, { drive })
+    const folder = stepFolder(results[0], p)
+    const calls = 2 * GFS_FILES_GENERATIONS.length
+    if (results.length <= calls) {
+      const index = Math.floor((results.length - 1) / 2)
+      const [tool, extension, args] = GFS_FILES_GENERATIONS[index]
+      const name = `${base}.${extension}`
+      if ((results.length - 1) % 2 === 0) return callTool(tool, { filename: name, ...args })
+      return callTool(
+        GFS_FILES_TOOL.create,
+        {
+          drive,
+          parentResourceId: folder.resourceId,
+          name,
+          generatedFile: name,
+          generatedFileId: saveIdOf(results.at(-1)),
+        },
+        true
+      )
+    }
+    const saves = GFS_FILES_GENERATIONS.map(([, extension], index) => ({
+      name: `${base}.${extension}`,
+      ...savedFile(results[2 * index + 2]),
+    }))
+    return finish(saves.every(save => save.ok) ? 'saved' : 'failed', { saves })
+  },
+
+  // Generate a second docx under the same name and replace the saved one.
+  'replace-docx': (p, results) => {
+    const file = requiredParam(p, 'file')
+    if (results.length === 0)
+      return callTool(GFS_FILES_TOOL.docx, {
+        filename: file,
+        title: 'Report',
+        body: requiredParam(p, 'body'),
+      })
+    if (results.length === 1)
+      return callTool(
+        GFS_FILES_TOOL.write,
+        {
+          drive: requiredParam(p, 'drive'),
+          resourceId: requiredParam(p, 'resource'),
+          ifMatch: versionParam(p),
+          generatedFile: file,
+          generatedFileId: saveIdOf(results[0]),
+        },
+        true
+      )
+    const save = savedFile(results[1])
+    return finish(save.ok ? 'saved' : 'failed', { saves: [{ name: file, ...save }] })
+  },
+
+  // List the kept files, then save a generated one by the listed id.
+  'list-and-save': (p, results) => {
+    const drive = requiredParam(p, 'drive')
+    const file = requiredParam(p, 'file')
+    if (results.length === 0) return callTool(GFS_FILES_TOOL.list, {})
+    if (results.length === 1) return callTool(GFS_FILES_TOOL.accessible, { drive })
+    const entry = listedEntry(keptListing(results[0]), 'generated', file)
+    if (results.length === 2)
+      return callTool(
+        GFS_FILES_TOOL.create,
+        {
+          drive,
+          parentResourceId: stepFolder(results[1], p).resourceId,
+          name: requiredParam(p, 'as'),
+          generatedFile: file,
+          generatedFileId: entry.id,
+        },
+        true
+      )
+    const save = savedFile(results[2])
+    return finish(save.ok ? 'saved' : 'failed', {
+      listedId: entry.id,
+      saves: [{ name: p.as, ...save }],
+    })
+  },
+
+  // Answer an attachment turn without saving; report whether the Host kept them.
+  acknowledge: (_p, _results, turnText) => {
+    const notKept = NOT_KEPT_LINE.exec(turnText)
+    return finish(notKept ? 'not-kept' : 'kept', notKept ? { code: notKept[1] } : {})
+  },
+
+  // Save two kept attachments of an earlier conversation by their listed ids.
+  'save-uploads': (p, results) => {
+    const drive = requiredParam(p, 'drive')
+    const names = [requiredParam(p, 'file'), requiredParam(p, 'image')]
+    if (results.length === 0) return callTool(GFS_FILES_TOOL.list, {})
+    if (results.length === 1) return callTool(GFS_FILES_TOOL.accessible, { drive })
+    const listing = keptListing(results[0])
+    if (results.length < 2 + names.length) {
+      const name = names[results.length - 2]
+      return callTool(
+        GFS_FILES_TOOL.create,
+        {
+          drive,
+          parentResourceId: stepFolder(results[1], p).resourceId,
+          name,
+          uploadedFileId: listedEntry(listing, 'upload', name).id,
+        },
+        true
+      )
+    }
+    const saves = names.map((name, index) => ({ name, ...savedFile(results[2 + index]) }))
+    return finish(saves.every(save => save.ok) ? 'saved' : 'failed', { saves })
+  },
+
+  // Generate about 10 KB of Markdown and save it, for the partial edit.
+  'edit-prepare': (p, results) => {
+    const drive = requiredParam(p, 'drive')
+    const file = requiredParam(p, 'file')
+    if (results.length === 0)
+      return callTool(GFS_FILES_TOOL.markdown, { filename: file, content: gfsFilesEditSource() })
+    if (results.length === 1) return callTool(GFS_FILES_TOOL.accessible, { drive })
+    if (results.length === 2)
+      return callTool(
+        GFS_FILES_TOOL.create,
+        {
+          drive,
+          parentResourceId: stepFolder(results[1], p).resourceId,
+          name: file,
+          generatedFile: file,
+          generatedFileId: saveIdOf(results[0]),
+        },
+        true
+      )
+    const save = savedFile(results[2])
+    return finish(save.ok ? 'saved' : 'failed', { saves: [{ name: file, ...save }] })
+  },
+
+  // Replace one paragraph of the saved file through the partial edit.
+  'edit-apply': (p, results) => {
+    const newText = requiredParam(p, 'new')
+    if (results.length === 0)
+      return callTool(GFS_FILES_TOOL.edit, {
+        drive: requiredParam(p, 'drive'),
+        resourceId: requiredParam(p, 'resource'),
+        ifMatch: versionParam(p),
+        edits: [{ oldText: requiredParam(p, 'old'), newText }],
+      })
+    const parsed = gfsFilesJson(results[0])
+    if (parsed.error !== undefined) return finish('failed', { error: parsed.error })
+    const edit = parsed.value
+    if (
+      !Number.isSafeInteger(edit?.version) ||
+      !isByteCount(edit.bytesBefore) ||
+      !isByteCount(edit.bytesAfter) ||
+      typeof edit.diff !== 'string' ||
+      typeof edit.truncated !== 'boolean'
+    )
+      throw filesMalformed('the clerum__gfs_edit_text result does not carry an edit')
+    return finish('edited', {
+      version: edit.version,
+      bytesBefore: edit.bytesBefore,
+      bytesAfter: edit.bytesAfter,
+      diffNamesEdit: edit.diff.includes(`+${newText}`),
+    })
+  },
+
+  // Write a workspace file without a shell and save it by its path.
+  'workspace-file': (p, results) => {
+    const drive = requiredParam(p, 'drive')
+    const sourcePath = requiredParam(p, 'path')
+    if (results.length === 0)
+      return callTool(GFS_FILES_TOOL.fileWrite, {
+        path: sourcePath,
+        content: requiredParam(p, 'text'),
+      })
+    if (/^(?:<tool_output\b[^>]*>\s*)?Error\b/.test(results[0].content))
+      return finish('failed', { error: 'file_write failed' })
+    if (results.length === 1) return callTool(GFS_FILES_TOOL.accessible, { drive })
+    if (results.length === 2)
+      return callTool(
+        GFS_FILES_TOOL.create,
+        {
+          drive,
+          parentResourceId: stepFolder(results[1], p).resourceId,
+          name: requiredParam(p, 'file'),
+          sourcePath,
+        },
+        true
+      )
+    const save = savedFile(results[2])
+    return finish(save.ok ? 'saved' : 'failed', { saves: [{ name: p.file, ...save }] })
+  },
+
+  // Generate `count` one-line Markdown files, one per tool call.
+  seed: (p, results) => {
+    const prefix = requiredParam(p, 'prefix')
+    const count = Number(requiredParam(p, 'count'))
+    if (!Number.isSafeInteger(count) || count < 1 || count > 200)
+      throw new FixtureGfsFilesError('gfs-files-step-unknown', 'the seed count must be 1 to 200')
+    if (results.length > 0) saveIdOf(results.at(-1))
+    if (results.length < count) {
+      const number = String(results.length + 1).padStart(3, '0')
+      return callTool(GFS_FILES_TOOL.markdown, {
+        filename: `${prefix}-${number}.md`,
+        content: `# Seed ${number}\n`,
+      })
+    }
+    return finish('seeded', { seeded: count })
+  },
+
+  // List the kept files, optionally by a part of the name.
+  list: (p, results) => {
+    if (results.length === 0)
+      return callTool(GFS_FILES_TOOL.list, p.part ? { nameContains: p.part } : {})
+    const listing = keptListing(results[0])
+    const times = listing.files.map(file => Date.parse(file.createdAt))
+    return finish('listed', {
+      count: listing.files.length,
+      truncated: listing.truncated,
+      spilled: listing.spilled,
+      oldestFirst: times.every((time, index) => index === 0 || times[index - 1] <= time),
+      names: listing.files.map(file => file.name),
+    })
+  },
+
+  // Generate one Markdown file, to delete later.
+  'generate-one': (p, results) => {
+    const file = requiredParam(p, 'file')
+    if (results.length === 0)
+      return callTool(GFS_FILES_TOOL.markdown, { filename: file, content: `# ${file}\n` })
+    return finish('generated', { saveId: saveIdOf(results[0]) })
+  },
+
+  // Delete a generated file by the kind, id and name the listing gives.
+  delete: (p, results) => {
+    const file = requiredParam(p, 'file')
+    if (results.length === 0) return callTool(GFS_FILES_TOOL.list, { nameContains: file })
+    const entry = listedEntry(keptListing(results[0]), 'generated', file)
+    if (results.length === 1)
+      return callTool(GFS_FILES_TOOL.delete, {
+        files: [{ kind: entry.kind, id: entry.id, name: entry.name }],
+      })
+    const parsed = gfsFilesJson(results[1])
+    if (parsed.error !== undefined) return finish('failed', { error: parsed.error })
+    if (!Array.isArray(parsed.value?.files) || !isByteCount(parsed.value.freedBytes))
+      throw filesMalformed('the clerum__kept_files_delete result does not carry its files')
+    const outcomes = parsed.value.files.map(item => String(item?.result))
+    return finish(outcomes.every(result => result === 'deleted') ? 'deleted' : 'failed', {
+      results: outcomes,
+      freedBytes: parsed.value.freedBytes,
+    })
+  },
+}
+
 const INTERNAL_HOST_SUFFIXES = [
   '.svc.cluster.local',
   '.svc',
@@ -942,13 +1382,14 @@ export function createImageFixtureFetch(
     model,
     content,
     responseKind,
-    { imageSha256 = null, document, saveOutcome, stream = false } = {}
+    { imageSha256 = null, document, saveOutcome, gfsFiles, stream = false } = {}
   ) => {
     sequence += 1
     const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
     recordCall(model, imageSha256, responseKind, {
       ...document,
       ...(saveOutcome === undefined ? {} : { saveOutcome }),
+      ...gfsFiles,
     })
     publish()
     return stream
@@ -1045,6 +1486,55 @@ export function createImageFixtureFetch(
     )
   }
 
+  /**
+   * One stateless generated-files turn: the step's script picks the next tool
+   * call from the tool results after the last user message, or the answer.
+   */
+  const gfsFilesTurn = (body, directive, model, stream) => {
+    const script = Object.hasOwn(GFS_FILES_STEPS, directive.step)
+      ? GFS_FILES_STEPS[directive.step]
+      : undefined
+    if (!script)
+      throw new FixtureGfsFilesError('gfs-files-step-unknown', 'the step is not scripted')
+    const tools = Array.isArray(body.tools) ? body.tools : []
+    const userIndex = lastUserIndex(body.messages)
+    const after = userIndex >= 0 ? body.messages.slice(userIndex + 1) : []
+    const callNames = new Map()
+    for (const message of after) {
+      if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls)) continue
+      for (const call of message.tool_calls) callNames.set(call?.id, call?.function?.name)
+    }
+    const results = after
+      .filter(message => message?.role === 'tool' && typeof message.content === 'string')
+      .map(message => ({ tool: callNames.get(message.tool_call_id), content: message.content }))
+    const next = script(
+      directive.params,
+      results,
+      messageText(userIndex >= 0 ? body.messages[userIndex].content : '')
+    )
+    if (next.answer) {
+      const { verdict, outcome } = next.answer
+      return answer(
+        model,
+        `${GFS_FILES_ANSWER_MARKER} ${directive.step} ${verdict}`,
+        'gfs-files-answer',
+        { gfsFiles: { step: directive.step, verdict, outcome }, stream }
+      )
+    }
+    const { tool, args, save } = next.call
+    if (!tools.some(offered => offered?.function?.name === tool))
+      throw new FixtureGfsFilesError('gfs-files-tool-missing', `the Host did not offer ${tool}`)
+    sequence += 1
+    const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
+    recordCall(model, null, 'gfs-files-tool-requested', {
+      step: directive.step,
+      tool,
+      ...(save ? { saveArgs: structuredClone(args) } : {}),
+    })
+    publish()
+    return jsonResponse(toolCallCompletionBody(completionId, model, tool, args))
+  }
+
   const handleProviderRequest = (input, init, target) => {
     state.counters.totalAttempts += 1
 
@@ -1083,6 +1573,24 @@ export function createImageFixtureFetch(
 
     const model = body.model
     const stream = body.stream === true
+
+    // A generated-files step is checked first, like the save directive below:
+    // its attachment turns must not enter the image scanner.
+    const filesDirective = gfsFilesDirective(body.messages)
+    if (filesDirective) {
+      if (model !== UNSUPPORTED_MODEL && model !== SUPPORTED_MODEL)
+        return refuse(model, 'unsupported-model', { code: 'unsupported_model' })
+      try {
+        return gfsFilesTurn(body, filesDirective, model, stream)
+      } catch (error) {
+        if (
+          !(error instanceof FixtureGfsFilesError) &&
+          !(error instanceof FixtureAttachmentSaveError)
+        )
+          throw error
+        return refuse(model, error.code, { code: error.code })
+      }
+    }
 
     // The save directive is checked before the image scanner: an image turn
     // that asks to save must make tool calls, not tile colors.

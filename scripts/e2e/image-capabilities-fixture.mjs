@@ -27,8 +27,9 @@ export const fixtureConfigKeys = [
  * The Playwright journeys this runner can drive against the swapped Host. The
  * lane is chosen by `IMAGE_CAPABILITIES_LANE` and only from this closed set, so
  * an environment value can never name an arbitrary config path.
- * `minimumExpected` is the floor `playwrightVerdict` requires. The save lane
- * is three journeys; the older lanes stay at one.
+ * `minimumExpected` is the floor `playwrightVerdict` requires. The attachment
+ * save lane is three journeys and the generated-files save lane eight; the
+ * older lanes stay at one.
  */
 export const playwrightLanes = {
   // `grep` selects the lane's fixture journey. The image spec also holds the
@@ -51,6 +52,12 @@ export const playwrightLanes = {
     label: 'attachment-gfs-save-playwright',
     grep: 'attachment-gfs-save fixture: ',
     minimumExpected: 3,
+  },
+  'generated-gfs-save': {
+    config: 'desktop-app/test/e2e-playwright/playwright.generated-gfs-save.config.ts',
+    label: 'generated-gfs-save-playwright',
+    grep: 'generated-gfs-save fixture: ',
+    minimumExpected: 8,
   },
 }
 
