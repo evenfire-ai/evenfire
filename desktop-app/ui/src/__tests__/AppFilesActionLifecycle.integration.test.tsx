@@ -526,9 +526,15 @@ function installClerum(
           return vi.fn()
         }),
         authorizeMarkdownTabClose: vi.fn(async () => 'granted'),
+        getMarkdownTabCloseDocumentEpoch: vi.fn(() => '11111111-1111-4111-8111-111111111111'),
         getMarkdownTabClosePermitStatus: vi.fn(async () => 'granted'),
         cancelMarkdownTabClosePermit: vi.fn(async () => 'cancelled'),
         consumeMarkdownTabClosePermit: vi.fn(async () => 'consumed'),
+        acknowledgeMarkdownTabClose: vi.fn(
+          async (binding: { sequence: number }) => binding.sequence + 1
+        ),
+        getRendererSessionView: vi.fn(async () => null),
+        commitRendererSessionView: vi.fn(async () => false),
       },
       shortcuts: {
         onCommand: vi.fn((handler: (commandId: string, source: 'host' | 'sandbox') => void) => {
@@ -3282,13 +3288,15 @@ describe('App → Files action lifecycle integration', () => {
         preview: { gfsUri: markdown.gfsUri },
       })
     )
-    // Keep the resource-action lookup singular while allowing the Markdown
-    // body to resolve before and after download for its stable-version check.
+    // The producer-backed sequence resolves once for navigation, once for the
+    // preview resource authorization query, and twice around the stable read.
+    await waitFor(() =>
+      expect(gfs.resolve.mock.calls.filter(([uri]) => uri === markdown.gfsUri)).toHaveLength(4)
+    )
     const markdownResolveCalls = gfs.resolve.mock.calls.filter(
       ([uri]) => uri === markdown.gfsUri
     ).length
-    expect(markdownResolveCalls).toBeGreaterThanOrEqual(3)
-    expect(markdownResolveCalls).toBeLessThanOrEqual(4)
+    expect(markdownResolveCalls).toBe(4)
     expect(gfs.downloadPreview.mock.calls.filter(([uri]) => uri === markdown.gfsUri)).toHaveLength(
       1
     )
