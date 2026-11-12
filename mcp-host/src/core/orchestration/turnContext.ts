@@ -92,7 +92,56 @@ export interface TurnContextInput {
   referencedFiles?: TurnContextReferencedFile[]
   preparedGfsFiles?: PreparedGfsFile[]
   /** Admission could not keep this message's attachments for a later save. */
-  keepRefusal?: { code: string }
+  keepRefusal?: { code: string; offer?: KeepOffer }
+}
+
+/**
+ * What the user could delete to make room for a refused keep: the bytes short
+ * and the caller's own files with an id, oldest first.
+ */
+export interface KeepOffer {
+  neededBytes: number
+  deletable: Array<{
+    kind: 'generated' | 'upload'
+    id: string
+    name: string
+    sizeBytes: number
+    ageHours: number
+  }>
+}
+
+/** The most files one offer names. */
+const OFFER_MAX_FILES = 10
+
+export const DELETE_OFFER_INSTRUCTION =
+  'Propose to the user the deletable_file entries above, which free needed_bytes, oldest first. Call clerum__kept_files_delete only with the files the user agrees to delete: its approval card is the confirmation. Afterwards ask the user to attach the files again; that message keeps them.'
+
+export const CANNOT_FREE_INSTRUCTION =
+  "Deleting this user's kept files cannot free enough room. Tell the user the space is held by files with no record, by files in workspaces (the user's own workspace files can be removed with an approved shell command), by other users of this agent or by downloads in use, and that kept files leave after the retention time."
+
+function keepOfferLines(code: string, offer: KeepOffer): string[] {
+  const deletableBytes = offer.deletable.reduce((sum, file) => sum + file.sizeBytes, 0)
+  const lines = [
+    `attachments_not_kept: code=${code} needed_bytes=${offer.neededBytes} your_deletable_bytes=${deletableBytes}`,
+  ]
+  if (deletableBytes < offer.neededBytes) {
+    lines.push('user_cannot_free_enough')
+    lines.push(CANNOT_FREE_INSTRUCTION)
+    return lines
+  }
+  let covered = 0
+  let shown = 0
+  for (const file of offer.deletable) {
+    if (covered >= offer.neededBytes || shown === OFFER_MAX_FILES) break
+    lines.push(
+      `deletable_file: kind=${file.kind} id=${file.id} name=${quotePromptValue(file.name)} bytes=${file.sizeBytes} age_hours=${file.ageHours}`
+    )
+    covered += file.sizeBytes
+    shown += 1
+  }
+  if (covered < offer.neededBytes) lines.push('more_deletable_files: call clerum__kept_files_list')
+  lines.push(DELETE_OFFER_INSTRUCTION)
+  return lines
 }
 
 export interface PreparedGfsUsage {
@@ -236,7 +285,11 @@ export function buildTurnContextBlock(input: TurnContextInput): string {
   }
   if (input.keepRefusal) {
     // The code is a fixed store or guard code, never client text.
-    lines.push(`attachments_not_kept: code=${input.keepRefusal.code}`)
+    if (input.keepRefusal.offer) {
+      lines.push(...keepOfferLines(input.keepRefusal.code, input.keepRefusal.offer))
+    } else {
+      lines.push(`attachments_not_kept: code=${input.keepRefusal.code}`)
+    }
     lines.push(ATTACHMENTS_NOT_KEPT_INSTRUCTION)
   }
   if (input.referencedFiles && input.referencedFiles.length > 0) {

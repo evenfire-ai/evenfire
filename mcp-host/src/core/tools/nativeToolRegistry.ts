@@ -14,6 +14,7 @@ import {
   buildGfsCopyTools,
   buildGfsReadTools,
   buildGfsWriteTools,
+  buildKeptFilesDeleteTool,
   buildKeptFilesListTool,
   referencedFilePins,
 } from '../../internalTools/gfs'
@@ -31,6 +32,10 @@ import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
 import type { McpTool } from '../../types'
 import { checkToolArguments } from '../../workflow/argumentGate'
+import {
+  NOT_ENOUGH_FREE_SPACE_PREFIX,
+  OUTPUT_QUOTA_EXCEEDED_PREFIX,
+} from '../../workflow/artifactOutput'
 import { resolveInternalTools } from '../../workflow/internalTools'
 import { boilerplateTexts } from '../../workflow/officeBoilerplate'
 import { printedForms } from '../../workflow/toolText'
@@ -90,6 +95,10 @@ function directlyInside(file: string, dir: string): boolean {
   }
 }
 
+/** Appended to a generator's space refusal where the confirmed delete exists. */
+export const MAKE_ROOM_SENTENCE =
+  "To make room, list this user's files with clerum__kept_files_list and delete the ones the user confirms with clerum__kept_files_delete; files in the user's own workspace can be removed with an approved shell command."
+
 /**
  * Removes the file a generator just wrote when its save record cannot be
  * written, only if it is still the same file (`dev`/`ino` as written), in one
@@ -123,9 +132,13 @@ class InternalToolAdapter implements Tool {
     /**
      * For a generator in a chat registry whose Host token can write to GFS:
      * a delivered file's result names its save id, which the GFS write tools
-     * take to save that file later.
+     * take to save that file later. Where the confirmed delete is registered,
+     * a space refusal says how to make room with it.
      */
-    private readonly generatorOptions: { saveIdShown: boolean } = { saveIdShown: false }
+    private readonly generatorOptions: { saveIdShown: boolean; spaceSentence: boolean } = {
+      saveIdShown: false,
+      spaceSentence: false,
+    }
   ) {}
   name(): string {
     return this.def.name
@@ -140,7 +153,7 @@ class InternalToolAdapter implements Tool {
     return false
   }
   requiresApproval(): boolean {
-    return false
+    return this.def.requiresApproval === true
   }
   spilloverExempt(): boolean {
     return this.def.spilloverExempt === true
@@ -187,7 +200,13 @@ class InternalToolAdapter implements Tool {
           `File generated: ${result.artifact?.name ?? 'output'} (${
             result.artifact?.format ?? 'unknown'
           })`)
-        : `Error: ${result.error ?? 'Unknown error'}`
+        : `Error: ${result.error ?? 'Unknown error'}${
+            this.generatorOptions.spaceSentence &&
+            (result.error?.startsWith(OUTPUT_QUOTA_EXCEEDED_PREFIX) ||
+              result.error?.startsWith(NOT_ENOUGH_FREE_SPACE_PREFIX))
+              ? ` ${MAKE_ROOM_SENTENCE}`
+              : ''
+          }`
       // The file must be where the caller's folder is now; a folder swapped
       // during the call must not route the file to anyone else.
       if (
@@ -384,7 +403,12 @@ export class NativeToolRegistry implements ToolRegistry {
     // generators write under its reserved outputs directory; without it they
     // refuse to write, never falling back to a folder shared by the Host.
     // Trailing optional; only taskExecutor passes it.
-    callerOutputRoot?: string
+    callerOutputRoot?: string,
+    // True when every call of the kept-files delete will ask the user first:
+    // approval enabled, a channel task, no Host override turning it off. The
+    // delete exists only then, and only with the listing (`gfs.write`).
+    // Trailing optional; only taskExecutor passes it.
+    keptFilesDeleteConfirmed?: boolean
   ) {
     // A Host-owned GFS store establishes a trusted caller binding even when
     // memory is disabled. In that mode file tools never fall back to the shared
@@ -461,6 +485,13 @@ export class NativeToolRegistry implements ToolRegistry {
                 secretEntries: () => attachmentOptions?.secretEntriesProvider?.() ?? [],
               }),
               buildKeptFilesListTool(callerOutputRoot),
+              ...(keptFilesDeleteConfirmed
+                ? [
+                    buildKeptFilesDeleteTool(callerOutputRoot, {
+                      keepRefused: sourceMessage?.keepRefusal !== undefined,
+                    }),
+                  ]
+                : []),
             ]
           : []),
         ...(attachmentSaveAvailable(gfsScopes, sourceMessage?.attachments)
@@ -598,7 +629,11 @@ export class NativeToolRegistry implements ToolRegistry {
           outputDir,
           resolvedAttachmentOptions,
           tool.name.startsWith(GENERATOR_PREFIX) ? callerOutputs : undefined,
-          { saveIdShown: gfsScopes?.has('gfs.write') === true }
+          {
+            saveIdShown: gfsScopes?.has('gfs.write') === true,
+            spaceSentence:
+              gfsScopes?.has('gfs.write') === true && keptFilesDeleteConfirmed === true,
+          }
         )
       )
     }

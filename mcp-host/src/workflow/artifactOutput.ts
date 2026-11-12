@@ -374,7 +374,7 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
   if (projected > quotaBytes) {
     const mb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1)
     throw new Error(
-      `Output quota exceeded: the output folder holds ${mb(current)} MB and this file needs ` +
+      `${OUTPUT_QUOTA_EXCEEDED_PREFIX}: the output folder holds ${mb(current)} MB and this file needs ` +
         `${mb(incomingBytes)} MB, over the ${quotaMB} MB limit. Make the file smaller, give ` +
         'it the name of an earlier generated file to replace that one, or ask an operator to ' +
         'raise CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
@@ -396,6 +396,10 @@ function sharesRootVolume(space: fs.BigIntStatsFs): boolean {
     return false
   }
 }
+
+/** How the two space refusals of a generation begin; the chat adapter matches them. */
+export const OUTPUT_QUOTA_EXCEEDED_PREFIX = 'Output quota exceeded'
+export const NOT_ENOUGH_FREE_SPACE_PREFIX = 'Not enough free space'
 
 let unmeasurableVolumeReported = false
 
@@ -438,7 +442,7 @@ function enforceFreeSpaceFloor(outputDir: string, incomingBytes: number): void {
   if (blocks * space.bsize + floor > space.bavail * space.bsize) {
     const mb = (bytes: bigint) => (Number(bytes) / (1024 * 1024)).toFixed(1)
     throw new Error(
-      `Not enough free space: the Host keeps ${mb(floor)} MB free and this file needs ` +
+      `${NOT_ENOUGH_FREE_SPACE_PREFIX}: the Host keeps ${mb(floor)} MB free and this file needs ` +
         `${mb(BigInt(incomingBytes))} MB. Make the file smaller, or ask an operator to free ` +
         'space on the Host.'
     )

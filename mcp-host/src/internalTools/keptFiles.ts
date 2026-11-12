@@ -488,6 +488,34 @@ export interface KeptFileEntry {
   sizeBytes: number
   canSave: boolean
   reason?: string
+  /** Where the entry lives, for the delete; never shown to the model. */
+  location: KeptFileLocation
+}
+
+/** A kept file's path and identity as listed, and its record's. */
+export interface KeptFileLocation {
+  file: string
+  fileIdentity: { dev: number; ino: number; mtimeMs: number }
+  record?: string
+  recordIdentity?: { dev: number; ino: number; size: number }
+}
+
+function identityOf(file: string): { dev: number; ino: number; size: number } | undefined {
+  try {
+    const info = fs.lstatSync(file)
+    return info.isFile() ? { dev: info.dev, ino: info.ino, size: info.size } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function located(file: string, info: fs.Stats, record?: string): KeptFileLocation {
+  const recordIdentity = record === undefined ? undefined : identityOf(record)
+  return {
+    file,
+    fileIdentity: { dev: info.dev, ino: info.ino, mtimeMs: info.mtimeMs },
+    ...(record !== undefined && recordIdentity !== undefined ? { record, recordIdentity } : {}),
+  }
 }
 
 /**
@@ -522,6 +550,11 @@ export function listKeptFiles(callerRoot: string): KeptFileEntry[] {
         sizeBytes: info.size,
         canSave: delivered,
         ...(delivered ? {} : { reason: record.outcome }),
+        location: located(
+          path.join(lookup.dir, dirent.name),
+          info,
+          path.join(lookup.dir, SAVE_LEDGER_DIR, ledgerRecordFileName(dirent.name))
+        ),
       })
     } else {
       entries.push({
@@ -532,6 +565,7 @@ export function listKeptFiles(callerRoot: string): KeptFileEntry[] {
         sizeBytes: info.size,
         canSave: true,
         reason: 'no_record',
+        location: located(path.join(lookup.dir, dirent.name), info),
       })
     }
   }
@@ -571,9 +605,120 @@ function listKeptUploads(callerRoot: string): KeptFileEntry[] {
       createdAt: record.createdAt,
       sizeBytes: info.size,
       canSave: true,
+      location: located(
+        path.join(lookup.dir, dirent.name),
+        info,
+        path.join(lookup.dir, `${id}.json`)
+      ),
     })
   }
   return entries
+}
+
+/**
+ * The no-room offer for a refused keep: the bytes short and the caller's own
+ * files that have an id (files with no record cannot be deleted), oldest
+ * first, from the uncut list.
+ */
+export function buildKeepOffer(
+  callerRoot: string,
+  neededBytes: number,
+  now: number
+): {
+  neededBytes: number
+  deletable: Array<{
+    kind: 'generated' | 'upload'
+    id: string
+    name: string
+    sizeBytes: number
+    ageHours: number
+  }>
+} {
+  const deletable = listKeptFiles(callerRoot)
+    .filter(entry => entry.id !== undefined)
+    .map(entry => ({
+      kind: entry.kind,
+      id: entry.id!,
+      name: entry.name,
+      sizeBytes: entry.sizeBytes,
+      ageHours: Math.max(0, Math.floor((now - Date.parse(entry.createdAt)) / 3_600_000)),
+    }))
+  return { neededBytes, deletable }
+}
+
+/** One file to delete, as the model names it from the listing. */
+export interface KeptFileToDelete {
+  kind: 'generated' | 'upload'
+  id: string
+  name: string
+}
+
+export type KeptFileDeletion =
+  | { status: 'mismatch' }
+  | {
+      status: 'done'
+      files: Array<KeptFileToDelete & { result: 'deleted' | 'not_found' }>
+      freedBytes: number
+    }
+
+/**
+ * Deletes the caller's own recorded files named by kind, id and name, from
+ * the uncut list, so a file the listing tool's first entries do not show can
+ * still be deleted. Every name must equal its entry's, or nothing is deleted.
+ * Each removal is one synchronous block that removes only the file listed
+ * (same dev and inode), file then record. A file with no record, a file that
+ * expired or was regenerated since the listing, and another caller's id are
+ * `not_found`; a generated file newer than its record is being regenerated
+ * and is `not_found` too.
+ */
+export function deleteKeptFiles(
+  callerRoot: string,
+  requested: readonly KeptFileToDelete[]
+): KeptFileDeletion {
+  const entries = listKeptFiles(callerRoot)
+  const find = (file: KeptFileToDelete) =>
+    entries.find(
+      entry => entry.kind === file.kind && entry.id !== undefined && entry.id === file.id
+    )
+  for (const file of requested) {
+    const entry = find(file)
+    if (entry && entry.name !== file.name) return { status: 'mismatch' }
+  }
+  let freedBytes = 0
+  const files = requested.map(file => {
+    const entry = find(file)
+    const location = entry?.location
+    if (!entry || !location?.record || !location.recordIdentity) {
+      return { ...file, result: 'not_found' as const }
+    }
+    if (
+      entry.kind === 'generated' &&
+      Math.floor(location.fileIdentity.mtimeMs) > Date.parse(entry.createdAt)
+    ) {
+      return { ...file, result: 'not_found' as const }
+    }
+    if (!unlinkIfSame(location.file, location.fileIdentity)) {
+      return { ...file, result: 'not_found' as const }
+    }
+    freedBytes += entry.sizeBytes
+    if (unlinkIfSame(location.record, location.recordIdentity)) {
+      freedBytes += location.recordIdentity.size
+    }
+    return { ...file, result: 'deleted' as const }
+  })
+  return { status: 'done', files, freedBytes }
+}
+
+/** Removes `file` only while it is the file identified, in one synchronous block. */
+function unlinkIfSame(file: string, identity: { dev: number; ino: number }): boolean {
+  try {
+    const now = fs.lstatSync(file)
+    if (!now.isFile() || now.dev !== identity.dev || now.ino !== identity.ino) return false
+    fs.unlinkSync(file)
+    return true
+  } catch {
+    return false
+  }
 }
 
 const UPLOAD_ID = /^[0-9a-f]{12}$/

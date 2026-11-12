@@ -33,10 +33,13 @@ import { gfsStoreSpaceGuidance } from './gfsSpaceGuidance'
 import {
   FILE_CONTAINS_SECRET,
   KEPT_FILES_UNAVAILABLE,
+  type KeptFileDeletion,
   type KeptFileEntry,
   type KeptFileSources,
+  type KeptFileToDelete,
   KeptFilesUnavailableError,
   type ResolvedSourceFile,
+  deleteKeptFiles,
   isSourceRefusal,
   listKeptFiles,
   resolveGeneratedFile,
@@ -1365,6 +1368,100 @@ export function buildKeptFilesListTool(callerRoot: string | undefined): Internal
           ...(entry.reason === undefined ? {} : { reason: entry.reason }),
         })),
         truncated: matching.length > KEPT_FILES_LIST_LIMIT,
+      })
+    },
+  }
+}
+
+export const KEPT_FILES_DELETE_TOOL = 'clerum__kept_files_delete'
+
+/** The sentence a delete adds when this turn's attachments could not be kept. */
+export const ATTACH_AGAIN_SENTENCE =
+  'the attachments of this message were not kept; ask the user to attach them again'
+
+/**
+ * `clerum__kept_files_delete`: deletes files the Host keeps for this user,
+ * named by kind, id and name from the listing, after the user approves the
+ * call. It cannot name a GFS file, a download copy, a workspace file, a file
+ * with no record or another user's file: it has no path and no GFS client.
+ */
+export function buildKeptFilesDeleteTool(
+  callerRoot: string | undefined,
+  options: { keepRefused: boolean }
+): InternalToolDefinition {
+  return {
+    name: KEPT_FILES_DELETE_TOOL,
+    description:
+      'Delete files this Host keeps for this user, to make room. Name each file by kind, id and name exactly as clerum__kept_files_list gives them; only files with an id can be deleted. ' +
+      'Call it only with the files the user agreed to delete; the user approves the call itself on an approval card that lists every name. Deleted files cannot be recovered.',
+    requiresApproval: true,
+    parameters: {
+      type: 'object',
+      required: ['files'],
+      properties: {
+        files: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: 'object',
+            required: ['kind', 'id', 'name'],
+            properties: {
+              kind: { type: 'string', enum: ['generated', 'upload'] },
+              id: { type: 'string', pattern: '^[0-9a-f]{12}$' },
+              name: { type: 'string', minLength: 1, maxLength: 255 },
+            },
+          },
+        },
+      },
+    },
+    execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      const files = args.files
+      if (
+        !Array.isArray(files) ||
+        files.length < 1 ||
+        files.length > 20 ||
+        !files.every(
+          (file): file is KeptFileToDelete =>
+            typeof file === 'object' &&
+            file !== null &&
+            ((file as KeptFileToDelete).kind === 'generated' ||
+              (file as KeptFileToDelete).kind === 'upload') &&
+            typeof (file as KeptFileToDelete).id === 'string' &&
+            /^[0-9a-f]{12}$/.test((file as KeptFileToDelete).id) &&
+            typeof (file as KeptFileToDelete).name === 'string'
+        )
+      ) {
+        return invalidArgs(
+          'files must be 1 to 20 entries of kind, id and name from clerum__kept_files_list'
+        )
+      }
+      if (!callerRoot) return { success: false, error: KEPT_FILES_UNAVAILABLE }
+      let outcome: KeptFileDeletion
+      try {
+        outcome = deleteKeptFiles(callerRoot, files)
+      } catch (err) {
+        if (err instanceof KeptFilesUnavailableError) {
+          return { success: false, error: KEPT_FILES_UNAVAILABLE }
+        }
+        throw err
+      }
+      if (outcome.status === 'mismatch') {
+        return {
+          success: false,
+          error:
+            'kept_file_mismatch: a name does not match its id; nothing was deleted. Call clerum__kept_files_list and use its names and ids',
+        }
+      }
+      return ok({
+        files: outcome.files.map(file => ({
+          kind: file.kind,
+          id: file.id,
+          name: file.name,
+          result: file.result,
+        })),
+        freedBytes: outcome.freedBytes,
+        ...(options.keepRefused ? { note: ATTACH_AGAIN_SENTENCE } : {}),
       })
     },
   }
