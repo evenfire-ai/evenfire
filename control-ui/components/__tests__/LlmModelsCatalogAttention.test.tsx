@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { LlmAllowedModel } from '@lib/api'
 import {
@@ -94,6 +94,21 @@ function renderSurface() {
   )
 }
 
+// The banner shares `role="status"` with the success toast a delete shows, so it
+// is located by its own text, never by the bare role.
+const BANNER_TEXT = /Models need review/
+
+/** The banner's message `<span>`, once the feed has landed. */
+function findBannerMessage() {
+  return screen.findByText(BANNER_TEXT)
+}
+
+/** The detail lives only in the dialog, which exists only after `Review models`. */
+async function openReview() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Review models' }))
+  return screen.findByRole('dialog')
+}
+
 describe('catalog attention banner', () => {
   beforeEach(() => {
     vi.mocked(getLlmModels).mockResolvedValue({ rows: [model] })
@@ -142,12 +157,13 @@ describe('catalog attention banner', () => {
 
     renderSurface()
 
-    expect(await screen.findByText('Claude Haiku')).toBeInTheDocument()
-    expect(screen.getByText('mcp-host/agent-a')).toBeInTheDocument()
-    expect(screen.getByText(/promptBridge/)).toBeInTheDocument()
-    expect(screen.getByText('sandbox-recipes/nightly-summary')).toBeInTheDocument()
-    // The unknown-kind item contributes nothing to the banner.
-    expect(screen.queryByText('gpt-5')).not.toBeInTheDocument()
+    const dialog = await openReview()
+    expect(within(dialog).getByText('Claude Haiku')).toBeInTheDocument()
+    expect(within(dialog).getByText('mcp-host/agent-a')).toBeInTheDocument()
+    expect(within(dialog).getByText(/promptBridge/)).toBeInTheDocument()
+    expect(within(dialog).getByText('sandbox-recipes/nightly-summary')).toBeInTheDocument()
+    // The unknown-kind item contributes nothing, checked where the rows render.
+    expect(within(dialog).queryByText('gpt-5')).not.toBeInTheDocument()
   })
 
   it('renders no banner for an empty feed', async () => {
@@ -156,7 +172,11 @@ describe('catalog attention banner', () => {
     renderSurface()
 
     expect(await screen.findByText('Model catalog')).toBeInTheDocument()
-    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    await waitFor(() => expect(vi.mocked(getAdminAttention)).toHaveBeenCalled())
+    await act(async () => {
+      await vi.mocked(getAdminAttention).mock.results[0].value
+    })
+    expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
   })
 
   it('falls back to the model id when displayName is absent', async () => {
@@ -175,7 +195,8 @@ describe('catalog attention banner', () => {
 
     renderSurface()
 
-    expect(await screen.findByText('gpt-5-mini')).toBeInTheDocument()
+    const dialog = await openReview()
+    expect(within(dialog).getByText('gpt-5-mini')).toBeInTheDocument()
   })
 })
 
@@ -214,22 +235,24 @@ describe('catalog attention banner — catalog-flagged kinds', () => {
 
     renderSurface()
 
-    const banner = await screen.findByRole('status')
+    const dialog = await openReview()
     const label = String(item.displayName ?? item.model)
     const providerLabel = getProviderDisplayLabel(item.provider)
-    expect(banner).toHaveTextContent(/1 enabled model is marked deprecated in the provider catalog/)
-    expect(banner).toHaveTextContent(
+    expect(dialog).toHaveTextContent(/1 enabled model is marked deprecated in the provider catalog/)
+    expect(dialog).toHaveTextContent(
       /disable it, replace it with a newer model, or keep it enabled/
     )
-    expect(screen.getByText(label)).toBeInTheDocument()
-    expect(banner).toHaveTextContent(`${providerLabel} · ${item.model}`)
-    const link = await screen.findByRole('link', {
+    const link = await within(dialog).findByRole('link', {
       name: `Review ${label} (${providerLabel} · ${item.model})`,
     })
     expect(link).toHaveAttribute('href', CONTROL_ROUTES.llmModels.edit('row-deprecated'))
-    // No reference list for a kind without references.
-    expect(banner).not.toHaveTextContent(/still use it/)
-    expect(banner).not.toHaveTextContent(/still referenced/)
+    // Provider and model sit in their own cells of the item's row.
+    const cells = within(link.closest('tr')!).getAllByRole('cell')
+    expect(cells[0]).toHaveTextContent(providerLabel)
+    expect(cells[1]).toHaveTextContent(label)
+    expect(cells[1]).toHaveTextContent(item.model)
+    // No reference column for a kind without references.
+    expect(within(dialog).queryByRole('columnheader', { name: 'Used by' })).not.toBeInTheDocument()
   })
 
   it('renders every stale discovery item with a count and a review link each', async () => {
@@ -242,23 +265,23 @@ describe('catalog attention banner — catalog-flagged kinds', () => {
 
     renderSurface()
 
-    const banner = await screen.findByRole('status')
-    expect(banner).toHaveTextContent(
+    const dialog = await openReview()
+    expect(dialog).toHaveTextContent(
       /2 enabled discovered models are no longer listed in the provider catalog/
     )
-    expect(banner).toHaveTextContent(
+    expect(dialog).toHaveTextContent(
       /disable it, replace it, or keep it if the provider still serves it/
     )
     for (const [index, item] of body.items.entries()) {
       const label = String(item.displayName ?? item.model)
       const providerLabel = getProviderDisplayLabel(item.provider)
-      expect(screen.getByText(label)).toBeInTheDocument()
-      const link = await screen.findByRole('link', {
+      expect(within(dialog).getByText(label)).toBeInTheDocument()
+      const link = await within(dialog).findByRole('link', {
         name: `Review ${label} (${providerLabel} · ${item.model})`,
       })
       expect(link).toHaveAttribute('href', CONTROL_ROUTES.llmModels.edit(`row-stale-${index}`))
     }
-    expect(banner).not.toHaveTextContent(/still use it/)
+    expect(within(dialog).queryByRole('columnheader', { name: 'Used by' })).not.toBeInTheDocument()
   })
 
   it('renders all three kinds from the full feed, counting a referenced stale model once and linking it', async () => {
@@ -283,18 +306,18 @@ describe('catalog attention banner — catalog-flagged kinds', () => {
 
     renderSurface()
 
-    const banner = await screen.findByRole('status')
-    expect(banner).toHaveTextContent(
+    const dialog = await openReview()
+    expect(dialog).toHaveTextContent(
       /1 model disappeared from the provider catalog but is still referenced/
     )
-    expect(banner).toHaveTextContent(/1 enabled model is marked deprecated/)
-    expect(banner).toHaveTextContent(/1 enabled discovered model is no longer listed/)
+    expect(dialog).toHaveTextContent(/1 enabled model is marked deprecated/)
+    expect(dialog).toHaveTextContent(/1 enabled discovered model is no longer listed/)
     const referencedLabel = String(referenced.displayName ?? referenced.model)
-    expect(screen.getAllByText(referencedLabel)).toHaveLength(1)
+    expect(within(dialog).getAllByText(referencedLabel)).toHaveLength(1)
     const hosts = referenced.hostsAffected as Array<{ namespace: string; name: string }>
-    expect(screen.getByText(`${hosts[0].namespace}/${hosts[0].name}`)).toBeInTheDocument()
+    expect(within(dialog).getByText(`${hosts[0].namespace}/${hosts[0].name}`)).toBeInTheDocument()
     const providerLabel = getProviderDisplayLabel(referenced.provider)
-    const link = await screen.findByRole('link', {
+    const link = await within(dialog).findByRole('link', {
       name: `Review ${referencedLabel} (${providerLabel} · ${referenced.model})`,
     })
     expect(link).toHaveAttribute(
@@ -310,9 +333,10 @@ describe('catalog attention banner — catalog-flagged kinds', () => {
 
     renderSurface()
 
+    const dialog = await openReview()
     const label = String(body.items[0].displayName ?? body.items[0].model)
-    expect(await screen.findByText(label)).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: /^Review / })).not.toBeInTheDocument()
+    expect(within(dialog).getByText(label)).toBeInTheDocument()
+    expect(within(dialog).queryByRole('link', { name: /^Review / })).not.toBeInTheDocument()
   })
 
   it('ignores an unknown kind next to the known ones without crashing', async () => {
@@ -326,9 +350,9 @@ describe('catalog attention banner — catalog-flagged kinds', () => {
 
     renderSurface()
 
-    const banner = await screen.findByRole('status')
-    expect(banner).toHaveTextContent(/1 enabled model is marked deprecated/)
-    expect(screen.queryByText('gpt-future')).not.toBeInTheDocument()
+    const dialog = await openReview()
+    expect(dialog).toHaveTextContent(/1 enabled model is marked deprecated/)
+    expect(within(dialog).queryByText('gpt-future')).not.toBeInTheDocument()
   })
 
   it('renders no banner when the feed only carries unknown kinds', async () => {
@@ -349,7 +373,7 @@ describe('catalog attention banner — catalog-flagged kinds', () => {
     await act(async () => {
       await vi.mocked(getAdminAttention).mock.results[0].value
     })
-    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
   })
 })
 
@@ -446,25 +470,15 @@ describe('delete impact gate (409 model_in_use → force)', () => {
     // returns it resolved (empty), so the banner must stop showing it. The
     // banner item is deliberately unrelated to the catalog row being deleted.
     vi.mocked(getAdminAttention)
-      .mockResolvedValueOnce({
-        items: [
-          {
-            kind: 'stale_model_referenced',
-            provider: 'openai',
-            model: 'gpt-5-mini',
-            displayName: 'GPT-5 Mini',
-            hostsAffected: [{ namespace: 'mcp-host', name: 'agent-b', roles: ['primary'] }],
-            grantsAffected: [],
-          },
-        ],
-        generatedAt: 'x',
-      })
+      .mockResolvedValueOnce(
+        parseAdminAttentionReport(attentionWireBodyOf('stale_model_referenced'))
+      )
       .mockResolvedValue({ items: [], generatedAt: 'x' })
 
     renderSurface()
 
-    // The stale item is visible in the banner before any mutation.
-    expect(await screen.findByText('GPT-5 Mini')).toBeInTheDocument()
+    // The stale item is counted in the banner before any mutation.
+    expect(await findBannerMessage()).toHaveTextContent('1 still referenced')
     // Exactly one feed fetch on mount — the banner re-fetches on demand only, so
     // no polling and no double-fetch (a mount-effect regression the observable
     // assertion below would not catch on its own).
@@ -476,7 +490,7 @@ describe('delete impact gate (409 model_in_use → force)', () => {
     // After the successful delete the banner re-fetches and the resolved item
     // is gone from the operator's view.
     await waitFor(() => {
-      expect(screen.queryByText('GPT-5 Mini')).not.toBeInTheDocument()
+      expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
     })
     // Exactly one additional fetch for the post-mutation refresh — one bump per
     // mutation, not a polling loop.
@@ -495,35 +509,247 @@ describe('delete impact gate (409 model_in_use → force)', () => {
     // transient attention failure, not a silent abort), so the advisory must
     // soft-degrade to hidden rather than tumble the surface.
     vi.mocked(getAdminAttention)
-      .mockResolvedValueOnce({
-        items: [
-          {
-            kind: 'stale_model_referenced',
-            provider: 'openai',
-            model: 'gpt-5-mini',
-            displayName: 'GPT-5 Mini',
-            hostsAffected: [{ namespace: 'mcp-host', name: 'agent-b', roles: ['primary'] }],
-            grantsAffected: [],
-          },
-        ],
-        generatedAt: 'x',
-      })
+      .mockResolvedValueOnce(
+        parseAdminAttentionReport(attentionWireBodyOf('stale_model_referenced'))
+      )
       .mockRejectedValue(new Error('attention refetch failed'))
 
     renderSurface()
 
-    // The stale item is visible in the banner before the mutation.
-    expect(await screen.findByText('GPT-5 Mini')).toBeInTheDocument()
+    // The stale item is counted in the banner before the mutation.
+    expect(await findBannerMessage()).toHaveTextContent('1 still referenced')
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
 
     // The rejected refetch clears the banner: the advisory item leaves the view.
     await waitFor(() => {
-      expect(screen.queryByText('GPT-5 Mini')).not.toBeInTheDocument()
+      expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
     })
     // And nothing else broke — the models surface stays interactive.
     expect(screen.getByText('Model catalog')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' })).toBeInTheDocument()
+  })
+})
+
+// The compact banner: one line of counts, the detail in a dialog. Every feed is
+// the producer-generated wire body run through the real client parser.
+describe('catalog attention banner — one line plus review dialog', () => {
+  type WireItem = ReturnType<typeof attentionWireBody>['items'][number]
+  const pair = (item: WireItem) => `${item.provider}/${item.model}`
+
+  /** One allowlist row per distinct pair of the body, so every item links. */
+  function rowsFor(body: ReturnType<typeof attentionWireBody>): LlmAllowedModel[] {
+    const pairs = [...new Set(body.items.map(pair))]
+    return pairs.map((key, index) => {
+      const item = body.items.find(candidate => pair(candidate) === key)!
+      return { ...model, id: `row-${index}`, provider: item.provider, model: item.model }
+    })
+  }
+
+  function rowIdOf(body: ReturnType<typeof attentionWireBody>, item: WireItem): string {
+    return `row-${[...new Set(body.items.map(pair))].indexOf(pair(item))}`
+  }
+
+  function reviewLinkName(item: WireItem): string {
+    const label = String(item.displayName ?? item.model)
+    return `Review ${label} (${getProviderDisplayLabel(item.provider)} · ${item.model})`
+  }
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(settle => {
+      resolve = settle
+    })
+    return { promise, resolve }
+  }
+
+  beforeEach(() => {
+    vi.mocked(getUnpricedModels).mockResolvedValue({ rows: [] })
+    vi.mocked(deleteLlmModel).mockResolvedValue(undefined)
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  it('T-1: shows the counts and no model name or link in the banner', async () => {
+    const body = attentionWireBody()
+    vi.mocked(getLlmModels).mockResolvedValue({ rows: rowsFor(body) })
+    vi.mocked(getAdminAttention).mockResolvedValue(parseAdminAttentionReport(body))
+
+    renderSurface()
+
+    const banner = (await findBannerMessage()).parentElement!
+    expect(banner).toHaveAttribute('role', 'status')
+    expect(banner).toHaveTextContent('1 still referenced')
+    for (const item of body.items) {
+      expect(banner).not.toHaveTextContent(item.model)
+      if (item.displayName) expect(banner).not.toHaveTextContent(String(item.displayName))
+    }
+    expect(within(banner).queryAllByRole('link')).toHaveLength(0)
+    expect(within(banner).getByRole('button', { name: 'Review models' })).toBeInTheDocument()
+  })
+
+  it('T-2: the message is exactly the per-group segments, without a total', async () => {
+    const body = attentionWireBody()
+    vi.mocked(getLlmModels).mockResolvedValue({ rows: [] })
+    vi.mocked(getAdminAttention).mockResolvedValue(parseAdminAttentionReport(body))
+
+    const { unmount } = renderSurface()
+
+    expect((await findBannerMessage()).textContent).toBe(
+      'Models need review: 1 still referenced · 1 deprecated · 1 no longer listed'
+    )
+    unmount()
+
+    vi.mocked(getAdminAttention).mockResolvedValue(
+      parseAdminAttentionReport(attentionWireBodyOf('deprecated_model_enabled'))
+    )
+    renderSurface()
+
+    expect((await findBannerMessage()).textContent).toBe('Models need review: 1 deprecated')
+  })
+
+  it('T-3: the dialog opens only from the banner, focuses Done and closes with it', async () => {
+    const body = attentionWireBody()
+    vi.mocked(getLlmModels).mockResolvedValue({ rows: rowsFor(body) })
+    vi.mocked(getAdminAttention).mockResolvedValue(parseAdminAttentionReport(body))
+
+    renderSurface()
+
+    await findBannerMessage()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    const dialog = await openReview()
+    expect(within(dialog).getByRole('heading', { name: 'Models that need review' })).toBeVisible()
+    // The rows are linked, so a default first-focusable target would be a link.
+    expect(await within(dialog).findAllByRole('link', { name: /^Review / })).not.toHaveLength(0)
+    const done = within(dialog).getByRole('button', { name: 'Done' })
+    expect(done).toHaveFocus()
+
+    fireEvent.click(done)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('T-4: each group shows its lede, provider, model and edit link, in group order', async () => {
+    const body = attentionWireBody()
+    vi.mocked(getLlmModels).mockResolvedValue({ rows: rowsFor(body) })
+    vi.mocked(getAdminAttention).mockResolvedValue(parseAdminAttentionReport(body))
+    const referenced = body.items.find(item => item.kind === 'stale_model_referenced')!
+    const deprecatedItem = body.items.find(item => item.kind === 'deprecated_model_enabled')!
+    const staleOnly = body.items.find(
+      item => item.kind === 'stale_discovery_enabled' && pair(item) !== pair(referenced)
+    )!
+
+    renderSurface()
+
+    const dialog = await openReview()
+    const tables = within(dialog).getAllByRole('table')
+    expect(tables).toHaveLength(3)
+    const ledes = [
+      /1 model disappeared from the provider catalog but is still referenced/,
+      /1 enabled model is marked deprecated in the provider catalog/,
+      /1 enabled discovered model is no longer listed in the provider catalog/,
+    ]
+    for (const [index, item] of [referenced, deprecatedItem, staleOnly].entries()) {
+      const section = tables[index].parentElement!
+      expect(section.querySelector('p')).toHaveTextContent(ledes[index])
+      const link = await within(tables[index]).findByRole('link', { name: reviewLinkName(item) })
+      expect(link).toHaveAttribute('href', CONTROL_ROUTES.llmModels.edit(rowIdOf(body, item)))
+      const cells = within(link.closest('tr')!).getAllByRole('cell')
+      expect(cells[0]).toHaveTextContent(getProviderDisplayLabel(item.provider))
+      expect(cells[1]).toHaveTextContent(String(item.displayName ?? item.model))
+    }
+  })
+
+  it('T-5: only the referenced group has a Used by column, listing its Hosts', async () => {
+    const body = attentionWireBody()
+    vi.mocked(getLlmModels).mockResolvedValue({ rows: rowsFor(body) })
+    vi.mocked(getAdminAttention).mockResolvedValue(parseAdminAttentionReport(body))
+    const referenced = body.items.find(item => item.kind === 'stale_model_referenced')!
+    const hosts = referenced.hostsAffected as Array<{ namespace: string; name: string }>
+
+    renderSurface()
+
+    const dialog = await openReview()
+    const [referencedTable, deprecatedTable, staleTable] = within(dialog).getAllByRole('table')
+    expect(
+      within(referencedTable).getByRole('columnheader', { name: 'Used by' })
+    ).toBeInTheDocument()
+    expect(
+      within(referencedTable).getByText(`${hosts[0].namespace}/${hosts[0].name}`)
+    ).toBeInTheDocument()
+    expect(within(referencedTable).getByText('1 Host')).toBeInTheDocument()
+    for (const table of [deprecatedTable, staleTable]) {
+      expect(within(table).queryByRole('columnheader', { name: 'Used by' })).not.toBeInTheDocument()
+    }
+  })
+
+  it('T-6: shows the id under the name only when they differ', async () => {
+    const body = attentionWireBody()
+    vi.mocked(getLlmModels).mockResolvedValue({ rows: rowsFor(body) })
+    vi.mocked(getAdminAttention).mockResolvedValue(parseAdminAttentionReport(body))
+    const deprecatedItem = body.items.find(item => item.kind === 'deprecated_model_enabled')!
+    // The generator gives this model a catalog name equal to its id.
+    expect(deprecatedItem.displayName).toBe(deprecatedItem.model)
+    const staleOnly = body.items.find(
+      item => item.kind === 'stale_discovery_enabled' && item.model === 'claude-haiku-4-5'
+    )!
+    expect(staleOnly.displayName).not.toBe(staleOnly.model)
+
+    renderSurface()
+
+    const dialog = await openReview()
+    expect(within(dialog).getAllByText(deprecatedItem.model, { exact: true })).toHaveLength(1)
+    expect(within(dialog).getByText(String(staleOnly.displayName))).toBeInTheDocument()
+    expect(within(dialog).getByText(staleOnly.model, { exact: true })).toBeInTheDocument()
+  })
+
+  // reviewOpen survives `return null` (the banner is not unmounted), so the
+  // dialog must be closed when the feed empties or it reappears on its own.
+  async function emptyThenRefill(secondFetch: () => void) {
+    const body = attentionWireBodyOf('stale_model_referenced')
+    vi.mocked(getLlmModels).mockResolvedValue({ rows: [model] })
+    vi.mocked(getAdminAttention).mockResolvedValueOnce(parseAdminAttentionReport(body))
+    secondFetch()
+    vi.mocked(getAdminAttention).mockResolvedValue(parseAdminAttentionReport(body))
+    const firstDelete = deferred<undefined>()
+    vi.mocked(deleteLlmModel).mockReturnValueOnce(firstDelete.promise)
+
+    renderSurface()
+
+    expect(await findBannerMessage()).toHaveTextContent('1 still referenced')
+    fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(vi.mocked(deleteLlmModel)).toHaveBeenCalledTimes(1))
+    // The delete is in flight when the operator opens the review.
+    await openReview()
+
+    await act(async () => {
+      firstDelete.resolve(undefined)
+    })
+    await waitFor(() => expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    // A second delete refetches a feed with items again.
+    fireEvent.click(screen.getByRole('button', { name: 'Delete claude-haiku-4-5' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+    expect(await findBannerMessage()).toHaveTextContent('1 still referenced')
+    expect(vi.mocked(getAdminAttention)).toHaveBeenCalledTimes(3)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  }
+
+  it('T-7: an empty refetch closes the dialog, and the banner comes back closed', async () => {
+    await emptyThenRefill(() =>
+      vi.mocked(getAdminAttention).mockResolvedValueOnce({ items: [], generatedAt: 'x' })
+    )
+  })
+
+  it('T-8: a failed refetch closes the dialog, and the banner comes back closed', async () => {
+    await emptyThenRefill(() =>
+      vi.mocked(getAdminAttention).mockRejectedValueOnce(new Error('attention refetch failed'))
+    )
   })
 })

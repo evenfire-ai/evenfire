@@ -213,7 +213,11 @@ describeRealPostgres('attention wire contract (real PostgreSQL)', () => {
       .sort()
     expect(eligible.length).toBeGreaterThanOrEqual(3)
     const [deprecatedId, staleReferencedId, staleUnreferencedId] = eligible
-    await sync(base)
+    // The to-be-deprecated model's catalog name equals its id, so the wire carries
+    // an item whose displayName === model. It goes in this run because the sync
+    // freezes display_name on enabled rows: renaming it in the second run would
+    // not reach the wire.
+    await sync(patched(base, rawIdOf(base, deprecatedId), { name: deprecatedId }))
 
     // Second run: the catalog deprecates one model and drops two. The sync keeps
     // all three enabled (it only informs); one of the dropped ones is still the
