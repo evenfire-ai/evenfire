@@ -353,9 +353,19 @@ describe('scanForSecrets on text the display rule refuses', () => {
     ])
     expect(scanForSecrets(withValue, entries)).not.toEqual(SCANNED)
     expect([FOUND, BINARY]).toContainEqual(scanForSecrets(withValue, entries))
+    // A non-ASCII value in a UTF-8 tail that shares the last 64 KiB block with
+    // the UTF-16 head is found in the UTF-8 reading.
+    const value = 'contraseña-Ünico-2026'
+    let utf8Tail = Buffer.from(` key ${value} end`)
+    if (utf8Tail.length % 2) utf8Tail = Buffer.concat([utf8Tail, Buffer.from(' ')])
+    expect(scanForSecrets(Buffer.concat([head, utf8Tail]), [{ name: 'PASS', value }])).toEqual(
+      FOUND
+    )
+    // The clean file shows zero bytes at one parity in every block and decodes
+    // as UTF-16 with no control character, so it is read as UTF-16; nothing is
+    // found in any reading: scanned.
     const clean = Buffer.concat([head, Buffer.from(' clean tail ')])
-    // Nothing to find: the clean file is never reported as holding a value.
-    expect(scanForSecrets(clean, entries)).not.toEqual(FOUND)
+    expect(scanForSecrets(clean, entries)).toEqual(SCANNED)
     // A tail longer than a block shows no zero bytes there: not read as UTF-16.
     const longTail = Buffer.concat([head, Buffer.from('t'.repeat(70_000))])
     expect(scanForSecrets(longTail, entries)).toEqual(BINARY)

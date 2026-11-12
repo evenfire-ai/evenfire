@@ -242,7 +242,11 @@ export function decodeForScan(bytes: Buffer, entries: ArtifactSecretEntry[]): Sc
     const parity = utf16ZeroParity(bytes)
     const text =
       parity === undefined ? null : utf16Text(parity === 1 ? 'utf-16le' : 'utf-16be', bytes)
-    if (text !== null) return { texts: [text, latin1], asWritten: true }
+    // The zero bytes of the last block can hide a tail written in another
+    // encoding: the bytes are also read as Latin-1 and as UTF-8, so a value
+    // in such a tail, ASCII or not, is found.
+    if (text !== null)
+      return { texts: [text, latin1, new TextDecoder('utf-8').decode(bytes)], asWritten: true }
   }
   if (bytes.includes(0)) return null
   const utf8 = fatalDecode('utf-8', bytes)
