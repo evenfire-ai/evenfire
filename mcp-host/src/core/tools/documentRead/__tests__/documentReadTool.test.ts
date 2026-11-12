@@ -80,10 +80,11 @@ function toolFor(
     ledger?: AttachmentReadLedger
     limits?: DocumentReadLimits
     redactor?: AttachmentReadRedactor
+    contextWindowTokens?: number
   } = {}
 ): DocumentReadTool {
   return new DocumentReadTool(messageFor(attachments), {
-    contextWindowTokens: WINDOW_TOKENS,
+    contextWindowTokens: options.contextWindowTokens ?? WINDOW_TOKENS,
     ledger: options.ledger ?? new AttachmentReadLedger(),
     redactor:
       options.redactor ??
@@ -692,7 +693,8 @@ describe('DocumentReadTool XLSX row probe cost (review M2)', () => {
 
   async function countedRead(
     outcome: XlsxOutcome,
-    admitted?: Attachment
+    admitted?: Attachment,
+    options: { contextWindowTokens?: number; ledger?: AttachmentReadLedger } = {}
   ): Promise<{ body: Record<string, unknown>; measures: number; measuredChars: number }> {
     const file =
       admitted ?? admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
@@ -704,12 +706,125 @@ describe('DocumentReadTool XLSX row probe cost (review M2)', () => {
       return measureResult(raw)
     }
     const { body } = await read(
-      toolFor([file], fakeRunner(outcome).runJob),
+      toolFor([file], fakeRunner(outcome).runJob, options),
       { attachmentId: 'xlsx-file' },
       { measureResult: counted }
     )
     return { body, measures, measuredChars }
   }
+
+  const emittedRows = (body: Record<string, unknown>): number =>
+    ((body.sheets ?? []) as Array<{ rows: unknown[] }>).reduce(
+      (sum, sheet) => sum + sheet.rows.length,
+      0
+    )
+
+  // The worst case for one call. Only rows up to the first one that cannot
+  // join the page are probed, and each probed row costs at most three
+  // measures: its own probe, its share of the halved group probes above it,
+  // and one probe of the prefix it closes. The rest are searches over the
+  // window (the reach of `[]` rows, the fit) and a few fixed measures. Rows
+  // past the page are never probed, so the cost follows the rows a call
+  // emits, not the rows the worker returned.
+  const probeBound = (emitted: number, windowRows: number): number =>
+    3 * (emitted + 2) + 3 * Math.ceil(Math.log2(windowRows + 1)) + 8
+
+  it('stops probing once the page is full: 1,300 sheet names and one 900-character row per page', async () => {
+    const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+    const sheetNames = names(1_300)
+    const rows = Array.from({ length: 430 }, (_, index) => [`${index + 1}:`.padEnd(900, 'r')])
+    const envelope = measureResult(
+      JSON.stringify({
+        status: 'ok',
+        attachmentId: file.id,
+        referenceId: file.fileReference!.id,
+        format: 'xlsx',
+        sheetNames,
+        sheets: [{ name: sheetNames[0], startRow: 1, rows: [], truncated: true, lastRow: 430 }],
+      })
+    )
+    // A page that holds the sheet list and one row, never two: the shape the
+    // independent review measured at 821 measures per call on e1fe20095's
+    // successor, each over the whole list, to emit a single row.
+    const pageTokens = envelope + 340
+    const { body, measures } = await countedRead(
+      {
+        ok: true,
+        sheetNames,
+        sheets: [{ name: sheetNames[0]!, startRow: 1, rows, truncated: false, lastRow: 430 }],
+      },
+      file,
+      { contextWindowTokens: pageTokens * 10 }
+    )
+    expect(body.status).toBe('ok')
+    const sheet = (body.sheets as Array<Record<string, unknown>>)[0]!
+    expect(sheet.rows).toEqual(rows.slice(0, 1))
+    expect(sheet.skippedRows).toBeUndefined()
+    expect(body.continuation).toMatchObject({
+      cursor: boundCursor('v1.xlsx.0.2', file),
+      limit: 'page_budget',
+    })
+    expect(measures).toBeLessThanOrEqual(probeBound(emittedRows(body), rows.length))
+  })
+
+  it('fits a 400,000-character PDF window to a page in a few measures', async () => {
+    const file = admittedFile('pdf-file', await textPdf([witnessCode()]), 'application/pdf')
+    const text = Array.from({ length: 60_000 }, (_, index) => `w${index % 997} `)
+      .join('')
+      .slice(0, 400_000)
+    let measures = 0
+    const { body } = await read(
+      toolFor(
+        [file],
+        fakeRunner({
+          ok: true,
+          pageCount: 1,
+          pages: [{ page: 1, text, from: 0, to: text.length, lowText: false }],
+        }).runJob,
+        { contextWindowTokens: 200_000 }
+      ),
+      { attachmentId: 'pdf-file' },
+      {
+        measureResult: raw => {
+          measures += 1
+          return measureResult(raw)
+        },
+      }
+    )
+    expect(body.status).toBe('ok')
+    const [page] = body.pages as Array<{ text: string }>
+    // The largest prefix that fits the 20,000-token page.
+    expect(text.startsWith(page!.text)).toBe(true)
+    expect(page!.text.length).toBeGreaterThan(79_000)
+    expect(body.continuation).toMatchObject({ limit: 'page_budget' })
+    // Each measure covers up to a whole page. A bisection over the 400,000
+    // characters took 22 (the notice, the whole window, 19 halvings and the
+    // chosen result again); aiming at the allowance takes a handful, and
+    // never more than about three per halving of the window.
+    expect(measures).toBeLessThanOrEqual(8)
+  })
+
+  it('keeps the bound when every row is too wide for a page', async () => {
+    const sheetNames = names(3)
+    // Five 2,000-character cells: about 2,500 tokens, more than the
+    // 2,000-token page, so every row becomes `[]` and is listed as skipped.
+    const rows = Array.from({ length: 40 }, (_, index) =>
+      Array.from({ length: 5 }, (_, cell) => `${index}.${cell}:`.padEnd(2_000, 'w'))
+    )
+    const { body, measures } = await countedRead({
+      ok: true,
+      sheetNames,
+      sheets: [{ name: sheetNames[0]!, startRow: 1, rows, truncated: false, lastRow: 40 }],
+    })
+    expect(body.status).toBe('ok')
+    const sheet = (body.sheets as Array<Record<string, unknown>>)[0]!
+    expect(sheet.rows).toEqual(rows.map(() => []))
+    expect(sheet.skippedRows).toEqual({
+      count: 40,
+      first: Array.from({ length: 20 }, (_, index) => index + 1),
+    })
+    expect(measures).toBeLessThanOrEqual(probeBound(emittedRows(body), rows.length))
+  })
 
   it('measures a 5,000-row window by groups instead of once per row', async () => {
     const sheetNames = names(150)
@@ -732,6 +847,7 @@ describe('DocumentReadTool XLSX row probe cost (review M2)', () => {
     // e1fe20095 measured one probe per row, each carrying the 150 names:
     // 5,000+ measures and over 25 MB of measured text.
     expect(measures).toBeLessThan(100)
+    expect(measures).toBeLessThanOrEqual(probeBound(emitted.length, rows.length))
     expect(measuredChars).toBeLessThan(2_000_000)
   })
 
@@ -749,6 +865,7 @@ describe('DocumentReadTool XLSX row probe cost (review M2)', () => {
       limit: 'row_width',
     })
     expect(measures).toBeLessThan(20)
+    expect(measures).toBeLessThanOrEqual(probeBound(0, rows.length))
   })
 
   it('checks only the rows a page can reach when the sheet list nearly fills it', async () => {
@@ -793,6 +910,7 @@ describe('DocumentReadTool XLSX row probe cost (review M2)', () => {
     // plus the reach search and the fit: bounded by the page, not by the
     // 5,000-row window.
     expect(measures).toBeLessThan(300)
+    expect(measures).toBeLessThanOrEqual(probeBound(emitted.length, rows.length))
   })
 })
 

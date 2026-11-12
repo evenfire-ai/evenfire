@@ -887,9 +887,28 @@ export class DocumentReadTool implements Tool {
     // monotonicity `fit` relies on. A group that does not fit is halved; only a
     // single row gets the exact probe. An envelope that alone exceeds the page
     // makes every row exceed it, with one measure.
+    //
+    // Rows are checked in order, and checking stops once the rows checked so
+    // far cannot all be emitted (independent review M2): with a long sheet
+    // list, rows that each fit alone but not two together were all probed,
+    // about 800 measures over the whole list to emit one row. The smallest
+    // result holding those rows (see `smallest`) is a floor for every result
+    // that emits a later row, so a floor over the allowance proves the call
+    // emits none of the unchecked rows. Every row a call can emit is decided
+    // exactly as before, so its result is unchanged; the rows left unchecked
+    // start a later call, which checks them again.
     const pageTokens = attachmentReadBudgets(this.contextWindowTokens).pageTokens
+    const noticeCost = measure(
+      JSON.stringify(this.exhaustedResult(identity.attachmentId, identity.referenceId, cursor))
+    )
+    const allowance = this.ledger.pageAllowance(this.contextWindowTokens, noticeCost)
+    // Set once a sheet stops before its last row: later sheets cannot be
+    // emitted by this call, since a result reaches them only after every row
+    // of the earlier sheets.
+    let laterSheetsUnreachable = false
     const skippedRowsBySheet = sheets.map((sheet, sheetIndex) => {
       const skipped = [...sheet.skipped]
+      if (laterSheetsUnreachable) return skipped.sort((a, b) => a - b)
       const parserSkipped = new Set(skipped)
       const nextSheet = sheets[sheetIndex + 1]
       const inSheet = (row: number): DocumentContinuation => ({
@@ -955,18 +974,32 @@ export class DocumentReadTool implements Tool {
       // window stopped after it; the result must say so.
       const truncatedAfter = (rowIndex: number): boolean =>
         rowIndex + 1 < sheet.rows.length || sheet.truncated
+      // Rows before `to` are decided. `estimate` follows the smallest result
+      // holding them, from what each fitting row or group adds to an empty
+      // probe; only when it passes the allowance is that result measured, so
+      // a call measures it about once. A blanked row adds about one token and
+      // is left out of the estimate, which can then only stop later.
+      let stopped = false
+      let estimate = 0
+      let probeBase = 0
+      const decided = (to: number, cost: number): void => {
+        estimate += Math.max(0, cost - probeBase)
+        if (estimate <= allowance || to >= sheet.rows.length) return
+        estimate = smallest(sheet.rows.slice(0, to))
+        if (estimate > allowance) stopped = true
+      }
       const check = (from: number, to: number): void => {
+        if (stopped) return
         if (to - from === 1) {
           if (parserSkipped.has(sheet.startRow + from)) return
-          if (probe(from, to, continuationAfter(from), truncatedAfter(from)) > pageTokens) {
-            skip(from)
-          }
+          const cost = probe(from, to, continuationAfter(from), truncatedAfter(from))
+          if (cost > pageTokens) skip(from)
+          else decided(to, cost)
           return
         }
-        if (
-          probe(from, to, continuationAfter(to - 1), truncatedAfter(to - 1)) <=
-          pageTokens - margin
-        ) {
+        const cost = probe(from, to, continuationAfter(to - 1), truncatedAfter(to - 1))
+        if (cost <= pageTokens - margin) {
+          decided(to, cost)
           return
         }
         const middle = from + Math.floor((to - from) / 2)
@@ -974,28 +1007,42 @@ export class DocumentReadTool implements Tool {
         check(middle, to)
       }
       if (sheet.rows.length === 0) return skipped.sort((a, b) => a - b)
-      // The smallest result holding `count` rows of this sheet: every row
-      // `[]`, no continuation, and `true`, the shorter literal.
-      const emptyRows = (count: number): number =>
+      // The smallest result holding these first rows of this sheet: `true`,
+      // the shorter literal, and no continuation, or the shortest one when the
+      // worker's window stopped before the document's end, since every result
+      // then carries one. A result that emits these rows, or any later row,
+      // holds them all and is never smaller.
+      const shortestContinuation: DocumentContinuation | undefined = outcome.next
+        ? {
+            cursor: encodeCursor({ format: 'xlsx', sheetIndex: 0, row: 1 }, identity.referenceId),
+            limit: 'max_rows',
+          }
+        : undefined
+      const smallest = (rows: XlsxCellValue[][]): number =>
         measure(
           JSON.stringify({
             status: 'ok',
             ...identity,
             format: 'xlsx',
             sheetNames,
+            ...(shortestContinuation ? { continuation: shortestContinuation } : {}),
             sheets: [
               {
                 name: sheet.name,
                 startRow: sheet.startRow,
-                rows: Array.from({ length: count }, () => []),
+                rows,
                 truncated: true,
                 lastRow: sheet.lastRow,
               },
             ],
           } satisfies DocumentReadResult)
         )
-      if (emptyRows(0) > pageTokens) {
+      // ... with every row `[]`.
+      const emptyRows = (count: number): number => smallest(Array.from({ length: count }, () => []))
+      estimate = emptyRows(0)
+      if (estimate > pageTokens) {
         for (let rowIndex = 0; rowIndex < sheet.rows.length; rowIndex += 1) skip(rowIndex)
+        laterSheetsUnreachable = true
         return skipped.sort((a, b) => a - b)
       }
       // This call can emit at most `reach` rows of the sheet: more cannot fit
@@ -1023,7 +1070,10 @@ export class DocumentReadTool implements Tool {
       const margin = measure(
         JSON.stringify({ startRow: lastRowNumber, continuation: inSheet(lastRowNumber + 1) })
       )
+      // A probe holding no row: what every probe costs before its rows.
+      probeBase = probe(0, 0, inSheet(lastRowNumber + 1), true)
       if (reach > 0) check(0, reach)
+      if (stopped || reach < sheet.rows.length) laterSheetsUnreachable = true
       return skipped.sort((a, b) => a - b)
     })
 
@@ -1105,7 +1155,8 @@ export class DocumentReadTool implements Tool {
         result.status === 'ok' && result.format === 'xlsx'
           ? result.sheets.some(sheet => sheet.rows.length > 0)
           : false,
-      'row_width'
+      'row_width',
+      noticeCost
     )
   }
 
@@ -1113,10 +1164,12 @@ export class DocumentReadTool implements Tool {
 
   /**
    * Emits `build(total)` when it fits the page allowance; otherwise the
-   * largest `build(n)` that fits and still carries content, found by binary
+   * largest `build(n)` that fits and still carries content, found by a
    * search over `n` with measurement only; otherwise the exhausted notice.
    * When even one unit exceeds a full page allowance, a new turn cannot help:
    * `oversized` names that limit as a typed failure instead of the notice.
+   * `noticeCost` is the measured exhausted notice when the caller already
+   * needed it.
    */
   private fit(
     identity: Identity,
@@ -1126,44 +1179,76 @@ export class DocumentReadTool implements Tool {
     total: number,
     build: (units: number, limit: DocumentReadLimit | null) => DocumentReadResult,
     hasContent: (result: DocumentReadResult) => boolean,
-    oversized: DocumentLimitName | null = null
-  ): ToolOutput {
-    const noticeCost = measure(
+    oversized: DocumentLimitName | null = null,
+    noticeCost: number = measure(
       JSON.stringify(this.exhaustedResult(identity.attachmentId, identity.referenceId, cursor))
     )
+  ): ToolOutput {
     const allowance = this.ledger.pageAllowance(this.contextWindowTokens, noticeCost)
     let units = total
     let serialized = JSON.stringify(build(total, null))
-    if (measure(serialized) > allowance) {
+    let cost = measure(serialized)
+    if (cost > allowance) {
       const limit: DocumentReadLimit =
         allowance < attachmentReadBudgets(this.contextWindowTokens).pageTokens
           ? 'turn_budget'
           : 'page_budget'
-      let lo = 1
-      let hi = total - 1
-      let best = -1
-      while (lo <= hi) {
-        const mid = Math.floor((lo + hi) / 2)
+      // The largest n in [1, total - 1] whose result fits and carries
+      // content. A result grows with n, so the search keeps a bracket: `lo`
+      // fits (0: none found yet) and `hi` does not (`total` was just
+      // measured). Every measure covers up to a whole page, so instead of
+      // bisecting each step aims where the line through the two measured ends
+      // crosses the allowance, which a result that grows about linearly with
+      // n reaches in a few measures (independent review M2: a plain bisection
+      // took about 20 per PDF call). Two aimed steps in a row that do not
+      // halve the bracket are followed by a bisection, so a result that grows
+      // unevenly costs at most about three measures per halving. A result that
+      // only grows with n gives the same n as a bisection.
+      let lo = 0
+      let loSerialized = ''
+      let hi = total
+      let hiCost = cost
+      // The result of no unit, measured once to aim the first step: it is
+      // about as small as the page envelope, and never emitted.
+      let loCost = total > 1 ? measure(JSON.stringify(build(0, limit))) : 0
+      // Aimed steps in a row that did not halve the bracket.
+      let stalls = 0
+      while (hi - lo > 1) {
+        const width = hi - lo
+        // `hi` may also fail for lack of content, below the allowance: only a
+        // rising pair of costs gives a line to aim with.
+        const aimed =
+          hiCost <= loCost
+            ? Number.NaN
+            : lo + Math.floor(((allowance - loCost) * width) / (hiCost - loCost))
+        const bisect = stalls >= 2 || !Number.isFinite(aimed)
+        const mid = bisect ? lo + Math.floor(width / 2) : Math.min(hi - 1, Math.max(lo + 1, aimed))
         const candidate = build(mid, limit)
-        if (hasContent(candidate) && measure(JSON.stringify(candidate)) <= allowance) {
-          best = mid
-          lo = mid + 1
+        const candidateSerialized = JSON.stringify(candidate)
+        const candidateCost = measure(candidateSerialized)
+        if (hasContent(candidate) && candidateCost <= allowance) {
+          lo = mid
+          loCost = candidateCost
+          loSerialized = candidateSerialized
         } else {
-          hi = mid - 1
+          hi = mid
+          hiCost = candidateCost
         }
+        stalls = bisect || hi - lo <= width / 2 ? 0 : stalls + 1
       }
-      if (best < 0 && limit === 'page_budget' && oversized) {
+      if (lo === 0 && limit === 'page_budget' && oversized) {
         return this.failure(
           identity,
           { ok: false, reason: 'document_limits_exceeded', limit: oversized },
           start
         )
       }
-      if (best < 0) return this.exhaustedOutput(identity, cursor, noticeCost)
-      units = best
-      serialized = JSON.stringify(build(best, limit))
+      if (lo === 0) return this.exhaustedOutput(identity, cursor, noticeCost)
+      units = lo
+      serialized = loSerialized
+      cost = loCost
     }
-    this.pending = { ...identity, cursor, units, reservedCost: measure(serialized) }
+    this.pending = { ...identity, cursor, units, reservedCost: cost }
     return {
       content: serialized,
       duration_ms: Date.now() - start,
