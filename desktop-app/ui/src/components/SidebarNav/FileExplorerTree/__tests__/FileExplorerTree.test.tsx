@@ -2386,7 +2386,8 @@ describe('FileExplorerTree — resource action menus', () => {
         'copy-route',
         undefined,
         7,
-        undefined
+        undefined,
+        { kind: 'accessible' }
       )
     }
 
@@ -2541,7 +2542,8 @@ describe('FileExplorerTree — resource action menus', () => {
       'copy-route',
       undefined,
       7,
-      undefined
+      undefined,
+      { kind: 'accessible' }
     )
     expect(firstRow.getAttribute('aria-selected')).toBe('true')
     expect(secondRow.getAttribute('aria-selected')).toBe('false')
@@ -2745,7 +2747,8 @@ describe('FileExplorerTree — resource action menus', () => {
           'copy-route',
           undefined,
           7,
-          undefined
+          undefined,
+          { kind: 'accessible' }
         )
       } else {
         expect(onResourceAction).toHaveBeenCalledWith(
@@ -2817,7 +2820,8 @@ describe('FileExplorerTree — resource action menus', () => {
       'copy-route',
       undefined,
       7,
-      undefined
+      undefined,
+      { kind: 'accessible' }
     )
   })
 
@@ -2850,7 +2854,8 @@ describe('FileExplorerTree — resource action menus', () => {
       'copy-route',
       undefined,
       7,
-      undefined
+      undefined,
+      { kind: 'accessible' }
     )
     expect(document.activeElement).not.toBe(trigger)
   })
@@ -3055,7 +3060,8 @@ describe('FileExplorerTree — resource action menus', () => {
       'copy-route',
       undefined,
       7,
-      undefined
+      undefined,
+      { kind: 'children', parentResourceId: 'root' }
     )
     expect(nestedRow.getAttribute('aria-expanded')).toBe('false')
     expect(onOpenFolder).not.toHaveBeenCalled()

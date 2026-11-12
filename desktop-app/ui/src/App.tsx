@@ -148,6 +148,7 @@ import {
   platformFromNavigator,
 } from '../../src/desktopCommands'
 import type { DeepLinkAcknowledgmentAuthority } from '../../src/types'
+import type { GfsResourceQuerySource } from './components/SidebarNav/FileExplorerTree/types'
 
 type SandboxUiSessionInvalidation = {
   sessionGeneration: number
@@ -176,6 +177,7 @@ type PendingSidebarCopy = {
   sessionGeneration: number
   ownerTabId: string
   intentSequence: number
+  querySource: GfsResourceQuerySource
   focusRecovery?: CopyIdFocusRecovery
 }
 
@@ -1166,7 +1168,8 @@ export function App() {
       actionId: GfsResourceActionId,
       file?: File,
       renderedSessionGeneration?: number | null,
-      focusRecovery?: CopyIdFocusRecovery
+      focusRecovery?: CopyIdFocusRecovery,
+      querySource?: GfsResourceQuerySource
     ) => {
       if (actionId === 'preview') {
         const preview = resolveGfsPreview(resource)
@@ -1206,6 +1209,7 @@ export function App() {
           !sessionScope ||
           !vm.isAuthenticated ||
           sessionGeneration === null ||
+          !querySource ||
           !ownerTabId ||
           !vm.isSessionGenerationCurrent(sessionGeneration) ||
           !vm.isNavigationIntentCurrent(vm.navigationIntentSequence)
@@ -1222,6 +1226,7 @@ export function App() {
             sessionGeneration,
             ownerTabId,
             intentSequence: vm.navigationIntentSequence,
+            querySource,
             ...(focusRecovery ? { focusRecovery } : {}),
           },
         ])
@@ -1300,7 +1305,7 @@ export function App() {
       }
 
       const parentQueryKey =
-        copy.resource.parentResourceId === null
+        copy.querySource.kind === 'accessible'
           ? desktopQueryKeys.gfsAccessible(
               copy.sessionScope,
               copy.resource.drive,
@@ -1308,7 +1313,7 @@ export function App() {
             )
           : desktopQueryKeys.gfsChildren(
               copy.sessionScope,
-              copy.resource.parentResourceId,
+              copy.querySource.parentResourceId,
               copy.resource.drive,
               copy.sessionGeneration
             )

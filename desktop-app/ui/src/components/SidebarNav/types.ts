@@ -3,6 +3,7 @@ import type { SidebarResizeControls } from '@hooks/useSidebarResize'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import type { CopyIdFocusRecovery, GfsResourceActionId } from '@lib/gfsResourceActions'
 import type { ActiveSandboxUiApp, NavItem, Tone } from '@/uiTypes'
+import type { GfsResourceQuerySource } from './FileExplorerTree/types'
 
 export type CompactMenuCloseFocus = 'preserve-destination-focus'
 
@@ -33,7 +34,8 @@ export type SidebarNavProps = {
     actionId: GfsResourceActionId,
     file?: File,
     renderedSessionGeneration?: number | null,
-    copyIdFocusRecovery?: CopyIdFocusRecovery
+    copyIdFocusRecovery?: CopyIdFocusRecovery,
+    querySource?: GfsResourceQuerySource
   ) => void
   getCopyIdFocusOwner?: (
     resource: GfsBrowserChild,

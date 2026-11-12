@@ -5,6 +5,10 @@ import type { CopyIdFocusRecovery, GfsResourceActionId } from '@lib/gfsResourceA
 import type { GfsDropVerdict } from '@/gfs/dragSession'
 import type { Tone } from '@/uiTypes'
 
+export type GfsResourceQuerySource =
+  | { kind: 'accessible' }
+  | { kind: 'children'; parentResourceId: string }
+
 /**
  * Actions the sidebar file explorer hands back to the app. A file activates on
  * single-click; a folder opens its files tab on double-click / Enter (its
@@ -21,7 +25,8 @@ export interface FileExplorerTreeProps {
     actionId: GfsResourceActionId,
     file?: File,
     renderedSessionGeneration?: number | null,
-    copyIdFocusRecovery?: CopyIdFocusRecovery
+    copyIdFocusRecovery?: CopyIdFocusRecovery,
+    querySource?: GfsResourceQuerySource
   ) => void
   onCopyIdFocusStart?: (
     resource: GfsBrowserChild,
@@ -38,6 +43,8 @@ export interface FileExplorerNodeProps {
   level: number
   /** Cache-scope key shared with the Files page's TanStack queries. */
   scope: string
+  /** Exact query which produced this row, independent of its parent metadata. */
+  querySource: GfsResourceQuerySource
   /** Published main-process generation that owns this authority query. */
   sessionGeneration: number | null
   /** Session access is live: gates the per-node children fetch the same way the
@@ -69,7 +76,8 @@ export interface FileExplorerNodeProps {
     actionId: GfsResourceActionId,
     file?: File,
     renderedSessionGeneration?: number | null,
-    copyIdFocusRecovery?: CopyIdFocusRecovery
+    copyIdFocusRecovery?: CopyIdFocusRecovery,
+    querySource?: GfsResourceQuerySource
   ) => void
   onCopyIdFocusStart?: (
     resource: GfsBrowserChild,

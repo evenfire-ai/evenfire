@@ -1082,6 +1082,122 @@ describe('App → Files action lifecycle integration', () => {
     expect(screen.queryAllByRole('dialog')).toHaveLength(0)
   })
 
+  it.each([
+    { kind: 'file', action: 'Copy file ID', name: 'a01-shared-root-file.md' },
+    { kind: 'folder', action: 'Copy folder ID', name: 'a01-shared-root-folder' },
+  ])(
+    'A01 copies an accessible root $kind with parent metadata while an embedded app remains active',
+    async ({ kind, action, name }) => {
+      const parentResourceId = 'abababababababababababababababab'
+      const resource = await resolveResource(
+        kind === 'file'
+          ? resolvedFile('18181818181818181818181818181818', name, { parentResourceId })
+          : resolvedDirectory('18181818181818181818181818181818', name, { parentResourceId })
+      )
+      const writeText = vi.fn(async (_text: string) => undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      const { controller, gfs } = await renderActualA01App([resource], writeText)
+      const scope = 'a01-environment:a01-user:team-a'
+      const accessibleKey = desktopQueryKeys.gfsAccessible(scope, 'main', 1)
+      const parentChildrenKey = desktopQueryKeys.gfsChildren(scope, parentResourceId, 'main', 1)
+
+      act(() => {
+        controller.current?.setWorkspaceTabs(state =>
+          openAppTab(state, {
+            id: 'a01-shared-app-tab',
+            appRef: 'a01-test-app',
+            title: 'A01 test app',
+          })
+        )
+      })
+      await waitFor(() =>
+        expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+          kind: 'app',
+          id: 'a01-shared-app-tab',
+        })
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      await screen.findByRole('treeitem', { name: new RegExp(name) })
+      await waitFor(() => {
+        expect(gfs.listAccessible).toHaveBeenCalled()
+        expect(
+          desktopQueryClient.getQueryCache().find({ queryKey: accessibleKey })?.state.data
+        ).toBeDefined()
+      })
+      expect(
+        desktopQueryClient.getQueryCache().find({ queryKey: parentChildrenKey })
+      ).toBeUndefined()
+      await chooseRowAction(resource.name, action)
+
+      expect(gfs.affordances).toHaveBeenCalledWith(resource.resourceId, 'main')
+      expect.soft(writeText).toHaveBeenCalledWith(resource.gfsUri)
+      expect.soft(writeText).toHaveBeenCalledTimes(1)
+      expect.soft(controller.current?.toasts).not.toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+        kind: 'app',
+        id: 'a01-shared-app-tab',
+      })
+      expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+      expect(gfs.download).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['settings', 'files'] as const)(
+    'A01 copies the same accessible root file with parent metadata while %s is active',
+    async surface => {
+      const resource = await resolveResource(
+        resolvedFile('19191919191919191919191919191919', `a01-root-${surface}.md`, {
+          parentResourceId: 'abababababababababababababababab',
+        })
+      )
+      const writeText = vi.fn(async (_text: string) => undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      const { controller } = await renderActualA01App([resource], writeText)
+
+      if (surface === 'settings') {
+        fireEvent.click(screen.getByTestId('nav-settings-menu'))
+        fireEvent.click(screen.getByTestId('nav-settings'))
+      } else {
+        fireEvent.click(screen.getByTestId('nav-files'))
+      }
+      await waitFor(() =>
+        expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe(surface)
+      )
+      const ownerTabId = activeWorkspaceTab(controller.current!.workspaceTabs)!.id
+      const explorerToggle = screen.getByTestId('nav-files-explorer-toggle')
+      if (explorerToggle.getAttribute('aria-expanded') !== 'true') {
+        fireEvent.click(explorerToggle)
+      }
+      await screen.findByRole('treeitem', { name: /a01-root-/ })
+
+      await chooseRowAction(resource.name, 'Copy file ID')
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(resource.gfsUri))
+      expect(writeText).toHaveBeenCalledTimes(1)
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+        kind: surface,
+        id: ownerTabId,
+      })
+      expect(
+        controller.current?.toasts.some(
+          toast => toast.text === 'This resource is no longer available from its parent folder.'
+        )
+      ).toBe(false)
+      expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+    }
+  )
+
   it('A01 copies from the sidebar while Preview remains active', async () => {
     const file = await resolveResource(
       resolvedFile('20202020202020202020202020202020', 'a01-while-preview-active.md')
@@ -1529,7 +1645,9 @@ describe('App → Files action lifecycle integration', () => {
 
   it('A01 model probe: changed URI is rejected and refreshes its exact parent query once', async () => {
     const file = await resolveResource(
-      resolvedFile('acacacacacacacacacacacacacacacac', 'a01-uri-v0.txt')
+      resolvedFile('acacacacacacacacacacacacacacacac', 'a01-uri-v0.txt', {
+        parentResourceId: 'abababababababababababababababab',
+      })
     )
     const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
     const writeText = vi.fn(async (_text: string) => undefined)

@@ -92,6 +92,7 @@ function FileExplorerNode({
   node,
   level,
   scope,
+  querySource,
   sessionGeneration,
   accessActive,
   expandedIds,
@@ -181,7 +182,8 @@ function FileExplorerNode({
                 'copy-route',
                 undefined,
                 sessionGeneration,
-                context?.copyIdFocusRecovery
+                context?.copyIdFocusRecovery,
+                querySource
               ),
             'open-route': () => onResourceAction(node, 'open-route'),
             rename: () => onResourceAction(node, 'rename'),
@@ -656,6 +658,7 @@ function FileExplorerNode({
               onNodeDrop={onNodeDrop}
               onToggle={onToggle}
               scope={scope}
+              querySource={{ kind: 'children', parentResourceId: node.resourceId }}
               sessionGeneration={sessionGeneration}
               selectedId={selectedId}
             />
@@ -1337,6 +1340,7 @@ export function FileExplorerTree({
               onNodeDrop={handleNodeDrop}
               onToggle={handleToggle}
               scope={ctrl.sessionScope ?? 'anonymous'}
+              querySource={{ kind: 'accessible' }}
               sessionGeneration={ctrl.sessionGeneration}
               selectedId={selectedId}
             />
