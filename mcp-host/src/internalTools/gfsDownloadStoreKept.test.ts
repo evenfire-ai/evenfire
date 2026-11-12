@@ -34,6 +34,13 @@ vi.mock('node:fs/promises', async original => ({
 // first time that path is checked, `race.run` writes a new file in its place,
 // as a regeneration landing between the sweep's judgement and its unlink.
 const race = vi.hoisted(() => ({ target: '', run: undefined as undefined | (() => void) }))
+// Likewise `afterUnlink`: once that path has been unlinked, `afterUnlink.run`
+// runs, as another process writing between the file's and the record's removal.
+const afterUnlink = vi.hoisted(() => ({
+  target: '',
+  run: undefined as undefined | (() => void),
+  runs: 0,
+}))
 vi.mock('node:fs', async original => {
   const actual = await original<typeof import('node:fs')>()
   return {
@@ -46,6 +53,15 @@ vi.mock('node:fs', async original => {
       }
       return (actual.lstatSync as (p: unknown, o?: unknown) => unknown)(target, options)
     }) as typeof actual.lstatSync,
+    unlinkSync: ((target: import('node:fs').PathLike) => {
+      actual.unlinkSync(target)
+      if (afterUnlink.run && String(target) === afterUnlink.target) {
+        const run = afterUnlink.run
+        afterUnlink.run = undefined
+        afterUnlink.runs += 1
+        run()
+      }
+    }) as typeof actual.unlinkSync,
   }
 })
 
@@ -132,6 +148,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  afterUnlink.run = undefined
   vi.restoreAllMocks()
   vi.useRealTimers()
   for (const opened of stores.splice(0)) await opened.close(0)
@@ -258,6 +275,33 @@ describe('kept files in the download store budget', () => {
     expect(exists(written)).toBe(true)
     release()
     ;(await store.reserveKept({ callerIdentity: A, sizeBytes: 20 * MIB }))()
+  })
+
+  it('counts an open keep reservation against the free space of a second keep', async () => {
+    const store = await openStore()
+    // Both keeps fit the kept bounds (40 MiB of 70 and 105); only the free
+    // space above the floor (35 MiB) is short for the second.
+    leaveFree(FLOOR + 35 * MIB)
+    const releaseA = await store.reserveKept({ callerIdentity: A, sizeBytes: 20 * MIB })
+    expect(
+      (await refusal(store.reserveKept({ callerIdentity: B, sizeBytes: 20 * MIB }))).code
+    ).toBe('disk_full')
+    // Witness: once the first keep is released, the same keep is admitted.
+    releaseA()
+    ;(await store.reserveKept({ callerIdentity: B, sizeBytes: 20 * MIB }))()
+  })
+
+  it('counts an open keep reservation against the free space of a download', async () => {
+    const store = await openStore()
+    // 25 MiB free above the floor: the download (10) fits alone, not beside the keep (20).
+    leaveFree(FLOOR + 25 * MIB)
+    const rootB = callerDirectory(hostRoot, B)
+    const releaseA = await store.reserveKept({ callerIdentity: A, sizeBytes: 20 * MIB })
+    expect((await refusal(startTransfer(store, rootB, B, 1, 10 * MIB))).code).toBe('disk_full')
+    // Witness: once the keep is released, the same download is admitted.
+    releaseA()
+    const { transfer } = await startTransfer(store, rootB, B, 1, 10 * MIB)
+    expect(transfer.sizeBytes).toBe(10 * MIB)
   })
 
   it('does not enter a kept folder that is a link', async () => {
@@ -444,6 +488,38 @@ describe('kept files expire after the retention period', () => {
     const plain = generated(A, 'plain.md', TTL * 2)
     await store.cleanupExpired()
     expect(exists(plain.file)).toBe(false)
+  })
+
+  it('keeps a file whose record is recent although the file itself is old', async () => {
+    const store = await openStore()
+    const recent = generated(A, 'rewritten-record.md', TTL + HOUR, HOUR)
+    const plain = keepFile(A, 'no-record.md', 1024)
+    age(plain, TTL + HOUR)
+    await store.cleanupExpired()
+    expect([exists(recent.file), exists(recent.record)]).toEqual([true, true])
+    // Witness: a file of the same age with no record expires in the same sweep.
+    expect(exists(plain)).toBe(false)
+  })
+
+  it('keeps a record written again between the removal of its file and its own', async () => {
+    const store = await openStore()
+    const expired = generated(A, 'regenerated.md', TTL * 2)
+    // Another writer replaces the record by rename right after the file's
+    // removal, before the sweep removes the old record.
+    afterUnlink.target = syncFs.realpathSync(expired.file)
+    afterUnlink.runs = 0
+    afterUnlink.run = () => {
+      const sibling = `${expired.record}.writer.tmp`
+      syncFs.writeFileSync(
+        sibling,
+        JSON.stringify({ id: 'fedcba987654', name: 'regenerated.md', createdAt: 'now' })
+      )
+      syncFs.renameSync(sibling, expired.record)
+    }
+    await store.cleanupExpired()
+    expect(afterUnlink.runs).toBe(1)
+    expect(exists(expired.file)).toBe(false)
+    expect(JSON.parse(syncFs.readFileSync(expired.record, 'utf8')).id).toBe('fedcba987654')
   })
 
   it('counts a time ahead of now as now: a future date keeps a file no longer than that date plus the retention', async () => {
