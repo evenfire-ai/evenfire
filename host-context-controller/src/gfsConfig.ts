@@ -57,6 +57,19 @@ function envPullPolicy(key: string): 'Always' | 'IfNotPresent' | 'Never' {
   throw new Error(`[gfs] ${key} must be Always|IfNotPresent|Never, got ${JSON.stringify(value)}`)
 }
 
+// Injected into every gfsc pod as GFS_DRIVE_NAME, which gfsc validates with this same
+// pattern at boot; rejecting it here fails the operator once instead of crash-looping
+// every gfsc pod it creates.
+const DRIVE_NAME_PATTERN = /^[a-z0-9-]{1,63}$/
+
+function envDriveName(key: string): string {
+  const value = env(key, 'main')
+  if (DRIVE_NAME_PATTERN.test(value)) return value
+  throw new Error(
+    `[gfs] ${key} must match ${DRIVE_NAME_PATTERN.source}, got ${JSON.stringify(value)}`
+  )
+}
+
 export function gfsDefaultFactoryConfig(): GfsFactoryConfig {
   return {
     gfsNamespace: env('CONTEXT_MAPPER_GFS_NAMESPACE', 'gfs'),
@@ -87,7 +100,7 @@ export function gfsDefaultFactoryConfig(): GfsFactoryConfig {
     pgSecretKey: env('CONTEXT_MAPPER_GFS_PG_SECRET_KEY', 'connection-string'),
     readerPgSecretName: env('CONTEXT_MAPPER_GFS_READER_PG_SECRET', 'gfs-controller-reader-db'),
     readerPgSecretKey: env('CONTEXT_MAPPER_GFS_READER_PG_SECRET_KEY', 'connection-string'),
-    driveName: env('CONTEXT_MAPPER_GFS_DRIVE_NAME', 'main'),
+    driveName: envDriveName('CONTEXT_MAPPER_GFS_DRIVE_NAME'),
     tokenAudience: env('CONTEXT_MAPPER_GFS_TOKEN_AUDIENCE', 'gfs-controller'),
     agentReadRlPerMinPerReplica: envAgentBudget(
       'CONTEXT_MAPPER_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA',
