@@ -274,6 +274,10 @@ describe('private memory (F5)', () => {
     // The collective memory_read by path does NOT see the private entry.
     await provider.forUser('alice').appendMemory('collective note')
     const rc = await reg.get('memory_read')!.execute({ path: 'MEMORY.md' })
+    // Positive witness: the read found the collective file, so the negative
+    // assertion below cannot pass on a read that found nothing.
+    expect(rc.is_error).toBe(false)
+    expect(rc.content).toContain('collective note')
     expect(rc.content).not.toContain('alice is the PM')
   })
 

@@ -55,7 +55,8 @@ function isSurfacedCollective(relativePath: string): boolean {
   return n === 'MEMORY.md' || n === 'memories' || n.startsWith('memories/')
 }
 
-function normalizeRel(relativePath: string): string {
+/** Canonical relative form: posix-normalized, without leading `./` or `/` and trailing `/`. */
+export function normalizeRel(relativePath: string): string {
   let n = path.posix.normalize(relativePath || '')
   if (n.startsWith('./')) n = n.slice(2)
   if (n.startsWith('/')) n = n.slice(1)
