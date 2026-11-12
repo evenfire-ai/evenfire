@@ -100,13 +100,24 @@ export function parseCorsOrigin(raw: string): string[] | '*' {
     .filter(Boolean)
 }
 
+// How to supply a value written by `writerScript`. gen-jwt-keys.sh rotates every key and resets
+// control-postgres, so on an existing install the hint points to the non-rotating repairs instead.
+function remedy(writerScript: string): string {
+  if (writerScript === 'gen-jwt-keys.sh') {
+    return (
+      'Run deploy/scripts/gen-jwt-keys.sh only on a new install; on an existing install it rotates ' +
+      'every key, so follow "Required secrets without code defaults" in ' +
+      'docs/deploy/releases-and-upgrades.md.'
+    )
+  }
+  return `Run deploy/scripts/${writerScript} before deploying.`
+}
+
 function assertNotPlaceholder(label: string, value: string, writerScript: string): void {
   // Fail loud if a `replace-with-*` placeholder ever leaks into a running pod.
   // `writerScript` is the deploy script that populates the value out-of-band.
   if (/^replace-with-/.test(value)) {
-    throw new Error(
-      `${label} has placeholder value "${value}". Run deploy/scripts/${writerScript} before deploying.`
-    )
+    throw new Error(`${label} has placeholder value "${value}". ${remedy(writerScript)}`)
   }
 }
 
@@ -127,7 +138,7 @@ function requiredSecret(name: string, writerScript: string, minBytes = 0): strin
   assertNotPlaceholder(name, value, writerScript)
   if (Buffer.byteLength(value, 'utf8') < minBytes) {
     throw new Error(
-      `${name} must be at least ${minBytes} bytes. Run deploy/scripts/${writerScript} or write a value from \`openssl rand -hex 32\`.`
+      `${name} must be at least ${minBytes} bytes; write a value from \`openssl rand -hex 32\`. ${remedy(writerScript)}`
     )
   }
   return value

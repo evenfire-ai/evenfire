@@ -370,6 +370,26 @@ describe('secrets have no code default in any NODE_ENV', () => {
     }
   )
 
+  // gen-jwt-keys.sh rotates every key and resets control-postgres, so the hint must not send an
+  // operator of an existing install there: it points to the non-rotating repairs instead.
+  const GEN_JWT_KEYS_SECRETS = SECRETS.filter(([, , writer]) => writer === 'gen-jwt-keys.sh')
+
+  it.each(GEN_JWT_KEYS_SECRETS)(
+    'warns not to re-run gen-jwt-keys.sh on an existing install when %s is a placeholder',
+    async name => {
+      vi.stubEnv(name, 'replace-with-a-real-value')
+
+      const failure = importConfig()
+      await expect(failure).rejects.toThrow(`${name} has placeholder value`)
+      await expect(failure).rejects.toThrow(
+        /only on a new install; on an existing install it rotates every key/
+      )
+      await expect(failure).rejects.toThrow(
+        /"Required secrets without code defaults" in docs\/deploy\/releases-and-upgrades\.md/
+      )
+    }
+  )
+
   it.each(SECRETS)('refuses to start when %s is empty', async name => {
     vi.stubEnv(name, '')
 
@@ -423,8 +443,9 @@ describe('secrets have no code default in any NODE_ENV', () => {
 
       const failure = importConfig()
       await expect(failure).rejects.toThrow(
-        new RegExp(`${name} must be at least 32 bytes\\. Run deploy/scripts/gen-jwt-keys\\.sh`)
+        new RegExp(`${name} must be at least 32 bytes;.*Run deploy/scripts/gen-jwt-keys\\.sh`)
       )
+      await expect(failure).rejects.toThrow(/on an existing install it rotates every key/)
       await expect(failure).rejects.not.toThrow(short)
       await expect(failure).rejects.not.toThrow(/\b31\b/)
     }

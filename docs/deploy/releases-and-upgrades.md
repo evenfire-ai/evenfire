@@ -344,9 +344,13 @@ the runner exits.
 
 ### Required secrets without code defaults
 
-The first release after v0.12.0 removes the built-in development values of seven
-secrets. Each service now stops at startup when one of them is unset, empty, only
-whitespace or a `replace-with-*` placeholder. Surrounding whitespace is trimmed.
+The first release after v0.12.0 makes seven secrets required. Five of them had a
+built-in development value and the two desktop API tokens had an empty default;
+none has a default now. Each service now stops at startup when one of them is
+unset, empty, only whitespace or a `replace-with-*` placeholder. Surrounding
+whitespace is trimmed. `gen-jwt-keys.sh` writes its four secrets on a new
+install; on an existing install it rotates every key, so do not re-run it to
+fill one missing secret.
 
 | Service                 | Variable                                      | Written in a cluster by                                                          |
 | ----------------------- | --------------------------------------------- | -------------------------------------------------------------------------------- |
@@ -368,9 +372,11 @@ whitespace or a `replace-with-*` placeholder. Surrounding whitespace is trimmed.
   `WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN must be set`, or with a placeholder
   error when the Secret still holds the `replace-with-*` value of an earlier
   release: the first apply of this release leaves the previous value in the
-  Secret. Run `apply-inter-service-tokens.sh` once after the first apply of this
-  release. It keeps a real token, replaces a placeholder, and restarts
-  webhook-proxy.
+  Secret. Run `apply-inter-service-tokens.sh` for this release, before or after
+  the first apply: it keeps a real token, replaces a placeholder, and restarts
+  webhook-proxy. Running it before the apply leaves no window in which
+  webhook-proxy stops, because the new manifest keeps the token the script
+  wrote.
 - **rpc-proxy and external-rest-api** images set `NODE_ENV=production`, where
   the two service tokens and the two cookie secrets were already required. Deployed
   rpc-proxy now also refuses a `replace-with-*` or whitespace-only secret, a
