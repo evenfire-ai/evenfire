@@ -1,7 +1,8 @@
 /**
- * The edges that T-W2 does not walk: Claude's cache-aware method and token
- * counter, the Responses continuation across an aliased tool turn, and the two
- * proxied providers, which must keep sending canonical names.
+ * The edges the provider contract (`wireToolNames.providers.test.ts`) does
+ * not walk: Claude's cache-aware method and token counter, the Responses
+ * continuation across an aliased tool turn, and the two proxied providers,
+ * which must keep sending canonical names.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OpenAITokenCounter, createTokenCounter } from '../../core/tokenizer'
@@ -75,7 +76,7 @@ describe('Claude cache-aware method', () => {
   })
 })
 
-describe('T-W8 · Claude token counter (offline=false)', () => {
+describe('Claude token counter (offline=false)', () => {
   const history: ChatMessage[] = [
     { role: 'user', content: 'q' },
     { role: 'assistant', content: '', tool_calls: [{ id: 't1', name: OVER_128, arguments: {} }] },
@@ -171,7 +172,7 @@ describe('Responses continuation across an aliased tool turn', () => {
   })
 })
 
-describe('T-W6 · proxied providers keep canonical names in the attempt contract', () => {
+describe('proxied providers keep canonical names in the attempt contract', () => {
   afterEach(() => {
     vi.unstubAllEnvs()
   })

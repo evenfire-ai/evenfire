@@ -168,9 +168,9 @@ function mapOf(set: string[], key: ToolNameEnvelopeKey, hash?: Hash): ToolWireNa
 
 const RUNS = { numRuns: 200 }
 
-// ─── T-W1 ───────────────────────────────────────────────────────────────────
+// ─── Envelopes and the alias map ────────────────────────────────────────────
 
-describe('T-W1 · envelopes', () => {
+describe('envelopes', () => {
   it('exports exactly the four literal envelopes, without flags', () => {
     expect(Object.keys(TOOL_NAME_ENVELOPES).sort()).toEqual([...ENVELOPE_KEYS].sort())
     for (const key of ENVELOPE_KEYS) {
@@ -185,7 +185,7 @@ describe('T-W1 · envelopes', () => {
   })
 })
 
-describe('T-W1 · control aliases', () => {
+describe('control aliases', () => {
   it('reproduces the two control aliases literally', () => {
     expect(
       wireToolAlias('mcp-evenfire-atlassian-remote-u-338995f5__getJiraIssueRemoteIssueLinks', 'W_g')
@@ -196,7 +196,7 @@ describe('T-W1 · control aliases', () => {
   })
 })
 
-describe.each(HASHES)('T-W1 · map properties (%s hash)', (_label, hash) => {
+describe.each(HASHES)('map properties (%s hash)', (_label, hash) => {
   for (const key of ENVELOPE_KEYS) {
     const E = LITERAL_ENVELOPES[key]
     const h = hash ?? oracleHash
@@ -278,7 +278,7 @@ describe.each(HASHES)('T-W1 · map properties (%s hash)', (_label, hash) => {
   }
 })
 
-describe('T-W1 · alias function properties', () => {
+describe('alias function properties', () => {
   for (const key of ENVELOPE_KEYS) {
     const E = LITERAL_ENVELOPES[key]
 
@@ -386,9 +386,9 @@ describe('T-W1 · alias function properties', () => {
   })
 })
 
-// ─── T-W1b · forced collisions ──────────────────────────────────────────────
+// ─── Forced collisions ──────────────────────────────────────────────────────
 
-describe('T-W1b · forced collisions with an injected hash', () => {
+describe('forced collisions with an injected hash', () => {
   const fixed: Hash = () => 'aaaaaaaaaaaa'
   const U = '1keychain-connect-vault-integration-engineering__item_get'
 
@@ -449,7 +449,7 @@ describe('T-W1b · forced collisions with an injected hash', () => {
   })
 })
 
-// ─── T-W7 · annotation ──────────────────────────────────────────────────────
+// ─── Annotation ─────────────────────────────────────────────────────────────
 
 function wireTool(name: string, description = 'D'): ToolDefinition {
   const tool: ToolDefinition = { name, description, parameters: {} }
@@ -462,7 +462,7 @@ function annotationOf(name: string): string {
   return desc.slice(0, -1)
 }
 
-describe('T-W7 · description annotation', () => {
+describe('description annotation', () => {
   it('(a) cuts T to 200 code points before escaping `"` and `\\`', () => {
     const T = 'q"w\\e'.repeat(200)
     const out = wireTool(`srv__${T}`)

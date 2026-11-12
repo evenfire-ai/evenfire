@@ -120,7 +120,7 @@ async function turn(id: LlmProvider, tools: ToolDefinition[], pick: (names: stri
 const QUERY_TOOL = 'notion-query-multiple-data-sources'
 const QUERY = `${NOTION_SERVER}__${QUERY_TOOL}`
 
-describe('T-W2b · alias returned by the model reaches the MCP server canonical', () => {
+describe('alias returned by the model reaches the MCP server canonical', () => {
   it.each(['openai', 'deepseek', 'gemini', 'bedrock'] as LlmProvider[])('%s', async id => {
     const manager = await notionManager()
     const tools = catalog(manager)
@@ -158,8 +158,8 @@ describe('T-W2b · alias returned by the model reaches the MCP server canonical'
   })
 })
 
-describe('T-W4 · through the loop', () => {
-  it('(c) an invented name is not translated and the loop answers Tool not found', async () => {
+describe('tool calls coming back, through the loop', () => {
+  it('an invented name is not translated and the loop answers Tool not found', async () => {
     const manager = await notionManager()
     const response = await turn('deepseek', catalog(manager), () => 'inventado_xyz')
     expect(response.tool_calls?.[0]?.name).toBe('inventado_xyz')
@@ -171,7 +171,7 @@ describe('T-W4 · through the loop', () => {
     expect(remote.calls).not.toHaveBeenCalled()
   })
 
-  it('(e) a deferred tool equal to an alias resolves to the aliased tool, and approval sees that tool', async () => {
+  it('a deferred tool equal to an alias resolves to the aliased tool, and approval sees that tool', async () => {
     // c2 is a real tool of the same server whose name equals the alias of c1;
     // it is not in the request, so c1 keeps that alias (accepted by design).
     const c1 = QUERY

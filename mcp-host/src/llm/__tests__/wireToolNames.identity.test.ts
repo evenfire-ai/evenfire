@@ -1,5 +1,5 @@
 /**
- * T-W5 · byte identity. When every name of a request already fits the
+ * Byte identity. When every name of a request already fits the
  * provider's envelope, the body must stay exactly what the adapters sent
  * before the wire-name edge existed. The golden was produced by this same
  * harness on the commit before that edge (`UPDATE_WIRE_GOLDENS=1` rewrites it).
@@ -60,7 +60,7 @@ function check(key: string, body: unknown) {
   if (!UPDATE) expect(serialized).toBe(golden[key])
 }
 
-describe('T-W5 · byte identity', () => {
+describe('byte identity', () => {
   it('the golden covers every direct provider', () => {
     if (UPDATE) return
     for (const id of DIRECT_PROVIDERS)
@@ -92,7 +92,7 @@ describe('T-W5 · byte identity', () => {
   })
 })
 
-describe('T-W5 · fixed envelope where there is no source', () => {
+describe('fixed envelope where there is no source', () => {
   const W_G = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
   const c = `${NOTION_SERVER}__notion-query-multiple-data-sources`
 

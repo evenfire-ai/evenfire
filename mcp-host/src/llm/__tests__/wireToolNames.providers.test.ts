@@ -79,7 +79,7 @@ describe('fixtures', () => {
   })
 })
 
-describe.each(DIRECT_PROVIDERS)('T-W2 · %s', id => {
+describe.each(DIRECT_PROVIDERS)('provider contract · %s', id => {
   const E = ENVELOPES[envelopeOf(id)]
 
   it(`sends only names in its envelope and resolves the call back to the canonical name`, async () => {
@@ -124,7 +124,7 @@ describe.each(DIRECT_PROVIDERS)('T-W2 · %s', id => {
   })
 })
 
-describe.each(DIRECT_PROVIDERS)('T-W3 · %s history', id => {
+describe.each(DIRECT_PROVIDERS)('history projection · %s', id => {
   const E = ENVELOPES[envelopeOf(id)]
   const historyOnly = `${NOTION_SERVER}__notion-link-meeting-note-to-calendar-event`
 
@@ -148,7 +148,7 @@ describe.each(DIRECT_PROVIDERS)('T-W3 · %s history', id => {
   })
 })
 
-describe('T-W4 · tool calls coming back', () => {
+describe('tool calls coming back', () => {
   const longA = `${NOTION_SERVER}__notion-query-multiple-data-sources`
   const shortB = `${NOTION_SERVER}__notion-search`
 
@@ -185,7 +185,7 @@ describe('T-W4 · tool calls coming back', () => {
     expect(response.tool_calls?.[0]?.name).toBe('inventado_xyz')
   })
 
-  it('(d) an orphan alias in history keeps its name, and the returning tool takes a suffix', async () => {
+  it('an orphan alias in history keeps its name, and the returning tool takes a suffix', async () => {
     const id: LlmProvider = 'deepseek'
     const family = familyOf(id)
     // Turn N: the tool is present and aliased.
@@ -220,7 +220,7 @@ describe('T-W4 · tool calls coming back', () => {
   })
 })
 
-describe('T-W9 · longest real server names', () => {
+describe('longest real server names', () => {
   const maxRegistry = Math.max(...REGISTRY_SERVER_NAMES.map(n => n.length))
   const longest = REGISTRY_SERVER_NAMES.filter(n => n.length === maxRegistry)
   const captured = [...NOTION_TOOLS, ...ATLASSIAN_TOOLS].map(t => t.name)
