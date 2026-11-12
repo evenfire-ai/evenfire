@@ -4334,10 +4334,51 @@ export class AppService {
 
   async refreshAccessCatalog(): Promise<AccessCatalog> {
     this.rpcTokenManager.clear()
-    const token = this.requireSessionToken()
-    const me = this.me ?? (await this.authClient.getMe(token))
-    this.me = me
-    await this.bindCurrentChatStore(me.id)
+    // The catalog belongs to one committed session and is stamped with that
+    // session's team. A transient team hop and a deliberate team switch replace
+    // the committed token and principal in steps while they hold the native
+    // commit owner, so the session is read under that owner and the catalog is
+    // published under it. The requests in between run outside the owner:
+    // nothing else waits for a catalog build.
+    for (let build = 1; build <= 2; build += 1) {
+      const session = await this.withNativeAuthEnvironmentCommit(async () => {
+        const token = this.requireSessionToken()
+        const me = this.me ?? (await this.authClient.getMe(token))
+        this.me = me
+        await this.bindCurrentChatStore(me.id)
+        return { token, me, sessionGeneration: this.sessionGeneration }
+      })
+      const catalog = await this.buildAccessCatalogForSession(session.token, session.me)
+      const published = await this.withNativeAuthEnvironmentCommit(async () => {
+        if (this.me?.id !== session.me.id) {
+          throw new Error(
+            'stale_auth_epoch: the session ended while the access catalog was being built'
+          )
+        }
+        // A transient team hop gives the session a new token and restores the
+        // same principal without advancing the generation, so the token is not
+        // compared: a catalog built across a hop still belongs to this session.
+        if (
+          this.sessionGeneration !== session.sessionGeneration ||
+          this.me.teamId !== session.me.teamId
+        ) {
+          return false
+        }
+        this.accessCatalog = catalog
+        return true
+      })
+      if (published) return catalog
+      // The same user's session was replaced during the build, for example by
+      // a team switch. The catalog is discarded and the request is answered
+      // once from the session that replaced it.
+    }
+    throw new Error(
+      'stale_auth_epoch: the session changed again while the access catalog was being rebuilt'
+    )
+  }
+
+  /** Reads no session state: the caller passes the session the catalog is for. */
+  private async buildAccessCatalogForSession(token: string, me: SessionMe): Promise<AccessCatalog> {
     const currentTeamId = String(me.teamId || '').trim()
 
     const [userContexts, userAgents, teamContexts, teamAgents] = await Promise.all([
@@ -4481,7 +4522,7 @@ export class AppService {
     const hasAgentScopedMcp = Object.keys(agentMcpServers).length > 0
     const hasContextScopedMcp = Object.keys(contextMcpServers).length > 0
 
-    this.accessCatalog = {
+    return {
       userId: me.id,
       teamId: currentTeamId || null,
       userContextIds,
@@ -4497,7 +4538,6 @@ export class AppService {
       agentProviderByName,
       agentDisplayByName,
     }
-    return this.accessCatalog
   }
 
   async listAccessibleMcpServers(hostRefs?: string[]): Promise<RpcAllowedServersResult> {

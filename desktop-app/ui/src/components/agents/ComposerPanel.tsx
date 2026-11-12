@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
-import { useAuthContext } from '@contexts/AuthContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
@@ -28,14 +27,12 @@ import {
   composerImageBudget,
   composerImageCountedBytes,
 } from '@constants/attachments'
-import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
 import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
-import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { formatFileSize } from '@lib/composerFileAdmission'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
@@ -151,7 +148,6 @@ function getComposerFileNotice(file: ComposerFileAttachment): string | null {
 
 export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelProps) {
   const { selectedAgent } = useNavigationContext()
-  const { me } = useAuthContext()
   const {
     composerImageAttachments,
     composerFileAttachments,
@@ -189,7 +185,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     selectedAgent,
   })
   const { sharedFilesByContext, refreshSharedFiles } = useContextsDataController()
-  const agentCatalog = useAgentsDataController()
 
   const [composerAttachmentError, setComposerAttachmentError] = useState<string | null>(null)
   const [composerMenuOpen, setComposerMenuOpen] = useState(false)
@@ -444,42 +439,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Sending now would leave it out without saying so, so send stays disabled
   // until each chip is ready or removed.
   const filesBlockedForSend = composerFileAttachments.some(file => file.status !== 'ready')
-  const accessCatalog = agentCatalog.accessCatalog
-  const agentCatalogMatchesSession = Boolean(
-    me && accessCatalog && accessCatalog.userId === me.id && accessCatalog.teamId === me.teamId
-  )
-  const selectedAgentCatalogState = resolveAgentCatalogAvailability({
-    selectedAgent,
-    loading: agentCatalog.loading,
-    error: agentCatalog.error,
-    catalogMatchesSession: agentCatalogMatchesSession,
-    agentNames: agentCatalog.agentNames,
-  })
-  const selectedAgentCatalogMessage =
-    selectedAgentCatalogState === 'checking'
-      ? 'Checking agent access for this team…'
-      : selectedAgentCatalogState === 'error'
-        ? 'Could not verify agent access for this team. Retry the check before sending.'
-        : selectedAgentCatalogState === 'unavailable'
-          ? `${selectedAgent} is unavailable in this team. Select an available agent to send.`
-          : null
-  const selectedAgentSendBlocked =
-    selectedAgentCatalogState !== 'ready' && selectedAgentCatalogState !== 'available'
-  const agentCatalogNoticeId = useId()
   const handleSend = useCallback(() => {
-    if (imagesBlockedForSend || filesBlockedForSend || selectedAgentSendBlocked) {
+    if (imagesBlockedForSend || filesBlockedForSend) {
       return
     }
     if (workspaceChatTabId) void onSend(draft, workspaceChatTabId)
     else void onSend(draft)
-  }, [
-    onSend,
-    draft,
-    imagesBlockedForSend,
-    filesBlockedForSend,
-    selectedAgentSendBlocked,
-    workspaceChatTabId,
-  ])
+  }, [onSend, draft, imagesBlockedForSend, filesBlockedForSend, workspaceChatTabId])
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1281,21 +1247,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 agentSending ||
                 imagesBlockedForSend ||
                 filesBlockedForSend ||
-                selectedAgentSendBlocked ||
                 (!draft.trim() &&
                   composerImageAttachments.length === 0 &&
                   composerFileAttachments.length === 0 &&
                   composerReferenceAttachments.length === 0)
               }
               aria-label={agentSending ? 'Sending message' : 'Send message'}
-              aria-describedby={
-                [
-                  imagesBlockedForSend ? imageNoticeId : null,
-                  selectedAgentCatalogMessage ? agentCatalogNoticeId : null,
-                ]
-                  .filter(Boolean)
-                  .join(' ') || undefined
-              }
+              aria-describedby={imagesBlockedForSend ? imageNoticeId : undefined}
               label={agentSending ? 'Sending message' : 'Send message'}
               size="sm"
               title={agentSending ? 'Sending...' : 'Send message'}
@@ -1326,32 +1284,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 'Image attachments are not available for this model yet.')
               : composerAttachmentError}
           </p>
-        </div>
-      ) : null}
-      {selectedAgentCatalogMessage ? (
-        <div className="composer-attachments">
-          <p
-            className={
-              selectedAgentCatalogState === 'checking'
-                ? 'composer-attachment-notice'
-                : 'composer-attachment-error'
-            }
-            role={selectedAgentCatalogState === 'checking' ? 'status' : 'alert'}
-            id={agentCatalogNoticeId}
-            data-testid="composer-agent-catalog-notice"
-          >
-            {selectedAgentCatalogMessage}
-          </p>
-          {selectedAgentCatalogState === 'error' ? (
-            <Button
-              disabled={agentCatalog.loading}
-              onClick={() => void agentCatalog.refresh()}
-              size="sm"
-              variant="ghost"
-            >
-              Retry access check
-            </Button>
-          ) : null}
         </div>
       ) : null}
       {composerFileNotices.length > 0 ? (
