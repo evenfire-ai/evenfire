@@ -78,6 +78,7 @@ function makeSnippetRunner(
 ) {
   return {
     execute: vi.fn().mockImplementation(impl),
+    healthCheck: vi.fn().mockResolvedValue({ status: 'healthy' }),
   }
 }
 
@@ -164,6 +165,140 @@ describe('sdk workflow runtime', () => {
       { executor: 'snippet', stepKind: 'snippet.typescript', status: 'succeeded' },
       2
     )
+  })
+
+  it('waits for the snippet runner to become healthy before dispatching snippet steps', async () => {
+    const { status } = makeStatus()
+    const snippetRunner = makeSnippetRunner(async () => ({
+      status: 'completed',
+      output: { ok: true },
+    }))
+    let healthy = false
+    snippetRunner.healthCheck
+      .mockResolvedValueOnce({ status: 'unhealthy' })
+      .mockResolvedValueOnce({ status: 'unhealthy' })
+      .mockImplementationOnce(async () => {
+        healthy = true
+        return { status: 'healthy' }
+      })
+    snippetRunner.execute.mockImplementation(async () => {
+      expect(healthy).toBe(true)
+      return { status: 'completed', output: { ok: true } }
+    })
+
+    const result = await runWorkflowRuntime({
+      config: runtimeConfig(),
+      spec: {
+        name: 'runtime-test',
+        namespace: 'sandbox-recipes',
+        steps: [{ id: 'emit', run: snippetRun() }],
+      },
+      coordinator: new StepCoordinator(),
+      status,
+      signals: makeSignals(),
+      mcpHost: null,
+      snippetRunner: snippetRunner as never,
+      modelInjection: vi.fn(),
+      snippetRunnerReadyDelayMs: 0,
+    })
+
+    expect(result).toEqual({ exitCode: 0, workflowPhase: 'completed' })
+    expect(snippetRunner.healthCheck).toHaveBeenCalledTimes(3)
+    expect(snippetRunner.execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports recovering when the snippet runner never becomes ready', async () => {
+    const { status } = makeStatus()
+    const statusMock = status as unknown as {
+      reportWorkflowStatus: ReturnType<typeof vi.fn>
+    }
+    const snippetRunner = makeSnippetRunner(async () => ({
+      status: 'completed',
+      output: { ok: true },
+    }))
+    snippetRunner.healthCheck.mockResolvedValue({ status: 'unhealthy' })
+
+    const result = await runWorkflowRuntime({
+      config: runtimeConfig(),
+      spec: {
+        name: 'runtime-test',
+        namespace: 'sandbox-recipes',
+        steps: [{ id: 'emit', run: snippetRun() }],
+      },
+      coordinator: new StepCoordinator(),
+      status,
+      signals: makeSignals(),
+      mcpHost: null,
+      snippetRunner: snippetRunner as never,
+      modelInjection: vi.fn(),
+      snippetRunnerReadyAttempts: 2,
+      snippetRunnerReadyDelayMs: 0,
+    })
+
+    expect(result).toEqual({
+      exitCode: 1,
+      workflowPhase: 'recovering',
+      failureReason: 'snippet_runner not ready',
+    })
+    expect(snippetRunner.healthCheck).toHaveBeenCalledTimes(2)
+    expect(snippetRunner.execute).not.toHaveBeenCalled()
+    expect(statusMock.reportWorkflowStatus).toHaveBeenCalledWith('recovering', {
+      failureReason: 'snippet_runner not ready',
+    })
+  })
+
+  it('does not probe the snippet runner for workflows without snippet steps', async () => {
+    const { status } = makeStatus()
+    const mcpHost = makeMcpHost('agent-output')
+    const snippetRunner = makeSnippetRunner(async () => ({ status: 'completed', output: {} }))
+
+    const result = await runWorkflowRuntime({
+      config: runtimeConfig(),
+      spec: {
+        name: 'runtime-test',
+        namespace: 'sandbox-recipes',
+        agent: { provider: 'openai', model: 'gpt-4o' },
+        steps: [{ id: 'agent', instruction: 'Summarize the input' }],
+      },
+      coordinator: new StepCoordinator(),
+      status,
+      signals: makeSignals(),
+      mcpHost,
+      snippetRunner: snippetRunner as never,
+      modelInjection: vi.fn(),
+    })
+
+    expect(result).toEqual({ exitCode: 0, workflowPhase: 'completed' })
+    expect(snippetRunner.healthCheck).not.toHaveBeenCalled()
+    expect(snippetRunner.execute).not.toHaveBeenCalled()
+  })
+
+  it('skips the snippet runner readiness probe when waitForSnippetRunner is false', async () => {
+    const { status } = makeStatus()
+    const snippetRunner = makeSnippetRunner(async () => ({
+      status: 'completed',
+      output: { ok: true },
+    }))
+
+    const result = await runWorkflowRuntime({
+      config: runtimeConfig(),
+      spec: {
+        name: 'runtime-test',
+        namespace: 'sandbox-recipes',
+        steps: [{ id: 'emit', run: snippetRun() }],
+      },
+      coordinator: new StepCoordinator(),
+      status,
+      signals: makeSignals(),
+      mcpHost: null,
+      snippetRunner: snippetRunner as never,
+      modelInjection: vi.fn(),
+      waitForSnippetRunner: false,
+    })
+
+    expect(result).toEqual({ exitCode: 0, workflowPhase: 'completed' })
+    expect(snippetRunner.healthCheck).not.toHaveBeenCalled()
+    expect(snippetRunner.execute).toHaveBeenCalledTimes(1)
   })
 
   it('fails the workflow when a completed step status cannot be persisted', async () => {

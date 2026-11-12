@@ -106,4 +106,43 @@ describe('SnippetRunnerClient', () => {
     expect(result.status).toBe('failed')
     expect(result.error).toBe('snippet runner request timed out')
   })
+
+  it('reports healthy from GET /health without reading the runner token', async () => {
+    const provider = { getSnippetRunnerToken: vi.fn().mockResolvedValue('jwt-a') }
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new SnippetRunnerClient('http://snippet-runner:8095', provider)
+    const result = await client.healthCheck()
+
+    expect(result).toEqual({ status: 'healthy' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe('http://snippet-runner:8095/health')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.signal).toBeDefined()
+    expect((init.headers as Record<string, string> | undefined)?.Authorization).toBeUndefined()
+    expect(provider.getSnippetRunnerToken).not.toHaveBeenCalled()
+  })
+
+  it('reports unhealthy when GET /health returns a non-ok status', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }))
+
+    const client = new SnippetRunnerClient(
+      'http://snippet-runner:8095',
+      createStaticRuntimeTokenProvider({ snippetRunnerToken: 'jwt-a' })
+    )
+
+    await expect(client.healthCheck()).resolves.toEqual({ status: 'unhealthy' })
+  })
+
+  it('reports unhealthy when GET /health cannot connect', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')))
+
+    const client = new SnippetRunnerClient(
+      'http://snippet-runner:8095',
+      createStaticRuntimeTokenProvider({ snippetRunnerToken: 'jwt-a' })
+    )
+
+    await expect(client.healthCheck()).resolves.toEqual({ status: 'unhealthy' })
+  })
 })

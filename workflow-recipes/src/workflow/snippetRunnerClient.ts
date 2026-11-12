@@ -3,6 +3,7 @@ import type { SnippetExecuteResponse, SnippetRunInvocationRequest } from './snip
 
 const DEFAULT_SNIPPET_RUNNER_TIMEOUT_MS = 305_000
 const SNIPPET_RUNNER_RESPONSE_BUFFER_MS = 5_000
+const SNIPPET_RUNNER_HEALTH_TIMEOUT_MS = 5_000
 
 function resolveRequestTimeoutMs(
   request: SnippetRunInvocationRequest,
@@ -47,6 +48,20 @@ export class SnippetRunnerClient {
         body: JSON.stringify(request),
         signal: controller.signal,
       })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** Liveness of the runner's HTTP server. Never throws. */
+  async healthCheck(): Promise<{ status: 'healthy' | 'unhealthy' }> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), SNIPPET_RUNNER_HEALTH_TIMEOUT_MS)
+    try {
+      const response = await fetch(`${this.baseUrl}/health`, { signal: controller.signal })
+      return { status: response.ok ? 'healthy' : 'unhealthy' }
+    } catch {
+      return { status: 'unhealthy' }
     } finally {
       clearTimeout(timer)
     }
