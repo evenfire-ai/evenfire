@@ -190,11 +190,14 @@ for i in "${!PROMOTE_NAMES[@]}"; do
 done
 
 # Another release may have pushed a higher tag since this checkout was made, so
-# fetch the tags and decide again right before :stable moves. A failed fetch
-# stops here, with every version tag written: a re-run converges on them and
-# moves :stable then.
+# fetch the tags and decide again right before :stable moves. --force lets
+# origin's tags replace local ones: actions/checkout re-fetches an annotated
+# release tag as a lightweight ref (+<commit>:refs/tags/<tag>), and a plain
+# fetch refuses to replace it, which would stop every annotated release here.
+# A failed fetch stops here, with every version tag written: a re-run
+# converges on them and moves :stable then.
 if [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  if git remote get-url origin >/dev/null 2>&1 && ! git fetch --quiet --tags origin; then
+  if git remote get-url origin >/dev/null 2>&1 && ! git fetch --quiet --tags --force origin; then
     echo "::error::could not fetch the release tags from origin, so :stable was not moved; every :$TAG is written, so re-run this release to move :stable"
     exit 1
   fi

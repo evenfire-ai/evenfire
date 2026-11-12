@@ -682,6 +682,29 @@ assert_a_failed_tag_fetch_stops_before_stable() {
   rm -rf "$d"
 }
 
+assert_an_annotated_release_tag_still_moves_stable() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # origin holds v0.2.0 as an ANNOTATED tag. The checkout holds the same tag
+  # as a lightweight ref, as actions/checkout leaves it: with fetch-depth 0 its
+  # testRef compares `git rev-parse refs/tags/v0.2.0` (the tag object) to the
+  # commit, and the mismatch makes it fetch +<commit>:refs/tags/v0.2.0 again.
+  # A plain `git fetch --tags` refuses to replace that local tag, which would
+  # stop every run of an annotated release before :stable.
+  git -C "$d" -c user.email=t@t -c user.name=t -c tag.gpgSign=false tag -f -a v0.2.0 -m release "$HEAD_SHA" >/dev/null
+  local origin; origin="$(mktemp -d)"
+  git clone -q --bare "$d" "$origin/repo.git"
+  git -C "$d" update-ref refs/tags/v0.2.0 "$HEAD_SHA"
+  git -C "$d" remote add origin "$origin/repo.git"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 0 ] && [ "$(grep -c ':v0.2.0$' "$d/copy-log")" -eq 2 ] \
+      && [ "$(grep -c ':stable$' "$d/copy-log")" -eq 2 ]; then
+    pass "an annotated release tag, lightweight in the checkout, still moves :stable"
+  else
+    fail "expected rc=0, two :v0.2.0 and two :stable copies; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d" "$origin"
+}
+
 assert_a_higher_version_tagged_at_an_older_commit_does_not_move_stable() {
   local d; d="$(mktemp -d)"; stub_two_images "$d"
   # v0.2.1 is the next commit. v0.2.2 is then tagged at the OLDER commit: the
@@ -848,6 +871,7 @@ assert_a_bare_not_found_on_the_version_tag_check_fails_the_image
 assert_a_failing_crane_manifest_in_the_arch_check_fails_the_image
 assert_a_higher_tag_pushed_to_origin_meanwhile_keeps_stable
 assert_a_failed_tag_fetch_stops_before_stable
+assert_an_annotated_release_tag_still_moves_stable
 assert_a_higher_version_tagged_at_an_older_commit_does_not_move_stable
 assert_an_ancestry_check_error_fails_instead_of_moving_stable
 assert_a_dry_run_from_a_ref_that_is_not_an_image_tag_skips_the_version_tag_check
