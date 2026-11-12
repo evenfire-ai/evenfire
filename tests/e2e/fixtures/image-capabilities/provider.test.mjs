@@ -1725,8 +1725,20 @@ function filesUserText(step, params, context = []) {
 }
 
 /** A Host that answers every tool the way the real one shapes its result. */
-function fakeFilesHost({ listing = [], spilled = false } = {}) {
+/**
+ * `olderEntries` puts that many older generated files of earlier runs ahead of
+ * `listing`, and the listing answers as the Host does: oldest first, filtered
+ * by nameContains, at most 100 entries with truncated set beyond that.
+ */
+function fakeFilesHost({ listing = [], spilled = false, olderEntries = 0 } = {}) {
   let generated = 0
+  const older = Array.from({ length: olderEntries }, (_, n) => ({
+    kind: 'generated',
+    name: `old-run-${n}.md`,
+    id: n.toString(16).padStart(12, 'f'),
+    createdAt: '2026-11-01T00:00:00Z',
+    sizeBytes: 10,
+  }))
   return (tool, args) => {
     if (tool === 'clerum__gfs_accessible')
       return accessibleToolResult({ items: [accessibleDirectory(FILES_FOLDER_RID, FILES_FOLDER)] })
@@ -1747,11 +1759,11 @@ function fakeFilesHost({ listing = [], spilled = false } = {}) {
       })
     if (tool === 'clerum__kept_files_list') {
       if (spilled) return JSON.stringify({ spillover_ref: 'spill-1', byte_size: 99 })
-      const files = listing.filter(
+      const files = [...older, ...listing].filter(
         file =>
           !args.nameContains || file.name.toLowerCase().includes(args.nameContains.toLowerCase())
       )
-      return JSON.stringify({ files, truncated: false })
+      return JSON.stringify({ files: files.slice(0, 100), truncated: files.length > 100 })
     }
     if (tool === 'clerum__gfs_edit_text')
       return JSON.stringify({
@@ -1974,6 +1986,7 @@ test('kept attachments: saves a file and an image of another conversation by the
       folder: FILES_FOLDER,
       file: 'notes.bin',
       image: 'logo.png',
+      part: '.',
     }),
     fakeFilesHost({ listing })
   )
@@ -1984,6 +1997,64 @@ test('kept attachments: saves a file and an image of another conversation by the
       ['notes.bin', '111111111111'],
       ['logo.png', '222222222222'],
     ]
+  )
+})
+
+test('kept files: list-and-save finds its file by name behind 100 older entries', async () => {
+  const h = harness()
+  const listing = [
+    {
+      kind: 'generated',
+      name: 'report-2b.md',
+      id: 'bbbbbbbbbbbb',
+      createdAt: '2026-11-12T00:01:00Z',
+    },
+  ]
+  const run = await runFilesStep(
+    h,
+    filesUserText('list-and-save', {
+      drive: 'main',
+      folder: FILES_FOLDER,
+      file: 'report-2b.md',
+      as: 'again-report-2b.md',
+    }),
+    fakeFilesHost({ listing, olderEntries: 100 })
+  )
+  assert.equal(run.answer, 'GFS-FILES list-and-save saved')
+  assert.equal(filesSaveArgs(h)[0].generatedFileId, 'bbbbbbbbbbbb')
+})
+
+test('kept attachments: save-uploads finds both by the run tag behind 100 older entries', async () => {
+  const h = harness()
+  const listing = [
+    {
+      kind: 'upload',
+      name: 'notes-ab12cd.bin',
+      id: '111111111111',
+      createdAt: '2026-11-12T00:00:00Z',
+    },
+    {
+      kind: 'upload',
+      name: 'logo-ab12cd.png',
+      id: '222222222222',
+      createdAt: '2026-11-12T00:00:00Z',
+    },
+  ]
+  const run = await runFilesStep(
+    h,
+    filesUserText('save-uploads', {
+      drive: 'main',
+      folder: FILES_FOLDER,
+      file: 'notes-ab12cd.bin',
+      image: 'logo-ab12cd.png',
+      part: 'ab12cd',
+    }),
+    fakeFilesHost({ listing, olderEntries: 100 })
+  )
+  assert.equal(run.answer, 'GFS-FILES save-uploads saved')
+  assert.deepEqual(
+    filesSaveArgs(h).map(args => args.uploadedFileId),
+    ['111111111111', '222222222222']
   )
 })
 

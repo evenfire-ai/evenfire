@@ -914,7 +914,9 @@ const GFS_FILES_STEPS = {
   'list-and-save': (p, results) => {
     const drive = requiredParam(p, 'drive')
     const file = requiredParam(p, 'file')
-    if (results.length === 0) return callTool(GFS_FILES_TOOL.list, {})
+    // By name: the listing is cut at 100 entries, oldest first, and earlier
+    // runs on the same profile leave their files there.
+    if (results.length === 0) return callTool(GFS_FILES_TOOL.list, { nameContains: file })
     if (results.length === 1) return callTool(GFS_FILES_TOOL.accessible, { drive })
     const entry = listedEntry(keptListing(results[0]), 'generated', file)
     if (results.length === 2)
@@ -942,11 +944,13 @@ const GFS_FILES_STEPS = {
     return finish(notKept ? 'not-kept' : 'kept', notKept ? { code: notKept[1] } : {})
   },
 
-  // Save two kept attachments of an earlier conversation by their listed ids.
+  // Save two kept attachments of an earlier conversation by their listed ids,
+  // listed by the part of the name both carry (the run tag).
   'save-uploads': (p, results) => {
     const drive = requiredParam(p, 'drive')
     const names = [requiredParam(p, 'file'), requiredParam(p, 'image')]
-    if (results.length === 0) return callTool(GFS_FILES_TOOL.list, {})
+    const part = requiredParam(p, 'part')
+    if (results.length === 0) return callTool(GFS_FILES_TOOL.list, { nameContains: part })
     if (results.length === 1) return callTool(GFS_FILES_TOOL.accessible, { drive })
     const listing = keptListing(results[0])
     if (results.length < 2 + names.length) {

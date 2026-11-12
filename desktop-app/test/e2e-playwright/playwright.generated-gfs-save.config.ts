@@ -45,9 +45,12 @@ const recorderRoot = process.env.QA_RECORDER_ROOT
 export default defineConfig({
   testDir: '.',
   testMatch: /qa-recorder-generated-gfs-save\.spec\.ts/,
-  // One Electron launch and sign-in in beforeAll, then eight serial tests.
-  // The runner cuts Playwright at 900s for the whole lane.
+  // One Electron launch and sign-in in beforeAll, then eight serial tests of
+  // at most 180s each. The runner stops Playwright at 900s for the whole lane,
+  // which leaves no report and skips afterAll; the lane ends itself below that,
+  // so a slow lane fails with a report that names the journey.
   timeout: 180_000,
+  globalTimeout: 840_000,
   expect: { timeout: 30_000 },
   retries: 0,
   workers: 1,

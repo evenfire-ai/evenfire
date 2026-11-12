@@ -202,7 +202,8 @@ async function downloadFromFiles(
   app: ElectronApplication,
   page: Page,
   browser: Locator,
-  filename: string
+  filename: string,
+  expectedBytes: number
 ): Promise<Buffer> {
   const savePath = test
     .info()
@@ -222,9 +223,14 @@ async function downloadFromFiles(
   await expect(page.getByText(`Downloaded ${filename}`, { exact: true })).toBeVisible({
     timeout: 120_000,
   })
+  // The toast fires at the click: wait until the whole file is on disk.
   await expect
-    .poll(() => (existsSync(savePath) ? statSync(savePath).size : -1), { timeout: 120_000 })
-    .toBeGreaterThan(0)
+    .poll(() => (existsSync(savePath) ? statSync(savePath).size : -1), {
+      timeout: 120_000,
+      intervals: [100, 500, 1_000],
+      message: `Desktop should write ${expectedBytes} bytes of ${filename} to ${savePath}`,
+    })
+    .toBe(expectedBytes)
   return readFileSync(savePath)
 }
 
@@ -399,7 +405,7 @@ test.describe('generated-gfs-save fixture', () => {
         const name = `${report}.${extension}`
         const received = await generatedFileDigest(page, env.hostRef, name)
         expect(summary(name)).toMatchObject({ kind: 'file', bytes: received.bytes, deleted: false })
-        const saved = await downloadFromFiles(app!, page, browser, name)
+        const saved = await downloadFromFiles(app!, page, browser, name, received.bytes)
         expect({ bytes: saved.length, sha256: sha256Hex(saved) }).toEqual(received)
       }
     })
@@ -432,7 +438,7 @@ test.describe('generated-gfs-save fixture', () => {
     await expect.poll(() => summary(name)?.version).toBe(current!.version + 1)
     const received = await generatedFileDigest(page, env.hostRef, name)
     const browser = await browseToFolder(page, folder.name)
-    const saved = await downloadFromFiles(app!, page, browser, name)
+    const saved = await downloadFromFiles(app!, page, browser, name, received.bytes)
     expect({ bytes: saved.length, sha256: sha256Hex(saved) }).toEqual(received)
   })
 
@@ -454,7 +460,7 @@ test.describe('generated-gfs-save fixture', () => {
     ])
     const received = await generatedFileDigest(page, env.hostRef, generated)
     const browser = await browseToFolder(page, folder.name)
-    const saved = await downloadFromFiles(app!, page, browser, copy)
+    const saved = await downloadFromFiles(app!, page, browser, copy, received.bytes)
     expect({ bytes: saved.length, sha256: sha256Hex(saved) }).toEqual(received)
   })
 
@@ -482,7 +488,7 @@ test.describe('generated-gfs-save fixture', () => {
       await askStep(
         page,
         'save-uploads',
-        { ...folderParams(), file: file.name, image: image.name },
+        { ...folderParams(), file: file.name, image: image.name, part: run },
         'saved'
       )
     })
@@ -497,7 +503,13 @@ test.describe('generated-gfs-save fixture', () => {
       ])
       const browser = await browseToFolder(page, folder.name)
       for (const attached of [file, image]) {
-        const saved = await downloadFromFiles(app!, page, browser, attached.name)
+        const saved = await downloadFromFiles(
+          app!,
+          page,
+          browser,
+          attached.name,
+          attached.buffer.length
+        )
         expect(sha256Hex(saved)).toBe(sha256Hex(attached.buffer))
       }
     })
@@ -512,7 +524,13 @@ test.describe('generated-gfs-save fixture', () => {
     expect(saved).toMatchObject({ kind: 'file', deleted: false })
     expect(saved!.bytes).toBeGreaterThan(10_000)
     const original = (
-      await downloadFromFiles(app!, page, await browseToFolder(page, folder.name), name)
+      await downloadFromFiles(
+        app!,
+        page,
+        await browseToFolder(page, folder.name),
+        name,
+        saved!.bytes
+      )
     ).toString('utf8')
     const oldText = 'Paragraph 050 of the notes'
     const newText = `Paragraph 050, edited ${run},`
@@ -540,7 +558,8 @@ test.describe('generated-gfs-save fixture', () => {
       app!,
       page,
       await browseToFolder(page, folder.name),
-      name
+      name,
+      Buffer.byteLength(original.replace(oldText, newText))
     )
     expect(edited.toString('utf8')).toBe(original.replace(oldText, newText))
   })
@@ -566,7 +585,13 @@ test.describe('generated-gfs-save fixture', () => {
     expect((answer!.outcome as { saves: { source: string }[] }).saves[0]!.source).toBe(
       'source_path'
     )
-    const saved = await downloadFromFiles(app!, page, await browseToFolder(page, folder.name), name)
+    const saved = await downloadFromFiles(
+      app!,
+      page,
+      await browseToFolder(page, folder.name),
+      name,
+      Buffer.byteLength(text)
+    )
     expect(saved.toString('utf8')).toBe(text)
   })
 
@@ -607,9 +632,11 @@ test.describe('generated-gfs-save fixture', () => {
 
   test('generated-gfs-save fixture: deletes a kept file only after the approval card is approved', async () => {
     const name = `delete-${run}.md`
-    const stepper = page.getByTestId('progress-stepper').filter({
-      has: page.getByTestId('approval-approve-btn'),
-    })
+    // Each send can leave a card behind: count the approve buttons before it
+    // and address the new card by index, so strict mode never sees two.
+    const approveButtons = page.getByTestId('approval-approve-btn')
+    const cardAfter = (count: number) =>
+      page.getByTestId('progress-stepper').filter({ has: approveButtons }).nth(count)
     const listedNames = async (rowsBefore: ImageCapabilityEvidenceSnapshot) => {
       await askStep(page, 'list', { part: name }, 'listed')
       const lists = stepAnswers(ledgerSince(rowsBefore), 'list')
@@ -620,6 +647,7 @@ test.describe('generated-gfs-save fixture', () => {
     await askStep(page, 'generate-one', { file: name }, 'generated')
 
     await test.step('Deny: the card names the file, and the file stays', async () => {
+      const stepper = cardAfter(await approveButtons.count())
       await composer(page).fill(`Please do this. GFS_FILES step=delete file="${name}"`)
       await sendButton(page).click()
       await expect(stepper).toBeVisible({ timeout: 120_000 })
@@ -633,6 +661,7 @@ test.describe('generated-gfs-save fixture', () => {
     })
 
     await test.step('Approve: the file is deleted once and is gone', async () => {
+      const stepper = cardAfter(await approveButtons.count())
       await composer(page).fill(`Please do this. GFS_FILES step=delete file="${name}"`)
       await sendButton(page).click()
       await expect(stepper).toBeVisible({ timeout: 120_000 })
