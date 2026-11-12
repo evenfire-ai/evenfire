@@ -4,21 +4,28 @@
  * `WorkflowService.executeStep` pastes every tool result into the prompt and
  * resends it on each iteration. This module wires the shared spillover store
  * (`core/spillover`) into that loop: a result at or above the threshold is
- * written under `<outputDir>/.spill/spillover/<stepId>/<callId>.json` and the
- * model receives the store's summary plus a `spillover_ref` it can read back
- * by byte range with `clerum__spillover_read`.
+ * written under `<outputDir>/.spill/<executionId>/spillover/<stepId>/<callId>.json`
+ * and the model receives the store's summary plus a `spillover_ref` it can
+ * read back by byte range with `clerum__spillover_read`. `executionId` is
+ * random per step execution, so refs stay `spillover://<stepId>/<callId>.json`
+ * while one execution can never read or delete another's files.
  *
  * Invariants:
- *   - Nothing touches the disk until the first result is persisted, so a step
- *     whose results all stay under the threshold is unchanged.
- *   - The read tool only accepts refs of the same step, and reads of at most
- *     the threshold.
+ *   - A step execution writes nothing until its first result is persisted, so
+ *     a step whose results all stay under the threshold is unchanged. The
+ *     first step of a process removes spill files a dead process left
+ *     (`removeLeftoverStepSpillover`).
+ *   - The read tool only accepts refs of the same step, finds only blobs of
+ *     the same execution, and reads at most the threshold.
+ *   - The budget caps the result bytes persisted by one execution; a result
+ *     that does not fit stays inline and later results that fit still spill.
  *   - Logs carry tool names, sizes and refs only, never result content or
  *     arguments.
  *
  * Configuration is deliberately separate from the first-party agent's
  * `CLERUM_TOOL_SPILLOVER_*` settings: threshold and retention differ.
  */
+import { randomBytes } from 'crypto'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { SpilloverStorage, parseSpilloverRef } from '../core/spillover'
@@ -43,6 +50,7 @@ const MAX_BUDGET_BYTES = 268435456
 const SPILL_DIR = '.spill'
 const STORE_ROOT = 'spillover'
 const SEGMENT_RE = /^[A-Za-z0-9_-]+$/
+const EXECUTION_DIR_RE = /^[0-9a-f]{16}$/
 
 export interface StepSpilloverConfig {
   enabled: boolean
@@ -121,7 +129,7 @@ export interface StepSpillover {
     content: string
     isError: boolean
   }): Promise<StepSpilloverResult>
-  /** Removes this step's blobs. Never throws; no-op when nothing was written. */
+  /** Removes this execution's blobs. Never throws; no-op when nothing was written. */
   cleanup(): Promise<void>
 }
 
@@ -150,10 +158,11 @@ export function createStepSpillover(opts: {
   }
 
   const spillRoot = path.join(outputDir, SPILL_DIR)
-  const storeRoot = path.join(spillRoot, STORE_ROOT)
-  const storeRootAbs = path.resolve(storeRoot)
+  const spillRootAbs = path.resolve(spillRoot)
+  const executionId = randomBytes(8).toString('hex')
+  const executionRoot = path.join(spillRoot, executionId)
   const storage = new SpilloverStorage({
-    workspacePath: spillRoot,
+    workspacePath: executionRoot,
     thresholdBytes,
     ttlMs: 0,
     gcIntervalMs: 0,
@@ -215,7 +224,7 @@ export function createStepSpillover(opts: {
         budgetWarned = true
         logger.warn(
           { component: LOG_COMPONENT, stepId, budgetBytes },
-          'Step spillover budget exceeded; further tool results stay inline'
+          'Tool result does not fit in the step spillover budget; it stays inline (logged once per step)'
         )
       }
       return inline
@@ -266,12 +275,12 @@ export function createStepSpillover(opts: {
 
   async function cleanup(): Promise<void> {
     if (!attemptedWrite) return
-    // The recursive delete must stay inside this store: the step id is already
-    // restricted to one path segment, and this re-checks the resolved path.
-    const stepDir = path.resolve(storeRootAbs, stepId)
-    if (!stepDir.startsWith(storeRootAbs + path.sep)) return
+    // The recursive delete must stay inside `.spill`: the execution id is
+    // generated here as hex, and this re-checks the resolved path.
+    const executionDir = path.resolve(spillRootAbs, executionId)
+    if (!executionDir.startsWith(spillRootAbs + path.sep)) return
     try {
-      await fs.rm(stepDir, { recursive: true, force: true })
+      await fs.rm(executionDir, { recursive: true, force: true })
     } catch (err) {
       logger.warn(
         {
@@ -283,17 +292,69 @@ export function createStepSpillover(opts: {
       )
       return
     }
-    // Remove the parents only when empty; another step may still use them.
-    for (const dir of [storeRoot, spillRoot]) {
-      try {
-        await fs.rmdir(dir)
-      } catch {
-        return
-      }
+    // Remove `.spill` only when empty; another execution may still use it.
+    try {
+      await fs.rmdir(spillRoot)
+    } catch {
+      // Not empty, or already gone.
     }
   }
 
   return { readTool, persist, cleanup }
+}
+
+/**
+ * Removes the spill files a process that died mid-step left in `outputDir`:
+ * `.spill/<executionId>` directories and the older `.spill/spillover` layout.
+ * Other entries under `.spill` are kept. Creates nothing and never throws.
+ *
+ * Call it once per process, before the first step creates its store: no
+ * execution of this process can own a spill directory yet.
+ */
+export async function removeLeftoverStepSpillover(outputDir: string): Promise<void> {
+  const spillRootAbs = path.resolve(outputDir, SPILL_DIR)
+  let entries: string[]
+  try {
+    entries = await fs.readdir(spillRootAbs)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code
+    if (code === 'ENOENT') return
+    logger.warn(
+      { component: LOG_COMPONENT, errorCode: code },
+      'Could not list leftover step spillover files'
+    )
+    return
+  }
+
+  let removed = 0
+  for (const entry of entries) {
+    if (entry !== STORE_ROOT && !EXECUTION_DIR_RE.test(entry)) continue
+    const target = path.resolve(spillRootAbs, entry)
+    if (!target.startsWith(spillRootAbs + path.sep)) continue
+    try {
+      await fs.rm(target, { recursive: true, force: true })
+      removed += 1
+    } catch (err) {
+      logger.warn(
+        {
+          component: LOG_COMPONENT,
+          errorCode: (err as NodeJS.ErrnoException | undefined)?.code,
+        },
+        'Could not remove leftover step spillover files'
+      )
+    }
+  }
+  if (removed > 0) {
+    logger.info(
+      { component: LOG_COMPONENT, removedEntries: removed },
+      'Removed step spillover files left by an earlier process'
+    )
+  }
+  try {
+    await fs.rmdir(spillRootAbs)
+  } catch {
+    // Not empty: other entries under `.spill` are not this feature's.
+  }
 }
 
 /** What `toolsCalled` records for a read call: never the blob content. */

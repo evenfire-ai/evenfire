@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
+import { config } from '../../config'
 import { LlmErrorCode } from '../../core/errors'
 import { FinishReason } from '../../core/types'
 import type { SingleTurnProvider } from '../../llm'
@@ -451,5 +452,249 @@ describe('WorkflowService step spillover — configured threshold', () => {
 
     expect(toolResultMessages(llm)[0]).toContain('of at most 4096 bytes.]')
     expect(offeredTools(llm)[1]).toContain(READ_TOOL)
+  })
+})
+
+describe('WorkflowService step spillover — configured budget', () => {
+  it('applies the configured budget to the step', async () => {
+    // 1 MiB is the smallest budget the resolver accepts; each result is
+    // ~700 KiB, so only the first fits.
+    vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES', '1048576')
+    const payload = big(700 * 1024)
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: 'done', tool_calls: null },
+    ])
+
+    const res = await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    const [first, second] = toolResultMessages(llm)
+    expect(first).toContain(`"spillover_ref":"${FIRST_REF}"`)
+    expect(second).toBe(
+      `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`
+    )
+  })
+})
+
+describe('WorkflowService step spillover — first-party flag', () => {
+  const firstPartyEnabled = config.toolSpilloverEnabled
+
+  afterEach(() => {
+    config.toolSpilloverEnabled = firstPartyEnabled
+  })
+
+  it('still spills when the first-party spillover is disabled', async () => {
+    vi.stubEnv('CLERUM_TOOL_SPILLOVER_ENABLED', 'false')
+    config.toolSpilloverEnabled = false
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(100 * 1024) } })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: 'done', tool_calls: null },
+    ])
+
+    const res = await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    expect(toolResultMessages(llm)[0]).toContain(`"spillover_ref":"${FIRST_REF}"`)
+    expect(offeredTools(llm)[1]).toContain(READ_TOOL)
+  })
+})
+
+function blobFile(content: string): string {
+  return JSON.stringify({
+    version: 1,
+    tool_call_id: 'i9c9',
+    tool_name: 'srv__read',
+    task_id: STEP_ID,
+    created_at_ms: Date.now(),
+    byte_size: Buffer.byteLength(content, 'utf8'),
+    line_count: 1,
+    content_type: 'text',
+    fingerprint_sha256: 'x',
+    content,
+  })
+}
+
+async function seedSpill(rel: string, body: string): Promise<string> {
+  const file = path.join(outputDir, '.spill', rel)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, body)
+  return file
+}
+
+describe('WorkflowService step spillover — files of other executions', () => {
+  it.each([
+    ['enabled', undefined],
+    ['disabled', 'false'],
+  ])(
+    'removes spill files left by an earlier process before the first step (%s)',
+    async (_label, enabled) => {
+      if (enabled !== undefined) vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED', enabled)
+      const leftovers = [
+        await seedSpill('spillover/review/i1c0.json', blobFile('OLD-LAYOUT-MARKER')),
+        await seedSpill('deadbeefdeadbeef/spillover/review/i1c0.json', blobFile('DEAD-MARKER')),
+      ]
+      const unrelated = await seedSpill('keep.txt', 'not written by spillover')
+      for (const f of [...leftovers, unrelated]) expect(await exists(f)).toBe(true)
+
+      const payload = big(1024)
+      const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
+      const llm = mockLlmProvider([
+        { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+        { content: 'done', tool_calls: null },
+      ])
+      const res = await service(llm, client).executeStep({
+        stepId: STEP_ID,
+        instruction: 'review',
+        mcpServers: SERVERS,
+      })
+
+      expect(res.status).toBe('completed')
+      expect(llm.completeSingleTurnWithTools).toHaveBeenCalledTimes(2)
+      expect(toolResultMessages(llm)).toEqual([
+        `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`,
+      ])
+      expect(await fs.readdir(path.join(outputDir, '.spill'))).toEqual(['keep.txt'])
+    }
+  )
+
+  it('does not let a step read a blob left under the same ref by another execution', async () => {
+    const llm = mockLlmProvider([
+      // Step 1 (text only) runs the once-per-process removal first.
+      { content: 'warm-up done' },
+      // Step 2: spill, read a foreign ref, read its own ref.
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      {
+        content: null,
+        tool_calls: [{ name: READ_TOOL, arguments: { ref: `spillover://${STEP_ID}/i9c9.json` } }],
+      },
+      {
+        content: null,
+        tool_calls: [
+          { name: READ_TOOL, arguments: { ref: FIRST_REF, range: { start: 0, end: 50 } } },
+        ],
+      },
+      { content: 'done', tool_calls: null },
+    ])
+    const payload = big(100 * 1024)
+    const svc = service(llm, mockMcpClient([{ name: 'read' }], { read: { content: payload } }))
+    const warmUp = await svc.executeStep({ stepId: 'warm-up', instruction: 'warm up' })
+    expect(warmUp.status).toBe('completed')
+
+    await seedSpill('spillover/review/i9c9.json', blobFile('FOREIGN-OLD-LAYOUT'))
+    await seedSpill('0123456789abcdef/spillover/review/i9c9.json', blobFile('FOREIGN-EXECUTION'))
+
+    const res = await svc.executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    const records = res.toolsCalled ?? []
+    expect(records[1]?.result).toEqual({
+      success: false,
+      ref: `spillover://${STEP_ID}/i9c9.json`,
+      error: 'spillover blob not found',
+    })
+    expect(records[2]?.result).toEqual({ success: true, ref: FIRST_REF, bytes: 50 })
+    const prompt = providerCalls(llm).flatMap(([messages]) => messages.map(m => m.content))
+    for (const text of prompt) {
+      expect(text).not.toContain('FOREIGN-OLD-LAYOUT')
+      expect(text).not.toContain('FOREIGN-EXECUTION')
+    }
+  })
+
+  it('keeps the blobs of an execution when another execution of the same step ends', async () => {
+    const payloadA = 'A'.repeat(100 * 1024)
+    const payloadB = 'B'.repeat(100 * 1024)
+    const client = mockMcpClient([{ name: 'a' }, { name: 'b' }], {
+      a: { content: payloadA },
+      b: { content: payloadB },
+    })
+
+    // Responses are routed by the step instruction, so both executions can
+    // share the provider. Execution A's second response is held until B ends.
+    let releaseA: () => void = () => undefined
+    const holdA = new Promise<void>(resolve => {
+      releaseA = resolve
+    })
+    let markReached: () => void = () => undefined
+    const reachedA = new Promise<void>(resolve => {
+      markReached = resolve
+    })
+    const scripts: Record<string, MockResponse[]> = {
+      'run A': [
+        { content: null, tool_calls: [{ name: 'srv__a', arguments: {} }] },
+        {
+          content: null,
+          tool_calls: [
+            { name: READ_TOOL, arguments: { ref: FIRST_REF, range: { start: 0, end: 20 } } },
+          ],
+        },
+        { content: 'A done', tool_calls: null },
+      ],
+      'run B': [
+        { content: null, tool_calls: [{ name: 'srv__b', arguments: {} }] },
+        { content: 'B done', tool_calls: null },
+      ],
+    }
+    const index: Record<string, number> = { 'run A': 0, 'run B': 0 }
+    const llm = mockLlmProvider([])
+    vi.mocked(llm.completeSingleTurnWithTools).mockImplementation(async messages => {
+      const key = (messages as Array<{ role: string; content: string }>).some(
+        m => m.role === 'user' && m.content === 'run A'
+      )
+        ? 'run A'
+        : 'run B'
+      const n = index[key]!
+      index[key] = n + 1
+      if (key === 'run A' && n === 1) {
+        markReached()
+        await holdA
+      }
+      const r = scripts[key]![n] ?? { content: 'done', tool_calls: null }
+      return {
+        content: r.content,
+        tool_calls: r.tool_calls?.map((call, k) => ({ id: `${key}-${n}-${k}`, ...call })) ?? null,
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        finish_reason: r.tool_calls ? FinishReason.ToolUse : FinishReason.Stop,
+      }
+    })
+    const svc = service(llm, client)
+
+    const runA = svc.executeStep({ stepId: STEP_ID, instruction: 'run A', mcpServers: SERVERS })
+    await reachedA
+    const resB = await svc.executeStep({
+      stepId: STEP_ID,
+      instruction: 'run B',
+      mcpServers: SERVERS,
+    })
+    expect(resB.status).toBe('completed')
+    releaseA()
+    const resA = await runA
+
+    expect(resA.status).toBe('completed')
+    expect(resA.toolsCalled?.[1]?.result).toEqual({ success: true, ref: FIRST_REF, bytes: 20 })
+    const readMessage = vi
+      .mocked(llm.completeSingleTurnWithTools)
+      .mock.calls.map(([messages]) => messages as Array<{ role: string; content: string }>)
+      .filter(messages => messages.some(m => m.content === 'run A'))
+      .at(-1)!
+      .find(m => m.content.startsWith(`<tool-result server="${READ_TOOL}"`))
+    expect(readMessage?.content).toContain('AAAAAAAAAA')
+    expect(readMessage?.content).not.toContain('BBBBBBBBBB')
+    expect(await exists(path.join(outputDir, '.spill'))).toBe(false)
   })
 })

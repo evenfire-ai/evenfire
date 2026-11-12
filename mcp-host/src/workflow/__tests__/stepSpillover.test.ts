@@ -1,11 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
+import { logger } from '../../logger'
 import {
   STEP_SPILLOVER_READ_TOOL_NAME,
   type StepSpillover,
   createStepSpillover,
+  removeLeftoverStepSpillover,
   resolveStepSpilloverConfig,
   summarizeSpilloverReadForRecord,
 } from '../stepSpillover'
@@ -68,6 +70,18 @@ describe('resolveStepSpilloverConfig', () => {
       resolveStepSpilloverConfig({ CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES: value }).budgetBytes
     ).toBe(16777216)
   })
+
+  it('ignores the first-party CLERUM_TOOL_SPILLOVER_ENABLED', () => {
+    expect(resolveStepSpilloverConfig({ CLERUM_TOOL_SPILLOVER_ENABLED: 'false' }).enabled).toBe(
+      true
+    )
+    expect(
+      resolveStepSpilloverConfig({
+        CLERUM_TOOL_SPILLOVER_ENABLED: 'true',
+        CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED: 'false',
+      }).enabled
+    ).toBe(false)
+  })
 })
 
 describe('createStepSpillover', () => {
@@ -78,6 +92,7 @@ describe('createStepSpillover', () => {
   })
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     await fs.rm(outputDir, { recursive: true, force: true })
   })
 
@@ -92,7 +107,18 @@ describe('createStepSpillover', () => {
     return spillover
   }
 
-  const stepDir = (): string => path.join(outputDir, '.spill', 'spillover', 'review-step')
+  // Execution roots under `.spill`; each execution gets one random hex directory.
+  async function executionRoots(): Promise<string[]> {
+    return (await fs.readdir(path.join(outputDir, '.spill'))).sort()
+  }
+
+  // The single execution's step directory; fails when there is not exactly one.
+  async function stepDir(stepId = 'review-step'): Promise<string> {
+    const roots = await executionRoots()
+    expect(roots).toHaveLength(1)
+    expect(roots[0]).toMatch(/^[0-9a-f]{16}$/)
+    return path.join(outputDir, '.spill', roots[0]!, 'spillover', stepId)
+  }
 
   it.each(['', 'a/b', '../x', 'a.b'])('returns null for an invalid step id %j', stepId => {
     expect(createStepSpillover({ outputDir, stepId, thresholdBytes: 4096, budgetBytes: 1 })).toBe(
@@ -130,7 +156,32 @@ describe('createStepSpillover', () => {
       expect(res.text.startsWith('[Result stored outside the prompt (8192 bytes).')).toBe(true)
       expect(res.text).toContain(`of at most ${THRESHOLD} bytes.]`)
       expect(res.text).toContain('"spillover_ref":"spillover://review-step/c1.json"')
-      expect(await exists(path.join(stepDir(), 'c1.json'))).toBe(true)
+      expect(await fs.readdir(await stepDir())).toEqual(['c1.json'])
+    })
+
+    it('gives each execution of the same step its own files', async () => {
+      const a = make()
+      const b = make()
+      await a.persist({
+        callId: 'c1',
+        toolName: 't',
+        content: 'A'.repeat(THRESHOLD),
+        isError: false,
+      })
+      await b.persist({
+        callId: 'c1',
+        toolName: 't',
+        content: 'B'.repeat(THRESHOLD),
+        isError: false,
+      })
+      expect(await executionRoots()).toHaveLength(2)
+      await b.cleanup()
+      const res = await a.readTool.execute(
+        { ref: 'spillover://review-step/c1.json', range: { start: 0, end: 10 } },
+        outputDir
+      )
+      expect(res).toEqual({ success: true, content: 'A'.repeat(10) })
+      expect(await executionRoots()).toHaveLength(1)
     })
 
     it('never spills an error result', async () => {
@@ -151,7 +202,7 @@ describe('createStepSpillover', () => {
       expect(res).toEqual({ text: content, spilled: false })
     })
 
-    it('keeps results inline once the step budget would be exceeded', async () => {
+    it('keeps a result inline when it would take the step over its budget', async () => {
       const spillover = make({ budgetBytes: 10000 })
       const content = 'b'.repeat(6000)
       const first = await spillover.persist({
@@ -168,7 +219,66 @@ describe('createStepSpillover', () => {
       })
       expect(first.spilled).toBe(true)
       expect(second).toEqual({ text: content, spilled: false })
-      expect(await exists(path.join(stepDir(), 'c2.json'))).toBe(false)
+      expect(await fs.readdir(await stepDir())).toEqual(['c1.json'])
+    })
+
+    it('still spills a later result that fits after one stayed inline', async () => {
+      const warn = vi.spyOn(logger, 'warn')
+      const spillover = make({ budgetBytes: 11000 })
+      const outcomes: boolean[] = []
+      for (const [callId, size] of [
+        ['c1', 6000],
+        ['c2', 6000],
+        ['c3', 4500],
+      ] as const) {
+        const res = await spillover.persist({
+          callId,
+          toolName: 't',
+          content: 'b'.repeat(size),
+          isError: false,
+        })
+        outcomes.push(res.spilled)
+      }
+      expect(outcomes).toEqual([true, false, true])
+      expect(await fs.readdir(await stepDir())).toEqual(['c1.json', 'c3.json'])
+      const budgetWarnings = warn.mock.calls.filter(([, msg]) =>
+        String(msg).includes('does not fit in the step spillover budget')
+      )
+      expect(budgetWarnings).toHaveLength(1)
+    })
+
+    it('stops trying to write for the rest of the step after one write failure', async () => {
+      const warn = vi.spyOn(logger, 'warn')
+      const blocker = path.join(outputDir, '.spill')
+      await fs.writeFile(blocker, 'not a directory')
+      const spillover = make()
+      const content = 'w'.repeat(THRESHOLD * 2)
+      const first = await spillover.persist({
+        callId: 'c1',
+        toolName: 't',
+        content,
+        isError: false,
+      })
+      expect(first).toEqual({ text: content, spilled: false })
+
+      // The path is writable again; only the latch keeps the next result inline.
+      await fs.rm(blocker)
+      const second = await spillover.persist({
+        callId: 'c2',
+        toolName: 't',
+        content,
+        isError: false,
+      })
+      expect(second).toEqual({ text: content, spilled: false })
+      expect(await exists(blocker)).toBe(false)
+      const writeWarnings = warn.mock.calls.filter(([, msg]) =>
+        String(msg).includes('Could not persist tool result')
+      )
+      expect(writeWarnings).toHaveLength(1)
+
+      // Witness: a fresh execution spills the same content on the same output dir.
+      const fresh = await make().persist({ callId: 'c1', toolName: 't', content, isError: false })
+      expect(fresh.spilled).toBe(true)
     })
 
     it('keeps the result inline and does not throw when the output dir is not writable', async () => {
@@ -303,26 +413,109 @@ describe('createStepSpillover', () => {
 
     it('removes the step directory and empty parents, and is idempotent', async () => {
       const spillover = make()
-      await spillover.persist({
+      const res = await spillover.persist({
         callId: 'c1',
         toolName: 't',
         content: 'z'.repeat(THRESHOLD),
         isError: false,
       })
+      expect(res.spilled).toBe(true)
+      expect(await fs.readdir(await stepDir())).toEqual(['c1.json'])
       await spillover.cleanup()
       expect(await fs.readdir(outputDir)).toEqual([])
       await expect(spillover.cleanup()).resolves.toBeUndefined()
     })
 
-    it('keeps parents that still hold another step', async () => {
+    it('keeps .spill while another execution still holds files', async () => {
       const a = make()
       const b = make({ stepId: 'other-step' })
       const content = 'z'.repeat(THRESHOLD)
-      await a.persist({ callId: 'c1', toolName: 't', content, isError: false })
-      await b.persist({ callId: 'c1', toolName: 't', content, isError: false })
+      const spilledA = await a.persist({ callId: 'c1', toolName: 't', content, isError: false })
+      const spilledB = await b.persist({ callId: 'c1', toolName: 't', content, isError: false })
+      expect([spilledA.spilled, spilledB.spilled]).toEqual([true, true])
+      expect(await executionRoots()).toHaveLength(2)
       await a.cleanup()
-      expect(await fs.readdir(path.join(outputDir, '.spill', 'spillover'))).toEqual(['other-step'])
+      expect(await fs.readdir(await stepDir('other-step'))).toEqual(['c1.json'])
     })
+  })
+})
+
+describe('removeLeftoverStepSpillover', () => {
+  let outputDir: string
+
+  beforeEach(async () => {
+    outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'step-spillover-leftover-'))
+  })
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await fs.chmod(outputDir, 0o700).catch(() => undefined)
+    await fs.chmod(path.join(outputDir, '.spill'), 0o700).catch(() => undefined)
+    await fs.rm(outputDir, { recursive: true, force: true })
+  })
+
+  async function seed(rel: string): Promise<string> {
+    const file = path.join(outputDir, '.spill', rel)
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, 'leftover')
+    return file
+  }
+
+  it('removes execution roots and the older layout, and then .spill when empty', async () => {
+    const files = [
+      await seed('0123456789abcdef/spillover/review/i1c0.json'),
+      await seed('spillover/review/i1c0.json'),
+    ]
+    for (const f of files) expect(await exists(f)).toBe(true)
+    await removeLeftoverStepSpillover(outputDir)
+    expect(await fs.readdir(outputDir)).toEqual([])
+  })
+
+  it('keeps entries under .spill that this feature does not write', async () => {
+    await seed('0123456789abcdef/spillover/review/i1c0.json')
+    // Uppercase hex differs from the seeded root in more than case, so it is a
+    // separate entry on case-insensitive filesystems too.
+    const kept = ['FEDCBA9876543210', '0123456789abcde', 'keep.txt', 'spillover2']
+    for (const name of kept) {
+      if (name.includes('.')) await seed(name)
+      else await seed(`${name}/x.json`)
+    }
+    await removeLeftoverStepSpillover(outputDir)
+    expect((await fs.readdir(path.join(outputDir, '.spill'))).sort()).toEqual([...kept].sort())
+  })
+
+  it('creates nothing when there is no .spill', async () => {
+    await fs.writeFile(path.join(outputDir, 'report.md'), 'artifact')
+    await removeLeftoverStepSpillover(outputDir)
+    expect(await fs.readdir(outputDir)).toEqual(['report.md'])
+  })
+
+  it('logs and resolves when .spill cannot be listed', async () => {
+    const warn = vi.spyOn(logger, 'warn')
+    await fs.writeFile(path.join(outputDir, '.spill'), 'not a directory')
+    await expect(removeLeftoverStepSpillover(outputDir)).resolves.toBeUndefined()
+    expect(await exists(path.join(outputDir, '.spill'))).toBe(true)
+    expect(
+      warn.mock.calls.filter(([, msg]) => String(msg).includes('Could not list leftover'))
+    ).toHaveLength(1)
+  })
+
+  it('logs, keeps going and resolves when one entry cannot be removed', async () => {
+    const warn = vi.spyOn(logger, 'warn')
+    await seed('0123456789abcdef/spillover/review/i1c0.json')
+    await seed('fedcba9876543210/spillover/review/i1c0.json')
+    // A read-only `.spill` makes removing its entries fail with EACCES.
+    await fs.chmod(path.join(outputDir, '.spill'), 0o500)
+    await expect(removeLeftoverStepSpillover(outputDir)).resolves.toBeUndefined()
+    const removeWarnings = warn.mock.calls.filter(([, msg]) =>
+      String(msg).includes('Could not remove leftover')
+    )
+    expect(removeWarnings).toHaveLength(2)
+    await fs.chmod(path.join(outputDir, '.spill'), 0o700)
+    expect((await fs.readdir(path.join(outputDir, '.spill'))).sort()).toEqual([
+      '0123456789abcdef',
+      'fedcba9876543210',
+    ])
   })
 })
 

@@ -40,6 +40,7 @@ import {
   STEP_SPILLOVER_READ_TOOL_NAME,
   type StepSpillover,
   createStepSpillover,
+  removeLeftoverStepSpillover,
   resolveStepSpilloverConfig,
   summarizeSpilloverReadForRecord,
 } from './stepSpillover'
@@ -336,6 +337,8 @@ export class WorkflowService {
   // `lazyBudgetClient` caches the one built from runtimeAuth.
   private readonly injectedBudgetClient: BudgetClient | null | undefined
   private lazyBudgetClient: BudgetClient | null = null
+  // Removal of step spill files left by an earlier process; runs once.
+  private leftoverSpillRemoval: Promise<void> | null = null
 
   constructor(
     recipeName: string,
@@ -882,6 +885,12 @@ export class WorkflowService {
       }
     }
 
+    // Spill files a dead process left in the output folder are removed once per
+    // process, before any step creates its own store. Started here, before the
+    // first await, so concurrent first steps share one removal.
+    const leftoverSpillRemoval = (this.leftoverSpillRemoval ??=
+      removeLeftoverStepSpillover(getOutputDir()))
+
     // Capture provider into local const — eliminates non-null assertions inside async loop
     // and prevents concurrent configure() from nullifying mid-execution.
     const provider = this.currentProvider!
@@ -1175,9 +1184,11 @@ export class WorkflowService {
       }
 
       // Oversized tool results are stored outside the prompt. The store does
-      // not touch the disk and the read tool is not offered until a result is
-      // actually spilled, so steps without large results keep today's prompts
-      // and toolset.
+      // not write to the disk and the read tool is not offered until a result
+      // is actually spilled, so steps without large results keep today's
+      // prompts and toolset. Leftovers of a dead process are removed first,
+      // also when spillover is disabled.
+      await leftoverSpillRemoval
       const spilloverConfig = resolveStepSpilloverConfig()
       if (spilloverConfig.enabled && toolDefs.length > 0) {
         stepSpillover = createStepSpillover({
