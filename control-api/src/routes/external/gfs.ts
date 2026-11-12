@@ -98,6 +98,9 @@ type ExternalGfsRequest = ExternalAuthedRequest & {
   gfsAuthority?: ExternalGfsAuthority
 }
 
+/** Served by the watch router, which is mounted ahead of this one. */
+export const EXTERNAL_GFS_WATCH_PATH = '/external/gfs/watch'
+
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export function attachExternalGfsRequestId(
@@ -377,6 +380,16 @@ export const edgeRateLimitHandler =
       authorityResolutionAvoided: guard === 'ingress' || guard === 'token',
       firstDenialInWindow: info.used === info.limit + 1,
     })
+    // The declared route, not req.path: the watch route also matches a
+    // trailing slash and any letter case. Only the watch router mounts this
+    // limiter on a route; the GFS router's router.use leaves req.route unset.
+    if (req.route?.path === EXTERNAL_GFS_WATCH_PATH) {
+      // The watch client reads the error code from this header without
+      // awaiting the body; every non-2xx response of the watch carries it.
+      res.setHeader('x-watch-error', 'rate_limited')
+      res.status(429).json({ error: 'rate_limited', retryAfterSeconds })
+      return
+    }
     res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
   }
 

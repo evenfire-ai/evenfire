@@ -311,6 +311,7 @@ type Config = {
   entityChangeStreamMaxLifetimeMs: number
   entityChangeStreamMaxConnections: number
   entityChangeStreamMaxConnectionsPerPrincipal: number
+  gfsWatchHeartbeatMs: number
   notificationsDesktopFirstEnabled: boolean
   notificationDesktopGraceSeconds: number
   // Stricter than the normal refresh limiter: a client reaching reissue has
@@ -1347,6 +1348,10 @@ export const config: Config = {
     1000,
     60 * 1000
   ),
+  // Kept apart from ENTITY_CHANGE_STREAM_HEARTBEAT_MS (ceiling 60 s): the value
+  // travels in the watch `ready` frame, and the desktop treats a `ready` whose
+  // heartbeat is outside [5 s, 25 s] as invalid and reopens.
+  gfsWatchHeartbeatMs: boundedIntegerEnv('GFS_WATCH_HEARTBEAT_MS', 20 * 1000, 5 * 1000, 25 * 1000),
   entityChangeStreamMaxLifetimeMs: boundedIntegerEnv(
     'ENTITY_CHANGE_STREAM_MAX_LIFETIME_MS',
     10 * 60 * 1000,

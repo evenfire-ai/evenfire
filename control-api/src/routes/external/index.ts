@@ -5,6 +5,7 @@ import { createExternalUserApprovalDecisionsRouter } from './decisions.routes.js
 import { createExternalDirectoryRouter } from './directory.js'
 import { createExternalEntityChangesRouter } from './entityChanges.routes.js'
 import { createExternalGfsRouter } from './gfs.js'
+import { createExternalGfsWatchRouter } from './gfsWatch.routes.js'
 import { createExternalInvitationsRouter } from './invitations.js'
 import { createExternalMembersRouter } from './members.js'
 import { createExternalNotificationsRouter } from './notifications.routes.js'
@@ -24,6 +25,9 @@ export function createExternalRouter(gateway: K8sGateway): Router {
   router.use(createExternalMembersRouter())
   router.use(createExternalDirectoryRouter())
   router.use(createExternalSharedFilesystemsRouter(gateway))
+  // Ahead of the GFS router, which answers every path outside its operation
+  // matrix with 404 after running its session and authority chain.
+  router.use(createExternalGfsWatchRouter())
   router.use(createExternalGfsRouter())
   router.use(createExternalEntityChangesRouter())
   router.use(createExternalNotificationsRouter())
