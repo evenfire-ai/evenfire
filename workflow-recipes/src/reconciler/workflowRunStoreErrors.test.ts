@@ -80,13 +80,15 @@ async function captureSilentServer(): Promise<{ queuedAcquire: unknown; connectT
     ])
     return { queuedAcquire, connectTimeout }
   } finally {
-    for (const socket of sockets) socket.destroy()
     await pool.end()
   }
 }
 
 async function captureClosingServer(): Promise<unknown> {
-  const server = await listen(socket => socket.destroy())
+  // Read the startup packet before closing: destroying a socket whose received data is
+  // still unread makes the kernel send a reset, which the driver reports as ECONNRESET
+  // instead of an orderly close.
+  const server = await listen(socket => socket.once('data', () => socket.destroy()))
   const pool = new Pool({ host: '127.0.0.1', port: portOf(server), user: 'x', database: 'x' })
   pool.on('error', () => {})
   try {
@@ -104,9 +106,15 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  for (const server of servers) {
-    await new Promise<void>(resolve => server.close(() => resolve()))
-  }
+  // `close` stops a listener and calls back only once every connection that server
+  // accepted has ended. The silent server never ends one: it does not read, so the
+  // peer's close never reaches it. The pool can also open a second connection to it,
+  // when its first client fails before the queued acquire's own timer has fired. So
+  // the sockets are destroyed here, after every listener has stopped, whatever their
+  // number and whenever they were accepted.
+  const closed = servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))
+  for (const socket of sockets) socket.destroy()
+  await Promise.all(closed)
 })
 
 describe('classifyWorkflowRunStoreError: errors captured from the real driver', () => {
