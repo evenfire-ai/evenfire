@@ -52,7 +52,7 @@ export const ATLASSIAN_SERVER = serverNames.registry.find(
 
 const FAKE_SERVICE_ACCOUNT = JSON.stringify({
   client_email: 'unit@unit-project.iam.gserviceaccount.com',
-  private_key: '-----BEGIN PRIVATE KEY-----\nunit\n-----END PRIVATE KEY-----\n',
+  private_key: 'unit-fake-private-key',
   project_id: 'unit-project',
 })
 
