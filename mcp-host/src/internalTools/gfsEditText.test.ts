@@ -22,7 +22,8 @@ function fakeClient(bytes: Buffer, version = 7) {
       bytes,
       reservation: { release },
     })),
-    write: vi.fn(async () => ({ version: version + 1 })),
+    // The gfsc envelope the Host receives for a replaced file.
+    write: vi.fn(async () => ({ ok: true, data: { resourceId: 'rid', version: version + 1 } })),
   } as unknown as GfscWriteClient
   return { client, release }
 }

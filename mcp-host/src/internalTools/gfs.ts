@@ -1539,11 +1539,12 @@ export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefiniti
             truncated,
           }
           if (args.dryRun === true) return ok({ dryRun: true, version: args.ifMatch, ...summary })
+          // gfsc answers `{ ok: true, data }`, where data is the resource view.
           const written = (await client.write(
             { ...target, content, ifMatch: args.ifMatch },
             callOptions(options)
-          )) as { version?: unknown } | undefined
-          return ok({ version: written?.version, ...summary })
+          )) as { data?: { version?: unknown } } | undefined
+          return ok({ version: written?.data?.version, ...summary })
         } catch (err) {
           if (err instanceof GfscHttpError) return mutationFail(err)
           return fail(err)
