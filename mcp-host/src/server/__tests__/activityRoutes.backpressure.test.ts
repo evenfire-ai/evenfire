@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
@@ -18,9 +18,46 @@ const userId = '11111111-1111-4111-8111-111111111111'
 const sid = '22222222-2222-4222-8222-222222222222'
 const delegationJti = '33333333-3333-4333-8333-333333333333'
 
-async function realActivityContext(
-  operationId: 'host.activity.read' | 'host.activity.read_all' = 'host.activity.read'
-) {
+const ACTIVITY_OPERATION_IDS = ['host.activity.read', 'host.activity.read_all'] as const
+type ActivityOperationId = (typeof ACTIVITY_OPERATION_IDS)[number]
+type AuthorizeActionV2 = (
+  delegation: unknown,
+  bound: unknown,
+  options: unknown
+) => Promise<{ trustedEdgeHeader: string }>
+type SetupOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown }
+
+// Setup, not behaviour under test: the control-api checkpoint producer runs in
+// a `tsx` child process, and Vitest compiles the rpc-proxy authority module on
+// its first import. `beforeAll` runs both once, so no test body starts a
+// process, and records each result or the error it failed with. A recorded
+// error is rethrown by `realActivityContext`: a broken producer fails the tests
+// that call it, with its own error, and the other tests still run. Each child
+// has its own `timeout`: a child that is too slow is recorded as an ETIMEDOUT
+// error and fails only the tests of its operation. The producer request
+// depends only on the operation; its other fields are constants here.
+const PRODUCER_CHILD_TIMEOUT_MS = 240_000
+// One child limit per operation, plus 120 s for the import the hook awaits.
+const PRODUCER_SETUP_TIMEOUT_MS =
+  ACTIVITY_OPERATION_IDS.length * PRODUCER_CHILD_TIMEOUT_MS + 120_000
+const producerStdout = new Map<ActivityOperationId, SetupOutcome<string>>()
+let rpcProxyAuthority: SetupOutcome<{ authorizeActionV2: AuthorizeActionV2 }> | undefined
+
+async function recordSetup<T>(run: () => T | Promise<T>): Promise<SetupOutcome<T>> {
+  try {
+    return { ok: true, value: await run() }
+  } catch (error) {
+    return { ok: false, error }
+  }
+}
+
+function setupValue<T>(outcome: SetupOutcome<T> | undefined, name: string): T {
+  if (!outcome) throw new Error(`${name} was not set up in beforeAll`)
+  if (!outcome.ok) throw outcome.error
+  return outcome.value
+}
+
+function activityAuthorityInputs(operationId: ActivityOperationId) {
   const resource = canonicalResourceIdentity({
     environmentId: 'cluster.local/evenfire',
     type: 'host',
@@ -56,48 +93,62 @@ async function realActivityContext(
     pathKind: 'direct' as const,
     effectiveTeamId: null,
   }
+  return { resource, target, targetHash, claims }
+}
+
+function produceCheckpoint(operationId: ActivityOperationId): string {
+  const { resource, target, targetHash, claims } = activityAuthorityInputs(operationId)
   const repositoryRoot = resolve(process.cwd(), '..')
-  const checkpoint = JSON.parse(
-    execFileSync(
-      resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
-      [
-        resolve(
-          repositoryRoot,
-          'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
-        ),
-        JSON.stringify({
-          request: {
-            version: 2,
-            principal: { sub: claims.sub, sid: claims.sid, sessionVersion: claims.sv },
-            delegationJti: claims.jti,
-            resource,
-            operationId,
-            target,
-            targetHash,
-            accessPathId: claims.accessPathId,
-            authorizationRevision: claims.authorizationRevision,
-            behaviorBindingHash: claims.behaviorBindingHash,
-            domain: { service: 'rpc-proxy', resource, targetHash },
-          },
-          destination: {
-            kind: 'host',
-            ref: 'mcp-host/chatllm',
-            url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-          },
-        }),
-      ],
-      { cwd: repositoryRoot, encoding: 'utf8' }
-    )
+  return execFileSync(
+    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    [
+      resolve(
+        repositoryRoot,
+        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
+      ),
+      JSON.stringify({
+        request: {
+          version: 2,
+          principal: { sub: claims.sub, sid: claims.sid, sessionVersion: claims.sv },
+          delegationJti: claims.jti,
+          resource,
+          operationId,
+          target,
+          targetHash,
+          accessPathId: claims.accessPathId,
+          authorizationRevision: claims.authorizationRevision,
+          behaviorBindingHash: claims.behaviorBindingHash,
+          domain: { service: 'rpc-proxy', resource, targetHash },
+        },
+        destination: {
+          kind: 'host',
+          ref: 'mcp-host/chatllm',
+          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        },
+      }),
+    ],
+    { cwd: repositoryRoot, encoding: 'utf8', timeout: PRODUCER_CHILD_TIMEOUT_MS }
   )
-  const { authorizeActionV2 } = (await import(
-    `${process.cwd()}/../rpc-proxy/src/actionAuthorityV2.ts`
-  )) as {
-    authorizeActionV2: (
-      delegation: unknown,
-      bound: unknown,
-      options: unknown
-    ) => Promise<{ trustedEdgeHeader: string }>
+}
+
+beforeAll(async () => {
+  for (const operationId of ACTIVITY_OPERATION_IDS) {
+    producerStdout.set(operationId, await recordSetup(() => produceCheckpoint(operationId)))
   }
+  rpcProxyAuthority = await recordSetup(
+    () =>
+      import(`${process.cwd()}/../rpc-proxy/src/actionAuthorityV2.ts`) as Promise<{
+        authorizeActionV2: AuthorizeActionV2
+      }>
+  )
+}, PRODUCER_SETUP_TIMEOUT_MS)
+
+async function realActivityContext(operationId: ActivityOperationId = 'host.activity.read') {
+  const { target, targetHash, claims } = activityAuthorityInputs(operationId)
+  const checkpoint = JSON.parse(
+    setupValue(producerStdout.get(operationId), `the ${operationId} checkpoint producer`)
+  )
+  const { authorizeActionV2 } = setupValue(rpcProxyAuthority, 'the rpc-proxy authority module')
   const authorized = await authorizeActionV2(
     claims,
     { operationId, target, targetHash },

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import type { Response as ExpressResponse, Request } from 'express'
 import { execFileSync } from 'node:child_process'
@@ -35,21 +35,66 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-async function rpcProxyActionFor(input: {
+type RpcProxyActionInput = {
   operationId: ActionOperationId
   resourceType: 'host' | 'runtime_session'
   target: Record<string, string>
-}): Promise<RpcProxyAction> {
-  // Keep the real producer out of mcp-host's TypeScript rootDir while Vitest
-  // loads it from the sibling service for the cross-service contract proof.
-  const producerModule = `${process.cwd()}/../rpc-proxy/src/actionAuthorityV2.ts`
-  const { authorizeActionV2 } = (await import(producerModule)) as {
-    authorizeActionV2: (
-      claims: unknown,
-      bound: unknown,
-      options: unknown
-    ) => Promise<RpcProxyAction>
+}
+type SetupOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown }
+
+// Setup, not behaviour under test: the control-api checkpoint producer runs in
+// a `tsx` child process. `beforeAll` runs it once per input below, so no test
+// body starts a process, and records its output or the error it failed with. A
+// recorded error is rethrown by `rpcProxyActionFor`: a broken producer fails
+// the tests that call it, with its own error, and the other tests still run.
+// Each child has its own `timeout`: a child that is too slow is recorded as an
+// ETIMEDOUT error and fails only the tests of its input.
+// An input that is not listed here has no checkpoint and fails its test.
+// Every call still builds fresh claims and a fresh admission nonce. The
+// recorded chat.message.invoke checkpoint carries the receipt minted for the
+// setup call; `authorizeActionV2` requires a receipt and never verifies it.
+const PRODUCER_CHILD_TIMEOUT_MS = 240_000
+const chatMessageInvokeInput: RpcProxyActionInput = {
+  operationId: 'chat.message.invoke',
+  resourceType: 'host',
+  target: {
+    hostRef: 'mcp-host/chatllm',
+    channelType: 'rpc',
+    channelId: 'chatllm',
+    messageId: '44444444-4444-4444-8444-444444444444',
+  },
+}
+const producerInputs: readonly RpcProxyActionInput[] = [
+  chatMessageInvokeInput,
+  {
+    operationId: 'session.read',
+    resourceType: 'runtime_session',
+    target: { hostRef: 'mcp-host/chatllm' },
+  },
+]
+// One child limit per input, plus 120 s for the imports the hook awaits.
+const PRODUCER_SETUP_TIMEOUT_MS = producerInputs.length * PRODUCER_CHILD_TIMEOUT_MS + 120_000
+const producerStdout = new Map<string, SetupOutcome<string>>()
+
+async function recordSetup<T>(run: () => T | Promise<T>): Promise<SetupOutcome<T>> {
+  try {
+    return { ok: true, value: await run() }
+  } catch (error) {
+    return { ok: false, error }
   }
+}
+
+function setupValue<T>(outcome: SetupOutcome<T> | undefined, name: string): T {
+  if (!outcome) throw new Error(`${name} was not set up in beforeAll`)
+  if (!outcome.ok) throw outcome.error
+  return outcome.value
+}
+
+function producerKey(input: RpcProxyActionInput): string {
+  return JSON.stringify([input.operationId, input.resourceType, input.target])
+}
+
+function rpcProxyAuthorityInputs(input: RpcProxyActionInput) {
   const resource = canonicalResourceIdentity({
     environmentId: 'cluster.local/evenfire',
     type: input.resourceType,
@@ -89,8 +134,14 @@ async function rpcProxyActionFor(input: {
           delegationExpiresAt: claims.exp,
         }
       : undefined
+  return { resource, target, targetHash, claims, hostMessageAdmission }
+}
+
+function produceCheckpoint(input: RpcProxyActionInput): string {
+  const { resource, target, targetHash, claims, hostMessageAdmission } =
+    rpcProxyAuthorityInputs(input)
   const repositoryRoot = resolve(process.cwd(), '..')
-  const producerOutput = execFileSync(
+  return execFileSync(
     resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
     [
       resolve(
@@ -119,9 +170,44 @@ async function rpcProxyActionFor(input: {
         },
       }),
     ],
-    { cwd: repositoryRoot, encoding: 'utf8' }
+    { cwd: repositoryRoot, encoding: 'utf8', timeout: PRODUCER_CHILD_TIMEOUT_MS }
   )
-  const checkpoint = JSON.parse(producerOutput)
+}
+
+beforeAll(async () => {
+  for (const input of producerInputs) {
+    producerStdout.set(producerKey(input), await recordSetup(() => produceCheckpoint(input)))
+  }
+  // The tests import these modules after `vi.resetModules()`. Importing them
+  // here first makes Vitest compile them outside any test body. This runs
+  // before `beforeEach` mocks `../../config`, so here they load the real
+  // config. The results are not used: every test imports again and reports a
+  // failing module itself.
+  await Promise.allSettled([
+    import(`${process.cwd()}/../rpc-proxy/src/actionAuthorityV2.ts`),
+    import(`${process.cwd()}/../rpc-proxy/src/services/mcpProxyService.ts`),
+    import('../edgeRuntimeAuth'),
+    import('../routes'),
+    import('./testHelpers'),
+  ])
+}, PRODUCER_SETUP_TIMEOUT_MS)
+
+async function rpcProxyActionFor(input: RpcProxyActionInput): Promise<RpcProxyAction> {
+  // Keep the real producer out of mcp-host's TypeScript rootDir while Vitest
+  // loads it from the sibling service for the cross-service contract proof.
+  const producerModule = `${process.cwd()}/../rpc-proxy/src/actionAuthorityV2.ts`
+  const { authorizeActionV2 } = (await import(producerModule)) as {
+    authorizeActionV2: (
+      claims: unknown,
+      bound: unknown,
+      options: unknown
+    ) => Promise<RpcProxyAction>
+  }
+  const { target, targetHash, claims, hostMessageAdmission } = rpcProxyAuthorityInputs(input)
+  const key = producerKey(input)
+  const checkpoint = JSON.parse(
+    setupValue(producerStdout.get(key), `the checkpoint producer for ${key}`)
+  )
   const authorized = await authorizeActionV2(
     claims,
     { operationId: input.operationId, target, targetHash },
@@ -147,16 +233,7 @@ async function rpcProxyHeaderFor(input: {
 }
 
 async function realRpcProxyAction(): Promise<RpcProxyAction> {
-  return rpcProxyActionFor({
-    operationId: 'chat.message.invoke',
-    resourceType: 'host',
-    target: {
-      hostRef: 'mcp-host/chatllm',
-      channelType: 'rpc',
-      channelId: 'chatllm',
-      messageId: '44444444-4444-4444-8444-444444444444',
-    },
-  })
+  return rpcProxyActionFor(chatMessageInvokeInput)
 }
 
 async function realRpcProxyHeader(): Promise<string> {

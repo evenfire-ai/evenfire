@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import {
@@ -52,9 +52,36 @@ function auth(): McpHostRuntimeAuth {
   }
 }
 
-function allowed() {
+type SetupOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown }
+
+// Setup, not behaviour under test: the control-api checkpoint producer runs in
+// a `tsx` child process. `beforeAll` runs it once, so no test body starts a
+// process, and records its output or the error it failed with. A recorded
+// error is rethrown by `allowed`: a broken producer fails the tests that call
+// it, with its own error, and the other tests still run. The child has its own
+// `timeout`: if it is too slow, the recorded error is ETIMEDOUT.
+const PRODUCER_CHILD_TIMEOUT_MS = 240_000
+// The child limit, plus 120 s of margin.
+const PRODUCER_SETUP_TIMEOUT_MS = PRODUCER_CHILD_TIMEOUT_MS + 120_000
+let allowedProducerStdout: SetupOutcome<string> | undefined
+
+async function recordSetup<T>(run: () => T | Promise<T>): Promise<SetupOutcome<T>> {
+  try {
+    return { ok: true, value: await run() }
+  } catch (error) {
+    return { ok: false, error }
+  }
+}
+
+function setupValue<T>(outcome: SetupOutcome<T> | undefined, name: string): T {
+  if (!outcome) throw new Error(`${name} was not set up in beforeAll`)
+  if (!outcome.ok) throw outcome.error
+  return outcome.value
+}
+
+function produceAllowed(): string {
   const repositoryRoot = resolve(process.cwd(), '..')
-  const output = execFileSync(
+  return execFileSync(
     resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
     [
       resolve(
@@ -70,9 +97,16 @@ function allowed() {
         },
       }),
     ],
-    { cwd: repositoryRoot, encoding: 'utf8' }
+    { cwd: repositoryRoot, encoding: 'utf8', timeout: PRODUCER_CHILD_TIMEOUT_MS }
   )
-  return JSON.parse(output)
+}
+
+beforeAll(async () => {
+  allowedProducerStdout = await recordSetup(produceAllowed)
+}, PRODUCER_SETUP_TIMEOUT_MS)
+
+function allowed() {
+  return JSON.parse(setupValue(allowedProducerStdout, 'the allowed checkpoint producer'))
 }
 
 describe('mcp-host action-authority checkpoint client', () => {
