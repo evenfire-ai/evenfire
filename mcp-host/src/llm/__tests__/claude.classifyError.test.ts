@@ -132,9 +132,11 @@ describe('ClaudeProvider.classifyError', () => {
     expect(c.message).toBe(text)
   })
 
-  // The inner message is used for the 400 arm only (#1433): any other status that
-  // falls to the shared classifier keeps the SDK's `${status} {json}` message.
-  it('keeps the SDK message for an enveloped non-400 error', () => {
+  // #1433 uses the inner message on the HTTP-status 400 arm only. The body-type
+  // arms above it (not_found, overloaded, billing, permission) already return the
+  // inner message at any status. Any other status that falls to the shared
+  // classifier keeps the SDK's `${status} {json}` message, as this 401 shows.
+  it('keeps the SDK message for an enveloped 401 that reaches the shared classifier', () => {
     const err = anthropicApiError(401, 'authentication_error', 'invalid x-api-key')
     const c = provider.classifyError(err)
     expect(c).toMatchObject({

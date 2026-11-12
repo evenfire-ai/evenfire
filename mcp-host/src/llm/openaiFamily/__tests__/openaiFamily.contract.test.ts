@@ -171,13 +171,17 @@ describe('OpenAICompatibleProvider is a constructor-only alias', () => {
   // The prototype alone misses members assigned in the constructor and statics.
   // The reference is the registry's own composition, so the alias may carry
   // exactly the fields the factory output carries and nothing more. The factory
-  // also wraps every provider with withWellFormedRequestText (#1433), which adds
-  // its request methods and classifyError as own non-enumerable members, so the
-  // alias is compared after the same wrap.
+  // also wraps every provider with withWellFormedRequestText (#1433), which
+  // defines the two request methods and classifyError as own non-enumerable
+  // members. Comparing only after the same wrap would hide an own member of the
+  // alias with one of those names, so the unwrapped alias must carry none of
+  // them, and the wrapped alias must match the factory output exactly.
   it('instances carry the same own fields as the registry-built driver and no statics', () => {
-    expect(ownKeys(withWellFormedRequestText(aliasFor('groq')))).toEqual(
-      ownKeys(buildFamilyProvider('groq'))
-    )
+    const wrapMembers = ['classifyError', 'completeSingleTurn', 'completeSingleTurnWithTools']
+    const factory = ownKeys(buildFamilyProvider('groq'))
+    expect(factory).toEqual(expect.arrayContaining(wrapMembers))
+    expect(ownKeys(aliasFor('groq'))).toEqual(factory.filter(k => !wrapMembers.includes(k)))
+    expect(ownKeys(withWellFormedRequestText(aliasFor('groq')))).toEqual(factory)
     expect(ownKeys(OpenAICompatibleProvider)).toEqual(['length', 'name', 'prototype'])
   })
 
