@@ -28,7 +28,9 @@
 import { randomBytes } from 'crypto'
 import * as fs from 'fs/promises'
 import * as path from 'path'
+import { Counter } from 'prom-client'
 import { SpilloverStorage, parseSpilloverRef } from '../core/spillover'
+import type { SpilloverInstruments } from '../core/spillover/types'
 import { SpilloverReadTool } from '../core/tools/spilloverRead'
 import { logger } from '../logger'
 import type { InternalToolDefinition, InternalToolResult } from './types'
@@ -51,6 +53,41 @@ const SPILL_DIR = '.spill'
 const STORE_ROOT = 'spillover'
 const SEGMENT_RE = /^[A-Za-z0-9_-]+$/
 const EXECUTION_DIR_RE = /^[0-9a-f]{16}$/
+
+// Workflow steps report to their own counters, so the first-party agent's
+// spillover metrics keep describing the agent only. Guarded like the
+// first-party instruments: a duplicate registration (vitest module reuse)
+// leaves the export undefined instead of failing module evaluation.
+export const clerumWorkflowStepSpilloverPersistedTotal = (() => {
+  try {
+    return new Counter({
+      name: 'clerum_workflow_step_spillover_persisted_total',
+      help: 'Count of workflow step tool results stored outside the prompt.',
+      labelNames: ['tool'] as const,
+    })
+  } catch {
+    return undefined
+  }
+})()
+
+export const clerumWorkflowStepSpilloverReadsTotal = (() => {
+  try {
+    return new Counter({
+      name: 'clerum_workflow_step_spillover_reads_total',
+      help: 'Count of clerum__spillover_read calls made by workflow steps.',
+      labelNames: ['with_range'] as const,
+    })
+  } catch {
+    return undefined
+  }
+})()
+
+// No output-size histogram: the step store only sees results at or above the
+// threshold, so it could not describe the size distribution.
+const STEP_SPILLOVER_INSTRUMENTS: SpilloverInstruments = {
+  persisted: clerumWorkflowStepSpilloverPersistedTotal,
+  reads: clerumWorkflowStepSpilloverReadsTotal,
+}
 
 export interface StepSpilloverConfig {
   enabled: boolean
@@ -166,6 +203,7 @@ export function createStepSpillover(opts: {
     thresholdBytes,
     ttlMs: 0,
     gcIntervalMs: 0,
+    instruments: STEP_SPILLOVER_INSTRUMENTS,
   })
   const reader = new SpilloverReadTool(storage)
 

@@ -45,12 +45,24 @@ export interface SpilloverBlob {
   content: string
 }
 
+/**
+ * Metrics a store reports to. A missing instrument is not reported.
+ * Defaults to the first-party agent's instruments.
+ */
+export interface SpilloverInstruments {
+  outputBytes?: { observe(labels: { tool: string }, value: number): void }
+  persisted?: { inc(labels: { tool: string }): void }
+  reads?: { inc(labels: { with_range: 'true' | 'false' }): void }
+}
+
 export interface SpilloverStorageOptions {
   workspacePath: string
   ttlMs: number
   thresholdBytes: number
   /** 0 disables the periodic sweep (lazy-only at boot). */
   gcIntervalMs: number
+  /** Metrics for this store; the first-party agent's when omitted. */
+  instruments?: SpilloverInstruments
 }
 
 export interface MaybePersistArgs {

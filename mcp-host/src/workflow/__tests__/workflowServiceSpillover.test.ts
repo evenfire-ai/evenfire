@@ -2,11 +2,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
+import { register } from 'prom-client'
 import { config } from '../../config'
 import { LlmErrorCode } from '../../core/errors'
+import {
+  SpilloverStorage,
+  clerumSpilloverPersistedTotal,
+  clerumSpilloverReadsTotal,
+  clerumToolOutputBytes,
+} from '../../core/spillover'
 import { FinishReason } from '../../core/types'
 import type { SingleTurnProvider } from '../../llm'
 import type { McpClientConnection, McpClientFactory } from '../stepRouter'
+import {
+  clerumWorkflowStepSpilloverPersistedTotal,
+  clerumWorkflowStepSpilloverReadsTotal,
+} from '../stepSpillover'
 import { WorkflowService } from '../workflowService'
 
 type MockResponse = {
@@ -696,5 +707,100 @@ describe('WorkflowService step spillover — files of other executions', () => {
     expect(readMessage?.content).toContain('AAAAAAAAAA')
     expect(readMessage?.content).not.toContain('BBBBBBBBBB')
     expect(await exists(path.join(outputDir, '.spill'))).toBe(false)
+  })
+})
+
+async function metricTotal(name: string, labels: Record<string, string> = {}): Promise<number> {
+  const metric = register.getSingleMetric(name)
+  if (!metric) throw new Error(`metric ${name} is not registered`)
+  const { values } = await metric.get()
+  // A histogram reports _bucket, _sum and _count series; count observations only.
+  const series = (v: object): string => (v as { metricName?: string }).metricName ?? name
+  return values
+    .filter(v => !series(v).endsWith('_bucket') && !series(v).endsWith('_sum'))
+    .filter(v => Object.entries(labels).every(([k, val]) => v.labels[k] === val))
+    .reduce((sum, v) => sum + v.value, 0)
+}
+
+describe('WorkflowService step spillover — metrics', () => {
+  it('reports a spilled result and its read under the workflow-step counters only', async () => {
+    // The module exports are the instruments the registry serves, so a delta
+    // of 0 below cannot come from an unregistered duplicate.
+    expect(register.getSingleMetric('clerum_spillover_persisted_total')).toBe(
+      clerumSpilloverPersistedTotal
+    )
+    expect(register.getSingleMetric('clerum_spillover_reads_total')).toBe(clerumSpilloverReadsTotal)
+    expect(register.getSingleMetric('clerum_tool_output_bytes')).toBe(clerumToolOutputBytes)
+    expect(register.getSingleMetric('clerum_workflow_step_spillover_persisted_total')).toBe(
+      clerumWorkflowStepSpilloverPersistedTotal
+    )
+    expect(register.getSingleMetric('clerum_workflow_step_spillover_reads_total')).toBe(
+      clerumWorkflowStepSpilloverReadsTotal
+    )
+
+    const before = {
+      stepPersisted: await metricTotal('clerum_workflow_step_spillover_persisted_total', {
+        tool: 'srv__read',
+      }),
+      stepReads: await metricTotal('clerum_workflow_step_spillover_reads_total', {
+        with_range: 'true',
+      }),
+      persisted: await metricTotal('clerum_spillover_persisted_total'),
+      reads: await metricTotal('clerum_spillover_reads_total'),
+      outputBytes: await metricTotal('clerum_tool_output_bytes'),
+    }
+
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(100 * 1024) } })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      {
+        content: null,
+        tool_calls: [
+          { name: READ_TOOL, arguments: { ref: FIRST_REF, range: { start: 0, end: 10 } } },
+        ],
+      },
+      { content: 'done', tool_calls: null },
+    ])
+    const res = await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    expect(toolResultMessages(llm)[0]).toContain(`"spillover_ref":"${FIRST_REF}"`)
+    expect(res.toolsCalled?.[1]?.result).toEqual({ success: true, ref: FIRST_REF, bytes: 10 })
+    expect(
+      await metricTotal('clerum_workflow_step_spillover_persisted_total', { tool: 'srv__read' })
+    ).toBe(before.stepPersisted + 1)
+    expect(
+      await metricTotal('clerum_workflow_step_spillover_reads_total', { with_range: 'true' })
+    ).toBe(before.stepReads + 1)
+    expect(await metricTotal('clerum_spillover_persisted_total')).toBe(before.persisted)
+    expect(await metricTotal('clerum_spillover_reads_total')).toBe(before.reads)
+    expect(await metricTotal('clerum_tool_output_bytes')).toBe(before.outputBytes)
+  })
+
+  it('keeps the first-party instruments for a store built without instruments', async () => {
+    const storage = new SpilloverStorage({
+      workspacePath: outputDir,
+      thresholdBytes: 10,
+      ttlMs: 0,
+      gcIntervalMs: 0,
+    })
+    const persisted = await metricTotal('clerum_spillover_persisted_total', { tool: 'probe' })
+    const observed = await metricTotal('clerum_tool_output_bytes', { tool: 'probe' })
+    const summary = await storage.maybePersist({
+      taskId: 'task',
+      toolCallId: 'call',
+      toolName: 'probe',
+      content: 'x'.repeat(100),
+      isError: false,
+    })
+    expect(summary?.spillover_ref).toBe('spillover://task/call.json')
+    expect(await metricTotal('clerum_spillover_persisted_total', { tool: 'probe' })).toBe(
+      persisted + 1
+    )
+    expect(await metricTotal('clerum_tool_output_bytes', { tool: 'probe' })).toBe(observed + 1)
   })
 })

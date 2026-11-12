@@ -13,7 +13,7 @@
  * its own recursion invariant.
  */
 import { Tool } from '../interfaces'
-import { SpilloverStorage, clerumSpilloverReadsTotal } from '../spillover'
+import { SpilloverStorage } from '../spillover'
 import { ToolOutput } from '../types'
 
 export class SpilloverReadTool implements Tool {
@@ -110,7 +110,7 @@ export class SpilloverReadTool implements Tool {
         rangeEnd <= rangeStart ||
         rangeEnd > blob.byte_size
       ) {
-        clerumSpilloverReadsTotal?.inc({ with_range: 'true' })
+        this.storage.instruments.reads?.inc({ with_range: 'true' })
         return {
           content: `Error: invalid range [${String(rangeStart)}, ${String(rangeEnd)}) for byte_size=${blob.byte_size}.`,
           duration_ms: Date.now() - start,
@@ -120,7 +120,7 @@ export class SpilloverReadTool implements Tool {
       const slice = Buffer.from(blob.content, 'utf8')
         .subarray(rangeStart, rangeEnd)
         .toString('utf8')
-      clerumSpilloverReadsTotal?.inc({ with_range: 'true' })
+      this.storage.instruments.reads?.inc({ with_range: 'true' })
       return {
         content: slice,
         duration_ms: Date.now() - start,
@@ -128,7 +128,7 @@ export class SpilloverReadTool implements Tool {
       }
     }
 
-    clerumSpilloverReadsTotal?.inc({ with_range: 'false' })
+    this.storage.instruments.reads?.inc({ with_range: 'false' })
     return {
       content: blob.content,
       duration_ms: Date.now() - start,
