@@ -1028,17 +1028,17 @@ function isToolResult(value: unknown): value is InternalToolResult {
 }
 
 /** Reads a file source of the caller; the refusal is a tool error, never an upload. */
-function resolvedFileSource(
+async function resolvedFileSource(
   sources: KeptFileSources,
   chosen: Exclude<ChosenSource, { kind: 'content' }>,
   createName?: string
-): ResolvedSourceFile | InternalToolResult {
+): Promise<ResolvedSourceFile | InternalToolResult> {
   const resolved =
     chosen.kind === 'generatedFile'
-      ? resolveGeneratedFile(sources, chosen.name, chosen.id, createName)
+      ? await resolveGeneratedFile(sources, chosen.name, chosen.id, createName)
       : chosen.kind === 'uploadedFileId'
-        ? resolveKeptUpload(sources, chosen.id)
-        : resolveSourcePath(sources, chosen.path)
+        ? await resolveKeptUpload(sources, chosen.id)
+        : await resolveSourcePath(sources, chosen.path)
   if (isSourceRefusal(resolved)) {
     return resolved.argument
       ? invalidArgs(resolved.error)
@@ -1096,7 +1096,7 @@ export function buildGfsWriteTools(
           const chosen = chosenSource(args)
           if (isToolResult(chosen)) return chosen
           if (chosen.kind !== 'content') {
-            const file = resolvedFileSource(sources, chosen)
+            const file = await resolvedFileSource(sources, chosen)
             if (isToolResult(file)) return file
             try {
               const resource = await client.writeBytes(
@@ -1161,7 +1161,7 @@ export function buildGfsWriteTools(
           const chosen = chosenSource(args)
           if (isToolResult(chosen)) return chosen
           if (chosen.kind !== 'content') {
-            const file = resolvedFileSource(sources, chosen, args.name as string)
+            const file = await resolvedFileSource(sources, chosen, args.name as string)
             if (isToolResult(file)) return file
             try {
               const resource = await client.createFileFromBytes(

@@ -47,12 +47,12 @@ without discarding the path, checksum, version or retained original.
 
 ## Effective limits
 
-| Environment variable                       |    Default |     Ceiling | Meaning                                                            |
-| ------------------------------------------ | ---------: | ----------: | ------------------------------------------------------------------ |
-| `MCP_HOST_GFS_MAX_FILE_BYTES`              | `16777216` | `209715200` | Largest GFS source admitted by MCP Host.                           |
+| Environment variable                       |    Default |     Ceiling | Meaning                                                                                                                     |
+| ------------------------------------------ | ---------: | ----------: | --------------------------------------------------------------------------------------------------------------------------- |
+| `MCP_HOST_GFS_MAX_FILE_BYTES`              | `16777216` | `209715200` | Largest GFS source admitted by MCP Host.                                                                                    |
 | `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT`    |       `70` |       `100` | Retained download budget, as a percentage of the workspace volume; it also counts the files the Host keeps for each caller. |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY` |        `1` |         `2` | Simultaneous active transfers per caller.                          |
-| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`          |      `168` |      `8760` | Retention period for a completed copy and for each kept file. |
+| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY` |        `1` |         `2` | Simultaneous active transfers per caller.                                                                                   |
+| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`          |      `168` |      `8760` | Retention period for a completed copy and for each kept file.                                                               |
 
 All values are parsed as positive decimal byte/percent/count/hour integers. Empty, zero, fractional, negative, exponent, padded, partial, non-integer, and above-ceiling values fail startup; the storage percent therefore accepts 1 to 100.
 
@@ -482,6 +482,23 @@ the file the sweep judged. A kept folder that is a symlink is not entered and
 is never removed; the count of removed kept files is logged as
 `removedKeptFiles`. Generated files that existed before this sweep, and are
 older than the retention period, are removed by the first sweep.
+
+A save from the Host volume (`generatedFile`, `sourcePath`, `uploadedFileId`)
+scans the bytes before they are sent and refuses a file in which it finds a
+protected value of this Host in clear. It reads text in UTF-8, UTF-16 or
+Latin-1, with or without control characters such as ANSI colours or form
+feeds, up to the GFS file limit (`MCP_HOST_GFS_MAX_FILE_BYTES`), and Office
+packages. Text above 4 MiB is read in overlapping windows of 256 Ki
+characters, with other tasks running between windows; there a value is found
+when its extent, markup that splits it included, is at most 64 Ki characters.
+The result says `scanned` only for a file the Host read as it was written. A
+file it cannot read as text (a PDF, an image, an archive, other binary data),
+a file above the GFS file limit and a file whose scan fails are saved with
+`secretScan: not_scanned`, and the model tells the user. A generated file with
+no save record (a dashboard, a file generated before records existed, a file
+whose record is missing) is saved by name and goes through the same scan;
+files the previous version withheld have no record and follow this rule until
+they expire.
 
 An admission replaces a caller's `.gfs-downloads`, deleting every copy in it
 (pinned ones included), only when the check answers about the directory itself:

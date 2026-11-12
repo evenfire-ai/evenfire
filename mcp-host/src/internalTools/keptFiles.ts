@@ -31,7 +31,7 @@ import { withoutWriteTimes } from '../workflow/officeBoilerplate'
 import { printedForms } from '../workflow/toolText'
 import { KEPT_UPLOADS_DIR, resolveCallerOutputDir } from '../workspace/callerOutputs'
 import { GFS_FILE_LIMITS } from './gfsFilePolicy'
-import { decodeTextContent } from './textContent'
+import { decodeTextContent, isNonTextFormat } from './textContent'
 
 /** The folder of save records inside a caller's `.clerum-outputs`. */
 export const SAVE_LEDGER_DIR = '.save-ledger'
@@ -39,7 +39,10 @@ export const SAVE_LEDGER_DIR = '.save-ledger'
 /** The largest record read back; a larger file is not a record. */
 export const MAX_RECORD_BYTES = 64 * 1024
 
-/** Bytes above this are not decoded as text by the scan (an Office package is still read). */
+/**
+ * Text above this is not read in one pass: {@link scanFileForSecrets} reads it in
+ * windows up to the GFS file limit (an Office package is read at any size).
+ */
 export const SCAN_TEXT_MAX_BYTES = 4 * 1024 * 1024
 
 /** What the attachment check decided when the file was generated. */
@@ -158,25 +161,129 @@ export type SecretScanResult =
         | 'scan_error'
     }
 
+/** C0 controls other than TAB, LF, CR, FF and ESC, which text files carry. */
+const UNEXPECTED_C0 = /[\u0000-\u0008\u000b\u000e-\u001a\u001c-\u001f]/
+/** The block in which BOM-less UTF-16 must show its zero bytes. */
+const UTF16_EVIDENCE_BLOCK = 64 * 1024
+
+/** The text the scan reads a file as, and whether that is the file as it was written. */
+export interface ScanDecode {
+  /** Every reading to search; a value found in any of them is a refusal. */
+  texts: string[]
+  /** True only when one reading is the file as it was written, so finding nothing means `scanned`. */
+  asWritten: boolean
+}
+
+function fatalDecode(encoding: 'utf-8' | 'utf-16le' | 'utf-16be', bytes: Buffer): string | null {
+  try {
+    return new TextDecoder(encoding, { fatal: true }).decode(bytes)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The byte parity that holds the zero bytes of BOM-less UTF-16 (1 for
+ * little-endian, where a Latin character's high byte follows it; 0 for
+ * big-endian), or undefined. Every 64 KiB block must show it: at least a
+ * quarter of the bytes at that parity are zero, and none at the other one.
+ */
+function utf16ZeroParity(bytes: Buffer): 0 | 1 | undefined {
+  if (bytes.length === 0 || bytes.length % 2 !== 0) return undefined
+  let parity: 0 | 1 | undefined
+  for (let start = 0; start < bytes.length; start += UTF16_EVIDENCE_BLOCK) {
+    const end = Math.min(start + UTF16_EVIDENCE_BLOCK, bytes.length)
+    const zeros = [0, 0]
+    for (let index = start; index < end; index += 1) if (bytes[index] === 0) zeros[index % 2] += 1
+    const perParity = (end - start) / 2
+    const blockParity =
+      zeros[1] * 4 >= perParity && zeros[1] > 0 && zeros[0] === 0
+        ? 1
+        : zeros[0] * 4 >= perParity && zeros[0] > 0 && zeros[1] === 0
+          ? 0
+          : undefined
+    if (blockParity === undefined || (parity !== undefined && blockParity !== parity))
+      return undefined
+    parity = blockParity
+  }
+  return parity
+}
+
+/** A UTF-16 reading that is text: no U+0000 and no unexpected control character. */
+function utf16Text(encoding: 'utf-16le' | 'utf-16be', bytes: Buffer): string | null {
+  const text = fatalDecode(encoding, bytes)
+  return text === null || text.includes('\u0000') || UNEXPECTED_C0.test(text) ? null : text
+}
+
+/**
+ * How the save-time scan reads `bytes` as text, or null when it does not read
+ * them (a binary signature, or zero bytes that are not UTF-16). The display
+ * rule of {@link decodeTextContent} decides first; text it rejects for control
+ * characters, a legacy encoding or UTF-16 is read too, so a protected value in
+ * it is found. The result says `asWritten` only when one reading is the file
+ * as written: a file read only as a guess, in which nothing is found, stays
+ * unscanned.
+ */
+export function decodeForScan(bytes: Buffer, entries: ArtifactSecretEntry[]): ScanDecode | null {
+  const display = decodeTextContent(bytes)
+  if (display !== null) return { texts: [display], asWritten: true }
+  if (isNonTextFormat(bytes)) return null
+  const latin1 = bytes.toString('latin1')
+  const bom =
+    bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe
+      ? 'utf-16le'
+      : bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff
+        ? 'utf-16be'
+        : undefined
+  if (bom !== undefined) {
+    const text = utf16Text(bom, bytes)
+    if (text !== null) return { texts: [text, latin1], asWritten: true }
+  } else {
+    const parity = utf16ZeroParity(bytes)
+    const text =
+      parity === undefined ? null : utf16Text(parity === 1 ? 'utf-16le' : 'utf-16be', bytes)
+    if (text !== null) return { texts: [text, latin1], asWritten: true }
+  }
+  if (bytes.includes(0)) return null
+  const utf8 = fatalDecode('utf-8', bytes)
+  if (utf8 !== null) return { texts: [utf8], asWritten: true }
+  // Not UTF-8: read as Latin-1 and as UTF-8 with replacements. Either is a
+  // guess at the encoding; it is the file as written only for text bytes and
+  // when every protected value is ASCII, which every ASCII-compatible
+  // encoding spells the same.
+  const textBytes = !UNEXPECTED_C0.test(latin1) && !latin1.includes('\u007f')
+  const asciiEntries = entries.every(entry => /^[\x00-\x7f]*$/.test(entry.value ?? ''))
+  return {
+    texts: [latin1, new TextDecoder('utf-8').decode(bytes)],
+    asWritten: textBytes && asciiEntries,
+  }
+}
+
 /**
  * Whether `bytes` hold a secret entry in clear, decided from the bytes alone:
- * no name, extension, format or record is consulted. Text of at most 4 MiB is
- * matched as read and in each printed form; an Office Open XML package of any
- * size is read part by part within the package limits; everything else (a
- * PDF, an image, an archive, larger text) is not read and is reported as
- * such. It never throws: a failure is reported as `scan_error`.
+ * no name, extension, format or record is consulted. Text of at most 4 MiB,
+ * as {@link decodeForScan} reads it, is matched in one pass as read and in
+ * each printed form; an Office Open XML package of any size is read part by
+ * part within the package limits; everything else (a PDF, an image, an
+ * archive, larger text) is not read here and is reported as such
+ * ({@link scanFileForSecrets} reads larger text). It never throws: a failure
+ * is reported as `scan_error`.
  */
 export function scanForSecrets(bytes: Buffer, entries: ArtifactSecretEntry[]): SecretScanResult {
   try {
     if (bytes.length === 0) return { state: 'not_scanned', reason: 'empty_file' }
     const holds = (text: string): boolean => textContainsRedactableSecretEntry(text, entries)
     if (bytes.length <= SCAN_TEXT_MAX_BYTES) {
-      const text = decodeTextContent(bytes)
-      if (text !== null) {
-        if (entries.length === 0) return { state: 'scanned' }
-        return holds(text) || printedForms(text).some(holds)
-          ? { state: 'secret_found' }
-          : { state: 'scanned' }
+      const decoded = decodeForScan(bytes, entries)
+      if (decoded !== null) {
+        if (
+          entries.length > 0 &&
+          decoded.texts.some(text => holds(text) || printedForms(text).some(holds))
+        )
+          return { state: 'secret_found' }
+        return decoded.asWritten
+          ? { state: 'scanned' }
+          : { state: 'not_scanned', reason: 'binary_format' }
       }
     }
     if (isOoxmlPackage(bytes)) {
@@ -194,6 +301,79 @@ export function scanForSecrets(bytes: Buffer, entries: ArtifactSecretEntry[]): S
     if (bytes.length > SCAN_TEXT_MAX_BYTES)
       return { state: 'not_scanned', reason: 'too_large_to_scan' }
     return { state: 'not_scanned', reason: 'binary_format' }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code
+    logger.warn(
+      {
+        component: 'KeptFiles',
+        errorName: err instanceof Error ? err.name : typeof err,
+        ...(typeof code === 'string' ? { errorCode: code } : {}),
+      },
+      'Secret scan failed; the file is reported as not scanned'
+    )
+    return { state: 'not_scanned', reason: 'scan_error' }
+  }
+}
+
+/** Characters of decoded text one window of the large-text scan reads. */
+export const SCAN_CHUNK_CHARS = 256 * 1024
+/**
+ * Characters each window shares with the next: an occurrence whose extent,
+ * markup that splits it included, is at most this long lies whole in one
+ * window. An entry longer than this is not scanned for in large text.
+ */
+export const SCAN_OVERLAP_CHARS = 64 * 1024
+
+function isHighSurrogate(text: string, index: number): boolean {
+  const code = text.charCodeAt(index)
+  return code >= 0xd800 && code <= 0xdbff
+}
+
+/** Whether one window of `text` holds an entry; each window waits a turn of the event loop first. */
+async function windowsHold(text: string, holds: (window: string) => boolean): Promise<boolean> {
+  const stride = SCAN_CHUNK_CHARS - SCAN_OVERLAP_CHARS
+  for (let start = 0; start < text.length; start += stride) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    // A window never starts or ends between the two halves of a surrogate pair.
+    const from = start > 0 && isHighSurrogate(text, start - 1) ? start - 1 : start
+    let to = Math.min(start + SCAN_CHUNK_CHARS, text.length)
+    if (to < text.length && isHighSurrogate(text, to - 1)) to += 1
+    const window = text.slice(from, to)
+    if (holds(window) || printedForms(window).some(holds)) return true
+    if (to >= text.length) break
+  }
+  return false
+}
+
+/**
+ * {@link scanForSecrets} for every size a GFS file may have: text above
+ * 4 MiB, up to the GFS file limit, is read in overlapping windows of
+ * {@link SCAN_CHUNK_CHARS}, with a turn of the event loop between windows, so
+ * other tasks run while a large file is scanned. Same verdicts and the same
+ * rule that it never throws; an entry longer than {@link SCAN_OVERLAP_CHARS}
+ * makes a clean large text `too_large_to_scan`.
+ */
+export async function scanFileForSecrets(
+  bytes: Buffer,
+  entries: ArtifactSecretEntry[]
+): Promise<SecretScanResult> {
+  if (bytes.length <= SCAN_TEXT_MAX_BYTES || isOoxmlPackage(bytes))
+    return scanForSecrets(bytes, entries)
+  try {
+    if (bytes.length > GFS_FILE_LIMITS.maxFileBytes)
+      return { state: 'not_scanned', reason: 'too_large_to_scan' }
+    const decoded = decodeForScan(bytes, entries)
+    if (decoded === null) return { state: 'not_scanned', reason: 'binary_format' }
+    if (entries.length > 0) {
+      const holds = (text: string): boolean => textContainsRedactableSecretEntry(text, entries)
+      for (const text of decoded.texts)
+        if (await windowsHold(text, holds)) return { state: 'secret_found' }
+      if (entries.some(entry => (entry.value?.length ?? 0) > SCAN_OVERLAP_CHARS))
+        return { state: 'not_scanned', reason: 'too_large_to_scan' }
+    }
+    return decoded.asWritten
+      ? { state: 'scanned' }
+      : { state: 'not_scanned', reason: 'binary_format' }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException | undefined)?.code
     logger.warn(
@@ -396,16 +576,18 @@ function extensionOf(name: string): string {
  * call must give its id: the record must be the latest generation of the name,
  * delivered to the chat, and the file's bytes as redacted now must hash to
  * what the chat received; the redacted bytes are uploaded. Without a record
- * (a dashboard, or a file generated before records existed) the call names the
- * file only and its bytes as read are uploaded. Both go through the scan.
+ * (a dashboard, a file generated before records existed, including one the
+ * previous version withheld, or a file whose record is missing) the call
+ * names the file only and its bytes as read are uploaded. Both go through the
+ * scan; a PDF or a PNG is not read by it and is saved `not_scanned`.
  * `createName`, for a new GFS file, must end in the record's format.
  */
-export function resolveGeneratedFile(
+export async function resolveGeneratedFile(
   sources: KeptFileSources,
   name: string,
   generatedFileId: string | undefined,
   createName?: string
-): SourceResolution {
+): Promise<SourceResolution> {
   const out = keptOutputDir(sources)
   if ('error' in out) return out
   const record = readSaveLedgerRecord(out.dir, name)
@@ -424,7 +606,7 @@ export function resolveGeneratedFile(
     return {
       source: 'generated_file',
       bytes,
-      secretScan: scanForSecrets(bytes, sources.secretEntries()),
+      secretScan: await scanFileForSecrets(bytes, sources.secretEntries()),
     }
   }
   if (generatedFileId === undefined) return { error: HAS_SAVE_ID, argument: true }
@@ -458,7 +640,7 @@ export function resolveGeneratedFile(
   return {
     source: 'generated_file',
     bytes: delivered,
-    secretScan: scanForSecrets(delivered, entries),
+    secretScan: await scanFileForSecrets(delivered, entries),
   }
 }
 
@@ -469,7 +651,10 @@ export function resolveGeneratedFile(
  * is refused too (tool configuration under the shell's home). A refused path
  * that goes through `.gfs-downloads` gets the hint that says how to proceed.
  */
-export function resolveSourcePath(sources: KeptFileSources, sourcePath: string): SourceResolution {
+export async function resolveSourcePath(
+  sources: KeptFileSources,
+  sourcePath: string
+): Promise<SourceResolution> {
   const root = sources.callerWorkspacePath
   if (!root) return { error: SOURCE_PATH_UNAVAILABLE }
   const invalid = (): SourceRefusal => ({
@@ -490,7 +675,7 @@ export function resolveSourcePath(sources: KeptFileSources, sourcePath: string):
   return {
     source: 'source_path',
     bytes,
-    secretScan: scanForSecrets(bytes, sources.secretEntries()),
+    secretScan: await scanFileForSecrets(bytes, sources.secretEntries()),
   }
 }
 
@@ -771,10 +956,10 @@ function readUploadRecord(dir: string, id: string): UploadRecord | undefined {
  * the scan. Uploads are scanned like every other file source, so a later save
  * of a file the user attached can be refused for a protected value it holds.
  */
-export function resolveKeptUpload(
+export async function resolveKeptUpload(
   sources: KeptFileSources,
   uploadedFileId: string
-): SourceResolution {
+): Promise<SourceResolution> {
   if (!UPLOAD_ID.test(uploadedFileId)) {
     return {
       error: 'uploadedFileId must be the 12-character id clerum__kept_files_list gives',
@@ -798,7 +983,7 @@ export function resolveKeptUpload(
   return {
     source: 'kept_upload',
     bytes,
-    secretScan: scanForSecrets(bytes, sources.secretEntries()),
+    secretScan: await scanFileForSecrets(bytes, sources.secretEntries()),
   }
 }
 

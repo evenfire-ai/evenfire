@@ -747,7 +747,7 @@ describe('saving a workspace file', () => {
     })
   })
 
-  it('scans text of exactly 4 MiB and uploads one byte more unscanned', async () => {
+  it('scans text of exactly 4 MiB in one pass and one byte more in windows', async () => {
     const root = rootOf('user-a')
     const tail = ` ${SYNTHETIC}\n`
     const exact = Buffer.alloc(SCAN_TEXT_MAX_BYTES, 0x61)
@@ -759,11 +759,44 @@ describe('saving a workspace file', () => {
     expect((await create(tools, { name: 'x', sourcePath: 'exact.txt' })).error).toBe(
       FILE_CONTAINS_SECRET
     )
-    expect(payload(await create(tools, { name: 'x', sourcePath: 'over.txt' })).secretScan).toEqual({
-      state: 'not_scanned',
-      reason: 'too_large_to_scan',
-    })
-  })
+    expect((await create(tools, { name: 'x', sourcePath: 'over.txt' })).error).toBe(
+      FILE_CONTAINS_SECRET
+    )
+    expect(calls(client)).toBe(0)
+  }, 60_000)
+
+  it.each([
+    ['1 KiB', 1024],
+    ['6 MiB', 6 * 1024 * 1024],
+  ])(
+    'refuses a %s log with ANSI colour that holds a value, and saves it clean',
+    async (_label, size) => {
+      const root = rootOf('user-a')
+      const body = (value: string) => {
+        const line = `\x1b[32mINFO\x1b[0m request served ${value}\n`
+        const filler = '\x1b[2mDEBUG\x1b[0m heartbeat\n'
+        return (
+          filler
+            .repeat(Math.ceil((size - line.length) / filler.length))
+            .slice(0, size - line.length) + line
+        )
+      }
+      seed(root, 'outputs/run.log', Buffer.from(body(SYNTHETIC)))
+      seed(root, 'outputs/clean.log', Buffer.from(body('without a value')))
+      const client = recordingClient()
+      const tools = writeTools(root, client, [{ name: 'P', value: SYNTHETIC }])
+      expect((await create(tools, { name: 'x', sourcePath: 'outputs/run.log' })).error).toBe(
+        FILE_CONTAINS_SECRET
+      )
+      expect(calls(client)).toBe(0)
+      // Witness: the same file without the value is uploaded, scanned.
+      expect(
+        payload(await create(tools, { name: 'x', sourcePath: 'outputs/clean.log' })).secretScan
+      ).toEqual({ state: 'scanned' })
+      expect(calls(client)).toBe(1)
+    },
+    60_000
+  )
 })
 
 describe('choosing the source of a write', () => {
@@ -1103,7 +1136,7 @@ describe('texts of the kept-files listing and of a withheld file', () => {
     ['mime_not_allowed', WITHHELD_OTHER_SENTENCE],
     ['redacted_artifact_too_large', WITHHELD_OTHER_SENTENCE],
     ['artifact_replaced_before_delivery', WITHHELD_OTHER_SENTENCE],
-  ])('a file withheld for %s says why it cannot be saved', (outcome, sentence) => {
+  ])('a file withheld for %s says why it cannot be saved', async (outcome, sentence) => {
     const root = rootOf('user-a')
     const out = outputsOf(root)
     fs.mkdirSync(out, { recursive: true, mode: 0o700 })
@@ -1115,7 +1148,7 @@ describe('texts of the kept-files listing and of a withheld file', () => {
       outcome,
       createdAt: new Date().toISOString(),
     })
-    const resolved = resolveGeneratedFile(
+    const resolved = await resolveGeneratedFile(
       { callerRoot: root, secretEntries: () => [] },
       'w.md',
       'abcabcabcabc'
