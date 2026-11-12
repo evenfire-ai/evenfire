@@ -701,6 +701,25 @@ assert_a_higher_version_tagged_at_an_older_commit_does_not_move_stable() {
   rm -rf "$d"
 }
 
+assert_an_ancestry_check_error_fails_instead_of_moving_stable() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # Same tags as the case above, but `git merge-base --is-ancestor` errors
+  # (exit 128) instead of answering. That is not a "yes": the run stops before
+  # any registry call rather than moving :stable on an unanswered question.
+  mkdir -p "$d/prep"; echo x > "$d/prep/x"
+  ( cd "$d" && git add prep && git -c user.email=t@t -c user.name=t commit -qm two && git tag v0.2.1 \
+    && git tag v0.2.2 "$HEAD_SHA" )
+  git_shim_fail_on "$d" 128 "merge-base --is-ancestor v0.2.1 *"
+  local out rc; run_promote "$d" false v0.2.2
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] && [ ! -s "$d/crane-calls" ] \
+      && grep -qF '::error::could not compare v0.2.2 against the existing release tags' <<< "$out"; then
+    pass "an error from the :stable ancestry check fails the run before any copy"
+  else
+    fail "expected rc=1, no crane call and 'could not compare'; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
 # --- Refs, exit codes and output -----------------------------------------------
 
 assert_a_dry_run_from_a_ref_that_is_not_an_image_tag_skips_the_version_tag_check() {
@@ -830,6 +849,7 @@ assert_a_failing_crane_manifest_in_the_arch_check_fails_the_image
 assert_a_higher_tag_pushed_to_origin_meanwhile_keeps_stable
 assert_a_failed_tag_fetch_stops_before_stable
 assert_a_higher_version_tagged_at_an_older_commit_does_not_move_stable
+assert_an_ancestry_check_error_fails_instead_of_moving_stable
 assert_a_dry_run_from_a_ref_that_is_not_an_image_tag_skips_the_version_tag_check
 assert_a_real_run_from_a_ref_that_is_not_an_image_tag_fails
 assert_a_dry_run_with_several_refused_images_exits_one
