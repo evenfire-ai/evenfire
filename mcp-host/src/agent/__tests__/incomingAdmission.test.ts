@@ -92,6 +92,7 @@ function makeAdmission(overrides: Partial<IncomingAdmissionDeps> = {}): {
       status: 'pending',
     })),
     fileReferenceGfs: () => ({ status: 'unsupported' }),
+    keepAttachments: async () => undefined,
     logger,
     ...overrides,
   }

@@ -133,6 +133,7 @@ function makeAdmission(
     applySessionModelSelection,
     dispatch,
     fileReferenceGfs,
+    keepAttachments: async () => undefined,
     logger: { info, warn },
     ...overrides,
   }
