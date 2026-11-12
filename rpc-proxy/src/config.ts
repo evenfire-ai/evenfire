@@ -100,14 +100,48 @@ export function parseCorsOrigin(raw: string): string[] | '*' {
     .filter(Boolean)
 }
 
-function assertNotPlaceholder(label: string, value: string): void {
-  // Fail loud if the former overlay placeholder ever leaks into a running pod.
-  // Populated out-of-band by deploy/scripts/apply-inter-service-tokens.sh.
-  if (/^replace-with-/.test(value)) {
-    throw new Error(
-      `${label} has placeholder value "${value}". Run deploy/scripts/apply-inter-service-tokens.sh before deploying.`
+// How to supply a value written by `writerScript`. gen-jwt-keys.sh rotates every key and resets
+// control-postgres, so on an existing install the hint points to the non-rotating repairs instead.
+function remedy(writerScript: string): string {
+  if (writerScript === 'gen-jwt-keys.sh') {
+    return (
+      'Run deploy/scripts/gen-jwt-keys.sh only on a new install; on an existing install it rotates ' +
+      'every key, so follow "Required secrets without code defaults" in ' +
+      'docs/deploy/releases-and-upgrades.md.'
     )
   }
+  return `Run deploy/scripts/${writerScript} before deploying.`
+}
+
+function assertNotPlaceholder(label: string, value: string, writerScript: string): void {
+  // Fail loud if a `replace-with-*` placeholder ever leaks into a running pod.
+  // `writerScript` is the deploy script that populates the value out-of-band.
+  if (/^replace-with-/.test(value)) {
+    throw new Error(`${label} has placeholder value "${value}". ${remedy(writerScript)}`)
+  }
+}
+
+// HMAC keys of the desktop and sandbox-UI session cookies: at least the HS256 key size
+// (32 bytes, RFC 7518 section 3.2). gen-jwt-keys.sh writes 64 bytes.
+const COOKIE_SECRET_MIN_BYTES = 32
+
+// Secret material has no code default in any NODE_ENV: a known default would let anyone
+// who reads this file authenticate to control-api or forge a session cookie. The value is
+// trimmed, as webhook-proxy does, so a whitespace-only value counts as unset and a trailing
+// newline from a hand-made Secret is not part of the secret. Error messages never echo the
+// value or its length.
+function requiredSecret(name: string, writerScript: string, minBytes = 0): string {
+  const value = (process.env[name] ?? '').trim()
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`)
+  }
+  assertNotPlaceholder(name, value, writerScript)
+  if (Buffer.byteLength(value, 'utf8') < minBytes) {
+    throw new Error(
+      `${name} must be at least ${minBytes} bytes; write a value from \`openssl rand -hex 32\`. ${remedy(writerScript)}`
+    )
+  }
+  return value
 }
 
 export function parseSandboxUiAllowedPorts(raw: string): ReadonlySet<number> {
@@ -235,11 +269,10 @@ export const config: Config = {
     'RPC_PROXY_CONTROL_API_BASE_URL',
     'http://control-api.control-plane.svc.cluster.local:8090/api/v1'
   ),
-  controlApiServiceToken: (() => {
-    const v = requiredOrDevDefault('RPC_PROXY_CONTROL_API_SERVICE_TOKEN', 'dev-rpc-proxy-token')
-    assertNotPlaceholder('RPC_PROXY_CONTROL_API_SERVICE_TOKEN', v)
-    return v
-  })(),
+  controlApiServiceToken: requiredSecret(
+    'RPC_PROXY_CONTROL_API_SERVICE_TOKEN',
+    'apply-inter-service-tokens.sh'
+  ),
   controlApiServiceName: process.env.RPC_PROXY_CONTROL_API_SERVICE_NAME || 'rpc-proxy',
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   // The Host refuses artifact files above 50 MiB (MAX_ARTIFACT_BYTES in
@@ -321,12 +354,15 @@ export const config: Config = {
   hostNamespace: requiredOrDevDefault('RPC_PROXY_HOST_NAMESPACE', 'mcp-host'),
   desktopCookieName: process.env.RPC_PROXY_DESKTOP_COOKIE_NAME || 'clerum_desktop_session',
   desktopCookieMaxAgeMs: Number(process.env.RPC_PROXY_DESKTOP_COOKIE_MAX_AGE_MS || 3_600_000),
-  desktopCookieSecret: requiredOrDevDefault(
+  desktopCookieSecret: requiredSecret(
     'RPC_PROXY_DESKTOP_COOKIE_SECRET',
-    'dev-desktop-cookie-secret-32chars!'
+    'gen-jwt-keys.sh',
+    COOKIE_SECRET_MIN_BYTES
   ),
   desktopPort: Number(process.env.RPC_PROXY_DESKTOP_PORT || 3000),
-  desktopApiToken: process.env.RPC_PROXY_DESKTOP_API_TOKEN || '',
+  // Bearer token sent to host-context-controller on desktop status calls; must equal HCC's
+  // CONTEXT_MAPPER_DESKTOP_API_TOKEN. No minimum length: it is not an HMAC key.
+  desktopApiToken: requiredSecret('RPC_PROXY_DESKTOP_API_TOKEN', 'gen-jwt-keys.sh'),
   sandboxUiNamespace: process.env.RPC_PROXY_SANDBOX_UI_NAMESPACE || 'sandbox-ui',
   // 5s cache for the registry lookup. Keep the value short — a recipe
   // transitioning from `deploying` to `active` should be picked up on the
@@ -335,9 +371,10 @@ export const config: Config = {
     process.env.RPC_PROXY_SANDBOX_UI_REGISTRY_CACHE_TTL_MS || 5000
   ),
   sandboxUiCookieName: process.env.RPC_PROXY_SANDBOX_UI_COOKIE_NAME || 'clerum_sandbox_ui_session',
-  sandboxUiCookieSecret: requiredOrDevDefault(
+  sandboxUiCookieSecret: requiredSecret(
     'RPC_PROXY_SANDBOX_UI_COOKIE_SECRET',
-    'dev-sandbox-ui-cookie-secret-32chars!'
+    'gen-jwt-keys.sh',
+    COOKIE_SECRET_MIN_BYTES
   ),
   // 5 minute TTL on the UI session cookie.
   sandboxUiCookieMaxAgeSec: Number(process.env.RPC_PROXY_SANDBOX_UI_COOKIE_MAX_AGE_SEC || 300),

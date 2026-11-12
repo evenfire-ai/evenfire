@@ -72,6 +72,13 @@ spec:
             secretKeyRef:
               name: internal-control-jwt-secrets
               key: INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET
+        # Bearer token rpc-proxy sends on GET /api/v1/desktop/<hostRef>. gen-jwt-keys.sh writes the same
+        # value here and to rpc-proxy-secrets/RPC_PROXY_DESKTOP_API_TOKEN. HCC refuses to start without it.
+        - name: CONTEXT_MAPPER_DESKTOP_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: inter-service-tokens
+              key: desktop-api-token
         - name: CONTEXT_MAPPER_PORT
           value: "8081"
         - name: CONTEXT_MAPPER_NAMESPACE

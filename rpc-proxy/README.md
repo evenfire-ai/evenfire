@@ -126,9 +126,18 @@ Critical variables:
 - `RPC_PROXY_CONTROL_API_BASE_URL`
 - `RPC_PROXY_CONTROL_API_CACHE_TTL_MS`
 
-Required in production:
+Required secrets, with no code default in any `NODE_ENV` (startup fails when one
+is unset, empty, only whitespace or a `replace-with-*` placeholder; surrounding
+whitespace is trimmed):
 
-- `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`
+- `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`: must match the `rpc-proxy` entry in
+  control-api's `CONTROL_API_INTERNAL_SERVICE_TOKENS`.
+- `RPC_PROXY_DESKTOP_COOKIE_SECRET`: signs the Desktop session cookie. At least
+  32 bytes.
+- `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`: signs the sandbox UI session cookie. At
+  least 32 bytes.
+- `RPC_PROXY_DESKTOP_API_TOKEN`: bearer token sent to host-context-controller on
+  desktop status calls; must equal HCC's `CONTEXT_MAPPER_DESKTOP_API_TOKEN`.
 
 `RPC_PROXY_JWT_PUBLIC_KEY` must match the public key for `CONTROL_API_RPC_JWT_PRIVATE_KEY`.
 
@@ -141,12 +150,24 @@ a separate terminal:
 ```bash
 cd rpc-proxy
 npm install
+export RPC_PROXY_CONTROL_API_SERVICE_TOKEN=dev-rpc-proxy-token
+export RPC_PROXY_DESKTOP_COOKIE_SECRET="$(openssl rand -hex 32)"
+export RPC_PROXY_SANDBOX_UI_COOKIE_SECRET="$(openssl rand -hex 32)"
+export RPC_PROXY_DESKTOP_API_TOKEN="$(openssl rand -hex 32)"
 CLERUM_DEV_MODE=true npm run dev
 ```
 
-`make dev` also opts into this local mode. It is rejected with
-`NODE_ENV=production`. Without this opt-in, set `RPC_PROXY_JWT_PUBLIC_KEY`
-explicitly.
+`dev-rpc-proxy-token` is the `rpc-proxy` entry of control-api's development
+token map, which control-api uses only outside `NODE_ENV=production`. The two
+cookie secrets and the desktop API token have no default either. Any random
+value of 32 bytes or more works locally for the cookie secrets
+(`openssl rand -hex 32` gives 64). Any value works for the desktop API token
+against a host-context-controller in dev mode with no token configured;
+otherwise use the value HCC has in `CONTEXT_MAPPER_DESKTOP_API_TOKEN`.
+
+`make dev` also opts into this local mode and needs the same exports. It is
+rejected with `NODE_ENV=production`. Without this opt-in, set
+`RPC_PROXY_JWT_PUBLIC_KEY` explicitly.
 
 The shared store defaults to `control-api/.dev-keys` in the same checkout.
 Leave `EVENFIRE_DEV_KEY_STORE` unset or blank to use that default; a nonblank
@@ -197,12 +218,21 @@ The `deploy/` manifests include:
 - ingress TLS and basic rate limiting annotations
 - restrictive `NetworkPolicy` and `PodDisruptionBudget`
 
-Before deploying, create a real secret from `deploy/example.secret.yaml` values:
+The `rpc-proxy-secrets` Secret must exist before the pod starts.
+`deploy/scripts/gen-jwt-keys.sh` creates it with the JWT public key, both
+cookie secrets and the desktop API token, and
+`deploy/scripts/apply-inter-service-tokens.sh` adds the service token. To
+create it by hand, use real values for every key. The desktop API token must be
+the same value as key `desktop-api-token` of Secret `inter-service-tokens` in
+`control-plane`, which host-context-controller reads:
 
 ```bash
 kubectl create secret generic rpc-proxy-secrets -n rpc-proxy \
-  --from-literal=RPC_PROXY_JWT_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----\nreplace-with-rs256-public-key\n-----END PUBLIC KEY-----' \
-  --from-literal=RPC_PROXY_CONTROL_API_SERVICE_TOKEN='replace-with-rpc-proxy-token'
+  --from-literal=RPC_PROXY_JWT_PUBLIC_KEY="$(cat rpc.public.pem)" \
+  --from-literal=RPC_PROXY_CONTROL_API_SERVICE_TOKEN="<token registered in control-api>" \
+  --from-literal=RPC_PROXY_DESKTOP_COOKIE_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=RPC_PROXY_SANDBOX_UI_COOKIE_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=RPC_PROXY_DESKTOP_API_TOKEN="<value of inter-service-tokens/desktop-api-token>"
 ```
 
 Then deploy:

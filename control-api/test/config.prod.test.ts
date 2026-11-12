@@ -70,4 +70,18 @@ describe('config: production voucher key guard', () => {
       /default dev internal service token/
     )
   })
+
+  it('boots with the production fixture alone (the token map it carries is accepted)', async () => {
+    const { config } = await import('../src/config.js')
+
+    expect(Object.keys(config.internalServiceTokens)).toContain('webhook-proxy')
+  })
+
+  it('rejects the built-in default token map when CONTROL_API_INTERNAL_SERVICE_TOKENS is unset in production', async () => {
+    delete process.env.CONTROL_API_INTERNAL_SERVICE_TOKENS
+
+    await expect(() => import('../src/config.js')).rejects.toThrow(
+      /default dev internal service token/
+    )
+  })
 })

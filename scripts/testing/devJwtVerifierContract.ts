@@ -90,6 +90,7 @@ export function createDevJwtVerifierContract(options: VerifierContractOptions) {
       CONTROL_API_BASE_URL: 'http://localhost:8090', CONTROL_API_SERVICE_TOKEN: randomUUID(),
       HCC_BASE_URL: 'http://localhost:8081', HOST_NAMESPACE: 'mcp-host',
       DESKTOP_COOKIE_SECRET: randomUUID(), SANDBOX_UI_COOKIE_SECRET: randomUUID(),
+      DESKTOP_API_TOKEN: randomUUID(),
       OAUTH_CALLBACK_BASE_URL: 'http://localhost:8090', GOOGLE_CLIENT_ID: randomUUID(),
       PUBLIC_BASE_URL: 'http://localhost:8091', DESKTOP_RPC_PROXY_BASE_URL: 'http://localhost:8094',
     }

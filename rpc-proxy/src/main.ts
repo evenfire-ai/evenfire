@@ -13,13 +13,6 @@ import { hostWakeCoordinator } from './services/wakeAndHold.js'
 const SHUTDOWN_DEADLINE_MS = 10_000
 
 async function bootstrap(): Promise<void> {
-  if (process.env.NODE_ENV === 'production' && !config.desktopApiToken) {
-    console.warn(
-      '[RPC_PROXY] WARNING: RPC_PROXY_DESKTOP_API_TOKEN is empty in production mode — ' +
-        'rpc-proxy→HCC desktop API calls have no service-token auth. Set this to match CONTEXT_MAPPER_DESKTOP_API_TOKEN.'
-    )
-  }
-
   const app = createApp()
   const server = http.createServer(app)
 

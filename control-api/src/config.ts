@@ -27,7 +27,6 @@ type Config = {
   sandboxUiNamespace: string
   secretsNamespace: string
   pgConnectionString: string
-  internalTokens: string[]
   internalServiceTokens: Record<string, string>
   internalControlJwtWrcHmacSecret: string
   internalControlJwtHccHmacSecret: string
@@ -398,15 +397,6 @@ function assertNotPlaceholder(label: string, value: string): void {
 function parseTimeoutMs(raw: string | undefined, fallback: number): number {
   const parsed = raw ? Number(raw) : Number.NaN
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647 ? parsed : fallback
-}
-
-function parseInternalTokens(input: string): string[] {
-  const tokens = input
-    .split(',')
-    .map(v => v.trim())
-    .filter(Boolean)
-  tokens.forEach((t, i) => assertNotPlaceholder(`CONTROL_API_INTERNAL_TOKENS[${i}]`, t))
-  return tokens
 }
 
 function parseInternalServiceTokens(input: string): Record<string, string> {
@@ -794,9 +784,6 @@ export const config: Config = {
   pgConnectionString:
     process.env.CONTROL_API_PG_CONNECTION_STRING ||
     'postgres://postgres:postgres@control-postgres.control-plane.svc.cluster.local:5432/profiles',
-  internalTokens: parseInternalTokens(
-    process.env.CONTROL_API_INTERNAL_TOKENS || 'dev-external-rest-api-token,dev-rpc-proxy-token'
-  ),
   internalServiceTokens: parseInternalServiceTokens(
     process.env.CONTROL_API_INTERNAL_SERVICE_TOKENS ||
       'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token,codex-llm-proxy=dev-codex-llm-proxy-token,grok-llm-proxy=dev-grok-llm-proxy-token'

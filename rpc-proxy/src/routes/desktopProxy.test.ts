@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../config.js'
 import { DesktopSessionService } from '../services/desktopSessionService.js'
 import { createDesktopRouter, handleDesktopUpgrade, parseCookies } from './desktopProxy.js'
 
@@ -128,6 +129,12 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
     )
     // No Secure flag in dev/test (NODE_ENV !== production); cookie must work over HTTP port-forwards.
     expect(res.headers['set-cookie']?.[0]).not.toMatch(/; Secure/)
+    // HCC requires the desktop API token on every status call.
+    expect(config.desktopApiToken).not.toBe('')
+    expect(mockHcc).toHaveBeenCalledWith(
+      expect.stringContaining('/api/v1/desktop/chatllm'),
+      expect.objectContaining({ headers: { authorization: `Bearer ${config.desktopApiToken}` } })
+    )
   })
 
   it('adds Secure flag to session cookie when NODE_ENV=production', async () => {
@@ -219,6 +226,34 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
       .send({})
 
     expect(res.status).toBe(403)
+  })
+})
+
+describe('GET /desktop/:hostRef (status)', () => {
+  const mockHcc = vi.fn()
+  beforeEach(() => {
+    mockHcc.mockReset()
+    global.fetch = mockHcc as any
+  })
+
+  it('sends the desktop API token to HCC and relays the status', async () => {
+    mockHcc.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ status: 'running', hostRef: 'chatllm', message: 'up' }),
+    })
+
+    const token = signTestJwt(['desktop:view'], ['chatllm'])
+    const res = await request(makeApp())
+      .get('/desktop/chatllm')
+      .set('authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ status: 'running', hostRef: 'chatllm', message: 'up' })
+    expect(config.desktopApiToken).not.toBe('')
+    expect(mockHcc).toHaveBeenCalledWith(
+      expect.stringContaining('/api/v1/desktop/chatllm'),
+      expect.objectContaining({ headers: { authorization: `Bearer ${config.desktopApiToken}` } })
+    )
   })
 })
 

@@ -6,6 +6,8 @@ set -euo pipefail
 # These secrets authenticate service-to-service calls:
 #   - external-rest-api → control-api   (token X)
 #   - rpc-proxy         → control-api   (token Y)
+#   - webhook-proxy     → control-api   (registry lookups)
+#   - codex-llm-proxy / grok-llm-proxy → control-api   (dedicated tokens)
 #   - workflow-approval-request-reader → control-api   (Figure D consulta token)
 #   - workflow-approval-request-reader → channel-reader (Slack webhook handoff)
 #   - workflow-recipes / host-context-controller → control-api
@@ -32,6 +34,15 @@ set -euo pipefail
 #   CONTEXT                              kubectl context (unset = current)
 #   CONTROL_API_INTERNAL_TOKEN_EXT_REST  override token X (default: preserve-or-generate)
 #   CONTROL_API_INTERNAL_TOKEN_RPC       override token Y (default: preserve-or-generate)
+#   CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY
+#                                        override webhook-proxy → control-api token
+#                                        (default: preserve-or-generate)
+#   CONTROL_API_INTERNAL_TOKEN_CODEX_LLM_PROXY
+#                                        override codex-llm-proxy → control-api token
+#                                        (default: preserve-or-generate)
+#   CONTROL_API_INTERNAL_TOKEN_GROK_LLM_PROXY
+#                                        override grok-llm-proxy → control-api token
+#                                        (default: preserve-or-generate)
 #   CONTROL_API_INTERNAL_TOKEN_WA_READER override workflow-approval-request-reader → control-api
 #                                       consulta token (Figure D cross-bot fix PR1;
 #                                       default: preserve-or-generate)

@@ -506,6 +506,16 @@ RPC_PROXY_JWT_ISSUER          = control-api
 RPC_PROXY_JWT_AUDIENCE        = rpc-proxy
 ```
 
+The same ConfigMap carries the two cookie signing secrets and the desktop API
+token, which rpc-proxy requires with no code default
+(`RPC_PROXY_DESKTOP_COOKIE_SECRET`, `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`, each
+at least 32 bytes, and `RPC_PROXY_DESKTOP_API_TOKEN`). The minikube values are
+fixed development strings. host-context-controller's copy of the desktop API
+token is the literal `CONTEXT_MAPPER_DESKTOP_API_TOKEN` in
+`deploy/overlays/minikube/patches/dynamic-images.yaml`, which must equal the
+ConfigMap value. Other clusters get random values in `rpc-proxy-secrets` and
+`inter-service-tokens` from `deploy/scripts/gen-jwt-keys.sh`.
+
 #### mcp-host-config (ConfigMap, namespace: mcp-host)
 
 ```
@@ -1099,8 +1109,10 @@ kubectl exec -n mcp-host deployment/chatllm -- \
   http://chatllm.mcp-host.svc.cluster.local:8080/v1/runtime/status
 ```
 
-`rpc-proxy-secrets` holds only public/verification material plus the control-api
-service token (`RPC_PROXY_JWT_PUBLIC_KEY`, `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`).
+In minikube, `rpc-proxy-secrets` holds only public/verification material plus the
+control-api service token (`RPC_PROXY_JWT_PUBLIC_KEY`,
+`RPC_PROXY_CONTROL_API_SERVICE_TOKEN`); the cookie secrets come from
+`rpc-proxy-config`.
 The RPC **private** key lives in `control-api-secrets` as
 `CONTROL_API_RPC_JWT_PRIVATE_KEY`; control-api uses it to sign every RPC token
 (and, reusing the same keypair, gfs access tokens — `control-api/src/auth/gfsToken.ts`),

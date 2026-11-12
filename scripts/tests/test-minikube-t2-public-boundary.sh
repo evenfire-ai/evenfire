@@ -48,8 +48,22 @@ from urllib.parse import urlsplit
 
 diff = Path(sys.argv[1]).read_text(errors="replace")
 bad = []
+# Mirrors the `!.env.*` exceptions in .gitignore: env templates committed on
+# purpose. Any other `.env` or `.env.*` file name is reported as sensitive, at
+# any depth, as .gitignore matches it.
+TRACKED_ENV_TEMPLATES = {
+    ".env.example",
+    ".env.test",
+    ".env.e2e.example",
+    ".env.dev.example",
+    ".env.quickstart.example",
+}
 current = ""
 root = Path(sys.argv[2]).resolve()
+
+
+def is_env_file_name(name):
+    return name == ".env" or name.startswith(".env.")
 
 
 def public_capture_source(relative):
@@ -148,8 +162,7 @@ for line in diff.splitlines():
         path = current.lower()
         path_parts = path.split("/")
         if (
-            path == ".env"
-            or path.startswith(".env.")
+            is_env_file_name(path_parts[-1])
             or path.endswith((".pem", ".key", ".p12", ".pfx", ".log"))
             or path.endswith(("/kubeconfig", "/config"))
             or (
@@ -162,7 +175,13 @@ for line in diff.splitlines():
             or ("screenshot" in path and not public_capture_source(current))
             or "e2e-artifacts" in path
         ):
-            if not (path.endswith(".env.example") or path.endswith(".env.test")):
+            # The env templates .gitignore tracks on purpose (its `!.env.*`
+            # lines) are public by design; their contents are still scanned.
+            if not (
+                path.endswith(".env.example")
+                or path.endswith(".env.test")
+                or path_parts[-1] in TRACKED_ENV_TEMPLATES
+            ):
                 finding = (current, "sensitive file name")
                 if finding not in bad:
                     bad.append(finding)
@@ -183,6 +202,29 @@ for line in diff.splitlines():
     # ordinary implementation expressions were reported as public
     # credentials. Keep literal/YAML-style values under
     # inspection, and handle shell-style uppercase assignments separately.
+    #
+    # `\b` does not match between `_` and a letter, so the two patterns above
+    # never see a prefixed name such as GCP_DB_PASSWORD= or
+    # RPC_PROXY_DESKTOP_COOKIE_SECRET=. The env-style patterns below cover
+    # those names in env files, shell, make, CLI arguments and docs:
+    # - a SCREAMING_SNAKE name ending in one of the key words below;
+    # - either a line that is an assignment (spaces around `=` and `export`
+    #   allowed), or an inline NAME=value with no space that does not follow
+    #   `.`, so `process.env.X_TOKEN=` and `const X_SECRET = '...'` stay out;
+    # - a value of 8 or more characters with no `<` or `>` (so `<your-token>`
+    #   placeholders pass); the unquoted form excludes brackets and backticks
+    #   and must end at whitespace, a quote or the end of the line, so code on
+    #   the right-hand side does not match.
+    # Not covered: a key word in the middle of the name (X_TOKEN_RPC=), the YAML
+    # form (X_TOKEN: "value"), an unquoted value containing a bracket, and
+    # values under 8 characters.
+    ENV_STYLE_NAME = r"[A-Z][A-Z0-9_]*_(?:API_?KEY|PASS(?:WORD|WD)?|SECRET|TOKENS?|PRIVATE_?KEY|ENCRYPTION_?KEY|SIGNING_?KEY)"
+    ENV_STYLE_PREFIX = (
+        r"(?:^\s*(?:export\s+)?" + ENV_STYLE_NAME + r"\s*=\s*"
+        r"|(?<![A-Za-z0-9_.])" + ENV_STYLE_NAME + r"=)"
+    )
+    ENV_STYLE_QUOTED = ENV_STYLE_PREFIX + r"[\"']([^\"'\r\n<>]{8,})[\"']"
+    ENV_STYLE_UNQUOTED = ENV_STYLE_PREFIX + r"([^\s\"'`<>(){}\[\]]{8,})(?=[\s\"'`]|$)"
     patterns = (
         (r"postgres(?:ql)?://[^\s\"'<>:]+:[^\s\"'<>@]+@", "credentialed PostgreSQL URL"),
         (r"(?i)postgres(?:ql)?://(?:[^\s\"'<>@]+@)?(?:localhost|127(?:\.[0-9]{1,3}){3}|\[::1\]|10\.[0-9.]+|192\.168\.[0-9.]+|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9.]+|[A-Za-z0-9.-]*(?:private|internal|local|cluster|postgres)[A-Za-z0-9.-]*)(?::[0-9]+)?(?:/|$)", "private PostgreSQL URL"),
@@ -190,6 +232,8 @@ for line in diff.splitlines():
         (r"(?i)\bBearer\s+[A-Za-z0-9._~-]{24,}", "bearer token"),
         (r"(?i)\b(?:api[_-]?key|password|secret|token|private[_-]?key)\s*[:=]\s*[\"']([^\"'\r\n]{8,})[\"']", "credential assignment"),
         (r"\b(?:API[_-]?KEY|PASSWORD|SECRET|TOKEN|PRIVATE[_-]?KEY)\s*=\s*([A-Za-z0-9_./:+@=-]{8,})", "credential assignment"),
+        (ENV_STYLE_QUOTED, "credential assignment"),
+        (ENV_STYLE_UNQUOTED, "credential assignment"),
         (r"https?://(?:127\.0\.0\.1|localhost|10\.[0-9.]+|192\.168\.[0-9.]+|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9.]*)(?::[0-9]{2,5})(?:/|$)", "private runtime URL"),
     )
     safe_fixture = re.compile(
@@ -268,6 +312,24 @@ for line in diff.splitlines():
             ):
                 continue
             if safe_source_fixture_value(current, reason, value, match):
+                continue
+            # Exemptions of the env-style patterns only; the two older patterns
+            # keep their verdicts. A `replace-with-*` placeholder (the services
+            # refuse it at startup); a mask with no letter or digit; a
+            # control-api public development token `dev-...-token` (production
+            # control-api refuses it); and a line in a source fixture path
+            # (`is_source_fixture`: a `test`, `tests` or `__tests__` directory at
+            # any depth, or a JS/TS `.test`/`.spec`/`.integration.test` file),
+            # unless the file is an env file.
+            if expression in (ENV_STYLE_QUOTED, ENV_STYLE_UNQUOTED) and (
+                match.group(1).startswith("replace-with-")
+                or not re.search(r"[A-Za-z0-9]", match.group(1))
+                or re.fullmatch(r"dev-[a-z0-9-]+-token", match.group(1))
+                or (
+                    is_source_fixture(current)
+                    and not is_env_file_name(current.lower().split("/")[-1])
+                )
+            ):
                 continue
             flagged = True
             break

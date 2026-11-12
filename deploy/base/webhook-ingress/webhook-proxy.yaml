@@ -23,12 +23,18 @@ data:
   WEBHOOK_PROXY_UPSTREAM_TIMEOUT_MS: "30000"
   WEBHOOK_PROXY_MAX_BODY_BYTES_CEILING: "10485760"
 ---
-# Service-token Secret. The actual value lives in
-# `internal-service-tokens` mapping inside control-api's config; we
-# reference it by service name when calling the registry endpoint.
-# In dev/minikube this can be the literal "dev-webhook-proxy-token"
-# (matches control-api's default in src/config.ts). In prod it is
-# rotated via apply-inter-service-tokens.sh, same flow as rpc-proxy.
+# Service-token Secret — DELIBERATELY EMPTY in base, like the canary Secrets
+# in deploy/base/control-plane/secrets-canary.yaml.
+#
+# Populated key (via kubectl patch, NOT kubectl apply):
+#   WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN — must equal the `webhook-proxy`
+#     entry of control-api's CONTROL_API_INTERNAL_SERVICE_TOKENS.
+# deploy/scripts/apply-inter-service-tokens.sh writes it with
+# `kubectl patch --type=merge` (in minikube and in clusters alike) and restarts
+# webhook-proxy. Because the key is not in this manifest, later
+# `kubectl apply -k` runs do not reset it. Until the script has run,
+# webhook-proxy exits at startup with
+# "WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN must be set".
 apiVersion: v1
 kind: Secret
 metadata:
@@ -37,8 +43,7 @@ metadata:
   labels:
     app: webhook-proxy
 type: Opaque
-stringData:
-  WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN: replace-with-real-webhook-proxy-token
+stringData: {}
 ---
 apiVersion: apps/v1
 kind: Deployment

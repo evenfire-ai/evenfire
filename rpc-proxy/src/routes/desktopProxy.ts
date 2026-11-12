@@ -39,9 +39,7 @@ function createStatusRoute(): Router {
           `${config.hccBaseUrl}/api/v1/desktop/${encodeURIComponent(hostRef)}`,
           {
             method: 'GET',
-            headers: config.desktopApiToken
-              ? { authorization: `Bearer ${config.desktopApiToken}` }
-              : {},
+            headers: { authorization: `Bearer ${config.desktopApiToken}` },
             signal: AbortSignal.timeout(config.upstreamTimeoutMs),
           }
         )
@@ -95,9 +93,7 @@ function createSessionRoute(): Router {
           `${config.hccBaseUrl}/api/v1/desktop/${encodeURIComponent(hostRef)}`,
           {
             method: 'GET',
-            headers: config.desktopApiToken
-              ? { authorization: `Bearer ${config.desktopApiToken}` }
-              : {},
+            headers: { authorization: `Bearer ${config.desktopApiToken}` },
             signal: AbortSignal.timeout(config.upstreamTimeoutMs),
           }
         )

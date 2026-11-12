@@ -10,6 +10,7 @@
  * and skips Kubernetes reconciliation.
  */
 import { config } from './config'
+import { assertDesktopApiToken } from './desktopApiToken'
 import { HeartbeatPoller } from './heartbeatPoller'
 import { SecretInformer } from './informers/secretInformer'
 import {
@@ -76,19 +77,15 @@ async function main(): Promise<void> {
   console.log(`[Main] Mode: ${config.devMode ? 'DEV' : 'PRODUCTION'}`)
   console.log(`[Main] Port: ${config.port}`)
 
-  if (!config.devMode && !config.desktopApiToken) {
-    console.warn(
-      '[HCC] WARNING: CONTEXT_MAPPER_DESKTOP_API_TOKEN is empty in production mode — ' +
-        'desktop API endpoints have no service-token auth. Set this to match RPC_PROXY_DESKTOP_API_TOKEN.'
-    )
-  }
-
   // HCC signs InternalControl JWTs for control-api token issuance. Refuse to
   // start in production if its HMAC secret is missing or still carries
-  // the canary placeholder.
+  // the canary placeholder. The desktop API token rpc-proxy sends on desktop
+  // status calls is required too (checked second, so a missing HMAC secret is
+  // the error reported when both are missing).
   if (!config.devMode) {
     try {
       assertInternalControlJwtHmacSecret(config.internalControlJwtHccHmacSecret)
+      assertDesktopApiToken(config.desktopApiToken)
     } catch (err) {
       console.error(`[HCC] FATAL: ${err instanceof Error ? err.message : String(err)}`)
       process.exit(1)

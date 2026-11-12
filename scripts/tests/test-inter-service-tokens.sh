@@ -10,6 +10,8 @@ HCC_OLD="aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff6677889900"
 HCC_NEW="ff00ee11dd22cc33bb44aa5566778899ff00ee11dd22cc33bb44aa5566778899"
 WRC_OLD="1111111111111111111111111111111111111111111111111111111111111111"
 WRC_NEW="2222222222222222222222222222222222222222222222222222222222222222"
+WEBHOOK_REAL="3333333333333333333333333333333333333333333333333333333333333333"
+WEBHOOK_PLACEHOLDER="replace-with-real-webhook-proxy-token"
 
 cat > "$TMP/bin/openssl" <<'SH'
 #!/usr/bin/env bash
@@ -67,6 +69,11 @@ case "${args[0]:-}" in
             printf '%s' "$KUBE_SECRET_WRC" | base64 | tr -d '\n'
           fi
         fi
+        if [[ "$ns" == "webhook-ingress" && "${args[2]:-}" == "webhook-proxy-secrets" ]]; then
+          if [[ "$jsonpath" == "jsonpath={.data.WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN}" && -n "${KUBE_SECRET_WEBHOOK_PROXY:-}" ]]; then
+            printf '%s' "$KUBE_SECRET_WEBHOOK_PROXY" | base64 | tr -d '\n'
+          fi
+        fi
         exit 0
         ;;
       deploy|deployment)
@@ -85,6 +92,13 @@ case "${args[0]:-}" in
       for ((i=0; i<${#args[@]}; i++)); do
         if [[ "${args[$i]}" == "-p" ]]; then
           printf '%s' "${args[$((i+1))]}" > "${CAPTURE_FILE:?}"
+        fi
+      done
+    fi
+    if [[ "$ns" == "webhook-ingress" && "${args[1]:-}" == "secret" && "${args[2]:-}" == "webhook-proxy-secrets" && -n "${WEBHOOK_CAPTURE_FILE:-}" ]]; then
+      for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[$i]}" == "-p" ]]; then
+          printf '%s' "${args[$((i+1))]}" > "$WEBHOOK_CAPTURE_FILE"
         fi
       done
     fi
@@ -109,7 +123,7 @@ printf '%s\n' 'DEV_HMAC_SECRET="dev-member-registration-hmac-secret"' \
 assert_no_secret_material() {
   local log
   for log in "$TMP/stdout" "$TMP/stderr"; do
-    if grep -E 'aa11bb22cc33dd44|ff00ee11dd22cc33|1111111111111111|2222222222222222|0123456789abcdef0123456789abcdef' "$log" >/dev/null; then
+    if grep -E 'aa11bb22cc33dd44|ff00ee11dd22cc33|1111111111111111|2222222222222222|3333333333333333|0123456789abcdef0123456789abcdef' "$log" >/dev/null; then
       echo "secret material leaked into $log" >&2
       cat "$log" >&2
       exit 1
@@ -254,5 +268,110 @@ fi
 grep -q 'Rolling deployment control-plane/host-context-controller' "$TMP/stderr"
 grep -q 'host-context-controller' "$force_rollout"
 assert_no_secret_material
+
+# --- webhook-proxy-secrets: the base Secret is an empty canary (B1), and the
+# script keeps a real token and replaces a placeholder (P2).
+webhook_manifest="$ROOT/deploy/base/webhook-ingress/webhook-proxy.yaml"
+secret_documents() {
+  # Print every `kind: Secret` YAML document of the given files, each followed by a marker line.
+  awk '
+    function flush() { if (doc ~ /\nkind: Secret\n/) printf "%s#--end-of-secret-document--\n", doc; doc = "\n" }
+    BEGIN { doc = "\n" }
+    FNR == 1 && NR != 1 { flush() }
+    /^---[[:space:]]*$/ { flush(); next }
+    { doc = doc $0 "\n" }
+    END { flush() }
+  ' "$@"
+}
+webhook_secret_doc="$(secret_documents "$webhook_manifest" | awk '
+  /^#--end-of-secret-document--$/ { if (doc ~ /\n  name: webhook-proxy-secrets\n/) printf "%s", doc; doc = "\n"; next }
+  BEGIN { doc = "\n" }
+  { doc = doc $0 "\n" }
+')"
+if [ -z "$webhook_secret_doc" ]; then
+  echo "witness: no Secret document named webhook-proxy-secrets in $webhook_manifest" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$webhook_secret_doc" | grep -qx 'stringData: {}'; then
+  echo "webhook-proxy-secrets must ship stringData: {} (kubectl apply would otherwise reset the token)" >&2
+  exit 1
+fi
+if grep -nE '^[[:space:]]+WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN:' "$webhook_manifest" >&2; then
+  echo "webhook-proxy.yaml must not declare the token key" >&2
+  exit 1
+fi
+base_secret_docs="$TMP/base-secret-documents.txt"
+find "$ROOT/deploy/base" -name '*.yaml' | LC_ALL=C sort | while IFS= read -r manifest; do
+  secret_documents "$manifest"
+done > "$base_secret_docs"
+base_secret_count="$(grep -c '^#--end-of-secret-document--$' "$base_secret_docs" || true)"
+if [ "$base_secret_count" -lt 5 ]; then
+  echo "witness: expected at least 5 Secret documents under deploy/base, read $base_secret_count" >&2
+  exit 1
+fi
+if grep -n 'replace-with-' "$base_secret_docs" | grep -v '^[0-9]*:[[:space:]]*#' >&2; then
+  echo "a Secret under deploy/base declares a replace-with- value" >&2
+  exit 1
+fi
+
+webhook_real_map="$TMP/webhook-real-control-api-internal-tokens.json"
+webhook_real_secret="$TMP/webhook-real-webhook-proxy-secrets.json"
+KUBE_SECRET_WEBHOOK_PROXY="$WEBHOOK_REAL" WEBHOOK_CAPTURE_FILE="$webhook_real_secret" \
+  run_apply gke-dev "$webhook_real_map" env CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac
+jq -e --arg t "$WEBHOOK_REAL" '.stringData.WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN == $t' "$webhook_real_secret" >/dev/null
+jq -e --arg t "$WEBHOOK_REAL" '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | split(",") | index("webhook-proxy=" + $t) != null' "$webhook_real_map" >/dev/null
+assert_no_secret_material
+
+webhook_placeholder_map="$TMP/webhook-placeholder-control-api-internal-tokens.json"
+webhook_placeholder_secret="$TMP/webhook-placeholder-webhook-proxy-secrets.json"
+KUBE_SECRET_WEBHOOK_PROXY="$WEBHOOK_PLACEHOLDER" WEBHOOK_CAPTURE_FILE="$webhook_placeholder_secret" \
+  run_apply gke-dev "$webhook_placeholder_map" env CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac
+jq -e '.stringData.WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN | test("^[0-9a-f]{64}$")' "$webhook_placeholder_secret" >/dev/null
+webhook_generated="$(jq -r '.stringData.WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN' "$webhook_placeholder_secret")"
+jq -e --arg t "$webhook_generated" '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | split(",") | index("webhook-proxy=" + $t) != null' "$webhook_placeholder_map" >/dev/null
+if grep -q 'replace-with-' "$webhook_placeholder_secret" "$webhook_placeholder_map"; then
+  echo "the placeholder must not be written back" >&2
+  exit 1
+fi
+
+# --- desktop API token: base HCC reads the key gen-jwt-keys.sh writes, and the
+# minikube literal replaces that source and equals rpc-proxy's copy. Values are
+# compared, never printed.
+hcc_manifest="$ROOT/deploy/base/control-plane/host-context-controller.yaml"
+if ! grep -q '^kind: Deployment' "$hcc_manifest" || ! grep -q '^  name: host-context-controller$' "$hcc_manifest"; then
+  echo "witness: $hcc_manifest is not the host-context-controller Deployment" >&2
+  exit 1
+fi
+hcc_token_entry="$(grep -A4 -E '^[[:space:]]+- name: CONTEXT_MAPPER_DESKTOP_API_TOKEN$' "$hcc_manifest" || true)"
+if [ -z "$hcc_token_entry" ] \
+  || ! printf '%s\n' "$hcc_token_entry" | grep -qE '^[[:space:]]+name: inter-service-tokens$' \
+  || ! printf '%s\n' "$hcc_token_entry" | grep -qE '^[[:space:]]+key: desktop-api-token$'; then
+  echo "base HCC must read CONTEXT_MAPPER_DESKTOP_API_TOKEN from Secret inter-service-tokens, key desktop-api-token" >&2
+  exit 1
+fi
+gen_jwt_keys="$ROOT/deploy/scripts/gen-jwt-keys.sh"
+grep -Fq -- '--from-literal="desktop-api-token=$DESKTOP_API_TOKEN"' "$gen_jwt_keys" || {
+  echo "gen-jwt-keys.sh must write desktop-api-token to inter-service-tokens" >&2
+  exit 1
+}
+grep -Fq -- '--from-literal="RPC_PROXY_DESKTOP_API_TOKEN=$DESKTOP_API_TOKEN"' "$gen_jwt_keys" || {
+  echo "gen-jwt-keys.sh must write the same token to rpc-proxy-secrets" >&2
+  exit 1
+}
+minikube_patch="$ROOT/deploy/overlays/minikube/patches/dynamic-images.yaml"
+minikube_entry="$(grep -A2 -E '^[[:space:]]+- name: CONTEXT_MAPPER_DESKTOP_API_TOKEN$' "$minikube_patch" || true)"
+if [ "$(printf '%s\n' "$minikube_entry" | sed -n '2p' | grep -cE '^[[:space:]]+value: ')" != 1 ] \
+  || [ "$(printf '%s\n' "$minikube_entry" | sed -n '3p' | grep -cE '^[[:space:]]+valueFrom: null$')" != 1 ]; then
+  echo "minikube HCC token entry must be a literal value immediately followed by valueFrom: null" >&2
+  exit 1
+fi
+minikube_hcc_token="$(printf '%s\n' "$minikube_entry" | sed -n '2p' | sed -E 's/^[[:space:]]+value: "?([^"]*)"?$/\1/')"
+minikube_rpc_token="$(grep -E '^[[:space:]]+RPC_PROXY_DESKTOP_API_TOKEN: ' "$ROOT/deploy/overlays/minikube/configmaps/rpc-proxy-config.yaml" \
+  | sed -E 's/^[[:space:]]+RPC_PROXY_DESKTOP_API_TOKEN: "?([^"]*)"?$/\1/' || true)"
+if [ -z "$minikube_hcc_token" ] || [ "$minikube_hcc_token" != "$minikube_rpc_token" ]; then
+  echo "minikube HCC and rpc-proxy desktop API tokens must be set and equal (values not printed)" >&2
+  exit 1
+fi
+unset minikube_hcc_token minikube_rpc_token
 
 echo "inter-service token patch tests passed"

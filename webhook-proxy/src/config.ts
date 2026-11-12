@@ -37,6 +37,31 @@ function intFromEnv(name: string, fallback: number): number {
   return n
 }
 
+function requiredNonEmpty(name: string, raw: string | undefined): string {
+  const value = raw?.trim() ?? ''
+  if (!value) throw new Error(`${name} must be set`)
+  return value
+}
+
+function assertNotPlaceholder(label: string, value: string): void {
+  // The base Secret now ships empty, but clusters deployed before this release may
+  // still hold the earlier `replace-with-*` value until apply-inter-service-tokens.sh
+  // runs; refuse it at startup instead of sending it as the bearer token on every
+  // registry lookup.
+  if (/^replace-with-/.test(value)) {
+    throw new Error(
+      `${label} has placeholder value "${value}". Run deploy/scripts/apply-inter-service-tokens.sh before deploying.`
+    )
+  }
+}
+
+function controlApiServiceTokenFromEnv(): string {
+  const name = 'WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN'
+  const value = requiredNonEmpty(name, process.env[name])
+  assertNotPlaceholder(name, value)
+  return value
+}
+
 export function loadConfig(): ProxyConfig {
   return {
     httpPort: intFromEnv('WEBHOOK_PROXY_HTTP_PORT', 8095),
@@ -47,8 +72,7 @@ export function loadConfig(): ProxyConfig {
     workflowApprovalReaderBaseUrl:
       process.env.WEBHOOK_PROXY_WORKFLOW_APPROVAL_READER_BASE_URL ||
       'http://workflow-approval-request-reader.channels.svc.cluster.local:8098',
-    controlApiServiceToken:
-      process.env.WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN || 'dev-webhook-proxy-token',
+    controlApiServiceToken: controlApiServiceTokenFromEnv(),
     sandboxNamespace: process.env.WEBHOOK_PROXY_SANDBOX_NAMESPACE || 'sandbox-recipes',
     registryCacheTtlMs: intFromEnv('WEBHOOK_PROXY_REGISTRY_CACHE_TTL_MS', 5_000),
     upstreamTimeoutMs: intFromEnv('WEBHOOK_PROXY_UPSTREAM_TIMEOUT_MS', 30_000),

@@ -20,8 +20,8 @@ data:
   CONTROL_API_MCP_SERVERS_NAMESPACE: 'mcp-server'
   CONTROL_API_SECRETS_NAMESPACE: 'mcp-host'
   CONTROL_API_PG_CONNECTION_STRING: 'postgres://postgres:postgres@control-postgres.control-plane.svc.cluster.local:5432/profiles'
-  # CONTROL_API_INTERNAL_TOKENS / CONTROL_API_INTERNAL_SERVICE_TOKENS removed —
-  # projected from the `control-api-internal-tokens` Secret (populated by
+  # CONTROL_API_INTERNAL_SERVICE_TOKENS removed — projected from the
+  # `control-api-internal-tokens` Secret (populated by
   # `apply-inter-service-tokens.sh`). See secrets-canary.yaml in base.
   # member-registration-service runs as an extracted sibling in the `registration`
   # namespace (deployed locally via scripts/minikube/deploy-evenfire-member-registration.sh).
