@@ -62,7 +62,7 @@ import type { SessionMessagesResult } from '../../../../src/types'
 import { DESKTOP_ROUTES } from '../../constants/navigation'
 import {
   classifyErrorKind,
-  errorRecoveryHint,
+  describeSendFailure,
   extractAssistantReply,
   isAuthorizationError,
   isConfirmedHostAccessRevoked,
@@ -163,6 +163,11 @@ const HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE =
 const HOST_FILE_ATTACHMENTS_DROPPED_MESSAGE =
   'The Host does not accept file attachments yet; the message was sent without them. Recover the files to attach them again once the Host is updated.'
 const HOST_INVALID_ATTACHMENT_CODE = 'LLM_INVALID_ATTACHMENT'
+// Recorded on a retained send that stopped because another path held its agent.
+const SEND_HELD_AGENT_MESSAGE = 'The agent was on hold, so the message was not sent.'
+// Shown when the local chat store refuses to remove a withdrawn turn.
+const WITHDRAW_REJECTED_TURN_FAILED_MESSAGE =
+  'Could not remove the unsent message from this conversation locally.'
 const LATEST_PAGE_FALLBACK_WINDOW = Symbol('latest-page-fallback-window')
 const DELTA_RECONCILIATION_WINDOW = Symbol('delta-reconciliation-window')
 type ReconciliationMessagesResult = SessionMessagesResult & {
@@ -241,6 +246,14 @@ async function hasLocalMessagesBeyond(
     .loadMessages(agentRef, chatId, 1, offset)
     .then(messages => messages.length > 0)
     .catch(() => false)
+}
+
+/** `messages` without the given ids; the same array when none is given. */
+function withoutMessageIds(
+  messages: AgentChatMessage[],
+  ids: ReadonlySet<string>
+): AgentChatMessage[] {
+  return ids.size ? messages.filter(message => !ids.has(message.id)) : messages
 }
 
 function mergeUniqueMessages(
@@ -676,6 +689,14 @@ export function useAgentChatController({
   // a snapshot of its own; `sendAgentMessage` has several early returns (image
   // guard, running task, send in flight) that retain nothing.
   const lastRetainedSendIdRef = useRef<string | null>(null)
+  // Ids of optimistic user turns withdrawn because the server rejected their
+  // send, or because the send ended before it was handed to the main process
+  // while its agent was on hold.
+  // A reconcile or an older-page backfill that read the transcript before the
+  // withdrawal drops them from what it writes, so the withdrawn turn does not
+  // come back. Cleared with the retained-send store; each id is a random UUID
+  // made by one send.
+  const withdrawnTurnIdsRef = useRef(new Set<string>())
   const lastRetentionScope = useRef(`${isAuthenticated}:${authenticatedScope}`)
   useEffect(() => {
     const scope = `${isAuthenticated}:${authenticatedScope}`
@@ -688,6 +709,7 @@ export function useAgentChatController({
     agentSendInFlightRef.current = false
     setAgentSending(false)
     retainedSends.resetRetainedSendStore()
+    withdrawnTurnIdsRef.current.clear()
     parkedRestorationsRef.current.clear()
     setFailedAgentSend(null)
     setAgentError(null)
@@ -1185,6 +1207,7 @@ export function useAgentChatController({
     reconcileChatRef.current?.reset()
     resetReplyNotificationDedupe()
     retainedSends.resetRetainedSendStore()
+    withdrawnTurnIdsRef.current.clear()
     parkedRestorationsRef.current.clear()
     setActivityByAgentMessage({})
     setProgressByAgentMessage({})
@@ -1217,6 +1240,7 @@ export function useAgentChatController({
     agentSendSetupOwnerRef.current = null
     agentSendInFlightRef.current = false
     retainedSends.resetRetainedSendStore()
+    withdrawnTurnIdsRef.current.clear()
     parkedRestorationsRef.current.clear()
     // Abort any in-flight reconcile so a run mid-backoff can't resurrect a
     // just-cleared tracker/FSM entry after this teardown (security review).
@@ -1698,10 +1722,13 @@ export function useAgentChatController({
       if (!isStillRelevant()) return
       const older = turnsToChatMessages(response.turns) as AgentChatMessage[]
       const activeTaskId = tracker.get(makeTaskKey(requestAgent, requestChatId))?.taskId
-      const merged = mergeServerMessages(
-        chatMessagesRef.current,
-        older,
-        activeTaskId ? new Set([activeTaskId]) : undefined
+      const merged = withoutMessageIds(
+        mergeServerMessages(
+          chatMessagesRef.current,
+          older,
+          activeTaskId ? new Set([activeTaskId]) : undefined
+        ),
+        withdrawnTurnIdsRef.current
       )
       chatMessagesRef.current = merged
       setChatMessages(merged)
@@ -2152,7 +2179,8 @@ export function useAgentChatController({
   // so the live branch can anchor and the idle branch can decide the durable
   // fallback. Replace is guarded on: chat active, server strictly grew, and NO
   // live tracker entry (a running task holds an optimistic turn a replace would
-  // drop) — re-checked after every await (TOCTOU).
+  // drop) — re-checked after every await (TOCTOU). Withdrawn turns
+  // (`withdrawnTurnIdsRef`) are dropped from what it writes.
   const hydrateActiveChatFromServer = useCallback(
     async (
       chatKey: TaskKey,
@@ -2231,7 +2259,7 @@ export function useAgentChatController({
         !localHasServerTurns &&
         !resp.activeTaskId &&
         responseContainsAllTurns
-      const rendered =
+      let rendered = withoutMessageIds(
         localMessages.length > 0
           ? mergeServerMessages(
               localMessages,
@@ -2239,7 +2267,9 @@ export function useAgentChatController({
               resp.activeTaskId ? new Set([resp.activeTaskId]) : undefined,
               replaceSettledLegacyCache
             )
-          : hydratedWithAttachments
+          : hydratedWithAttachments,
+        withdrawnTurnIdsRef.current
+      )
       const hasOlderAfterMerge =
         hasOlderFromServer || nextServerBackfillBeforeTurn(rendered) !== undefined
       if (!mayHydrate()) return staleResult(rendered)
@@ -2256,6 +2286,10 @@ export function useAgentChatController({
       setChatMessages(rendered)
       const meta = await chatStore.createChat(agentRef, chatId)
       if (!mayHydrate()) return staleResult(rendered)
+      // A send that ended during that await may have withdrawn its turn after
+      // `rendered` was computed: filter again so neither the store, the loaded
+      // count nor the returned list brings it back.
+      rendered = withoutMessageIds(rendered, withdrawnTurnIdsRef.current)
       if (resp.activeTaskId) {
         await chatStore.replaceMessages(agentRef, chatId, rendered, {
           activeTaskIds: [resp.activeTaskId],
@@ -3296,6 +3330,37 @@ export function useAgentChatController({
     activeFsmApproval,
   ])
 
+  // Puts an undelivered payload back in the composer: the text in the draft of
+  // `chatId`, then the attachments. An empty text never replaces a draft. Used
+  // by Recover input and by a send that ends undelivered: rejected by the
+  // server, or ended before it was handed to the main process while its agent
+  // was on hold.
+  const restoreComposerPayload = useCallback(
+    (
+      chatId: string | null,
+      agentRef: string | undefined,
+      workspaceTabId: string | null | undefined,
+      payload: Pick<FailedAgentSend, 'content' | 'attachments' | 'files' | 'references'>
+    ): void => {
+      if (payload.content) setComposerDraft(chatId, payload.content, agentRef, workspaceTabId)
+      if (payload.attachments.length) {
+        handleAddComposerImageAttachments(
+          payload.attachments.map(attachment => ({
+            ...attachment,
+            previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
+          }))
+        )
+      }
+      if (payload.files.length) handleRestoreComposerFiles(payload.files)
+      if (payload.references.length) handleAddComposerReferenceAttachments(payload.references)
+    },
+    [
+      handleAddComposerImageAttachments,
+      handleRestoreComposerFiles,
+      handleAddComposerReferenceAttachments,
+    ]
+  )
+
   const sendAgentMessage = useCallback(
     async (
       content: string,
@@ -3449,11 +3514,12 @@ export function useAgentChatController({
       let sendChatId = currentChatId
       const sendSelectionIntentRevision = currentChatId ? null : beginSelectionIntent()
       if (sendSelectionIntentRevision !== null) clearPendingSelection(sendAgent)
-      const sendStillAuthorized = () =>
+      const sendAuthScopeIsCurrent = () =>
         sendScope === sendScopeGeneration.current &&
-        sendScopeIdentity === currentAuthScopeRef.current &&
-        !isHostAccessBlocked(sendAgent) &&
-        (!sendChatId || !isChatDeleted(sendAgent, sendChatId))
+        sendScopeIdentity === currentAuthScopeRef.current
+      const sendChatWasDeleted = () => sendChatId !== null && isChatDeleted(sendAgent, sendChatId)
+      const sendStillAuthorized = () =>
+        sendAuthScopeIsCurrent() && !isHostAccessBlocked(sendAgent) && !sendChatWasDeleted()
       const sendChatIsVisible = () =>
         activeChatVisibilityRef.current.selectedAgent === sendAgent &&
         activeChatVisibilityRef.current.activeChatId === sendChatId
@@ -3540,7 +3606,10 @@ export function useAgentChatController({
       }
       // Persist before the async POST so a Host wake, approval, tab switch, or
       // Desktop restart cannot erase the only copy of the user's outgoing turn.
-      // The acknowledgement below updates this same ID with its task id.
+      // The acknowledgement below updates this same ID with its task id. A send
+      // the server rejects, or one that ends before it is handed to the main
+      // process while its agent is on hold, withdraws it again
+      // (`withdrawUndeliveredTurn`).
       if (sendChatId) {
         try {
           await chatStore.upsertMessages(sendAgent, sendChatId, [userMessage])
@@ -3657,16 +3726,150 @@ export function useAgentChatController({
         clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined, originWorkspaceTabId)
       }
       if (shouldResetAttachments) resetComposerAttachments()
+      // The composer's attachments still belong to this send while their
+      // revision stays at the value the clear above gave it.
+      const attachmentRevisionAfterClear = shouldResetAttachments
+        ? composerAttachmentRevisionRef.current
+        : null
       setAgentError(null)
       setFailedAgentSend(null)
       setAgentSending(true)
+
+      // Ends a send the server never accepted, all or nothing: the payload goes
+      // back to the composer when the draft of the send's chat is free and the
+      // composer can take its attachments, and the retained snapshot is
+      // released. Otherwise the snapshot keeps the payload with a failure, for
+      // Recover input. Runs synchronously with the decision that ends the send.
+      const returnUndeliveredSend = (
+        detail: string,
+        kind: FailedAgentSend['kind'],
+        attachmentsUsable: boolean
+      ) => {
+        const payload = {
+          content: trimmedContent,
+          attachments: effectiveAttachments,
+          files: effectiveFiles,
+          references: effectiveReferences,
+        }
+        const hasAttachments =
+          payload.attachments.length > 0 ||
+          payload.files.length > 0 ||
+          payload.references.length > 0
+        const draftIsFree =
+          !payload.content || !getComposerDraft(sendChatId, sendAgent, originWorkspaceTabId)
+        const attachmentsCanReturn =
+          !hasAttachments ||
+          (attachmentsUsable &&
+            attachmentRevisionAfterClear !== null &&
+            composerAttachmentRevisionRef.current === attachmentRevisionAfterClear &&
+            sendChatIsVisible())
+        if (draftIsFree && attachmentsCanReturn) {
+          restoreComposerPayload(sendChatId, sendAgent, originWorkspaceTabId, payload)
+          releaseRetainedSend(sendAgent, sendChatId, userMessageId)
+          return
+        }
+        failRetainedSend(sendAgent, sendChatId, userMessageId, 'post_failed', detail, kind)
+      }
+      // Ends this send's activity entry and closes the agent's activity stream
+      // when no other send or task of the agent uses it.
+      let activityHandedToTask = false
+      const releaseSendActivity = () => {
+        activityInFlightByAgentRef.current[sendAgent] = (
+          activityInFlightByAgentRef.current[sendAgent] || []
+        ).filter(messageId => messageId !== userMessageId)
+        void maybeStopAgentActivityStream(sendAgent)
+      }
+      // Takes back the optimistic turn of a send the server never accepted. The
+      // activity bookkeeping and the fence are settled before the store call;
+      // after it, nothing is touched if the auth scope changed meanwhile. A
+      // refused removal leaves the turn visible and stored, and is reported.
+      const withdrawUndeliveredTurn = async () => {
+        if (!sendChatId) return
+        const chatId = sendChatId
+        releaseSendActivity()
+        withdrawnTurnIdsRef.current.add(userMessageId)
+        let refused = false
+        try {
+          await chatStore.removeMessages(sendAgent, chatId, [userMessageId])
+        } catch (error) {
+          refused = true
+          console.warn('[chat-history] failed to withdraw an undelivered message', {
+            agentRef: sendAgent,
+            chatId,
+            error,
+          })
+        }
+        if (!sendAuthScopeIsCurrent()) return
+        if (refused) {
+          withdrawnTurnIdsRef.current.delete(userMessageId)
+          updateMessageActivity(sendAgent, userMessageId, previous => ({
+            ...previous,
+            status: 'error',
+            errorMessage: WITHDRAW_REJECTED_TURN_FAILED_MESSAGE,
+          }))
+          pushToast(WITHDRAW_REJECTED_TURN_FAILED_MESSAGE, 'error')
+          return
+        }
+        if (sendChatIsVisible()) {
+          chatMessagesRef.current = chatMessagesRef.current.filter(
+            message => message.id !== userMessageId
+          )
+          setChatMessages(previous => previous.filter(message => message.id !== userMessageId))
+        } else {
+          transcriptMemo.delete(chatTranscriptMemoKey(sendAgent, chatId))
+        }
+      }
+      // Keeps the turn of a failed send that is not withdrawn: marks it so that a
+      // reconcile does not evict it, and stores it.
+      const keepUndeliveredTurn = async () => {
+        if (!sendChatId) return
+        try {
+          const failedUserMessage: AgentChatMessage = { ...userMessage, preserveLocal: true }
+          if (sendChatIsVisible()) {
+            setChatMessages(prev =>
+              prev.map(message => (message.id === userMessageId ? failedUserMessage : message))
+            )
+          }
+          await chatStore.upsertMessages(sendAgent, sendChatId, [failedUserMessage])
+        } catch {
+          // Persistence is best-effort. When the chat is visible, the in-memory
+          // view still shows the marked turn. When it is not (for example the
+          // agent was held and deselected), the mark is lost: the store keeps
+          // the optimistic copy written before the send, without the mark. The
+          // input is kept in the retained snapshot either way.
+        }
+      }
+      // Another path held the agent while this send was pending, and the scope and
+      // the chat are still there. `postIssued` marks that the send was handed to
+      // the main process (`invokeHostMessage` was called), not that its POST was
+      // made: main can still refuse it before the POST, for example on request
+      // validation or while minting the RPC token, and such a refusal is treated
+      // as posted. A send that was not handed to main, or that was rejected with a
+      // 401 or 403, is withdrawn, and its input is kept as for a loss of access. A
+      // send that was handed to main and failed in another way keeps its turn,
+      // and its input is retained with the failure.
+      let postIssued = false
+      const sendHeldByAnotherPath = () =>
+        sendAuthScopeIsCurrent() && !sendChatWasDeleted() && isHostAccessBlocked(sendAgent)
+      const endSendHeldByAnotherPath = async (detail: string, kind: FailedAgentSend['kind']) => {
+        returnUndeliveredSend(detail, kind, false)
+        await withdrawUndeliveredTurn()
+      }
+      const keepSendHeldByAnotherPath = async (detail: string, kind: FailedAgentSend['kind']) => {
+        failRetainedSend(sendAgent, sendChatId, userMessageId, 'post_failed', detail, kind)
+        await keepUndeliveredTurn()
+      }
 
       try {
         await ensureAgentActivityStream(sendAgent)
         // R2 "Option A": a per-session model chosen while the host was suspended
         // couldn't be persisted server-side, so it was held as pending. Piggyback
         // it here — this send wakes the host and applies the model to this task.
-        if (!sendStillAuthorized()) return
+        if (!sendStillAuthorized()) {
+          if (sendHeldByAnotherPath())
+            await endSendHeldByAnotherPath(SEND_HELD_AGENT_MESSAGE, 'auth')
+          return
+        }
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
         const fileReferences = fileReferencesForSend
@@ -3686,6 +3889,8 @@ export function useAgentChatController({
           ...(fileReferences.length > 0 ? { fileReferences } : {}),
         }
 
+        // Handed to main from here, even if main refuses it before the POST.
+        postIssued = true
         const response = await window.clerum.rpc.invokeHostMessage(
           sendAgent,
           request,
@@ -3893,10 +4098,6 @@ export function useAgentChatController({
             // a success toast right after it would contradict it.
             if (!fileReferencesDropped) pushToast(`Message sent to ${sendAgent}.`, 'success')
           }
-          activityInFlightByAgentRef.current[sendAgent] = (
-            activityInFlightByAgentRef.current[sendAgent] || []
-          ).filter(id => id !== userMessageId)
-          void maybeStopAgentActivityStream(sendAgent)
           return
         }
 
@@ -3958,56 +4159,56 @@ export function useAgentChatController({
           fsm.dispatch(taskKey, { type: 'SEND_STARTED', taskId })
           fsm.dispatch(taskKey, { type: 'TASK_CREATED', taskId })
         }
+        // The task owns the activity entry from here.
+        activityHandedToTask = true
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
         if (
           isAuthorizationError(error) &&
-          sendScope === sendScopeGeneration.current &&
-          sendScopeIdentity === currentAuthScopeRef.current &&
+          sendAuthScopeIsCurrent() &&
           !isHostAccessBlocked(sendAgent)
         ) {
-          if (isConfirmedHostAccessRevoked(error)) {
-            revokeHostAccess(sendAgent)
-            return
-          }
-          if (!isHttp403(error)) {
-            holdHostAccess(sendAgent)
-            return
-          }
-          try {
-            await chatStore.listSessions(sendAgent, { agent: sendAgent, limit: 1 }, { force: true })
-          } catch (readError) {
-            if (
-              isAuthorizationError(readError) &&
-              sendScope === sendScopeGeneration.current &&
-              sendScopeIdentity === currentAuthScopeRef.current &&
-              !isHostAccessBlocked(sendAgent)
-            ) {
-              if (isConfirmedHostAccessRevoked(readError)) revokeHostAccess(sendAgent)
-              else holdHostAccess(sendAgent)
-              return
+          // A rejection is a loss of access only when the server reports one:
+          // `host_access_revoked` on the send, or a 403 whose follow-up read is
+          // denied too. A 401, or a 403 whose read is not denied, is a generic
+          // rejection: the server decides again on the next attempt.
+          let lossOfAccess: 'revoked' | 'uncertain' | null = isConfirmedHostAccessRevoked(error)
+            ? 'revoked'
+            : null
+          if (!lossOfAccess && isHttp403(error)) {
+            try {
+              await chatStore.listSessions(
+                sendAgent,
+                { agent: sendAgent, limit: 1 },
+                { force: true }
+              )
+            } catch (readError) {
+              if (isAuthorizationError(readError)) {
+                lossOfAccess = isConfirmedHostAccessRevoked(readError) ? 'revoked' : 'uncertain'
+              }
             }
+            if (!sendAuthScopeIsCurrent()) return
           }
+          // No await between the composer write and the hold; only the withdrawal
+          // of the turn awaits.
+          const chatDeleted = sendChatWasDeleted()
+          if (!chatDeleted) returnUndeliveredSend(message, 'auth', lossOfAccess === null)
+          if (lossOfAccess === 'revoked') revokeHostAccess(sendAgent)
+          else if (lossOfAccess === 'uncertain') holdHostAccess(sendAgent)
+          if (!chatDeleted) await withdrawUndeliveredTurn()
+          return
         }
-        if (!sendStillAuthorized()) return
-        const message = error instanceof Error ? error.message : String(error)
-        const normalized = message.toLowerCase()
-        const isRequestEntityTooLarge =
-          normalized.includes('request entity too large') ||
-          normalized.includes('payload too large')
+        if (!sendStillAuthorized()) {
+          if (sendHeldByAnotherPath()) {
+            if (!postIssued) await endSendHeldByAnotherPath(message, classifyErrorKind(message))
+            else if (isAuthorizationError(error)) await endSendHeldByAnotherPath(message, 'auth')
+            else await keepSendHeldByAnotherPath(message, classifyErrorKind(message))
+          }
+          return
+        }
         const kind = classifyErrorKind(message)
-        const fallback = isRequestEntityTooLarge
-          ? 'Send fewer or smaller attachments. If small attachments are refused too, the rpc-proxy and mcp-host deployments may predate the current payload limits.'
-          : errorRecoveryHint(kind)
-        const friendlyMessage = isRequestEntityTooLarge
-          ? 'The message is larger than the deployed runtime accepts (images or attached files).'
-          : kind === 'waking'
-            ? 'Agent is waking up.'
-            : kind === 'network'
-              ? 'Temporary connection issue while sending to the agent.'
-              : kind === 'auth'
-                ? 'Access issue while sending to this agent.'
-                : 'Unable to send message to this agent.'
-        setAgentError(`${friendlyMessage} ${fallback}`)
+        const { summary, hint: fallback } = describeSendFailure(message, kind)
+        setAgentError(`${summary} ${fallback}`)
         // Issue #654 — keep the payload recoverable and record WHO it belongs
         // to, so recovery can never overwrite a different chat's composer or a
         // newer draft. Memory only; released on terminal success/discard.
@@ -4036,30 +4237,11 @@ export function useAgentChatController({
             : `Message failed (${kind}).`,
           'error'
         )
-        // Durability: the POST threw before either success branch persisted the
-        // user message (post-D.3 persists once, after the taskId is known). Write
-        // it now so a transient send failure doesn't silently drop the user's
-        // typed input on reload — matches pre-D.3 eager-persist. Best-effort.
-        if (sendChatId) {
-          try {
-            const failedUserMessage: AgentChatMessage = { ...userMessage, preserveLocal: true }
-            if (sendChatIsVisible()) {
-              setChatMessages(prev =>
-                prev.map(message => (message.id === userMessageId ? failedUserMessage : message))
-              )
-            }
-            await chatStore.upsertMessages(sendAgent, sendChatId, [failedUserMessage])
-          } catch {
-            // persistence is best-effort; the in-memory view still shows it
-          }
-        }
-        // The POST failed — no background task exists, so retire the activity
-        // stream now. (For a started task, onTrackerTerminal does this instead.)
-        activityInFlightByAgentRef.current[sendAgent] = (
-          activityInFlightByAgentRef.current[sendAgent] || []
-        ).filter(messageId => messageId !== userMessageId)
-        void maybeStopAgentActivityStream(sendAgent)
+        await keepUndeliveredTurn()
       } finally {
+        // A send that handed its activity entry to no task releases it here,
+        // whichever exit it took.
+        if (!activityHandedToTask) releaseSendActivity()
         // Fire & forget: release the synchronous setup guard immediately. The
         // task (if any) keeps running in the tracker.
         releaseSendSetup()
@@ -4093,6 +4275,9 @@ export function useAgentChatController({
       appendAssistantMessage,
       appendNewEntry,
       bumpActivity,
+      restoreComposerPayload,
+      transcriptMemo,
+      chatTranscriptMemoKey,
     ]
   )
 
@@ -4131,6 +4316,22 @@ export function useAgentChatController({
       answeredWithoutFiles: snapshot.reason === 'host_files_dropped',
     } satisfies FailedAgentSend
   }, [retainedSends, retainedRevision, selectedAgent, activeChatId])
+  // The alert for a retained failure. Reason `post_failed` records either the
+  // error the send threw (while opening the activity stream, in the call to the
+  // main process, or in a later step of the send), or the fixed
+  // `SEND_HELD_AGENT_MESSAGE` of a send its agent's hold stopped before it was
+  // handed to main. That text is technical detail and stays under "Technical
+  // details": the alert is the sentence for the failure's kind. Other reasons
+  // keep the text they recorded.
+  const retainedFailureAlert = useMemo(() => {
+    if (!visibleRetainedFailure) return null
+    if (visibleRetainedFailure.reason !== 'post_failed') return visibleRetainedFailure.message
+    const { summary, hint } = describeSendFailure(
+      visibleRetainedFailure.message,
+      visibleRetainedFailure.kind
+    )
+    return `${summary} ${hint}`
+  }, [visibleRetainedFailure])
   const visibleFailure =
     visibleRetainedFailure ??
     (failedAgentSend &&
@@ -4161,7 +4362,8 @@ export function useAgentChatController({
     // in flight) retained nothing, so the old snapshot is still the only copy of
     // the payload: keep it and the failure it shows. Once a newer send has
     // retained its own snapshot, the old one is redundant whatever that send's
-    // outcome — on failure the payload lives on in the newer snapshot.
+    // outcome — on failure the payload lives on in the newer snapshot, and on a
+    // rejection it is back in the composer or in that snapshot.
     if (lastRetainedSendIdRef.current === retainedBefore) return
     if (previous.agentRef && previous.userMessageId) {
       releaseRetainedSend(previous.agentRef, previous.chatId ?? null, previous.userMessageId)
@@ -4225,28 +4427,12 @@ export function useAgentChatController({
         pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
         return
       }
-      if (
-        !setComposerDraft(
-          activeChatId,
-          visibleFailure.content,
-          selectedAgent ?? undefined,
-          workspaceTabId
-        )
-      ) {
-        pushToast(
-          'This composer no longer owns the draft. Select its chat tab and try again.',
-          'error'
-        )
-        return
-      }
-      handleAddComposerImageAttachments(
-        visibleFailure.attachments.map(attachment => ({
-          ...attachment,
-          previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
-        }))
+      restoreComposerPayload(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceTabId,
+        visibleFailure
       )
-      handleRestoreComposerFiles(visibleFailure.files)
-      handleAddComposerReferenceAttachments(visibleFailure.references)
       handleDiscardFailedAgentSend()
     },
     [
@@ -4257,8 +4443,7 @@ export function useAgentChatController({
       composerReferenceAttachments,
       pushToast,
       handleRestoreComposerFiles,
-      handleAddComposerImageAttachments,
-      handleAddComposerReferenceAttachments,
+      restoreComposerPayload,
       handleDiscardFailedAgentSend,
     ]
   )
@@ -4554,9 +4739,9 @@ export function useAgentChatController({
     composerReferenceAttachments,
     agentSending,
     // A fresh send-time error (a blocked image send, a new POST failure) wins;
-    // the retained failure's message covers the banner only when nothing newer
-    // has been reported.
-    agentError: agentError ?? visibleRetainedFailure?.message ?? null,
+    // the retained failure's alert covers the banner only when nothing newer has
+    // been reported.
+    agentError: agentError ?? retainedFailureAlert,
     failedAgentSend: visibleFailure,
     chatEndRef,
     scrollChatToBottom,

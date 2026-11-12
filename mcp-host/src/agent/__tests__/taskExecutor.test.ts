@@ -40,6 +40,7 @@ import { ClaudeProvider } from '../../llm/claude'
 import { FailoverEngine } from '../../llm/failover/engine'
 import type { LlmPolicy } from '../../llm/failover/types'
 import { OpenAIProvider } from '../../llm/openai'
+import { recordedResponse } from '../../llm/openaiFamily/__tests__/responsesFixtures'
 import { PromptCache } from '../../llm/promptCache'
 import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
@@ -2693,14 +2694,11 @@ describe('#654 failover identity + per-attempt image guard', () => {
   }
 
   it('builds a SAME-provider fallback with the session model, and the SDK sends that model', async () => {
-    const create = vi.fn(async (_input: unknown) => ({
-      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-    }))
+    const create = vi.fn(async (_input: unknown) => recordedResponse('v1-text-gpt-4.1'))
     // Mirrors `buildFallbackProvider`: the SDK model comes from `entry.model`.
     const buildProvider = vi.fn(
       (entry: { model: string }) =>
-        new OpenAIProvider({ chat: { completions: { create } } } as never, entry.model)
+        new OpenAIProvider({ responses: { create } } as never, entry.model)
     )
     const { executor } = executorWith({
       modelName: 'gpt-5.4-mini',

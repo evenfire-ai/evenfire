@@ -435,11 +435,12 @@ export class PromptBridgeHandler {
           ? 'atomic_terminal_finalization'
           : 'per_attempt',
         // The per-grant ceiling is enforced here, before the request
-        // reaches any provider. On API-key providers it lands as `max_tokens`
-        // on the wire; on codex-subscription it bounds the hashed request
-        // identity while the proxy omits it from the ChatGPT wire, which also
-        // keeps a capped grant eligible for failover instead of failing the
-        // contract's 16384 range check outright.
+        // reaches any provider. On API-key providers it lands as the wire's
+        // output-token field (see clampMaxTokens for the Responses floor);
+        // on codex-subscription it bounds the hashed request identity while
+        // the proxy omits it from the ChatGPT wire, which also keeps a capped
+        // grant eligible for failover instead of failing the contract's 16384
+        // range check outright.
         maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
@@ -664,10 +665,14 @@ function unexpectedAuthorizationResponse(): PluginWorkloadError {
 /**
  * Bound a workload's requested output against the grant's ceiling.
  *
- * Scope, stated honestly: on API-key providers this is the real cap —
- * `max_tokens` reaches the provider. On codex-subscription the ChatGPT wire
- * rejects `max_output_tokens` and the proxy omits it, so there the clamp bounds
- * the hashed request identity rather than the response, and the enforced bound
+ * Scope, stated honestly: on API-key providers this is the real cap — it
+ * reaches the provider as `max_tokens`/`max_completion_tokens` on Chat
+ * Completions and as `max_output_tokens` on Responses (official OpenAI).
+ * Responses rejects values below 16, so there a grant of 1-15 tokens is sent
+ * as 16 and the response may overrun the grant by at most 16 - grant tokens.
+ * On codex-subscription the ChatGPT wire rejects `max_output_tokens` and the
+ * proxy omits it, so there the clamp bounds the hashed request identity rather
+ * than the response, and the enforced bound
  * is the contract's structural `LIMITS.maxOutputTokens`. It still matters
  * there: an unclamped request above that limit fails the contract range check
  * as a non-retryable error, which is terminal with no failover.

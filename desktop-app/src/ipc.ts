@@ -42,6 +42,7 @@ import {
   type DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfig,
   EntityChangeStreamEvent,
+  GfsResourceDeepLinkEnvelope,
   HostActivityStreamEvent,
   HostMessageAttachment,
   HostMessageRequest,
@@ -230,6 +231,24 @@ export function sanitizeChatLoadWindow(
   }
 }
 
+const MAX_CHAT_MESSAGE_IDS = 16
+const MAX_CHAT_MESSAGE_ID_LENGTH = 128
+
+/** Ids for chat:removeMessages: 1 to 16 non-blank strings of at most 128 characters. */
+export function sanitizeChatMessageIds(input: unknown): string[] {
+  if (!Array.isArray(input) || input.length < 1 || input.length > MAX_CHAT_MESSAGE_IDS) {
+    throw new Error('Invalid chat message ids')
+  }
+  return input.map(id => {
+    if (typeof id !== 'string') throw new Error('Invalid chat message ids')
+    const trimmed = id.trim()
+    if (!trimmed || trimmed.length > MAX_CHAT_MESSAGE_ID_LENGTH) {
+      throw new Error('Invalid chat message ids')
+    }
+    return trimmed
+  })
+}
+
 function sanitizeSessionsListQuery(
   input: import('./types.js').SessionsListQuery | undefined
 ): import('./types.js').SessionsListQuery {
@@ -398,6 +417,16 @@ export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): v
   if (!isFileSender && !isDevSender) {
     throw new Error('Untrusted IPC sender')
   }
+}
+
+/** Register the trusted renderer's read-only snapshot of the native GFS inbox. */
+export function registerGfsDeepLinkListHandler(queue: {
+  list(): GfsResourceDeepLinkEnvelope[]
+}): void {
+  ipcMain.handle('gfs:listPendingDeepLinks', event => {
+    assertTrustedSender(event)
+    return { links: queue.list() }
+  })
 }
 
 /**
@@ -2011,6 +2040,22 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
         chatId,
         messages as import('./types.js').ChatMessage[]
       )
+    }
+  )
+
+  // Removes local user turns that carry no stored sign of a server answer.
+  // The store applies the rule to what is stored: it throws when a requested
+  // message that is stored fails the rule, and removes nothing from a deleted
+  // or missing chat.
+  ipcMain.handle(
+    'chat:removeMessages',
+    async (event, payload: { agentRef: string; chatId: string; messageIds: unknown }) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      const messageIds = sanitizeChatMessageIds(payload?.messageIds)
+      return requireChatStore().removeMessages(agentRef, chatId, messageIds)
     }
   )
 
