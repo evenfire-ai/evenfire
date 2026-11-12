@@ -634,8 +634,8 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
 
   it('reports failure with the HCC diagnostic only after the FULL poll budget when RolloutIncomplete persists', async () => {
     // RolloutIncomplete is the HCC saying "I exhausted MY 120s budget", not an
-    // irreversible verdict — its post-terminal re-poll can still correct the
-    // condition to True (see the recovery test below). So the UI must NOT latch
+    // irreversible verdict — a later HCC reconcile of the McpServer can still
+    // correct the condition to True (see the recovery test below). So the UI must NOT latch
     // failure on the first sighting; it reports failure only when its OWN
     // POLL_TIMEOUT_MS expires with the diagnostic still uncorrected — and then
     // with the HCC's rollout numbers, never a bare "timed out".
@@ -674,11 +674,12 @@ describe('UpdateConnectorCredentials — rollout polling', () => {
     expect(screen.queryByText(/Credentials rotated/i)).not.toBeInTheDocument()
   })
 
-  it('recovers to success when a transient RolloutIncomplete is later corrected to True (HCC re-poll)', async () => {
+  it('recovers to success when a transient RolloutIncomplete is later corrected to True (later HCC reconcile)', async () => {
     // The HCC readiness budget (24x5s=120s, reconciler.ts pollReadiness) can write
     // a False/RolloutIncomplete BEFORE a legitimately slow pod finishes rolling
-    // out; its post-terminal re-poll (commit c49957b) then corrects the condition
-    // to True within the UI's own POLL_TIMEOUT_MS (180s). RolloutIncomplete is
+    // out; a later reconcile of the McpServer (a Secret event, a desired-state
+    // change, a NetworkPolicy pass, a retry) can then correct the condition to
+    // True within the UI's own POLL_TIMEOUT_MS (180s). RolloutIncomplete is
     // therefore NOT irreversible — it means "the controller exhausted ITS budget,
     // still observing". The UI must keep polling and report SUCCESS on the later
     // True, not latch 'failed' on the first RolloutIncomplete. This is the

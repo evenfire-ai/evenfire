@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as http from 'http'
 import { externalEgressResyncDelayMs } from './externalEgressConvergenceCoordinator'
 import { HostFleetReconcileError } from './hostReconciler'
-import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
+import { K8sRequestTimeoutError } from './k8s/k8sRequestDeadline'
 import {
   McpServerWatcher,
   createMcpAuthorizationStore,
@@ -288,6 +288,8 @@ const mockConfig = vi.hoisted(() => ({
   port: 8081,
   runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
   hostK8sRequestTimeoutMs: 30_000,
+  k8sRequestTimeoutMs: 30_000,
+  netPolPassHardLimitMs: 1_800_000,
   hostResyncIntervalSec: 0,
   netPolResyncIntervalSec: 0,
   netPolDefaultsResyncIntervalSec: 0,
@@ -376,12 +378,17 @@ vi.mock('./reconciler', () => ({
     hasIncompleteReconciliation() {
       return false
     }
+    hasSecretChangeEvidence() {
+      return false
+    }
+    recordSecretChangeEvidence = vi.fn()
     fullReconcile = mocks.serverFullReconcile
     reconcile = vi.fn()
     reconcileDelete = vi.fn()
     getStatus = vi.fn()
     setInventoryAuthority = vi.fn()
     setResolveCurrentServer = vi.fn()
+    setIncompleteReconciliationListener = vi.fn()
   },
 }))
 
@@ -3192,7 +3199,7 @@ describe('McpServerWatcher startup', () => {
     })
     await blockerStarted.promise
 
-    const convergence = watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+    const convergence = watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
     ;(watcher as any).servers.set(staleServer.name, {
       ...staleServer,
       spec: { ...staleServer.spec, envSecret: { name: 'replacement-env' } },
@@ -3206,6 +3213,11 @@ describe('McpServerWatcher startup', () => {
     releaseBlocker.resolve(undefined)
     await Promise.all([blocker, convergence])
 
+    // MODIFIED is Secret-change evidence for every server that referenced
+    // the Secret when the event arrived (#1338).
+    expect(
+      reconciler.recordSecretChangeEvidence.mock.calls.map(([name]: [string]) => name).sort()
+    ).toEqual([currentServer.name, staleServer.name].sort())
     expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
     expect(
       reconciler.reconcile.mock.calls.some(
@@ -3235,18 +3247,22 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).servers.set(selected.name, selected)
     ;(watcher as any).mcpServerCacheSynced = false
 
-    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
 
     expect(reconciler.reconcile).not.toHaveBeenCalled()
+    // Deferred, not dropped: the change waits for the next authority gain.
+    expect(reconciler.recordSecretChangeEvidence).not.toHaveBeenCalled()
+    expect([...(watcher as any).unroutedSecretChanges]).toEqual(['mcp-server/shared-env'])
 
     markMcpServerInventoryAuthoritative(watcher)
-    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
 
     expect(reconciler.reconcile).toHaveBeenCalledOnce()
     expect(reconciler.reconcile).toHaveBeenCalledWith(
       expect.objectContaining({ name: selected.name }),
       { isCurrent: expect.any(Function) }
     )
+    expect(reconciler.recordSecretChangeEvidence).toHaveBeenCalledExactlyOnceWith(selected.name)
     await watcher.stop()
   })
 
@@ -3331,7 +3347,7 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).servers.set(selected.name, selected)
 
     await watcher.stop()
-    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server', 'MODIFIED')
 
     expect(reconciler.reconcile).not.toHaveBeenCalled()
   })
@@ -9206,7 +9222,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     )
     const watcher = newContextAuthoritativeWatcher()
     const order: string[] = []
-    const timeout = new HostK8sRequestTimeoutError('AppsV1Api.readNamespacedDeployment', 30_000)
+    const timeout = new K8sRequestTimeoutError('AppsV1Api.readNamespacedDeployment', 30_000)
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockImplementation(async host => {

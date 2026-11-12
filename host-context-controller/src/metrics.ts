@@ -89,7 +89,9 @@ export const networkPoliciesTotal = gauge({
 
 export const initialConvergenceRetriesTotal = counter({
   name: 'clerum_hcc_initial_convergence_retries_total',
-  help: 'Initial background convergence retries scheduled after a failed fleet pass.',
+  help:
+    'Background convergence retries scheduled after a failed fleet pass or, for the McpServer ' +
+    'lane, after a reconcile outside a fleet pass left an incomplete obligation.',
   labelNames: ['lane'] as const,
 })
 
@@ -122,6 +124,12 @@ export const initialConvergencePassDurationSeconds = histogram({
   help: 'Seconds spent in an initial background convergence pass, labeled by named result.',
   labelNames: ['lane', 'result'] as const,
   buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
+})
+
+export const networkPolicyPassOverrunsTotal = counter({
+  name: 'clerum_hcc_networkpolicy_pass_overruns_total',
+  help: 'NetworkPolicy passes still running at an overrun mark (warn) or at the hard limit (fatal), by the stage they were in.',
+  labelNames: ['severity', 'phase'] as const,
 })
 
 export const networkPolicySafetyPassDurationSeconds = histogram({
@@ -205,6 +213,14 @@ export const mcpserverMissingSecret = gauge({
   name: 'clerum_hcc_mcpserver_missing_secret',
   help: '1 when an McpServer references a non-existent Secret',
   labelNames: ['namespace', 'name', 'secret_name'] as const,
+})
+
+export const mcpserverReconcileCallFailuresTotal = counter({
+  name: 'clerum_hcc_mcpserver_reconcile_call_failures_total',
+  help:
+    'Failed Kubernetes calls in an McpServer reconcile that decide its published readiness, ' +
+    'by step (site) and by whether the authoritative verdict was kept or not-ready was published.',
+  labelNames: ['site', 'outcome'] as const,
 })
 
 export const infrastructureTelemetryEnqueuedTotal = counter({

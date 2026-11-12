@@ -2,6 +2,7 @@
  * Configuration settings loaded from environment variables.
  */
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
+import { NETPOL_PASS_OVERRUN_WARN_MS } from './constants'
 import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
 import { ContextCRD, McpServerCRD } from './types'
 
@@ -202,6 +203,22 @@ export interface Config {
   // convergence path. Watches keep their independent long-lived lifecycle.
   hostK8sRequestTimeoutMs: number
 
+  // Per-request deadline for finite Kubernetes calls made by the NetworkPolicy,
+  // McpServer runtime and binding reconcilers and by the watcher's shared
+  // McpServer/Context and Secret clients. Their work shares the keyed effect
+  // queues with the authoritative NetworkPolicy pass, so one request that never
+  // settles would hold that pass forever (#1338). Host work, including the Host
+  // convergence queued on the Context identity queue and the watcher's Host
+  // client, uses hostK8sRequestTimeoutMs instead. Watches keep their
+  // independent long-lived lifecycle.
+  k8sRequestTimeoutMs: number
+
+  // Hard bound for one NetworkPolicy convergence pass. A pass that exceeds it
+  // is logged with its phase and pending effect and the process exits so the
+  // container restarts; a pass that never settles otherwise blocks every later
+  // pass and keeps the provider inventory non-authoritative (#1338).
+  netPolPassHardLimitMs: number
+
   // Bounded cross-Host concurrency for a full/lifecycle Host fleet pass. Urgent
   // per-Host events (ADDED/MODIFIED/DELETED/wake) are admitted outside this
   // budget. Integer 1..8, default 2 (see parseHostFullReconcileConcurrency).
@@ -364,12 +381,42 @@ export function parseHeartbeatPollMs(raw: string | undefined): number {
   return parsed
 }
 
+// Node clamps a larger setTimeout delay to 1 ms, which would fire a deadline
+// or a hard limit immediately instead of never.
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
 export function parseHostK8sRequestTimeoutMs(raw: string | undefined): number {
   if (raw === undefined) return 30_000
   const parsed = Number(raw)
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
     throw new Error(
-      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer (milliseconds), got '${raw}'`
+      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds, got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+export function parseK8sRequestTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined) return 30_000
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `HCC_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds, got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+export function parseNetPolPassHardLimitMs(raw: string | undefined): number {
+  if (raw === undefined) return 30 * 60_000
+  const parsed = Number(raw)
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed <= NETPOL_PASS_OVERRUN_WARN_MS ||
+    parsed > MAX_TIMER_DELAY_MS
+  ) {
+    throw new Error(
+      `HCC_NETPOL_PASS_HARD_LIMIT_MS must be an integer number of milliseconds above the ${NETPOL_PASS_OVERRUN_WARN_MS}ms overrun warning and at most ${MAX_TIMER_DELAY_MS}, got '${raw}'`
     )
   }
   return parsed
@@ -838,6 +885,8 @@ export const config: Config = {
   // Every finite Kubernetes request that can hold Host convergence gets its
   // own deadline. Watch streams are intentionally excluded.
   hostK8sRequestTimeoutMs: parseHostK8sRequestTimeoutMs(getEnv('HCC_HOST_K8S_REQUEST_TIMEOUT_MS')),
+  k8sRequestTimeoutMs: parseK8sRequestTimeoutMs(getEnv('HCC_K8S_REQUEST_TIMEOUT_MS')),
+  netPolPassHardLimitMs: parseNetPolPassHardLimitMs(getEnv('HCC_NETPOL_PASS_HARD_LIMIT_MS')),
   hostFullReconcileConcurrency: parseHostFullReconcileConcurrency(
     getEnv('HCC_HOST_FULL_RECONCILE_CONCURRENCY')
   ),

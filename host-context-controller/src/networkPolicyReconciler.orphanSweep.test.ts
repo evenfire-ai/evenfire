@@ -10,6 +10,7 @@ import {
 vi.mock('./config', () => ({
   config: {
     namespace: 'mcp-server',
+    k8sRequestTimeoutMs: 30_000,
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
@@ -313,7 +314,9 @@ describe('NetworkPolicy orphan sweep cap (#478)', () => {
     })
 
     expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
-    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+    expect(
+      mockApi.deleteNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+    ).not.toContainEqual(
       expect.objectContaining({
         name: 'ext-egress-orphan-server-old-example-com-443',
         namespace: 'mcp-server',
