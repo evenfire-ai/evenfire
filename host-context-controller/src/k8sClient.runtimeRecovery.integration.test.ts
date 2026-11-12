@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { V1Deployment, V1Service } from '@kubernetes/client-node'
+import { fakeSecretApiserver } from './__tests__/fakeSecretApiserver'
+import { SecretInformer } from './informers/secretInformer'
 import { K8sRequestTimeoutError } from './k8s/k8sRequestDeadline'
 import { McpServerWatcher } from './k8sClient'
 import { hccLogger } from './logger'
@@ -977,6 +979,112 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
     })
 
+    function holdQueue(state: any) {
+      const started = deferred()
+      const release = deferred()
+      const blocker = state.enqueueMcpServerReconciliation(
+        { name: witness, namespace: 'mcp-server' },
+        async () => {
+          started.resolve()
+          await release.promise
+        }
+      )
+      return { blocker, started, release }
+    }
+
+    it('I17 a Secret first seen while the inventory is not authoritative is replayed after an identical recovery', async () => {
+      failNext('witness-input', absentInput, absentInput)
+      const harness = prepareWatcher()
+      watcher = harness.watcher
+      const { state } = harness
+      await watcher.start()
+      await drain(state)
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      expect(fixture.deployments.has(witness)).toBe(false)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'SecretResolved', reason: 'SecretNotFound' }),
+        ])
+      )
+      const info = vi.spyOn(hccLogger, 'info')
+      const readsBefore = reads('witness-input')
+      state.retireMcpServerWatch()
+
+      await watcher.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      await watcher.reconcileByEnvSecret('unrelated-input', 'mcp-server', 'ADDED')
+
+      expect(reads('witness-input')).toBe(readsBefore)
+      expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('identical-complete', 'skip')
+      )
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(reads('unrelated-input')).toBe(0)
+      expect(fixture.deployments.has(witness)).toBe(true)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+    })
+
+    it('I18 a queued ADDED dropped because authority moved is replayed, and its read timeout keeps ready', async () => {
+      const state = await startCertified()
+      const warn = vi.spyOn(hccLogger, 'warn')
+      const info = vi.spyOn(hccLogger, 'info')
+      const readsBefore = reads('witness-input')
+      const { blocker, started, release } = holdQueue(state)
+      await started.promise
+
+      const event = watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      state.retireMcpServerWatch()
+      release.resolve()
+      await Promise.all([blocker, event])
+      await drain(state)
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ event: 'secret-reconcile-dropped', serverName: witness })
+      )
+      expect(reads('witness-input')).toBe(readsBefore)
+      failNext('witness-input', timeout)
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('identical-complete', 'skip')
+      )
+      expect(reads('witness-input')).toBe(readsBefore + 1)
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(state.reconciler.incompleteReconciliationNames()).toEqual([witness])
+    })
+
+    it('I18b MODIFIED then ADDED for one Secret records evidence and also replays', async () => {
+      const state = await startCertified()
+      const reconciled = recordReconciledNames(state)
+      state.retireMcpServerWatch()
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'MODIFIED')
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      failNext('witness-input', timeout)
+
+      const info = vi.spyOn(hccLogger, 'info')
+      await state.recoverMcpServerInventoryAndWatch()
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('work-pending', 'request')
+      )
+      await drain(state)
+      // The pass the evidence requested and the replayed ADDED each reconcile.
+      expect(reconciled).toEqual([witness, witness])
+      expect(state.unroutedSecretAdditions.size).toBe(0)
+    })
+
     it('I18c a DELETED event whose read times out publishes not-ready', async () => {
       const state = await startCertified()
       const readsBefore = reads('witness-input')
@@ -1052,9 +1160,213 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
     })
 
-    // The mcp-server SecretInformer replays every Secret as ADDED after each
-    // reconnect. These tests drive its consumer, handleSecretEvent, as main.ts
-    // wires it.
+    async function informerEvents(type: string): Promise<number> {
+      const metric = registry.getSingleMetric('clerum_hcc_secret_informer_events_total')
+      if (!metric) throw new Error('clerum_hcc_secret_informer_events_total is not registered')
+      const snapshot = await metric.get()
+      return (
+        snapshot.values.find(
+          value => value.labels.namespace === 'mcp-server' && value.labels.type === type
+        )?.value ?? 0
+      )
+    }
+
+    async function informerCounter(name: string, labels: Record<string, string>) {
+      const metric = registry.getSingleMetric(name)
+      if (!metric) throw new Error(`${name} is not registered`)
+      const snapshot = await metric.get()
+      return (
+        snapshot.values.find(value =>
+          Object.entries(labels).every(([label, expected]) => value.labels[label] === expected)
+        )?.value ?? 0
+      )
+    }
+
+    /** The mcp-server informer, in resume mode, wired to the watcher as main.ts wires it. */
+    async function startInformer(state: any, names: string[]) {
+      const api = fakeSecretApiserver('mcp-server', names)
+      const informer = new SecretInformer(
+        {} as any,
+        'mcp-server',
+        watcher!.handleSecretEvent,
+        { mode: 'resume', list: api.list },
+        { watch: { watch: api.watch } }
+      )
+      await expect(informer.start()).resolves.toBe(true)
+      await drain(state)
+      return { api, informer }
+    }
+
+    it('I10a an informer MODIFIED reaches the watcher as MODIFIED: evidence is recorded and a read timeout publishes', async () => {
+      const state = await startCertified()
+      const { api, informer } = await startInformer(state, ['witness-input'])
+      try {
+        const readsBefore = reads('witness-input')
+        const modifiedBefore = await informerEvents('MODIFIED')
+        failNext('witness-input', timeout)
+
+        api.modify('witness-input')
+        await drain(state)
+
+        expect(await informerEvents('MODIFIED')).toBe(modifiedBefore + 1)
+        expect(reads('witness-input')).toBe(readsBefore + 1)
+        expect(state.reconciler.hasSecretChangeEvidence()).toBe(true)
+        expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(false)
+      } finally {
+        informer.stop()
+      }
+    })
+
+    it('I10b an informer ADDED for a first-seen Secret reaches the watcher as ADDED: a read timeout keeps ready', async () => {
+      const state = await startCertified()
+      const { api, informer } = await startInformer(state, ['unrelated-input'])
+      try {
+        const readsBefore = reads('witness-input')
+        const addedBefore = await informerEvents('ADDED')
+        failNext('witness-input', timeout)
+
+        api.create('witness-input')
+        await drain(state)
+
+        expect(await informerEvents('ADDED')).toBe(addedBefore + 1)
+        expect(reads('witness-input')).toBe(readsBefore + 1)
+        expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
+        expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
+      } finally {
+        informer.stop()
+      }
+    })
+
+    /** Three env-Secret McpServers, ready and certified, with the informer started. */
+    async function startQuietFleet() {
+      const peers = ['peer-one', 'peer-two'].map(name => {
+        const sibling = structuredClone(fixture.server)
+        sibling.metadata = { ...sibling.metadata, name, uid: `${name}-uid` }
+        sibling.spec.envSecret = { name: `${name}-input`, keys: [] }
+        return sibling
+      })
+      fixture.peers = peers
+      const state = await startCertified()
+      const started = await startInformer(state, [
+        'witness-input',
+        'peer-one-input',
+        'peer-two-input',
+      ])
+      const allReads = () => [...secretReads.values()].reduce((sum, value) => sum + value, 0)
+      return { state, ...started, allReads }
+    }
+
+    it.each([
+      ['resumes', false],
+      ['relists after a 410', true],
+    ] as const)(
+      'I11 a quiet informer reconnect that %s costs no reconcile, no Secret read and no status write',
+      async (_label, expire) => {
+        const { state, api, informer, allReads } = await startQuietFleet()
+        try {
+          const byEnvSecret = vi.spyOn(watcher!, 'reconcileByEnvSecret')
+          const readsBefore = allReads()
+          const patchesBefore = fixture.statusPatches
+          const resumesBefore = await informerCounter('clerum_hcc_secret_informer_resumes_total', {
+            namespace: 'mcp-server',
+          })
+          const relistsBefore = await informerCounter('clerum_hcc_secret_informer_lists_total', {
+            namespace: 'mcp-server',
+            outcome: 'relist',
+          })
+
+          for (let reconnect = 0; reconnect < 3; reconnect++) {
+            api.disconnect()
+            if (expire && reconnect === 0) {
+              api.expireNextResume()
+              await vi.advanceTimersByTimeAsync(1000)
+            }
+            await vi.advanceTimersByTimeAsync(1000)
+            await drain(state)
+          }
+
+          expect(byEnvSecret).not.toHaveBeenCalled()
+          expect(allReads()).toBe(readsBefore)
+          expect(fixture.statusPatches).toBe(patchesBefore)
+          const watches = api.watchCalls.slice(1)
+          expect(watches.length).toBeGreaterThanOrEqual(3)
+          for (const call of watches) expect(call.queryParams.resourceVersion).toBeDefined()
+          if (expire) {
+            expect(api.list).toHaveBeenCalledTimes(2)
+            expect(
+              await informerCounter('clerum_hcc_secret_informer_lists_total', {
+                namespace: 'mcp-server',
+                outcome: 'relist',
+              })
+            ).toBe(relistsBefore + 1)
+          } else {
+            expect(api.watchFn).toHaveBeenCalledTimes(4)
+            expect(
+              await informerCounter('clerum_hcc_secret_informer_resumes_total', {
+                namespace: 'mcp-server',
+              })
+            ).toBe(resumesBefore + 3)
+          }
+        } finally {
+          informer.stop()
+        }
+      }
+    )
+
+    it('I12 a Secret modified while the informer was down becomes evidence, so a read timeout publishes', async () => {
+      const state = await startCertified()
+      const { api, informer } = await startInformer(state, ['witness-input'])
+      try {
+        const readsBefore = reads('witness-input')
+        api.disconnect()
+        api.expireNextResume()
+        api.modify('witness-input')
+        failNext('witness-input', timeout)
+
+        await vi.advanceTimersByTimeAsync(2000)
+        await drain(state)
+
+        expect(api.list).toHaveBeenCalledTimes(2)
+        expect(reads('witness-input')).toBe(readsBefore + 1)
+        expect(state.reconciler.hasSecretChangeEvidence()).toBe(true)
+        expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(false)
+      } finally {
+        informer.stop()
+      }
+    })
+
+    it('I13 a Secret deleted while the informer was down is reconciled and fails the server closed', async () => {
+      const state = await startCertified()
+      const { api, informer } = await startInformer(state, ['witness-input'])
+      try {
+        const readsBefore = reads('witness-input')
+        expect(fixture.deployments.has(witness)).toBe(true)
+        api.disconnect()
+        api.expireNextResume()
+        api.remove('witness-input')
+        failNext('witness-input', absentInput)
+
+        await vi.advanceTimersByTimeAsync(2000)
+        await drain(state)
+
+        expect(reads('witness-input')).toBe(readsBefore + 1)
+        expect(fixture.deployments.has(witness)).toBe(false)
+        expect(fixture.server.status.conditions).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'SecretResolved',
+              status: 'False',
+              reason: 'SecretNotFound',
+            }),
+          ])
+        )
+      } finally {
+        informer.stop()
+      }
+    })
+
+    // These tests drive the mcp-server Secret informer's consumer,
+    // handleSecretEvent, as main.ts wires it.
     const secretEvent = (type: 'ADDED' | 'MODIFIED' | 'DELETED', name = 'witness-input') =>
       watcher!.handleSecretEvent({ type, name, namespace: 'mcp-server' })
     const setRolloutReady = (ready: boolean) => {
@@ -1089,110 +1401,6 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
       return state
     }
-
-    it.each([
-      ['MODIFIED', true],
-      ['DELETED', true],
-      ['ADDED', false],
-    ] as const)(
-      'I19 the Secret informer consumer passes %s through to the watcher: evidence recorded is %s',
-      async (type, evidence) => {
-        const state = await startCertified()
-        const reconciled = recordReconciledNames(state)
-        const readsBefore = reads('witness-input')
-        failNext('witness-input', timeout)
-
-        secretEvent(type)
-        await drain(state)
-
-        expect(reconciled).toEqual([witness])
-        expect(reads('witness-input')).toBe(readsBefore + 1)
-        expect(state.reconciler.hasSecretChangeEvidence()).toBe(evidence)
-        expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(!evidence)
-      }
-    )
-
-    it('I20 a replayed ADDED whose read fails transiently leaves pending evidence in place and the verdict not-ready', async () => {
-      const state = await startCertified()
-      const readsBefore = reads('witness-input')
-      failNext('witness-input', timeout, timeout)
-      secretEvent('MODIFIED')
-      await drain(state)
-      expect(state.reconciler.hasSecretChangeEvidence()).toBe(true)
-      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(false)
-
-      secretEvent('ADDED')
-      await drain(state)
-
-      expect(reads('witness-input')).toBe(readsBefore + 2)
-      expect(state.reconciler.hasSecretChangeEvidence()).toBe(true)
-      expect(state.reconciler.getStatus(state.servers.get(witness))).toMatchObject({
-        ready: false,
-        authoritative: true,
-      })
-      expect(condition('SecretResolved')).toMatchObject({ status: 'False', reason: 'ReadError' })
-    })
-
-    it('I21 a replayed ADDED whose reconcile completes discharges the evidence, so a later transient failure keeps ready', async () => {
-      const state = await startCertified()
-      const readsBefore = reads('witness-input')
-      failNext('witness-input', timeout)
-      secretEvent('MODIFIED')
-      await drain(state)
-      expect(state.reconciler.hasSecretChangeEvidence()).toBe(true)
-      const writesBefore = deploymentWrites().length
-      secretData = { token: Buffer.from('fixture-rotated').toString('base64') }
-
-      secretEvent('ADDED')
-      await drain(state)
-
-      expect(reads('witness-input')).toBe(readsBefore + 2)
-      expect(deploymentWrites()).toHaveLength(writesBefore + 1)
-      expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
-      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
-
-      failNext('witness-input', timeout)
-      secretEvent('ADDED')
-      await drain(state)
-
-      expect(reads('witness-input')).toBe(readsBefore + 3)
-      expect(state.reconciler.getStatus(state.servers.get(witness)).ready).toBe(true)
-    })
-
-    it('I22 an ADDED while the inventory is not authoritative is dropped with no record and no log line', async () => {
-      const state = await startCertified({ withPeer: true })
-      const consoleWarn = vi.spyOn(console, 'warn')
-      const info = vi.spyOn(hccLogger, 'info')
-      const witnessBefore = reads('witness-input')
-      const peerBefore = reads('peer-input')
-      state.retireMcpServerWatch()
-
-      secretEvent('ADDED')
-      secretEvent('MODIFIED', 'peer-input')
-      await drain(state)
-
-      const deferredLines = consoleWarn.mock.calls
-        .map(call => String(call[0]))
-        .filter(line => line.includes('secret-change-deferred'))
-      expect(deferredLines).toHaveLength(1)
-      expect(JSON.parse(deferredLines[0])).toMatchObject({
-        eventType: 'MODIFIED',
-        deferredChanges: 1,
-      })
-      expect([...state.unroutedSecretChanges]).toEqual(['mcp-server/peer-input'])
-      expect(state.reconciler.hasSecretChangeEvidence()).toBe(false)
-      expect(reads('witness-input')).toBe(witnessBefore)
-      expect(reads('peer-input')).toBe(peerBefore)
-
-      await state.recoverMcpServerInventoryAndWatch()
-      await drain(state)
-
-      expect(info).toHaveBeenCalledWith(
-        expect.any(String),
-        recoveryDecision('work-pending', 'request')
-      )
-      expect(reads('peer-input')).toBe(peerBefore + 1)
-    })
 
     it('I23 evidence pending when a reconcile ends at a terminal RolloutIncomplete is discharged, and a new window opens', async () => {
       const state = await startTerminal()

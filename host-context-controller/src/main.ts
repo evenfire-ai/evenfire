@@ -9,9 +9,11 @@
  * In dev mode, it reads MCP servers from environment variables
  * and skips Kubernetes reconciliation.
  */
+import * as k8s from '@kubernetes/client-node'
 import { config } from './config'
 import { HeartbeatPoller } from './heartbeatPoller'
-import { SecretInformer } from './informers/secretInformer'
+import { SecretInformer, secretListFromCoreApi } from './informers/secretInformer'
+import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import {
   McpServerProvider,
   McpServerWatcher,
@@ -227,7 +229,17 @@ async function main(): Promise<void> {
   if (!config.devMode && provider instanceof McpServerWatcher) {
     const kc = getKubeConfig()
     if (kc) {
-      secretInformer = new SecretInformer(kc, config.namespace, provider.handleSecretEvent)
+      // #1338: only this informer runs in
+      // resume mode. Each page of its list runs on HCC's request deadline.
+      const secretListApi = makeK8sApiClientWithDeadline(
+        kc,
+        k8s.CoreV1Api,
+        config.k8sRequestTimeoutMs
+      )
+      secretInformer = new SecretInformer(kc, config.namespace, provider.handleSecretEvent, {
+        mode: 'resume',
+        list: secretListFromCoreApi(secretListApi),
+      })
       try {
         const running = await secretInformer.start()
         if (running) {
@@ -253,11 +265,17 @@ async function main(): Promise<void> {
   if (!config.devMode && watcher) {
     const kc = getKubeConfig()
     if (kc) {
-      channelSecretInformer = new SecretInformer(kc, config.channelsNamespace, evt => {
-        watcher.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
-          hccLogger.error('[Main] reconcileChannelReaderRevision failed', { err })
-        })
-      })
+      channelSecretInformer = new SecretInformer(
+        kc,
+        config.channelsNamespace,
+        evt => {
+          watcher.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
+            hccLogger.error('[Main] reconcileChannelReaderRevision failed', { err })
+          })
+        },
+        // Replay mode until this consumer has its own retry owner (#1360).
+        { mode: 'replay' }
+      )
       try {
         await channelSecretInformer.start()
         hccLogger.info(
@@ -276,11 +294,17 @@ async function main(): Promise<void> {
     const kc = getKubeConfig()
     if (kc) {
       const watcher = provider
-      llmHooksSecretInformer = new SecretInformer(kc, config.llmHooksNamespace, evt => {
-        watcher.reconcileLlmHookByEnvSecret(evt.name, evt.namespace).catch(err => {
-          hccLogger.error('[Main] reconcileLlmHookByEnvSecret failed', { err })
-        })
-      })
+      llmHooksSecretInformer = new SecretInformer(
+        kc,
+        config.llmHooksNamespace,
+        evt => {
+          watcher.reconcileLlmHookByEnvSecret(evt.name, evt.namespace).catch(err => {
+            hccLogger.error('[Main] reconcileLlmHookByEnvSecret failed', { err })
+          })
+        },
+        // Replay mode until this consumer has its own retry owner (#1360).
+        { mode: 'replay' }
+      )
       try {
         await llmHooksSecretInformer.start()
         hccLogger.info(

@@ -195,18 +195,36 @@ export const bindingReconciliationsTotal = counter({
 
 export const secretInformerEventsTotal = counter({
   name: 'clerum_hcc_secret_informer_events_total',
-  help: 'Secret informer events received',
-  labelNames: ['type'] as const,
+  help: 'Secret informer events delivered to the consumer, by informer namespace and event type',
+  labelNames: ['namespace', 'type'] as const,
 })
 
 export const secretInformerReconnectsTotal = counter({
   name: 'clerum_hcc_secret_informer_reconnects_total',
-  help: 'Secret informer reconnection attempts',
+  help: 'Secret informer reconnection attempts, by informer namespace',
+  labelNames: ['namespace'] as const,
 })
 
 export const secretInformerRunning = gauge({
   name: 'clerum_hcc_secret_informer_running',
-  help: '1 when the SecretInformer watch is currently established, 0 when stopped or reconnecting',
+  help:
+    '1 when the SecretInformer watch of the namespace is currently established, 0 when stopped, ' +
+    'reconnecting or waiting for a complete Secret list',
+  labelNames: ['namespace'] as const,
+})
+
+export const secretInformerListsTotal = counter({
+  name: 'clerum_hcc_secret_informer_lists_total',
+  help:
+    'Paginated Secret lists of a resume-mode SecretInformer, by namespace and outcome ' +
+    '(initial, relist after a resume became impossible, failed)',
+  labelNames: ['namespace', 'outcome'] as const,
+})
+
+export const secretInformerResumesTotal = counter({
+  name: 'clerum_hcc_secret_informer_resumes_total',
+  help: 'Secret watches of a resume-mode SecretInformer reopened from the last resourceVersion seen',
+  labelNames: ['namespace'] as const,
 })
 
 export const mcpserverMissingSecret = gauge({
