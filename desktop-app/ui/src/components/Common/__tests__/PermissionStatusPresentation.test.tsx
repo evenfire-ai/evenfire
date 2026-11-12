@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useLayoutEffect, useRef, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -57,6 +58,68 @@ describe('EvenDrive permission status presentation', () => {
 
     expect(container.querySelector('.da-permission-status-slot')).toBeTruthy()
     expect(container.querySelector('.da-permission-status-indicator')).toBeNull()
+  })
+
+  it('restores dismissal focus to an eligible input outside the portaled Files surface', () => {
+    function FocusReturnFixture() {
+      const inputRef = useRef<HTMLInputElement>(null)
+      const [dialogOpen, setDialogOpen] = useState(true)
+      useLayoutEffect(() => inputRef.current?.focus(), [])
+      return (
+        <>
+          <input aria-label="Search outside Files" ref={inputRef} />
+          <div className="da-gfs-page">
+            <div className="da-gfs-current-file__title-row">
+              <button className="da-gfs-resource-menu__trigger">Options</button>
+            </div>
+            {dialogOpen ? (
+              <PermissionErrorDialog
+                errors={[{ id: 'query-focus-return', message: 'Permission check failed.' }]}
+                onDismiss={() => setDialogOpen(false)}
+              />
+            ) : null}
+          </div>
+        </>
+      )
+    }
+
+    render(<FocusReturnFixture />)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+
+    expect(document.activeElement).toBe(
+      screen.getByRole('textbox', { name: 'Search outside Files' })
+    )
+  })
+
+  it('uses the visible Files menu trigger when the previously focused element disappears', () => {
+    function FocusReturnFixture() {
+      const inputRef = useRef<HTMLInputElement>(null)
+      const [inputVisible, setInputVisible] = useState(true)
+      const [dialogOpen, setDialogOpen] = useState(true)
+      useLayoutEffect(() => inputRef.current?.focus(), [])
+      return (
+        <div className="da-gfs-page">
+          {inputVisible ? <input aria-label="Temporary search" ref={inputRef} /> : null}
+          <div className="da-gfs-current-file__title-row">
+            <button className="da-gfs-resource-menu__trigger">Options</button>
+          </div>
+          {dialogOpen ? (
+            <PermissionErrorDialog
+              errors={[{ id: 'query-focus-fallback', message: 'Permission check failed.' }]}
+              onDismiss={() => {
+                setInputVisible(false)
+                setDialogOpen(false)
+              }}
+            />
+          ) : null}
+        </div>
+      )
+    }
+
+    render(<FocusReturnFixture />)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Options' }))
   })
 
   it('traps keyboard focus, dismisses on Escape, and retains the exact Retry callback', () => {

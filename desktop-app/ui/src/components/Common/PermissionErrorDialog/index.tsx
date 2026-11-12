@@ -34,7 +34,6 @@ export function PermissionErrorDialog({
     if (!visible) return
     const previouslyFocused =
       document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const surface = dialogRef.current?.closest('.da-gfs-page, .da-gfs-preview-page')
     closeRef.current?.focus()
     return () => {
       if (latestRef.current.suspended) return
@@ -44,11 +43,18 @@ export function PermissionErrorDialog({
           !element.closest('[hidden], [aria-hidden="true"]') &&
           (typeof element.checkVisibility !== 'function' || element.checkVisibility())
         )
-      if (isVisible(previouslyFocused) && (!surface || surface.contains(previouslyFocused))) {
+      const wasEligibleFocusTarget = (element: HTMLElement | null): element is HTMLElement =>
+        Boolean(
+          element &&
+          element.matches(
+            'input:not(:disabled), textarea:not(:disabled), select:not(:disabled), button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])'
+          )
+        )
+      if (isVisible(previouslyFocused) && wasEligibleFocusTarget(previouslyFocused)) {
         previouslyFocused.focus()
         return
       }
-      const fallback = (surface ?? document).querySelector<HTMLElement>(
+      const fallback = document.querySelector<HTMLElement>(
         '.da-gfs-preview-title-row .da-gfs-resource-menu__trigger, .da-gfs-current-file__title-row .da-gfs-resource-menu__trigger, .da-gfs-drive__title-row .da-gfs-resource-menu__trigger'
       )
       if (isVisible(fallback)) fallback.focus()
