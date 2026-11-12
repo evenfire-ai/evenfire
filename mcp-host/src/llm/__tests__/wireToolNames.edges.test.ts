@@ -26,6 +26,8 @@ const NOTION_CANONICALS = NOTION_TOOLS.map(t => `${NOTION_SERVER}__${t.name}`)
 const WITH_DOT = 'notion.v2__search'
 const OVER_128 = `${NOTION_SERVER}__${'x'.repeat(129 - NOTION_SERVER.length - 2)}`
 const QUERY = `${NOTION_SERVER}__notion-query-multiple-data-sources`
+// Varied words on purpose: `'x'.repeat` tokenizes to about as many tokens as its alias.
+const OVER_128_WORDS = `${NOTION_SERVER}__${['retrieve', 'quarterly', 'revenue', 'breakdown', 'grouped', 'by', 'region', 'product', 'line', 'and', 'currency', 'adjusted', 'for', 'seasonal', 'trends'].join('-')}`
 
 describe('Claude cache-aware method', () => {
   it('sends only W_c names, keeps 65–128 canonicals and resolves the call back', async () => {
@@ -118,24 +120,92 @@ describe('Claude token counter (offline=false)', () => {
 
 describe('tiktoken counter of the providers that use it', () => {
   // The counter of `openai` and `azure` comes from the factory, not from the provider.
+  async function sendThrough(
+    id: 'openai' | 'azure',
+    history: ChatMessage[],
+    tools: ToolDefinition[]
+  ) {
+    const cap = buildCapturingProvider(id)
+    const counter = createTokenCounter(cap.provider, 'gpt-4o-mini')
+    expect(counter).toBeInstanceOf(OpenAITokenCounter)
+    await counter.warmup()
+    cap.respondWith(null)
+    await cap.provider.completeSingleTurnWithTools(history, tools)
+    const family = id === 'openai' ? 'responses' : 'chat'
+    const body = cap.bodies[0] as Record<string, any>
+    const sent: ToolDefinition[] = body.tools.map((t: Record<string, any>) => {
+      const decl = family === 'chat' ? t.function : t
+      return { name: decl.name, description: decl.description, parameters: decl.parameters }
+    })
+    return { counter, family, body, sent }
+  }
+
   it.each(['openai', 'azure'] as const)(
-    '%s: aliased tools are counted as the declarations that are sent',
+    '%s: an aliased tool turn is counted as the history that is sent',
     async id => {
-      const cap = buildCapturingProvider(id)
-      const counter = createTokenCounter(cap.provider, 'gpt-4o-mini')
-      expect(counter).toBeInstanceOf(OpenAITokenCounter)
-      await counter.warmup()
-      const tools = [QUERY, OVER_128, 'srv__ok'].map(toolDef)
-      const messages: ChatMessage[] = [{ role: 'user', content: 'q' }]
-      cap.respondWith(null)
-      await cap.provider.completeSingleTurnWithTools(messages, tools)
-      const family = id === 'openai' ? 'responses' : 'chat'
-      const sent = (cap.bodies[0] as { tools: Array<Record<string, any>> }).tools.map(t => {
-        const decl = family === 'chat' ? t.function : t
-        return { name: decl.name, description: decl.description, parameters: decl.parameters }
+      const canonicalCalls = [OVER_128_WORDS, QUERY]
+      expect(OVER_128_WORDS.length).toBeGreaterThan(128)
+      const tools = [...canonicalCalls, 'srv__ok'].map(toolDef)
+      // Tool messages carry the canonical `name`, as the tool-use loop and the
+      // task executor build them.
+      const history = toolTurn(
+        canonicalCalls.map((name, i) => ({ id: `call_${i}`, name })),
+        canonicalCalls
+      )
+      const { counter, family, body, sent } = await sendThrough(id, history, tools)
+      const sentNames = sent.map(t => t.name)
+      expect(sentNames).not.toContain(QUERY)
+
+      // The two families lay the history out differently (chat `messages` vs
+      // Responses `input` items), and aliasing changes nothing but the names, so
+      // `sentHistory` is the canonical history with the aliases read off the
+      // body substituted. The `name` of its tool messages is that substitution
+      // (the alias of the call each one answers): no family sends it, but the
+      // counter counts it.
+      const sentCallNames: string[] =
+        family === 'chat'
+          ? body.messages.flatMap((m: Record<string, any>) =>
+              (m.tool_calls ?? []).map((tc: Record<string, any>) => tc.function.name)
+            )
+          : body.input
+              .filter((i: Record<string, any>) => i.type === 'function_call')
+              .map((i: Record<string, any>) => i.name)
+      expect(sentCallNames).toHaveLength(canonicalCalls.length)
+      sentCallNames.forEach((n, i) => {
+        expect(n).not.toBe(canonicalCalls[i])
+        expect(n).toMatch(W)
+        expect(sentNames).toContain(n)
       })
-      expect(sent.map(t => t.name)).not.toContain(QUERY)
-      expect(counter.countSync(messages, tools)).toBe(counter.countSync(messages, sent))
+      if (family === 'chat') {
+        const sentToolMessages = (body.messages as Array<Record<string, any>>).filter(
+          m => m.role === 'tool'
+        )
+        expect(sentToolMessages).toHaveLength(canonicalCalls.length)
+        for (const m of sentToolMessages) expect(typeof m.name).not.toBe('string')
+      } else {
+        expect((body.input as Array<Record<string, any>>).some(i => i.role === 'tool')).toBe(false)
+      }
+      const wireOf = new Map(canonicalCalls.map((c, i) => [c, sentCallNames[i]]))
+      const sentHistory = history.map(m => {
+        if (m.tool_calls)
+          return {
+            ...m,
+            tool_calls: m.tool_calls.map(tc => ({ ...tc, name: wireOf.get(tc.name)! })),
+          }
+        if (m.role === 'tool' && m.name) return { ...m, name: wireOf.get(m.name)! }
+        return m
+      })
+
+      // Message content is never projected, so it measures the names as plain
+      // text. If the sent names cost the same as the canonical ones, the
+      // comparison below cannot tell a counter that skips the history projection
+      // from one that applies it.
+      const tokens = (text: string) =>
+        counter.countSync([{ role: 'user', content: text }]) -
+        counter.countSync([{ role: 'user', content: '' }])
+      const cost = (names: string[]) => names.reduce((sum, n) => sum + tokens(n), 0)
+      expect(cost(sentCallNames)).not.toBe(cost(canonicalCalls))
+      expect(counter.countSync(history, tools)).toBe(counter.countSync(sentHistory, sent))
     }
   )
 })
