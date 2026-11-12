@@ -151,37 +151,46 @@ describe.each(DIRECT_PROVIDERS)('history projection · %s', id => {
 describe('tool calls coming back', () => {
   const longA = `${NOTION_SERVER}__notion-query-multiple-data-sources`
   const shortB = `${NOTION_SERVER}__notion-search`
+  // Witness that the projection ran on the request whose response is checked:
+  // a name that resolves to itself proves nothing if nothing was aliased.
+  const sentNames = (id: LlmProvider, body: unknown) =>
+    wireToolDecls(familyOf(id), body).map(t => t.name)
 
   it.each(W_IDS)('%s: an exact canonical of the request resolves to itself', async id => {
-    const { response } = await send(
+    const { response, body } = await send(
       id,
       [{ role: 'user', content: 'q' }],
       [toolDef(longA), toolDef(shortB)],
       () => shortB
     )
+    expect(sentNames(id, body)[0]).not.toBe(longA)
     expect(response.tool_calls?.[0]?.name).toBe(shortB)
   })
 
   it.each(W_IDS)(
     '%s: the canonical of an aliased tool, copied from the annotation, resolves to itself',
     async id => {
-      const { response } = await send(
+      const { response, body } = await send(
         id,
         [{ role: 'user', content: 'q' }],
         [toolDef(longA)],
         () => longA
       )
+      expect(sentNames(id, body)[0]).not.toBe(longA)
       expect(response.tool_calls?.[0]?.name).toBe(longA)
     }
   )
 
   it.each(DIRECT_PROVIDERS)('%s: an unknown name passes through unchanged', async id => {
-    const { response } = await send(
+    // `longA` fits the 128-character envelopes of Claude and Vertex, so the
+    // witness is a name past every envelope.
+    const { response, body } = await send(
       id,
       [{ role: 'user', content: 'q' }],
-      [toolDef(longA)],
+      [toolDef(longA), toolDef(OVER_128)],
       () => 'inventado_xyz'
     )
+    expect(sentNames(id, body)[1]).not.toBe(OVER_128)
     expect(response.tool_calls?.[0]?.name).toBe('inventado_xyz')
   })
 
