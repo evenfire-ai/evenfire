@@ -51,6 +51,7 @@ function harness(
   }
   const tool = buildGfsReadTools(client, {
     writeTools: { editText: true, saveBySourcePath: true },
+    keptFilesDelete: false,
     referencedFiles,
   }).find(t => t.name === 'clerum__gfs_read')!
   const contentRequests = () =>
@@ -156,6 +157,7 @@ describe('live-resource descriptions (#666)', () => {
     }
     const tools = buildGfsReadTools(client, {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
     })
     const note =
@@ -269,6 +271,7 @@ describe('clerum__gfs_read pinned by a file reference of the message (#666)', ()
     } as Awaited<ReturnType<GfscReadClient['stat']>>)
     const stat = buildGfsReadTools(client, {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles,
     }).find(t => t.name === 'clerum__gfs_stat')!
 

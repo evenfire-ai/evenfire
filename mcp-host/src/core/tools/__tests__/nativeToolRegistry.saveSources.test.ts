@@ -92,7 +92,7 @@ function registryFor(root: string): NativeToolRegistry {
       callerIdentity: path.basename(root),
       callerWorkspacePath: root,
     },
-    root
+    { root: root, room: async () => Number.MAX_SAFE_INTEGER }
   )
 }
 

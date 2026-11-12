@@ -479,7 +479,7 @@ describe('the kept attachments folder', () => {
         undefined,
         undefined,
         undefined,
-        root
+        { root: root, room: async () => Number.MAX_SAFE_INTEGER }
       )
       const generated = await registry
         .get('clerum__generate_markdown')!

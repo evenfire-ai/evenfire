@@ -6,6 +6,7 @@
  * singleton on the AgentStateMachine.
  */
 import { randomUUID } from 'node:crypto'
+import * as path from 'node:path'
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
 import { BRIDGE_TOOL_NAMES } from '../capabilities/toolCatalogTools'
@@ -112,7 +113,7 @@ import { ApprovalExpiredError } from '../core/types'
 import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
 import { GFS_SAVE_ATTACHMENT_TOOL, KEPT_FILES_DELETE_TOOL } from '../internalTools/gfs'
-import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
+import { type GfsDownloadStore, GfsDownloadStoreError } from '../internalTools/gfsDownloadStore'
 import { buildKeepOffer } from '../internalTools/keptFiles'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
@@ -1324,6 +1325,26 @@ export class TaskExecutor {
    * approval off. The registry registers the delete only then (and only with
    * the listing), and this task asks on every call of it.
    */
+  /**
+   * The caller's outputs root with the room its kept files have in the
+   * download store, for every chat generation; undefined when the task has
+   * no caller root (the generators then refuse to write). The store keys a
+   * caller by the root's last segment. With no store the room rejects
+   * `workspace_unavailable`, so nothing is generated.
+   */
+  private callerOutputs(): { root: string; room: () => Promise<number> } | undefined {
+    const root = generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath)
+    if (!root) return undefined
+    const store = this.deps.gfsDownloadStore
+    return {
+      root,
+      room: () =>
+        store
+          ? store.keptRoom({ callerIdentity: path.basename(root) })
+          : Promise.reject(new GfsDownloadStoreError('workspace_unavailable')),
+    }
+  }
+
   private keptFilesDeleteConfirmed(): boolean {
     return keptFilesDeleteAsks({
       approvalEnabled: appConfig.enableApproval,
@@ -1388,6 +1409,7 @@ export class TaskExecutor {
           this.task.sourceMessage?.fileReferenceResolutions
         ),
         preparedGfsFiles: this.preparedGfsFiles,
+        keptFilesDeleteAvailable: deleteAvailable,
         ...(this.task.sourceMessage?.keepRefusal
           ? {
               keepRefusal: {
@@ -2401,7 +2423,7 @@ export class TaskExecutor {
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
       gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined,
-      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath),
+      this.callerOutputs(),
       this.keptFilesDeleteConfirmed()
     )
     await registerDesktopTools(nativeRegistry)

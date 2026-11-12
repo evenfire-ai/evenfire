@@ -108,7 +108,9 @@ describe('generated documents are private to their caller', () => {
       undefined,
       undefined,
       undefined,
-      callerRoot
+      callerRoot === undefined
+        ? undefined
+        : { root: callerRoot, room: async () => Number.MAX_SAFE_INTEGER }
     )
   }
 

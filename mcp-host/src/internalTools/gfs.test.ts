@@ -47,6 +47,7 @@ function toolMap(c: GfscReadClient) {
   return new Map(
     buildGfsReadTools(c, {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
     }).map(t => [t.name, t])
   )
@@ -60,6 +61,7 @@ describe('buildGfsReadTools', () => {
   it('exposes the read tools plus accessible-resource discovery', () => {
     const names = buildGfsReadTools(client(), {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
     })
       .map(t => t.name)

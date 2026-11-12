@@ -79,6 +79,7 @@ describe('GFS large-file tool routing', () => {
     expect(
       buildGfsReadTools(client(), {
         writeTools: { editText: true, saveBySourcePath: true },
+        keptFilesDelete: false,
         referencedFiles: new Map(),
       }).map(tool => tool.name)
     ).not.toContain('clerum__gfs_download')
@@ -102,6 +103,7 @@ describe('GFS large-file tool routing', () => {
     const store = fakeDownloadStore()
     const tool = buildGfsReadTools(gfs, {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
       downloadStore: store,
       callerIdentity: 'caller-a',
@@ -156,6 +158,7 @@ describe('GFS large-file tool routing', () => {
     const store = fakeDownloadStore()
     const tool = buildGfsReadTools(gfs, {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
       downloadStore: store,
       callerIdentity: 'caller-a',
@@ -192,6 +195,7 @@ describe('GFS large-file tool routing', () => {
     const store = fakeDownloadStore()
     const tool = buildGfsReadTools(client({ download }), {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
       downloadStore: store,
       callerIdentity: 'caller-a',
@@ -222,6 +226,7 @@ describe('GFS large-file tool routing', () => {
     const gfs = client({ download })
     const tool = buildGfsReadTools(gfs, {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
       downloadStore: store as unknown as GfsDownloadStore,
       callerIdentity: 'caller-a',
@@ -277,6 +282,7 @@ describe('GFS large-file tool routing', () => {
     const store = spyDownloadStore()
     const tool = buildGfsReadTools(client({ download }), {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
       downloadStore: store as unknown as GfsDownloadStore,
       callerIdentity: 'caller-a',
@@ -314,6 +320,7 @@ describe('GFS large-file tool routing', () => {
       const store = fakeDownloadStore()
       const tool = buildGfsReadTools(gfs, {
         writeTools: { editText: true, saveBySourcePath: true },
+        keptFilesDelete: false,
         referencedFiles: new Map(),
         downloadStore: store,
         callerIdentity: 'caller-a',
@@ -353,6 +360,7 @@ describe('GFS large-file tool routing', () => {
       gfs.readMetadata = vi.fn(async () => snapshot(bytes.byteLength))
       const tool = buildGfsReadTools(gfs, {
         writeTools: { editText: true, saveBySourcePath: true },
+        keptFilesDelete: false,
         referencedFiles: new Map(),
       }).find(item => item.name === 'clerum__gfs_read')!
 
@@ -373,6 +381,7 @@ describe('GFS large-file tool routing', () => {
     gfs.readMetadata = vi.fn(async () => snapshot(file.bytes.byteLength))
     const tool = buildGfsReadTools(gfs, {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
       downloadStore: fakeDownloadStore(),
       callerIdentity: 'caller-a',
@@ -409,6 +418,7 @@ describe('GFS large-file tool routing', () => {
     const store = fakeDownloadStore()
     const tool = buildGfsReadTools(gfs, {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
       downloadStore: store,
       callerIdentity: 'caller-a',
@@ -437,6 +447,7 @@ describe('GFS large-file tool routing', () => {
     const store = fakeDownloadStore()
     const tool = buildGfsReadTools(client({ download }), {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
       downloadStore: store,
       callerIdentity: 'caller-a',

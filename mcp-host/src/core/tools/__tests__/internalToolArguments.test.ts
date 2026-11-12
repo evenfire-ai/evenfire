@@ -77,7 +77,7 @@ describe('chat internal-tool arguments are checked before the tool runs', () => 
       undefined,
       undefined,
       undefined,
-      root
+      { root: root, room: async () => Number.MAX_SAFE_INTEGER }
     )
     return registry.get(name)!.execute(args)
   }

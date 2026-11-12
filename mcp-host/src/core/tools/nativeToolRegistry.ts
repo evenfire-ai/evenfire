@@ -20,10 +20,12 @@ import {
   referencedFilePins,
 } from '../../internalTools/gfs'
 import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
-import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
+import { type GfsDownloadStore, GfsDownloadStoreError } from '../../internalTools/gfsDownloadStore'
+import { GFS_FILE_LIMITS } from '../../internalTools/gfsFilePolicy'
 import {
   type SaveLedgerRecord,
   SaveLedgerWriteError,
+  buildKeepOffer,
   newSaveId,
   writeSaveLedgerRecord,
 } from '../../internalTools/keptFiles'
@@ -36,6 +38,7 @@ import { checkToolArguments } from '../../workflow/argumentGate'
 import {
   NOT_ENOUGH_FREE_SPACE_PREFIX,
   OUTPUT_QUOTA_EXCEEDED_PREFIX,
+  parseKeptBudgetRefusal,
 } from '../../workflow/artifactOutput'
 import { resolveInternalTools } from '../../workflow/internalTools'
 import { boilerplateTexts } from '../../workflow/officeBoilerplate'
@@ -51,6 +54,7 @@ import type { Workspace } from '../../workspace/service'
 import type { AttachmentReadLedger } from '../attachments/attachmentReadBudget'
 import { attachmentSaveAvailable } from '../attachments/attachmentSave'
 import { type ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../interfaces'
+import { keepOfferLines } from '../orchestration/turnContext'
 import { BasicSafety } from '../safety/safety'
 import type { SessionSearchService } from '../sessionSearch'
 import type { SpilloverStorage } from '../spillover'
@@ -100,6 +104,40 @@ function directlyInside(file: string, dir: string): boolean {
 export const MAKE_ROOM_SENTENCE =
   "To make room, list this user's files with clerum__kept_files_list and delete the ones the user confirms with clerum__kept_files_delete; files in the user's own workspace can be removed with an approved shell command."
 
+const RETENTION_HOURS = Math.round(GFS_FILE_LIMITS.retentionMs / 3_600_000)
+
+/** A generation refused because the download store is closed or not initialized. */
+export const STORE_UNAVAILABLE_FOR_GENERATION =
+  "The Host's file storage is not available right now, so the file was not generated. Tell the user; the Host retries by itself, so the same request can be tried again in a few minutes."
+
+/** A generation refused by the kept-files bounds in a turn that cannot delete kept files. */
+export const KEPT_STORAGE_FULL_NO_DELETE = `The Host's storage for kept files is full, so the file was not generated. Files past their retention time were just removed. This conversation cannot delete kept files, so room returns only as kept files reach ${RETENTION_HOURS} hours of age. Tell the user.`
+
+/** A generation whose kept-files room could not be read for another reason; only the code is shown. */
+export function storageCheckFailed(code: string): string {
+  return `The Host could not check its storage (${code}), so the file was not generated. Tell the user; an operator has to look at the Host.`
+}
+
+/** The first-line sentence of every chat generation: when the Host deletes the file. */
+export function generationRetentionSentence(save: 'save_id' | 'by_name' | 'none'): string {
+  const deletes = `The Host deletes this file ${RETENTION_HOURS} hours after it was generated`
+  if (save === 'save_id')
+    return `${deletes}; to keep it longer, save it to EvenDrive with clerum__gfs_create_file (generatedFile and this Save id). Tell the user.`
+  if (save === 'by_name')
+    return `${deletes}; to keep it longer, save it to EvenDrive with clerum__gfs_create_file (generatedFile). Tell the user.`
+  return `${deletes}. Tell the user.`
+}
+
+let unmeasuredRoomReported = false
+
+function errorCodeOf(err: unknown): string {
+  const code =
+    err instanceof GfsDownloadStoreError
+      ? err.code
+      : (err as NodeJS.ErrnoException | undefined)?.code
+  return typeof code === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(code) ? code : 'UNKNOWN'
+}
+
 /**
  * Removes the file a generator just wrote when its save record cannot be
  * written, only if it is still the same file (`dev`/`ino` as written), in one
@@ -139,7 +177,13 @@ class InternalToolAdapter implements Tool {
     private readonly generatorOptions: { saveIdShown: boolean; spaceSentence: boolean } = {
       saveIdShown: false,
       spaceSentence: false,
-    }
+    },
+    /**
+     * For a generator in a chat registry: the caller's root and what its kept
+     * files may still add (GfsDownloadStore.keptRoom). Read before the
+     * generator runs; the generator refuses a file that does not fit.
+     */
+    private readonly keptFiles?: { root: string; room: () => Promise<number> }
   ) {}
   name(): string {
     return this.def.name
@@ -187,12 +231,65 @@ class InternalToolAdapter implements Tool {
       }
       outputDir = resolved.dir
     }
+    let keptRoomBytes: number | undefined
+    if (this.keptFiles) {
+      const refused = (text: string): ToolOutput => ({
+        content: `Error: ${text}`,
+        duration_ms: Date.now() - start,
+        is_error: true,
+      })
+      try {
+        keptRoomBytes = await this.keptFiles.room()
+      } catch (err) {
+        const code = errorCodeOf(err)
+        if (code === 'workspace_unavailable' || code === 'download_busy')
+          return refused(STORE_UNAVAILABLE_FOR_GENERATION)
+        if (code !== 'volume_unmeasurable') {
+          logger.warn(
+            {
+              component: 'InternalToolAdapter',
+              tool: this.def.name,
+              errorName: err instanceof Error ? err.name : typeof err,
+              errorCode: code,
+            },
+            'The kept-files room could not be read; the file was not generated'
+          )
+          return refused(storageCheckFailed(code))
+        }
+        // Read twice and still unmeasurable: the file is generated as before
+        // the check existed (folder quota and free-space floor), and the next
+        // sweep counts it.
+        if (!unmeasuredRoomReported) {
+          unmeasuredRoomReported = true
+          logger.warn(
+            { component: 'InternalToolAdapter' },
+            'Could not measure the Host volume; generated files are written without the kept-files check'
+          )
+        }
+      }
+    }
     try {
       const result = await this.def.execute(checked.input, outputDir, {
         signal: context?.signal,
         timeoutMs: context?.timeoutMs,
         visualInput: context?.visualInput,
+        ...(keptRoomBytes === undefined ? {} : { keptRoomBytes }),
       })
+      const neededBytes = result.success ? undefined : parseKeptBudgetRefusal(result.error)
+      if (neededBytes !== undefined && this.keptFiles) {
+        const offer = this.generatorOptions.spaceSentence
+          ? keepOfferLines(
+              'host_quota_exceeded',
+              buildKeepOffer(this.keptFiles.root, neededBytes, Date.now()),
+              'generation'
+            )
+          : [KEPT_STORAGE_FULL_NO_DELETE]
+        return {
+          content: `Error: ${result.error}\n${offer.join('\n')}`,
+          duration_ms: Date.now() - start,
+          is_error: true,
+        }
+      }
       // Query-style tools (e.g. clerum__get_capabilities) return text via
       // result.content; file-generation tools return an artifact and we
       // synthesize a message from it. Errors take precedence over both.
@@ -316,9 +413,25 @@ class InternalToolAdapter implements Tool {
           })) ?? [])
         : []
       const attachments = [...(attachment ? [attachment] : []), ...images]
+      // Every chat generation says when the Host deletes the file.
+      const retention =
+        this.keptFiles && result.success && result.artifact
+          ? ` ${generationRetentionSentence(
+              saveId && this.generatorOptions.saveIdShown
+                ? 'save_id'
+                : this.generatorOptions.saveIdShown &&
+                    !isInternalGeneratedArtifactSourceTool(this.def.name)
+                  ? 'by_name'
+                  : 'none'
+            )}`
+          : ''
+      // On the first line: a generator's notes may follow it, the Save id ends it.
+      const lines = content.split('\n')
+      lines[0] = `${lines[0]}${retention}`
+      const shown = lines.join('\n')
       return {
         content:
-          saveId && this.generatorOptions.saveIdShown ? `${content}\nSave id: ${saveId}` : content,
+          saveId && this.generatorOptions.saveIdShown ? `${shown}\nSave id: ${saveId}` : shown,
         duration_ms: Date.now() - start,
         is_error: !result.success,
         attachments: attachments.length ? attachments : undefined,
@@ -400,17 +513,22 @@ export class NativeToolRegistry implements ToolRegistry {
       callerWorkspacePath?: string
       retentionOwnerId?: string
     },
-    // The caller's verified root (`<host>/users/<key>`). The document
-    // generators write under its reserved outputs directory; without it they
-    // refuse to write, never falling back to a folder shared by the Host.
-    // Trailing optional; only taskExecutor passes it.
-    callerOutputRoot?: string,
+    // The caller's verified root (`<host>/users/<key>`) and the room its kept
+    // files have in the download store (GfsDownloadStore.keptRoom). The
+    // document generators write under the root's reserved outputs directory,
+    // after reading the room; without them they refuse to write, never
+    // falling back to a folder shared by the Host. A root without a room is
+    // refused at construction. Trailing optional; only taskExecutor passes it.
+    callerOutputs?: { root: string; room: () => Promise<number> },
     // True when every call of the kept-files delete will ask the user first:
     // approval enabled, a channel task, no Host override turning it off. The
     // delete exists only then, and only with the listing (`gfs.write`).
     // Trailing optional; only taskExecutor passes it.
     keptFilesDeleteConfirmed?: boolean
   ) {
+    if (callerOutputs !== undefined && typeof callerOutputs.room !== 'function')
+      throw new Error('A caller outputs root needs the kept-files room of the download store')
+    const callerOutputRoot = callerOutputs?.root
     // A Host-owned GFS store establishes a trusted caller binding even when
     // memory is disabled. In that mode file tools never fall back to the shared
     // Host root; if the caller root cannot be verified they are omitted.
@@ -482,6 +600,7 @@ export class NativeToolRegistry implements ToolRegistry {
                 editText: gfsScopes.has('gfs.write'),
                 saveBySourcePath: gfsScopes.has('gfs.write'),
               },
+              keptFilesDelete: gfsScopes.has('gfs.write') && keptFilesDeleteConfirmed === true,
             })
           : []),
         ...(gfsScopes.has('gfs.write')
@@ -617,7 +736,7 @@ export class NativeToolRegistry implements ToolRegistry {
     // Only the generators write files, each into the caller's own folder;
     // the other internal tools take no output directory.
     const outputDir = ''
-    const callerOutputs = (): CallerOutputLookup =>
+    const callerOutputLookup = (): CallerOutputLookup =>
       callerOutputRoot
         ? resolveCallerOutputDir(callerOutputRoot, { create: true })
         : { failureCode: 'ENOENT' }
@@ -635,12 +754,13 @@ export class NativeToolRegistry implements ToolRegistry {
           tool,
           outputDir,
           resolvedAttachmentOptions,
-          tool.name.startsWith(GENERATOR_PREFIX) ? callerOutputs : undefined,
+          tool.name.startsWith(GENERATOR_PREFIX) ? callerOutputLookup : undefined,
           {
             saveIdShown: gfsScopes?.has('gfs.write') === true,
             spaceSentence:
               gfsScopes?.has('gfs.write') === true && keptFilesDeleteConfirmed === true,
-          }
+          },
+          tool.name.startsWith(GENERATOR_PREFIX) ? callerOutputs : undefined
         )
       )
     }

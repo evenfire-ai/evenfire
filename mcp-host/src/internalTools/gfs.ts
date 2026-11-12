@@ -113,10 +113,10 @@ function ok(content: unknown): InternalToolResult {
 // fixed guidance for its code as a second line; gfsFilePreparation accepts that
 // exact second line and nothing else. Every other store code, including
 // `volume_unmeasurable`, is the bare envelope.
-function fail(error: unknown): InternalToolResult {
+function fail(error: unknown, keptFilesDelete: boolean): InternalToolResult {
   if (error instanceof VisualInputError) return { success: false, error: error.message }
   if (error instanceof GfsDownloadStoreError) {
-    const guidance = gfsStoreSpaceGuidance(error.code)
+    const guidance = gfsStoreSpaceGuidance(error.code, { keptFilesDelete })
     return {
       success: false,
       error: guidance === undefined ? error.message : `${error.message}\n${guidance}`,
@@ -412,6 +412,8 @@ export interface GfsReadToolOptions {
   retentionOwnerId?: string
   /** The write tools registered beside these, which download results may name. */
   writeTools: GfsGuidanceWriteTools
+  /** Whether the kept-files delete is registered; a storage-full refusal names it only then. */
+  keptFilesDelete: boolean
 }
 
 /** The five read tools, bound to a gfsc client. */
@@ -424,6 +426,7 @@ export function buildGfsReadTools(
     callerWorkspacePath,
     retentionOwnerId,
     writeTools,
+    keptFilesDelete,
   }: GfsReadToolOptions
 ): InternalToolDefinition[] {
   const canDownload = Boolean(
@@ -501,7 +504,7 @@ export function buildGfsReadTools(
             )
           )
         } catch (err) {
-          return fail(err)
+          return fail(err, keptFilesDelete)
         }
       },
     },
@@ -529,7 +532,7 @@ export function buildGfsReadTools(
             )
           )
         } catch (err) {
-          return fail(err)
+          return fail(err, keptFilesDelete)
         }
       },
     },
@@ -714,7 +717,7 @@ export function buildGfsReadTools(
               resourceId: target.resourceId,
               expectedVersion,
             })
-          return fail(err)
+          return fail(err, keptFilesDelete)
         } finally {
           file?.reservation.release()
         }
@@ -734,7 +737,7 @@ export function buildGfsReadTools(
             await client.stat(args as { drive: string; resourceId: string }, callOptions(context))
           )
         } catch (err) {
-          return fail(err)
+          return fail(err, keptFilesDelete)
         }
       },
     },
@@ -754,7 +757,7 @@ export function buildGfsReadTools(
         try {
           return ok(await client.resolve(args as { uri: string }, callOptions(context)))
         } catch (err) {
-          return fail(err)
+          return fail(err, keptFilesDelete)
         }
       },
     },
@@ -837,7 +840,7 @@ export function buildGfsReadTools(
           )
           if (expectedVersion !== undefined && versionConflict(error))
             return ok({ availability: 'stale', ...target, expectedVersion })
-          return fail(error)
+          return fail(error, keptFilesDelete)
         }
       },
     })
@@ -1632,7 +1635,7 @@ export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefiniti
           return ok({ version: written?.data?.version, ...summary })
         } catch (err) {
           if (err instanceof GfscHttpError) return mutationFail(err)
-          return fail(err)
+          return fail(err, false)
         } finally {
           file?.reservation.release()
         }

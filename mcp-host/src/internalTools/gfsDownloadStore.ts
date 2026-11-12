@@ -1618,6 +1618,46 @@ export class GfsDownloadStore {
     )
   }
 
+  /**
+   * What the kept bounds leave: the bytes one caller's kept files may still
+   * grow by (half the budget) and every caller's (three quarters), negative
+   * when already over. Keeps and generations apply this one formula.
+   */
+  private keptBoundsLeft(budget: bigint, callerIdentity: string): { caller: bigint; host: bigint } {
+    return {
+      caller: budget / 2n - this.keptUsage(callerIdentity),
+      host: (budget * 3n) / 4n - this.keptUsage(),
+    }
+  }
+
+  /**
+   * The bytes one caller's generated files may add before the kept bounds
+   * refuse: the smaller of what the two bounds leave, negative when already
+   * over. It first removes every expired copy and kept file on the Host (one
+   * sweep), then reads the volume; a volume that cannot be measured is read
+   * once more before `volume_unmeasurable` is thrown. Not initialized:
+   * `workspace_unavailable`; closed or closing: `download_busy`. Nothing is
+   * reserved: the generator writes after this returns (see enforceQuota).
+   */
+  async keptRoom(input: { callerIdentity: string }): Promise<number> {
+    if (typeof input.callerIdentity !== 'string' || input.callerIdentity.length === 0)
+      throw new GfsDownloadStoreError('caller_mismatch')
+    return this.serialize(async () => {
+      this.assertAdmitting()
+      await this.sweep(Date.now())
+      let volume: VolumeSpace
+      try {
+        volume = await this.measureVolume()
+      } catch (error) {
+        if (!(error instanceof GfsDownloadStoreError) || error.code !== 'volume_unmeasurable')
+          throw error
+        volume = await this.measureVolume()
+      }
+      const left = this.keptBoundsLeft(retainedBudget(volume), input.callerIdentity)
+      return Number(left.caller < left.host ? left.caller : left.host)
+    })
+  }
+
   /** Kept bytes on disk plus live keep reservations, of one caller or of every caller. */
   private keptUsage(callerIdentity?: string): bigint {
     let bytes = 0n
@@ -1663,8 +1703,9 @@ export class GfsDownloadStore {
           Number(this.physicalDeficit(volume, input.sizeBytes) - freeable)
         )
       }
-      const callerShort = this.keptUsage(input.callerIdentity) + size - budget / 2n
-      const hostShort = this.keptUsage() + size - (budget * 3n) / 4n
+      const left = this.keptBoundsLeft(budget, input.callerIdentity)
+      const callerShort = size - left.caller
+      const hostShort = size - left.host
       if (callerShort > 0n || hostShort > 0n) {
         recordGfsDownloadQuota(callerShort > 0n ? 'caller' : 'host', 'storage_bytes')
         throw new GfsDownloadStoreError(

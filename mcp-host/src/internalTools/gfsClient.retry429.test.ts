@@ -153,6 +153,7 @@ describe('gfsc client under a concurrent 429 burst', () => {
     const statTools = clients.map(({ client }) => {
       const tool = buildGfsReadTools(client, {
         writeTools: { editText: true, saveBySourcePath: true },
+        keptFilesDelete: false,
         referencedFiles: new Map(),
       }).find(t => t.name === 'clerum__gfs_stat')
       if (!tool) throw new Error('clerum__gfs_stat is not registered')

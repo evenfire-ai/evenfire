@@ -12,8 +12,8 @@ import type { PreparedGfsFile } from '../../core/orchestration/turnContext'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import { GfsDownloadStore, GfsDownloadStoreError } from '../../internalTools/gfsDownloadStore'
 import {
-  GFS_CACHE_FULL_GUIDANCE,
   GFS_DISK_FULL_GUIDANCE,
+  GFS_STORE_FULL_GUIDANCE,
 } from '../../internalTools/gfsSpaceGuidance'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
@@ -724,7 +724,7 @@ describe('TaskExecutor prepares admitted GFS files before its first model call',
   // the model's own clerum__gfs_download shows the exact string that path emits.
   it.each([
     ['disk_full', 'disk_full', `\n${GFS_DISK_FULL_GUIDANCE}`],
-    ['host_quota_exceeded', 'quota_exceeded', `\n${GFS_CACHE_FULL_GUIDANCE}`],
+    ['host_quota_exceeded', 'quota_exceeded', `\n${GFS_STORE_FULL_GUIDANCE}`],
     ['volume_unmeasurable', 'volume_unmeasurable', ''],
   ] as const)(
     'maps the real tool output for a %s store refusal to its preparation code',

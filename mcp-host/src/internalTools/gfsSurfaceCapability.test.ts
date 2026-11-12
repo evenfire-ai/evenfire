@@ -28,6 +28,7 @@ describe('GFS workspace delivery capability', () => {
     }
     const tools = buildGfsReadTools(client, {
       writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
       referencedFiles: new Map(),
     })
     expect(tools.map(tool => tool.name)).not.toContain('clerum__gfs_download')

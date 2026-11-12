@@ -1119,6 +1119,7 @@ export class WorkflowService {
                 // No download runs in a workflow step (no store), so no
                 // result names a write tool.
                 writeTools: { editText: false, saveBySourcePath: false },
+                keptFilesDelete: false,
               })
             : []),
           ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),

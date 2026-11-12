@@ -8,11 +8,12 @@ import {
   replacedBytes,
   writeArtifact,
 } from './artifactOutput'
-import type { InternalToolResult } from './types'
+import type { InternalToolExecutionOptions, InternalToolResult } from './types'
 
 export async function runGeneratePptx(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  options?: InternalToolExecutionOptions
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'pptx', 'deck')
@@ -23,7 +24,7 @@ export async function runGeneratePptx(
     // Buffer first, quota check, then an atomic write.
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
-    enforceQuota(outputDir, buffer.byteLength, replacedBytes(target))
+    enforceQuota(outputDir, buffer.byteLength, replacedBytes(target), options?.keptRoomBytes)
     writeArtifact(target, buffer)
     return {
       ...artifactResult(target, 'pptx', {

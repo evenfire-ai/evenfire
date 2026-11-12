@@ -113,7 +113,7 @@ describe('generated internal artifact attachments', () => {
       undefined,
       undefined,
       undefined,
-      callerRoot
+      { root: callerRoot, room: async () => Number.MAX_SAFE_INTEGER }
     )
   }
 

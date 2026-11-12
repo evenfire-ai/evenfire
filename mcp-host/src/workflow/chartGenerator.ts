@@ -32,7 +32,7 @@ import { drawnTexts, recordDrawnText } from './drawnText'
 import { PNG_BASE_PPM } from './embeddedImages'
 import { CHART_FONT_STACK, ensureFontsReady, sanitizeForFont } from './fonts'
 import { choose } from './ownEntry'
-import type { InternalToolResult } from './types'
+import type { InternalToolExecutionOptions, InternalToolResult } from './types'
 
 // Register Chart.js controllers/scales/elements/plugins once. Chart.js v4 ships
 // these as separate exports so we have to opt in. `registerables` includes all
@@ -321,7 +321,8 @@ function crc32(buf: Buffer): number {
 
 export async function runGenerateChart(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  options?: InternalToolExecutionOptions
 ): Promise<InternalToolResult> {
   let chart: Chart | undefined
   try {
@@ -634,7 +635,7 @@ export async function runGenerateChart(
 
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
-    enforceQuota(outputDir, pngBuffer.byteLength, replacedBytes(target))
+    enforceQuota(outputDir, pngBuffer.byteLength, replacedBytes(target), options?.keptRoomBytes)
     writeArtifact(target, pngBuffer)
 
     const summary =

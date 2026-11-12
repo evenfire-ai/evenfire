@@ -24,7 +24,11 @@ import { MARKDOWN_TOOL } from './toolSchemas/markdown'
 import { PDF_TOOL } from './toolSchemas/pdf'
 import { PPTX_TOOL } from './toolSchemas/pptx'
 import { XLSX_TOOL } from './toolSchemas/xlsx'
-import type { InternalToolDefinition, InternalToolResult } from './types'
+import type {
+  InternalToolDefinition,
+  InternalToolExecutionOptions,
+  InternalToolResult,
+} from './types'
 import { listWorkflows, readWorkflow, triggerWorkflow } from './workflowTools'
 import { runGenerateXlsx } from './xlsxGenerator'
 
@@ -37,10 +41,14 @@ export { getOutputDir, setOutputDirHostAccessor, validateOutputPath } from './ou
 
 const generateChart: InternalToolDefinition = {
   ...CHART_TOOL,
-  execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
+  execute(
+    args: Record<string, unknown>,
+    outputDir: string,
+    options?: InternalToolExecutionOptions
+  ): Promise<InternalToolResult> {
     return fromModule(
       () => import('./chartGenerator'),
-      m => m.runGenerateChart(args, outputDir)
+      m => m.runGenerateChart(args, outputDir, options)
     )
   },
 }
@@ -49,20 +57,28 @@ const generateMarkdown: InternalToolDefinition = { ...MARKDOWN_TOOL, execute: ru
 
 const generatePdf: InternalToolDefinition = {
   ...PDF_TOOL,
-  execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
+  execute(
+    args: Record<string, unknown>,
+    outputDir: string,
+    options?: InternalToolExecutionOptions
+  ): Promise<InternalToolResult> {
     return fromModule(
       () => import('./pdfGenerator'),
-      m => m.runGeneratePdf(args, outputDir)
+      m => m.runGeneratePdf(args, outputDir, options)
     )
   },
 }
 
 const generateDocx: InternalToolDefinition = {
   ...DOCX_TOOL,
-  execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
+  execute(
+    args: Record<string, unknown>,
+    outputDir: string,
+    options?: InternalToolExecutionOptions
+  ): Promise<InternalToolResult> {
     return fromModule(
       () => import('./docxGenerator'),
-      m => m.runGenerateDocx(args, outputDir)
+      m => m.runGenerateDocx(args, outputDir, options)
     )
   },
 }
@@ -71,10 +87,14 @@ const generateXlsx: InternalToolDefinition = { ...XLSX_TOOL, execute: runGenerat
 
 const generateDashboardTool: InternalToolDefinition = {
   ...DASHBOARD_TOOL,
-  execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
+  execute(
+    args: Record<string, unknown>,
+    outputDir: string,
+    options?: InternalToolExecutionOptions
+  ): Promise<InternalToolResult> {
     return fromModule(
       () => import('./dashboardRender'),
-      m => m.runGenerateDashboard(args, outputDir)
+      m => m.runGenerateDashboard(args, outputDir, options)
     )
   },
 }

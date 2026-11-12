@@ -374,9 +374,25 @@ function reportRemovedQuotaVariable(): void {
  * combined output would exceed the cap. This is a best-effort soft quota. For
  * a workflow run the hard cap is its output volume (256Mi by default, 1Gi for
  * the legacy shared one), enforced by kubelet; for a chat caller's folder the
- * volume is protected by the free-space floor (enforceFreeSpaceFloor).
+ * volume is protected by the free-space floor (enforceFreeSpaceFloor), and the
+ * kept-files bounds of the download store by `keptRoomBytes`.
+ *
+ * `keptRoomBytes`, given only for a chat generation, is what the caller's
+ * kept files may still add (GfsDownloadStore.keptRoom, read before the
+ * generator ran); a file that needs more is refused with
+ * {@link keptBudgetRefusal} and nothing is written, so an earlier file of the
+ * same name stays. That check is soft too: two calls of one turn read the same
+ * room, and generations of several callers at the same moment each read the
+ * room before the others' files exist, so together they can pass the bound by
+ * their combined size; the next sweep counts them, and later generations and
+ * keeps are refused until the kept bytes are back under the bound.
  */
-export function enforceQuota(outputDir: string, incomingBytes: number, replacingBytes = 0): void {
+export function enforceQuota(
+  outputDir: string,
+  incomingBytes: number,
+  replacingBytes = 0,
+  keptRoomBytes?: number
+): void {
   const callerFolder = path.basename(outputDir) === CALLER_OUTPUTS_DIR
   reportRemovedQuotaVariable()
   const quotaMB = outputQuotaMB(
@@ -408,7 +424,24 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
         'raise CLERUM_GENERATED_FILES_QUOTA_MB.'
     )
   }
+  if (keptRoomBytes !== undefined && incomingBytes - replacingBytes > keptRoomBytes)
+    throw new Error(keptBudgetRefusal(incomingBytes - replacingBytes - keptRoomBytes))
   if (callerFolder) enforceFreeSpaceFloor(outputDir, incomingBytes)
+}
+
+/** How a generation refused by the kept-files bounds begins; the chat adapter matches it. */
+export const KEPT_BUDGET_REFUSAL_PREFIX = 'Host storage for kept files is full'
+
+/** The refusal of a generation the kept-files bounds have no room for, with the bytes short. */
+export function keptBudgetRefusal(neededBytes: number): string {
+  return `${KEPT_BUDGET_REFUSAL_PREFIX}: this file needs ${neededBytes} more bytes of room than this user's kept files have (needed_bytes=${neededBytes})`
+}
+
+/** The bytes short in a {@link keptBudgetRefusal}, or undefined for any other text. */
+export function parseKeptBudgetRefusal(message: string | undefined): number | undefined {
+  if (!message?.startsWith(KEPT_BUDGET_REFUSAL_PREFIX)) return undefined
+  const match = /\(needed_bytes=(\d+)\)$/.exec(message)
+  return match ? Number(match[1]) : undefined
 }
 
 /**

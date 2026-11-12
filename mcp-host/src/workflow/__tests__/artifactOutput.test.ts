@@ -9,7 +9,9 @@ import {
   capNotes,
   claimOutputFile,
   getDirectorySize,
+  keptBudgetRefusal,
   outputFilename,
+  parseKeptBudgetRefusal,
   replacedBytes,
   writeArtifact,
 } from '../artifactOutput'
@@ -217,6 +219,30 @@ describe('capNotes', () => {
   it('keeps notes about different columns apart', () => {
     const notes = capNotes(["column 'A' is text.", "column 'B' is text.", "column 'C' is text."])
     expect(notes).toHaveLength(3)
+  })
+})
+
+describe('enforceQuota with the kept-files room of a chat generation', () => {
+  it('refuses a file larger than the room with the exact bytes short, and admits one that fits', () => {
+    expect(() => enforceQuota(outputDir, 1000, 0, 999)).toThrow(keptBudgetRefusal(1))
+    expect(() => enforceQuota(outputDir, 1000, 0, 1000)).not.toThrow()
+    // A negative room: the bound is already passed by that much.
+    expect(() => enforceQuota(outputDir, 10, 0, -5)).toThrow(keptBudgetRefusal(15))
+  })
+
+  it('credits a replaced file of the same name', () => {
+    expect(() => enforceQuota(outputDir, 1000, 400, 600)).not.toThrow()
+    expect(() => enforceQuota(outputDir, 1000, 399, 600)).toThrow(keptBudgetRefusal(1))
+  })
+
+  it('checks nothing more without a room, as in the workflow runtime', () => {
+    expect(() => enforceQuota(outputDir, 1000)).not.toThrow()
+  })
+
+  it('reads back the bytes short from the refusal, and nothing from other text', () => {
+    expect(parseKeptBudgetRefusal(keptBudgetRefusal(12345))).toBe(12345)
+    expect(parseKeptBudgetRefusal('Output quota exceeded: needed_bytes=5')).toBeUndefined()
+    expect(parseKeptBudgetRefusal(undefined)).toBeUndefined()
   })
 })
 

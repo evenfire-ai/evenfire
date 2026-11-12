@@ -396,6 +396,58 @@ function generated(
   return { file, record }
 }
 
+describe('the room a generation has under the kept bounds', () => {
+  it('is the smaller of what the two bounds leave, after expired kept files are removed', async () => {
+    const store = await openStore()
+    // Budget 140 MiB: one caller 70, every caller 105.
+    keepFile(A, 'a.md', 30 * MIB)
+    keepFile(B, 'b.md', 60 * MIB)
+    const expired = generated(A, 'old.md', TTL + HOUR)
+    expect(await store.keptRoom({ callerIdentity: A })).toBe(15 * MIB)
+    // Witness: the expired file was removed by the call, and its bytes are back.
+    expect(exists(expired.file)).toBe(false)
+    expect(await store.keptRoom({ callerIdentity: C })).toBe(15 * MIB)
+    keepFile(A, 'more.md', 50 * MIB)
+    // Over a bound: negative.
+    expect(await store.keptRoom({ callerIdentity: A })).toBe(-35 * MIB)
+  })
+
+  it('refuses before initialization and after close', async () => {
+    const fresh = new GfsDownloadStore(hostRoot)
+    stores.push(fresh)
+    expect((await refusal(fresh.keptRoom({ callerIdentity: A }))).code).toBe(
+      'workspace_unavailable'
+    )
+    const closed = await openStore()
+    await closed.close(0)
+    expect((await refusal(closed.keptRoom({ callerIdentity: A }))).code).toBe('download_busy')
+  })
+
+  it('reads an unmeasurable volume once more, and at most four times in all', async () => {
+    const store = await openStore()
+    const valid = statfsBoundary.getMockImplementation()!
+    const invalid = async (target: string) => ({ ...(await valid(target)), bsize: 0n })
+    statfsBoundary.mockClear()
+    statfsBoundary.mockImplementationOnce(invalid).mockImplementationOnce(invalid)
+    expect(await store.keptRoom({ callerIdentity: A })).toBe(70 * MIB)
+    expect(statfsBoundary).toHaveBeenCalledTimes(3)
+    statfsBoundary.mockClear()
+    statfsBoundary.mockImplementation(invalid)
+    expect((await refusal(store.keptRoom({ callerIdentity: A }))).code).toBe('volume_unmeasurable')
+    expect(statfsBoundary).toHaveBeenCalledTimes(4)
+  })
+
+  it('leaves the verdicts and bytes short of a keep as they were', async () => {
+    const store = await openStore()
+    keepFile(A, 'kept.md', 65 * MIB)
+    const refused = await refusal(store.reserveKept({ callerIdentity: A, sizeBytes: 10 * MIB }))
+    expect([refused.code, refused.neededBytes]).toEqual(['host_quota_exceeded', 5 * MIB])
+    keepFile(B, 'b.md', 35 * MIB)
+    const host = await refusal(store.reserveKept({ callerIdentity: C, sizeBytes: 10 * MIB }))
+    expect([host.code, host.neededBytes]).toEqual(['host_quota_exceeded', 5 * MIB])
+  })
+})
+
 describe('kept files expire after the retention period', () => {
   it('removes an expired generated file with its record and keeps an unexpired one', async () => {
     const store = await openStore()

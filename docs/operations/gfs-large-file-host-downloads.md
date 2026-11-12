@@ -473,7 +473,22 @@ top level (generated files), `.save-ledger/` (their save records) and
 `.uploads/` (kept chat attachments, `<id>.bin` with its record `<id>.json`),
 and no other folder of the caller. A keep of a message's attachments is
 refused when one caller's kept bytes would pass half the budget or every
-caller's three quarters. A regular file there expires once the retention
+caller's three quarters.
+
+A chat generation is checked against the same two bounds. Before the generator
+runs, the Host removes everything past the retention period (one sweep) and
+reads the room the bounds leave; a file larger than the room is refused before
+anything is written, so an earlier file of that name stays. Where the turn has
+`clerum__kept_files_delete`, the refusal offers the user's own kept files,
+oldest first, to delete after approval; otherwise it says why it cannot make
+room. While the download store is closed or not initialized, no file is
+generated. When the volume cannot be measured, the Host reads it once more and
+then generates without this check (the folder quota and the free-space floor
+still apply); the next sweep counts the file. The check is soft: two
+generations of one turn read the same room, and generations of several callers
+at the same moment can together pass the bound by their combined size until
+the next sweep counts them. Each generation result says after how many hours
+the Host deletes the file. A regular file there expires once the retention
 period has passed since the later of its record's `createdAt` and its own
 modification time, each taken as now when it is in the future; a file with no
 readable record (a record itself, a temporary file) ages by its modification
@@ -653,10 +668,13 @@ user what happened and what they can do:
   what the user no longer needs with a `shell_exec` command the user approves.
   It never lists, reads or deletes another user's directory or anything
   outside the workspace.
-- `host_quota_exceeded`: the Host's cache of downloaded files is full. Space
-  frees as tasks finish and downloaded copies expire. The model tells the user,
-  who can finish or cancel their own running tasks to free space sooner and
-  then try again. It never acts on another user's tasks or files. The text
+- `host_quota_exceeded`: the Host's storage for downloaded and kept files is
+  full. Space frees as running tasks finish, as downloaded copies expire and as
+  kept files reach the retention period. The model tells the user, who can
+  finish or cancel their own running tasks to free space sooner and then try
+  again; where the turn has `clerum__kept_files_delete`, the text also says the
+  user can list their kept files and delete the ones they confirm. It never
+  acts on another user's tasks or files. The text
   offers no deletion of downloaded copies, because that cannot admit the
   download: the budget refusal comes when evicting every copy no running task
   protects would still not make room (the store then evicts nothing), or when a

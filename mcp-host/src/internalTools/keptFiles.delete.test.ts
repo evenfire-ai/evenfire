@@ -170,7 +170,7 @@ function registryFor(root: string, deleteConfirmed: boolean): NativeToolRegistry
     undefined,
     undefined,
     undefined,
-    root,
+    { root: root, room: async () => Number.MAX_SAFE_INTEGER },
     deleteConfirmed
   )
 }

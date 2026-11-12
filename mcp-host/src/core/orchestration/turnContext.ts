@@ -23,10 +23,7 @@
 import { quotePromptValue } from '@clerum/gfs-interaction-policy'
 import type { GfsDownloadReceipt } from '../../internalTools/gfsDownloadStore'
 import { GFS_FILE_LIMITS } from '../../internalTools/gfsFilePolicy'
-import {
-  GFS_CACHE_FULL_GUIDANCE,
-  GFS_DISK_FULL_GUIDANCE,
-} from '../../internalTools/gfsSpaceGuidance'
+import { GFS_DISK_FULL_GUIDANCE, gfsStoreSpaceGuidance } from '../../internalTools/gfsSpaceGuidance'
 import { imageSaveName } from '../attachments/attachmentSave'
 import type { Attachment } from '../types'
 
@@ -93,6 +90,8 @@ export interface TurnContextInput {
   preparedGfsFiles?: PreparedGfsFile[]
   /** Admission could not keep this message's attachments for a later save. */
   keepRefusal?: { code: string; offer?: KeepOffer }
+  /** Whether the turn has the kept-files delete; the storage-full guidance names it only then. */
+  keptFilesDeleteAvailable?: boolean
 }
 
 /**
@@ -118,25 +117,50 @@ const OFFER_MAX_FILES = 10
 const DELETE_CONFIRMATION_SENTENCE =
   'Call clerum__kept_files_delete only with the files the user agrees to delete: its approval card is the confirmation.'
 
-const ATTACH_AGAIN_CLOSING =
-  'Afterwards ask the user to attach the files again; that message keeps them.'
+/** What the no-room offer is for: a message's attachments, or a file to generate. */
+export type KeepOfferSubject = 'attachments' | 'generation'
+
+const OFFER_CLOSING: Record<KeepOfferSubject, string> = {
+  attachments: 'Afterwards ask the user to attach the files again; that message keeps them.',
+  generation: 'Afterwards generate the file again.',
+}
+
+const COVERED_OFFER =
+  'Propose to the user the deletable_file entries above, which free needed_bytes, oldest first.'
+const CAPPED_OFFER =
+  "The deletable_file entries above free only part of needed_bytes. Propose them to the user, oldest first, then call clerum__kept_files_list and propose the user's next oldest files from it until needed_bytes is covered."
+
+/** The offer's instruction: covered or capped, closed by the sentence of its subject. */
+function deleteOfferInstruction(capped: boolean, subject: KeepOfferSubject): string {
+  return `${capped ? CAPPED_OFFER : COVERED_OFFER} ${DELETE_CONFIRMATION_SENTENCE} ${OFFER_CLOSING[subject]}`
+}
 
 /** The offer's instruction when the files it names cover the bytes short. */
-export const DELETE_OFFER_INSTRUCTION = `Propose to the user the deletable_file entries above, which free needed_bytes, oldest first. ${DELETE_CONFIRMATION_SENTENCE} ${ATTACH_AGAIN_CLOSING}`
+export const DELETE_OFFER_INSTRUCTION = deleteOfferInstruction(false, 'attachments')
 
 /**
  * The offer's instruction when it names its most files and they still do not
  * cover the bytes short: the user's other files are in the listing.
  */
-export const DELETE_OFFER_CAPPED_INSTRUCTION = `The deletable_file entries above free only part of needed_bytes. Propose them to the user, oldest first, then call clerum__kept_files_list and propose the user's next oldest files from it until needed_bytes is covered. ${DELETE_CONFIRMATION_SENTENCE} ${ATTACH_AGAIN_CLOSING}`
+export const DELETE_OFFER_CAPPED_INSTRUCTION = deleteOfferInstruction(true, 'attachments')
 
 export const CANNOT_FREE_INSTRUCTION =
   "Deleting this user's kept files cannot free enough room. Tell the user the space is held by files with no record, by files in workspaces (the user's own workspace files can be removed with an approved shell command), by other users of this agent or by downloads in use, and that kept files leave after the retention time."
 
-function keepOfferLines(code: string, offer: KeepOffer): string[] {
+/**
+ * The no-room offer: the bytes short, then the user's own files that cover
+ * them, oldest first (at most ten), or that the user cannot free enough. The
+ * first line and the closing sentence follow the subject.
+ */
+export function keepOfferLines(
+  code: string,
+  offer: KeepOffer,
+  subject: KeepOfferSubject = 'attachments'
+): string[] {
   const deletableBytes = offer.deletable.reduce((sum, file) => sum + file.sizeBytes, 0)
+  const head = subject === 'attachments' ? 'attachments_not_kept' : 'file_not_generated'
   const lines = [
-    `attachments_not_kept: code=${code} needed_bytes=${offer.neededBytes} your_deletable_bytes=${deletableBytes}`,
+    `${head}: code=${code} needed_bytes=${offer.neededBytes} your_deletable_bytes=${deletableBytes}`,
   ]
   if (deletableBytes < offer.neededBytes) {
     lines.push('user_cannot_free_enough')
@@ -155,9 +179,9 @@ function keepOfferLines(code: string, offer: KeepOffer): string[] {
   }
   if (covered < offer.neededBytes) {
     lines.push('more_deletable_files: call clerum__kept_files_list')
-    lines.push(DELETE_OFFER_CAPPED_INSTRUCTION)
+    lines.push(deleteOfferInstruction(true, subject))
   } else {
-    lines.push(DELETE_OFFER_INSTRUCTION)
+    lines.push(deleteOfferInstruction(false, subject))
   }
   return lines
 }
@@ -338,7 +362,11 @@ export function buildTurnContextBlock(input: TurnContextInput): string {
     )
     if (codes.has('disk_full')) lines.push(`For code=disk_full: ${GFS_DISK_FULL_GUIDANCE}`)
     if (codes.has('quota_exceeded'))
-      lines.push(`For code=quota_exceeded: ${GFS_CACHE_FULL_GUIDANCE}`)
+      lines.push(
+        `For code=quota_exceeded: ${gfsStoreSpaceGuidance('host_quota_exceeded', {
+          keptFilesDelete: input.keptFilesDeleteAvailable === true,
+        })}`
+      )
   }
   return `<turn-context>\n${lines.join('\n')}\n</turn-context>\n\n`
 }

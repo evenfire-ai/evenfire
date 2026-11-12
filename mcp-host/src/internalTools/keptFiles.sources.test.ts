@@ -159,7 +159,7 @@ function registryFor(root: string, secrets: Secrets = []): NativeToolRegistry {
     undefined,
     undefined,
     undefined,
-    root
+    { root: root, room: async () => Number.MAX_SAFE_INTEGER }
   )
 }
 
