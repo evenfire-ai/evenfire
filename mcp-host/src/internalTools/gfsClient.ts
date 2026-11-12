@@ -343,6 +343,17 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
         },
         call
       ),
+    writeBytes: ({ drive, resourceId, contentBase64, ifMatch }, call) =>
+      request(
+        writerBase,
+        `/v1/resources/${encodeURIComponent(resourceId)}/content?drive=${encodeURIComponent(drive)}`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ contentBase64, ifMatch }),
+        },
+        call
+      ),
     createFile: ({ drive, parentResourceId, name, content }, call) =>
       request(
         writerBase,

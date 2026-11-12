@@ -799,6 +799,16 @@ export interface GfscWriteClient extends GfscReadClient {
     },
     call?: GfscCallOptions
   ): Promise<unknown>
+  /** Replaces a file's content with bytes, as the create route accepts them. */
+  writeBytes(
+    args: {
+      drive: string
+      resourceId: string
+      contentBase64: string
+      ifMatch: number
+    },
+    call?: GfscCallOptions
+  ): Promise<unknown>
   createFile(
     args: {
       drive: string
