@@ -54,4 +54,19 @@ describe('mockClerum chat persistence', () => {
 
     expect(await persistedIds(clerum)).toEqual([])
   })
+
+  it('removes from the real store what its upsert wrote', async () => {
+    const clerum = installMockClerum()
+    await clerum.chat.create(AGENT, CHAT)
+    await clerum.chat.upsertMessages(AGENT, CHAT, [
+      { id: 'kept', role: 'user', content: 'kept', timestamp: 1 },
+      { id: 'pending', role: 'user', content: 'rejected', timestamp: 2 },
+    ])
+    // Witness: the upsert stored both turns.
+    expect(await persistedIds(clerum)).toEqual(['kept', 'pending'])
+
+    await expect(clerum.chat.removeMessages(AGENT, CHAT, ['pending'])).resolves.toBe(1)
+
+    expect(await persistedIds(clerum)).toEqual(['kept'])
+  })
 })
