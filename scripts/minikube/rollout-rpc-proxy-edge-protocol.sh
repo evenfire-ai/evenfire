@@ -97,7 +97,8 @@ restart_host_targets() {
     done < <("${KC[@]}" get deployments -n "$HOST_NAMESPACE" \
       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
   else
-    for deployment in "${HOST_DEPLOYMENTS[@]}"; do
+    # bash before 4.4 treats an empty array as unbound under `set -u`.
+    for deployment in ${HOST_DEPLOYMENTS[@]+"${HOST_DEPLOYMENTS[@]}"}; do
       restart_host "$deployment"
     done
   fi
@@ -171,7 +172,7 @@ fi
 # This read-only check must finish before any coordinator restart begins.
 if [[ "$hcc_selector_missing" == true ]]; then
   if ! wait_hosts_legacy || ! wait_proxy_legacy; then
-    echo "ERROR: selector-free HCC is not backed by a Ready legacy Proxy and Host cohort" >&2
+    echo "ERROR: selector-free HCC is not backed by a Ready legacy Host cohort and a Ready legacy-compatible Proxy" >&2
     exit 1
   fi
 fi
@@ -192,8 +193,8 @@ if [[ "$hcc_protocol" == "dedicated-header-v1" ]]; then
   fi
   restart_host_targets
 else
-  # Rollback is the reverse: all HCC-managed Hosts must be compatible before
-  # an old Proxy producer can serve again.
+  # Legacy-headers order: all HCC-managed Hosts must be legacy-compatible
+  # before the Proxy restarts, whatever label the Proxy carries.
   if [[ "$RESTART_HCC" == true ]]; then
     restart_and_wait "$CONTROL_PLANE_NAMESPACE" host-context-controller
   fi

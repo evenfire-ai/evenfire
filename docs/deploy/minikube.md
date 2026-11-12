@@ -451,21 +451,27 @@ Desktop App
 ### Authenticated Proxy/Host rollout order
 
 The RPC Proxy Deployment pod template carries the non-secret
-`clerum.io/rpc-proxy-edge-protocol=dedicated-header-v1` cohort marker. HCC
-requires the full current Ready Proxy cohort before it writes any strict Host
-Deployment. `make minikube-restart-all` and the pre-gate incremental path use the
-same bounded ordering: Proxy, cohort proof, HCC, then Hosts. Do not manually
-roll a Proxy back while strict Host Deployments remain. The supported local
-rollback wrapper restores HCC/Hosts first and only then the Proxy:
+`clerum.io/rpc-proxy-edge-protocol=dedicated-header-v1` cohort marker. The
+marker says the Proxy can produce the dedicated header for strict Hosts. A
+marked Proxy still sends the legacy context headers on every call that carries
+no authorized V2 action, so it also serves Hosts on `legacy-headers`, the
+protocol HCC selects by default. HCC requires the full current Ready Proxy
+cohort before it writes any strict Host Deployment. `make minikube-restart-all`
+and the pre-gate incremental path order their restarts by the HCC selector:
+HCC, Hosts, then Proxy for `legacy-headers`; Proxy, cohort proof, HCC, then
+Hosts for `dedicated-header-v1`. Do not manually roll a Proxy back while strict
+Host Deployments remain. The supported local rollback wrapper restores
+HCC/Hosts first and only then the Proxy:
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> HCC_TO_REVISION=<legacy-hcc-revision> \
-  RPC_PROXY_TO_REVISION=<legacy-proxy-revision> make minikube-rollback-rpc-proxy
+  RPC_PROXY_TO_REVISION=<proxy-revision> make minikube-rollback-rpc-proxy
 ```
 
 The wrapper uses the branch-owned mutation lease, explicit Kubernetes context,
 bounded rollout waits, and fails closed if a strict Host Deployment or Pod is
-still present. Production GCP rollout/rollback orchestration is owned by the
+still present. The Proxy revision it restores may carry the marker or not.
+Production GCP rollout/rollback orchestration is owned by the
 separate `keyper-labs/evenfire-infra` repository.
 
 ### GFS Upload v2 local/T2 profile

@@ -89,13 +89,18 @@ proxy_cohort_ready() {
     ' <<<"$pods" >/dev/null
 }
 
+# "Legacy-compatible" means the cohort can serve legacy-headers Hosts. A Proxy
+# labelled dedicated-header-v1 can: the label marks that it is able to produce
+# the dedicated header for strict Hosts, and it still sends the legacy context
+# headers on every call that carries no authorized V2 action. So every
+# supported label value passes here and only an unknown value is rejected.
 proxy_cohort_legacy() {
   local deployment pods
   deployment="$(bounded_kubectl_get proxy-legacy-deployment deployment rpc-proxy \
     -n "$RPC_PROXY_NAMESPACE" -o json 2>/dev/null)" || return 1
   pods="$(bounded_kubectl_get proxy-legacy-pods pods -n "$RPC_PROXY_NAMESPACE" \
     -l app=rpc-proxy -o json 2>/dev/null)" || return 1
-  jq -e --arg label "$PROTOCOL_LABEL" '
+  jq -e --arg label "$PROTOCOL_LABEL" --arg strict "$STRICT_PROTOCOL" '
     (.spec.template.metadata.labels // {}) as $templateLabels |
     (.spec.replicas // 1) as $desired |
     (.metadata.generation // 0) as $generation |
@@ -104,15 +109,17 @@ proxy_cohort_legacy() {
     ((.status.updatedReplicas // 0) == $desired) and
     ((.status.readyReplicas // 0) == $desired) and
     ((.status.availableReplicas // 0) == $desired) and
-    ((($templateLabels | has($label)) | not) or $templateLabels[$label] == "legacy-headers")
+    ((($templateLabels | has($label)) | not) or
+      $templateLabels[$label] == "legacy-headers" or $templateLabels[$label] == $strict)
   ' <<<"$deployment" >/dev/null || return 1
-  jq -e --arg label "$PROTOCOL_LABEL" \
+  jq -e --arg label "$PROTOCOL_LABEL" --arg strict "$STRICT_PROTOCOL" \
     --argjson desired "$(jq -r '.spec.replicas // 1' <<<"$deployment")" '
       (.items | length) == $desired and
       all(.items[];
         .metadata.deletionTimestamp == null and
         (((.metadata.labels // {}) as $labels |
-          ((($labels | has($label)) | not) or $labels[$label] == "legacy-headers"))) and
+          ((($labels | has($label)) | not) or
+            $labels[$label] == "legacy-headers" or $labels[$label] == $strict))) and
         .status.phase == "Running" and
         any(.status.conditions[]?; .type == "Ready" and .status == "True")
       )
