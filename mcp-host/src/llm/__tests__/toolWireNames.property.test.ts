@@ -569,4 +569,43 @@ describe('toWireRequest / fromWireResponse', () => {
     const back = fromWireResponse(resp, req.names)
     expect(back.tool_calls?.map(tc => tc.name)).toEqual([long, long, 'inventado_xyz'])
   })
+
+  // Each history source alone must enter the set. The tool sent is a real name
+  // equal to the base alias of the history name: if that history name were left
+  // out, it would be sent under the tool's own name.
+  describe('each history source alone enters the name set', () => {
+    const shadow = wireToolAlias(historyOnly, 'W')
+    const tools: ToolDefinition[] = [{ name: shadow, description: 'D', parameters: {} }]
+
+    function expectDistinctAndResolved(req: ReturnType<typeof toWireRequest>, wire: string) {
+      expect(req.tools[0].name).toBe(shadow)
+      expect(wire).not.toBe(shadow)
+      expect(wire).toMatch(LITERAL_ENVELOPES.W)
+      expect(req.names.fromWire(wire)).toBe(historyOnly)
+      expect(req.names.fromWire(shadow)).toBe(shadow)
+    }
+
+    it('an assistant tool_call whose tool message carries no name', () => {
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'hi' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 't1', name: historyOnly, arguments: {} }],
+        },
+        { role: 'tool', content: 'ok', tool_call_id: 't1' },
+      ]
+      const req = toWireRequest(messages, tools, 'W')
+      expectDistinctAndResolved(req, req.messages[1].tool_calls?.[0].name as string)
+    })
+
+    it('an orphan tool message with a long name, outside tool_calls and tools[]', () => {
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'hi' },
+        { role: 'tool', content: 'ok', tool_call_id: 'gone', name: historyOnly },
+      ]
+      const req = toWireRequest(messages, tools, 'W')
+      expectDistinctAndResolved(req, req.messages[1].name as string)
+    })
+  })
 })
