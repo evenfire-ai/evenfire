@@ -137,6 +137,25 @@ describe('T-W2b · alias returned by the model reaches the MCP server canonical'
     expect(remote.calls).toHaveBeenCalledTimes(1)
     expect(remote.calls.mock.calls[0][0].name).toBe(QUERY_TOOL)
   })
+
+  // Every captured Notion name fits Vertex's 128, so it needs a tool past it.
+  it('vertex: a 129-character tool', async () => {
+    const longTool = 'x'.repeat(129 - NOTION_SERVER.length - 2)
+    const longCanonical = `${NOTION_SERVER}__${longTool}`
+    const manager = await notionManager([longTool])
+    const tools = catalog(manager)
+    const index = tools.findIndex(t => t.name === longCanonical)
+    expect(index).toBeGreaterThanOrEqual(0)
+
+    let sentAlias = ''
+    const response = await turn('vertex', tools, names => (sentAlias = names[index]))
+    expect(sentAlias).not.toBe(longCanonical)
+    expect(response.tool_calls?.[0]?.name).toBe(longCanonical)
+
+    const result = await executeToolCalls(response.tool_calls!, loopConfig(manager), 0)
+    expect(result.toolResults[0]).toMatchObject({ is_error: false, content: `ran ${longTool}` })
+    expect(remote.calls.mock.calls[0][0].name).toBe(longTool)
+  })
 })
 
 describe('T-W4 · through the loop', () => {

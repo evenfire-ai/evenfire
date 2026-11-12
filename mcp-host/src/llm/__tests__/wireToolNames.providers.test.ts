@@ -108,6 +108,20 @@ describe.each(DIRECT_PROVIDERS)('T-W2 · %s', id => {
     expect(response.tool_calls?.[0]?.name).toBe(QUERY)
     if (id === 'openai') expect(cap.methods).toEqual(['responses', 'responses'])
   })
+
+  // The Notion call above fits Claude's and Vertex's 128; only a name past every
+  // envelope proves each adapter maps the returned alias back.
+  it('resolves a returned alias of a 129-character tool back to the canonical name', async () => {
+    const overIndex = CONTRACT_TOOLS.findIndex(t => t.name === OVER_128)
+    const { sent, response } = await send(
+      id,
+      [{ role: 'user', content: 'q' }],
+      CONTRACT_TOOLS,
+      names => names[overIndex]
+    )
+    expect(sent[overIndex].name).not.toBe(OVER_128)
+    expect(response.tool_calls?.[0]?.name).toBe(OVER_128)
+  })
 })
 
 describe.each(DIRECT_PROVIDERS)('T-W3 · %s history', id => {
