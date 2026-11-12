@@ -63,7 +63,7 @@ describe('StatusReporter', () => {
     )
   })
 
-  it('bounds toolsCalled in step reports while keeping the full output', async () => {
+  it('bounds toolsCalled and output in step reports', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
     vi.stubGlobal('fetch', fetchMock)
     const toolsCalled = Array.from({ length: 22 }, (_, i) => ({
@@ -84,10 +84,102 @@ describe('StatusReporter', () => {
 
     const rawBody: string = fetchMock.mock.calls[0][1].body
     const body = JSON.parse(rawBody)
-    expect(body.output).toBe(output)
+    expect(body.output).toBe(output.slice(0, 65_536))
+    expect(body.outputLength).toBe(150_000)
+    expect(body.outputTruncated).toBe(true)
     expect(body.toolsCalled).toHaveLength(22)
     expect(body.toolsCalled[0].result).toEqual({ truncated: true, preview: expect.any(String) })
-    expect(rawBody.length - output.length).toBeLessThan(64 * 1024)
+    expect(rawBody.length - body.output.length).toBeLessThan(64 * 1024)
+  })
+
+  it('cuts a large step output to the WRC preview maximum and reports its original length', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const output = 'r'.repeat(150_000)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('review', 'completed', { output })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.output).toBe(output.slice(0, 65_536))
+    expect(body.outputLength).toBe(150_000)
+    expect(body.outputTruncated).toBe(true)
+  })
+
+  it('sends a small step output whole with its length', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('s1', 'completed', { output: 'ok' })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body).toEqual({
+      stepId: 's1',
+      phase: 'completed',
+      output: 'ok',
+      outputLength: 2,
+      outputTruncated: false,
+    })
+  })
+
+  it('warns with structural fields only when a report is over the size ceiling', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    const logSpy = vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', fetchMock)
+    const failureReason = 'secret-reason '.repeat(30_000)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportWorkflowStatus('failed', { failureReason })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const sentBytes = Buffer.byteLength(fetchMock.mock.calls[0][1].body)
+    expect(sentBytes).toBeGreaterThan(256 * 1024)
+    expect(logSpy).toHaveBeenCalledWith('warn', 'Step status report exceeds the size ceiling', {
+      label: 'workflow status',
+      bodyBytes: sentBytes,
+    })
+    expect(JSON.stringify(logSpy.mock.calls)).not.toContain('secret-reason')
+    logSpy.mockRestore()
+  })
+
+  it('does not warn about the size ceiling for a bounded step report', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    const logSpy = vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('s1', 'failed', {
+      output: '\u0001'.repeat(65_536),
+      failureReason: '\u0001'.repeat(100_000),
+    })
+
+    // Witness: the report was sent, and its input was far over the ceiling.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(Buffer.byteLength(JSON.stringify('\u0001'.repeat(65_536)))).toBeGreaterThan(256 * 1024)
+    expect(Buffer.byteLength(fetchMock.mock.calls[0][1].body)).toBeLessThanOrEqual(256 * 1024)
+    expect(logSpy).not.toHaveBeenCalledWith(
+      'warn',
+      'Step status report exceeds the size ceiling',
+      expect.anything()
+    )
+    logSpy.mockRestore()
   })
 
   it('retries 5xx status reports and succeeds on a later attempt', async () => {

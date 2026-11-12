@@ -5,6 +5,7 @@ import * as k8s from '@kubernetes/client-node'
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import {
   MAX_STATUS_TOOL_CALLS,
+  extractOutputArtifactsForStatus,
   normalizeArtifactForStatus,
   normalizeToolArgsForStatus,
   normalizeToolResultForStatus,
@@ -158,7 +159,21 @@ function extractArtifactsFromStepStatus(body: StepStatusUpdate): ArtifactStatus[
     if (parsed) artifacts.push(parsed)
   }
 
-  artifacts.push(...extractCustomArtifacts(body.output))
+  artifacts.push(...extractOutputArtifactsForStatus(body.output))
+
+  // A coordinator that cut the output sends the artifacts it declared, which
+  // WRC can no longer parse from the preview.
+  if (Array.isArray(body.outputArtifacts)) {
+    const paths = new Set(artifacts.map(artifact => artifact.path))
+    for (const item of body.outputArtifacts.slice(0, MAX_CUSTOM_ARTIFACTS_PER_STEP)) {
+      if (!isRecord(item)) continue
+      const artifact = normalizeArtifactForStatus(item)
+      if (artifact && !paths.has(artifact.path)) {
+        paths.add(artifact.path)
+        artifacts.push(artifact)
+      }
+    }
+  }
   return artifacts
 }
 
@@ -167,38 +182,6 @@ function parseUnknownArtifactResult(result: unknown): ArtifactStatus | null {
     const parsed = typeof result === 'object' ? result : JSON.parse(String(result ?? '{}'))
     if (!isRecord(parsed) || parsed.success !== true || !isRecord(parsed.artifact)) return null
     return normalizeArtifactForStatus(parsed.artifact)
-  } catch {
-    return null
-  }
-}
-
-function extractCustomArtifacts(output: unknown): ArtifactStatus[] {
-  const parsedOutput = parseOutputRecord(output)
-  if (!parsedOutput) return []
-
-  const artifacts: ArtifactStatus[] = []
-  if (isRecord(parsedOutput.artifact)) {
-    const artifact = normalizeArtifactForStatus(parsedOutput.artifact)
-    if (artifact) artifacts.push(artifact)
-  }
-
-  if (Array.isArray(parsedOutput.artifacts)) {
-    for (const item of parsedOutput.artifacts.slice(0, MAX_CUSTOM_ARTIFACTS_PER_STEP)) {
-      if (!isRecord(item)) continue
-      const artifact = normalizeArtifactForStatus(item)
-      if (artifact) artifacts.push(artifact)
-    }
-  }
-
-  return artifacts
-}
-
-function parseOutputRecord(output: unknown): Record<string, unknown> | null {
-  if (isRecord(output)) return output
-  if (typeof output !== 'string') return null
-  try {
-    const parsed = JSON.parse(output)
-    return isRecord(parsed) ? parsed : null
   } catch {
     return null
   }
@@ -438,6 +421,9 @@ interface StepStatusUpdate {
   stepId: string
   phase: StepPhase
   output?: unknown
+  outputLength?: unknown
+  outputTruncated?: unknown
+  outputArtifacts?: unknown
   error?: string
   failureReason?: string
   executor?: 'agentic' | 'snippet' | 'custom'
@@ -826,7 +812,10 @@ export function createWorkflowEndpointHandlers(
         }
         const outputPreview =
           body.output != null
-            ? buildStatusOutputPreview(body.output, statusOutputPreviewMaxChars)
+            ? buildStatusOutputPreview(body.output, statusOutputPreviewMaxChars, {
+                outputLength: body.outputLength,
+                outputTruncated: body.outputTruncated,
+              })
             : undefined
         if (
           body.approvalBindingSha256 !== undefined &&
