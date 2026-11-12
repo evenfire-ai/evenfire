@@ -59,6 +59,7 @@ import {
   validateToolLinkages,
 } from '../core/orchestration/toolUseLoop'
 import {
+  appendToolResults,
   collectToolAttachments,
   mergeCollectedAttachments,
   requestImageUsage,
@@ -877,22 +878,23 @@ export class TaskExecutor {
 
       // Reconstruct messages using the resolved completed_results.
       // `resolvedCompletedResults` is `approval.completed_results` with any
-      // spillover refs swapped in for their blob bodies (invariant #2).
-      const messages: ChatMessage[] = [
-        ...approval.context_snapshot,
-        ...resolvedCompletedResults.map((tr: ToolResult) => ({
-          role: 'tool' as const,
-          content: tr.content,
-          tool_call_id: tr.tool_call_id,
-          name: tr.name,
+      // spillover refs swapped in for their blob bodies (invariant #2), so the
+      // rebuilt tool messages carry no ref. The batch is appended the way the
+      // loop appends it, image parts included: a visual read's pages reach
+      // the model and match the image count forwarded above (review M1). The
+      // scratch collection starts from the turn's attachments before this
+      // batch, the state the loop's own append would have seen; the response
+      // attachments below keep their separate collection.
+      const messages: ChatMessage[] = [...approval.context_snapshot]
+      appendToolResults(
+        messages,
+        [...resolvedCompletedResults, toolResult].map(result => ({
+          ...result,
+          spillover_ref: undefined,
         })),
-        {
-          role: 'tool' as const,
-          content: toolResult.content,
-          tool_call_id: toolResult.tool_call_id,
-          name: toolResult.name,
-        },
-      ]
+        [...(approval.attachments ?? [])],
+        loopConfig.imageSourceIdentity === true
+      )
 
       validateToolLinkages(messages)
 

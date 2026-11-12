@@ -22,6 +22,7 @@ import {
   witnessCode,
 } from '../../core/tools/documentRead/__tests__/fixtures'
 import type { RunDocumentJob } from '../../core/tools/documentRead/types'
+import { runDocumentJob } from '../../core/tools/documentRead/workerRunner'
 import {
   requestEffectiveWorkflowList,
   resolveEffectiveWorkflowTarget,
@@ -182,6 +183,19 @@ function createImageAttachment(overrides: Partial<Attachment> = {}): Attachment 
     filename: 'image.jpg',
     ...overrides,
   }
+}
+
+/** The tool-result image parts of the request the resumed loop received. */
+function resumedToolImages(toolCallId: string): MessageContentPart[] {
+  const messages = vi.mocked(runToolUseLoop).mock.calls[1]![1] as ChatMessage[]
+  return messages.flatMap(message =>
+    (message.contentParts ?? []).filter(
+      part =>
+        part.type === 'image' &&
+        part.source?.kind === 'tool' &&
+        part.source.toolCallId === toolCallId
+    )
+  )
 }
 
 /** A document reader whose worker must never run: the request has no free image slot. */
@@ -1206,7 +1220,68 @@ describe('TaskExecutor', () => {
     expect(executor.executorState).toBe('completed')
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
     expect(runToolUseLoop).toHaveBeenCalledTimes(2)
+    // The rebuilt request carries the 20 pages it counted (review M1): the
+    // count describes the request the model receives, not dropped images.
+    expect(resumedToolImages('call-earlier')).toHaveLength(20)
   })
+
+  it('M1: the page an approved visual read renders reaches the resumed request', async () => {
+    const file = admittedFile('resume-render', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const reader = new DocumentReadTool(
+      { ...createTask('Read the scan').sourceMessage!, attachments: [file] },
+      {
+        contextWindowTokens: 100_000,
+        ledger: new AttachmentReadLedger(),
+        redactor: { toolOutputRedactionRanges: () => [] },
+        runJob: runDocumentJob,
+        limits: documentLimits(),
+      }
+    )
+    const call = {
+      id: 'call-document-render',
+      name: reader.name(),
+      arguments: { attachmentId: file.id, mode: 'visual' },
+    }
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-document-render',
+          tool_name: reader.name(),
+          parameters: call.arguments,
+          description: 'Read the scanned page',
+          tool_call_id: call.id,
+          context_snapshot: [
+            { role: 'user', content: 'Read the scan' },
+            { role: 'assistant', content: '', tool_calls: [call] },
+          ],
+          completed_results: [],
+        },
+      } as any)
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    const observed = resumeThroughReader(reader)
+
+    const deps = createDeps()
+    const executor = new TaskExecutor(createTask('Read the scan'), deps)
+    await executor.run()
+    await executor.resumeAfterApproval(false)
+
+    expect(observed.resumed?.is_error).toBe(false)
+    expect(JSON.parse(observed.resumed!.rawContent ?? observed.resumed!.content)).toMatchObject({
+      status: 'ok',
+      mode: 'visual',
+      images: [{ page: 1 }],
+    })
+    // The tool result says the model has the page; the request must carry it.
+    const parts = resumedToolImages(call.id)
+    expect(parts).toHaveLength(1)
+    expect(parts[0]).toMatchObject({
+      type: 'image',
+      mimeType: 'image/png',
+      data: observed.resumed!.attachments![0]!.dataBase64,
+    })
+    expect(executor.executorState).toBe('completed')
+  }, 30_000)
 
   it('U5: a 401 on resume re-suspends as connect_required, then re-executes on connect (no double approval)', async () => {
     vi.mocked(runToolUseLoop)
