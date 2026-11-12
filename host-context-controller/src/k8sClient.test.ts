@@ -381,6 +381,13 @@ vi.mock('./reconciler', () => ({
     hasSecretChangeEvidence() {
       return false
     }
+    namesAwaitingExternalChange() {
+      return []
+    }
+    rolloutObservationRequiresReconcile() {
+      return false
+    }
+    probeSecretAccess = vi.fn()
     recordSecretChangeEvidence = vi.fn()
     fullReconcile = mocks.serverFullReconcile
     reconcile = vi.fn()

@@ -59,11 +59,15 @@ Before deploying an MCP server, the reconciler checks that:
 
 If the secret is missing or incomplete, the MCP server will **not** be deployed. Creating the secrets an `McpServer` references is not the host-context-controller's responsibility — for those it only validates their existence. (It does create its own Secrets elsewhere, e.g. the per-Host runtime-token Secret in `mcp-host`.)
 
+A 401 or 403 on the Secret read fails the server closed with `SecretAccessDenied`. That is an answer about HCC's own access, so no Secret event follows when it recovers. While any server is denied, HCC issues one Secret read per minute (`clerum_hcc_secret_access_probes_total`), and on success it reconciles every denied server, at most 10 at a time. Each NetworkPolicy pass also reconciles denied servers. The probe reads one Secret, so a denial limited to that one Secret delays the other denied servers until the next pass.
+
 ### Credential rollout
 
 Container env vars that come from `secretKeyRef` are read only when the container starts, so editing the Secret alone does not reach a running pod. HCC closes that gap with a pod-template annotation: secret validation returns a sha256 of the Secret it just read, and the reconciler stamps it as `clerum.io/credentials-revision` on the Deployment's pod template (`src/reconciler.ts`). A `SecretInformer` on the McpServer namespace re-enqueues the servers that reference a changed Secret, the hash changes, and Kubernetes rolls the pod.
 
 The same annotation drives rollouts for per-Host channel-reader pods (a second informer on `channels`) and for LlmHook pods (a third informer on `llm-hooks`) (`src/main.ts`).
+
+A rollout that does not converge within its readiness budget (24 polls, 120 s) gets a terminal `DeploymentReady=False`, reason `RolloutIncomplete`. That condition is a published verdict, not unfinished work, so it does not hold certification or use the McpServer lane's retry. A Deployment informer re-enqueues the server when its rollout converges, its generation changes or its Deployment is deleted, and with periodic resync on, each NetworkPolicy pass also reconciles it. While that informer is down, a rollout that converged stays `False` until the next pass, and Control UI reports a failure for a credential rotation that converges between 120 s and 180 s.
 
 For setting and rotating connector credentials from the operator side, see [Connect an OAuth connector](../docs/how-to/connect-oauth-connector.md).
 
@@ -472,20 +476,22 @@ For the create and existence-read counters, including PromQL examples, see [CREA
 
 **Secret watch, MCP API and reporters**
 
-| Metric                                               | Type    | Labels                        | Meaning                                                                                                 |
-| ---------------------------------------------------- | ------- | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `clerum_hcc_secret_informer_events_total`            | counter | `namespace`, `type`           | Secret informer events delivered to the consumer.                                                       |
-| `clerum_hcc_secret_informer_reconnects_total`        | counter | `namespace`                   | Secret informer reconnect attempts.                                                                     |
-| `clerum_hcc_secret_informer_running`                 | gauge   | `namespace`                   | `1` while the Secret watch is established; `0` while reconnecting or until a complete list succeeds.    |
-| `clerum_hcc_secret_informer_lists_total`             | counter | `namespace`, `outcome`        | Paginated Secret lists of the resume-mode informer (`initial`, `relist` after a 410, `failed`).         |
-| `clerum_hcc_secret_informer_resumes_total`           | counter | `namespace`                   | Secret watches the resume-mode informer reopened from the last resourceVersion it saw.                  |
-| `clerum_hcc_mcp_host_api_requests_total`             | counter | `action`, `outcome`, `reason` | Host-scoped MCP API requests (inventory, credential).                                                   |
-| `clerum_hcc_infrastructure_telemetry_enqueued_total` | counter | `telemetry_type`              | Telemetry items accepted by the bounded reporter.                                                       |
-| `clerum_hcc_infrastructure_telemetry_dropped_total`  | counter | `telemetry_type`, `reason`    | Telemetry items dropped.                                                                                |
-| `clerum_hcc_infrastructure_telemetry_flushes_total`  | counter | `result`                      | Telemetry flush attempts.                                                                               |
-| `clerum_hcc_infrastructure_telemetry_retries_total`  | counter | `telemetry_type`              | Telemetry retries after a failed flush.                                                                 |
-| `clerum_hcc_infrastructure_telemetry_gaps_total`     | counter | `telemetry_type`, `reason`    | Gaps that leave trace or cost coverage incomplete.                                                      |
-| `clerum_hcc_administrative_outcome_reporter_total`   | counter | `result`                      | Administrative outcome reports: enqueued, deduplicated, accepted, conflict, rejected, or a drop reason. |
+| Metric                                               | Type    | Labels                        | Meaning                                                                                                               |
+| ---------------------------------------------------- | ------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `clerum_hcc_secret_informer_events_total`            | counter | `namespace`, `type`           | Secret informer events delivered to the consumer.                                                                     |
+| `clerum_hcc_secret_informer_reconnects_total`        | counter | `namespace`                   | Secret informer reconnect attempts.                                                                                   |
+| `clerum_hcc_secret_informer_running`                 | gauge   | `namespace`                   | `1` while the Secret watch is established; `0` while reconnecting or until a complete list succeeds.                  |
+| `clerum_hcc_secret_informer_lists_total`             | counter | `namespace`, `outcome`        | Paginated Secret lists of the resume-mode informer (`initial`, `relist` after a 410, `failed`).                       |
+| `clerum_hcc_secret_informer_resumes_total`           | counter | `namespace`                   | Secret watches the resume-mode informer reopened from the last resourceVersion it saw.                                |
+| `clerum_hcc_deployment_informer_running`             | gauge   | `namespace`                   | `1` while the watch of HCC-managed Deployments is established; `0` while stopped, reconnecting or waiting for a list. |
+| `clerum_hcc_secret_access_probes_total`              | counter | `outcome`                     | Secret access probes run while an McpServer is denied (`allowed`, `denied`, `failed`, `no-target`).                   |
+| `clerum_hcc_mcp_host_api_requests_total`             | counter | `action`, `outcome`, `reason` | Host-scoped MCP API requests (inventory, credential).                                                                 |
+| `clerum_hcc_infrastructure_telemetry_enqueued_total` | counter | `telemetry_type`              | Telemetry items accepted by the bounded reporter.                                                                     |
+| `clerum_hcc_infrastructure_telemetry_dropped_total`  | counter | `telemetry_type`, `reason`    | Telemetry items dropped.                                                                                              |
+| `clerum_hcc_infrastructure_telemetry_flushes_total`  | counter | `result`                      | Telemetry flush attempts.                                                                                             |
+| `clerum_hcc_infrastructure_telemetry_retries_total`  | counter | `telemetry_type`              | Telemetry retries after a failed flush.                                                                               |
+| `clerum_hcc_infrastructure_telemetry_gaps_total`     | counter | `telemetry_type`, `reason`    | Gaps that leave trace or cost coverage incomplete.                                                                    |
+| `clerum_hcc_administrative_outcome_reporter_total`   | counter | `result`                      | Administrative outcome reports: enqueued, deduplicated, accepted, conflict, rejected, or a drop reason.               |
 
 ## Environment Variables
 
@@ -748,16 +754,16 @@ The shipped Roles and RoleBindings are the source of truth — see `deploy/base/
 
 In `mcp-server` (`deploy/base/mcp-server/rbac.yaml`):
 
-| API Group           | Resource            | Verbs                             | Purpose                                                      |
-| ------------------- | ------------------- | --------------------------------- | ------------------------------------------------------------ |
-| `clerum.io`         | `mcpservers`        | get, list, watch, patch           | Watch McpServer CRDs                                         |
-| `clerum.io`         | `mcpservers/status` | get, patch                        | Publish readiness / secret-resolution conditions             |
-| `clerum.io`         | `contexts`          | get, list, watch                  | Watch Context CRDs for NetworkPolicy reconciliation          |
-| `networking.k8s.io` | `networkpolicies`   | get, list, create, update, delete | Manage generated NetworkPolicies                             |
-| `apps`              | `deployments`       | get, list, create, update, delete | Manage MCP server Deployments                                |
-| _(core)_            | `services`          | get, list, create, update, delete | Manage MCP server Services                                   |
-| _(core)_            | `configmaps`        | get, list, create, update, delete | Manage the remote egress proxy nginx config                  |
-| _(core)_            | `secrets`           | get, list, watch                  | Read auth tokens, validate `envSecret`, re-enqueue on change |
+| API Group           | Resource            | Verbs                                    | Purpose                                                                         |
+| ------------------- | ------------------- | ---------------------------------------- | ------------------------------------------------------------------------------- |
+| `clerum.io`         | `mcpservers`        | get, list, watch, patch                  | Watch McpServer CRDs                                                            |
+| `clerum.io`         | `mcpservers/status` | get, patch                               | Publish readiness / secret-resolution conditions                                |
+| `clerum.io`         | `contexts`          | get, list, watch                         | Watch Context CRDs for NetworkPolicy reconciliation                             |
+| `networking.k8s.io` | `networkpolicies`   | get, list, create, update, delete        | Manage generated NetworkPolicies                                                |
+| `apps`              | `deployments`       | get, list, watch, create, update, delete | Manage MCP server Deployments; re-enqueue a server when its stuck rollout moves |
+| _(core)_            | `services`          | get, list, create, update, delete        | Manage MCP server Services                                                      |
+| _(core)_            | `configmaps`        | get, list, create, update, delete        | Manage the remote egress proxy nginx config                                     |
+| _(core)_            | `secrets`           | get, list, watch                         | Read auth tokens, validate `envSecret`, re-enqueue on change                    |
 
 In `mcp-host` (`deploy/base/mcp-host/rbac.yaml`), the controller additionally manages per-Host identity and SharedFileSystem resources: `hosts` (get, list, watch), `sharedfilesystems` + `sharedfilesystems/status`, `batch/jobs`, `deployments`, `services`, `persistentvolumeclaims`, `networkpolicies`, `serviceaccounts`, `roles`/`rolebindings`, `configmaps` (get, watch, list), `pods` (get, list), and `secrets` with **get, watch, list, create, update, patch, delete** — it creates the per-Host `host-<hostRef>-mcp-host-runtime-tokens` Secret and the per-Host ServiceAccount + Role + RoleBinding on every reconcile.
 

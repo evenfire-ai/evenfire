@@ -307,8 +307,9 @@ Read the notes for every release you skip over, not only the target release.
 | [User access foundation upgrade](user-access-foundation-upgrade.md)                | You upgrade to the release with External REST user sessions. It has a required order: edge before control-api.                             |
 | [Changed code defaults](#changed-code-defaults-first-release-after-v0120)          | You run HCC, WRC, control-api, control-ui or the approval reader with a variable unset. The pull Secret change restarts Host pods once; plan a window. |
 | [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.   |
-| [HCC NetworkPolicy pass bounds](#hcc-networkpolicy-pass-bounds) | You upgrade host-context-controller. It can now exit and restart when a NetworkPolicy pass reaches its hard limit. No RBAC change. |
+| [HCC NetworkPolicy pass bounds](#hcc-networkpolicy-pass-bounds) | You upgrade host-context-controller. It can now exit and restart when a NetworkPolicy pass reaches its hard limit. The pass bounds need no RBAC change. |
 | [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor) | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`. |
+| [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac) | Every cluster. Apply the updated Role before you roll the new host-context-controller image. |
 
 #### Snippet runner Node permissions
 
@@ -463,9 +464,24 @@ earlier releases used `HCC_HOST_K8S_REQUEST_TIMEOUT` and
 `HostK8sRequestTimeoutError`. Update any log filter or alert that matches the
 old names.
 
-**No RBAC change.** This release does not change the HCC Role, ClusterRole or
-their bindings in `deploy/base`. Roll out the new HCC image as usual; no RBAC
-manifest needs to be applied first.
+**RBAC.** The pass bounds need no change to the HCC Role, ClusterRole or their
+bindings in `deploy/base`. The Deployment watch in the same release does: see
+[HCC Deployment watch RBAC](#hcc-deployment-watch-rbac).
+
+### HCC Deployment watch RBAC
+
+host-context-controller (HCC) now watches its managed Deployments in `mcp-server`,
+so its Role there needs `watch` on `deployments`. Apply the Role before you roll
+the new HCC image. If your CD identity may not patch Roles, re-run
+`deploy/scripts/bootstrap-rbac.sh` before upgrading.
+
+If the image rolls first, the list succeeds, the watch answers 403, and the
+informer retries at up to 30 s with a warning per attempt, with
+`clerum_hcc_deployment_informer_running` at 0. HCC readiness does not depend on
+the informer. While the informer is down, a stuck rollout recovers only at the
+next NetworkPolicy pass, and a Control UI credential rotation that converges
+between 120 s and 180 s reports a false failure, because the condition stays
+False until that pass.
 
 ### mcp-host authority staleness floor
 

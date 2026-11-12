@@ -21,6 +21,8 @@ import {
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants'
+import { evaluateDeploymentRollout } from './deploymentRollout'
+import type { DeploymentObservation } from './informers/deploymentInformer'
 import { K8S_REQUEST_TIMEOUT_CODE, makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import { hccLogger } from './logger'
 import {
@@ -32,6 +34,7 @@ import {
   createsTotal,
   mcpserverMissingSecret,
   mcpserverReconcileCallFailuresTotal,
+  secretAccessProbesTotal,
 } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
@@ -41,6 +44,7 @@ import {
   deploymentMatchesDesired,
   ensureResource,
   getErrorCode,
+  mapSettledWithConcurrency,
   observeCreate,
   observeExistenceRead,
   preserveDeploymentAnnotations,
@@ -131,6 +135,11 @@ export type McpServerMutationOptions = {
  * `clerum_hcc_mcpserver_reconcile_call_failures_total`.
  */
 type VerdictCallSite = 'secret_read' | 'resource_sync' | 'pre_deploy_handshake' | 'rollout_read'
+
+/** A published verdict only a change outside HCC can move. See verdictsAwaitingExternalChange. */
+export type VerdictAwaitingExternalChange = 'RolloutIncomplete' | 'SecretAccessDenied'
+
+export type SecretAccessProbeOutcome = 'allowed' | 'denied' | 'failed' | 'no-target'
 
 /**
  * Transport error codes that mean the request got no answer from the
@@ -316,37 +325,6 @@ function throwCleanupFailures(failures: unknown[], message: string): void {
   }
 }
 
-async function mapSettledWithConcurrency<T, TResult>(
-  items: readonly T[],
-  maxConcurrency: number,
-  work: (item: T, index: number) => Promise<TResult>
-): Promise<Array<PromiseSettledResult<TResult>>> {
-  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
-    throw new RangeError('maxConcurrency must be a positive integer')
-  }
-
-  const results = new Array<PromiseSettledResult<TResult>>(items.length)
-  let nextIndex = 0
-  const worker = async (): Promise<void> => {
-    while (nextIndex < items.length) {
-      const index = nextIndex
-      nextIndex += 1
-      try {
-        results[index] = {
-          status: 'fulfilled',
-          value: await work(items[index], index),
-        }
-      } catch (reason) {
-        results[index] = { status: 'rejected', reason }
-      }
-    }
-  }
-
-  const workerCount = Math.min(maxConcurrency, items.length)
-  await Promise.all(Array.from({ length: workerCount }, () => worker()))
-  return results
-}
-
 /**
  * State of the readiness poll window for one McpServer (issue #223).
  *
@@ -393,12 +371,6 @@ interface ReadinessPollState {
   /** True once the terminal RolloutIncomplete verdict was written for `generation`. */
   exhausted: boolean
   /**
-   * Rollout numbers from the exhausting tick. reconcile() re-writes them so
-   * the terminal condition stays sticky instead of being downgraded to
-   * WaitingForReplicas by the very reconcile the terminal write triggers.
-   */
-  detail: string
-  /**
    * Mutation fence and CRD object of the LATEST reconcile that owns this
    * window. pollReadiness() REBINDS both on every call that finds the window
    * live: a superseding reconcile (e.g. the fullReconcile after a routine
@@ -422,8 +394,8 @@ interface ReadinessPollState {
    *     rotation is instead guarded by the tick's live Deployment read (a new
    *     generation resets attempts/exhausted) and by recheckRequested deferring
    *     a mid-flight tick's terminal verdict past the rotation's write.
-   * A rebind never touches the budget fields (generation/attempts/exhausted/
-   * detail) above.
+   * A rebind never touches the budget fields (generation/attempts/exhausted)
+   * above.
    */
   isCurrent: () => boolean
   server: McpServerCRD
@@ -505,6 +477,14 @@ export class McpServerReconciler {
   // so a read of another revision proves the runtime differs from the Secret.
   private readonly appliedSecretRevisions = new Map<string, string>()
 
+  /**
+   * Published verdicts that HCC cannot finish by retrying. They are not
+   * unfinished work, so they stay out of pendingReconciliations: they do not
+   * hold certification, use the lane's retry, or force a recovery pass. One
+   * reason per name, so each re-observation path reads only its own entries.
+   */
+  private readonly verdictsAwaitingExternalChange = new Map<string, VerdictAwaitingExternalChange>()
+
   // #1338: only the fleet lane reads pendingReconciliations, and only
   // at the end of its own pass. Work that runs outside a pass (watch events,
   // SecretInformer events, readiness-poll ticks) reports an obligation it
@@ -577,6 +557,38 @@ export class McpServerReconciler {
     return [...this.pendingReconciliations.keys()]
   }
 
+  /** Names waiting under this reason. Prunes names the inventory no longer holds, for any reason. */
+  namesAwaitingExternalChange(reason: VerdictAwaitingExternalChange): string[] {
+    const names: string[] = []
+    for (const [name, awaiting] of [...this.verdictsAwaitingExternalChange]) {
+      if (
+        this.resolveCurrentServer !== undefined &&
+        this.resolveCurrentServer(name) === undefined
+      ) {
+        this.verdictsAwaitingExternalChange.delete(name)
+        continue
+      }
+      if (awaiting === reason) names.push(name)
+    }
+    return names
+  }
+
+  /**
+   * True when a Deployment observation can move a terminal RolloutIncomplete:
+   * the rollout converged, a new generation started, or the Deployment is gone.
+   * A stuck-to-stuck change returns false, so a flapping pod costs no reads.
+   */
+  rolloutObservationRequiresReconcile(observation: DeploymentObservation): boolean {
+    if (this.verdictsAwaitingExternalChange.get(observation.name) !== 'RolloutIncomplete') {
+      return false
+    }
+    return (
+      observation.deleted ||
+      observation.ready ||
+      observation.generation !== this.readinessPolls.get(observation.name)?.generation
+    )
+  }
+
   hasPendingReconciliation(): boolean {
     return (
       this.hasIncompleteReconciliation() ||
@@ -585,6 +597,44 @@ export class McpServerReconciler {
         poll => (poll.timer !== undefined || poll.ticking) && this.readinessPollStillDesired(poll)
       )
     )
+  }
+
+  /**
+   * Test HCC's Secret access with one read for the first name that has an
+   * envSecret. Authorization runs before lookup, so a 404 means access works;
+   * the reconcile that follows publishes SecretNotFound. The response is
+   * discarded, and this writes no status.
+   */
+  async probeSecretAccess(names: string[]): Promise<SecretAccessProbeOutcome> {
+    const outcome = await this.runSecretAccessProbe(names)
+    secretAccessProbesTotal.inc({ outcome })
+    return outcome
+  }
+
+  private async runSecretAccessProbe(names: string[]): Promise<SecretAccessProbeOutcome> {
+    const target = names
+      .map(name => this.resolveCurrentServer?.(name))
+      .find(server => server?.spec.envSecret !== undefined)
+    const secretName = target?.spec.envSecret?.name
+    if (target === undefined || secretName === undefined) return 'no-target'
+    try {
+      await this.coreApi.readNamespacedSecret({
+        name: secretName,
+        namespace: target.namespace,
+      })
+      return 'allowed'
+    } catch (error: unknown) {
+      const code = getErrorCode(error)
+      if (code === 404) return 'allowed'
+      if (code === 401 || code === 403) return 'denied'
+      hccLogger.warn('Secret access probe failed', {
+        scope: '[Reconciler]',
+        resourceName: secretName,
+        name: target.name,
+        err: error,
+      })
+      return 'failed'
+    }
   }
 
   private readinessPollStillDesired(poll: ReadinessPollState): boolean {
@@ -780,6 +830,7 @@ export class McpServerReconciler {
     this.statusMap.delete(name)
     this.statusIdentities.delete(name)
     this.managedSnapshot.delete(name)
+    this.verdictsAwaitingExternalChange.delete(name)
     this.appliedSecretRevisions.delete(name)
     const poll = this.readinessPolls.get(name)
     if (poll) {
@@ -789,32 +840,9 @@ export class McpServerReconciler {
   }
 
   /**
-   * Read a Deployment's rollout state, generation-aware.
-   *
-   * `readyReplicas > 0` is NOT enough (issue #223): during a rolling update the
-   * OLD pod is still Ready, so a new pod that never starts would be reported as
-   * healthy. A rollout has actually converged only when the controller has
-   * observed the current generation AND every replica is updated, ready, and
-   * available.
-   *
-   * `totalReplicas === updatedReplicas` is the part that catches a FAILED
-   * rollout of a credential rotation (issue #223, E2): with replicas=1 and the
-   * default RollingUpdate (maxSurge=1, maxUnavailable=0), a new pod that
-   * crash-loops on a bad credential never becomes Ready, so Kubernetes keeps
-   * the OLD pod. That old pod holds readyReplicas=1 and availableReplicas=1, so
-   * unavailableReplicas stays 0 and updatedReplicas reaches 1 — every other
-   * signal looks converged. Only `status.replicas` (total managed pods) reveals
-   * the leftover: it stays at 2 while the new pod crash-loops, and drops to 1
-   * only once the rollout truly completes. Without this check the poll would
-   * report a failed rotation as healthy and never write RolloutIncomplete.
-   *
-   * `detail` carries the numbers into status conditions so a stuck rollout says
-   * what is stuck instead of just "not ready".
-   *
-   * `generation` is the Deployment's `metadata.generation`, exposed so the
-   * readiness poll can tell "same rollout, keep counting" apart from "NEW
-   * rollout, fresh window" (issue #223, E2). It plays no part in the
-   * readiness verdict above. null when the Deployment could not be read.
+   * Read a Deployment's rollout state; `evaluateDeploymentRollout` holds the
+   * readiness formula. `generation` is null when the Deployment could not be
+   * read.
    *
    * `readFailure` carries the error of a failed read, so a reconcile can tell
    * "the read failed" apart from "the rollout is not ready" (#1338).
@@ -830,29 +858,7 @@ export class McpServerReconciler {
   }> {
     try {
       const deployment = await this.appsApi.readNamespacedDeployment({ name, namespace })
-      const desired = deployment.spec?.replicas ?? 1
-      const generation = deployment.metadata?.generation ?? 0
-      const observedGeneration = deployment.status?.observedGeneration ?? 0
-      const updatedReplicas = deployment.status?.updatedReplicas ?? 0
-      const readyReplicas = deployment.status?.readyReplicas ?? 0
-      const totalReplicas = deployment.status?.replicas ?? 0
-      const unavailableReplicas = deployment.status?.unavailableReplicas ?? 0
-
-      const ready =
-        observedGeneration >= generation &&
-        updatedReplicas === desired &&
-        readyReplicas === desired &&
-        totalReplicas === updatedReplicas &&
-        unavailableReplicas === 0
-
-      return {
-        ready,
-        generation,
-        detail:
-          `generation ${observedGeneration}/${generation}, ` +
-          `updated ${updatedReplicas}/${desired}, ready ${readyReplicas}/${desired}, ` +
-          `total ${totalReplicas}, unavailable ${unavailableReplicas}`,
-      }
+      return evaluateDeploymentRollout(deployment)
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       return {
@@ -926,7 +932,6 @@ export class McpServerReconciler {
       generation: previous?.generation ?? null,
       attempts: 0,
       exhausted: previous?.exhausted ?? false,
-      detail: previous?.detail ?? '',
       isCurrent,
       server,
       retirementEpoch: this.readinessRetirements.get(name) ?? 0,
@@ -980,7 +985,6 @@ export class McpServerReconciler {
         state.generation = rollout.generation
         state.attempts = 0
         state.exhausted = false
-        state.detail = ''
       }
       state.attempts++
 
@@ -1054,10 +1058,9 @@ export class McpServerReconciler {
         // the status write below, so a reconcile arriving during that await
         // opens a fresh observation window instead of flagging a re-check
         // this dying tick would never honor) so reconcile() keeps the verdict
-        // sticky and a later pollReadiness() call may re-observe.
+        // sticky until the Deployment informer or a pass re-enqueues the server.
         state.ticking = false
         state.exhausted = true
-        state.detail = rollout.detail
         hccLogger.warn('McpServer not ready after polls — giving up', {
           scope: '[Reconciler]',
           name,
@@ -1068,6 +1071,16 @@ export class McpServerReconciler {
         // operator with the numbers that prove it, never left as a stale
         // condition or a silent Unknown.
         if (retiredNow()) return
+        // A failed read proved nothing about the rollout, so it is unfinished
+        // work and the lane re-reads. Otherwise the verdict is published truth:
+        // it waits for the Deployment to move. The name registers before the
+        // write, so an event during the write queues a reconcile.
+        if ('readFailure' in rollout) {
+          this.pendingReconciliations.set(name, { namespace })
+          this.notifyIncompleteReconciliation(name)
+        } else {
+          this.verdictsAwaitingExternalChange.set(name, 'RolloutIncomplete')
+        }
         await this.updateStatusConditions(
           state.server,
           false,
@@ -3047,6 +3060,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   private async performReconcile(server: McpServerCRD, isCurrent: () => boolean): Promise<boolean> {
     if (!isCurrent()) return false
     this.beginStatusTracking(server)
+    // A later branch re-adds the name. A failed reconcile keeps the obligation
+    // from reconcile(), so the name is always in one of the two states.
+    this.verdictsAwaitingExternalChange.delete(server.name)
 
     // G7: Enforce managed field immutability — once set, cannot change
     if (!isCurrent()) return false
@@ -3177,6 +3193,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         isCurrent
       )
       if (retract && !retract.retracted && !retract.foreignRuntime) return false
+      // A 401/403 is an answer about HCC's identity or authorization, not about
+      // the Secret, so no Secret event follows when it recovers. The fail-closed
+      // verdict stands, and the watcher's access probe re-enqueues the server.
+      if (secretResult.reason === 'SecretAccessDenied') {
+        this.verdictsAwaitingExternalChange.set(server.name, 'SecretAccessDenied')
+      }
       return withdrawRuntime && cleanupComplete && isCurrent()
     }
 
@@ -3309,6 +3331,24 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // Check readiness after reconciliation
     const rollout = await this.readDeploymentRollout(server.name, server.namespace)
     if (!isCurrent()) return false
+    const pollState = this.readinessPolls.get(server.name)
+    const pollLive = (): boolean =>
+      pollState !== undefined &&
+      this.readinessPolls.get(server.name) === pollState &&
+      (pollState.timer !== undefined || pollState.ticking)
+    // A transient read failure says nothing about a rollout that already has a
+    // terminal verdict, so it must not overwrite that verdict. The obligation
+    // stays, and the lane re-reads.
+    if (
+      'readFailure' in rollout &&
+      pollState?.exhausted === true &&
+      !pollLive() &&
+      !runtimeDiffers &&
+      isTransientKubernetesFailure(rollout.readFailure)
+    ) {
+      this.reportVerdictKept(server, 'rollout_read', rollout.detail)
+      return false
+    }
     if (
       'readFailure' in rollout &&
       this.keepReadyVerdictOverTransientFailure(server, 'rollout_read', rollout.readFailure, {
@@ -3331,17 +3371,28 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // NetworkPolicy pass, a retry) reaches this code path while the rollout is
     // still not ready, and writing a bare "waiting" condition here would
     // downgrade the published rollout failure before the operator (or the E2
-    // scenario) could observe it. A NEW rollout (different generation) drops
-    // the stickiness and reports fresh.
-    const pollState = this.readinessPolls.get(server.name)
+    // scenario) could observe it. A NEW rollout (different generation) or a
+    // Deployment this reconcile created drops the stickiness and reports fresh.
     const exhaustedDetail =
       !ready &&
-      pollState !== undefined &&
-      pollState.exhausted &&
+      deploymentApply !== 'created' &&
+      pollState?.exhausted === true &&
       rollout.generation !== null &&
       pollState.generation === rollout.generation
-        ? pollState.detail
+        ? rollout.detail
         : undefined
+    // Registered before the status writes, which await API calls: a Deployment
+    // event during them must find the name, or it would be ignored and lost.
+    if (exhaustedDetail !== undefined && !pollLive()) {
+      this.verdictsAwaitingExternalChange.set(server.name, 'RolloutIncomplete')
+      hccLogger.warn('McpServer rollout still incomplete', {
+        name: server.name,
+        detail: exhaustedDetail,
+      })
+    }
+    if (ready && pollState?.exhausted === true && !pollLive()) {
+      this.readinessPolls.delete(server.name)
+    }
     await this.updateStatusConditions(server, ready, exhaustedDetail, isCurrent)
 
     // PR-B B1: record SecretResolved=True + Ready=True after a successful
@@ -3376,22 +3427,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // If not ready yet, poll until it becomes ready. With generation-aware
     // readiness this is the normal path right after any Deployment write —
     // including a credential rotation — so the poll owns the terminal verdict
-    // on the CRD.
-    //
-    // Post-terminal re-observation: the status write that records a terminal
-    // RolloutIncomplete does NOT come back here. A status-only McpServer
-    // MODIFIED only refreshes discovery (the McpServer watch handler in
-    // k8sClient.ts), so nothing re-polls a stuck Deployment on a timer, and a
-    // rollout that converges after the terminal verdict keeps Ready=False until
-    // a later reconcile of this server reaches here with !ready: a Secret
-    // event, a desired-state change, a NetworkPolicy pass that converges the
-    // McpServer lane, or a retry. That reconcile arms ONE more poll window,
-    // which writes True if the Deployment has converged by then. For a stuck
-    // Deployment the terminal condition re-write is byte-identical (the detail
-    // is a pure function of the replica tuple, no timestamps), so
-    // writeStatusCondition's `unchanged` short-circuit skips the patch (and
-    // pollReadiness's atomic check-then-set prevents a timer leak).
-    if (!ready && isCurrent()) {
+    // on the CRD. An idle terminal verdict opens no window: the Deployment
+    // informer re-enqueues the server when its rollout moves. pollLive() is
+    // read again because a live tick can end during the writes above; a tick
+    // that ended terminal keeps its entry, and one that ended ready removed it,
+    // so this write may have overwritten its verdict and a window must correct it.
+    if (
+      !ready &&
+      isCurrent() &&
+      (exhaustedDetail === undefined ||
+        pollLive() ||
+        this.readinessPolls.get(server.name) !== pollState)
+    ) {
       this.pollReadiness(server, 5000, 24, isCurrent)
     }
     return isCurrent()
@@ -3447,6 +3494,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
+      // As in the managed branch, the access probe re-enqueues a denied server.
+      if (secretResult.reason === 'SecretAccessDenied') {
+        this.verdictsAwaitingExternalChange.set(server.name, 'SecretAccessDenied')
+      }
       return shouldFailClosedForSecretFailure(secretResult.reason) && isCurrent()
     }
 

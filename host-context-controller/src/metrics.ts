@@ -227,6 +227,22 @@ export const secretInformerResumesTotal = counter({
   labelNames: ['namespace'] as const,
 })
 
+export const deploymentInformerRunning = gauge({
+  name: 'clerum_hcc_deployment_informer_running',
+  help:
+    '1 when the watch of HCC-managed Deployments in the namespace is currently established, ' +
+    '0 when stopped, reconnecting or waiting for a list',
+  labelNames: ['namespace'] as const,
+})
+
+export const secretAccessProbesTotal = counter({
+  name: 'clerum_hcc_secret_access_probes_total',
+  help:
+    'Secret access probes run while an McpServer is denied, by outcome ' +
+    '(allowed, denied, failed, no-target)',
+  labelNames: ['outcome'] as const,
+})
+
 export const mcpserverMissingSecret = gauge({
   name: 'clerum_hcc_mcpserver_missing_secret',
   help: '1 when an McpServer references a non-existent Secret',

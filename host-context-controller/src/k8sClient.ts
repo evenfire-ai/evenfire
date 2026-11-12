@@ -34,6 +34,7 @@ import {
   HostReconciler,
   type ResolvedSfsMount,
 } from './hostReconciler'
+import type { DeploymentObservation } from './informers/deploymentInformer'
 import type { SecretEvent, SecretEventType } from './informers/secretInformer'
 import {
   type InfrastructureTelemetryReporter,
@@ -101,7 +102,7 @@ import {
   SharedFileSystemCRD,
   SharedFileSystemSpec,
 } from './types'
-import { getErrorCode } from './utils'
+import { getErrorCode, mapSettledWithConcurrency } from './utils'
 
 // Only initialize K8s client if not in dev mode
 let customObjectsApi: k8s.CustomObjectsApi | null = null
@@ -136,6 +137,11 @@ const PLURAL_LLMHOOKS = 'llmhooks'
 // sweep made provider.start() fail and Kubernetes restarted HCC. These retries
 // retain that convergence guarantee now that the sweeps run in the background.
 const INITIAL_CONVERGENCE_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
+// While a McpServer is denied, one Secret read per minute tests HCC's access.
+const MCP_SERVER_SECRET_ACCESS_PROBE_INTERVAL_MS = 60_000
+// A recovered access wakes every denied server at once, and each one recreates
+// its runtime. Same bound as the fleet pass.
+const MCP_SERVER_SECRET_ACCESS_WAKE_CONCURRENCY = 10
 
 const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
 // Retry-after-failure pacing for the three hardened inventory lanes
@@ -232,6 +238,7 @@ type HostSnapshot = {
 type HostInventoryRecoveryCause = 'cold-start' | 'watch-recovery'
 type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
+type VerdictReobservationTrigger = 'deployment-change' | 'inventory-recovery' | 'secret-access'
 type NetworkPolicyConvergenceCause =
   | 'mcp-recovery'
   | 'context-recovery'
@@ -969,6 +976,10 @@ export class McpServerWatcher implements McpServerProvider {
   // returns. ADDED is not change evidence, so this set stays apart from the one
   // above: it replays after the recovery decision and cannot change it.
   private readonly unroutedSecretAdditions = new Set<string>()
+  // McpServers whose re-observation found no inventory authority. Replayed at
+  // the next authority gain, so an event inside a recovery window is not left
+  // to wait for the next pass.
+  private readonly deferredVerdictReobservations = new Set<string>()
   private readonly contextReconciliationQueues = new Map<string, KeyedReconciliationQueue>()
   private readonly sharedFileSystemReconciliationQueues = new Map<
     string,
@@ -1006,6 +1017,8 @@ export class McpServerWatcher implements McpServerProvider {
   // (interval <= 0). Never shares the full-pass in-flight skip; write sets
   // are disjoint from the typed sweep.
   private netPolDefaultsResyncTimer: ReturnType<typeof setInterval> | null = null
+  private secretAccessProbeTimer: ReturnType<typeof setInterval> | null = null
+  private secretAccessProbeRun: Promise<void> | null = null
   // Serializes overlapping defaults-only ticks. Distinct from
   // initialConvergenceRuns.get('NetworkPolicy').
   private netPolDefaultsOnlyRun: Promise<void> | null = null
@@ -1654,9 +1667,10 @@ export class McpServerWatcher implements McpServerProvider {
         if (this.shouldRequestNetworkPolicyRecovery('McpServer', before)) {
           void this.runInitialNetworkPolicyConvergence({ cause: 'mcp-recovery' })
         }
-        // After the decision above, so a replay cannot change it. Not awaited
-        // here: each job holds that server's queue key.
+        // After the decision above, so a replay cannot change it. Neither is
+        // awaited here: each job holds that server's queue key.
         this.replayDeferredSecretAdditions()
+        this.replayDeferredVerdictReobservations()
         return true
       } catch (error) {
         this.mcpServerCacheSynced = false
@@ -2739,6 +2753,119 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
+   * The managed Deployment informer's consumer. Only an observation that can
+   * move a terminal verdict costs a reconcile.
+   */
+  readonly handleDeploymentObservation = (observation: DeploymentObservation): void => {
+    if (!this.reconciler.rolloutObservationRequiresReconcile(observation)) return
+    this.reobserveMcpServerVerdict(observation.name, 'deployment-change').catch(err => {
+      hccLogger.error('[K8s] McpServer verdict re-observation failed', {
+        name: observation.name,
+        trigger: 'deployment-change',
+        err,
+      })
+    })
+  }
+
+  /**
+   * Reconcile one server whose published verdict waits for an outside change.
+   * The job is runtime-only: a scoped lane request would certify the revision
+   * on a clean end, and the watch path adds egress, binding and Context work.
+   */
+  private async reobserveMcpServerVerdict(
+    name: string,
+    trigger: VerdictReobservationTrigger
+  ): Promise<void> {
+    const generation = this.mcpWatchGeneration
+    if (!this.hasMcpServerInventoryAuthority(generation)) {
+      this.deferredVerdictReobservations.add(name)
+      return
+    }
+    const server = this.servers.get(name)
+    if (!server) return
+    hccLogger.info('[K8s] Re-observing a terminal McpServer verdict', {
+      event: 'mcpserver-verdict-reobservation',
+      name,
+      trigger,
+    })
+    await this.enqueueMcpServerReconciliation(server, async () => {
+      if (!this.hasMcpServerInventoryAuthority(generation)) {
+        // Not awaited: this job holds the key. It defers if authority is still
+        // missing, and runs under the new generation if not.
+        void this.reobserveMcpServerVerdict(name, trigger).catch(err => {
+          hccLogger.error('[K8s] McpServer verdict re-observation failed', { name, trigger, err })
+        })
+        return
+      }
+      const current = this.servers.get(name)
+      // A spec superseded while this job waited has its own queued watch job,
+      // which runs external egress before the runtime.
+      if (!current || !sameMcpServerDesiredRevision(server, current)) return
+      try {
+        await this.reconciler.reconcile(current, {
+          isCurrent: () => this.mcpServerWatchEffectIsCurrent(current, generation),
+        })
+      } catch (err) {
+        hccLogger.error('[K8s] McpServer verdict re-observation failed', { name, trigger, err })
+      }
+    })
+  }
+
+  /** The guard holds through the fan-out: a queued reconcile can outlast a tick. */
+  private probeMcpServerSecretAccess(): void {
+    if (this.secretAccessProbeRun !== null) return
+    const run = this.runSecretAccessProbe()
+      .catch(err => {
+        hccLogger.error('[K8s] Secret access probe failed', { err })
+      })
+      .finally(() => {
+        if (this.secretAccessProbeRun === run) this.secretAccessProbeRun = null
+      })
+    this.secretAccessProbeRun = run
+  }
+
+  private async runSecretAccessProbe(): Promise<void> {
+    if (!this.hasMcpServerInventoryAuthority(this.mcpWatchGeneration)) return
+    const denied = this.reconciler.namesAwaitingExternalChange('SecretAccessDenied')
+    if (denied.length === 0) return
+    const outcome = await this.reconciler.probeSecretAccess(denied)
+    if (outcome !== 'allowed') return
+    const results = await mapSettledWithConcurrency(
+      this.reconciler.namesAwaitingExternalChange('SecretAccessDenied'),
+      MCP_SERVER_SECRET_ACCESS_WAKE_CONCURRENCY,
+      name => this.reobserveMcpServerVerdict(name, 'secret-access')
+    )
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        hccLogger.error('[K8s] McpServer verdict re-observation failed', {
+          trigger: 'secret-access',
+          err: result.reason,
+        })
+      }
+    }
+  }
+
+  private replayDeferredVerdictReobservations(): void {
+    if (this.deferredVerdictReobservations.size === 0) return
+    const deferred = [...this.deferredVerdictReobservations]
+    this.deferredVerdictReobservations.clear()
+    const awaiting = new Set([
+      ...this.reconciler.namesAwaitingExternalChange('RolloutIncomplete'),
+      ...this.reconciler.namesAwaitingExternalChange('SecretAccessDenied'),
+    ])
+    for (const name of deferred) {
+      if (!awaiting.has(name)) continue
+      this.reobserveMcpServerVerdict(name, 'inventory-recovery').catch(err => {
+        hccLogger.error('[K8s] McpServer verdict re-observation failed', {
+          name,
+          trigger: 'inventory-recovery',
+          err,
+        })
+      })
+    }
+  }
+
+  /**
    * Trigger a reconcile for any cached McpServer whose `envSecret.name`
    * matches the given Secret. Used by SecretInformer to react to Secret
    * lifecycle changes (create/update/delete) without waiting for a CRD
@@ -3150,6 +3277,11 @@ export class McpServerWatcher implements McpServerProvider {
       )
     }
 
+    this.secretAccessProbeTimer = setInterval(
+      () => this.probeMcpServerSecretAccess(),
+      MCP_SERVER_SECRET_ACCESS_PROBE_INTERVAL_MS
+    )
+
     // Class-D cheap path (#488). Interval > 0 is an ops enable, not a merge
     // default. This timer never consults initialConvergenceRuns and never
     // calls runInitialNetworkPolicyConvergence / fullReconcile.
@@ -3420,9 +3552,10 @@ export class McpServerWatcher implements McpServerProvider {
       }
       if (this.reconciler.hasIncompleteReconciliation()) {
         // Every offered effect ran under this certificate, so only individual
-        // servers are unfinished (for example a Deployment write rejected by
-        // admission). Retry just those names: one persistently failing server
-        // must not re-reconcile the whole fleet at the retry cap.
+        // servers are unfinished: for example a remote spec HCC refuses to render,
+        // or a Kubernetes answer that is not transient. Retry just those names: one
+        // persistently failing server must not re-reconcile the whole fleet at the
+        // retry cap.
         this.scheduleInitialConvergenceRetry('McpServer', {
           contextRevision: safetyCertificate.contextRevision,
           serverRevision: safetyCertificate.serverRevision,
@@ -5311,6 +5444,10 @@ export class McpServerWatcher implements McpServerProvider {
     if (this.netPolDefaultsResyncTimer) {
       clearInterval(this.netPolDefaultsResyncTimer)
       this.netPolDefaultsResyncTimer = null
+    }
+    if (this.secretAccessProbeTimer) {
+      clearInterval(this.secretAccessProbeTimer)
+      this.secretAccessProbeTimer = null
     }
     this.netPolDefaultsOnlyRun = null
     this.netPolConvergenceEnsureDefaults = false
