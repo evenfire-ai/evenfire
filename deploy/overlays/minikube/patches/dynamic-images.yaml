@@ -50,8 +50,12 @@ spec:
               value: clerum/gfs-controller:test
             - name: CONTEXT_MAPPER_GFSC_IMAGE_PULL_POLICY
               value: IfNotPresent
+            # Fixed development token, equal to RPC_PROXY_DESKTOP_API_TOKEN in configmaps/rpc-proxy-config.yaml.
+            # base reads this variable from Secret inter-service-tokens; `valueFrom: null` removes that
+            # inherited source, because an env entry with both `value` and `valueFrom` is invalid.
             - name: CONTEXT_MAPPER_DESKTOP_API_TOKEN
               value: "minikube-desktop-api-token-shared-xxxxxxxx"
+              valueFrom: null
             # Image rewritten by kustomize image transformer (see kustomizeconfig/imagetags.yaml).
             # The base value here matches `clerum/channel-reader` from images: block → rewritten to :test.
             - name: CONTEXT_MAPPER_CHANNEL_READER_IMAGE

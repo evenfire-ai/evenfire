@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Readable } from 'node:stream'
+import { config } from './config'
 import { DevMcpServerProvider, McpServerProvider } from './k8sClient'
 import { McpApiAuthenticator, type VerifiedMcpHostPrincipal } from './mcpApiAuthentication'
 import {
@@ -607,8 +608,18 @@ describe('ContextMapperServer desktop status authority', () => {
     hasDesktop: () => true,
   } as unknown as ConstructorParameters<typeof ContextMapperServer>[2]
   const hasDesktopFn = () => true
+  const EXISTING_DESKTOP_TOKEN = 'desktop-token-under-test'
+  let savedDesktopConfig: { token: string; devMode: boolean }
+
+  beforeEach(() => {
+    savedDesktopConfig = { token: config.desktopApiToken, devMode: config.devMode }
+    config.devMode = false
+    config.desktopApiToken = EXISTING_DESKTOP_TOKEN
+  })
 
   afterEach(async () => {
+    config.desktopApiToken = savedDesktopConfig.token
+    config.devMode = savedDesktopConfig.devMode
     await server?.stop()
     server = null
     vi.restoreAllMocks()
@@ -628,7 +639,9 @@ describe('ContextMapperServer desktop status authority', () => {
     )
     server.setReady(true)
 
-    const desktop = await invoke(server, '/api/v1/desktop/host-a')
+    const desktop = await invoke(server, '/api/v1/desktop/host-a', {
+      headers: { authorization: `Bearer ${EXISTING_DESKTOP_TOKEN}` },
+    })
     expect(desktop.statusCode).toBe(200)
     expect(JSON.parse(desktop.body)).toEqual({ status: 'running', hostRef: 'host-a' })
 
@@ -673,6 +686,9 @@ describe('ContextMapperServer desktop status authority', () => {
       hostAuthoritativeFn
     )
     server.setReady(true)
+    // The dev wiring this test names: dev mode, no desktop token, no header.
+    config.devMode = true
+    config.desktopApiToken = ''
 
     const desktop = await invoke(server, '/api/v1/desktop/host-a')
     expect(desktop.statusCode).toBe(200)
@@ -1183,5 +1199,176 @@ describe('ContextMapperServer /ready probe cut (A1)', () => {
     expect(JSON.parse(ready.body)).toEqual({ status: 'ready', ready: true })
     expect(health.statusCode).toBe(200)
     expect(JSON.parse(health.body)).toEqual({ status: 'ok', ready: false })
+  })
+})
+
+describe('desktop status service-token auth', () => {
+  const DESKTOP_TOKEN = 'desktop-token-under-test'
+  const DENIED_BODY = { error: 'Unauthorized', message: 'Invalid or missing service token' }
+  const DENIAL_MESSAGE = 'desktop status request denied'
+  let server: ContextMapperServer | null = null
+  let saved: { token: string; devMode: boolean }
+  let getStatus: ReturnType<typeof vi.fn>
+  let spies: Array<ReturnType<typeof vi.spyOn>>
+
+  beforeEach(() => {
+    saved = { token: config.desktopApiToken, devMode: config.devMode }
+    // The logger reads LOG_LEVEL on every line; pin it so the denial line (info) is emitted.
+    vi.stubEnv('LOG_LEVEL', 'info')
+    spies = (['log', 'warn', 'error'] as const).map(method =>
+      vi.spyOn(console, method).mockImplementation(() => undefined)
+    )
+    getStatus = vi.fn(() => ({ deployed: true, ready: true, message: '' }))
+    server = new ContextMapperServer(
+      new FakeProvider(),
+      0,
+      { getStatus, hasDesktop: () => true } as unknown as ConstructorParameters<
+        typeof ContextMapperServer
+      >[2],
+      () => true,
+      () => true,
+      () => true
+    )
+    server.setReady(true)
+  })
+
+  afterEach(async () => {
+    config.desktopApiToken = saved.token
+    config.devMode = saved.devMode
+    await server?.stop()
+    server = null
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+  })
+
+  function emittedLines(): string[] {
+    return spies.flatMap(spy => spy.mock.calls.map((args: unknown[]) => String(args[0])))
+  }
+
+  function denialLines(): Array<Record<string, unknown>> {
+    return emittedLines().flatMap(line => {
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>
+        return parsed.msg === DENIAL_MESSAGE ? [parsed] : []
+      } catch {
+        return []
+      }
+    })
+  }
+
+  function request(header: 'right' | 'wrong' | 'missing', token: string = DESKTOP_TOKEN) {
+    const headers: Record<string, string> =
+      header === 'missing'
+        ? {}
+        : { authorization: header === 'right' ? `Bearer ${token}` : `Bearer not-the-${token}` }
+    return invoke(server as ContextMapperServer, '/api/v1/desktop/host-a', { headers })
+  }
+
+  type Row = {
+    n: number
+    devMode: boolean
+    tokenSet: boolean
+    header: 'right' | 'wrong' | 'missing'
+    reason: string | null
+    // The configured token when tokenSet; the default is DESKTOP_TOKEN.
+    tokenValue?: string
+  }
+  const rows: Row[] = [
+    { n: 1, devMode: true, tokenSet: true, header: 'right', reason: null },
+    { n: 2, devMode: true, tokenSet: true, header: 'wrong', reason: 'token_mismatch' },
+    { n: 3, devMode: true, tokenSet: true, header: 'missing', reason: 'missing_authorization' },
+    { n: 4, devMode: true, tokenSet: false, header: 'right', reason: null },
+    { n: 5, devMode: true, tokenSet: false, header: 'wrong', reason: null },
+    { n: 6, devMode: true, tokenSet: false, header: 'missing', reason: null },
+    { n: 7, devMode: false, tokenSet: true, header: 'right', reason: null },
+    { n: 8, devMode: false, tokenSet: true, header: 'wrong', reason: 'token_mismatch' },
+    { n: 9, devMode: false, tokenSet: true, header: 'missing', reason: 'missing_authorization' },
+    { n: 10, devMode: false, tokenSet: false, header: 'right', reason: 'token_not_configured' },
+    { n: 11, devMode: false, tokenSet: false, header: 'wrong', reason: 'token_not_configured' },
+    { n: 12, devMode: false, tokenSet: false, header: 'missing', reason: 'token_not_configured' },
+    // In dev mode a placeholder is an ordinary configured token: main.ts does not refuse it there.
+    {
+      n: 16,
+      devMode: true,
+      tokenSet: true,
+      header: 'right',
+      reason: null,
+      tokenValue: 'replace-with-x',
+    },
+  ]
+
+  it.each(rows)(
+    'row $n: devMode=$devMode tokenSet=$tokenSet header=$header -> reason $reason',
+    async row => {
+      config.devMode = row.devMode
+      const configuredToken = row.tokenValue ?? DESKTOP_TOKEN
+      config.desktopApiToken = row.tokenSet ? configuredToken : ''
+
+      const response = await request(row.header, configuredToken)
+
+      if (row.reason === null) {
+        expect(response.statusCode).toBe(200)
+        expect(JSON.parse(response.body)).toEqual({ status: 'running', hostRef: 'host-a' })
+        expect(getStatus).toHaveBeenCalledTimes(1)
+        expect(denialLines()).toEqual([])
+      } else {
+        expect(response.statusCode).toBe(401)
+        expect(JSON.parse(response.body)).toEqual(DENIED_BODY)
+        expect(getStatus).not.toHaveBeenCalled()
+        const lines = denialLines()
+        expect(lines).toHaveLength(1)
+        expect(lines[0]).toMatchObject({
+          level: 'info',
+          svc: 'host-context-controller',
+          module: 'desktop-auth',
+          msg: DENIAL_MESSAGE,
+          reason: row.reason,
+        })
+        expect(Object.keys(lines[0]).sort()).toEqual([
+          'level',
+          'module',
+          'msg',
+          'reason',
+          'svc',
+          'ts',
+        ])
+      }
+      // No emitted line, denial or not, carries the token, a header value or a length.
+      for (const line of emittedLines()) {
+        expect(line).not.toContain(configuredToken)
+        expect(line).not.toContain('Bearer')
+      }
+
+      // Liveness witness for both negative assertions above, on the same server:
+      // with dev mode off, the token set and a wrong header the request is denied and logged
+      // (the spies and the parser see a denial line), and with the right header the handler
+      // runs (the route, the readiness gate and the handler were live).
+      config.devMode = false
+      config.desktopApiToken = DESKTOP_TOKEN
+      const before = denialLines().length
+      const denied = await request('wrong')
+      expect(denied.statusCode).toBe(401)
+      expect(denialLines()).toHaveLength(before + 1)
+      const calls = getStatus.mock.calls.length
+      const allowed = await request('right')
+      expect(allowed.statusCode).toBe(200)
+      expect(getStatus).toHaveBeenCalledTimes(calls + 1)
+      expect(denialLines()).toHaveLength(before + 1)
+    }
+  )
+
+  it('still answers 401 when LOG_LEVEL filters the denial line out', async () => {
+    config.devMode = false
+    config.desktopApiToken = DESKTOP_TOKEN
+    vi.stubEnv('LOG_LEVEL', 'warn')
+
+    const response = await request('wrong')
+
+    expect(response.statusCode).toBe(401)
+    expect(denialLines()).toEqual([])
+    // Witness that the spies still observe the logger at this level.
+    vi.stubEnv('LOG_LEVEL', 'info')
+    await request('wrong')
+    expect(denialLines()).toHaveLength(1)
   })
 })

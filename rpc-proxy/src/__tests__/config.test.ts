@@ -327,6 +327,8 @@ describe('secrets have no code default in any NODE_ENV', () => {
     ],
     ['RPC_PROXY_DESKTOP_COOKIE_SECRET', 'desktopCookieSecret', 'gen-jwt-keys.sh'],
     ['RPC_PROXY_SANDBOX_UI_COOKIE_SECRET', 'sandboxUiCookieSecret', 'gen-jwt-keys.sh'],
+    // Must equal HCC's CONTEXT_MAPPER_DESKTOP_API_TOKEN.
+    ['RPC_PROXY_DESKTOP_API_TOKEN', 'desktopApiToken', 'gen-jwt-keys.sh'],
   ] as const
 
   afterEach(() => {
@@ -446,10 +448,13 @@ describe('secrets have no code default in any NODE_ENV', () => {
     }
   )
 
-  it('sets no minimum length on the service token', async () => {
+  it.each([
+    ['RPC_PROXY_CONTROL_API_SERVICE_TOKEN', 'controlApiServiceToken'],
+    ['RPC_PROXY_DESKTOP_API_TOKEN', 'desktopApiToken'],
+  ] as const)('sets no minimum length on the bearer token %s', async (name, field) => {
     const value = 'nine-byte'
-    vi.stubEnv('RPC_PROXY_CONTROL_API_SERVICE_TOKEN', value)
+    vi.stubEnv(name, value)
 
-    expect((await importConfig()).controlApiServiceToken).toBe(value)
+    expect((await importConfig())[field]).toBe(value)
   })
 })

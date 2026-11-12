@@ -349,7 +349,9 @@ export const config: Config = {
     COOKIE_SECRET_MIN_BYTES
   ),
   desktopPort: Number(process.env.RPC_PROXY_DESKTOP_PORT || 3000),
-  desktopApiToken: process.env.RPC_PROXY_DESKTOP_API_TOKEN || '',
+  // Bearer token sent to host-context-controller on desktop status calls; must equal HCC's
+  // CONTEXT_MAPPER_DESKTOP_API_TOKEN. No minimum length: it is not an HMAC key.
+  desktopApiToken: requiredSecret('RPC_PROXY_DESKTOP_API_TOKEN', 'gen-jwt-keys.sh'),
   sandboxUiNamespace: process.env.RPC_PROXY_SANDBOX_UI_NAMESPACE || 'sandbox-ui',
   // 5s cache for the registry lookup. Keep the value short — a recipe
   // transitioning from `deploying` to `active` should be picked up on the

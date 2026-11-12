@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 // variable the file never mentions.
 const REQUIRED_SECRETS = [
   'RPC_PROXY_CONTROL_API_SERVICE_TOKEN',
+  'RPC_PROXY_DESKTOP_API_TOKEN',
   'RPC_PROXY_DESKTOP_COOKIE_SECRET',
   'RPC_PROXY_SANDBOX_UI_COOKIE_SECRET',
 ]

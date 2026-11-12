@@ -121,7 +121,8 @@ export interface Config {
     limits: { memory: string; cpu: string }
   }
 
-  // Service token for desktop API endpoints (empty = skip auth, e.g. dev mode)
+  // Service token for the desktop status endpoint. Required outside dev mode; the check is
+  // skipped only in dev mode with no token configured.
   desktopApiToken: string
 
   // workspace-files-controller (per-SharedFileSystem) reconciliation defaults
@@ -745,8 +746,9 @@ export const config: Config = {
     },
   },
 
-  // Service token for desktop API endpoints (empty = skip auth for dev mode)
-  desktopApiToken: getEnv('CONTEXT_MAPPER_DESKTOP_API_TOKEN', '')!,
+  // Service token for the desktop status endpoint. Required outside CLERUM_DEV_MODE
+  // (main.ts refuses to start); trimmed, as rpc-proxy trims its copy.
+  desktopApiToken: getEnv('CONTEXT_MAPPER_DESKTOP_API_TOKEN', '')!.trim(),
 
   // workspace-files-controller (per-SharedFileSystem) reconciliation defaults
   wfcImage: getEnv(

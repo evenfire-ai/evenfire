@@ -334,4 +334,44 @@ if grep -q 'replace-with-' "$webhook_placeholder_secret" "$webhook_placeholder_m
   exit 1
 fi
 
+# --- desktop API token: base HCC reads the key gen-jwt-keys.sh writes, and the
+# minikube literal replaces that source and equals rpc-proxy's copy. Values are
+# compared, never printed.
+hcc_manifest="$ROOT/deploy/base/control-plane/host-context-controller.yaml"
+if ! grep -q '^kind: Deployment' "$hcc_manifest" || ! grep -q '^  name: host-context-controller$' "$hcc_manifest"; then
+  echo "witness: $hcc_manifest is not the host-context-controller Deployment" >&2
+  exit 1
+fi
+hcc_token_entry="$(grep -A4 -E '^[[:space:]]+- name: CONTEXT_MAPPER_DESKTOP_API_TOKEN$' "$hcc_manifest" || true)"
+if [ -z "$hcc_token_entry" ] \
+  || ! printf '%s\n' "$hcc_token_entry" | grep -qE '^[[:space:]]+name: inter-service-tokens$' \
+  || ! printf '%s\n' "$hcc_token_entry" | grep -qE '^[[:space:]]+key: desktop-api-token$'; then
+  echo "base HCC must read CONTEXT_MAPPER_DESKTOP_API_TOKEN from Secret inter-service-tokens, key desktop-api-token" >&2
+  exit 1
+fi
+gen_jwt_keys="$ROOT/deploy/scripts/gen-jwt-keys.sh"
+grep -Fq -- '--from-literal="desktop-api-token=$DESKTOP_API_TOKEN"' "$gen_jwt_keys" || {
+  echo "gen-jwt-keys.sh must write desktop-api-token to inter-service-tokens" >&2
+  exit 1
+}
+grep -Fq -- '--from-literal="RPC_PROXY_DESKTOP_API_TOKEN=$DESKTOP_API_TOKEN"' "$gen_jwt_keys" || {
+  echo "gen-jwt-keys.sh must write the same token to rpc-proxy-secrets" >&2
+  exit 1
+}
+minikube_patch="$ROOT/deploy/overlays/minikube/patches/dynamic-images.yaml"
+minikube_entry="$(grep -A2 -E '^[[:space:]]+- name: CONTEXT_MAPPER_DESKTOP_API_TOKEN$' "$minikube_patch" || true)"
+if [ "$(printf '%s\n' "$minikube_entry" | sed -n '2p' | grep -cE '^[[:space:]]+value: ')" != 1 ] \
+  || [ "$(printf '%s\n' "$minikube_entry" | sed -n '3p' | grep -cE '^[[:space:]]+valueFrom: null$')" != 1 ]; then
+  echo "minikube HCC token entry must be a literal value immediately followed by valueFrom: null" >&2
+  exit 1
+fi
+minikube_hcc_token="$(printf '%s\n' "$minikube_entry" | sed -n '2p' | sed -E 's/^[[:space:]]+value: "?([^"]*)"?$/\1/')"
+minikube_rpc_token="$(grep -E '^[[:space:]]+RPC_PROXY_DESKTOP_API_TOKEN: ' "$ROOT/deploy/overlays/minikube/configmaps/rpc-proxy-config.yaml" \
+  | sed -E 's/^[[:space:]]+RPC_PROXY_DESKTOP_API_TOKEN: "?([^"]*)"?$/\1/' || true)"
+if [ -z "$minikube_hcc_token" ] || [ "$minikube_hcc_token" != "$minikube_rpc_token" ]; then
+  echo "minikube HCC and rpc-proxy desktop API tokens must be set and equal (values not printed)" >&2
+  exit 1
+fi
+unset minikube_hcc_token minikube_rpc_token
+
 echo "inter-service token patch tests passed"

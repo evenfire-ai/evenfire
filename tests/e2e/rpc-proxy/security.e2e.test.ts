@@ -255,6 +255,7 @@ describe('rpc-proxy e2e security suite', () => {
         // rpc-proxy requires at least 32 bytes for each cookie secret.
         RPC_PROXY_DESKTOP_COOKIE_SECRET: 'e2e-desktop-cookie-secret-32-bytes-min',
         RPC_PROXY_SANDBOX_UI_COOKIE_SECRET: 'e2e-sandbox-ui-cookie-secret-32-bytes-min',
+        RPC_PROXY_DESKTOP_API_TOKEN: 'e2e-desktop-api-token',
         RPC_PROXY_CONTROL_API_CACHE_TTL_MS: '5',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
