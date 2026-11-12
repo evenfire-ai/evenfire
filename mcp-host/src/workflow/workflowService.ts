@@ -37,10 +37,18 @@ import { getOutputDir, resolveInternalTools } from './internalTools'
 import { createMcpHostRuntimeAuth } from './runtimeAuthFactory'
 import { McpClientFactory, StepMcpRouter } from './stepRouter'
 import {
+  STEP_SPILLOVER_READ_TOOL_NAME,
+  type StepSpillover,
+  createStepSpillover,
+  resolveStepSpilloverConfig,
+  summarizeSpilloverReadForRecord,
+} from './stepSpillover'
+import {
   ConfigureRequest,
   ConfigureResponse,
   ExecuteStepRequest,
   ExecuteStepResponse,
+  type InternalToolResult,
   PluginWorkloadSdkBootstrapRequest,
   ToolCallRecord,
 } from './types'
@@ -900,6 +908,8 @@ export class WorkflowService {
     }
 
     const router = new StepMcpRouter(this.mcpClientFactory)
+    let stepSpillover: StepSpillover | null = null
+    let spilloverReadOffered = false
 
     // Spec §3.1.2: a non-empty allowedTools.include is the step's complete
     // toolset. Absent/empty keeps today's behaviour: every registered tool is
@@ -1164,6 +1174,20 @@ export class WorkflowService {
         }
       }
 
+      // Oversized tool results are stored outside the prompt. The store does
+      // not touch the disk and the read tool is not offered until a result is
+      // actually spilled, so steps without large results keep today's prompts
+      // and toolset.
+      const spilloverConfig = resolveStepSpilloverConfig()
+      if (spilloverConfig.enabled && toolDefs.length > 0) {
+        stepSpillover = createStepSpillover({
+          outputDir: getOutputDir(),
+          stepId: req.stepId,
+          thresholdBytes: spilloverConfig.thresholdBytes,
+          budgetBytes: spilloverConfig.budgetBytes,
+        })
+      }
+
       // 3. Build system prompt
       const soulContent = this.soulOverrideActive ? this.stepSoulContent : this.globalSoulContent
       const systemParts: string[] = []
@@ -1298,7 +1322,7 @@ export class WorkflowService {
 
           if (response.tool_calls && response.tool_calls.length > 0) {
             // Process tool calls
-            for (const call of response.tool_calls) {
+            for (const [callIndex, call] of response.tool_calls.entries()) {
               onProgress?.({ iteration: i + 1, toolCall: call.name })
               if (abortController.signal.aborted) {
                 throw new Error(abortReason(abortController.signal))
@@ -1307,11 +1331,43 @@ export class WorkflowService {
                 timeoutMs: remainingTimeoutMs(startTime, timeoutMs),
                 signal: abortController.signal,
               })
+              if (stepSpillover && call.name === STEP_SPILLOVER_READ_TOOL_NAME) {
+                // Record the ref and byte count, never the blob content.
+                record.result = summarizeSpilloverReadForRecord(
+                  call.arguments ?? {},
+                  result.content as InternalToolResult
+                )
+              }
               toolsCalled.push(record)
               messages.push({ role: 'assistant', content: `Tool call: ${call.name}` })
               // SEC-01 fix: wrap tool results in structural delimiters to prevent prompt
               // injection — MCP server responses are untrusted third-party data.
-              const toolOutput = JSON.stringify(result.content)
+              let toolOutput = JSON.stringify(result.content)
+              if (stepSpillover) {
+                const spill = await stepSpillover.persist({
+                  callId: `i${i + 1}c${callIndex}`,
+                  toolName: call.name,
+                  content: toolOutput,
+                  isError: result.isError === true,
+                })
+                toolOutput = spill.text
+                if (spill.spilled && !spilloverReadOffered) {
+                  // Offer the read tool only once something can be read back, so
+                  // steps that never spill keep today's exact toolset.
+                  router.registerInternalTools([stepSpillover.readTool], getOutputDir())
+                  if (allowedToolNames) {
+                    router.setAllowedTools({
+                      include: [...allowedToolNames, STEP_SPILLOVER_READ_TOOL_NAME],
+                    })
+                  }
+                  toolDefs.push({
+                    name: stepSpillover.readTool.name,
+                    description: stepSpillover.readTool.description,
+                    parameters: stepSpillover.readTool.parameters,
+                  })
+                  spilloverReadOffered = true
+                }
+              }
               messages.push({
                 role: 'user',
                 content: `<tool-result server="${call.name}" data-only="true">\n${toolOutput}\n</tool-result>`,
@@ -1584,6 +1640,7 @@ export class WorkflowService {
     } finally {
       clearTimeout(timeout)
       options.signal?.removeEventListener('abort', abortFromCaller)
+      await stepSpillover?.cleanup()
       await router.disconnect()
       this.revertSoulToGlobal()
       // P2b token budgets (§5.4) — workflow steps never traverse the agent
