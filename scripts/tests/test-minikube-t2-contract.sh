@@ -854,8 +854,8 @@ grep -Fq 'private key' "$tmp/malicious-public.err"
 grep -Fq 'sensitive file name' "$tmp/malicious-public.err"
 
 # The env templates .gitignore tracks on purpose (.gitignore `!.env.*` lines)
-# may change; any other `.env.*` name stays a sensitive file. The template's
-# contents are still scanned.
+# may change; any other `.env.*` name stays a sensitive file, at any depth, as
+# .gitignore matches it. The template's contents are still scanned.
 env_template_case() {
   local name="$1" file="$2" line="$3"
   local case_repo="$tmp/public-env-${name}"
@@ -871,7 +871,7 @@ env_template_case() {
   mkdir -p "$(dirname "$case_repo/$file")"
   printf '%s\n' "$line" >"$case_repo/$file"
 }
-for template in .env.dev.example .env.quickstart.example desktop-app/.env.e2e.example; do
+for template in .env.dev.example .env.quickstart.example desktop-app/.env.e2e.example rpc-proxy/.env.example; do
   env_template_case "accept-$(basename "$template")" "$template" '# Required: set in your own copy.'
   if ! T2_PUBLIC_ROOT="$ENV_CASE_REPO" T2_PUBLIC_BASE_REF="$ENV_CASE_BASE" \
     bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/env-accept.out" 2>"$tmp/env-accept.err"; then
@@ -881,7 +881,8 @@ for template in .env.dev.example .env.quickstart.example desktop-app/.env.e2e.ex
   fi
   grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/env-accept.out"
 done
-for sensitive in .env.dev .env.dev.example.bak .env.staging.example; do
+for sensitive in .env.dev .env.dev.example.bak .env.staging.example \
+  rpc-proxy/.env.local rpc-proxy/.env.prod deploy/.env.dev a/b/.env; do
   env_template_case "reject-$sensitive" "$sensitive" '# Required: set in your own copy.'
   if T2_PUBLIC_ROOT="$ENV_CASE_REPO" T2_PUBLIC_BASE_REF="$ENV_CASE_BASE" \
     bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/env-reject.err"; then
@@ -890,6 +891,24 @@ for sensitive in .env.dev .env.dev.example.bak .env.staging.example; do
   fi
   grep -Fq "$sensitive: sensitive file name" "$tmp/env-reject.err"
 done
+# Deleting a committed nested env file is still reported by name, as a root
+# `.env.local` deletion is: the gate reads the `diff --git` header.
+env_deletion_repo="$tmp/public-env-delete-nested"
+mkdir -p "$env_deletion_repo/rpc-proxy"
+git init -q -b dev "$env_deletion_repo"
+git -C "$env_deletion_repo" config user.email test@example.invalid
+git -C "$env_deletion_repo" config user.name boundary-test
+printf '# Required: set in your own copy.\n' >"$env_deletion_repo/rpc-proxy/.env.local"
+git -C "$env_deletion_repo" add -f rpc-proxy/.env.local
+git -C "$env_deletion_repo" commit -q -m base
+env_deletion_base="$(git -C "$env_deletion_repo" rev-parse HEAD)"
+rm "$env_deletion_repo/rpc-proxy/.env.local"
+if T2_PUBLIC_ROOT="$env_deletion_repo" T2_PUBLIC_BASE_REF="$env_deletion_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/env-delete.err"; then
+  echo 'FAIL: public boundary accepted the deletion of a nested env file without reporting it' >&2
+  exit 1
+fi
+grep -Fq 'rpc-proxy/.env.local: sensitive file name' "$tmp/env-delete.err"
 env_template_case content-secret .env.dev.example 'PASS''WORD=ProdCustomerPassword123'
 if T2_PUBLIC_ROOT="$ENV_CASE_REPO" T2_PUBLIC_BASE_REF="$ENV_CASE_BASE" \
   bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/env-content.err"; then

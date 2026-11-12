@@ -49,7 +49,8 @@ from urllib.parse import urlsplit
 diff = Path(sys.argv[1]).read_text(errors="replace")
 bad = []
 # Mirrors the `!.env.*` exceptions in .gitignore: env templates committed on
-# purpose. Any other `.env.*` file name is reported as sensitive.
+# purpose. Any other `.env` or `.env.*` file name is reported as sensitive, at
+# any depth, as .gitignore matches it.
 TRACKED_ENV_TEMPLATES = {
     ".env.example",
     ".env.test",
@@ -59,6 +60,10 @@ TRACKED_ENV_TEMPLATES = {
 }
 current = ""
 root = Path(sys.argv[2]).resolve()
+
+
+def is_env_file_name(name):
+    return name == ".env" or name.startswith(".env.")
 
 
 def public_capture_source(relative):
@@ -157,8 +162,7 @@ for line in diff.splitlines():
         path = current.lower()
         path_parts = path.split("/")
         if (
-            path == ".env"
-            or path.startswith(".env.")
+            is_env_file_name(path_parts[-1])
             or path.endswith((".pem", ".key", ".p12", ".pfx", ".log"))
             or path.endswith(("/kubeconfig", "/config"))
             or (
