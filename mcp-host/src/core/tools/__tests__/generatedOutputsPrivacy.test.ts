@@ -140,7 +140,8 @@ describe('generated documents are private to their caller', () => {
 
     const lookup = resolveRpcCallerOutputDir(hostBase, 'user-a')
     expect(lookup).toEqual({ dir: outputsOf(a) })
-    expect(fs.readdirSync(outputsOf(a)).sort()).toEqual(['later.md', 'report.md'])
+    // The save records sit in their own folder next to the files.
+    expect(fs.readdirSync(outputsOf(a)).sort()).toEqual(['.save-ledger', 'later.md', 'report.md'])
     expect(path.basename(a)).toBe(deriveUserKeyFromSource({ sender: 'user-a', channelType: 'rpc' }))
   })
 
@@ -265,7 +266,8 @@ describe('generated documents are private to their caller', () => {
     const result = await markdown(a, 'report.md', '# too much\n')
     expect(result.is_error).toBe(true)
     expect(result.content).toMatch(/Not enough free space/)
-    expect(fs.readdirSync(outputsOf(a))).toEqual(['kept.md'])
+    // Nothing was removed to make room: the earlier file and its record stay.
+    expect(fs.readdirSync(outputsOf(a)).sort()).toEqual(['.save-ledger', 'kept.md'])
   })
 
   it('keeps only the minimum free space on the root disk in development', async () => {

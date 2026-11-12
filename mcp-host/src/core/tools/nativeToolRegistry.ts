@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
 import type { CronScheduler } from '../../agent/cronScheduler'
@@ -17,7 +18,14 @@ import {
 } from '../../internalTools/gfs'
 import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
 import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
+import {
+  type SaveLedgerRecord,
+  SaveLedgerWriteError,
+  newSaveId,
+  writeSaveLedgerRecord,
+} from '../../internalTools/keptFiles'
 import type { LlmProvider } from '../../llm/registryCore'
+import { logger } from '../../logger'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
 import type { McpTool } from '../../types'
@@ -44,7 +52,10 @@ import { AttachmentReadTool } from './attachmentRead'
 import { CronManageTool } from './cronManage'
 import { FileReadTool } from './fileRead'
 import { FileWriteTool } from './fileWrite'
-import { buildGeneratedArtifactAttachment } from './generatedArtifactAttachments'
+import {
+  buildGeneratedArtifactAttachment,
+  isInternalGeneratedArtifactSourceTool,
+} from './generatedArtifactAttachments'
 import { HttpRequestTool } from './httpRequest'
 import { JsonTransformTool } from './jsonTransform'
 import {
@@ -78,6 +89,21 @@ function directlyInside(file: string, dir: string): boolean {
   }
 }
 
+/**
+ * Removes the file a generator just wrote when its save record cannot be
+ * written, only if it is still the same file (`dev`/`ino` as written), in one
+ * synchronous block, so a regeneration landing in between is not lost.
+ */
+function discardGeneratedFile(file: string, written: fs.Stats | undefined): void {
+  if (!written) return
+  try {
+    const now = fs.lstatSync(file)
+    if (now.dev === written.dev && now.ino === written.ino) fs.unlinkSync(file)
+  } catch {
+    // Already gone.
+  }
+}
+
 /** Adapter: wraps an InternalToolDefinition as a native Tool for use in chat mode. */
 class InternalToolAdapter implements Tool {
   constructor(
@@ -92,7 +118,13 @@ class InternalToolAdapter implements Tool {
      * call (callerOutputs.ts). It replaces `outputDir`; when it cannot be
      * verified the call writes nothing.
      */
-    private readonly callerOutputs?: () => CallerOutputLookup
+    private readonly callerOutputs?: () => CallerOutputLookup,
+    /**
+     * For a generator in a chat registry whose Host token can write to GFS:
+     * a delivered file's result names its save id, which the GFS write tools
+     * take to save that file later.
+     */
+    private readonly generatorOptions: { saveIdShown: boolean } = { saveIdShown: false }
   ) {}
   name(): string {
     return this.def.name
@@ -174,6 +206,15 @@ class InternalToolAdapter implements Tool {
         (this.attachmentOptions.secretEntriesProvider?.().length ?? 0) > 0
           ? await boilerplateTexts(format)
           : undefined
+      // The file as the generator left it, so a discard removes only that file.
+      let written: fs.Stats | undefined
+      if (this.callerOutputs && result.success && result.artifact) {
+        try {
+          written = fs.lstatSync(result.artifact.path)
+        } catch {
+          written = undefined
+        }
+      }
       const delivery =
         result.success && result.artifact
           ? buildGeneratedArtifactAttachment({
@@ -192,6 +233,49 @@ class InternalToolAdapter implements Tool {
             })
           : null
       const attachment = delivery && 'attachment' in delivery ? delivery.attachment : null
+      // A chat generation records what the attachment check decided, so the
+      // file can be saved to GFS later only if the chat received it. A
+      // generation whose record cannot be written is discarded.
+      let saveId: string | undefined
+      if (
+        this.callerOutputs &&
+        delivery &&
+        result.artifact &&
+        isInternalGeneratedArtifactSourceTool(this.def.name)
+      ) {
+        const record: SaveLedgerRecord = {
+          id: newSaveId(),
+          name: result.artifact.name,
+          format: result.artifact.format,
+          outcome: 'attachment' in delivery ? 'delivered' : delivery.skipped,
+          createdAt: new Date().toISOString(),
+          ...('attachment' in delivery
+            ? {
+                deliveredSha256: createHash('sha256')
+                  .update(Buffer.from(delivery.attachment.dataBase64, 'base64'))
+                  .digest('hex'),
+              }
+            : {}),
+        }
+        try {
+          writeSaveLedgerRecord(outputDir, record)
+        } catch (err) {
+          discardGeneratedFile(result.artifact.path, written)
+          const code = err instanceof SaveLedgerWriteError ? err.code : 'EIO'
+          logger.warn(
+            { component: 'InternalToolAdapter', tool: this.def.name, errorCode: code },
+            'Generated file discarded: its save record could not be written'
+          )
+          return {
+            content:
+              `Error: Generated file discarded: its save record could not be written (ledger ${code}). ` +
+              `Try again; if it keeps failing, the Host's storage needs attention.`,
+            duration_ms: Date.now() - start,
+            is_error: true,
+          }
+        }
+        if ('attachment' in delivery) saveId = record.id
+      }
       const images = result.success
         ? (result.images?.map(image => ({
             id: `gfs-${image.source.resourceId}-${image.source.version}`,
@@ -209,7 +293,8 @@ class InternalToolAdapter implements Tool {
         : []
       const attachments = [...(attachment ? [attachment] : []), ...images]
       return {
-        content,
+        content:
+          saveId && this.generatorOptions.saveIdShown ? `${content}\nSave id: ${saveId}` : content,
         duration_ms: Date.now() - start,
         is_error: !result.success,
         attachments: attachments.length ? attachments : undefined,
@@ -499,7 +584,8 @@ export class NativeToolRegistry implements ToolRegistry {
           tool,
           outputDir,
           resolvedAttachmentOptions,
-          tool.name.startsWith(GENERATOR_PREFIX) ? callerOutputs : undefined
+          tool.name.startsWith(GENERATOR_PREFIX) ? callerOutputs : undefined,
+          { saveIdShown: gfsScopes?.has('gfs.write') === true }
         )
       )
     }
