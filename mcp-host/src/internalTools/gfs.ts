@@ -30,6 +30,18 @@ import {
   type GfsReadOptions,
 } from './gfsReadTypes'
 import { gfsStoreSpaceGuidance } from './gfsSpaceGuidance'
+import {
+  FILE_CONTAINS_SECRET,
+  KEPT_FILES_UNAVAILABLE,
+  type KeptFileEntry,
+  type KeptFileSources,
+  KeptFilesUnavailableError,
+  type ResolvedSourceFile,
+  isSourceRefusal,
+  listKeptFiles,
+  resolveGeneratedFile,
+  resolveSourcePath,
+} from './keptFiles'
 import { decodeTextContent } from './textContent'
 
 /**
@@ -155,6 +167,8 @@ function workspaceFileUsage(visualDelivery: 'included' | 'not_included', visualR
     ...(visualReason === undefined ? {} : { visualReason }),
     approval: 'user-approval-required',
     writeOutputsTo: 'outputs/',
+    saveChangedFileWith: 'clerum__gfs_write or clerum__gfs_create_file with sourcePath',
+    sourcePathMustBeOutside: '.gfs-downloads',
     processLocally: true,
     boundedOutputOnly: true,
     wholeFileToContextAllowed: false,
@@ -894,26 +908,124 @@ function isValidIfMatch(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
 }
 
+/** The file sources a chat caller may save from, besides text the model wrote. */
+const FILE_SOURCE_FIELDS = ['generatedFile', 'sourcePath'] as const
+const SOURCE_FIELDS = ['content', ...FILE_SOURCE_FIELDS] as const
+const EXACTLY_ONE_SOURCE = 'give exactly one of content, generatedFile, sourcePath'
+
+const SOURCE_PROPERTIES = {
+  generatedFile: {
+    type: 'string',
+    description:
+      'Name of a file a document generator made in this chat, as its result or clerum__kept_files_list names it. Pass its Save id as generatedFileId; a listed file with no id is saved by generatedFile alone. Give every generated file its own descriptive file name; a file generated under an existing name replaces it.',
+  },
+  generatedFileId: {
+    type: 'string',
+    description:
+      'The Save id of the generatedFile, from the generator result or clerum__kept_files_list. Only together with generatedFile.',
+  },
+  sourcePath: {
+    type: 'string',
+    description:
+      'Relative path of a file in your workspace, such as outputs/report.csv; the Host uploads its bytes. Reserved folders and a path whose first part starts with a dot are refused. To save a changed copy of a download, write it outside .gfs-downloads and pass that path. Not for memory notes (MEMORY.md, daily/, the notes in memory/): use the memory tools.',
+  },
+} as const
+
+const FILE_SOURCE_NOTICE =
+  ' Exactly one source: content (short text you wrote, never a whole file), generatedFile with generatedFileId, or sourcePath. The result has source and secretScan. When source is source_path or kept_upload, or generated_file with no Save id, and secretScan is not_scanned, tell the user the file was saved without a secret scan. A generated file with a Save id passed its check when it was generated and needs no such notice.'
+
+type ChosenSource =
+  | { kind: 'content'; content: string }
+  | { kind: 'generatedFile'; name: string; id?: string }
+  | { kind: 'sourcePath'; path: string }
+
+/** The one source of a write call, or the argument error that refuses the call. */
+function chosenSource(args: Record<string, unknown>): ChosenSource | InternalToolResult {
+  const given = SOURCE_FIELDS.filter(field => args[field] !== undefined)
+  if (given.length !== 1) return invalidArgs(EXACTLY_ONE_SOURCE)
+  if (args.generatedFileId !== undefined && given[0] !== 'generatedFile') {
+    return invalidArgs(EXACTLY_ONE_SOURCE)
+  }
+  switch (given[0]) {
+    case 'content':
+      return typeof args.content === 'string'
+        ? { kind: 'content', content: args.content }
+        : invalidArgs('content must be a string')
+    case 'generatedFile':
+      if (typeof args.generatedFile !== 'string' || args.generatedFile === '') {
+        return invalidArgs('generatedFile must be a file name')
+      }
+      if (args.generatedFileId !== undefined && typeof args.generatedFileId !== 'string') {
+        return invalidArgs('generatedFileId must be a string')
+      }
+      return {
+        kind: 'generatedFile',
+        name: args.generatedFile,
+        ...(args.generatedFileId === undefined ? {} : { id: args.generatedFileId }),
+      }
+    default:
+      return typeof args.sourcePath === 'string' && args.sourcePath !== ''
+        ? { kind: 'sourcePath', path: args.sourcePath }
+        : invalidArgs('sourcePath must be a relative path')
+  }
+}
+
+function isToolResult(value: unknown): value is InternalToolResult {
+  return typeof value === 'object' && value !== null && 'success' in value
+}
+
+/** Reads a file source of the caller; the refusal is a tool error, never an upload. */
+function resolvedFileSource(
+  sources: KeptFileSources,
+  chosen: Exclude<ChosenSource, { kind: 'content' }>,
+  createName?: string
+): ResolvedSourceFile | InternalToolResult {
+  const resolved =
+    chosen.kind === 'generatedFile'
+      ? resolveGeneratedFile(sources, chosen.name, chosen.id, createName)
+      : resolveSourcePath(sources, chosen.path)
+  if (isSourceRefusal(resolved)) {
+    return resolved.argument
+      ? invalidArgs(resolved.error)
+      : { success: false, error: resolved.error }
+  }
+  if (resolved.secretScan.state === 'secret_found')
+    return { success: false, error: FILE_CONTAINS_SECRET }
+  return resolved
+}
+
 /**
  * Agent gfs WRITE tool (plan P4-S04). clerum__gfs_write replaces a file and
  * REQUIRES If-Match (the resource version) — agent writes are writer-routed
  * conditional writes (P4-S01); the mutation is audited server-side. Destructive
  * bits (delete) stay default-denied for agents.
+ *
+ * With `sources` (the chat registry), the write and create tools also save a
+ * file of the caller's own folders: a generated file, or a workspace file. The
+ * Host reads and scans the bytes; the model never carries them. Without it
+ * (the workflow runtime) only `content` exists, as before.
  */
-export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinition[] {
+export function buildGfsWriteTools(
+  client: GfscWriteClient,
+  sources?: KeptFileSources
+): InternalToolDefinition[] {
   return [
     {
       name: 'clerum__gfs_write',
       description:
-        'Conditionally replace the complete content of an existing gfs file. Requires If-Match (the current version).',
+        'Conditionally replace the complete content of an existing gfs file. Requires If-Match (the current version).' +
+        (sources ? FILE_SOURCE_NOTICE : ''),
       parameters: {
         type: 'object',
-        required: ['drive', 'resourceId', 'content', 'ifMatch'],
+        required: sources
+          ? ['drive', 'resourceId', 'ifMatch']
+          : ['drive', 'resourceId', 'content', 'ifMatch'],
         properties: {
           drive: { type: 'string', description: 'gfs drive name.' },
           resourceId: { type: 'string', description: 'Resource id (32-hex rid).' },
           content: { type: 'string', description: 'New file content.' },
           ifMatch: { type: 'number', description: 'The resource version being replaced.' },
+          ...(sources ? SOURCE_PROPERTIES : {}),
         },
       },
       execute: async (
@@ -923,6 +1035,33 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
       ): Promise<InternalToolResult> => {
         if (!isValidIfMatch(args.ifMatch)) {
           return invalidArgs('clerum__gfs_write requires a non-negative safe-integer If-Match')
+        }
+        if (sources) {
+          const chosen = chosenSource(args)
+          if (isToolResult(chosen)) return chosen
+          if (chosen.kind !== 'content') {
+            const file = resolvedFileSource(sources, chosen)
+            if (isToolResult(file)) return file
+            try {
+              const resource = await client.writeBytes(
+                {
+                  drive: args.drive as string,
+                  resourceId: args.resourceId as string,
+                  contentBase64: file.bytes.toString('base64'),
+                  ifMatch: args.ifMatch,
+                },
+                callOptions(context)
+              )
+              return ok({
+                source: file.source,
+                bytes: file.bytes.byteLength,
+                secretScan: file.secretScan,
+                resource,
+              })
+            } catch (err) {
+              return mutationFail(err)
+            }
+          }
         }
         try {
           return ok(
@@ -938,10 +1077,13 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
     },
     {
       name: 'clerum__gfs_create_file',
-      description: 'Create one file under an existing gfs folder.',
+      description:
+        'Create one file under an existing gfs folder.' + (sources ? FILE_SOURCE_NOTICE : ''),
       parameters: {
         type: 'object',
-        required: ['drive', 'parentResourceId', 'name', 'content'],
+        required: sources
+          ? ['drive', 'parentResourceId', 'name']
+          : ['drive', 'parentResourceId', 'name', 'content'],
         properties: {
           drive: { type: 'string', description: 'gfs drive name.' },
           parentResourceId: { type: 'string', description: 'Destination folder resource id.' },
@@ -951,6 +1093,7 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
               'New file name including its file extension, e.g. "report.txt" or "notes.md". Always match the content format.',
           },
           content: { type: 'string', description: 'Initial file content.' },
+          ...(sources ? SOURCE_PROPERTIES : {}),
         },
       },
       execute: async (
@@ -958,6 +1101,33 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
         _outputDir: string,
         context?: InternalToolCallContext
       ): Promise<InternalToolResult> => {
+        if (sources) {
+          const chosen = chosenSource(args)
+          if (isToolResult(chosen)) return chosen
+          if (chosen.kind !== 'content') {
+            const file = resolvedFileSource(sources, chosen, args.name as string)
+            if (isToolResult(file)) return file
+            try {
+              const resource = await client.createFileFromBytes(
+                {
+                  drive: args.drive as string,
+                  parentResourceId: args.parentResourceId as string,
+                  name: args.name as string,
+                  contentBase64: file.bytes.toString('base64'),
+                },
+                callOptions(context)
+              )
+              return ok({
+                source: file.source,
+                bytes: file.bytes.byteLength,
+                secretScan: file.secretScan,
+                resource,
+              })
+            } catch (err) {
+              return mutationFail(err)
+            }
+          }
+        }
         try {
           return ok(
             await client.createFile(
@@ -1114,6 +1284,76 @@ export function buildGfsAttachmentSaveTools(
       },
     },
   ]
+}
+
+/** The most entries the listing tool returns; the delete and the saves read the uncut list. */
+export const KEPT_FILES_LIST_LIMIT = 100
+
+/**
+ * `clerum__kept_files_list`: the caller's kept files, oldest first, at most
+ * 100, optionally only those whose name contains `nameContains`. Its output
+ * never goes to spillover storage, so no file name rests there.
+ */
+export function buildKeptFilesListTool(callerRoot: string | undefined): InternalToolDefinition {
+  const hours = Math.round(GFS_FILE_LIMITS.retentionMs / 3_600_000)
+  return {
+    name: 'clerum__kept_files_list',
+    description:
+      'List the files this Host keeps for this user: files the document generators made in chat, with their Save id. ' +
+      'Save one with clerum__gfs_create_file or clerum__gfs_write and generatedFile plus generatedFileId; an entry without id is saved by generatedFile alone; canSave false means it cannot be saved (reason). ' +
+      'The list starts with the oldest files and the newest file is the last entry; at most 100 entries. ' +
+      'When truncated is true and the user asks for a recent file, ask the user for part of its name and pass it as nameContains, or use the Save id of the generation. ' +
+      `Each file is deleted ${hours} hours after its createdAt; tell the user the date when they say they will save a file later. ` +
+      'Give every generated file its own descriptive file name; a file generated under an existing name replaces it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        nameContains: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 255,
+          description: 'Only files whose name contains this text, in any case.',
+        },
+      },
+    },
+    spilloverExempt: true,
+    execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      const filter = args.nameContains
+      if (
+        filter !== undefined &&
+        (typeof filter !== 'string' || filter.length < 1 || filter.length > 255)
+      ) {
+        return invalidArgs('nameContains must be 1 to 255 characters')
+      }
+      if (!callerRoot) return { success: false, error: KEPT_FILES_UNAVAILABLE }
+      let entries: KeptFileEntry[]
+      try {
+        entries = listKeptFiles(callerRoot)
+      } catch (err) {
+        if (err instanceof KeptFilesUnavailableError) {
+          return { success: false, error: KEPT_FILES_UNAVAILABLE }
+        }
+        throw err
+      }
+      const needle = typeof filter === 'string' ? filter.toLowerCase() : undefined
+      const matching = needle
+        ? entries.filter(entry => entry.name.toLowerCase().includes(needle))
+        : entries
+      return ok({
+        files: matching.slice(0, KEPT_FILES_LIST_LIMIT).map(entry => ({
+          kind: entry.kind,
+          name: entry.name,
+          ...(entry.id === undefined ? {} : { id: entry.id }),
+          format: entry.format,
+          createdAt: entry.createdAt,
+          sizeBytes: entry.sizeBytes,
+          canSave: entry.canSave,
+          ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+        })),
+        truncated: matching.length > KEPT_FILES_LIST_LIMIT,
+      })
+    },
+  }
 }
 
 /** Recursive copy is advertised only when both read and write scopes exist. */

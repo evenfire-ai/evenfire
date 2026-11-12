@@ -117,6 +117,10 @@ describe('GFS large-file tool routing', () => {
       pathSemantics: 'relative-to-caller-workspace',
       nextTool: 'shell_exec_when_local_processing_is_needed',
       wholeFileToContextAllowed: false,
+      // How a changed copy goes back to GFS: by its path, written outside the downloads.
+      saveChangedFileWith: 'clerum__gfs_write or clerum__gfs_create_file with sourcePath',
+      sourcePathMustBeOutside: '.gfs-downloads',
+      writeOutputsTo: 'outputs/',
     })
     expect(JSON.stringify(parsed)).not.toContain('AAAAAAA')
     expect(read).not.toHaveBeenCalled()

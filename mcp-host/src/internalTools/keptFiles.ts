@@ -12,6 +12,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { readOpenedArtifactBuffer, redactArtifactForDelivery } from '../artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from '../artifacts/artifactRedaction'
 import {
   OFFICE_PACKAGE_LIMITS,
@@ -19,9 +20,14 @@ import {
   officePackageHasText,
 } from '../artifacts/officePackageText'
 import { textContainsRedactableSecretEntry } from '../core/tools/generatedArtifactAttachments'
+import { validatePath } from '../core/tools/pathValidation'
 import { logger } from '../logger'
+import { isPartialArtifactName } from '../workflow/artifactOutput'
+import { ArtifactPathError, openExistingArtifactFile } from '../workflow/artifactPaths'
 import { withoutWriteTimes } from '../workflow/officeBoilerplate'
 import { printedForms } from '../workflow/toolText'
+import { resolveCallerOutputDir } from '../workspace/callerOutputs'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 import { decodeTextContent } from './textContent'
 
 /** The folder of save records inside a caller's `.clerum-outputs`. */
@@ -196,5 +202,346 @@ export function scanForSecrets(bytes: Buffer, entries: ArtifactSecretEntry[]): S
       'Secret scan failed; the file is reported as not scanned'
     )
     return { state: 'not_scanned', reason: 'scan_error' }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reading the caller's kept files: the sources of the GFS write tools and the
+// listing. Every file is opened with the artifact opener (no link followed,
+// regular files only, non-blocking) and read within the artifact bound.
+// ---------------------------------------------------------------------------
+
+/** Where the sources of one chat caller come from; every path is the caller's own. */
+export interface KeptFileSources {
+  /** The verified caller root `<host>/users/<key>`; its `.clerum-outputs` holds the kept files. */
+  callerRoot?: string
+  /** The caller's workspace root, from which `sourcePath` is resolved. */
+  callerWorkspacePath?: string
+  /** The Host's current secret entries, for redaction and the scan. */
+  secretEntries: () => ArtifactSecretEntry[]
+}
+
+/** A file read from one of the sources, ready to upload. */
+export interface ResolvedSourceFile {
+  source: 'generated_file' | 'source_path' | 'kept_upload'
+  bytes: Buffer
+  secretScan: SecretScanResult
+}
+
+/** Why a source could not be used. `argument` marks a call to correct, not a missing file. */
+export interface SourceRefusal {
+  error: string
+  argument?: true
+}
+
+export type SourceResolution = ResolvedSourceFile | SourceRefusal
+
+export function isSourceRefusal(value: SourceResolution): value is SourceRefusal {
+  return 'error' in value
+}
+
+function retentionHours(): number {
+  return Math.round(GFS_FILE_LIMITS.retentionMs / 3_600_000)
+}
+
+/** The message of `kept_file_not_found`; it carries the retention in hours, as digits. */
+export function keptFileNotFound(): SourceRefusal {
+  return {
+    error:
+      `kept_file_not_found: no such file for this user: it was never created, ` +
+      `it expired after ${retentionHours()} hours, or it was deleted`,
+  }
+}
+
+export const KEPT_FILES_UNAVAILABLE =
+  'kept_files_unavailable: this conversation has no private file folder on this Host, so no kept file can be used'
+export const SOURCE_PATH_UNAVAILABLE =
+  'source_path_unavailable: this conversation has no private workspace on this Host, so sourcePath cannot be used'
+export const SOURCE_PATH_INVALID =
+  'source_path_invalid: give the relative path of a regular file in your workspace; reserved folders and paths whose first part starts with a dot are refused'
+export const DOWNLOADS_HINT =
+  'source_path_invalid: a downloaded copy cannot be saved from .gfs-downloads; write the changed file outside .gfs-downloads, for example in outputs/, and save that path with sourcePath'
+export const NO_SAVE_ID = 'this file has no save id: call again with generatedFile only'
+export const HAS_SAVE_ID =
+  'this file has a save id: call clerum__kept_files_list and pass its id as generatedFileId'
+export const WITHHELD_SENTENCE =
+  'this file was not delivered to the chat because it holds a protected value or could not be checked, so it cannot be saved; generate it again without that value'
+export const FILE_CONTAINS_SECRET =
+  'file_contains_secret: the file holds a protected value of this Host, so it was not saved'
+
+/** `name_format_mismatch`: the generated file's format, and the ending its GFS name needs. */
+export function nameFormatMismatch(format: string): SourceRefusal {
+  return {
+    error: `name_format_mismatch: this file is a ${format} file: give it a name that ends in .${format}`,
+  }
+}
+
+/**
+ * Maps an opener or reader failure: a missing, refused or invalid name is the
+ * source's not-found answer; a file over the bound is `limit_exceeded`; any
+ * other failure (a read error, a file changed during the read) says so with
+ * its code and is never reported as missing.
+ */
+function readFailure(err: unknown, notFound: () => SourceRefusal): SourceRefusal {
+  if (err instanceof ArtifactPathError) {
+    if (err.status === 400 || err.status === 403 || err.status === 404) return notFound()
+    if (err.status === 413) {
+      return { error: 'limit_exceeded: the file is larger than the Host can save to GFS' }
+    }
+    return { error: `could not read the file (${err.code ?? 'EIO'})` }
+  }
+  return { error: `could not read the file (${errorCode(err)})` }
+}
+
+/** Reads `name` directly inside `dir` through the artifact opener, within `maxBytes`. */
+function readKeptFile(dir: string, name: string, maxBytes?: number): Buffer {
+  const opened = openExistingArtifactFile(dir, name)
+  try {
+    return readOpenedArtifactBuffer(opened, maxBytes)
+  } finally {
+    try {
+      fs.closeSync(opened.fd)
+    } catch {
+      // Closing after the outcome is known.
+    }
+  }
+}
+
+function isRecord(value: unknown): value is SaveLedgerRecord {
+  if (typeof value !== 'object' || value === null) return false
+  const r = value as Record<string, unknown>
+  return (
+    typeof r.id === 'string' &&
+    /^[0-9a-f]{12}$/.test(r.id) &&
+    typeof r.name === 'string' &&
+    typeof r.format === 'string' &&
+    typeof r.outcome === 'string' &&
+    typeof r.createdAt === 'string' &&
+    (r.deliveredSha256 === undefined || typeof r.deliveredSha256 === 'string')
+  )
+}
+
+/**
+ * The save record of `name` in `outputDir`, or undefined when there is none or
+ * it cannot be read as one (missing, not a regular file, too large, malformed,
+ * or naming another file).
+ */
+export function readSaveLedgerRecord(
+  outputDir: string,
+  name: string
+): SaveLedgerRecord | undefined {
+  let raw: Buffer
+  try {
+    raw = readKeptFile(
+      path.join(outputDir, SAVE_LEDGER_DIR),
+      ledgerRecordFileName(name),
+      MAX_RECORD_BYTES
+    )
+  } catch {
+    return undefined
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw.toString('utf8'))
+    return isRecord(parsed) && parsed.name === name ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+type OutputLookup = { dir: string } | SourceRefusal
+
+function keptOutputDir(sources: KeptFileSources): OutputLookup {
+  if (!sources.callerRoot) return { error: KEPT_FILES_UNAVAILABLE }
+  const lookup = resolveCallerOutputDir(sources.callerRoot, { create: false })
+  if ('dir' in lookup) return lookup
+  if ('missing' in lookup) return keptFileNotFound()
+  return { error: KEPT_FILES_UNAVAILABLE }
+}
+
+function regularFileExists(dir: string, name: string): boolean {
+  try {
+    const opened = openExistingArtifactFile(dir, name)
+    fs.closeSync(opened.fd)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+}
+
+/**
+ * A generated file of the caller's `.clerum-outputs`. With a save record the
+ * call must give its id: the record must be the latest generation of the name,
+ * delivered to the chat, and the file's bytes as redacted now must hash to
+ * what the chat received; the redacted bytes are uploaded. Without a record
+ * (a dashboard, or a file generated before records existed) the call names the
+ * file only and its bytes as read are uploaded. Both go through the scan.
+ * `createName`, for a new GFS file, must end in the record's format.
+ */
+export function resolveGeneratedFile(
+  sources: KeptFileSources,
+  name: string,
+  generatedFileId: string | undefined,
+  createName?: string
+): SourceResolution {
+  const out = keptOutputDir(sources)
+  if ('error' in out) return out
+  const record = readSaveLedgerRecord(out.dir, name)
+  if (!record) {
+    if (generatedFileId !== undefined) {
+      return regularFileExists(out.dir, name)
+        ? { error: NO_SAVE_ID, argument: true }
+        : keptFileNotFound()
+    }
+    let bytes: Buffer
+    try {
+      bytes = readKeptFile(out.dir, name)
+    } catch (err) {
+      return readFailure(err, keptFileNotFound)
+    }
+    return {
+      source: 'generated_file',
+      bytes,
+      secretScan: scanForSecrets(bytes, sources.secretEntries()),
+    }
+  }
+  if (generatedFileId === undefined) return { error: HAS_SAVE_ID, argument: true }
+  if (record.id !== generatedFileId) {
+    return {
+      error:
+        `kept_file_replaced: a newer file was generated under this name at ${record.createdAt}; ` +
+        `call clerum__kept_files_list for its id, or ask the user which file they mean`,
+    }
+  }
+  if (record.outcome !== 'delivered' || record.deliveredSha256 === undefined) {
+    return { error: `kept_file_withheld (${record.outcome}): ${WITHHELD_SENTENCE}` }
+  }
+  let bytes: Buffer
+  try {
+    bytes = readKeptFile(out.dir, name)
+  } catch (err) {
+    return readFailure(err, keptFileNotFound)
+  }
+  const entries = sources.secretEntries()
+  const delivered = redactArtifactForDelivery(record.format, bytes, entries).buffer
+  if (createHash('sha256').update(delivered).digest('hex') !== record.deliveredSha256) {
+    return {
+      error:
+        'kept_file_changed: the file or the Host protected values changed since it was generated; generate it again',
+    }
+  }
+  if (createName !== undefined && extensionOf(createName) !== record.format) {
+    return nameFormatMismatch(record.format)
+  }
+  return {
+    source: 'generated_file',
+    bytes: delivered,
+    secretScan: scanForSecrets(delivered, entries),
+  }
+}
+
+/**
+ * A regular file of the caller's workspace, by its path relative to the
+ * workspace root: `validatePath` refuses absolute paths, `..`, links out of the
+ * root and reserved folders at any depth; a first part that starts with a dot
+ * is refused too (tool configuration under the shell's home). A refused path
+ * that goes through `.gfs-downloads` gets the hint that says how to proceed.
+ */
+export function resolveSourcePath(sources: KeptFileSources, sourcePath: string): SourceResolution {
+  const root = sources.callerWorkspacePath
+  if (!root) return { error: SOURCE_PATH_UNAVAILABLE }
+  const invalid = (): SourceRefusal => ({
+    error: sourcePath.split(/[\\/]+/).includes('.gfs-downloads')
+      ? DOWNLOADS_HINT
+      : SOURCE_PATH_INVALID,
+  })
+  const checked = validatePath(sourcePath, root)
+  if (!checked.valid) return invalid()
+  const first = sourcePath.split(/[\\/]+/).find(segment => segment !== '' && segment !== '.')
+  if (first === undefined || first.startsWith('.')) return invalid()
+  let bytes: Buffer
+  try {
+    bytes = readKeptFile(path.dirname(checked.resolved), path.basename(checked.resolved))
+  } catch (err) {
+    return readFailure(err, invalid)
+  }
+  return {
+    source: 'source_path',
+    bytes,
+    secretScan: scanForSecrets(bytes, sources.secretEntries()),
+  }
+}
+
+/** One entry of {@link listKeptFiles}. */
+export interface KeptFileEntry {
+  kind: 'generated' | 'upload'
+  name: string
+  id?: string
+  format: string
+  createdAt: string
+  sizeBytes: number
+  canSave: boolean
+  reason?: string
+}
+
+/**
+ * Every kept file of the caller, oldest first and uncut: generated files with
+ * their record's id and verdict (a file with no record has no id and is saved
+ * by name). Files still being written are skipped. Nothing else of the caller
+ * root is read. No folder yet is an empty list.
+ */
+export function listKeptFiles(callerRoot: string): KeptFileEntry[] {
+  const lookup = resolveCallerOutputDir(callerRoot, { create: false })
+  if ('missing' in lookup) return []
+  if (!('dir' in lookup)) throw new KeptFilesUnavailableError()
+  const entries: KeptFileEntry[] = []
+  for (const dirent of fs.readdirSync(lookup.dir, { withFileTypes: true })) {
+    if (!dirent.isFile() || isPartialArtifactName(dirent.name)) continue
+    let info: fs.Stats
+    try {
+      info = fs.lstatSync(path.join(lookup.dir, dirent.name))
+    } catch {
+      continue
+    }
+    if (!info.isFile()) continue
+    const record = readSaveLedgerRecord(lookup.dir, dirent.name)
+    if (record) {
+      const delivered = record.outcome === 'delivered'
+      entries.push({
+        kind: 'generated',
+        name: dirent.name,
+        id: record.id,
+        format: record.format,
+        createdAt: record.createdAt,
+        sizeBytes: info.size,
+        canSave: delivered,
+        ...(delivered ? {} : { reason: record.outcome }),
+      })
+    } else {
+      entries.push({
+        kind: 'generated',
+        name: dirent.name,
+        format: extensionOf(dirent.name),
+        createdAt: info.mtime.toISOString(),
+        sizeBytes: info.size,
+        canSave: true,
+        reason: 'no_record',
+      })
+    }
+  }
+  return entries.sort(
+    (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.name.localeCompare(b.name)
+  )
+}
+
+/** The caller's kept folder exists but cannot be verified. */
+export class KeptFilesUnavailableError extends Error {
+  constructor() {
+    super(KEPT_FILES_UNAVAILABLE)
+    this.name = 'KeptFilesUnavailableError'
   }
 }

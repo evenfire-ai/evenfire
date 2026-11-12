@@ -252,6 +252,8 @@ export interface InternalToolDefinition {
   name: string
   description: string
   parameters: Record<string, unknown>
+  /** The tool loop ships this tool's output inline, never to spillover storage. */
+  spilloverExempt?: boolean
   execute: (
     args: Record<string, unknown>,
     outputDir: string,

@@ -14,6 +14,7 @@ import {
   buildGfsCopyTools,
   buildGfsReadTools,
   buildGfsWriteTools,
+  buildKeptFilesListTool,
   referencedFilePins,
 } from '../../internalTools/gfs'
 import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
@@ -140,6 +141,9 @@ class InternalToolAdapter implements Tool {
   }
   requiresApproval(): boolean {
     return false
+  }
+  spilloverExempt(): boolean {
+    return this.def.spilloverExempt === true
   }
   traceDescriptor() {
     return { kind: 'internal_tool' as const, sourceRef: 'mcp-host' }
@@ -449,7 +453,16 @@ export class NativeToolRegistry implements ToolRegistry {
               retentionOwnerId: gfsDownload?.retentionOwnerId,
             })
           : []),
-        ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
+        ...(gfsScopes.has('gfs.write')
+          ? [
+              ...buildGfsWriteTools(gfsClient, {
+                callerRoot: callerOutputRoot,
+                callerWorkspacePath: gfsDownload?.callerWorkspacePath,
+                secretEntries: () => attachmentOptions?.secretEntriesProvider?.() ?? [],
+              }),
+              buildKeptFilesListTool(callerOutputRoot),
+            ]
+          : []),
         ...(attachmentSaveAvailable(gfsScopes, sourceMessage?.attachments)
           ? buildGfsAttachmentSaveTools(gfsClient, sourceMessage?.attachments ?? [])
           : []),
