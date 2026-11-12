@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
+import { QueryClient } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import fc from 'fast-check'
 import { PermissionErrorDialog } from '@components/Common'
@@ -98,6 +100,55 @@ class ResolveAsNewFailure implements fc.Command<Model, Real> {
 }
 
 describe('permission error acknowledgement oracle', () => {
+  it('keeps a real Query failure acknowledged across presenter unmount and remount', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    const queryKey = ['permission-remount', 'resource-a'] as const
+    await expect(
+      queryClient.fetchQuery({
+        queryKey,
+        queryFn: async () => {
+          throw new Error('permission service unavailable')
+        },
+      })
+    ).rejects.toThrow('permission service unavailable')
+    const queryIdentity = queryClient.getQueryCache().find({ queryKey, exact: true })
+    expect(queryIdentity?.state.status).toBe('error')
+    expect(queryIdentity?.state.errorUpdateCount).toBe(1)
+    if (!queryIdentity) throw new Error('QueryClient did not retain the failed permission Query')
+
+    function Presenter() {
+      const [locallyDismissed, setLocallyDismissed] = useState(false)
+      const error: PermissionErrorItem = {
+        id: 'permission-remount:resource-a',
+        message: 'Could not verify permissions for resource-a.',
+        queryIdentity,
+        errorUpdateCount: queryIdentity.state.errorUpdateCount,
+      }
+      const errors = locallyDismissed || isPermissionErrorAcknowledged(error) ? [] : [error]
+      return <PermissionErrorDialog errors={errors} onDismiss={() => setLocallyDismissed(true)} />
+    }
+
+    const firstMount = render(<Presenter />)
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    firstMount.unmount()
+
+    render(<Presenter />)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(
+      isPermissionErrorAcknowledged({
+        id: 'permission-remount:resource-a',
+        message: 'Could not verify permissions for resource-a.',
+        queryIdentity,
+        errorUpdateCount: queryIdentity.state.errorUpdateCount,
+      })
+    ).toBe(true)
+    queryClient.clear()
+  })
+
   it('matches the independent generation model through generated UI events', () => {
     fc.assert(
       fc.property(
