@@ -198,17 +198,8 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
         )
       }
     }
-    if (needsSnippetRunner) {
-      if (!snippetRunner) {
-        throw new Error('snippet runner endpoint and token are required for snippet workflow steps')
-      }
-      if (deps.waitForSnippetRunner !== false) {
-        await waitForSnippetRunnerReady(
-          snippetRunner,
-          deps.snippetRunnerReadyAttempts ?? 120,
-          deps.snippetRunnerReadyDelayMs ?? 2000
-        )
-      }
+    if (needsSnippetRunner && !snippetRunner) {
+      throw new Error('snippet runner endpoint and token are required for snippet workflow steps')
     }
 
     const currentStatus = await readCurrentStatus(status)
@@ -224,6 +215,21 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
     if (orderedSteps.every(step => completedStepIds.has(step.id))) {
       await status.reportWorkflowStatus('completed', { completedAt: new Date().toISOString() })
       return { exitCode: 0, workflowPhase: 'completed' }
+    }
+
+    // Wait for the runner only when a step that still has to run uses it: a resumed run whose
+    // snippet steps are already completed must not block on a runner it will never call.
+    const pendingStepNeedsSnippetRunner = orderedSteps.some(
+      step =>
+        !completedStepIds.has(step.id) &&
+        workflowStepUsesSnippetRunner(runtimeStepsById.get(step.id) ?? step)
+    )
+    if (pendingStepNeedsSnippetRunner && deps.waitForSnippetRunner !== false) {
+      await waitForSnippetRunnerReady(
+        snippetRunner!,
+        deps.snippetRunnerReadyAttempts ?? 120,
+        deps.snippetRunnerReadyDelayMs ?? 2000
+      )
     }
 
     await status.reportWorkflowStatus('running')
