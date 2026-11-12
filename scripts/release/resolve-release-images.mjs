@@ -24,9 +24,10 @@
 // (`crane config --platform linux/amd64` would break if that leg's manifest
 // were ever the one missing while another platform's was present).
 //
-// The candidate chain: candidates() yields registry tags in priority order,
-// and evaluateCandidate() checks each one. Every outcome of that check is one
-// of two kinds, and a bare `catch` cannot tell them apart:
+// The candidate chain: candidates() yields registry tags in priority order
+// (:latest, then the previous release's version tag), and
+// evaluateCandidate() checks each one. Every outcome of that check is one of
+// two kinds, and a bare `catch` cannot tell them apart:
 //   - Reject the candidate, and try the next one. The tag does not exist
 //     (crane says MANIFEST_UNKNOWN), carries no revision annotation, was built
 //     from a commit that is not an ancestor of the release commit, or its
@@ -37,14 +38,18 @@
 //     unparsable manifest), a revision this checkout does not have, or a git
 //     error. None of these says anything about the candidate itself, so
 //     falling through would let a transient error promote an older image.
+//     The candidates rejected before the error are listed with it.
 // Candidates are generated lazily, so a release whose first candidate passes
-// makes no registry call for any later one.
+// makes no registry call for any later one, and does not look up the
+// previous release at all.
 import { spawnSync } from 'node:child_process'
 import process from 'node:process'
-import { argValue } from './release-coordinates.mjs'
+import { argValue, compareVersions } from './release-coordinates.mjs'
 
 const REGISTRY = 'ghcr.io/evenfire-ai'
 const REVISION_ANNOTATION = 'org.opencontainers.image.revision'
+// A strict release tag. rc and other pre-release tags never match.
+const RELEASE_TAG_RE = /^v\d+\.\d+\.\d+$/
 
 // An outcome that says nothing about the candidate being checked, so the
 // whole image fails instead of moving on to the next candidate. Messages are
@@ -97,7 +102,17 @@ function craneRevision(image, digest) {
   } catch (error) {
     throw new ImageFailure(`could not read the image manifest at ${digest}: ${error.message}`)
   }
-  const revision = manifest?.annotations?.[REVISION_ANNOTATION]
+  // JSON that is not an object (null, an array, a number) is not an index
+  // either. Reading it as "no annotation" would reject the candidate and move
+  // on, when the registry answer itself is broken.
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
+    const got =
+      manifest === null ? 'null' : Array.isArray(manifest) ? 'an array' : `a ${typeof manifest}`
+    throw new ImageFailure(
+      `could not read the image manifest at ${digest}: expected a JSON object, got ${got}`
+    )
+  }
+  const revision = manifest.annotations?.[REVISION_ANNOTATION]
   return typeof revision === 'string' && revision !== '' ? revision : null
 }
 
@@ -108,6 +123,30 @@ function gitStatus(args) {
   const result = run('git', args)
   if (result.status === 0 || result.status === 1) return result.status
   throw new ImageFailure(failed('git', args, result))
+}
+
+// Runs a git command for its output. Any non-zero exit is an error.
+function gitOutput(args) {
+  const result = run('git', args)
+  if (result.status !== 0) throw new ImageFailure(failed('git', args, result))
+  return result.stdout
+}
+
+// The previous release of the release commit tagSha, or null when there is
+// none: the highest strict vX.Y.Z tag reachable from tagSha, compared as
+// numbers. Tags on tagSha itself are left out, since they name the release
+// being cut. This comes from git ancestry, not from the version being
+// released, so a dry run given a raw sha finds the same tag, and so does a
+// release that skipped a patch number.
+function previousRelease(tagSha) {
+  const lines = text => text.split('\n').filter(Boolean)
+  const onTagCommit = new Set(lines(gitOutput(['tag', '--points-at', tagSha])))
+  let best = null
+  for (const tag of lines(gitOutput(['tag', '--merged', tagSha, '--list', 'v*']))) {
+    if (!RELEASE_TAG_RE.test(tag) || onTagCommit.has(tag)) continue
+    if (best === null || compareVersions(tag.slice(1), best.slice(1)) > 0) best = tag
+  }
+  return best
 }
 
 // Checks one candidate tag of one image against the release commit. Returns
@@ -121,7 +160,17 @@ function evaluateCandidate({ image, tag, tagSha, sourcePaths }) {
   const ref = `${REGISTRY}/${image}:${tag}`
   const digest = craneDigest(ref)
   if (digest === null) {
-    return { ok: false, reason: `${ref} does not exist (the registry answered MANIFEST_UNKNOWN)` }
+    let reason = `${ref} does not exist (the registry answered MANIFEST_UNKNOWN)`
+    if (RELEASE_TAG_RE.test(tag)) {
+      // A release tag whose promotion failed still counts as the previous
+      // release, so every image that needs this fallback is refused until it
+      // is cleared.
+      reason +=
+        `. Either ${image} was first published after ${tag}, or the ${tag} promotion failed ` +
+        `and left its git tag behind: delete a failed release tag and push the same version ` +
+        `again at the fixed commit.`
+    }
+    return { ok: false, reason }
   }
 
   const revision = craneRevision(image, digest)
@@ -169,14 +218,19 @@ function evaluateCandidate({ image, tag, tagSha, sourcePaths }) {
     // hotfix cut from an older base while dev moved on). Run the reverse check
     // to tell them apart instead of assuming staleness in both.
     if (gitStatus(['merge-base', '--is-ancestor', tagSha, revision]) === 0) {
+      // Only :latest moves with dev, so only its reason blames dev.
+      const after =
+        `the published image was built from ${revision}, which comes AFTER the release ` +
+        `commit ${tagSha} (it descends from it), not before`
       return {
         ok: false,
         reason:
-          `the published image was built from ${revision}, which comes AFTER the release ` +
-          `commit ${tagSha} (it descends from it), not before -- :latest moved ahead on dev after ` +
-          `${tagSha} was already tagged. This is not a stale image and merging will not help, since ` +
-          `${tagSha} is fixed history now. Either cut the release tag from a commit that already ` +
-          `includes ${revision}, or wait for a fresh dev-proven build whose revision predates ${tagSha}.`,
+          tag === 'latest'
+            ? `${after} -- :latest moved ahead on dev after ` +
+              `${tagSha} was already tagged. This is not a stale image and merging will not help, since ` +
+              `${tagSha} is fixed history now. Either cut the release tag from a commit that already ` +
+              `includes ${revision}, or wait for a fresh dev-proven build whose revision predates ${tagSha}.`
+            : `${after}, so it can contain changes the release commit does not have.`,
       }
     }
     return {
@@ -202,11 +256,12 @@ function evaluateCandidate({ image, tag, tagSha, sourcePaths }) {
     }
     const changed = diff.stdout.trim()
     if (changed) {
+      // Pushing to dev refreshes :latest, never any other tag.
+      const advice =
+        tag === 'latest' ? ' Push to dev and let build-publish run before tagging.' : ''
       return {
         ok: false,
-        reason:
-          `source changed after the published image (${revision}). Push to dev and let ` +
-          `build-publish run before tagging.\nchanged:\n${changed}`,
+        reason: `source changed after the published image (${revision}).${advice}\nchanged:\n${changed}`,
       }
     }
   }
@@ -216,9 +271,11 @@ function evaluateCandidate({ image, tag, tagSha, sourcePaths }) {
 
 // The release candidates for the release commit tagSha, best first. A
 // generator, so each candidate is produced only after every earlier one was
-// rejected.
+// rejected: the previous release is looked up only once :latest has failed.
 function* candidates(tagSha) {
   yield { tag: 'latest' }
+  const prev = previousRelease(tagSha)
+  if (prev !== null) yield { tag: prev }
 }
 
 function fail(message) {
@@ -234,8 +291,12 @@ function main() {
   if (!image || !tagSha) return fail('--image and --tag-sha are required')
 
   const rejected = []
+  // The candidate being checked, so an error names it. null between
+  // candidates, when the error comes from producing the next one.
+  let checking = null
   try {
     for (const candidate of candidates(tagSha)) {
+      checking = candidate.tag
       const result = evaluateCandidate({ ...candidate, image, tagSha, sourcePaths })
       if (result.ok) {
         process.stdout.write(`${result.digest}\t${candidate.tag}\n`)
@@ -244,10 +305,16 @@ function main() {
       // Continuation lines (the changed-file list) stay indented under their
       // candidate.
       rejected.push(`  ${candidate.tag}: ${result.reason.replaceAll('\n', '\n    ')}`)
+      checking = null
     }
   } catch (error) {
-    if (error instanceof ImageFailure) return fail(`${image}: ${error.message}`)
-    throw error
+    if (!(error instanceof ImageFailure)) throw error
+    return fail(
+      [
+        `${image}: ${checking === null ? '' : `${checking}: `}${error.message}`,
+        ...(rejected.length > 0 ? ['Candidates rejected before this error:', ...rejected] : []),
+      ].join('\n')
+    )
   }
 
   fail(

@@ -98,6 +98,14 @@ stub_error() {
   printf '%s\t%s\t%s\n' "$2" error "$3" >> "$1/registry.tsv"
 }
 
+# stub_manifest <d> <ref> <payload>
+# `crane manifest <ref>` prints <payload> (a single line) and exits 0. Added
+# after stub_image, it replaces that image's index, e.g. with text that is not
+# JSON, or JSON that is not an object.
+stub_manifest() {
+  printf '%s\t%s\t%s\n' "$2" manifest "$3" >> "$1/registry.tsv"
+}
+
 # git_shim_install <d> <code>
 # "$d/bin/git" exits <code> for `git merge-base --is-ancestor ...` and execs
 # the real git (resolved now, before "$d/bin" is on PATH) for everything else.
@@ -113,6 +121,34 @@ git_shim_install() {
     printf '#!/usr/bin/env bash\n'
     # shellcheck disable=SC2016 # the shim expands $1/$2 at run time, not here
     printf 'if [ "${1:-}" = merge-base ] && [ "${2:-}" = --is-ancestor ]; then exit %d; fi\n' "$code"
+    printf 'exec %q "$@"\n' "$real"
+  } > "$d/bin/git"
+  chmod +x "$d/bin/git"
+}
+
+# git_shim_fail_on <d> <code> <glob>
+# "$d/bin/git" prints a line on stderr and exits <code> when its arguments
+# ("$*") match the shell glob <glob>, and execs the real git (resolved now,
+# before "$d/bin" is on PATH) for everything else. Unlike git_shim_install,
+# it can fail one call and not its neighbours: one direction of
+# `merge-base --is-ancestor`, or one revision's `git diff`.
+#   git_shim_fail_on "$d" 128 "merge-base --is-ancestor $T $D3"   # reverse check only
+#   git_shim_fail_on "$d" 128 "diff --name-only $M1 *"
+git_shim_fail_on() {
+  local d=$1 code=$2 glob=$3 real
+  real="$(command -v git)"
+  if [ -z "$real" ] || [ "$real" = "$d/bin/git" ]; then
+    echo "git_shim_fail_on: cannot find the real git outside $d/bin" >&2
+    return 1
+  fi
+  mkdir -p "$d/bin"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'glob=%q\n' "$glob"
+    # An unquoted $glob in a case pattern is matched as a pattern, so its
+    # `*` stays a wildcard while the spaces in it stay literal.
+    # shellcheck disable=SC2016 # the shim expands $glob and $* at run time, not here
+    printf 'case "$*" in $glob) echo "git shim: exit %d for: $*" >&2; exit %d ;; esac\n' "$code" "$code"
     printf 'exec %q "$@"\n' "$real"
   } > "$d/bin/git"
   chmod +x "$d/bin/git"
