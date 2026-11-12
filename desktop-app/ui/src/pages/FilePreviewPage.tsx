@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Button, EmptyState, StatusBanner } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
-import { GfsMarkdownEditor } from '@components/GfsMarkdownPreview/MarkdownAdapter'
+import { MarkdownEditorSurface } from '@components/GfsMarkdownPreview/MarkdownEditorSurface'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
@@ -35,7 +35,11 @@ function toMessage(error: unknown): string {
  */
 function isPerResourceAccessDenial(message: string): boolean {
   const normalized = message.toLowerCase()
-  return /(^|\D)403(\D|$)/.test(normalized) || normalized.includes('forbidden')
+  return (
+    /(^|\D)(?:403|404)(\D|$)/.test(normalized) ||
+    normalized.includes('forbidden') ||
+    normalized.includes('not found')
+  )
 }
 
 function encodeUtf8Base64(value: string): string {
@@ -481,8 +485,11 @@ export function FilePreviewPage({
             is preserved.
           </div>
         ) : null}
-        <GfsMarkdownEditor
-          ariaLabel={`Edit Markdown source for ${fileName}`}
+        <MarkdownEditorSurface
+          binding={draftBinding}
+          fileName={fileName}
+          mode="edit"
+          owner={markdownDraftOwner}
           onChange={value => {
             if (draftBinding) markdownDraftOwner?.type(draftBinding, value)
           }}
@@ -535,8 +542,13 @@ export function FilePreviewPage({
         discardAfterReadBindingRef.current = null
         if (draftBinding) markdownDraftOwner?.discard(draftBinding)
       }
+      const message = toMessage(error)
+      if (isPerResourceAccessDenial(message)) {
+        setDenied(message)
+        return
+      }
       ctrl.handleAuthorityFailure(
-        toMessage(error),
+        message,
         'operation',
         capturedSessionScope,
         capturedSessionGeneration
@@ -829,7 +841,17 @@ export function FilePreviewPage({
           ) : denied || unavailable || accessRevoked ? (
             <>
               <div className="da-gfs-preview-unavailable-actions">{fileActionsMenu}</div>
-              <EmptyState title="File unavailable" body="This item is no longer available." />
+              {markdownEligible && visibleDraftRecord?.dirty ? (
+                <MarkdownEditorSurface
+                  binding={draftBinding}
+                  fileName={fileName}
+                  mode="recover"
+                  owner={markdownDraftOwner}
+                  value={visibleDraftRecord.draft}
+                />
+              ) : (
+                <EmptyState title="File unavailable" body="This item is no longer available." />
+              )}
             </>
           ) : (
             <>
