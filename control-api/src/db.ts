@@ -1,4 +1,4 @@
-import { type Client, Pool, type PoolClient } from 'pg'
+import { type Client, Pool, type PoolClient, type QueryConfig } from 'pg'
 import {
   type BoundedPoolBudget,
   type PoolConstructor,
@@ -6961,6 +6961,99 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       }
     }
     client.release(destroySession)
+  }
+}
+
+// Errors that mean Postgres is not reachable yet, as seen while it moves to
+// another node. Anything else (authentication, a missing database, SQL errors)
+// is not a reason to wait and fails the boot at once.
+const DB_WAIT_RETRY_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  '57P01', // admin_shutdown: the server began a shutdown after accepting the connection
+  '57P03', // cannot_connect_now: starting up, shutting down or in recovery
+])
+// Errors pg raises with a message and no code, mapped to the code logged for them.
+const DB_WAIT_RETRY_MESSAGES = new Map([
+  ['Connection terminated due to connection timeout', 'connection_timeout'], // pg-pool
+  ['Connection terminated unexpectedly', 'connection_terminated'], // pg: the server closed the socket
+  ['Query read timeout', 'query_timeout'], // pg: no answer within the probe's query_timeout
+])
+
+/** Default bound of the boot wait. The control-api startupProbe budget must cover it. */
+export const DB_WAIT_DEADLINE_MS = 90_000
+/**
+ * Pause between boot-wait probes. A probe that fails before the deadline is
+ * followed by one more after this pause, so the last probe can start up to one
+ * interval after the deadline.
+ */
+export const DB_WAIT_INTERVAL_MS = 2_000
+/**
+ * Bound of one boot-wait probe once it has a connection. The pool's
+ * connectionTimeoutMillis ends when the server is ready for queries, so a
+ * server that accepts the handshake and then never answers would otherwise
+ * hold the probe until the startupProbe kills the container.
+ */
+export const DB_WAIT_QUERY_TIMEOUT_MS = 2_000
+
+export type WaitForDbConnectionOptions = {
+  ensureActive: () => void
+  probe?: () => Promise<unknown>
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  deadlineMs?: number
+  intervalMs?: number
+}
+
+function dbWaitRetryCode(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null)?.code
+  if (typeof code === 'string' && DB_WAIT_RETRY_CODES.has(code)) return code
+  if (error instanceof Error) return DB_WAIT_RETRY_MESSAGES.get(error.message) ?? null
+  return null
+}
+
+/**
+ * Wait, within a bound, until Postgres accepts a connection. Boot calls this
+ * before `assertDbReady` so a Postgres that is moving to another node does not
+ * turn into a crash loop. Past the deadline the last error is thrown and boot
+ * fails as before. Each probe is bounded by `DB_WAIT_QUERY_TIMEOUT_MS` once
+ * connected. The warning carries only the error code, never the message,
+ * which can include the connection string.
+ */
+export async function waitForDbConnection({
+  ensureActive,
+  probe = () => {
+    const probeQuery: QueryConfig & { query_timeout: number } = {
+      text: 'SELECT 1',
+      query_timeout: DB_WAIT_QUERY_TIMEOUT_MS,
+    }
+    return pool.query(probeQuery)
+  },
+  now = Date.now,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  deadlineMs = DB_WAIT_DEADLINE_MS,
+  intervalMs = DB_WAIT_INTERVAL_MS,
+}: WaitForDbConnectionOptions): Promise<void> {
+  const deadline = now() + deadlineMs
+  for (let attempt = 1; ; attempt++) {
+    ensureActive()
+    try {
+      await probe()
+      return
+    } catch (error) {
+      const code = dbWaitRetryCode(error)
+      if (!code || now() >= deadline) throw error
+      rootLogger.warn(
+        { event: 'control_api_database_wait', attempt, code },
+        'Database not reachable yet; waiting'
+      )
+    }
+    await sleep(intervalMs)
   }
 }
 

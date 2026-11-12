@@ -3036,7 +3036,7 @@ function startStatelessHeartbeat(): void {
   // consumer (approvals, usage). auth.accessToken is updated IN PLACE by the
   // refresh path (persistRotatedTokens handles rotation-on-use), so the
   // heartbeat always presents a live token — unlike a static process.env read,
-  // which freezes at boot and 401s once the ~300s access token expires.
+  // which freezes at boot and 401s once the 600s access token expires.
   if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
   const heartbeatAuth = runtimeAuth!
   // Arm the proactive refresher HERE — the heartbeat is a first-class runtime

@@ -86,6 +86,7 @@ import {
   deploymentMatchesDesired,
   ensureResource,
   getErrorCode,
+  normalizeDeploymentForComparison,
   observeCreate,
   observeExistenceRead,
   preserveDeploymentAnnotations,
@@ -152,7 +153,7 @@ class HostMutationIdentityChangedError extends Error {
 
 class RuntimeBootstrapPreparationUnavailableError extends Error {
   constructor() {
-    super('Waiting for a prepared runtime bootstrap before changing resources')
+    super('Waiting for a prepared runtime bootstrap before changing the pod template')
     this.name = 'RuntimeBootstrapPreparationUnavailableError'
   }
 }
@@ -533,7 +534,8 @@ type BootstrapOptions = {
   forceFreshForWake?: boolean
   forceFreshForDeploymentChange?: boolean
   targetSuspended?: boolean
-  prepareForResourceChange?: boolean
+  /** True when writing the desired Deployment would change this observed pod template. */
+  prepareForTemplateChange?: (deployment: k8s.V1Deployment) => Promise<boolean>
   refreshGfsOnly?: boolean
   preserveDeploymentTemplateOnWake?: boolean
 }
@@ -1590,6 +1592,97 @@ export class HostReconciler {
     )
   }
 
+  /**
+   * Whether writing the desired Deployment would change the observed pod
+   * template (`spec.template`). Only a template change rolls out a new pod.
+   * Deployment metadata, `strategy` and `progressDeadlineSeconds` do not, and
+   * `replicas` only scales (callers skip a Deployment at zero replicas; the
+   * wake path mints for it). Both sides go through the merge and the
+   * normalizer the Deployment write uses. The observed token revision is kept,
+   * so a token rotation alone is not a template change.
+   *
+   * The local comparison cannot see fields the API server adds on every write
+   * (a newer Kubernetes default, a mutating admission webhook on the
+   * Deployment): they would report a change, and a mint, on every pass. So
+   * when it finds a difference, the API server is asked, with a dry-run
+   * replace of the body the write would send, which template it would store;
+   * only a difference from the observed template counts. The dry-run omits
+   * resourceVersion: it persists nothing, so a stale version must not fail it.
+   *
+   * A failed check throws, and token provisioning sorts the error by its code
+   * (`getErrorCode`). A 404 retries provisioning against a fresh read. An
+   * error with any other code is taken as a failed dry-run request: the HTTP
+   * status of a rejection, or a string code when no answer came (a transport
+   * error such as ECONNREFUSED, HCC's request deadline). Provisioning then
+   * prepares nothing for the template change and still makes the renewal it
+   * decided without it. One that needs a rollout is persisted with its
+   * rollout marker; when the later checks of the pass fail too, it is left
+   * for a later pass, as when the Deployment write itself fails. An error
+   * without a code is taken as HCC's own failure, not a failed request.
+   * Known members: a resource quantity HCC cannot parse, a dry-run answer
+   * without a pod template, an answer body that is not JSON. It fails the
+   * provisioning attempt, and when the retries fail too that provisioning
+   * call renews nothing; a renewal made earlier in the same pass stays in
+   * the Secret. The code is a proxy for where the error came from, not a
+   * proof: a client error raised without a system error (a redirect loop, an
+   * oversized body) has no code and takes the HCC-failure path, and an HCC
+   * exception that carries a code would take the failed-request path. At the
+   * mutation read and the write gate, any of these errors fails the pass
+   * before the Deployment write.
+   *
+   * Known gap (accepted): HCC never writes `paused`, so its write unpauses a
+   * Deployment someone paused by hand. A template edit held by that pause, in
+   * a pod-template annotation HCC keeps from the live object, is invisible
+   * here and rolls out on the consumed material. Nothing in this repository
+   * pauses a Host Deployment.
+   */
+  private async templateWillChange(
+    observed: k8s.V1Deployment,
+    host: HostCRD,
+    mounts: ResolvedSfsMount[],
+    lifecycle: EffectiveHostLifecycle,
+    grokExecutionEnabled: boolean
+  ): Promise<boolean> {
+    const desired = this.buildDeployment(
+      host,
+      mounts,
+      HostReconciler.deploymentRuntimeTokenRevision(observed),
+      lifecycle,
+      grokExecutionEnabled
+    )
+    const template = (deployment: k8s.V1Deployment): string =>
+      JSON.stringify(
+        (normalizeDeploymentForComparison(deployment) as k8s.V1Deployment).spec?.template
+      )
+    // Cheap pre-filter on a copy. The API server stores quantities in canonical
+    // form (1024Mi as 1Gi). Equal amounts start no new pod, so they need no new
+    // credentials and no dry-run; every other field, and any other resources
+    // key, stays an exact comparison.
+    const local = structuredClone(desired)
+    if (HostReconciler.deploymentResourcesMatchHost(observed, host)) {
+      const live = observed.spec?.template.spec?.containers.find(c => c.name === 'mcp-host')
+      const want = local.spec!.template.spec!.containers.find(c => c.name === 'mcp-host')!
+      want.resources = {
+        ...want.resources,
+        requests: structuredClone(live?.resources?.requests),
+        limits: structuredClone(live?.resources?.limits),
+      }
+    }
+    if (template(preserveHostDeploymentAnnotations(local, observed)) === template(observed)) {
+      return false
+    }
+    const admitted = await this.appsApi.replaceNamespacedDeployment({
+      namespace: host.namespace,
+      name: host.name,
+      body: preserveHostDeploymentAnnotations(desired, observed),
+      dryRun: 'All',
+    })
+    if (!admitted?.spec?.template) {
+      throw new Error(`Deployment dry-run replace for Host "${host.name}" returned no pod template`)
+    }
+    return template(admitted) !== template(observed)
+  }
+
   private static deploymentReady(deployment: k8s.V1Deployment | null): boolean {
     return (deployment?.status?.readyReplicas ?? 0) > 0
   }
@@ -1786,10 +1879,12 @@ export class HostReconciler {
    * revokes the prior JTI on every successful refresh. Once a running pod has
    * rotated, the copy still sitting in this HCC-owned Secret is REVOKED.
    * Reusing it (because its decoded exp is far out) hands a booting pod a
-   * revoked refresh token -- it can never refresh its 300s access token,
-   * readiness 503s forever, and the pod never becomes Ready. Reuse is only
-   * safe for a pod that stays up and never re-reads the Secret (it uses its
-   * in-memory rotated tokens), which is exactly deploymentReady && replicas>=1.
+   * revoked refresh token -- it can never refresh its 600 s access token; the
+   * pod is Ready without tools at first and goes NotReady after about
+   * 125-131 s. Reuse is only safe for a pod that stays up and never re-reads
+   * the Secret (it uses its in-memory rotated tokens), which is exactly
+   * deploymentReady && replicas>=1, and only while HCC does not write a new pod
+   * template: a template change mints first (`prepareForTemplateChange`).
    *
    * A wake bootstrap already bound to this exact Deployment UID and applied
    * runtime revision is the one startup exception: its replica-only wake starts
@@ -2240,10 +2335,12 @@ export class HostReconciler {
           // Deployment, or a not-Ready (re)starting pod -- reads its bootstrap
           // refresh token from THIS Secret. If the pre-suspend pod already
           // rotated, the copy in the Secret is REVOKED, so an exp-based "reuse"
-          // hands the booting pod a dead token and readiness 503s forever. When
-          // a new pod will consume the Secret, force a fresh mint + rollout even
-          // though the decoded exp is far out. Reuse stays correct only for a
-          // running, Ready pod that never re-reads the Secret (churn fix).
+          // hands the booting pod a dead token: it is Ready without tools at
+          // first and goes NotReady after about 125-131 s. When a new pod will
+          // consume the Secret, force a fresh mint + rollout even though the
+          // decoded exp is far out. Reuse stays correct only for a running,
+          // Ready pod that never re-reads the Secret (churn fix) and whose
+          // template HCC is not about to change (see templateWillChange).
           if (
             existingRevision &&
             decided.refresh === false &&
@@ -2336,11 +2433,47 @@ export class HostReconciler {
           grokProjection
         )
         let decision = decideRefresh(observedFrontsOAuth)
-        const resourcesWillChange =
-          options.prepareForResourceChange === true &&
+        // A running pod has consumed the Secret's single-use refresh token, so
+        // any new pod template needs fresh material before it is written.
+        // The catch below sorts a failed check by its error code. The mutation
+        // read and the write gate ask again: a failed check there fails the pass
+        // before the Deployment write, and a confirmed change still needs
+        // prepared material.
+        let templateWillChange = false
+        if (
+          options.prepareForTemplateChange &&
           HostReconciler.deploymentBelongsToHost(deployment, host) &&
-          (deployment.spec?.replicas ?? 1) > 0 &&
-          !HostReconciler.deploymentResourcesMatchHost(deployment!, host)
+          (deployment.spec?.replicas ?? 1) > 0
+        ) {
+          try {
+            templateWillChange = await options.prepareForTemplateChange(deployment)
+          } catch (error) {
+            const code = getErrorCode(error)
+            // The Deployment is gone: retry against a fresh read, which mints for it.
+            if (code === 404) throw error
+            // No code: taken as HCC's own failure, not a failed request. HCC
+            // could not make the comparison (a resource quantity it cannot
+            // parse) or cannot use the answer (no pod template, a body that is
+            // not JSON). Fail this attempt; when the retries fail too, this
+            // provisioning call renews nothing. The test is `undefined`, not
+            // "not a number": a refused or reset connection and HCC's request
+            // deadline carry a string code (ECONNREFUSED,
+            // HCC_HOST_K8S_REQUEST_TIMEOUT). A client error raised without a
+            // system error (a redirect loop) has no code and lands here too.
+            if (code === undefined) throw error
+            // Any other code is taken as a failed dry-run request: rejected, or
+            // no answer. Nothing is prepared for the change and the renewal
+            // decided above still runs. One that needs a rollout is persisted
+            // with its rollout marker; when the later checks of the pass fail
+            // too, it is left for a later pass, as when the Deployment write
+            // itself fails.
+            log.warn('pod template change not confirmed; no fresh bootstrap prepared for it', {
+              host: host.name,
+              namespace: host.namespace,
+              err: error,
+            })
+          }
+        }
         const bootstrapApplied =
           !!existing &&
           !!existingRevision &&
@@ -2354,15 +2487,15 @@ export class HostReconciler {
           existing?.metadata?.annotations?.[RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION] === 'true' &&
           !bootstrapApplied &&
           (!boundUid || boundUid === deployment?.metadata?.uid)
-        if (resourcesWillChange) {
-          // Resource preparation is optional until scope authority is observed;
+        if (templateWillChange) {
+          // Template preparation is optional until scope authority is observed;
           // it must not participate in the intrinsic renewal/OAuth fallback above.
           // Compose a real transition with an already due renewal in one issuance.
           decision = {
             ...decision,
             refresh: decision.refresh || !usablePendingPreparation,
             rolloutRequired: true,
-            reason: decision.refresh ? decision.reason : 'fresh_mint_for_resource_change',
+            reason: decision.refresh ? decision.reason : 'fresh_mint_for_template_change',
           }
         }
 
@@ -2384,7 +2517,7 @@ export class HostReconciler {
               RUNTIME_TOKEN_BOOTSTRAP_STATE_CONSUMED && bootstrapBoundToAppliedDeployment
           const rolloutPending =
             !bootstrapApplied &&
-            (resourcesWillChange ||
+            (templateWillChange ||
               rolloutMarker === 'true' ||
               (rolloutMarker === undefined &&
                 bootstrapIsFresh &&
@@ -2396,7 +2529,7 @@ export class HostReconciler {
             deployment,
             existingRevision
           )
-          if (resourcesWillChange && usablePendingPreparation && !bootstrapApplied) {
+          if (templateWillChange && usablePendingPreparation && !bootstrapApplied) {
             // Older preparations can already carry the rollout marker without
             // a target binding. Persist that binding before delivering them.
             const preparationAnnotations = {
@@ -2477,7 +2610,7 @@ export class HostReconciler {
         }
 
         if (
-          !resourcesWillChange &&
+          !templateWillChange &&
           existing &&
           existingRevision &&
           (decision.reason === 'refresh_before_reached' ||
@@ -4234,6 +4367,8 @@ export class HostReconciler {
         ? await resolveStateBeforeMutation(observedDeployment)
         : null
       const effective = state?.lifecycle ?? lifecycle
+      const grokExecutionEnabled =
+        state?.grokExecutionEnabled ?? this.hostDerivesGrokExecution(host)
       const resourcesDiffer =
         !!observedDeployment &&
         HostReconciler.deploymentBelongsToHost(observedDeployment, host) &&
@@ -4279,13 +4414,21 @@ export class HostReconciler {
       }
       if (
         observedDeployment &&
-        resourcesDiffer &&
+        HostReconciler.deploymentBelongsToHost(observedDeployment, host) &&
         (observedDeployment.spec?.replicas ?? 1) > 0 &&
         effective?.state === 'active' &&
-        state?.freshBootstrapPrepared !== true
+        state?.freshBootstrapPrepared !== true &&
+        (await this.templateWillChange(
+          observedDeployment,
+          host,
+          mounts,
+          effective,
+          grokExecutionEnabled
+        ))
       ) {
-        // Readiness cannot gate a resource repair that is needed for scheduling.
-        // Delivery is gated on persisted, fresh material for the observed target.
+        // The new pod would read a refresh token the running pod has consumed.
+        // Readiness cannot gate a repair that is needed for scheduling, so
+        // delivery is gated on persisted, fresh material for the observed target.
         throw new RuntimeBootstrapPreparationUnavailableError()
       }
       const desired = this.buildDeployment(
@@ -4293,7 +4436,7 @@ export class HostReconciler {
         mounts,
         state?.runtimeTokenRevision ?? runtimeTokenRevision,
         effective,
-        state?.grokExecutionEnabled ?? this.hostDerivesGrokExecution(host)
+        grokExecutionEnabled
       )
       if (observedDeployment && resourcesDiffer && effective?.state === 'draining') {
         // Defer only resource policy while draining. An intrinsic credential
@@ -5669,13 +5812,33 @@ export class HostReconciler {
       return
     }
 
+    // Only an active Host mints for a template change. A suspension-blocked
+    // Host, and a suspend with resource drift, hold the applied template. Any
+    // other template change on a suspended Host is written with zero replicas,
+    // so it starts no pod, and the wake mints before the pod starts. A draining
+    // Host defers only its resource policy: any other template change is
+    // written with the material its running pod has already consumed (known
+    // gap, not changed here), unless an intrinsic credential recovery is
+    // delivering fresh material in the same pass.
+    const templateChangeFor =
+      (effective: EffectiveHostLifecycle) =>
+      async (observed: k8s.V1Deployment): Promise<boolean> =>
+        effective.state === 'active' &&
+        (await this.templateWillChange(
+          observed,
+          host,
+          mounts,
+          effective,
+          this.hostDerivesGrokExecution(host)
+        ))
+
     // Bootstrap captures the scope contract used for issuance. The Deployment
     // guard below compares that contract with the live channel cache after this
     // potentially slow I/O and before every create/replace attempt.
     let runtimeTokenProvision = await this.provisionRuntimeTokenRevision(host, {
       forceFreshForWake,
       targetSuspended: lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
-      prepareForResourceChange: lifecycle.effective.state === 'active',
+      prepareForTemplateChange: templateChangeFor(lifecycle.effective),
     })
     if (!runtimeTokenProvision) {
       const liveDeployment = await this.readHostDeploymentOrNull(host)
@@ -5725,7 +5888,7 @@ export class HostReconciler {
           forceFreshForWake: false,
           targetSuspended:
             lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
-          prepareForResourceChange: lifecycle.effective.state === 'active',
+          prepareForTemplateChange: templateChangeFor(lifecycle.effective),
         })
         if (!runtimeTokenProvision) {
           const error = new Error('Waiting for authoritative scope observation')
@@ -5773,20 +5936,19 @@ export class HostReconciler {
           !!observed?.metadata?.uid &&
           !!requireRuntimeTokenProvision().deploymentUid &&
           observed.metadata.uid !== requireRuntimeTokenProvision().deploymentUid
-        const observedResourceTransition =
+        const observedTemplateTransition =
           !!observed &&
-          beforeScope.state === 'active' &&
           HostReconciler.deploymentBelongsToHost(observed, host) &&
           (observed.spec?.replicas ?? 1) > 0 &&
-          !HostReconciler.deploymentResourcesMatchHost(observed, host)
-        if (deploymentIdentityChanged || observedResourceTransition) {
-          // A CAS retry or existence read can reveal a new UID or resource drift.
+          (await templateChangeFor(beforeScope)(observed))
+        if (deploymentIdentityChanged || observedTemplateTransition) {
+          // A CAS retry or existence read can reveal a new UID or template drift.
           // Prepare against this observation before rebuilding the Pod template;
           // persisted preparation is reused for retries against the same target.
           runtimeTokenProvision = await this.provisionRuntimeTokenRevision(host, {
             forceFreshForDeploymentChange: deploymentIdentityChanged,
             targetSuspended: beforeScope.stateless && beforeScope.state === 'suspended',
-            prepareForResourceChange: beforeScope.state === 'active',
+            prepareForTemplateChange: templateChangeFor(beforeScope),
           })
           requireRuntimeTokenProvision()
           revalidateHostMutationBoundary()

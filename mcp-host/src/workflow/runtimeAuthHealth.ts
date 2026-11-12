@@ -8,7 +8,10 @@ export type RuntimeAuthHealthSnapshot = {
 }
 
 const DEFAULT_DEGRADED_AFTER_FAILURES = 3
-const KNOWN_FAILURE_REASONS = new Set(['refresh_recovery_failed'])
+const KNOWN_FAILURE_REASONS = new Set([
+  'refresh_recovery_failed',
+  'refresh_unavailable_token_valid',
+])
 
 let consecutiveFailures = 0
 let lastFailureAt: string | null = null
@@ -44,7 +47,7 @@ export const runtimeAuthDegradedGauge = getOrCreateGauge({
 
 export const runtimeAuthRecoveryFailuresCounter = getOrCreateCounter({
   name: 'mcp_host_runtime_auth_recovery_failures_total',
-  help: 'Total runtime auth recovery failures labelled by low-cardinality reason.',
+  help: 'Total failed runtime auth refreshes labelled by low-cardinality reason; refresh_unavailable_token_valid marks deferred ones that do not count toward degraded.',
   labelNames: ['reason'] as const,
 })
 
@@ -77,6 +80,16 @@ export function recordRuntimeAuthRecoveryFailure(reason: string): void {
   lastFailureReason = safeReason
   runtimeAuthRecoveryFailuresCounter.inc({ reason: safeReason }, 1)
   setDegradedGauge()
+}
+
+/**
+ * A failed refresh that does not count toward degraded: control-api was
+ * unavailable and the pod's access token is still valid at the next retry.
+ * It is counted in the failures metric under its own reason. The consecutive
+ * count is left as it is, so it neither adds to nor clears a degraded state.
+ */
+export function recordRuntimeAuthRecoveryDeferred(reason: string): void {
+  runtimeAuthRecoveryFailuresCounter.inc({ reason: metricReason(reason) }, 1)
 }
 
 export function runtimeAuthHealthSnapshot(): RuntimeAuthHealthSnapshot {

@@ -1,5 +1,5 @@
 import { config } from './config.js'
-import { assertDbReady, pool, rateLimitPool } from './db.js'
+import { assertDbReady, pool, rateLimitPool, waitForDbConnection } from './db.js'
 import { K8sGateway } from './k8s.js'
 import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootReconcile.js'
 import { rootLogger } from './observability/logger.js'
@@ -147,6 +147,9 @@ async function main(): Promise<void> {
     'Allowed issuance namespaces'
   )
 
+  // Postgres may still be moving to another node (node upgrade): wait for it
+  // within a bound instead of exiting into crash back-off.
+  await waitForDbConnection({ ensureActive: ensureStartupActive })
   await assertDbReady()
   ensureStartupActive()
   logger.info({ event: 'control_api_database_ready' }, 'Database schema ready')
@@ -381,11 +384,13 @@ async function main(): Promise<void> {
   logger.info({ event: 'control_api_running' }, 'Control API running')
 
   // Hosted member-registration self-enrollment (spec §8.4): degrade, never
-  // block. Fire-and-forget, and only AFTER the listener is up — the liveness
-  // probe has no startupProbe grace (control-api.yaml: initialDelaySeconds=8,
-  // periodSeconds=12, failureThreshold=3 ≈ 32s), and a silently dropped hub
-  // (egress firewall / default-deny NetworkPolicy) can burn up to 20s of that
-  // budget on its own. Nothing is gained by awaiting it here: the hook never
+  // block. Fire-and-forget, and only AFTER the listener is up — the startupProbe
+  // (control-api.yaml: earliest restart 39 x 3s = 117s after start) already
+  // spends most of its budget on the database wait above, and liveness
+  // (initialDelaySeconds=8, periodSeconds=12, failureThreshold=3 ≈ 32s) takes
+  // over once it passes; a silently dropped hub
+  // (egress firewall / default-deny NetworkPolicy) can burn up to 20s on its
+  // own. Nothing is gained by awaiting it here: the hook never
   // rejects, every send re-attempts enrollment on demand via ensureEnrollment,
   // and the in-flight map dedupes any request that races this boot call.
   void runBootEnrollment()

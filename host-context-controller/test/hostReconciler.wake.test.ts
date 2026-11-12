@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { asApiserverDeployment } from '../src/__tests__/asApiserverDeployment'
 import { HostReconciler } from '../src/hostReconciler'
 import { HostCRD, HostCrdStatus, HostLifecycleState } from '../src/types'
 import {
@@ -421,7 +422,7 @@ describe('HostReconciler wake fast-path — wake × state transition matrix', ()
     expect(ensureBootstrap).toHaveBeenCalledWith(expect.anything(), {
       forceFreshForWake: false,
       targetSuspended: false,
-      prepareForResourceChange: true,
+      prepareForTemplateChange: expect.any(Function),
     })
     // The guard re-ran the durable wake transition.
     const writes = lifecycleStatusWrites(customApi)
@@ -457,8 +458,25 @@ describe('HostReconciler wake fast-path — wake × state transition matrix', ()
     expect(ensureBootstrap).toHaveBeenCalledWith(expect.anything(), {
       forceFreshForWake: false,
       targetSuspended: false,
-      prepareForResourceChange: true,
+      prepareForTemplateChange: expect.any(Function),
     })
+    // The template-change check uses the woken (active) lifecycle, not the
+    // cached suspended one: a suspended target would never prepare for it.
+    const [, options] = ensureBootstrap.mock.calls.at(-1)! as unknown as [
+      HostCRD,
+      { prepareForTemplateChange: (deployment: k8s.V1Deployment) => Promise<boolean> },
+    ]
+    const written = hostDeploymentBody(appsApi, 'stateless-host')
+    const otherImage = structuredClone(written)
+    otherImage.spec!.template.spec!.containers.find(c => c.name === 'mcp-host')!.image =
+      'registry.test/mcp-host:other'
+    // A local difference is confirmed by a dry-run replace, which echoes the
+    // body as the API server would store it.
+    appsApi.replaceNamespacedDeployment.mockImplementation(async request =>
+      request.dryRun === 'All' ? asApiserverDeployment(request.body) : {}
+    )
+    expect(await options.prepareForTemplateChange(otherImage)).toBe(true)
+    expect(await options.prepareForTemplateChange(written)).toBe(false)
   })
 
   it('wake in active records the generation only: no scale, no writes beyond the generation', async () => {

@@ -85,6 +85,34 @@ function isDeploymentGated(block: string): boolean {
   )
 }
 
+/** Text of the call's argument list, from its opening to its matching closing parenthesis. */
+function callArguments(source: string, callIndex: number): string {
+  const open = source.indexOf('(', callIndex)
+  let depth = 0
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '(') depth += 1
+    else if (source[i] === ')') {
+      depth -= 1
+      if (depth === 0) return source.slice(open + 1, i)
+    }
+  }
+  throw new Error(`unterminated replaceNamespacedDeployment call at index ${callIndex}`)
+}
+
+/**
+ * A server-side dry-run persists nothing, so it is not a write and needs no
+ * no-op gate. It counts as one only with a plain `dryRun: 'All'` property in
+ * the argument object: comment lines are ignored, and an argument object with
+ * a spread could drop or override it at run time.
+ */
+function isDryRunCall(source: string, callIndex: number): boolean {
+  const args = callArguments(source, callIndex)
+    .split('\n')
+    .filter(line => !isCommentLine(line))
+    .join('\n')
+  return /^\s*dryRun:\s*'All',?\s*$/m.test(args) && !args.includes('...')
+}
+
 /** Replica-only scale in K8sGfsApi is not a template replace; it is not a no-op gate. */
 function isReplicaScaleReplace(block: string): boolean {
   return /replicas/.test(block) && /mergeExisting/.test(block) && !isDeploymentGated(block)
@@ -93,6 +121,7 @@ function isReplicaScaleReplace(block: string): boolean {
 describe('Deployment writer inventory', () => {
   it('every replaceNamespacedDeployment call is gated or explicitly exempt', () => {
     const hits: Array<{ rel: string; count: number; gated: boolean }> = []
+    const dryRunSites: string[] = []
     for (const file of productionTsFiles(SRC_ROOT)) {
       const rel = relative(SRC_ROOT, file).replaceAll('\\', '/')
       const source = readFileSync(file, 'utf8')
@@ -118,7 +147,12 @@ describe('Deployment writer inventory', () => {
         `${rel} calls replaceNamespacedDeployment ${sites.length} time(s) but is on neither the gated nor the exempt list`
       ).toBe(true)
 
+      const writeSites: number[] = []
       for (const index of sites) {
+        if (isDryRunCall(source, index)) dryRunSites.push(rel)
+        else writeSites.push(index)
+      }
+      for (const index of writeSites) {
         const block = enclosingReplaceRetryBlock(source, index)
         if (isGated) {
           expect(
@@ -139,9 +173,12 @@ describe('Deployment writer inventory', () => {
         }
       }
 
-      hits.push({ rel, count: sites.length, gated: isGated })
+      hits.push({ rel, count: writeSites.length, gated: isGated })
     }
 
+    // The single dry-run: the Host template-change check asks the API server
+    // which template a write would store.
+    expect(dryRunSites).toEqual(['hostReconciler.ts'])
     expect(hits.map(h => h.rel).sort()).toEqual([...GATED, ...EXEMPT].sort())
     expect(hits.reduce((sum, h) => sum + h.count, 0)).toBe(8)
     expect(
