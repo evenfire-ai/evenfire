@@ -18,6 +18,8 @@ import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { MARKDOWN_DRAFT_MAX_BYTES, MarkdownDraftOwner } from '@lib/markdownDraftOwner'
 import {
   previewDownloadResult,
+  replaceFileFailureMessage,
+  replaceFileResult,
   resolveDeniedMessage,
   resolveResource,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
@@ -71,7 +73,10 @@ const activeAffordances = delegationAffordances(
   false
 )
 
-async function resolvePreviewResource(gfsUri: string) {
+async function resolvePreviewResource(
+  gfsUri: string,
+  overrides: Partial<Parameters<typeof resolveResource>[0]> = {}
+) {
   const resourceId = gfsUri.slice(gfsUri.lastIndexOf('/') + 1)
   return resolveResource({
     resourceId,
@@ -83,6 +88,7 @@ async function resolvePreviewResource(gfsUri: string) {
     kind: 'file',
     version: 1,
     bytes: 3,
+    ...overrides,
   })
 }
 
@@ -94,6 +100,21 @@ async function previewResult(
 ) {
   const resource = await resolvePreviewResource(gfsUri)
   return previewDownloadResult({ ...resource, version }, bytes, maxBytes)
+}
+
+async function replacePreviewResult(
+  uri: string,
+  input: Parameters<typeof replaceFileResult>[0],
+  version: number
+) {
+  const resolved = await resolvePreviewResource(uri, { version })
+  return replaceFileResult(input, {
+    ...resolved,
+    kind: 'file',
+    rid: resolved.rid ?? resolved.resourceId,
+    path: resolved.path ?? null,
+    bytes: resolved.bytes ?? 0,
+  })
 }
 
 const queryClients: QueryClient[] = []
@@ -284,7 +305,9 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new Uint8Array([1]).buffer, 7, maxBytes)
+          ),
           resolve: vi.fn(async () =>
             resolveResource({
               resourceId: '0123456789abcdef0123456789abcdef',
@@ -363,7 +386,9 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new Uint8Array([1]).buffer, 7, maxBytes)
+          ),
           resolve: vi.fn(async () =>
             resolveResource({
               resourceId: '0123456789abcdef0123456789abcdef',
@@ -453,7 +478,9 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new Uint8Array([1]).buffer, 7, maxBytes)
+          ),
           resolve,
           affordances: vi.fn(async () => activeAffordances),
           renameResource,
@@ -532,7 +559,9 @@ describe('FilePreviewPage', () => {
         },
         team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
         gfs: {
-          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new Uint8Array([1]).buffer, 7, maxBytes)
+          ),
           resolve: vi.fn(producerResource),
           affordances: vi.fn(async () => activeAffordances),
           listGrants,
@@ -615,7 +644,9 @@ describe('FilePreviewPage', () => {
         },
         team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
         gfs: {
-          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new Uint8Array([1]).buffer, 7, maxBytes)
+          ),
           resolve: vi.fn(producerResource),
           affordances: vi.fn(async () => activeAffordances),
           listGrants: vi.fn(async () => []),
@@ -707,7 +738,9 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new Uint8Array([1]).buffer, 7, maxBytes)
+          ),
           resolve,
           affordances,
           renameResource,
@@ -790,7 +823,9 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new Uint8Array([1]).buffer, 7, maxBytes)
+          ),
           resolve: vi.fn(async () =>
             resolveResource({
               resourceId: '0123456789abcdef0123456789abcdef',
@@ -881,7 +916,9 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new Uint8Array([1]).buffer, 7, maxBytes)
+          ),
           resolve: vi.fn(async () =>
             resolveResource({
               resourceId: '0123456789abcdef0123456789abcdef',
@@ -945,7 +982,9 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new Uint8Array([1]).buffer, 7, maxBytes)
+          ),
           resolve: vi.fn(async () =>
             resolveResource({
               resourceId: '0123456789abcdef0123456789abcdef',
@@ -1098,17 +1137,14 @@ describe('FilePreviewPage', () => {
     const source = '# Saved source'
     let serverSource = source
     let serverVersion = 1
-    const resolve = vi.fn(async () => ({
-      kind: 'file',
-      resourceId: '0123456789abcdef0123456789abcdef',
-      drive: 'main',
-      version: serverVersion,
-    }))
-    const replaceFile = vi.fn(async () => {
-      serverSource = '# Updated source'
-      serverVersion += 1
-      return { version: serverVersion }
-    })
+    const resolve = vi.fn(() => resolvePreviewResource(uri, { version: serverVersion }))
+    const replaceFile = vi.fn(
+      async (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) => {
+        serverSource = '# Updated source'
+        serverVersion += 1
+        return replacePreviewResult(uri, { resourceId, encodedData, drive, ifMatch }, serverVersion)
+      }
+    )
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -1192,17 +1228,15 @@ describe('FilePreviewPage', () => {
   it('does not announce success when the draft owner rejects save completion', async () => {
     hookMock.useRealMarkdownEditor = true
     const uri = 'gfs://main/0123456789abcdef0123456789abcdea'
-    const replaceFile = vi.fn(async () => ({ version: 2 }))
+    const replaceFile = vi.fn(
+      async (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
+        replacePreviewResult(uri, { resourceId, encodedData, drive, ifMatch }, 2)
+    )
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: '0123456789abcdef0123456789abcdea',
-            drive: 'main',
-            version: 2,
-          })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: 2, name: 'README.md' })),
           downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
             previewResult(uri, new TextEncoder().encode('# Saved source').buffer, 1, maxBytes)
           ),
@@ -1266,17 +1300,15 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: 'abababababababababababababababab',
-            drive: 'main',
-            version: 1,
-          })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: 1, name: 'README.md' })),
           downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
             previewResult(uri, new TextEncoder().encode('# Saved source').buffer, 1, maxBytes)
           ),
           affordances: vi.fn(() => pendingAffordances),
-          replaceFile: vi.fn(async () => ({ version: 2 })),
+          replaceFile: vi.fn(
+            async (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
+              replacePreviewResult(uri, { resourceId, encodedData, drive, ifMatch }, 2)
+          ),
         },
       },
     })
@@ -1387,12 +1419,7 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: 'abababababababababababababababcd',
-            drive: 'main',
-            version: 1,
-          })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: 1, name: 'README.md' })),
           downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
             previewResult(
               uri,
@@ -1433,9 +1460,12 @@ describe('FilePreviewPage', () => {
     expect(
       await screen.findByRole('heading', { name: 'Readable while permissions fail' })
     ).toBeTruthy()
-    expect((await screen.findByRole('alert')).textContent).toContain(
-      'Could not verify file permissions'
-    )
+    const permissionAlerts = await screen.findAllByRole('alert')
+    expect(
+      permissionAlerts.some(alert =>
+        alert.textContent?.includes('Could not verify file permissions')
+      )
+    ).toBe(true)
     expect(
       within(openPreviewActions('README.md')).queryByRole('menuitem', { name: 'Edit' })
     ).toBeNull()
@@ -1450,9 +1480,9 @@ describe('FilePreviewPage', () => {
     const source = '# Saved source'
     let serverSource = source
     let serverVersion = 1
-    let resolveSave!: (value: { version: number }) => void
-    const save = new Promise<{ version: number }>(resolve => {
-      resolveSave = resolve
+    let releaseSave!: () => void
+    const saveGate = new Promise<void>(resolve => {
+      releaseSave = resolve
     })
     const binding = {
       principalOwner: 'principal-owner-1',
@@ -1464,12 +1494,7 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: '11111111111111111111111111111111',
-            drive: 'main',
-            version: serverVersion,
-          })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: serverVersion })),
           downloadPreview: vi.fn(async () =>
             previewResult(
               uri,
@@ -1479,7 +1504,17 @@ describe('FilePreviewPage', () => {
             )
           ),
           affordances: vi.fn(async () => activeAffordances),
-          replaceFile: vi.fn(() => save),
+          replaceFile: vi.fn(
+            async (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) => {
+              const response = await replacePreviewResult(
+                uri,
+                { resourceId, encodedData, drive, ifMatch },
+                2
+              )
+              await saveGate
+              return response
+            }
+          ),
         },
       },
     })
@@ -1512,7 +1547,7 @@ describe('FilePreviewPage', () => {
     await act(async () => {
       serverSource = '# Submitted'
       serverVersion = 2
-      resolveSave({ version: 2 })
+      releaseSave()
       await Promise.resolve()
       fireEvent.change(editor, { target: { value: '# Commit-gap draft' } })
     })
@@ -1535,9 +1570,9 @@ describe('FilePreviewPage', () => {
     const source = '# Saved source'
     let serverSource = source
     let serverVersion = 1
-    let resolveSave!: (value: { version: number }) => void
-    const save = new Promise<{ version: number }>(resolve => {
-      resolveSave = resolve
+    let releaseSave!: () => void
+    const saveGate = new Promise<void>(resolve => {
+      releaseSave = resolve
     })
     const binding = {
       principalOwner: 'principal-owner-1',
@@ -1549,12 +1584,7 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: '12121212121212121212121212121212',
-            drive: 'main',
-            version: serverVersion,
-          })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: serverVersion })),
           downloadPreview: vi.fn(async () =>
             previewResult(
               uri,
@@ -1564,7 +1594,17 @@ describe('FilePreviewPage', () => {
             )
           ),
           affordances: vi.fn(async () => activeAffordances),
-          replaceFile: vi.fn(() => save),
+          replaceFile: vi.fn(
+            async (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) => {
+              const response = await replacePreviewResult(
+                uri,
+                { resourceId, encodedData, drive, ifMatch },
+                2
+              )
+              await saveGate
+              return response
+            }
+          ),
         },
       },
     })
@@ -1596,8 +1636,8 @@ describe('FilePreviewPage', () => {
     await act(async () => {
       serverSource = '# Submitted'
       serverVersion = 2
-      resolveSave({ version: 2 })
-      await save
+      releaseSave()
+      await saveGate
       fireEvent.change(editor, { target: { value: '# Post-ack draft' } })
     })
 
@@ -1627,17 +1667,15 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: '22222222222222222222222222222222',
-            drive: 'main',
-            version: 1,
-          })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: 1 })),
           downloadPreview: vi.fn(async () =>
             previewResult(uri, new TextEncoder().encode(source).buffer, 1, 2_097_152)
           ),
           affordances: vi.fn(async () => activeAffordances),
-          replaceFile: vi.fn(async () => ({ version: 2 })),
+          replaceFile: vi.fn(
+            async (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
+              replacePreviewResult(uri, { resourceId, encodedData, drive, ifMatch }, 2)
+          ),
         },
       },
     })
@@ -1695,12 +1733,7 @@ describe('FilePreviewPage', () => {
           resolve: vi.fn(async (uri: string) => {
             const file = files.get(uri)
             if (!file) throw new Error('missing test file')
-            return {
-              kind: 'file',
-              resourceId: file.resourceId,
-              drive: 'main',
-              version: 1,
-            }
+            return resolvePreviewResource(uri, { name: file.name })
           }),
           downloadPreview: vi.fn(async (uri: string, maxBytes: number) => {
             const file = files.get(uri)
@@ -1773,20 +1806,16 @@ describe('FilePreviewPage', () => {
   it('keeps the preview neutral when a delayed outgoing-scope read settles after switch intent', async () => {
     const uri = 'gfs://main/ffeeddccbbaa99887766554433221100'
     let downloadCount = 0
-    let releaseDelayedDownload!: (value: { bytes: ArrayBuffer }) => void
-    const delayedDownload = new Promise<{ bytes: ArrayBuffer }>(resolve => {
+    type PreviewDownload = Awaited<ReturnType<typeof previewDownloadResult>>
+    let releaseDelayedDownload!: (value: PreviewDownload) => void
+    const delayedDownload = new Promise<PreviewDownload>(resolve => {
       releaseDelayedDownload = resolve
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: 'ffeeddccbbaa99887766554433221100',
-            drive: 'main',
-            version: 1,
-          })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: 1 })),
           downloadPreview: vi.fn(async () => {
             downloadCount += 1
             return delayedDownload
@@ -1830,7 +1859,9 @@ describe('FilePreviewPage', () => {
     expect(screen.queryByRole('heading', { name: 'README.md' })).toBeNull()
 
     await act(async () => {
-      releaseDelayedDownload({ bytes: new TextEncoder().encode('# Late Team A').buffer })
+      releaseDelayedDownload(
+        await previewResult(uri, new TextEncoder().encode('# Late Team A').buffer)
+      )
       await Promise.resolve()
     })
     expect(screen.getByText('Changing workspace')).toBeTruthy()
@@ -1852,12 +1883,7 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: '12341234123412341234123412341234',
-            drive: 'main',
-            version: 1,
-          })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: 1 })),
           downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
             previewResult(uri, new TextEncoder().encode('# Saved source').buffer, 1, maxBytes)
           ),
@@ -1955,12 +1981,7 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: '43214321432143214321432143214321',
-            drive: 'main',
-            version: 1,
-          })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: 1 })),
           downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
             previewResult(uri, new TextEncoder().encode('# Saved source').buffer, 1, maxBytes)
           ),
@@ -2043,17 +2064,12 @@ describe('FilePreviewPage', () => {
   it('honors an explicit discard after an ambiguous Save even when the reconciliation read fails', async () => {
     const uri = 'gfs://main/abcdef0123456789abcdef0123456789'
     const source = '# Saved source'
-    const resolve = vi.fn(async () => ({
-      kind: 'file',
-      resourceId: 'abcdef0123456789abcdef0123456789',
-      drive: 'main',
-      version: 1,
-    }))
+    const resolve = vi.fn(() => resolvePreviewResource(uri, { version: 1 }))
     let downloadCalls = 0
-    const downloadPreview = vi.fn(async () => {
+    const downloadPreview = vi.fn(async (_uri: string, maxBytes: number) => {
       downloadCalls += 1
       if (downloadCalls > 1) throw new Error('network timeout')
-      return { bytes: new TextEncoder().encode(source).buffer }
+      return previewResult(uri, new TextEncoder().encode(source).buffer, 1, maxBytes)
     })
     const replaceFile = vi.fn(async () => {
       throw new Error('network timeout')
@@ -2131,17 +2147,22 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          resolve: vi.fn(async () => ({
-            kind: 'file',
-            resourceId: '0987654321abcdef0987654321abcdef',
-            drive: 'main',
-            version: 1,
-          })),
-          downloadPreview: vi.fn(async () => ({ bytes: new TextEncoder().encode(source).buffer })),
+          resolve: vi.fn(() => resolvePreviewResource(uri, { version: 1 })),
+          downloadPreview: vi.fn(async (_uri: string, maxBytes: number) =>
+            previewResult(uri, new TextEncoder().encode(source).buffer, 1, maxBytes)
+          ),
           affordances: vi.fn(async () => activeAffordances),
-          replaceFile: vi.fn(async () => {
-            throw Object.assign(new Error('403 write permission revoked'), { status: 403 })
-          }),
+          replaceFile: vi.fn(
+            async (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) => {
+              const message = await replaceFileFailureMessage({
+                resourceId,
+                encodedData,
+                drive,
+                ifMatch,
+              })
+              throw new Error(message)
+            }
+          ),
         },
       },
     })
@@ -2221,9 +2242,9 @@ describe('FilePreviewPage', () => {
       value: {
         gfs: {
           copyDeepLink,
-          downloadPreview: vi.fn(async () => ({
-            bytes: new TextEncoder().encode(markdown).buffer,
-          })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new TextEncoder().encode(markdown).buffer, 1, maxBytes)
+          ),
           resolve: vi.fn(resolvePreviewResource),
           affordances: vi.fn(async () => activeAffordances),
         },
@@ -2266,7 +2287,7 @@ describe('FilePreviewPage', () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller())
     stubGfs({
       downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
-      resolve: async () => ({ kind: 'file', version: 1 }),
+      resolve: async () => resolvePreviewResource('gfs://main/image-1'),
     })
 
     render(
@@ -2295,7 +2316,7 @@ describe('FilePreviewPage', () => {
       downloadPreview: async () => ({
         bytes: new TextEncoder().encode(`# Load ${++downloadNumber}`).buffer,
       }),
-      resolve: async () => ({ kind: 'file', version: 1 }),
+      resolve: async () => resolvePreviewResource('gfs://main/image-1'),
     })
     hookMock.useGfsBrowserController.mockReturnValue(controller())
 
@@ -2350,9 +2371,9 @@ describe('FilePreviewPage', () => {
       configurable: true,
       value: {
         gfs: {
-          downloadPreview: vi.fn(async () => ({
-            bytes: new TextEncoder().encode('# Preview').buffer,
-          })),
+          downloadPreview: vi.fn(async (downloadUri: string, maxBytes: number) =>
+            previewResult(downloadUri, new TextEncoder().encode('# Preview').buffer, 7, maxBytes)
+          ),
           resolve: vi.fn(() => (refreshPending ? refreshResolve() : resolve())),
           affordances: vi.fn(async () => activeAffordances),
         },
