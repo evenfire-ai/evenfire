@@ -122,10 +122,7 @@ export class ClaudeProvider implements SingleTurnProvider {
           : httpClassification
       // Anthropic quirk: insufficient credit is reported as HTTP 400
       // (not 402), detectable only by message substring.
-      if (
-        classified.code === LlmErrorCode.ApiCallFailed &&
-        /credit balance is too low/i.test(classified.message)
-      ) {
+      if (classified.httpStatus === 400 && /credit balance is too low/i.test(classified.message)) {
         return {
           ...classified,
           code: LlmErrorCode.InsufficientQuota,
@@ -134,6 +131,11 @@ export class ClaudeProvider implements SingleTurnProvider {
           // shared classifier only sees the outer `${status} {json}` string.
           message: rawMsg,
         }
+      }
+      if (classified.code === LlmErrorCode.UpstreamRejected) {
+        // #1433: a refused request shows Anthropic's own text. Same reason as
+        // above: the shared classifier only sees the outer `${status} {json}`.
+        return { ...classified, message: rawMsg }
       }
       return classified
     }

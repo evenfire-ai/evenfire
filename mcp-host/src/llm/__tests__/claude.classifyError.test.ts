@@ -92,12 +92,17 @@ describe('ClaudeProvider.classifyError', () => {
     expect(result.message).toBe('Your credit balance is too low to access the Claude API')
   })
 
-  it('keeps 400 without credit message as ApiCallFailed', () => {
+  // #1433: a 400 is a rejected request, not "Connection Error" (ApiCallFailed).
+  it('classifies 400 without credit message as UpstreamRejected, not retryable', () => {
     const err = {
       status: 400,
       error: { type: 'invalid_request_error', message: 'messages.0.role: Field required' },
     }
-    expect(provider.classifyError(err).code).toBe(LlmErrorCode.ApiCallFailed)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.UpstreamRejected,
+      retryable: false,
+      httpStatus: 400,
+    })
   })
 
   it('surfaces the inner modeled type as providerCode for an unmapped enveloped error (R1-L1)', () => {
@@ -107,9 +112,54 @@ describe('ClaudeProvider.classifyError', () => {
     // it falls through to the shared HTTP classifier.
     const err = anthropicApiError(400, 'invalid_request_error', 'messages.0.role: Field required')
     const c = provider.classifyError(err)
-    expect(c.code).toBe(LlmErrorCode.ApiCallFailed)
+    expect(c.code).toBe(LlmErrorCode.UpstreamRejected)
     expect(c.providerCode).toBe('invalid_request_error')
     expect(c.providerCode).not.toBe('error')
+  })
+
+  // #1433: the request body that held a lone UTF-16 surrogate. The message is
+  // the provider's own text, not the SDK's `400 {json}` string.
+  it('classifies the "request body is not valid JSON" 400 as UpstreamRejected', () => {
+    const text =
+      'The request body is not valid JSON: unexpected end of hex escape at line 1 column 9'
+    const c = provider.classifyError(anthropicApiError(400, 'invalid_request_error', text))
+    expect(c).toMatchObject({
+      code: LlmErrorCode.UpstreamRejected,
+      retryable: false,
+      httpStatus: 400,
+      providerCode: 'invalid_request_error',
+    })
+    expect(c.message).toBe(text)
+  })
+
+  // #1433 uses the inner message on the HTTP-status 400 arm only. The body-type
+  // arms above it (not_found, overloaded, billing, permission) already return the
+  // inner message at any status. Any other status that falls to the shared
+  // classifier keeps the SDK's `${status} {json}` message, as this 401 shows.
+  it('keeps the SDK message for an enveloped 401 that reaches the shared classifier', () => {
+    const err = anthropicApiError(401, 'authentication_error', 'invalid x-api-key')
+    const c = provider.classifyError(err)
+    expect(c).toMatchObject({
+      code: LlmErrorCode.AuthenticationFailed,
+      httpStatus: 401,
+      providerCode: 'authentication_error',
+    })
+    expect(c.message).toBe((err as Error).message)
+    expect(c.message).not.toBe('invalid x-api-key')
+  })
+
+  // The credit-balance guard keys on the HTTP status, so it survives the 400
+  // recode above (claude.ts). Real SDK envelope, not a plain object.
+  it('still reclassifies an enveloped credit-balance 400 as InsufficientQuota', () => {
+    const c = provider.classifyError(
+      anthropicApiError(
+        400,
+        'invalid_request_error',
+        'Your credit balance is too low to access the Claude API'
+      )
+    )
+    expect(c.code).toBe(LlmErrorCode.InsufficientQuota)
+    expect(c.retryable).toBe(false)
   })
 
   it('falls back to unknown for plain Error', () => {
