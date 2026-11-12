@@ -317,8 +317,8 @@ describe('clerum__generate_pptx — quota enforcement', () => {
     // enforceQuota parses MB as integer, so we set a 1 MB cap and
     // pre-fill the directory with ~950 KB of bytes so any pptx write
     // pushes us past the limit.
-    const prev = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-    process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1'
+    const prev = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+    process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1'
     // 1 MB = 1,048,576 bytes. Pre-fill > quota so even a tiny pptx exceeds.
     fs.writeFileSync(path.join(testOutputDir, 'filler.bin'), Buffer.alloc(1_100_000))
     try {
@@ -332,8 +332,8 @@ describe('clerum__generate_pptx — quota enforcement', () => {
       expect(result.success).toBe(false)
       expect(result.error).toMatch(/quota/i)
     } finally {
-      if (prev === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-      else process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = prev
+      if (prev === undefined) delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      else process.env.CLERUM_GENERATED_FILES_QUOTA_MB = prev
     }
   })
 })

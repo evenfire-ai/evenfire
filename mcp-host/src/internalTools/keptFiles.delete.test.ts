@@ -468,8 +468,8 @@ describe('registration and approval of the delete', () => {
 
   it('appends how to make room to a generator space refusal only where the delete exists', async () => {
     const root = rootOf('user-a')
-    const quota = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-    process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1'
+    const quota = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+    process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1'
     try {
       fs.mkdirSync(outputsOf(root), { recursive: true, mode: 0o700 })
       fs.writeFileSync(path.join(outputsOf(root), 'big.bin'), Buffer.alloc(2 * 1024 * 1024))
@@ -484,8 +484,8 @@ describe('registration and approval of the delete', () => {
       expect(without.content).toMatch(/^Error: Output quota exceeded/)
       expect(without.content).not.toContain('clerum__kept_files_delete')
     } finally {
-      if (quota === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-      else process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = quota
+      if (quota === undefined) delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      else process.env.CLERUM_GENERATED_FILES_QUOTA_MB = quota
     }
   })
 })

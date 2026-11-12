@@ -285,8 +285,18 @@ export function ensureDir(dir: string): void {
 }
 
 // A dashboard with charts inlines the Chart.js UMD bundle (~210 KB) so the
-// HTML works offline: about 250 of them fit in the default quota.
-const DEFAULT_QUOTA_MB = 50
+// HTML works offline: about 250 of them fit in a workflow run's default
+// quota, and about 2,400 in a chat caller's.
+/** Default quota of a workflow run's output folder, whose volume is small and has no floor. */
+const WORKFLOW_DEFAULT_QUOTA_MB = 50
+/** Default quota of a chat caller's folder, which the Host volume's free-space floor also bounds. */
+const CALLER_DEFAULT_QUOTA_MB = 500
+
+/** The quota variable; one value overrides both defaults. */
+const QUOTA_VARIABLE = 'CLERUM_GENERATED_FILES_QUOTA_MB'
+/** The variable's former name, ignored and warned about once when still set. */
+const REMOVED_QUOTA_VARIABLE = 'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB'
+let reportedRemovedQuotaVariable = false
 
 /**
  * Recursively sum the size of all regular files under `dir`.
@@ -315,24 +325,35 @@ export function getDirectorySize(dir: string): number {
 let reportedQuotaSetting: string | undefined
 
 /**
- * CLERUM_WORKFLOW_OUTPUT_QUOTA_MB as a whole number of megabytes. Anything
- * else ("2GB", "1.5", "0") leaves the default, and is logged once: read
- * leniently, "2GB" became a quota of 2 MB.
+ * CLERUM_GENERATED_FILES_QUOTA_MB as a whole number of megabytes, or
+ * `defaultMB` (the default for the folder's kind). Anything else ("2GB",
+ * "1.5", "0") leaves that default, and is logged once: read leniently, "2GB"
+ * became a quota of 2 MB.
  */
-function outputQuotaMB(raw: string | undefined): number {
+function outputQuotaMB(raw: string | undefined, defaultMB: number): number {
   const text = raw?.trim() ?? ''
-  if (text === '') return DEFAULT_QUOTA_MB
+  if (text === '') return defaultMB
   if (/^\d+$/.test(text) && Number(text) > 0 && Number.isSafeInteger(Number(text))) {
     return Number(text)
   }
   if (reportedQuotaSetting !== raw) {
     reportedQuotaSetting = raw
     logger.warn(
-      { component: 'ArtifactOutput', value: text.slice(0, 32), defaultMB: DEFAULT_QUOTA_MB },
-      'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB is not a whole number of megabytes; the default applies'
+      { component: 'ArtifactOutput', value: text.slice(0, 32), defaultMB },
+      'CLERUM_GENERATED_FILES_QUOTA_MB is not a whole number of megabytes; the default applies'
     )
   }
-  return DEFAULT_QUOTA_MB
+  return defaultMB
+}
+
+/** The former quota variable is not read; when it is still set, that is logged once. */
+function reportRemovedQuotaVariable(): void {
+  if (reportedRemovedQuotaVariable || process.env[REMOVED_QUOTA_VARIABLE] === undefined) return
+  reportedRemovedQuotaVariable = true
+  logger.warn(
+    { component: 'ArtifactOutput', variable: REMOVED_QUOTA_VARIABLE, replacement: QUOTA_VARIABLE },
+    'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB is no longer read; set CLERUM_GENERATED_FILES_QUOTA_MB instead'
+  )
 }
 
 /**
@@ -340,23 +361,30 @@ function outputQuotaMB(raw: string | undefined): number {
  * run's output, or one chat caller's folder, so in chat each user has their
  * own. A caller's folder must also leave the Host volume its free-space floor.
  *
- * Reads the ceiling from `CLERUM_WORKFLOW_OUTPUT_QUOTA_MB` (default: 50 MB).
- * Throws if the current directory usage + `incomingBytes` would exceed the cap.
- * `replacingBytes` is the size of a file the write overwrites, which stops
- * counting once it is replaced.
+ * Reads the ceiling from `CLERUM_GENERATED_FILES_QUOTA_MB` (default: 500 MB
+ * for a chat caller's folder, 50 MB for a workflow run; a set value applies to
+ * both). Throws if the current directory usage + `incomingBytes` would exceed
+ * the cap. `replacingBytes` is the size of a file the write overwrites, which
+ * stops counting once it is replaced.
  *
  * Known limitation (race condition): When the LLM issues multiple tool calls
  * concurrently (e.g., generate_pdf + generate_xlsx in the same turn), both
  * calls read the directory size before either has written its file. Both see
  * the same "current" size and both pass the quota check, even though the
- * combined output would exceed the 50 MB cap. This is a best-effort soft
- * quota; the 1Gi PVC hard cap enforced by kubelet is the primary defense.
+ * combined output would exceed the cap. This is a best-effort soft quota. For
+ * a workflow run the hard cap is its output volume (256Mi by default, 1Gi for
+ * the legacy shared one), enforced by kubelet; for a chat caller's folder the
+ * volume is protected by the free-space floor (enforceFreeSpaceFloor).
  */
 export function enforceQuota(outputDir: string, incomingBytes: number, replacingBytes = 0): void {
-  const quotaMB = outputQuotaMB(process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB)
+  const callerFolder = path.basename(outputDir) === CALLER_OUTPUTS_DIR
+  reportRemovedQuotaVariable()
+  const quotaMB = outputQuotaMB(
+    process.env[QUOTA_VARIABLE],
+    callerFolder ? CALLER_DEFAULT_QUOTA_MB : WORKFLOW_DEFAULT_QUOTA_MB
+  )
   const quotaBytes = quotaMB * 1024 * 1024
 
-  const callerFolder = path.basename(outputDir) === CALLER_OUTPUTS_DIR
   let size: number
   try {
     size = getDirectorySize(outputDir)
@@ -377,7 +405,7 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
       `${OUTPUT_QUOTA_EXCEEDED_PREFIX}: the output folder holds ${mb(current)} MB and this file needs ` +
         `${mb(incomingBytes)} MB, over the ${quotaMB} MB limit. Make the file smaller, give ` +
         'it the name of an earlier generated file to replace that one, or ask an operator to ' +
-        'raise CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
+        'raise CLERUM_GENERATED_FILES_QUOTA_MB.'
     )
   }
   if (callerFolder) enforceFreeSpaceFloor(outputDir, incomingBytes)

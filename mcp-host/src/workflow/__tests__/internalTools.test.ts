@@ -550,13 +550,13 @@ describe('StepMcpRouter with internal tools', () => {
 // ─── Quota enforcement ──────────────────────────────────────────────
 
 describe('Output quota enforcement', () => {
-  const ORIGINAL_QUOTA = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
+  const ORIGINAL_QUOTA = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
 
   afterEach(() => {
     if (ORIGINAL_QUOTA === undefined) {
-      delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
+      delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
     } else {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = ORIGINAL_QUOTA
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = ORIGINAL_QUOTA
     }
   })
 
@@ -585,33 +585,33 @@ describe('Output quota enforcement', () => {
 
   describe('enforceQuota', () => {
     it('allows writes below the default (50 MB) limit', () => {
-      delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
+      delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
       expect(() => enforceQuota(testOutputDir, 1024)).not.toThrow()
     })
 
     it('throws when projected size would exceed the default limit', () => {
-      delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
+      delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
       // 51 MB projected write with an empty dir -> over 50 MB default
       expect(() => enforceQuota(testOutputDir, 51 * 1024 * 1024)).toThrow(/Output quota exceeded/)
     })
 
-    it('respects CLERUM_WORKFLOW_OUTPUT_QUOTA_MB env var', () => {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1' // 1 MB cap
+    it('respects CLERUM_GENERATED_FILES_QUOTA_MB env var', () => {
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1' // 1 MB cap
       expect(() => enforceQuota(testOutputDir, 512 * 1024)).not.toThrow()
       expect(() => enforceQuota(testOutputDir, 2 * 1024 * 1024)).toThrow(/Output quota exceeded/)
     })
 
     it('falls back to default when env var is not a positive integer', () => {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = 'garbage'
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = 'garbage'
       expect(() => enforceQuota(testOutputDir, 1024)).not.toThrow()
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '0'
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '0'
       expect(() => enforceQuota(testOutputDir, 1024)).not.toThrow()
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '-5'
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '-5'
       expect(() => enforceQuota(testOutputDir, 1024)).not.toThrow()
     })
 
     it('counts existing files toward the quota', () => {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1' // 1 MB cap
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1' // 1 MB cap
       // Write 900 KB already on disk
       fs.writeFileSync(path.join(testOutputDir, 'existing.bin'), Buffer.alloc(900 * 1024))
       // Another 200 KB would push us over
@@ -623,7 +623,7 @@ describe('Output quota enforcement', () => {
 
   describe('clerum__generate_markdown quota', () => {
     it('throws and does not write when content exceeds quota', async () => {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1' // 1 MB cap
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1' // 1 MB cap
       const tool = findTool('clerum__generate_markdown')
       const huge = 'x'.repeat(2 * 1024 * 1024) // 2 MB
       const result = await tool.execute({ filename: 'huge.md', content: huge }, testOutputDir)
@@ -634,7 +634,7 @@ describe('Output quota enforcement', () => {
     })
 
     it('writes successfully when under quota', async () => {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1'
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1'
       const tool = findTool('clerum__generate_markdown')
       const result = await tool.execute({ filename: 'ok.md', content: '# small' }, testOutputDir)
 
@@ -645,7 +645,7 @@ describe('Output quota enforcement', () => {
 
   describe('clerum__generate_pdf quota', () => {
     it('throws and does not write when pdf size exceeds quota', async () => {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1' // 1 MB cap
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1' // 1 MB cap
       // Pre-fill the directory so any non-trivial PDF trips the quota.
       fs.writeFileSync(path.join(testOutputDir, 'filler.bin'), Buffer.alloc(1024 * 1024))
 
@@ -667,7 +667,7 @@ describe('Output quota enforcement', () => {
 
   describe('clerum__generate_docx quota', () => {
     it('throws and does not write when docx size exceeds quota', async () => {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1'
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1'
       fs.writeFileSync(path.join(testOutputDir, 'filler.bin'), Buffer.alloc(1024 * 1024))
 
       const tool = findTool('clerum__generate_docx')
@@ -684,7 +684,7 @@ describe('Output quota enforcement', () => {
 
   describe('clerum__generate_xlsx quota', () => {
     it('throws and does not write when xlsx size exceeds quota', async () => {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1'
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1'
       fs.writeFileSync(path.join(testOutputDir, 'filler.bin'), Buffer.alloc(1024 * 1024))
 
       const tool = findTool('clerum__generate_xlsx')
@@ -702,7 +702,7 @@ describe('Output quota enforcement', () => {
     })
 
     it('writes successfully when under quota', async () => {
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '50'
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '50'
       const tool = findTool('clerum__generate_xlsx')
       const result = await tool.execute(
         {
