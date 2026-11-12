@@ -11,7 +11,10 @@ import type {
 import type { ToolOutput } from '../core/types'
 import { normalizeRid } from '../internalTools/gfsContentRead'
 import { GFS_FILE_LIMITS } from '../internalTools/gfsFilePolicy'
-import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../internalTools/gfsReadTypes'
+import {
+  type GfsGuidanceWriteTools,
+  gfsLocalProcessingGuidance,
+} from '../internalTools/gfsReadTypes'
 import { gfsStoreSpaceGuidance } from '../internalTools/gfsSpaceGuidance'
 import type { FileReferenceResolution } from './fileReferenceResolver'
 import type { TaskExecutionBudget } from './taskExecutionBudget'
@@ -81,7 +84,8 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function checkedPreparation(
   output: ToolOutput,
-  reference: FileReferenceV1
+  reference: FileReferenceV1,
+  writeTools: GfsGuidanceWriteTools
 ): PreparedGfsFile | undefined {
   if (
     reference.source.kind !== 'gfs' ||
@@ -152,7 +156,7 @@ function checkedPreparation(
     boundedOutputOnly: true,
     wholeFileToContextAllowed: false,
     // Publish our trusted instructions, never instruction text from a tool result.
-    processingInstructions: GFS_LOCAL_PROCESSING_GUIDANCE,
+    processingInstructions: gfsLocalProcessingGuidance(writeTools),
   }
   return {
     referenceId: reference.id,
@@ -190,6 +194,11 @@ export async function prepareGfsFiles(
   if (resolutions.length > FILE_REFERENCE_MAX_COUNT)
     throw new Error('Too many GFS file references to prepare')
   const prepared: PreparedGfsFile[] = []
+  // The receipts name the write tools of the registry the download runs in.
+  const writeTools: GfsGuidanceWriteTools = {
+    editText: context.config.toolRegistry.get('clerum__gfs_edit_text') !== null,
+    saveBySourcePath: context.config.toolRegistry.get('clerum__gfs_write') !== null,
+  }
   for (const { availability, reference, surfaces } of resolutions) {
     if (
       availability !== 'available' ||
@@ -246,7 +255,7 @@ export async function prepareGfsFiles(
       prepared.push(
         output.is_error
           ? unavailable(failureCode(output.content))
-          : (checkedPreparation(output, reference) ?? unavailable('invalid_response'))
+          : (checkedPreparation(output, reference, writeTools) ?? unavailable('invalid_response'))
       )
     } catch {
       context.config.abortSignal?.throwIfAborted()

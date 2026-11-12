@@ -476,6 +476,12 @@ export class NativeToolRegistry implements ToolRegistry {
               callerIdentity: gfsDownload?.callerIdentity,
               callerWorkspacePath: gfsDownload?.callerWorkspacePath,
               retentionOwnerId: gfsDownload?.retentionOwnerId,
+              // The write tools registered below, so a download result never
+              // names a tool this registry does not have.
+              writeTools: {
+                editText: gfsScopes.has('gfs.write'),
+                saveBySourcePath: gfsScopes.has('gfs.write'),
+              },
             })
           : []),
         ...(gfsScopes.has('gfs.write')

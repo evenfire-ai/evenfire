@@ -75,10 +75,11 @@ import {
   CAPABILITY_CONTRACT_TEXT,
   DESKTOP_ENVIRONMENT_HINT,
   DefaultPromptBuilder,
-  GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
   MCP_SERVER_SELECTION_TEXT,
   MEMORY_GUIDANCE_TEXT,
   WORKFLOW_RECIPES_TEXT,
+  gfsGuidanceWriteTools,
+  gfsWorkspaceFileGuidanceText,
   toolDiscoveryText,
 } from '../core/reasoning/promptBuilder'
 import type { SystemPromptParts } from '../core/reasoning/systemPrompt'
@@ -2185,6 +2186,9 @@ export class TaskExecutor {
       tools.some(t => t.name.startsWith('desktop_') || t.name.startsWith('browser_')),
       tools.some(t => t.name.startsWith('workflow_')),
       tools.some(t => t.name === 'clerum__gfs_download'),
+      // The GFS guidance names the edit and save tools only when they exist.
+      tools.some(t => t.name === 'clerum__gfs_edit_text'),
+      tools.some(t => t.name === 'clerum__gfs_write'),
       tools.some(t => t.name.includes('__')),
       tools.some(t => t.name === 'clerum__tool_search'),
       // #1003 — the discovery guidance text depends on the native presentation.
@@ -2242,7 +2246,9 @@ export class TaskExecutor {
       platformHints,
       capabilities,
       workflowGuidance: hasWorkflowTools ? WORKFLOW_RECIPES_TEXT : '',
-      gfsWorkspaceGuidance: hasGfsDownloadTool ? GFS_WORKSPACE_FILE_GUIDANCE_TEXT : '',
+      gfsWorkspaceGuidance: hasGfsDownloadTool
+        ? gfsWorkspaceFileGuidanceText(gfsGuidanceWriteTools(tools))
+        : '',
       mcpServerGuidance: hasMcpTools ? MCP_SERVER_SELECTION_TEXT : '',
       toolDiscoveryGuidance: hasToolDiscovery
         ? toolDiscoveryText(appConfig.nativeToolPresentation)

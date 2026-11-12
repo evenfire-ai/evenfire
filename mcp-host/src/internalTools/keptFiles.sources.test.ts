@@ -7,7 +7,7 @@ import * as fs from 'fs'
 import JSZip from 'jszip'
 import * as os from 'os'
 import * as path from 'path'
-import { GFS_WORKSPACE_FILE_GUIDANCE_TEXT } from '../core/reasoning/promptBuilder'
+import { gfsWorkspaceFileGuidanceText } from '../core/reasoning/promptBuilder'
 import { NativeToolRegistry } from '../core/tools/nativeToolRegistry'
 import { ShellTool } from '../core/tools/shell'
 import type { ToolOutput } from '../core/types'
@@ -1077,7 +1077,7 @@ describe('a shell result saved by its workspace path', () => {
 
 describe('guidance for changing a file that is in EvenDrive', () => {
   it('states the shell-then-sourcePath route, in order, in the workspace guidance', () => {
-    const text = GFS_WORKSPACE_FILE_GUIDANCE_TEXT
+    const text = gfsWorkspaceFileGuidanceText({ editText: true, saveBySourcePath: true })
     const outside = text.indexOf('writes the new file outside .gfs-downloads')
     const save = text.indexOf('clerum__gfs_write with sourcePath')
     const never = text.indexOf('Never paste a whole file into content')

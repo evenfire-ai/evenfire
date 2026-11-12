@@ -25,9 +25,10 @@ import {
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
 import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 import {
-  GFS_LOCAL_PROCESSING_GUIDANCE,
   type GfsFileContent,
+  type GfsGuidanceWriteTools,
   type GfsReadOptions,
+  gfsLocalProcessingGuidance,
 } from './gfsReadTypes'
 import { gfsStoreSpaceGuidance } from './gfsSpaceGuidance'
 import {
@@ -163,7 +164,16 @@ function invalidArgs(message: string): InternalToolResult {
   return { success: false, error: message }
 }
 
-function workspaceFileUsage(visualDelivery: 'included' | 'not_included', visualReason?: string) {
+/**
+ * How the model may use a downloaded file. The save fields and sentences
+ * appear only where the save tools are registered, so a Host that can only
+ * read is never told to save with a tool it does not have.
+ */
+function workspaceFileUsage(
+  writeTools: GfsGuidanceWriteTools,
+  visualDelivery: 'included' | 'not_included',
+  visualReason?: string
+) {
   return {
     pathSemantics: 'relative-to-caller-workspace',
     nextTool: 'shell_exec_when_local_processing_is_needed',
@@ -171,22 +181,30 @@ function workspaceFileUsage(visualDelivery: 'included' | 'not_included', visualR
     ...(visualReason === undefined ? {} : { visualReason }),
     approval: 'user-approval-required',
     writeOutputsTo: 'outputs/',
-    saveChangedFileWith: 'clerum__gfs_write or clerum__gfs_create_file with sourcePath',
-    sourcePathMustBeOutside: '.gfs-downloads',
+    ...(writeTools.saveBySourcePath
+      ? {
+          saveChangedFileWith: 'clerum__gfs_write or clerum__gfs_create_file with sourcePath',
+          sourcePathMustBeOutside: '.gfs-downloads',
+        }
+      : {}),
     processLocally: true,
     boundedOutputOnly: true,
     wholeFileToContextAllowed: false,
-    processingInstructions: GFS_LOCAL_PROCESSING_GUIDANCE,
+    processingInstructions: gfsLocalProcessingGuidance(writeTools),
   }
 }
 
-function workspaceFileWithoutImage(receipt: GfsDownloadResult, reason: string): InternalToolResult {
+function workspaceFileWithoutImage(
+  writeTools: GfsGuidanceWriteTools,
+  receipt: GfsDownloadResult,
+  reason: string
+): InternalToolResult {
   return ok({
     delivery: 'workspace_file',
     ...receipt,
     visualDelivery: 'not_included',
     visualReason: reason,
-    usage: workspaceFileUsage('not_included', reason),
+    usage: workspaceFileUsage(writeTools, 'not_included', reason),
   })
 }
 
@@ -194,6 +212,7 @@ async function projectManagedImage(
   receipt: GfsDownloadResult,
   downloadStore: GfsDownloadStore,
   callerIdentity: string,
+  writeTools: GfsGuidanceWriteTools,
   options: InternalToolExecutionOptions | undefined,
   knownBytes?: Buffer
 ): Promise<InternalToolResult> {
@@ -207,22 +226,31 @@ async function projectManagedImage(
       prefix.length >= 3 &&
       ((prefix[0] === 0x89 && prefix[1] === 0x50 && prefix[2] === 0x4e) ||
         (prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff))
-    if (!hasImageMagic) return workspaceFileWithoutImage(receipt, 'not_image')
+    if (!hasImageMagic) return workspaceFileWithoutImage(writeTools, receipt, 'not_image')
     const visualInput = options?.visualInput
     if (!visualInput)
-      return workspaceFileWithoutImage(receipt, 'image_input_unavailable_in_this_execution')
+      return workspaceFileWithoutImage(
+        writeTools,
+        receipt,
+        'image_input_unavailable_in_this_execution'
+      )
     const capability = await visualInput.resolveCapability(options?.signal)
     if (options?.signal?.aborted) throw new VisualInputError('cancelled')
     if (capability.status !== 'supported')
-      return workspaceFileWithoutImage(receipt, `model_image_input_${capability.status}`)
+      return workspaceFileWithoutImage(
+        writeTools,
+        receipt,
+        `model_image_input_${capability.status}`
+      )
     const profile = capability.deliveryLimits
-    if (!profile) return workspaceFileWithoutImage(receipt, 'provider_visual_profile_unavailable')
+    if (!profile)
+      return workspaceFileWithoutImage(writeTools, receipt, 'provider_visual_profile_unavailable')
     if (
       (profile.maxImageBytes !== undefined && receipt.sizeBytes > profile.maxImageBytes) ||
       (profile.maxImageEncodedBytes !== undefined &&
         4 * Math.ceil(receipt.sizeBytes / 3) > profile.maxImageEncodedBytes)
     )
-      return workspaceFileWithoutImage(receipt, 'provider_visual_limit_exceeded')
+      return workspaceFileWithoutImage(writeTools, receipt, 'provider_visual_limit_exceeded')
     if (bytes === undefined) {
       if (receipt.sizeBytes > visualInput.budget.remainingReadBytes)
         throw new VisualInputError('limit_exceeded')
@@ -239,13 +267,13 @@ async function projectManagedImage(
       maxPixels: profile.maxPixels,
     }
     const image = inspectImage(bytes, limits)
-    if (!image) return workspaceFileWithoutImage(receipt, 'not_image')
+    if (!image) return workspaceFileWithoutImage(writeTools, receipt, 'not_image')
     if (
       (profile.maxDimension !== undefined &&
         (image.width > profile.maxDimension || image.height > profile.maxDimension)) ||
       (profile.maxPixels !== undefined && image.width * image.height > profile.maxPixels)
     )
-      return workspaceFileWithoutImage(receipt, 'provider_visual_limit_exceeded')
+      return workspaceFileWithoutImage(writeTools, receipt, 'provider_visual_limit_exceeded')
     await validateImage(bytes, image, {
       signal: options?.signal,
       budget: visualInput.budget,
@@ -259,13 +287,14 @@ async function projectManagedImage(
         delivery: 'workspace_file',
         ...receipt,
         visualDelivery: 'included',
-        usage: workspaceFileUsage('included'),
+        usage: workspaceFileUsage(writeTools, 'included'),
       }),
       images: [{ ...image, source: receipt.source, sizeBytes: receipt.sizeBytes, dataBase64 }],
     }
   } catch (error) {
     if (error instanceof VisualInputError && error.code !== 'cancelled')
       return workspaceFileWithoutImage(
+        writeTools,
         receipt,
         error.code === 'limit_exceeded' ? 'local_visual_resources_exceeded' : error.code
       )
@@ -381,6 +410,8 @@ export interface GfsReadToolOptions {
   callerWorkspacePath?: string
   /** Trusted task lifetime identity; never accepted from model arguments. */
   retentionOwnerId?: string
+  /** The write tools registered beside these, which download results may name. */
+  writeTools: GfsGuidanceWriteTools
 }
 
 /** The five read tools, bound to a gfsc client. */
@@ -392,6 +423,7 @@ export function buildGfsReadTools(
     callerIdentity,
     callerWorkspacePath,
     retentionOwnerId,
+    writeTools,
   }: GfsReadToolOptions
 ): InternalToolDefinition[] {
   const canDownload = Boolean(
@@ -440,7 +472,7 @@ export function buildGfsReadTools(
     return ok({
       delivery: 'workspace_file',
       ...receipt,
-      usage: workspaceFileUsage('not_included'),
+      usage: workspaceFileUsage(writeTools, 'not_included'),
     })
   }
   const tools: InternalToolDefinition[] = [
@@ -557,7 +589,13 @@ export function buildGfsReadTools(
                   metadata.source.version,
                   options
                 )
-                return await projectManagedImage(receipt, downloadStore!, callerIdentity!, options)
+                return await projectManagedImage(
+                  receipt,
+                  downloadStore!,
+                  callerIdentity!,
+                  writeTools,
+                  options
+                )
               } else {
                 recordGfsDownloadAdmission('workspace_unavailable')
                 expectedVersion ??= metadata.source.version
@@ -597,6 +635,7 @@ export function buildGfsReadTools(
                 receipt,
                 downloadStore!,
                 callerIdentity!,
+                writeTools,
                 options,
                 file.bytes
               )

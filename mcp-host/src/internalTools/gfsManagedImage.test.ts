@@ -134,6 +134,7 @@ function scenario(
     evidence: 'fixture-catalog',
   }))
   const tool = buildGfsReadTools(client, {
+    writeTools: { editText: true, saveBySourcePath: true },
     referencedFiles: new Map(),
     downloadStore: store as unknown as GfsDownloadStore,
     callerIdentity: 'caller-a',
