@@ -526,6 +526,7 @@ assert_no_previous_release_tries_only_latest() {
   stub_image "$d" other latest sha256:lat "$D3"
   local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
   if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && grep -q "no release candidate passed" "$d/stderr" \
+      && grep -qF "no previous release reachable from $T" "$d/stderr" \
       && only_latest_was_queried "$d"; then
     pass "with no previous release, only :latest is tried and the image is refused"
   else
@@ -548,7 +549,7 @@ assert_every_candidate_missing_is_refused_with_the_remedy() {
       && grep -q "hotfix_images=other" "$d/stderr" \
       && candidate_line "$d" latest | grep -qF 'ghcr.io/evenfire-ai/other:latest does not exist' \
       && candidate_line "$d" v0.1.0 | grep -qF 'ghcr.io/evenfire-ai/other:v0.1.0 does not exist' \
-      && candidate_line "$d" v0.1.0 | grep -qF 'push the same version again'; then
+      && candidate_line "$d" v0.1.0 | grep -qF 'delete the v0.1.0 tag and push v0.1.0 again at the fixed commit'; then
     pass "every candidate missing is refused with one line per candidate and the remedy"
   else
     fail "expected '  latest: ' and '  v0.1.0: ' lines, the failed-tag hint and hotfix_images=other; got $(run_summary "$d" "$rc")"
@@ -718,7 +719,7 @@ assert_a_git_tag_error_fails_instead_of_meaning_no_previous_release() {
   stub_image "$d" other latest sha256:lat "$D3"
   git_shim_fail_on "$d" 128 'tag *'
   local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
-  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && error_line "$d" | grep -q 'git tag.*exit 128' \
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && error_line "$d" | grep -q '^::error::other: finding the previous release: git tag.*exit 128' \
       && ! grep -q "no release candidate passed" "$d/stderr" && only_latest_was_queried "$d" \
       && candidate_line "$d" latest | grep -q "diverged history"; then
     pass "a git error while finding the previous release fails the image, listing the rejected :latest"
@@ -790,6 +791,143 @@ assert_a_source_drift_reason_says_push_to_dev_only_for_latest() {
   rm -rf "$d"
 }
 
+# --- main's first-parent sha-<c7> candidates ----------------------------------
+#
+# All use tag v0.1.0 at C0, image widget (widget/**) and :latest built at D3
+# (dev only, rejected). First-parent history of v0.1.0..T is T, H1, M1, so the
+# candidates run :latest, :sha-T, :sha-H1, :sha-M1, :v0.1.0. widget/** is
+# unchanged between H1 and T, but changed between M1 and T.
+
+assert_a_main_built_hotfix_image_wins_over_the_previous_release() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  git -C "$d" tag v0.1.0 "$C0"
+  stub_image "$d" widget latest sha256:lat "$D3"
+  stub_image "$d" widget "sha-${H1:0:7}" sha256:hot "$H1"
+  stub_image "$d" widget v0.1.0 sha256:prev "$C0"
+  local rc=0; resolve_in "$d" widget 'widget/**' "$T" || rc=$?
+  if [ "$rc" -eq 0 ] && cmp -s "$d/stdout" <(printf 'sha256:hot\tsha-%s\n' "${H1:0:7}"); then
+    pass "a main-built sha- image at the exact commit wins over the previous release"
+  else
+    fail "expected 'sha256:hot<TAB>sha-${H1:0:7}'; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_the_newest_passing_sha_candidate_wins() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  git -C "$d" tag v0.1.0 "$C0"
+  stub_image "$d" widget latest sha256:lat "$D3"
+  stub_image "$d" widget "sha-${H1:0:7}" sha256:hot "$H1"
+  stub_image "$d" widget "sha-${T:0:7}" sha256:tee "$T"
+  local rc=0; resolve_in "$d" widget 'widget/**' "$T" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(cut -f2 "$d/stdout")" = "sha-${T:0:7}" ] \
+      && [ "$(cut -f1 "$d/stdout")" = "sha256:tee" ]; then
+    pass "the newest passing sha- candidate wins"
+  else
+    fail "expected the sha-${T:0:7} candidate; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_sha_candidate_with_a_different_revision_is_rejected() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  git -C "$d" tag v0.1.0 "$C0"
+  stub_image "$d" widget latest sha256:lat "$D3"
+  # The tag names H1 but the image says M1 (an ancestor with the same widget
+  # source it would otherwise pass for? no: M1 differs from T in widget/**).
+  stub_image "$d" widget "sha-${H1:0:7}" sha256:odd "$M1"
+  local rc=0; resolve_in "$d" widget 'widget/**' "$T" || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && grep -qF "expected $H1" "$d/stderr" \
+      && candidate_line "$d" "sha-${H1:0:7}" | grep -qF "built from $M1, expected $H1"; then
+    pass "a sha- candidate built from another revision than its tag names is rejected"
+  else
+    fail "expected a rejection 'built from $M1, expected $H1'; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_second_parent_commits_are_never_queried() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  git -C "$d" tag v0.1.0 "$C0"
+  stub_image "$d" widget latest sha256:lat "$D3"
+  local rc=0; resolve_in "$d" widget 'widget/**' "$T" || rc=$?
+  # D1 (M1's second parent) and F1 (H1's) were merged in, never pushed to
+  # main. The first-parent commits T, H1 and M1 were looked up.
+  if grep -qF "sha-${H1:0:7}" "$d/crane-calls" && grep -qF "sha-${M1:0:7}" "$d/crane-calls" \
+      && ! grep -qF "sha-${D1:0:7}" "$d/crane-calls" && ! grep -qF "sha-${F1:0:7}" "$d/crane-calls"; then
+    pass "second-parent commits are never queried as sha- candidates"
+  else
+    fail "expected sha- lookups for H1 and M1 only; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_walk_longer_than_the_bound_fails_the_image() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  git -C "$d" tag v0.1.0 "$C0"
+  stub_image "$d" widget latest sha256:lat "$D3"
+  local i
+  for i in $(seq 1 51); do
+    _release_stub_git "$d" commit -q --allow-empty -m "extra $i" || return 1
+  done
+  local tip; tip="$(git -C "$d" rev-parse HEAD)"
+  local rc=0; resolve_in "$d" widget 'widget/**' "$tip" || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/stdout" ] && grep -qF "more than 50" "$d/stderr" \
+      && ! grep -q "no release candidate passed" "$d/stderr"; then
+    pass "a first-parent walk longer than the bound fails the image"
+  else
+    fail "expected a failure containing 'more than 50'; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_latest_passing_skips_every_other_candidate() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  with_passing_previous_release "$d"
+  stub_image "$d" other latest sha256:lat "$C0"
+  local rc=0; resolve_in "$d" other 'other/**' "$T" || rc=$?
+  if [ "$rc" -eq 0 ] && cmp -s "$d/stdout" <(printf 'sha256:lat\tlatest\n') && only_latest_was_queried "$d"; then
+    pass "a passing :latest makes no lookup for any sha- or version candidate"
+  else
+    fail "expected only :latest to be queried; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
+assert_non_latest_reasons_give_no_latest_or_dev_advice() {
+  local d; d="$(mktemp -d)"; make_release_repo "$d"; stub_install "$d"
+  # shellcheck disable=SC2034 # load_shas sets all seven fixture SHAs; each case reads what it needs
+  local C0 D1 M1 D3 F1 H1 T; load_shas "$d"
+  git -C "$d" tag v0.1.0 "$C0"
+  stub_image "$d" widget latest sha256:lat "$D3"
+  # :sha-T carries no annotation; :v0.1.0 is built on diverged history (D3).
+  stub_image "$d" widget "sha-${T:0:7}" sha256:noann -
+  stub_image "$d" widget v0.1.0 sha256:div "$D3"
+  local rc=0; resolve_in "$d" widget 'widget/**' "$T" || rc=$?
+  local t1 t2
+  t1="$(candidate_line "$d" "sha-${T:0:7}")"; t2="$(candidate_line "$d" v0.1.0)"
+  if [ "$rc" -eq 1 ] && grep -qF 'revision annotation' <<< "$t1" && grep -qF 'diverged history' <<< "$t2" \
+      && ! grep -qiE 'build_all|:latest|dev' <<< "$t1" \
+      && ! grep -qiE 'Re-publish|:latest|dev' <<< "$t2" && grep -qF 'hotfix_images=widget' <<< "$t2"; then
+    pass "no-annotation and diverged reasons for a non-latest candidate give no :latest or dev advice"
+  else
+    fail "expected neutral reasons; got $(run_summary "$d" "$rc")"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   # comm -23 over sorted lists. An earlier draft used a `while read` loop fed by
   # `grep -oE ... -P`, which mixes two incompatible matcher flags: the loop body
@@ -839,6 +977,13 @@ assert_a_git_tag_error_fails_instead_of_meaning_no_previous_release
 assert_a_passing_latest_never_looks_for_a_previous_release
 assert_a_descendant_reason_blames_dev_only_for_latest
 assert_a_source_drift_reason_says_push_to_dev_only_for_latest
+assert_a_main_built_hotfix_image_wins_over_the_previous_release
+assert_the_newest_passing_sha_candidate_wins
+assert_a_sha_candidate_with_a_different_revision_is_rejected
+assert_second_parent_commits_are_never_queried
+assert_a_walk_longer_than_the_bound_fails_the_image
+assert_latest_passing_skips_every_other_candidate
+assert_non_latest_reasons_give_no_latest_or_dev_advice
 assert_every_defined_case_is_invoked
 
 exit $FAIL

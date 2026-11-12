@@ -25,7 +25,8 @@
 // were ever the one missing while another platform's was present).
 //
 // The candidate chain: candidates() yields registry tags in priority order
-// (:latest, then the previous release's version tag), and
+// (:latest, then main's first-parent commits since the previous release as
+// sha-<c7> tags, then the previous release's version tag), and
 // evaluateCandidate() checks each one. Every outcome of that check is one of
 // two kinds, and a bare `catch` cannot tell them apart:
 //   - Reject the candidate, and try the next one. The tag does not exist
@@ -50,6 +51,10 @@ const REGISTRY = 'ghcr.io/evenfire-ai'
 const REVISION_ANNOTATION = 'org.opencontainers.image.revision'
 // A strict release tag. rc and other pre-release tags never match.
 const RELEASE_TAG_RE = /^v\d+\.\d+\.\d+$/
+// How many first-parent commits since the previous release are tried as
+// sha-<c7> candidates. A longer walk fails the image: it is a lot of registry
+// lookups for a release that should be cut from a much shorter line.
+const MAX_FIRST_PARENT_COMMITS = 50
 
 // An outcome that says nothing about the candidate being checked, so the
 // whole image fails instead of moving on to the next candidate. Messages are
@@ -140,19 +145,45 @@ function gitOutput(args) {
 // release that skipped a patch number.
 function previousRelease(tagSha) {
   const lines = text => text.split('\n').filter(Boolean)
-  const onTagCommit = new Set(lines(gitOutput(['tag', '--points-at', tagSha])))
+  let onTagCommit
+  let tags
+  try {
+    onTagCommit = new Set(lines(gitOutput(['tag', '--points-at', tagSha])))
+    tags = lines(gitOutput(['tag', '--merged', tagSha, '--list', 'v*']))
+  } catch (error) {
+    if (!(error instanceof ImageFailure)) throw error
+    throw new ImageFailure(`finding the previous release: ${error.message}`)
+  }
   let best = null
-  for (const tag of lines(gitOutput(['tag', '--merged', tagSha, '--list', 'v*']))) {
+  for (const tag of tags) {
     if (!RELEASE_TAG_RE.test(tag) || onTagCommit.has(tag)) continue
     if (best === null || compareVersions(tag.slice(1), best.slice(1)) > 0) best = tag
   }
   return best
 }
 
+// The commits on main's first-parent line after prev up to and including
+// tagSha, newest first. First-parent keeps the merged-in branch commits out:
+// build-publish tags a sha- image for each commit pushed to main, and a
+// dev->main merge's second parent was never pushed to main itself. More than
+// MAX_FIRST_PARENT_COMMITS fails the image.
+function firstParentCommits(prev, tagSha) {
+  const commits = gitOutput(['rev-list', '--first-parent', `${prev}..${tagSha}`])
+    .split('\n')
+    .filter(Boolean)
+  if (commits.length > MAX_FIRST_PARENT_COMMITS) {
+    throw new ImageFailure(
+      `more than ${MAX_FIRST_PARENT_COMMITS} commits on main's first-parent line between ${prev} ` +
+        `and ${tagSha}, so their sha- images are not all tried`
+    )
+  }
+  return commits
+}
+
 // Checks one candidate tag of one image against the release commit. Returns
 // { ok: true, digest } or { ok: false, reason }; throws ImageFailure when the
 // answer is an error rather than a verdict on this candidate.
-function evaluateCandidate({ image, tag, tagSha, sourcePaths }) {
+function evaluateCandidate({ image, tag, expectRevision, tagSha, sourcePaths }) {
   // Resolve the tag to an immutable digest ONCE, and read everything else
   // through the digest. A tag like :latest is re-pointed on every dev push,
   // so reading it twice -- once to verify, once to copy -- can verify one
@@ -167,8 +198,7 @@ function evaluateCandidate({ image, tag, tagSha, sourcePaths }) {
       // is cleared.
       reason +=
         `. Either ${image} was first published after ${tag}, or the ${tag} promotion failed ` +
-        `and left its git tag behind: delete a failed release tag and push the same version ` +
-        `again at the fixed commit.`
+        `and left its git tag behind: delete the ${tag} tag and push ${tag} again at the fixed commit.`
     }
     return { ok: false, reason }
   }
@@ -181,7 +211,19 @@ function evaluateCandidate({ image, tag, tagSha, sourcePaths }) {
         `${image}@${digest} carries no org.opencontainers.image.revision annotation, so there is no way ` +
         `to tell what it was built from. This usually means it is not a multi-arch index produced by ` +
         `build-publish.yml's merge step (a lone single-platform push has no index to annotate) or it ` +
-        `predates that step recording one -- re-publish via a build_all run so the merge step writes it.`,
+        `predates that step recording one -- ` +
+        (tag === 'latest'
+          ? `re-publish via a build_all run so the merge step writes it.`
+          : `so this candidate cannot be used.`),
+    }
+  }
+
+  // A sha-<c7> tag is only as trustworthy as the commit it names: the image
+  // must say it was built from exactly that commit.
+  if (expectRevision !== undefined && revision !== expectRevision) {
+    return {
+      ok: false,
+      reason: `${ref} was built from ${revision}, expected ${expectRevision}`,
     }
   }
 
@@ -238,8 +280,11 @@ function evaluateCandidate({ image, tag, tagSha, sourcePaths }) {
       reason:
         `the published image was built from ${revision}, which shares no ancestry with the ` +
         `release commit ${tagSha} -- they are on diverged history, so neither descends from the other. ` +
-        `Re-publish the image from a commit that is actually an ancestor of ${tagSha}, then cut the ` +
-        `release tag again.`,
+        (tag === 'latest'
+          ? `Re-publish the image from a commit that is actually an ancestor of ${tagSha}, then cut the ` +
+            `release tag again.`
+          : `Build ${image} at ${tagSha} on main with build-publish.yml hotfix_images=${image}, ` +
+            `then cut the release tag again.`),
     }
   }
 
@@ -272,10 +317,17 @@ function evaluateCandidate({ image, tag, tagSha, sourcePaths }) {
 // The release candidates for the release commit tagSha, best first. A
 // generator, so each candidate is produced only after every earlier one was
 // rejected: the previous release is looked up only once :latest has failed.
-function* candidates(tagSha) {
+// `found` is filled in as a side effect: found.previousRelease is the version
+// tag, or null when none is reachable, so a refusal can say so.
+function* candidates(tagSha, found) {
   yield { tag: 'latest' }
   const prev = previousRelease(tagSha)
-  if (prev !== null) yield { tag: prev }
+  found.previousRelease = prev
+  if (prev === null) return
+  for (const commit of firstParentCommits(prev, tagSha)) {
+    yield { tag: `sha-${commit.slice(0, 7)}`, expectRevision: commit }
+  }
+  yield { tag: prev }
 }
 
 function fail(message) {
@@ -291,11 +343,12 @@ function main() {
   if (!image || !tagSha) return fail('--image and --tag-sha are required')
 
   const rejected = []
+  const found = { previousRelease: undefined }
   // The candidate being checked, so an error names it. null between
   // candidates, when the error comes from producing the next one.
   let checking = null
   try {
-    for (const candidate of candidates(tagSha)) {
+    for (const candidate of candidates(tagSha, found)) {
       checking = candidate.tag
       const result = evaluateCandidate({ ...candidate, image, tagSha, sourcePaths })
       if (result.ok) {
@@ -321,6 +374,9 @@ function main() {
     [
       `${image}: no release candidate passed for ${tagSha}:`,
       ...rejected,
+      ...(found.previousRelease === null
+        ? [`  (no previous release reachable from ${tagSha}, so no fallback candidate was tried)`]
+        : []),
       `To release ${image}, build it at ${tagSha} on main with build-publish.yml ` +
         `hotfix_images=${image}, or for a dev→main release let dev's build-publish run first.`,
     ].join('\n')
