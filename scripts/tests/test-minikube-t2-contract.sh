@@ -917,6 +917,71 @@ if T2_PUBLIC_ROOT="$ENV_CASE_REPO" T2_PUBLIC_BASE_REF="$ENV_CASE_BASE" \
 fi
 grep -Fq 'credential assignment' "$tmp/env-content.err"
 
+# Env-style assignments whose name ends in a secret key word after a prefix
+# (`GCP_DB_PASSWORD=`, `..._COOKIE_SECRET=`, `..._SERVICE_TOKEN=`) are
+# credentials too. Literals are split so this script's own diff does not hold
+# them; hex values are built at run time.
+env_style_hex64="$(printf 'a1b2c3d4%.0s' 1 2 3 4 5 6 7 8)"
+env_style_reject() {
+  local name="$1" file="$2" line="$3"
+  env_template_case "style-reject-$name" "$file" "$line"
+  if T2_PUBLIC_ROOT="$ENV_CASE_REPO" T2_PUBLIC_BASE_REF="$ENV_CASE_BASE" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/env-style.err"; then
+    echo "FAIL: public boundary accepted the env-style credential case $name" >&2
+    exit 1
+  fi
+  if ! grep -Fq "$file: credential assignment" "$tmp/env-style.err"; then
+    echo "FAIL: env-style case $name was not reported as a credential assignment" >&2
+    cat "$tmp/env-style.err" >&2
+    exit 1
+  fi
+}
+env_style_accept() {
+  local name="$1" file="$2" line="$3"
+  env_template_case "style-accept-$name" "$file" "$line"
+  if ! T2_PUBLIC_ROOT="$ENV_CASE_REPO" T2_PUBLIC_BASE_REF="$ENV_CASE_BASE" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/env-style.out" 2>"$tmp/env-style.err"; then
+    echo "FAIL: public boundary rejected the env-style case $name" >&2
+    cat "$tmp/env-style.err" >&2
+    exit 1
+  fi
+  if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/env-style.out"; then
+    echo "FAIL: env-style case $name passed without PUBLIC_BOUNDARY_PASS" >&2
+    exit 1
+  fi
+}
+env_style_reject plain .env.dev.example 'GCP_DB_PASS''WORD=ProdCustomerPassword123'
+env_style_reject punctuation .env.dev.example 'GCP_DB_PASS''WORD=Pr0d!Customer#Pass123'
+env_style_reject quoted-spaces .env.dev.example 'GCP_DB_PASS''WORD="Prod Customer Pass 123"'
+env_style_reject cookie-hex .env.dev.example "RPC_PROXY_DESKTOP_COOKIE_SEC""RET=$env_style_hex64"
+env_style_reject quoted-token .env.dev.example "RPC_PROXY_CONTROL_API_SERVICE_TOK""EN=\"$env_style_hex64\""
+env_style_reject base64 .env.dev.example 'FOO_API_K''EY=abc+/def==12'
+env_style_reject spaced .env.dev.example 'GCP_DB_PASS''WORD = ProdCustomerPassword123'
+env_style_reject nested-template rpc-proxy/.env.example "RPC_PROXY_CONTROL_API_SERVICE_TOK""EN=$env_style_hex64"
+env_style_reject test-dir-template tests/e2e/.env.example "E2E_SERVICE_TOK""EN=$env_style_hex64"
+env_style_reject non-js-test-suffix svc/src/a.test.py 'FOO_TOK''EN=abcdefgh12345678'
+env_style_reject pass .env.dev.example 'IMAP_PA''SS=RealMailPassword1'
+env_style_reject passwd .env.dev.example 'SMTP_PASS''WD=RealMailPassword1'
+env_style_reject tokens .env.dev.example 'CONTROL_API_INTERNAL_SERVICE_TOK''ENS=rpc-proxy=abcdefgh12345678'
+env_style_reject encryption-key .env.dev.example "CONTROL_API_OAUTH_ENCRYPTION_K""EY=$env_style_hex64"
+env_style_reject signing-key .env.dev.example "CLERUM_WRC_SIGNING_K""EY=$env_style_hex64"
+env_style_accept replace-with .env.dev.example 'FOO_TOK''EN=replace-with-real-token'
+env_style_accept empty .env.dev.example 'FOO_TOK''EN='
+env_style_accept file-suffix .env.dev.example 'FOO_TOKEN_FILE=/var/run/secrets/service/token'
+env_style_accept name-suffix .env.dev.example 'FOO_SECRET_NAME=rpc-proxy-secrets'
+env_style_accept ttl-suffix .env.dev.example 'FOO_TOKEN_TTL_MS=3600000000'
+env_style_accept hash-suffix .env.dev.example 'ADMIN_PASSWORD_HASH=$2b$12$abcdefghijklmnopqrstuv'
+env_style_accept dev-token .env.dev.example 'RPC_PROXY_CONTROL_API_SERVICE_TOK''EN=dev-rpc-proxy-token'
+env_style_accept variable .env.dev.example 'FOO_SEC''RET=${OTHER}'
+env_style_accept angle-placeholder .env.dev.example 'FOO_TOK''EN=<your-token-here>'
+env_style_accept python-code svc/app/settings.py 'ADMIN_TOK''EN = os.environ["ADMIN_TOKEN"]'
+env_style_accept shell-fixture scripts/tests/x.sh 'T2_LOCK_TOK''EN=parent-lease-token'
+env_style_accept signing-key-id .env.dev.example 'FOO_SIGNING_KEY_ID=key-2026-11-primary'
+env_style_accept tokens-file .env.dev.example 'FOO_TOKENS_FILE=/var/run/secrets/service/tokens'
+env_style_accept pass-through .env.dev.example 'FOO_PASS_THROUGH=enabled-for-all'
+env_style_accept encryption-key-placeholder .env.dev.example 'FOO_ENCRYPTION_K''EY=replace-with-a-real-key'
+env_style_accept short-tokens .env.dev.example 'LLM_MAX_TOKENS=4096'
+
 # A logger test asserts the redaction marker under a secret-named key; that is
 # not a credential. A real value, or one that merely contains the marker, is.
 marker_repo="$tmp/public-marker-repo"
