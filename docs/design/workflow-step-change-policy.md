@@ -66,13 +66,21 @@ explicit, justified exception list.
 
 - **Precedence:** recipe-level setting where one exists, then operator environment on the WRC
   Deployment, then the default.
-- Operator environment reaches recipe pods only through the reviewed allowlist in
-  `workflow-recipes/src/workflow/podFactory.ts:78-83`. A flag is usable by operators only once
-  it is on that list, so the allowlist change ships before the behaviour it controls.
+- WRC forwards a variable of its own environment to a recipe pod under the same name only when
+  the variable is on the allowlist for that pod type. Three pod types have such a list:
+  `MCP_HOST_ENV_PASSTHROUGH` (`workflow-recipes/src/workflow/podFactory.ts:78-83`),
+  `COORDINATOR_ENV_PASSTHROUGH` (`workflow-recipes/src/workflow/podFactory.ts:90-93`) and
+  `SNIPPET_RUNNER_ENV_PASSTHROUGH` (`workflow-recipes/src/workflow/podFactory.ts:99-102`). A flag
+  read by mcp-host, where agentic steps run, must be on `MCP_HOST_ENV_PASSTHROUGH`. A flag is
+  usable by operators only once it is on the list of the pod that reads it, so the allowlist
+  change ships before the behaviour it controls.
 - The effective execution path is recorded with the step result, so an outcome can be
   attributed to the code that produced it.
 - Each flag is introduced with its removal criterion.
 - New behaviour starts off, with one exception described below.
+
+The flags in the table are proposed. None of the four names exists in the code at the `dev`
+commit cited above; what this section says about them describes intended behaviour.
 
 | Flag                                          | Values           | Default    | Purpose                                                                                |
 | --------------------------------------------- | ---------------- | ---------- | -------------------------------------------------------------------------------------- |
@@ -81,8 +89,8 @@ explicit, justified exception list.
 | `CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES` | bytes            | `16777216` | Per-step cap on persisted bytes                                                        |
 | `CLERUM_WORKFLOW_STEP_ENGINE`                 | `legacy`, `core` | `legacy`   | Reserved: selects the step execution loop                                              |
 
-**Step spillover is on by default.** It is the exception to "new behaviour starts off", so that
-every recipe with an mcp-host gets it without configuration. That is acceptable because:
+**Step spillover would be on by default.** It is the exception to "new behaviour starts off", so
+that every recipe with an mcp-host gets it without configuration. That is acceptable because:
 
 - a step whose tool results all stay under the threshold is unchanged: same prompts, same
   offered tools, nothing written;
@@ -92,7 +100,7 @@ every recipe with an mcp-host gets it without configuration. That is acceptable 
 - the switch restores the previous behaviour without a code change.
 
 It is a separate variable from the agent's `CLERUM_TOOL_SPILLOVER_ENABLED` because threshold and
-retention differ. The step threshold is 32 KiB against the agent's 8 KiB
+retention differ. The proposed step threshold is 32 KiB against the agent's 8 KiB
 (`mcp-host/src/config.ts:1127-1128`): the step loop does not compact context, so a low threshold
 would turn ordinary results into extra read iterations. When steps run on a loop with context
 compaction, the step threshold should be revisited and converged with the agent's.
