@@ -697,6 +697,24 @@ export const llmAllowlistConfigMapWriteFailuresTotal = getOrCreateCounter({
   labelNames: ['phase'] as const as Array<'phase'>, // mutation | boot | sync | sync_retry
 })
 
+// ─── LLM catalog prune (stale catalog models nobody uses) ─────────────────
+// One increment per prune phase of a catalog sync run. `aborted` means a LIST
+// or a query failed and the run stopped with what it had already pruned; a
+// steady rate of it leaves stale models enabled. `skipped` is a run that could
+// not decide (vendored or implausible catalog).
+export const llmCatalogPruneRunsTotal = getOrCreateCounter({
+  name: 'clerum_llm_catalog_prune_runs_total',
+  help: 'Count of catalog prune runs, labelled by outcome.',
+  labelNames: ['outcome'] as const as Array<'outcome'>, // completed | aborted | skipped
+})
+
+// Models the prune disabled (each one also has an `auto_disable` audit row).
+export const llmCatalogPrunedModelsTotal = getOrCreateCounter({
+  name: 'clerum_llm_catalog_pruned_models_total',
+  help: 'Count of stale catalog models disabled by the catalog prune.',
+  labelNames: [] as string[],
+})
+
 export type PasswordAdmissionDenialReason =
   | 'source_rate'
   | 'identifier_attempts'

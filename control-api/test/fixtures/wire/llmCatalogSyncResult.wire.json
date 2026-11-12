@@ -22,7 +22,9 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 48
+          "pricesLoaded": 48,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         },
         "claude": {
           "inserted": 17,
@@ -36,7 +38,9 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 17
+          "pricesLoaded": 17,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         },
         "groq": {
           "inserted": 4,
@@ -50,10 +54,14 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 3
+          "pricesLoaded": 3,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         }
       },
-      "decidable": true
+      "decidable": true,
+      "reEnabled": 0,
+      "reEnableDeferredByCap": 0
     },
     "decidable_capped": {
       "source": "live",
@@ -77,7 +85,9 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 14
+          "pricesLoaded": 14,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         },
         "claude": {
           "inserted": 1,
@@ -91,7 +101,9 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 1
+          "pricesLoaded": 1,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         },
         "groq": {
           "inserted": 4,
@@ -105,10 +117,14 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 3
+          "pricesLoaded": 3,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         }
       },
-      "decidable": true
+      "decidable": true,
+      "reEnabled": 0,
+      "reEnableDeferredByCap": 0
     },
     "decidable_none_enabled": {
       "source": "live",
@@ -132,10 +148,14 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 3
+          "pricesLoaded": 3,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         }
       },
-      "decidable": true
+      "decidable": true,
+      "reEnabled": 0,
+      "reEnableDeferredByCap": 0
     },
     "undecidable_vendored": {
       "source": "vendored",
@@ -159,7 +179,9 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 0
+          "pricesLoaded": 0,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         },
         "claude": {
           "inserted": 0,
@@ -173,7 +195,9 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 0
+          "pricesLoaded": 0,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         },
         "groq": {
           "inserted": 4,
@@ -187,10 +211,14 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 3
+          "pricesLoaded": 3,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         }
       },
-      "decidable": false
+      "decidable": false,
+      "reEnabled": 0,
+      "reEnableDeferredByCap": 0
     },
     "undecidable_implausible": {
       "source": "live",
@@ -214,7 +242,9 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 0
+          "pricesLoaded": 0,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         },
         "claude": {
           "inserted": 0,
@@ -228,7 +258,9 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 0
+          "pricesLoaded": 0,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         },
         "groq": {
           "inserted": 4,
@@ -242,10 +274,14 @@
             "not_runnable": 0
           },
           "dismissed": 0,
-          "pricesLoaded": 3
+          "pricesLoaded": 3,
+          "reEnabled": 0,
+          "reEnableDeferredByCap": 0
         }
       },
-      "decidable": false
+      "decidable": false,
+      "reEnabled": 0,
+      "reEnableDeferredByCap": 0
     }
   }
 }

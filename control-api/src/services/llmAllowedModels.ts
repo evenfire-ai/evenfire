@@ -284,6 +284,22 @@ async function writeAudit(
   )
 }
 
+/** The audit actor of every `enabled` change the catalog sync makes on its own. */
+export const CATALOG_SYNC_AUDIT_ACTOR = 'system:catalog-sync'
+
+/**
+ * Audit row for an `enabled` change the catalog sync decided (the prune turning
+ * a model off, or the sync turning a pruned one back on). Written in the same
+ * transaction as the change, and only when the change's UPDATE reported the row,
+ * so a run that lost a race leaves no trace of something it did not do.
+ */
+export async function writeCatalogSyncAudit(
+  db: DbClient,
+  entry: { action: 'auto_disable' | 'auto_enable'; provider: string; model: string }
+): Promise<void> {
+  await writeAudit(db, { actor: CATALOG_SYNC_AUDIT_ACTOR, ...entry })
+}
+
 /** All rows (enabled + disabled) so UI pickers can flag disabled entries. */
 export async function listAllowedModels(db: DbClient = pool): Promise<LlmAllowedModel[]> {
   const result = await db.query(

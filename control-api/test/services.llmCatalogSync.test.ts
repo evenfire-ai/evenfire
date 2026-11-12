@@ -324,7 +324,10 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     const sql = updates[0].sql
     expect(sql).toMatch(/COALESCE\(t\.context_window_tokens/)
     expect(sql).toMatch(/COALESCE\(t\.display_name/)
-    expect(sql).toMatch(/stale = false/)
+    // `stale` is cleared only by a live run, and never on a row the prune disabled.
+    expect(sql).toMatch(
+      /stale = CASE\s+WHEN NOT \$6::boolean THEN t\.stale\s+WHEN t\.auto_disabled_at IS NOT NULL THEN t\.stale\s+ELSE false\s+END/
+    )
     // The serialized columns are CASE-guarded to disabled rows only, so an
     // ENABLED discovery row (already in the CM) is never mutated → no CM drift.
     expect(sql).toMatch(/CASE\s+WHEN t\.enabled THEN t\.context_window_tokens/)

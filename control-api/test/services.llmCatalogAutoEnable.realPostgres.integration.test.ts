@@ -1221,6 +1221,8 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
         ineligible: { no_text_output: 0, no_tool_call: 0, status: 0, not_runnable: 0 },
         dismissed: 0,
         pricesLoaded: 0,
+        reEnabled: 0,
+        reEnableDeferredByCap: 0,
       }
       expect(result.providerCounts?.claude).toEqual(expected)
       expect((await mod.getLastCatalogSyncRun())?.providerCounts?.claude).toEqual(expected)
@@ -1318,6 +1320,8 @@ describeRealPostgres('catalog sync auto-enable on insert (real PostgreSQL)', () 
         ineligible: rejections,
         dismissed: dismissedHere,
         pricesLoaded: discovered.filter(m => m.cost !== null).length,
+        reEnabled: 0,
+        reEnableDeferredByCap: 0,
       })
     }
     // The status endpoint's source reports them too.

@@ -26,7 +26,10 @@ import './realPostgres.requirement.ts'
 // The strict fake DB is only a valid substrate for the model-based test if it
 // leaves the tables exactly as Postgres does. This runs one scripted sequence —
 // sync runs (live, capped, vendored, implausible), admin create / disable /
-// rename / delete, conflicting creates, policy toggles and price creates —
+// rename / delete, conflicting creates, policy toggles and price creates, and
+// each sync's prune phase (with no consumers anywhere and no grace, so every
+// stale catalog-managed model is pruned, then re-enabled when it is listed
+// again) —
 // against the fake and against real Postgres, through the same production
 // functions, and requires the same observable state after every step. Both
 // start from an installation upgraded from a release that seeded a default
@@ -112,6 +115,9 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
     listProviderCatalogPolicy: typeof import('../src/services/llmProviderCatalogSettings.js').listProviderCatalogPolicy
     withTransaction: typeof import('../src/db.js').withTransaction
     Writer: typeof import('../src/services/llmAllowedModelsConfigMap.js').LlmAllowedModelsConfigMapWriter
+    pruneStaleCatalogModels: typeof import('../src/services/llmCatalogPrune.js').pruneStaleCatalogModels
+    modelConsumerSourcesFromGateway: typeof import('../src/services/llmModelConsumers.js').modelConsumerSourcesFromGateway
+    gateway: InstanceType<typeof import('./mockGateway.js').MockGateway>
   }
 
   beforeAll(async () => {
@@ -138,6 +144,9 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
     const pricesMod = await import('../src/services/llmPrices.js')
     const policyMod = await import('../src/services/llmProviderCatalogSettings.js')
     const cmMod = await import('../src/services/llmAllowedModelsConfigMap.js')
+    const pruneMod = await import('../src/services/llmCatalogPrune.js')
+    const consumersMod = await import('../src/services/llmModelConsumers.js')
+    const { MockGateway } = await import('./mockGateway.js')
     // Imported only now: the helper loads db.js, whose pool must see the URL above.
     const { makeFakeDb } = await import('./helpers/llmCatalogSyncFakeDb.js')
     mod = {
@@ -152,12 +161,17 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
       listProviderCatalogPolicy: policyMod.listProviderCatalogPolicy,
       withTransaction: dbMod.withTransaction,
       Writer: cmMod.LlmAllowedModelsConfigMapWriter,
+      pruneStaleCatalogModels: pruneMod.pruneStaleCatalogModels,
+      modelConsumerSourcesFromGateway: consumersMod.modelConsumerSourcesFromGateway,
+      // An empty cluster: no Host or recipe uses any model.
+      gateway: new MockGateway(),
     }
 
     // The fake starts from the state the real migrations leave behind.
     const seeded = await corePool.query(
       `SELECT provider, model, enabled, source, stale, context_window_tokens,
-              display_name, vendor, image_input, catalog_status, enabled_managed_by
+              display_name, vendor, image_input, catalog_status, enabled_managed_by,
+              auto_disabled_at, stale_since, stale_episode, deprecated_episode
          FROM llm_allowed_models`
     )
     const seededPrices = await corePool.query(
@@ -225,6 +239,7 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
         dismissed: [...fake.dismissed],
         settings: fake.settings as unknown as Rows,
         audit: fake.audit,
+        pruneRuns: fake.pruneRuns as unknown as Rows,
       }
     }
     const q = (sql: string) => corePool.query(sql).then(r => r.rows as Rows)
@@ -236,6 +251,7 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
       ),
       settings: await q(`SELECT * FROM llm_provider_catalog_settings`),
       audit: await q(`SELECT * FROM llm_allowed_models_audit`),
+      pruneRuns: await q(`SELECT * FROM llm_catalog_prune_runs ORDER BY ran_at, id`),
     }
   }
 
@@ -262,7 +278,10 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
               'vendor',
               'catalog_status',
               'enabled_managed_by',
+              'stale_episode',
+              'deprecated_episode',
             ]),
+            in_stale_episode: r.stale_since !== null,
             auto_disabled: r.auto_disabled_at !== null,
             acknowledged: r.attention_ack !== null,
             image_input: canonical(r.image_input),
@@ -291,6 +310,16 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
         .map(r => pick(r, ['provider', 'auto_enable', 'updated_by']))
         .sort((a, b) => byCodeUnits(String(a.provider), String(b.provider))),
       audit: t.audit.map(r => `${r.actor} ${r.action} ${r.provider}/${r.model}`).sort(byCodeUnits),
+      pruneRuns: t.pruneRuns.map(r =>
+        pick(r, [
+          'candidates',
+          'prefiltered',
+          'examined_locked',
+          'pruned',
+          'aborted',
+          'abort_reason',
+        ])
+      ),
       // What the GET and the sync derive from the stored rows, NULL included.
       policy: (await mod.listProviderCatalogPolicy(side.pool)).map(
         ({ updated_at: _at, ...rest }) => rest
@@ -360,9 +389,28 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
         minPlausibleLiveTotal: opts.implausible ? 1_000_000 : 1,
         autoEnableMaxPerProviderPerRun: opts.maxPerProvider ?? 1_000,
         autoEnableMaxPerRun: opts.maxPerRun ?? 1_000,
+        prune: run =>
+          mod.pruneStaleCatalogModels(run, {
+            consumerSources: db =>
+              mod.modelConsumerSourcesFromGateway(
+                mod.gateway,
+                { hostNamespaces: ['mcp-host'], recipeNamespaces: ['sandbox-recipes'] },
+                db
+              ),
+            graceMs: 0,
+            maxPerRun: 1_000,
+            txPool: side.pool,
+          }),
       },
       side.connector
     )
+  }
+
+  /** Rows the prune disabled and that still carry its token (Postgres side). */
+  async function pruned(provider: string): Promise<string[]> {
+    return (await state(pg)).models
+      .filter(r => r.provider === provider && r.auto_disabled === true)
+      .map(r => String(r.model))
   }
 
   async function idOf(side: Side, provider: string, model: string): Promise<string> {
@@ -527,9 +575,44 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
     await both('vendored', side => sync(side, snapshot, { source: 'vendored' }))
     await both('implausible live', side => sync(side, full, { implausible: true }))
 
+    // The claude entries removed here include rows the capped runs enabled
+    // (catalog-managed, no consumers): the prune of this run disables them.
+    const enabledClaude = await enabledDiscovery('claude')
     const shrunk = withoutFirst(withoutFirst(full, 'claude', 3), 'groq', 2)
-    await both('live, some entries gone', side => sync(side, shrunk))
-    await both('live again (idempotent)', side => sync(side, shrunk))
+    const goneEnabled = mapCatalogToProviders(full)
+      .claude!.slice(0, 3)
+      .map(m => m.model_id)
+      .filter(m => enabledClaude.includes(m))
+    const removed = new Set(goneEnabled)
+    for (const m of enabledClaude.filter(m => !removed.has(m)).slice(0, 2)) {
+      removed.add(m)
+    }
+    const shrunkEnabled = {
+      ...shrunk,
+      [PROVIDER_KEY_MAP.claude]: {
+        ...shrunk[PROVIDER_KEY_MAP.claude],
+        models: Object.fromEntries(
+          Object.entries(shrunk[PROVIDER_KEY_MAP.claude].models).filter(
+            ([rawId]) =>
+              !mapCatalogToProviders({
+                [PROVIDER_KEY_MAP.claude]: {
+                  ...shrunk[PROVIDER_KEY_MAP.claude],
+                  models: { [rawId]: shrunk[PROVIDER_KEY_MAP.claude].models[rawId] },
+                },
+              }).claude!.some(m => removed.has(m.model_id))
+          )
+        ),
+      },
+    }
+    await both('live, some entries gone', side => sync(side, shrunkEnabled))
+    expect((await pruned('claude')).length).toBeGreaterThanOrEqual(2)
+    await both('live again (idempotent)', side => sync(side, shrunkEnabled))
+    // Neither keeps nor clears the prune's token, nor `stale`.
+    await both('vendored after the prune', side => sync(side, snapshot, { source: 'vendored' }))
+    await both('implausible live listing the pruned rows', side =>
+      sync(side, full, { implausible: true })
+    )
+    expect((await pruned('claude')).length).toBeGreaterThanOrEqual(2)
 
     // Reset both overrides (NULL), and one provider that never had a row.
     await both('reset deepseek to default', side =>
@@ -541,7 +624,13 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
     await both('reset openrouter (no override yet)', side =>
       mod.setProviderAutoEnable('openrouter', null, 'admin', side.pool)
     )
+    // One re-enable fits the cap; the other pruned rows keep their token.
+    await both('live relisting the pruned rows, capped', side =>
+      sync(side, full, { maxPerProvider: 1, maxPerRun: 1 })
+    )
+    expect((await pruned('claude')).length).toBeGreaterThanOrEqual(1)
     await both('live with the deleted and renamed pairs back', side => sync(side, full))
+    expect(await pruned('claude')).toEqual([])
     await both('override again after a reset', side =>
       mod.setProviderAutoEnable('groq', true, 'admin', side.pool)
     )

@@ -1,6 +1,5 @@
 import { type Request, type Response, Router } from 'express'
 import { z } from 'zod'
-import { config } from '../../config.js'
 import {
   type DbTransactionClient,
   advisoryLockModelName,
@@ -29,12 +28,16 @@ import {
   updateLlmAllowedModelSchema,
 } from '../../services/llmAllowedModels.js'
 import { computeAttention } from '../../services/llmAttention.js'
+import { catalogPruneFromGateway } from '../../services/llmCatalogPrune.js'
 import {
   CatalogPublishAfterCommitError,
   getLastCatalogSyncRun,
   syncDiscoveredModels,
 } from '../../services/llmCatalogSync.js'
-import { modelConsumerSourcesFromGateway } from '../../services/llmModelConsumers.js'
+import {
+  consumerNamespacesFromConfig,
+  modelConsumerSourcesFromGateway,
+} from '../../services/llmModelConsumers.js'
 import {
   type ModelImpact,
   computeModelImpact,
@@ -138,14 +141,12 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
     }
   }
 
-  // The exact set of namespaces a Host can occupy. Mirrors the canonical host
-  // fan-out (`ResourceService.listNamespacesForPlural('hosts')` =
-  // `config.hostsNamespace` + the control-api default namespace); every admin
-  // write pins Hosts to `config.hostsNamespace` via `enforceNamespace`, so this
-  // is the full universe. Passed explicitly (not the `'*'` sentinel) so the
-  // impact enumeration LISTs each namespace fail-loud instead of swallowing
-  // per-namespace LIST errors — see llmModelImpact.ts.
-  const hostNamespaces = Array.from(new Set([config.hostsNamespace, config.namespace]))
+  // The exact set of namespaces a Host or a WorkflowRecipe can occupy (see
+  // `consumerNamespacesFromConfig`), passed explicitly (not the `'*'` sentinel)
+  // so the impact enumeration LISTs each namespace fail-loud instead of
+  // swallowing per-namespace LIST errors — see llmModelImpact.ts.
+  const consumerNamespaces = consumerNamespacesFromConfig()
+  const { hostNamespaces } = consumerNamespaces
 
   // Live references to a `(provider, model)` pair, enumerated from the real
   // producers (K8s Host LIST + grant SQL). The `?force`/attention seam shares
@@ -153,12 +154,11 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   const impactSources = modelImpactSourcesFromGateway(gateway, hostNamespaces)
 
   // Every consumer of a pair (the impact references plus prompt targets,
-  // WorkflowRecipes and all-models Hosts), for the attention feed. Recipes
-  // live only in the sandbox namespace, where every recipe write places them.
-  const consumerSources = modelConsumerSourcesFromGateway(gateway, {
-    hostNamespaces,
-    recipeNamespaces: [config.sandboxNamespace],
-  })
+  // WorkflowRecipes and all-models Hosts), for the attention feed.
+  const consumerSources = modelConsumerSourcesFromGateway(gateway, consumerNamespaces)
+
+  // The on-demand sync runs the same prune as the cron, so both behave alike.
+  const catalogPrune = catalogPruneFromGateway(gateway)
 
   // Availability-reduction gate (Fase 3), now SERIALIZED (R1-H3 fase 1). A DELETE
   // (always), a PUT that flips `enabled` true→false, or a PUT that RENAMES an
@@ -291,7 +291,10 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
     asyncHandler(async (_req: Request, res: Response) => {
       let result: Awaited<ReturnType<typeof syncDiscoveredModels>>
       try {
-        result = await syncDiscoveredModels({ materializer: gateway.llmAllowedModelsConfigMap() })
+        result = await syncDiscoveredModels({
+          materializer: gateway.llmAllowedModelsConfigMap(),
+          prune: catalogPrune,
+        })
       } catch (err) {
         // The response maps the publish failure itself, as before the sync
         // wrapped it to tell its re-running callers that the rows committed.

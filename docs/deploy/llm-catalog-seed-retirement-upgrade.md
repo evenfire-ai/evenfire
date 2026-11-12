@@ -49,9 +49,16 @@ as they are; on a disabled one the sync fills them from the catalog if they are
 empty. From the first live sync on,
 the sync records when it last saw them, marks them stale if they leave the
 catalog, and records the catalog's lifecycle status. Expect new
-`/admin/attention` items after that first run: enabled models the catalog
+`/admin/attention` items after that first run, but only for models somebody
+uses (a Host, a grant or a WorkflowRecipe names them; for a stale model, also a
+Host without a model subset of the same provider): enabled models the catalog
 calls deprecated, and enabled catalog models that went stale. They are
-warnings. Nothing is disabled automatically.
+warnings. These 28 pairs are never disabled automatically: the upgrade marks
+them operator-managed. Catalog-managed models (the ones the sync inserted) that
+stay stale for longer than `LLM_CATALOG_PRUNE_STALE_GRACE_MS` (default 7 days)
+with no consumer are disabled by the sync (audited as `auto_disable`, actor
+`system:catalog-sync`), and enabled again if the catalog lists them later; see
+[the model allowlist](llm-providers.md#5-the-model-allowlist).
 
 The seeded pairs models.dev does not list (for example `zai/glm-5.1` or the
 Bedrock Claude ids) stay `manual`, and the sync leaves them alone.

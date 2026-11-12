@@ -29,6 +29,7 @@
  * per candidate, bound to its transaction. Within one call every namespace is
  * LISTed at most once whatever the caller passes.
  */
+import { config } from '../config.js'
 import type { DbClient } from '../db.js'
 import { enumerateHostModelReferences } from '../routes/admin/hostModelReferences.js'
 import { isPlainObject } from '../utils/isPlainObject.js'
@@ -71,8 +72,26 @@ export interface ModelConsumers {
   recipes: ObjectRef[]
 }
 
-interface ConsumerGateway {
+export interface ConsumerGateway {
   listResource: (plural: 'hosts' | 'workflowrecipes', namespace?: string) => Promise<unknown[]>
+}
+
+/**
+ * Where consumers live. Hosts: the canonical host fan-out
+ * (`config.hostsNamespace` + the control-api namespace); every admin write pins
+ * Hosts to `config.hostsNamespace`, so this is the full universe. Recipes: only
+ * the sandbox namespace, where every recipe write places them. Listed
+ * explicitly, never through the `'*'` sentinel, so each namespace's LIST fails
+ * loud. The attention feed and the prune read this one definition.
+ */
+export function consumerNamespacesFromConfig(): {
+  hostNamespaces: string[]
+  recipeNamespaces: string[]
+} {
+  return {
+    hostNamespaces: Array.from(new Set([config.hostsNamespace, config.namespace])),
+    recipeNamespaces: [config.sandboxNamespace],
+  }
 }
 
 /**

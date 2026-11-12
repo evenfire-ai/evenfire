@@ -78,6 +78,12 @@ provider order of `PROVIDER_IDS`, so the providers further down wait for the
 ones ahead. See
 [the model allowlist](../deploy/llm-providers.md#5-the-model-allowlist).
 
+After each live, plausible run the sync disables catalog-managed models that
+have been stale for longer than `LLM_CATALOG_PRUNE_STALE_GRACE_MS` (default
+7 days, in milliseconds, at least 1 hour) and that no Host, grant or
+WorkflowRecipe uses, at most `LLM_CATALOG_PRUNE_MAX_PER_RUN` per run (default
+50, 1–1000).
+
 Every replica syncs once at start: as the cron's first tick, or, with the cron
 off, on its own unless `LLM_CATALOG_BOOT_SYNC_ENABLED=false` (code default
 `true`; only `true` or `false`). A boot sync that got no live, plausible catalog,
