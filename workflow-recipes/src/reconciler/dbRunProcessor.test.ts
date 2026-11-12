@@ -6,6 +6,7 @@ import {
   type ChildRecipeCreator,
   type DbRunProcessor,
   type DbRunRow,
+  type RunningBoundaryOutcome,
   type WorkflowRunAuthorityBinding,
   createDbRunProcessor,
   hasCompletedAllDeclaredSteps,
@@ -1795,6 +1796,65 @@ describe('createDbRunProcessor', () => {
         false
       )
       expect(tripwire.openTransactions).toBe(0)
+    }
+  )
+
+  // Each early return of the locked boundary step ends its transaction before
+  // the client goes back to the pool (`releasedInTransaction` stays 0).
+  const BOUNDARY_TRANSACTION_ENDINGS: ReadonlyArray<
+    readonly [string, Partial<DbRunRow> | null, 'COMMIT' | 'ROLLBACK', RunningBoundaryOutcome]
+  > = [
+    ['the locked row is gone', null, 'ROLLBACK', { outcome: 'not_running' }],
+    [
+      'the locked row is already paused',
+      { phase: 'AuthorizationPaused', failure_reason: 'workflow_authority_denied' },
+      'ROLLBACK',
+      { outcome: 'paused', failureReason: 'workflow_authority_denied' },
+    ],
+    [
+      'the checkpoint allows the locked run',
+      { phase: 'Running' },
+      'COMMIT',
+      { outcome: 'allowed' },
+    ],
+  ]
+
+  it.each(BOUNDARY_TRANSACTION_ENDINGS)(
+    'ends the boundary transaction before release when %s',
+    async (_label, lockedOverrides, closing, expected) => {
+      const observed = runWithBinding('binding-1', { phase: 'Running', failure_reason: null })
+      const locked = lockedOverrides ? runWithBinding('binding-1', lockedOverrides) : null
+      const client = makeClient(async sql => {
+        if (LOCKED_RUN_READ_SQL.test(sql)) {
+          return locked ? { rows: [locked], rowCount: 1 } : { rows: [], rowCount: 0 }
+        }
+        if (RUN_READ_SQL.test(sql)) return { rows: [observed], rowCount: 1 }
+        return { rows: [], rowCount: 1 }
+      })
+      const tripwire = createTransactionTripwire()
+      const checkpointAuthority = vi.fn(tripwire.guard(async (_run: DbRunRow) => {}, 'checkpoint'))
+      const proc = spawn({
+        instanceId: 'wrc-1',
+        pool: tripwire.pool(client),
+        runPollMs: 30_000,
+        checkpointAuthority,
+        createChildRecipe: vi.fn(),
+        logger: silentLogger(),
+      })
+
+      await expect(proc.checkpointRunningBoundary(observed.run_id)).resolves.toEqual(expected)
+
+      // Witness: the checkpoint ran, the locked re-read ran, and exactly one
+      // statement ended the transaction.
+      expect(checkpointAuthority).toHaveBeenCalledOnce()
+      expect(client.calls.some(call => LOCKED_RUN_READ_SQL.test(call.sql))).toBe(true)
+      expect(
+        client.calls.filter(call => /^(COMMIT|ROLLBACK)$/i.test(call.sql)).map(call => call.sql)
+      ).toEqual([closing])
+      expect(tripwire.violations).toEqual([])
+      expect(tripwire.checkouts).toBe(2)
+      expect(tripwire.checkedOut).toBe(0)
+      expect(tripwire.releasedInTransaction).toBe(0)
     }
   )
 

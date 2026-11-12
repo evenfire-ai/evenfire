@@ -652,7 +652,6 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       const run = selectRes.rows[0]
       if (!run || run.phase !== 'Pending') {
         await client.query('ROLLBACK')
-        inTransaction = false
         return
       }
       if (!sameAuthorityBinding(observed, run)) {
@@ -694,7 +693,6 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         // child instead of materializing a duplicate execution.
         log.warn('pending claim lost race', { run_id: run.run_id })
         await client.query('ROLLBACK')
-        inTransaction = false
         return
       }
       await client.query('COMMIT')
@@ -924,13 +922,11 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       const run = selected.rows[0]
       if (!run) {
         await client.query('ROLLBACK')
-        inTransaction = false
         return { outcome: 'not_running' }
       }
       const lockedPhaseOutcome = boundaryPhaseOutcome(run)
       if (lockedPhaseOutcome) {
         await client.query('ROLLBACK')
-        inTransaction = false
         return lockedPhaseOutcome
       }
       if (!sameAuthorityBinding(observed, run)) {
@@ -944,7 +940,6 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
 
       if (!failureReason) {
         await client.query('COMMIT')
-        inTransaction = false
         return { outcome: 'allowed' }
       }
 

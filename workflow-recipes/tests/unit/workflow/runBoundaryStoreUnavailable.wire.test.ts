@@ -64,6 +64,11 @@ async function captureConnectionRefused(): Promise<Error> {
 
 function mergePatch(target: Record<string, unknown>, patch: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(patch)) {
+    // The code under test never sends these keys; fail instead of writing
+    // through an object prototype.
+    if (key === '__proto__' || key === 'constructor') {
+      throw new Error(`unexpected merge-patch key ${key}`)
+    }
     const current = target[key]
     if (
       value !== null &&
