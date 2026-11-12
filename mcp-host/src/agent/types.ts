@@ -89,6 +89,14 @@ export interface AgentConfig {
 }
 
 /**
+ * Default lifetime of an unanswered tool approval: 7 days. On expiry the
+ * request is auto-denied and its session is released. channel-reader keeps
+ * the provider-side approval answerable for the same default, read from the
+ * same CLERUM_APPROVAL_TIMEOUT variable.
+ */
+export const DEFAULT_APPROVAL_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000
+
+/**
  * Default agent configuration.
  */
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
@@ -96,7 +104,7 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   maxToolCallsPerTask: 1000,
   autoStart: true,
   taskDelay: 3, // 3ms minimum between task dispatches
-  approvalTimeout: 0, // 0 = no in-memory auto-deny; the request stays available until resolved. Override via CLERUM_APPROVAL_TIMEOUT
+  approvalTimeout: DEFAULT_APPROVAL_TIMEOUT_MS, // Override via CLERUM_APPROVAL_TIMEOUT; 0 disables the auto-deny
 }
 
 /**

@@ -44,6 +44,10 @@ export interface Config {
   // Polling
   pollIntervalSeconds: number
 
+  // How long (ms) a tool approval prompt stays answerable from the channel.
+  // Same variable and default as mcp-host's auto-deny; 0 = never forget.
+  approvalTimeoutMs: number
+
   // Attachment delivery
   enableResponseAttachments: boolean
   attachmentMaxCount: number
@@ -83,6 +87,29 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+/** Default lifetime of a pending tool approval: 7 days, the same as mcp-host. */
+export const DEFAULT_APPROVAL_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000
+/** mcp-host's upper bound for the same variable (the Node.js timer range). */
+const MAX_APPROVAL_TIMEOUT_MS = 2_147_483_647
+
+/**
+ * CLERUM_APPROVAL_TIMEOUT in ms, read with mcp-host's rules so both services
+ * accept and reject the same values. Unset keeps 7 days; 0 keeps approvals
+ * answerable until mcp-host resolves them. Anything else that is not a whole
+ * decimal integer up to MAX_APPROVAL_TIMEOUT_MS stops channel-reader at
+ * startup, as it stops mcp-host.
+ */
+export function parseApprovalTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_APPROVAL_TIMEOUT_MS
+  const value = Number(raw)
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value > MAX_APPROVAL_TIMEOUT_MS) {
+    throw new Error(
+      `CLERUM_APPROVAL_TIMEOUT must be a valid bounded integer from 0 to ${MAX_APPROVAL_TIMEOUT_MS} (inclusive)`
+    )
+  }
+  return value
 }
 
 /**
@@ -162,6 +189,8 @@ export const config: Config = {
   // makes a real IMAP SEARCH per cycle; 2s is well within typical IMAP server
   // tolerance for `SEARCH UNSEEN`.
   pollIntervalSeconds: getEnvInt('CLERUM_POLL_INTERVAL_SECONDS', 2),
+
+  approvalTimeoutMs: parseApprovalTimeoutMs(process.env.CLERUM_APPROVAL_TIMEOUT),
 
   // Attachment delivery
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),

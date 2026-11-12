@@ -372,11 +372,13 @@ fault that is not there. `channel-reader` logs the giveaway:
 
 The scope is one session, not the host. `pickNextReadySession` skips only
 suspended session keys, so other conversations keep running. Approving or
-denying releases it (`releaseSuspendedSession`). Server-side expiry of the
-approval itself is off by default (`CLERUM_APPROVAL_TIMEOUT` is `0`), so with a
-misconfigured Slack app the stall persists until the durable pending row ages
-out, 7 days by default (`CLERUM_PENDING_APPROVAL_TTL_HOURS`), or the pod
-restarts and the boot reaper clears it.
+denying releases it (`releaseSuspendedSession`). An unanswered approval is
+auto-denied after `CLERUM_APPROVAL_TIMEOUT`, 7 days by default, which also
+releases the session. `channel-reader` reads the same variable and keeps the
+approval answerable from Slack for exactly as long, so the buttons and
+`\approve` / `\deny` work until mcp-host gives up. With a misconfigured Slack
+app the stall therefore persists until that timeout or until the pod restarts
+and the boot reaper clears it.
 
 To clear a stuck request without waiting, deny it from inside the
 `channel-reader` pod, the only legitimate edge caller. The image has no curl,
