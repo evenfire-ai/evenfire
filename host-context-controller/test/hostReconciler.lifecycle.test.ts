@@ -14,6 +14,7 @@ import {
   type ResolvedSfsMount,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
+import { HostK8sRequestTimeoutError } from '../src/k8s/hostK8sApiClient'
 import { HostContextLogger } from '../src/logger'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
 import {
@@ -1384,7 +1385,7 @@ describe('HostReconciler resource rollout bootstrap', () => {
       expect(image(fixture.deployment())).toBe(initialHostImage)
     })
 
-    it('refuses the template write when only the write gate cannot ask the API server', async () => {
+    it('refuses the template write when the write gate cannot ask the API server about a change the mutation read confirmed', async () => {
       const fixture = await runtime()
       config.hostImage = NEW_IMAGE
       const replace = fixture.appsApi.replaceNamespacedDeployment.getMockImplementation()!
@@ -1441,7 +1442,7 @@ describe('HostReconciler resource rollout bootstrap', () => {
       expect(image(fixture.deployment())).toBe(initialHostImage)
     })
 
-    it('fails the pass when the dry-run answer has no pod template', async () => {
+    it('fails token provisioning without a mint or a write when the dry-run answer has no pod template', async () => {
       const fixture = await runtime()
       config.hostImage = NEW_IMAGE
       const replace = fixture.appsApi.replaceNamespacedDeployment.getMockImplementation()!
@@ -1449,17 +1450,32 @@ describe('HostReconciler resource rollout bootstrap', () => {
         request.dryRun === 'All' ? { metadata: { name: fixture.host.name } } : replace(request)
       )
       const before = dryRunRequests(fixture).length
+      const writes = realWriteRequests(fixture)
+      const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+      try {
+        // Witness: provisioning ran the check on each of its three attempts and
+        // failed with HCC's own error, which carries no code.
+        await expect(fixture.reconcile()).rejects.toThrow(
+          `Failed to ensure mcp-host-runtime-token Secret for host "${fixture.host.name}" after 3 attempts: Error: Deployment dry-run replace for Host "${fixture.host.name}" returned no pod template`
+        )
+        expect(warn).not.toHaveBeenCalledWith(
+          'pod template change not confirmed; no fresh bootstrap prepared for it',
+          expect.anything()
+        )
+      } finally {
+        warn.mockRestore()
+      }
 
-      await expect(fixture.reconcile()).rejects.toThrow(
-        `Deployment dry-run replace for Host "${fixture.host.name}" returned no pod template`
-      )
-
-      // Witness: token provisioning and the mutation read both asked.
-      expect(dryRunRequests(fixture).length - before).toBe(2)
+      // One dry-run per provisioning attempt; the mutation read was not reached.
+      expect(dryRunRequests(fixture).length - before).toBe(3)
       expect(issue).not.toHaveBeenCalled()
       expect(fixture.events).toEqual([])
+      expect(realWriteRequests(fixture) - writes).toBe(0)
       expect(image(fixture.deployment())).toBe(initialHostImage)
-    })
+      expect(fixture.reconciler.getStatus(fixture.host.name)).toMatchObject({
+        message: 'mcpHost runtime token provisioning failed',
+      })
+    }, 30_000)
 
     it('renews due credentials while the API server rejects the template change', async () => {
       const reporter: InfrastructureTelemetryReporter = {
@@ -1525,6 +1541,171 @@ describe('HostReconciler resource rollout bootstrap', () => {
       expect(issue).toHaveBeenCalledOnce()
       expect(image(fixture.deployment())).toBe(initialHostImage)
     })
+
+    it('reuses a rollout renewal made while the API server rejects the template change, as after a failed Deployment write', async () => {
+      const fixture = await runtime()
+      const consumed = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      config.hostImage = NEW_IMAGE
+      // A token-contract change: the renewal needs a rollout whatever the template does.
+      fixture.reconciler.setHostFrontsOAuthServer(async () => true)
+      const replace = fixture.appsApi.replaceNamespacedDeployment.getMockImplementation()!
+      const rejected = { code: 422, body: { reason: 'Invalid' } }
+      fixture.appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+        if (request.name !== fixture.host.name) return replace(request)
+        throw rejected
+      })
+      const dryRunsBefore = dryRunRequests(fixture).length
+      const writes = realWriteRequests(fixture)
+      const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+      try {
+        await expect(fixture.reconcile()).rejects.toBe(rejected)
+        expect(warn).toHaveBeenCalledWith(
+          'pod template change not confirmed; no fresh bootstrap prepared for it',
+          { host: fixture.host.name, namespace: fixture.host.namespace, err: rejected }
+        )
+      } finally {
+        warn.mockRestore()
+      }
+
+      // The renewal was made and persisted for a rollout; the template was not written.
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.events).toEqual(['issue', 'persist-secret'])
+      const held = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      expect(held).not.toBe(consumed)
+      expect(fixture.secret().metadata!.annotations).toMatchObject({
+        [BOOTSTRAP]: 'fresh',
+        [ROLLOUT]: 'true',
+        'clerum.io/runtime-token-bootstrap-deployment-uid': fixture.deployment().metadata!.uid,
+      })
+      // Witness: provisioning and the mutation read asked; no Deployment write was sent.
+      expect(dryRunRequests(fixture).length - dryRunsBefore).toBe(2)
+      expect(realWriteRequests(fixture) - writes).toBe(0)
+      expect(image(fixture.deployment())).toBe(initialHostImage)
+
+      // A second rejected pass keeps the same material.
+      await expect(fixture.reconcile()).rejects.toBe(rejected)
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.secret().metadata!.annotations![SECRET_REVISION]).toBe(held)
+
+      // Once the API server accepts the template, the held material is delivered.
+      fixture.appsApi.replaceNamespacedDeployment.mockImplementation(replace)
+      fixture.events.length = 0
+      await fixture.reconcile()
+      expect(fixture.events).toEqual(['replace-deployment'])
+      expect(issue).toHaveBeenCalledOnce()
+      expect(image(fixture.deployment())).toBe(NEW_IMAGE)
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        held
+      )
+      fixture.advance()
+      await fixture.reconcile()
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+    })
+
+    it.each([
+      [
+        'a refused connection',
+        // What @kubernetes/client-node rejects with when nothing answers: a
+        // FetchError with a string code and no HTTP response.
+        () =>
+          Object.assign(new Error('request failed, reason: connect ECONNREFUSED'), {
+            name: 'FetchError',
+            type: 'system',
+            code: 'ECONNREFUSED',
+          }),
+      ],
+      [
+        "HCC's request deadline",
+        () => new HostK8sRequestTimeoutError('AppsV1Api.replaceNamespacedDeployment', 30_000),
+      ],
+    ] as const)(
+      'renews due credentials when the dry-run gets no answer (%s)',
+      async (_label, makeError) => {
+        const fixture = await runtime()
+        config.hostImage = NEW_IMAGE
+        const replace = fixture.appsApi.replaceNamespacedDeployment.getMockImplementation()!
+        const unanswered = makeError()
+        // Witness for the shape under test: a code that is not a number.
+        expect(typeof (unanswered as { code?: unknown }).code).toBe('string')
+        fixture.appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+          if (request.name !== fixture.host.name) return replace(request)
+          throw unanswered
+        })
+        const gfsBefore = fixture.secret().data![MCP_HOST_GFS_TOKEN_SECRET_KEY]
+        const dryRunsBefore = dryRunRequests(fixture).length
+        const writes = realWriteRequests(fixture)
+        gfsMint.mockClear()
+        // Past the GFS token's renewal point.
+        vi.setSystemTime(Date.now() + 550_000)
+        const warn = vi
+          .spyOn(HostContextLogger.prototype, 'warn')
+          .mockImplementation(() => undefined)
+        try {
+          await expect(fixture.reconcile()).rejects.toBe(unanswered)
+          expect(warn).toHaveBeenCalledWith(
+            'pod template change not confirmed; no fresh bootstrap prepared for it',
+            { host: fixture.host.name, namespace: fixture.host.namespace, err: unanswered }
+          )
+        } finally {
+          warn.mockRestore()
+        }
+
+        // The renewal decided without the template answer was made and persisted.
+        expect(gfsMint).toHaveBeenCalledOnce()
+        expect(issue).toHaveBeenCalledOnce()
+        expect(fixture.events).toEqual(['issue', 'persist-secret'])
+        expect(fixture.secret().data![MCP_HOST_GFS_TOKEN_SECRET_KEY]).not.toBe(gfsBefore)
+        expect(fixture.secret().metadata!.annotations![ROLLOUT]).toBe('false')
+        // Witness: provisioning and the mutation read asked; no Deployment write was sent.
+        expect(dryRunRequests(fixture).length - dryRunsBefore).toBe(2)
+        expect(realWriteRequests(fixture) - writes).toBe(0)
+        expect(image(fixture.deployment())).toBe(initialHostImage)
+      }
+    )
+
+    it('fails token provisioning without a renewal when HCC cannot parse a desired resource quantity', async () => {
+      const fixture = await runtime()
+      config.hostResources.requests.cpu = 'not-a-quantity'
+      const gfsBefore = fixture.secret().data![MCP_HOST_GFS_TOKEN_SECRET_KEY]
+      const dryRunsBefore = dryRunRequests(fixture).length
+      const writes = realWriteRequests(fixture)
+      gfsMint.mockClear()
+      // Past the GFS token's renewal point: a renewal is due.
+      vi.setSystemTime(Date.now() + 550_000)
+      const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+      try {
+        // Witness: provisioning ran the check on each of its three attempts and
+        // failed with HCC's own error, which carries no code.
+        await expect(fixture.reconcile()).rejects.toThrow(
+          `Failed to ensure mcp-host-runtime-token Secret for host "${fixture.host.name}" after 3 attempts: Error: Invalid Kubernetes quantity`
+        )
+        expect(warn).not.toHaveBeenCalledWith(
+          'pod template change not confirmed; no fresh bootstrap prepared for it',
+          expect.anything()
+        )
+      } finally {
+        warn.mockRestore()
+      }
+
+      // Nothing was renewed or written; the comparison threw before any dry-run.
+      expect(gfsMint).not.toHaveBeenCalled()
+      expect(issue).not.toHaveBeenCalled()
+      expect(fixture.events).toEqual([])
+      expect(fixture.secret().data![MCP_HOST_GFS_TOKEN_SECRET_KEY]).toBe(gfsBefore)
+      expect(dryRunRequests(fixture).length - dryRunsBefore).toBe(0)
+      expect(realWriteRequests(fixture) - writes).toBe(0)
+      expect(fixture.reconciler.getStatus(fixture.host.name)).toMatchObject({
+        message: 'mcpHost runtime token provisioning failed',
+      })
+
+      // Witness that a renewal was due: once the value is fixed, it is made.
+      config.hostResources = structuredClone(initialResources)
+      await fixture.reconcile()
+      expect(gfsMint).toHaveBeenCalledOnce()
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.secret().data![MCP_HOST_GFS_TOKEN_SECRET_KEY]).not.toBe(gfsBefore)
+    }, 30_000)
 
     it('mints for a recreated Deployment when the dry-run finds it deleted', async () => {
       const fixture = await runtime()

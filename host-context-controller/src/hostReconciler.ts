@@ -1608,10 +1608,23 @@ export class HostReconciler {
    * replace of the body the write would send, which template it would store;
    * only a difference from the observed template counts. The dry-run omits
    * resourceVersion: it persists nothing, so a stale version must not fail it.
-   * A failed dry-run throws. Token provisioning then prepares nothing for the
-   * template change and still makes the renewal it decided without it (a 404
-   * retries provisioning against a fresh read); at the mutation read and the
-   * write gate, a failed dry-run fails the pass before the Deployment write.
+   *
+   * A failed check throws, and token provisioning sorts the error by its code
+   * (`getErrorCode`). A 404 retries provisioning against a fresh read. An
+   * error with any other code is taken as a failed dry-run request: the HTTP
+   * status of a rejection, or a string code when no answer came (a transport
+   * error such as ECONNREFUSED, HCC's request deadline). Provisioning then
+   * prepares nothing for the template change and still makes the renewal it
+   * decided without it. One that needs a rollout is persisted with its
+   * rollout marker; when the later checks of the pass fail too, it is left
+   * for a later pass, as when the Deployment write itself fails. An error
+   * without a code is taken as HCC's own failure, not a failed request.
+   * Known members: a resource quantity HCC cannot parse, a dry-run answer
+   * without a pod template, an answer body that is not JSON. It fails the
+   * provisioning attempt, and when the retries fail too that provisioning
+   * call renews nothing; a renewal made earlier in the same pass stays in
+   * the Secret. At the mutation read and the write gate, any of these errors
+   * fails the pass before the Deployment write.
    *
    * Known gap (accepted): HCC never writes `paused`, so its write unpauses a
    * Deployment someone paused by hand. A template edit held by that pause, in
@@ -2418,10 +2431,10 @@ export class HostReconciler {
         let decision = decideRefresh(observedFrontsOAuth)
         // A running pod has consumed the Secret's single-use refresh token, so
         // any new pod template needs fresh material before it is written.
-        // When the dry-run fails, nothing is prepared for the change and the
-        // renewal decided above still runs. The mutation read and the write gate
-        // ask again: a failed dry-run there fails the pass before the Deployment
-        // write, and a confirmed change still needs prepared material.
+        // The catch below sorts a failed check by its error code. The mutation
+        // read and the write gate ask again: a failed check there fails the pass
+        // before the Deployment write, and a confirmed change still needs
+        // prepared material.
         let templateWillChange = false
         if (
           options.prepareForTemplateChange &&
@@ -2431,8 +2444,23 @@ export class HostReconciler {
           try {
             templateWillChange = await options.prepareForTemplateChange(deployment)
           } catch (error) {
+            const code = getErrorCode(error)
             // The Deployment is gone: retry against a fresh read, which mints for it.
-            if (getErrorCode(error) === 404) throw error
+            if (code === 404) throw error
+            // No code: taken as HCC's own failure, not a failed request. HCC
+            // could not make the comparison (a resource quantity it cannot
+            // parse) or cannot use the answer (no pod template, a body that is
+            // not JSON). Fail this attempt; when the retries fail too, this
+            // provisioning call renews nothing. The test is `undefined`, not
+            // "not a number": a request that got no answer carries a string
+            // code (ECONNREFUSED, HCC_HOST_K8S_REQUEST_TIMEOUT).
+            if (code === undefined) throw error
+            // Any other code is taken as a failed dry-run request: rejected, or
+            // no answer. Nothing is prepared for the change and the renewal
+            // decided above still runs. One that needs a rollout is persisted
+            // with its rollout marker; when the later checks of the pass fail
+            // too, it is left for a later pass, as when the Deployment write
+            // itself fails.
             log.warn('pod template change not confirmed; no fresh bootstrap prepared for it', {
               host: host.name,
               namespace: host.namespace,
