@@ -348,8 +348,10 @@ export function classifyBedrockError(err: unknown): ClassifiedError {
       // trigger (spec 02 §3.1). The $metadata 404 fallback below covers the
       // same case when the modeled name is absent.
       return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
+    // #1433: Bedrock's HTTP 400 for a request it refuses; the same request
+    // gets the same answer. Same label as the other providers' HTTP 400.
     case 'ValidationException':
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
+      return { code: LlmErrorCode.UpstreamRejected, retryable: false, message, ...diag }
     case 'ModelTimeoutException':
     case 'ModelNotReadyException':
     case 'ServiceUnavailableException':

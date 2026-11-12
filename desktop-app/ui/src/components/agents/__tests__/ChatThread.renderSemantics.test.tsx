@@ -182,6 +182,14 @@ describe('ChatThread error code labels', () => {
     expect(text).not.toContain('Connection Error')
   })
 
+  // #1433: the Host refused the request's text before dispatch; nothing
+  // reached the provider, so neither "Connection Error" nor a provider refusal.
+  it('labels a request refused for its text as "Invalid Request Text"', () => {
+    const { label, text } = renderErrorLabel('LLM_REQUEST_TEXT_REJECTED', 'openai')
+    expect(label).toBe('Invalid Request Text · OPENAI')
+    expect(text).not.toContain('Connection Error')
+  })
+
   it('keeps the generic "Error" label for an unknown code', () => {
     expect(renderErrorLabel('LLM_SOMETHING_UNMAPPED').label).toBe('Error')
   })
