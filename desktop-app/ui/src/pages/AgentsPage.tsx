@@ -13,12 +13,10 @@ export function AgentsPage({ scrollContainerRef }: AgentsPageProps) {
   const { agentNames, loading, error } = useAgentsDataController()
   const { selectedAgent } = useNavigationContext()
 
-  return agentNames.length ? (
-    selectedAgent ? (
-      <AgentWorkspace scrollContainerRef={scrollContainerRef} />
-    ) : (
-      <FleetBoard />
-    )
+  return selectedAgent ? (
+    <AgentWorkspace scrollContainerRef={scrollContainerRef} />
+  ) : agentNames.length ? (
+    <FleetBoard />
   ) : (
     <section className="page">
       <div className="page-header">
