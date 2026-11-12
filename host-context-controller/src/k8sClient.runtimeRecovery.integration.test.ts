@@ -33,6 +33,8 @@ const fixture = vi.hoisted(() => ({
   server: undefined as any,
   peers: [] as any[],
   readService: undefined as undefined | ((name: string) => Promise<void>),
+  readDeployment: undefined as undefined | ((name: string) => Promise<void>),
+  deploymentGets: 0,
 }))
 
 vi.mock('./config', () => ({
@@ -119,7 +121,11 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
     listNamespacedDeployment: async () => ({
       items: [...fixture.deployments.values()].map(value => structuredClone(value)),
     }),
-    readNamespacedDeployment: async ({ name }: any) => read(fixture.deployments, name),
+    readNamespacedDeployment: async ({ name }: any) => {
+      fixture.deploymentGets++
+      await fixture.readDeployment?.(name)
+      return read(fixture.deployments, name)
+    },
     createNamespacedDeployment: async ({ namespace, body }: any) =>
       save('Deployment', fixture.deployments, namespace, body),
     replaceNamespacedDeployment: async ({ namespace, body }: any) =>
@@ -254,6 +260,8 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
     fixture.statusPatches = 0
     fixture.failPublication = undefined
     fixture.readService = undefined
+    fixture.readDeployment = undefined
+    fixture.deploymentGets = 0
     fixture.server = {
       metadata: {
         name: 'runtime-witness',
@@ -1392,14 +1400,14 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       const readsAtStop = reads('witness-input')
 
       await watcher!.stop()
-      expect(state.secretAccessProbeTimer).toBeNull()
+      expect(state.verdictReobservationTimer).toBeNull()
       await vi.advanceTimersByTimeAsync(180_000)
 
       expect(probe).toHaveBeenCalledTimes(1)
       expect(reads('witness-input')).toBe(readsAtStop)
     })
 
-    it('I22c with nothing denied a tick issues no read and no probe', async () => {
+    it('I22c with nothing awaiting a tick issues no read and no probe', async () => {
       const state = await startCertified()
       const readsBefore = reads('witness-input')
       const accessor = vi.spyOn(state.reconciler, 'namesAwaitingExternalChange')
@@ -1408,7 +1416,8 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       await vi.advanceTimersByTimeAsync(60_000)
       await drain(state)
 
-      expect(accessor).toHaveBeenCalledTimes(1)
+      // One look for denied names, one for terminal rollouts.
+      expect(accessor.mock.calls).toEqual([['SecretAccessDenied'], ['RolloutIncomplete']])
       expect(probe).not.toHaveBeenCalled()
       expect(reads('witness-input')).toBe(readsBefore)
     })
@@ -1768,7 +1777,8 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       const filter = vi.spyOn(state.reconciler, 'rolloutObservationRequiresReconcile')
       markRolloutReady(witness)
 
-      // Nothing polls: without an event the converged rollout stays unobserved.
+      // Before the next periodic re-read (every 60 s), only an event observes
+      // the converged rollout.
       await vi.advanceTimersByTimeAsync(30_000)
       await drain(state)
       expect(reconciled).toEqual([])
@@ -2084,6 +2094,414 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       expect(state.completedRuntimeRevision).not.toBe(certificateBefore)
       expect(state.matchesCurrentInventory(state.completedRuntimeRevision)).toBe(true)
       expect(reconciled.filter(name => name === peer)).toHaveLength(peerReconciles)
+    })
+
+    // P2-SB: the 60 s tick re-reads every terminal RolloutIncomplete (F-01, F-04, F-05).
+    async function rolloutRereads(outcome: string): Promise<number> {
+      return informerCounter('clerum_hcc_mcpserver_rollout_rereads_total', { outcome })
+    }
+
+    const periodicReobservations = (info: { mock: { calls: any[][] } }) =>
+      info.mock.calls.filter(
+        ([, fields]) =>
+          fields?.event === 'mcpserver-verdict-reobservation' &&
+          fields.trigger === 'periodic-reread'
+      ).length
+
+    function startGeneration(name: string, generation: number) {
+      const deployment = fixture.deployments.get(name)!
+      deployment.metadata!.generation = generation
+      deployment.status!.observedGeneration = generation
+    }
+
+    /** Hold the first matching rollout read of the witness, before or after it reads. */
+    function holdRolloutRead(state: any, options: { before?: boolean; when?: () => boolean } = {}) {
+      const entered = deferred()
+      const release = deferred()
+      const read = state.reconciler.readDeploymentRollout.bind(state.reconciler)
+      const when = options.when ?? (() => true)
+      let held = false
+      const spy = vi
+        .spyOn(state.reconciler, 'readDeploymentRollout')
+        .mockImplementation(async (name: any, namespace: any) => {
+          const hit = !held && name === witness && when()
+          if (hit) held = true
+          if (hit && options.before) {
+            entered.resolve()
+            await release.promise
+          }
+          const rollout = await read(name, namespace)
+          if (hit && !options.before) {
+            entered.resolve()
+            await release.promise
+          }
+          return rollout
+        })
+      return { entered, release, spy }
+    }
+
+    /** LANEB-P1: an observation lands between a reconcile's rollout read and its registration. */
+    async function loseEdgeAtReconcile(state: any, emit: (type: string, name: string) => void) {
+      const hold = holdRolloutRead(state)
+      const reconcile = state.reconciler.reconcile(state.servers.get(witness))
+      await hold.entered.promise
+      markRolloutReady(witness)
+      emit('MODIFIED', witness)
+      hold.release.resolve()
+      await reconcile
+      await drain(state)
+      hold.spy.mockRestore()
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+      expect(state.reconciler.getStatus(witness).ready).toBe(false)
+    }
+
+    function verdictOwner(state: any): string {
+      if (state.reconciler.getStatus(witness).ready) return 'ready'
+      if (state.reconciler.readinessPolls.get(witness)?.timer !== undefined) return 'live-poll'
+      if (state.reconciler.incompleteReconciliationNames().includes(witness)) return 'obligation'
+      for (const reason of ['RolloutIncomplete', 'SecretAccessDenied']) {
+        if (state.reconciler.namesAwaitingExternalChange(reason).includes(witness)) return reason
+      }
+      return 'none'
+    }
+
+    it('T1 a Deployment edge lost at the reconcile site is corrected by the next periodic re-read', async () => {
+      const { state, emit } = await startStuckCertified()
+      await loseEdgeAtReconcile(state, emit)
+      const info = vi.spyOn(hccLogger, 'info')
+      const getsBefore = fixture.deploymentGets
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'DeploymentReady', status: 'True' }),
+        ])
+      )
+      expect(periodicReobservations(info)).toBe(1)
+      expect(fixture.deploymentGets).toBeGreaterThan(getsBefore)
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+    })
+
+    it('T2 a Deployment edge lost at the last readiness tick is corrected by the next periodic re-read', async () => {
+      fixture.rolloutReady = false
+      const harness = prepareWatcher()
+      watcher = harness.watcher
+      const { state } = harness
+      await watcher.start()
+      await drain(state)
+      const emit = await attachDeploymentInformer()
+      const hold = holdRolloutRead(state, {
+        when: () => state.reconciler.readinessPolls.get(witness)?.attempts === 23,
+      })
+
+      await vi.advanceTimersByTimeAsync(24 * 5000)
+      await hold.entered.promise
+      markRolloutReady(witness)
+      emit('MODIFIED', witness)
+      hold.release.resolve()
+      await until(
+        () => state.reconciler.namesAwaitingExternalChange('RolloutIncomplete').length === 1
+      )
+      await drain(state)
+      expect(state.reconciler.readinessPolls.get(witness)).toMatchObject({
+        attempts: 24,
+        exhausted: true,
+      })
+      expect(state.reconciler.getStatus(witness).ready).toBe(false)
+      const getsBefore = fixture.deploymentGets
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(fixture.deploymentGets).toBeGreaterThan(getsBefore)
+    })
+
+    it('T3 a Deployment deleted without an informer event is recreated after the next periodic re-read', async () => {
+      const { state } = await startStuckCertified()
+      const deletedBefore = await rolloutRereads('deleted')
+      fixture.deployments.delete(witness)
+      const writesBefore = fixture.writes.length
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(
+        fixture.writes.slice(writesBefore).filter(write => write === `Deployment/${witness}`)
+      ).toHaveLength(1)
+      expect(fixture.deployments.has(witness)).toBe(true)
+      expect(await rolloutRereads('deleted')).toBe(deletedBefore + 1)
+    })
+
+    it('T4 without a Deployment informer a converged rollout is published after the next periodic re-read', async () => {
+      fixture.rolloutReady = false
+      const harness = prepareWatcher()
+      watcher = harness.watcher
+      const { state } = harness
+      await watcher.start()
+      await drain(state)
+      await vi.advanceTimersByTimeAsync(24 * 5000)
+      await drain(state)
+      expect(deploymentInformers).toEqual([])
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+      markRolloutReady(witness)
+      const getsBefore = fixture.deploymentGets
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(fixture.deploymentGets).toBeGreaterThan(getsBefore)
+    })
+
+    it('T5 a rollout that stays stuck costs one read per period and nothing else', async () => {
+      config.netPolResyncIntervalSec = 0
+      const { state } = await startStuckCertified()
+      const reconciled = recordReconciledNames(state)
+      const info = vi.spyOn(hccLogger, 'info')
+      const patchesBefore = fixture.statusPatches
+      const unchangedBefore = await rolloutRereads('unchanged')
+      const getsBefore = fixture.deploymentGets
+
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      await drain(state)
+
+      expect(fixture.deploymentGets).toBe(getsBefore + 5)
+      expect(await rolloutRereads('unchanged')).toBe(unchangedBefore + 5)
+      expect(reconciled).toEqual([])
+      expect(fixture.statusPatches).toBe(patchesBefore)
+      expect(periodicReobservations(info)).toBe(0)
+    })
+
+    it('T6 a failed re-read changes nothing, is counted with one warning, and is read again at the next tick', async () => {
+      const { state } = await startStuckCertified()
+      const warn = vi.spyOn(hccLogger, 'warn')
+      const patchesBefore = fixture.statusPatches
+      const failedBefore = await rolloutRereads('failed')
+      fixture.readDeployment = async () => {
+        throw new K8sRequestTimeoutError('readNamespacedDeployment', 30_000)
+      }
+      const getsBefore = fixture.deploymentGets
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(fixture.deploymentGets).toBe(getsBefore + 1)
+      expect(await rolloutRereads('failed')).toBe(failedBefore + 1)
+      expect(
+        warn.mock.calls.filter(
+          ([, fields]: any[]) => fields?.event === 'mcpserver-rollout-reread-failed'
+        )
+      ).toEqual([
+        [expect.any(String), { event: 'mcpserver-rollout-reread-failed', failed: 1, read: 1 }],
+      ])
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(fixture.statusPatches).toBe(patchesBefore)
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+
+      fixture.readDeployment = undefined
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(fixture.deploymentGets).toBe(getsBefore + 2)
+      expect(await rolloutRereads('failed')).toBe(failedBefore + 1)
+    })
+
+    it('T7 the re-read does not run without inventory authority', async () => {
+      const { state } = await startStuckCertified()
+      const getsBefore = fixture.deploymentGets
+      state.retireMcpServerWatch()
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+      expect(fixture.deploymentGets).toBe(getsBefore)
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      const getsAfterRecovery = fixture.deploymentGets
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(fixture.deploymentGets).toBe(getsAfterRecovery + 1)
+    })
+
+    it.each([
+      ['ready', 'ready'],
+      ['live readiness window', 'live-poll'],
+      ['terminal and idle', 'RolloutIncomplete'],
+      ['terminal with a lost edge', 'RolloutIncomplete'],
+      ['failed read on the last tick', 'obligation'],
+      ['SecretAccessDenied', 'SecretAccessDenied'],
+    ] as const)('T8 a not-ready verdict always has an owner that reads: %s', async (row, owner) => {
+      let state: any
+      if (row === 'ready') {
+        state = await startCertified()
+      } else if (row === 'live readiness window' || row === 'failed read on the last tick') {
+        fixture.rolloutReady = false
+        const harness = prepareWatcher()
+        watcher = harness.watcher
+        state = harness.state
+        await watcher.start()
+        await drain(state)
+        if (row === 'failed read on the last tick') {
+          fixture.readDeployment = async () => {
+            if (state.reconciler.readinessPolls.get(witness)?.attempts === 23) {
+              throw new K8sRequestTimeoutError('readNamespacedDeployment', 30_000)
+            }
+          }
+          await vi.advanceTimersByTimeAsync(24 * 5000)
+          await drain(state)
+          fixture.readDeployment = undefined
+        }
+      } else if (row === 'SecretAccessDenied') {
+        state = await startCertified()
+        await denyWitness(state)
+      } else {
+        const stuck = await startStuckCertified()
+        state = stuck.state
+        if (row === 'terminal with a lost edge') await loseEdgeAtReconcile(state, stuck.emit)
+      }
+      expect(verdictOwner(state)).toBe(owner)
+      const getsBefore = fixture.deploymentGets
+      const secretReadsBefore = reads('witness-input')
+      const rereadsBefore = await rolloutRereads('unchanged')
+      const movedBefore = await rolloutRereads('moved')
+      if (row === 'SecretAccessDenied') failNext('witness-input', forbidden)
+
+      // A live window reads every 5 s, an obligation retries after 5 s, and
+      // every other owner reads at the 60 s tick.
+      await vi.advanceTimersByTimeAsync(
+        owner === 'live-poll' || owner === 'obligation' ? 5000 : 60_000
+      )
+      await drain(state)
+
+      const gets = fixture.deploymentGets - getsBefore
+      if (owner === 'ready') expect(gets).toBe(0)
+      if (owner === 'live-poll' || owner === 'obligation') expect(gets).toBeGreaterThan(0)
+      if (row === 'terminal and idle') {
+        expect(gets).toBe(1)
+        expect(await rolloutRereads('unchanged')).toBe(rereadsBefore + 1)
+      }
+      if (row === 'terminal with a lost edge') {
+        expect(await rolloutRereads('moved')).toBe(movedBefore + 1)
+        expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      }
+      if (owner === 'SecretAccessDenied') {
+        expect(gets).toBe(0)
+        expect(reads('witness-input')).toBe(secretReadsBefore + 1)
+      }
+    })
+
+    it('T9 stop ends the periodic re-read', async () => {
+      const { state } = await startStuckCertified()
+      const getsBefore = fixture.deploymentGets
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+      expect(fixture.deploymentGets).toBe(getsBefore + 1)
+
+      await watcher!.stop()
+      expect(state.verdictReobservationTimer).toBeNull()
+      await vi.advanceTimersByTimeAsync(180_000)
+
+      expect(fixture.deploymentGets).toBe(getsBefore + 1)
+    })
+
+    it('T10 a tick during a reconcile of that name issues no read for it, and the new generation opens a window', async () => {
+      const { state, emit } = await startStuckCertified()
+      const hold = holdRolloutRead(state, { before: true })
+      const reconcile = state.reconciler.reconcile(state.servers.get(witness))
+      await hold.entered.promise
+      startGeneration(witness, 2)
+      emit('MODIFIED', witness)
+      const getsBefore = fixture.deploymentGets
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      // The reconcile removed the name when it started, so the tick reads nothing.
+      expect(fixture.deploymentGets).toBe(getsBefore)
+
+      hold.release.resolve()
+      await reconcile
+      await drain(state)
+      expect(hold.spy.mock.calls.filter(([name]) => name === witness)).toHaveLength(1)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+      expect(state.reconciler.readinessPolls.get(witness).timer).toBeDefined()
+      const windowGets = fixture.deploymentGets
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(fixture.deploymentGets).toBe(windowGets + 1)
+      // The window's first poll reads the new generation and starts its budget.
+      expect(state.reconciler.readinessPolls.get(witness)).toMatchObject({
+        generation: 2,
+        exhausted: false,
+      })
+    })
+
+    it('T11 a new Deployment generation seen by the re-read costs one reconcile and opens a window', async () => {
+      const { state } = await startStuckCertified()
+      const reconciled = recordReconciledNames(state)
+      const movedBefore = await rolloutRereads('moved')
+      startGeneration(witness, 2)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(reconciled).toEqual([witness])
+      expect(state.reconciler.readinessPolls.get(witness).timer).toBeDefined()
+      expect(await rolloutRereads('moved')).toBe(movedBefore + 1)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(state.reconciler.readinessPolls.get(witness)).toMatchObject({
+        generation: 2,
+        exhausted: false,
+      })
+    })
+
+    it('R6 a re-read made stale by a newer terminal generation costs exactly one extra reconcile', async () => {
+      config.netPolResyncIntervalSec = 0
+      const { state, emit } = await startStuckCertified()
+      const hold = holdRolloutRead(state)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await hold.entered.promise
+      // While the tick holds its generation-1 result, generation 2 rolls out
+      // and also ends terminal. The ticks in between are skipped by the guard.
+      startGeneration(witness, 2)
+      emit('MODIFIED', witness)
+      await drain(state)
+      await vi.advanceTimersByTimeAsync(24 * 5000)
+      await drain(state)
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+      expect(state.reconciler.readinessPolls.get(witness)).toMatchObject({
+        generation: 2,
+        exhausted: true,
+      })
+      const reconciled = recordReconciledNames(state)
+
+      hold.release.resolve()
+      await until(() => reconciled.length === 1)
+      await drain(state)
+
+      expect(reconciled).toEqual([witness])
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([witness])
+    })
+
+    it('R7 a Secret access probe that throws does not stop the re-read in the same tick', async () => {
+      const { state } = await startStuckCertified()
+      const error = vi.spyOn(hccLogger, 'error')
+      vi.spyOn(state, 'runSecretAccessProbe').mockRejectedValueOnce(
+        new Error('fixture probe failure')
+      )
+      const getsBefore = fixture.deploymentGets
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await drain(state)
+
+      expect(error).toHaveBeenCalledWith(
+        '[K8s] Secret access probe failed',
+        expect.objectContaining({ err: expect.any(Error) })
+      )
+      expect(fixture.deploymentGets).toBe(getsBefore + 1)
     })
   })
 })

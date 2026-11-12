@@ -589,6 +589,23 @@ export class McpServerReconciler {
     )
   }
 
+  /**
+   * Read one Deployment's rollout as the observation the Deployment informer
+   * would report, for rolloutObservationRequiresReconcile. A 404 is a deleted
+   * Deployment. Any other failed read returns undefined and changes nothing.
+   */
+  async readRolloutObservation(
+    name: string,
+    namespace: string
+  ): Promise<DeploymentObservation | undefined> {
+    const rollout = await this.readDeploymentRollout(name, namespace)
+    if (rollout.generation !== null) {
+      return { name, deleted: false, ready: rollout.ready, generation: rollout.generation }
+    }
+    if (getErrorCode(rollout.readFailure) !== 404) return undefined
+    return { name, deleted: true, ready: false, generation: 0 }
+  }
+
   hasPendingReconciliation(): boolean {
     return (
       this.hasIncompleteReconciliation() ||

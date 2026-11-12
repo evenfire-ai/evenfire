@@ -243,6 +243,14 @@ export const secretAccessProbesTotal = counter({
   labelNames: ['outcome'] as const,
 })
 
+export const mcpserverRolloutRereadsTotal = counter({
+  name: 'clerum_hcc_mcpserver_rollout_rereads_total',
+  help:
+    'Periodic Deployment reads of McpServers at a terminal RolloutIncomplete, by outcome ' +
+    '(unchanged, moved, deleted, failed)',
+  labelNames: ['outcome'] as const,
+})
+
 export const mcpserverMissingSecret = gauge({
   name: 'clerum_hcc_mcpserver_missing_secret',
   help: '1 when an McpServer references a non-existent Secret',
