@@ -525,8 +525,10 @@ function installClerum(
           appHarness.sessionCleared = handler
           return vi.fn()
         }),
-        authorizeMarkdownTabClose: vi.fn(async () => 'integration-close-permit'),
-        consumeMarkdownTabClosePermit: vi.fn(async () => true),
+        authorizeMarkdownTabClose: vi.fn(async () => 'granted'),
+        getMarkdownTabClosePermitStatus: vi.fn(async () => 'granted'),
+        cancelMarkdownTabClosePermit: vi.fn(async () => 'cancelled'),
+        consumeMarkdownTabClosePermit: vi.fn(async () => 'consumed'),
       },
       shortcuts: {
         onCommand: vi.fn((handler: (commandId: string, source: 'host' | 'sandbox') => void) => {

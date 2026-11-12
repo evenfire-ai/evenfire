@@ -31,6 +31,8 @@ import {
   HostRuntimeStatus,
   HostStatusStreamEvent,
   LoginBackendHint,
+  MarkdownTabCloseBinding,
+  MarkdownTabCloseState,
   MessageToolStep,
   PasswordLoginResult,
   PendingWorkflowApproval,
@@ -123,8 +125,18 @@ declare global {
           sessionGeneration: number
           reason: 'logout' | 'session-ended' | 'environment-change'
         }) => Promise<boolean>
-        authorizeMarkdownTabClose: (requestId: string) => Promise<string | null>
-        consumeMarkdownTabClosePermit: (permit: string) => Promise<boolean>
+        authorizeMarkdownTabClose: (
+          binding: MarkdownTabCloseBinding
+        ) => Promise<MarkdownTabCloseState>
+        getMarkdownTabClosePermitStatus: (
+          binding: MarkdownTabCloseBinding
+        ) => Promise<MarkdownTabCloseState>
+        cancelMarkdownTabClosePermit: (
+          binding: MarkdownTabCloseBinding
+        ) => Promise<MarkdownTabCloseState>
+        consumeMarkdownTabClosePermit: (
+          binding: MarkdownTabCloseBinding
+        ) => Promise<MarkdownTabCloseState>
         onSessionPreclear: (
           callback: (notice: {
             transitionId: number

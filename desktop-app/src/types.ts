@@ -19,6 +19,22 @@ export type RpcScope =
   | 'sandbox:ui:view'
 export type RpcAccessScope = 'team' | 'user'
 
+export type MarkdownTabCloseState =
+  | 'unknown'
+  | 'pending'
+  | 'granted'
+  | 'denied'
+  | 'consumed'
+  | 'cancelled'
+  | 'expired'
+
+export type MarkdownTabCloseBinding = Readonly<{
+  requestId: string
+  tabId: string
+  sessionGeneration: number
+  ownerIdentities: readonly string[]
+}>
+
 export type DeepLinkAcknowledgmentAuthority = {
   sessionGeneration: number
   userNavigationGeneration: number

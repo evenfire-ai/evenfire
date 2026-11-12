@@ -81,6 +81,7 @@ export type MarkdownDraftRecordSnapshot = Readonly<{
   closeReserved: boolean
   closeAuthorizationPending: boolean
   closePermitId: string | null
+  closeRequestId: string | null
 }>
 
 type RecordState = {
@@ -111,6 +112,7 @@ type RecordState = {
   closeReserved: boolean
   closeAuthorizationPending: boolean
   closePermitId: string | null
+  closeRequestId: string | null
 }
 
 type ScopeTransition = {
@@ -290,6 +292,7 @@ export class MarkdownDraftOwner {
       closeReserved: false,
       closeAuthorizationPending: false,
       closePermitId: null,
+      closeRequestId: null,
     }
     this.records.set(key, record)
     this.emit()
@@ -634,6 +637,7 @@ export class MarkdownDraftOwner {
       record.closePrompt = false
       record.closeReserved = true
       record.closeAuthorizationPending = true
+      record.closeRequestId = null
     }
     this.emit()
     return true
@@ -666,7 +670,85 @@ export class MarkdownDraftOwner {
       record.closeReserved = false
       record.closeAuthorizationPending = false
       record.closePermitId = null
+      record.closeRequestId = null
     }
+    this.emit()
+    return true
+  }
+
+  reserveCloseRequest(tabId: string, requestId: string): readonly string[] | null {
+    if (!requestId) return null
+    const records = this.recordsForTab(tabId, this.activePrincipalOwner ?? undefined)
+    if (
+      !records.length ||
+      records.some(
+        record =>
+          !record.closeReserved ||
+          !record.closeAuthorizationPending ||
+          record.pendingSave ||
+          record.closeRequestId !== null
+      )
+    )
+      return null
+    const identities = records.map(record =>
+      JSON.stringify([
+        record.ownerId,
+        record.binding.principalOwner,
+        record.binding.scopeKey,
+        record.binding.tabId,
+        record.binding.gfsUri,
+      ])
+    )
+    for (const record of records) record.closeRequestId = requestId
+    this.emit()
+    return Object.freeze(identities)
+  }
+
+  promoteCloseRequest(requestId: string): boolean {
+    const records = [...this.records.values()].filter(record => record.closeRequestId === requestId)
+    if (
+      !records.length ||
+      records.some(
+        record => !record.closeReserved || !record.closeAuthorizationPending || record.pendingSave
+      )
+    )
+      return false
+    for (const record of records) {
+      record.closeAuthorizationPending = false
+      record.closePermitId = requestId
+    }
+    this.emit()
+    return true
+  }
+
+  releaseCloseRequest(requestId: string): boolean {
+    const records = [...this.records.values()].filter(record => record.closeRequestId === requestId)
+    if (!records.length || records.some(record => !record.closeAuthorizationPending)) return false
+    for (const record of records) {
+      record.closePrompt = false
+      record.closeReserved = false
+      record.closeAuthorizationPending = false
+      record.closePermitId = null
+      record.closeRequestId = null
+    }
+    this.emit()
+    return true
+  }
+
+  commitCloseRequest(requestId: string): boolean {
+    const records = [...this.records.values()].filter(record => record.closeRequestId === requestId)
+    if (
+      !records.length ||
+      records.some(
+        record =>
+          !record.closeReserved ||
+          record.closeAuthorizationPending ||
+          record.pendingSave ||
+          record.closePermitId !== requestId
+      )
+    )
+      return false
+    for (const record of records) this.records.delete(record.key)
     this.emit()
     return true
   }
@@ -879,11 +961,6 @@ export class MarkdownDraftOwner {
     this.scopeTransition = null
     for (const record of this.records.values()) {
       record.closePrompt = false
-      if (record.closeAuthorizationPending) {
-        record.closeReserved = false
-        record.closeAuthorizationPending = false
-        record.closePermitId = null
-      }
     }
     this.emit()
     return Object.freeze({ id: transition.id })
@@ -1027,6 +1104,7 @@ export class MarkdownDraftOwner {
       closeReserved: record.closeReserved,
       closeAuthorizationPending: record.closeAuthorizationPending,
       closePermitId: record.closePermitId,
+      closeRequestId: record.closeRequestId,
     })
   }
 }

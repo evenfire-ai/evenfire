@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
@@ -66,6 +66,8 @@ import {
   HostRuntimeStatus,
   HostStatusStreamEvent,
   LoginBackendHint,
+  MarkdownTabCloseBinding,
+  MarkdownTabCloseState,
   PasswordLoginResult,
   PendingWorkflowApproval,
   PrewarmHostResult,
@@ -894,6 +896,13 @@ export interface SessionPreclearNotice {
   reason: SessionPreclearReason
 }
 
+type MarkdownTabCloseRequest = {
+  binding: MarkdownTabCloseBinding
+  ownerIdentityDigest: string
+  state: Exclude<MarkdownTabCloseState, 'unknown'>
+  expiresAt: number
+}
+
 interface PendingSessionPreclear {
   notice: SessionPreclearNotice
   promise: Promise<boolean>
@@ -980,11 +989,7 @@ export class AppService {
   private nextSessionPreclearId = 0
   private pendingSessionPreclear: PendingSessionPreclear | null = null
   private pendingLogout: Promise<number> | null = null
-  private nextMarkdownClosePermitId = 0
-  private readonly markdownClosePermits = new Map<
-    string,
-    { requestId: string; expiresAt: number }
-  >()
+  private readonly markdownTabCloseRequests = new Map<string, MarkdownTabCloseRequest>()
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
@@ -1801,22 +1806,157 @@ export class AppService {
   }
 
   /** Main-process linearization point for a renderer tab-close attempt. */
-  authorizeMarkdownTabClose(requestId: string): string | null {
-    if (!/^[a-zA-Z0-9:_-]{1,160}$/.test(requestId) || this.pendingSessionPreclear) return null
-    const now = Date.now()
-    for (const [permit, record] of this.markdownClosePermits) {
-      if (record.expiresAt <= now) this.markdownClosePermits.delete(permit)
-      else if (record.requestId === requestId) return null
-    }
-    const permit = `markdown-close:${++this.nextMarkdownClosePermitId}:${requestId}`
-    this.markdownClosePermits.set(permit, { requestId, expiresAt: now + 30_000 })
-    return permit
+  authorizeMarkdownTabClose(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseState {
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    if (!binding || !Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0)
+      return 'denied'
+
+    const key = this.markdownTabCloseRequestKey(senderWebContentsId, binding.requestId)
+    const existing = this.markdownTabCloseRequests.get(key)
+    if (existing)
+      return this.sameMarkdownTabCloseBinding(existing, binding) ? existing.state : 'unknown'
+
+    const state =
+      this.pendingSessionPreclear || binding.sessionGeneration !== this.sessionGeneration
+        ? 'denied'
+        : 'granted'
+    this.markdownTabCloseRequests.set(key, this.createMarkdownTabCloseRequest(binding, state))
+    return state
   }
 
-  consumeMarkdownTabClosePermit(permit: string): boolean {
-    const record = this.markdownClosePermits.get(permit)
-    this.markdownClosePermits.delete(permit)
-    return Boolean(record && record.expiresAt > Date.now())
+  getMarkdownTabClosePermitStatus(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseState {
+    const request = this.findMarkdownTabCloseRequest(senderWebContentsId, input)
+    if (!request) return 'unknown'
+    this.expireMarkdownTabCloseRequest(request)
+    return request.state
+  }
+
+  cancelMarkdownTabClosePermit(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseState {
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    if (!binding || !Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0)
+      return 'unknown'
+
+    const key = this.markdownTabCloseRequestKey(senderWebContentsId, binding.requestId)
+    const request = this.markdownTabCloseRequests.get(key)
+    if (!request) {
+      this.markdownTabCloseRequests.set(
+        key,
+        this.createMarkdownTabCloseRequest(binding, 'cancelled')
+      )
+      return 'cancelled'
+    }
+    if (!this.sameMarkdownTabCloseBinding(request, binding)) return 'unknown'
+
+    this.expireMarkdownTabCloseRequest(request)
+    if (request.state === 'pending') request.state = 'cancelled'
+    return request.state
+  }
+
+  consumeMarkdownTabClosePermit(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseState {
+    const request = this.findMarkdownTabCloseRequest(senderWebContentsId, input)
+    if (!request) return 'unknown'
+    this.expireMarkdownTabCloseRequest(request)
+    if (request.state === 'granted') request.state = 'consumed'
+    return request.state
+  }
+
+  clearMarkdownTabCloseRequests(senderWebContentsId: number): void {
+    for (const [key, request] of this.markdownTabCloseRequests) {
+      if (key.startsWith(`${senderWebContentsId}:`)) this.markdownTabCloseRequests.delete(key)
+    }
+  }
+
+  private normalizeMarkdownTabCloseBinding(
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseBinding | null {
+    if (
+      !input ||
+      typeof input.requestId !== 'string' ||
+      !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.requestId) ||
+      typeof input.tabId !== 'string' ||
+      !input.tabId.trim() ||
+      input.tabId.length > 256 ||
+      !Number.isSafeInteger(input.sessionGeneration) ||
+      input.sessionGeneration < 0 ||
+      !Array.isArray(input.ownerIdentities) ||
+      input.ownerIdentities.length < 1 ||
+      input.ownerIdentities.length > 256 ||
+      input.ownerIdentities.some(
+        identity => typeof identity !== 'string' || !identity || identity.length > 512
+      ) ||
+      new Set(input.ownerIdentities).size !== input.ownerIdentities.length
+    )
+      return null
+    return Object.freeze({
+      requestId: input.requestId,
+      tabId: input.tabId,
+      sessionGeneration: input.sessionGeneration,
+      ownerIdentities: Object.freeze([...input.ownerIdentities].sort()),
+    })
+  }
+
+  private markdownTabCloseRequestKey(senderWebContentsId: number, requestId: string): string {
+    return `${senderWebContentsId}:${requestId}`
+  }
+
+  private createMarkdownTabCloseRequest(
+    binding: MarkdownTabCloseBinding,
+    state: Exclude<MarkdownTabCloseState, 'unknown'>
+  ): MarkdownTabCloseRequest {
+    return {
+      binding,
+      ownerIdentityDigest: createHash('sha256')
+        .update(JSON.stringify(binding.ownerIdentities))
+        .digest('hex'),
+      state,
+      expiresAt: Date.now() + 30_000,
+    }
+  }
+
+  private findMarkdownTabCloseRequest(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): MarkdownTabCloseRequest | null {
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    if (!binding || !Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0)
+      return null
+    const request = this.markdownTabCloseRequests.get(
+      this.markdownTabCloseRequestKey(senderWebContentsId, binding.requestId)
+    )
+    return request && this.sameMarkdownTabCloseBinding(request, binding) ? request : null
+  }
+
+  private sameMarkdownTabCloseBinding(
+    request: MarkdownTabCloseRequest,
+    binding: MarkdownTabCloseBinding
+  ): boolean {
+    return (
+      request.binding.tabId === binding.tabId &&
+      request.binding.sessionGeneration === binding.sessionGeneration &&
+      request.ownerIdentityDigest ===
+        createHash('sha256').update(JSON.stringify(binding.ownerIdentities)).digest('hex')
+    )
+  }
+
+  private expireMarkdownTabCloseRequest(request: MarkdownTabCloseRequest): void {
+    if (
+      (request.state === 'pending' || request.state === 'granted') &&
+      request.expiresAt <= Date.now()
+    ) {
+      request.state = 'expired'
+    }
   }
 
   /**

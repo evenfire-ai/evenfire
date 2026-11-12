@@ -46,6 +46,7 @@ import {
   HostMessageAttachment,
   HostMessageRequest,
   HostStatusStreamEvent,
+  MarkdownTabCloseBinding,
   TaskProgressStreamEvent,
   WorkflowNotificationStreamEvent,
 } from './types.js'
@@ -210,6 +211,28 @@ function sanitizeOptionalSessionGeneration(input: unknown): number | undefined {
     throw new Error('Invalid session generation')
   }
   return generation
+}
+
+function parseMarkdownTabCloseBinding(input: unknown): MarkdownTabCloseBinding {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid Markdown tab close binding')
+  }
+  const payload = input as Record<string, unknown>
+  const sessionGeneration = sanitizeOptionalSessionGeneration(payload.sessionGeneration)
+  const ownerIdentities = payload.ownerIdentities
+  if (
+    sessionGeneration === undefined ||
+    !Array.isArray(ownerIdentities) ||
+    ownerIdentities.some(identity => typeof identity !== 'string')
+  ) {
+    throw new Error('Invalid Markdown tab close binding')
+  }
+  return {
+    requestId: sanitizeString(payload.requestId),
+    tabId: sanitizeString(payload.tabId),
+    sessionGeneration,
+    ownerIdentities: ownerIdentities as string[],
+  }
 }
 
 function sanitizeOptionalPositiveInteger(input: unknown, label: string): number | undefined {
@@ -455,7 +478,17 @@ export function registerIpcHandlers(
 ): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
+  const markdownCloseOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
+
+  const trackMarkdownCloseOwner = (sender: IpcMainInvokeEvent['sender']) => {
+    if (markdownCloseOwnerCleanupRegistered.has(sender.id)) return
+    markdownCloseOwnerCleanupRegistered.add(sender.id)
+    sender.once('destroyed', () => {
+      markdownCloseOwnerCleanupRegistered.delete(sender.id)
+      service.clearMarkdownTabCloseRequests(sender.id)
+    })
+  }
 
   // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
   // R1-M1): the renderer attaches a requestId to an invoke and fires
@@ -670,21 +703,50 @@ export function registerIpcHandlers(
       return service.acknowledgeSessionPreclear(notice)
     }
   )
-  ipcMain.handle('auth:authorizeMarkdownTabClose', (event, payload: { requestId?: unknown }) => {
+  ipcMain.handle('auth:authorizeMarkdownTabClose', (event, payload: unknown) => {
     assertTrustedSender(event)
     const mainWindow = getMainWindow()
     if (!mainWindow || event.sender !== mainWindow.webContents) {
       throw new Error('Markdown tab close requires the owning window')
     }
-    return service.authorizeMarkdownTabClose(sanitizeString(payload?.requestId))
+    trackMarkdownCloseOwner(event.sender)
+    return service.authorizeMarkdownTabClose(event.sender.id, parseMarkdownTabCloseBinding(payload))
   })
-  ipcMain.handle('auth:consumeMarkdownTabClosePermit', (event, payload: { permit?: unknown }) => {
+  ipcMain.handle('auth:getMarkdownTabClosePermitStatus', (event, payload: unknown) => {
     assertTrustedSender(event)
     const mainWindow = getMainWindow()
     if (!mainWindow || event.sender !== mainWindow.webContents) {
       throw new Error('Markdown tab close requires the owning window')
     }
-    return service.consumeMarkdownTabClosePermit(sanitizeString(payload?.permit))
+    trackMarkdownCloseOwner(event.sender)
+    return service.getMarkdownTabClosePermitStatus(
+      event.sender.id,
+      parseMarkdownTabCloseBinding(payload)
+    )
+  })
+  ipcMain.handle('auth:cancelMarkdownTabClosePermit', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Markdown tab close requires the owning window')
+    }
+    trackMarkdownCloseOwner(event.sender)
+    return service.cancelMarkdownTabClosePermit(
+      event.sender.id,
+      parseMarkdownTabCloseBinding(payload)
+    )
+  })
+  ipcMain.handle('auth:consumeMarkdownTabClosePermit', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    const mainWindow = getMainWindow()
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('Markdown tab close requires the owning window')
+    }
+    trackMarkdownCloseOwner(event.sender)
+    return service.consumeMarkdownTabClosePermit(
+      event.sender.id,
+      parseMarkdownTabCloseBinding(payload)
+    )
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)

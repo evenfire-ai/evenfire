@@ -7,6 +7,8 @@ import type {
   EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
   HostMessageRequest,
+  MarkdownTabCloseBinding,
+  MarkdownTabCloseState,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
   SandboxUiReleasedEvent,
@@ -198,10 +200,20 @@ const clerum = Object.freeze({
       sessionGeneration: number
       reason: 'logout' | 'session-ended' | 'environment-change'
     }) => ipcRenderer.invoke('auth:acknowledgeSessionPreclear', notice),
-    authorizeMarkdownTabClose: (requestId: string): Promise<string | null> =>
-      ipcRenderer.invoke('auth:authorizeMarkdownTabClose', { requestId }),
-    consumeMarkdownTabClosePermit: (permit: string): Promise<boolean> =>
-      ipcRenderer.invoke('auth:consumeMarkdownTabClosePermit', { permit }),
+    authorizeMarkdownTabClose: (binding: MarkdownTabCloseBinding): Promise<MarkdownTabCloseState> =>
+      ipcRenderer.invoke('auth:authorizeMarkdownTabClose', binding),
+    getMarkdownTabClosePermitStatus: (
+      binding: MarkdownTabCloseBinding
+    ): Promise<MarkdownTabCloseState> =>
+      ipcRenderer.invoke('auth:getMarkdownTabClosePermitStatus', binding),
+    cancelMarkdownTabClosePermit: (
+      binding: MarkdownTabCloseBinding
+    ): Promise<MarkdownTabCloseState> =>
+      ipcRenderer.invoke('auth:cancelMarkdownTabClosePermit', binding),
+    consumeMarkdownTabClosePermit: (
+      binding: MarkdownTabCloseBinding
+    ): Promise<MarkdownTabCloseState> =>
+      ipcRenderer.invoke('auth:consumeMarkdownTabClosePermit', binding),
     onSessionPreclear: (
       callback: (notice: {
         transitionId: number

@@ -142,6 +142,13 @@ import {
 } from '../../src/desktopCommands'
 import type { DeepLinkAcknowledgmentAuthority } from '../../src/types'
 
+type PendingMarkdownCloseRequest = {
+  binding: Parameters<typeof window.clerum.auth.authorizeMarkdownTabClose>[0]
+  gfsUri: string
+  reconciling: boolean
+  retryTimer: number | null
+}
+
 type SandboxUiSessionInvalidation = {
   sessionGeneration: number
   appDeepLinkMinimumId: number
@@ -406,6 +413,10 @@ export function App() {
   // is its projection). App composes the strip/reveal/reconcile over it.
   const workspaceTabs = vm.workspaceTabs
   const [markdownCloseTabId, setMarkdownCloseTabId] = React.useState<string | null>(null)
+  const pendingMarkdownClosesRef = React.useRef(new Map<string, PendingMarkdownCloseRequest>())
+  const reconcileMarkdownCloseRef = React.useRef<(requestId: string) => Promise<void>>(
+    async () => undefined
+  )
   const [markdownAuthBarrier, setMarkdownAuthBarrier] = React.useState(() =>
     markdownDraftOwner.getAuthBarrier()
   )
@@ -447,10 +458,17 @@ export function App() {
       markdownDraftOwner.restoreAfterAuthBarrier({ id: barrier.id }, notice.sessionGeneration)
       setMarkdownPreclearNotice(null)
       setMarkdownAuthBarrier(markdownDraftOwner.getAuthBarrier())
+      for (const requestId of pendingMarkdownClosesRef.current.keys()) {
+        void reconcileMarkdownCloseRef.current(requestId)
+      }
     })
     const unsubscribeCleared = window.clerum.auth?.onSessionCleared?.(() => {
       const barrier = markdownDraftOwner.getAuthBarrier()
       if (barrier) markdownDraftOwner.retirePrincipalAfterAuthBarrier({ id: barrier.id })
+      for (const request of pendingMarkdownClosesRef.current.values()) {
+        if (request.retryTimer !== null) window.clearTimeout(request.retryTimer)
+      }
+      pendingMarkdownClosesRef.current.clear()
       setMarkdownPreclearNotice(null)
       setMarkdownAuthBarrier(markdownDraftOwner.getAuthBarrier())
     })
@@ -1033,39 +1051,118 @@ export function App() {
     ]
   )
 
-  const authorizeAndCloseMarkdownTab = React.useCallback(
-    async (id: string) => {
-      const requestId = `${id}:${window.crypto.randomUUID()}`
-      let permit: string | null = null
+  const reconcileMarkdownCloseRequest = React.useCallback(
+    async (requestId: string) => {
+      const request = pendingMarkdownClosesRef.current.get(requestId)
+      if (!request || request.reconciling) return
+      request.reconciling = true
       try {
-        permit = await window.clerum.auth.authorizeMarkdownTabClose(requestId)
-        if (!permit) {
-          markdownDraftOwner.releaseCloseReservation(id)
+        let state = await window.clerum.auth.getMarkdownTabClosePermitStatus(request.binding)
+        if (state === 'pending' || state === 'unknown') {
+          state = await window.clerum.auth.cancelMarkdownTabClosePermit(request.binding)
+        }
+        if (state === 'granted') {
+          state = await window.clerum.auth.consumeMarkdownTabClosePermit(request.binding)
+        }
+
+        if (state === 'consumed') {
+          if (!markdownDraftOwner.promoteCloseRequest(requestId)) {
+            request.retryTimer = window.setTimeout(() => {
+              request.retryTimer = null
+              void reconcileMarkdownCloseRef.current(requestId)
+            }, 500)
+            return
+          }
+          if (!markdownDraftOwner.commitCloseRequest(requestId)) {
+            request.retryTimer = window.setTimeout(() => {
+              request.retryTimer = null
+              void reconcileMarkdownCloseRef.current(requestId)
+            }, 500)
+            return
+          }
+          pendingMarkdownClosesRef.current.delete(requestId)
+          const currentTab = workspaceTabsRef.current.tabs.find(
+            candidate =>
+              candidate.id === request.binding.tabId &&
+              candidate.kind === 'preview' &&
+              candidate.preview?.fileKind === 'markdown' &&
+              candidate.preview.gfsUri === request.gfsUri
+          )
+          if (currentTab) closeWorkspaceTabNow(request.binding.tabId)
           setMarkdownCloseTabId(null)
           return
         }
-        const consumed = await window.clerum.auth.consumeMarkdownTabClosePermit(permit)
-        if (!consumed) {
-          markdownDraftOwner.releaseCloseReservation(id)
+
+        if (state === 'denied' || state === 'cancelled' || state === 'expired') {
+          markdownDraftOwner.releaseCloseRequest(requestId)
+          pendingMarkdownClosesRef.current.delete(requestId)
           setMarkdownCloseTabId(null)
           return
         }
-        const promoted = markdownDraftOwner.promoteCloseReservation(id, permit)
-        if (promoted) {
-          if (!markdownDraftOwner.commitClose(id)) return
-        } else if (!markdownDraftOwner.getAuthBarrier()?.mainReserved) {
-          return
-        }
-        setMarkdownCloseTabId(null)
-        closeWorkspaceTabNow(id)
       } catch {
-        if (permit)
-          void window.clerum.auth.consumeMarkdownTabClosePermit(permit).catch(() => undefined)
-        markdownDraftOwner.releaseCloseReservation(id)
-        setMarkdownCloseTabId(null)
+        // An unavailable or lost main response is not a terminal result. Keep
+        // the exact owner reservation and retry with its immutable binding.
+      } finally {
+        request.reconciling = false
+      }
+
+      if (pendingMarkdownClosesRef.current.has(requestId) && request.retryTimer === null) {
+        request.retryTimer = window.setTimeout(() => {
+          request.retryTimer = null
+          void reconcileMarkdownCloseRef.current(requestId)
+        }, 500)
       }
     },
     [closeWorkspaceTabNow, markdownDraftOwner]
+  )
+  reconcileMarkdownCloseRef.current = reconcileMarkdownCloseRequest
+
+  const authorizeAndCloseMarkdownTab = React.useCallback(
+    async (id: string) => {
+      const tab = workspaceTabsRef.current.tabs.find(
+        candidate => candidate.id === id && candidate.kind === 'preview'
+      )
+      const sessionGeneration = vm.sessionGeneration
+      if (
+        !tab ||
+        tab.preview?.fileKind !== 'markdown' ||
+        !tab.preview.gfsUri ||
+        !Number.isSafeInteger(sessionGeneration) ||
+        sessionGeneration === null ||
+        sessionGeneration === undefined
+      ) {
+        markdownDraftOwner.releaseCloseReservation(id)
+        setMarkdownCloseTabId(null)
+        return
+      }
+      const requestId = `${id}:${window.crypto.randomUUID()}`
+      const ownerIdentities = markdownDraftOwner.reserveCloseRequest(id, requestId)
+      if (!ownerIdentities) {
+        markdownDraftOwner.releaseCloseReservation(id)
+        setMarkdownCloseTabId(null)
+        return
+      }
+      const binding = {
+        requestId,
+        tabId: id,
+        sessionGeneration,
+        ownerIdentities,
+      }
+      pendingMarkdownClosesRef.current.set(requestId, {
+        binding,
+        gfsUri: tab.preview.gfsUri,
+        reconciling: false,
+        retryTimer: null,
+      })
+      try {
+        await window.clerum.auth.authorizeMarkdownTabClose(binding)
+      } catch {
+        // The main request may already have linearized. Reconcile its exact
+        // status instead of releasing the reservation on a lost response.
+      }
+      await reconcileMarkdownCloseRequest(requestId)
+    },
+    [markdownDraftOwner, reconcileMarkdownCloseRequest, vm.sessionGeneration]
   )
 
   const handleCloseWorkspaceTab = React.useCallback(
