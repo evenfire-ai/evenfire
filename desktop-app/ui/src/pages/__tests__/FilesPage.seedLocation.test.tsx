@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
+import { isInaccessible } from '@testing-library/dom'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
@@ -906,9 +907,11 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       rejectRefresh(new Error(rateLimitMessage))
       await Promise.resolve()
     })
-    expect(
-      await screen.findByText('Too many file requests. Wait before retrying permissions.')
-    ).toBeTruthy()
+    const rateLimitFeedback = await screen.findByText(
+      'Too many file requests. Wait before retrying permissions.'
+    )
+    expect(rateLimitFeedback).toBeTruthy()
+    expect(isInaccessible(rateLimitFeedback)).toBe(false)
     expect(folderActions.getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
     expect(folderActions.getByRole('menuitem', { name: 'New folder' })).toBeTruthy()
     expect(folderActions.getByRole('menuitem', { name: 'Upload file' })).toBeTruthy()
