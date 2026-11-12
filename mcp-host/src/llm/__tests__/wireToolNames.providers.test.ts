@@ -152,9 +152,20 @@ describe('tool calls coming back', () => {
   const longA = `${NOTION_SERVER}__notion-query-multiple-data-sources`
   const shortB = `${NOTION_SERVER}__notion-search`
   // Witness that the projection ran on the request whose response is checked:
-  // a name that resolves to itself proves nothing if nothing was aliased.
-  const sentNames = (id: LlmProvider, body: unknown) =>
-    wireToolDecls(familyOf(id), body).map(t => t.name)
+  // a name that resolves to itself proves nothing if nothing was aliased. The
+  // length check keeps an empty tool list from passing as "not the canonical".
+  const expectAliased = (
+    id: LlmProvider,
+    body: unknown,
+    sentCount: number,
+    index: number,
+    canonical: string
+  ) => {
+    const names = wireToolDecls(familyOf(id), body).map(t => t.name)
+    expect(names).toHaveLength(sentCount)
+    expect(names[index]).toMatch(ENVELOPES[envelopeOf(id)])
+    expect(names[index]).not.toBe(canonical)
+  }
 
   it.each(W_IDS)('%s: an exact canonical of the request resolves to itself', async id => {
     const { response, body } = await send(
@@ -163,7 +174,7 @@ describe('tool calls coming back', () => {
       [toolDef(longA), toolDef(shortB)],
       () => shortB
     )
-    expect(sentNames(id, body)[0]).not.toBe(longA)
+    expectAliased(id, body, 2, 0, longA)
     expect(response.tool_calls?.[0]?.name).toBe(shortB)
   })
 
@@ -176,7 +187,7 @@ describe('tool calls coming back', () => {
         [toolDef(longA)],
         () => longA
       )
-      expect(sentNames(id, body)[0]).not.toBe(longA)
+      expectAliased(id, body, 1, 0, longA)
       expect(response.tool_calls?.[0]?.name).toBe(longA)
     }
   )
@@ -190,7 +201,7 @@ describe('tool calls coming back', () => {
       [toolDef(longA), toolDef(OVER_128)],
       () => 'inventado_xyz'
     )
-    expect(sentNames(id, body)[1]).not.toBe(OVER_128)
+    expectAliased(id, body, 2, 1, OVER_128)
     expect(response.tool_calls?.[0]?.name).toBe('inventado_xyz')
   })
 
