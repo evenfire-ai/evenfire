@@ -2,20 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE_FILE="$ROOT_DIR/deploy/scripts/control-api-runtime-access-profiles.tsv"
-PEER_FILE="$ROOT_DIR/deploy/scripts/workflow-recipes-runtime-access-profiles.tsv"
 MIGRATION_SCRIPT="$ROOT_DIR/deploy/scripts/run-control-api-db-migration.sh"
 
-relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$PROFILE_FILE")"
-peer_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$PEER_FILE")"
-duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$PROFILE_FILE")"
-invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_delete|none)$/) { count++ } END { print count + 0 }' "$PROFILE_FILE")"
-name_diff="$(comm -3 \
-  <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$PROFILE_FILE" | sort) \
-  <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$PEER_FILE" | sort))"
 
-# Existing sentinel rows, plus the three session rows. The expected relation
-# count is the peer workflow-recipes profile, not a handwritten literal.
+# Existing Control API sentinels remain local; the shared helper owns profile
+# shape, role-specific values, and the two exact OIDC rows.
 sentinels=(
   $'dynamic_clients\tlegacy_dml'
   $'entity_change_feed\tnone'
@@ -52,12 +45,8 @@ if ! grep -Fq '$2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_dele
   contract_fragments_ok=0
 fi
 
-if [[ "$relation_count" -le 0 || "$relation_count" != "$peer_count" || -n "$name_diff" || "$duplicate_count" != "0" || "$invalid_count" != "0" || ${#missing_sentinels[@]} -gt 0 || "$contract_fragments_ok" != "1" ]]; then
-  printf 'FAIL: control-api runtime access contract is incomplete or not exact (%s has %s relations, %s has %s relations; duplicates=%s invalid=%s)\n' \
-    "$PROFILE_FILE" "$relation_count" "$PEER_FILE" "$peer_count" "$duplicate_count" "$invalid_count" >&2
-  if [[ -n "$name_diff" ]]; then
-    printf 'relation name sets differ:\n%s\n' "$name_diff" >&2
-  fi
+if [[ ${#missing_sentinels[@]} -gt 0 || "$contract_fragments_ok" != "1" ]]; then
+  printf 'FAIL: control-api runtime access privileges are incomplete or not exact\n' >&2
   if [[ ${#missing_sentinels[@]} -gt 0 ]]; then
     printf 'missing sentinel rows:\n' >&2
     printf '%s\n' "${missing_sentinels[@]}" >&2
@@ -65,5 +54,9 @@ if [[ "$relation_count" -le 0 || "$relation_count" != "$peer_count" || -n "$name
   exit 1
 fi
 
-printf 'PASS: control-api runtime access contract is explicit and least privilege (%s relations, peer %s relations)\n' \
-  "$relation_count" "$peer_count"
+if ! bash "$SCRIPT_DIR/lib/runtime-access-profile-contract.sh"; then
+  printf 'FAIL: shared runtime access-profile contract helper failed\n' >&2
+  exit 1
+fi
+
+printf 'PASS: control-api runtime access contract is explicit and least privilege\n'

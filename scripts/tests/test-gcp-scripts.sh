@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FAIL=0
 
 # DRY_RUN=1 mode: scripts should echo the gcloud command they'd run
@@ -1556,21 +1557,12 @@ assert_trace_maintenance_runtime_access_contract_is_exact() {
 }
 
 assert_control_api_runtime_access_contract_is_exact() {
-  local profile_file peer_file sequence_profile_file migration_script
-  local relation_count peer_count duplicate_count invalid_count sequence_count sequence_duplicate_count sequence_invalid_count
-  local name_diff sentinel missing_sentinels=""
+  local profile_file sequence_profile_file migration_script
+  local sentinel missing_sentinels=""
   profile_file="deploy/scripts/control-api-runtime-access-profiles.tsv"
-  peer_file="deploy/scripts/workflow-recipes-runtime-access-profiles.tsv"
   sequence_profile_file="deploy/scripts/control-api-runtime-sequence-access-profiles.tsv"
   migration_script="$(cat deploy/scripts/run-control-api-db-migration.sh)"
 
-  relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$profile_file")"
-  peer_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$peer_file")"
-  duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$profile_file")"
-  invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|insert_delete|none)$/) { count++ } END { print count + 0 }' "$profile_file")"
-  name_diff="$(comm -3 \
-    <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$profile_file" | sort) \
-    <(awk -F '\t' '!/^[[:space:]]*(#|$)/ { print $1 }' "$peer_file" | sort))"
   local -a sentinels=(
     $'dynamic_clients\tlegacy_dml'
     $'entity_change_feed\tnone'
@@ -1605,7 +1597,7 @@ assert_control_api_runtime_access_contract_is_exact() {
   sequence_duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$sequence_profile_file")"
   sequence_invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_rw|consume|none)$/) { count++ } END { print count + 0 }' "$sequence_profile_file")"
 
-  if [[ "$relation_count" -gt 0 && "$relation_count" == "$peer_count" && -z "$name_diff" && -z "$missing_sentinels" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
+  if [[ -z "$missing_sentinels" ]] && \
      [[ "$sequence_count" == "9" && "$sequence_duplicate_count" == "0" && "$sequence_invalid_count" == "0" ]] && \
      grep -qx $'dynamic_clients_id_seq\tlegacy_rw' "$sequence_profile_file" && \
      grep -qx $'entity_change_outbox_id_seq\tnone' "$sequence_profile_file" && \
@@ -1622,12 +1614,9 @@ assert_control_api_runtime_access_contract_is_exact() {
      [[ "$migration_script" == *"('TRUNCATE', false)"* ]] && \
      [[ "$migration_script" == *"('REFERENCES', false)"* ]] && \
      [[ "$migration_script" == *"('TRIGGER', false)"* ]]; then
-    pass "control-api runtime access contract rejects missing and excessive relation privileges (${profile_file} has ${relation_count} relations, ${peer_file} has ${peer_count} relations)"
+    pass "control-api runtime access verifier contract remains least privilege"
   else
-    fail "control-api runtime access contract is incomplete or not exact: ${profile_file} has ${relation_count} relations, ${peer_file} has ${peer_count} relations; duplicates=${duplicate_count} invalid=${invalid_count}"
-    if [[ -n "$name_diff" ]]; then
-      printf 'relation name sets differ:\n%s\n' "$name_diff" >&2
-    fi
+    fail "control-api runtime access verifier contract is incomplete or not exact"
     if [[ -n "$missing_sentinels" ]]; then
       printf 'missing sentinel rows:\n%s\n' "$missing_sentinels" >&2
     fi
@@ -1679,5 +1668,9 @@ run_private_infra_test "deploy runtime role reconciliation" \
   .github/workflows/deploy-dev.yaml .github/workflows/deploy-prod.yaml
 assert_runtime_role_provisioning_script
 assert_db_migration_context_fails_closed
+
+if ! bash "$SCRIPT_DIR/lib/runtime-access-profile-contract.sh"; then
+  fail "shared runtime access-profile contract helper failed"
+fi
 
 exit $FAIL

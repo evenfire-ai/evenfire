@@ -68,6 +68,11 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     const passwordAdmission = '0130_password_login_success_admission'
     const lastDev = '0136_llm_catalog_dismissed_backfill'
     const task106 = ['0137_user_access_foundation', '0138_legacy_password_security_epoch_backfill']
+    const oidc = [
+      '0139_oidc_protocol_attempts',
+      '0140_oidc_protocol_attempt_expiry_index',
+      '0141_oidc_protocol_attempt_browser_binding',
+    ]
 
     expect(
       versions.slice(versions.indexOf(parentDev[0]!), versions.indexOf(parentDev[0]!) + 3)
@@ -79,7 +84,8 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 2)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
-    expect(versions.at(-1)).toBe(task106.at(-1))
+    expect(versions.slice(-3)).toEqual(oidc)
+    expect(versions.at(-1)).toBe(oidc.at(-1))
   })
 
   it('keeps legacy aliases unique and distinct from current versions', async () => {
