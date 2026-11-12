@@ -1486,6 +1486,10 @@ export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefiniti
           }
           const bom = file.bytes.subarray(0, 3).equals(UTF8_BOM)
           let text = decoded
+          // The size the text will have, so an edit that would make the file
+          // larger than a GFS file may be is refused before the text is built:
+          // a replaceAll can multiply the file many times over.
+          let bytes = (bom ? UTF8_BOM.byteLength : 0) + Buffer.byteLength(text)
           const hunks: Array<{ edit: number; line: number; removed: string[]; added: string[] }> =
             []
           for (const [index, edit] of (edits as TextEdit[]).entries()) {
@@ -1496,6 +1500,14 @@ export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefiniti
                 error: `edit ${index} matched ${found.length} times; it must match ${
                   edit.replaceAll ? 'at least once' : 'exactly once'
                 }. Nothing was written`,
+              }
+            }
+            bytes +=
+              found.length * (Buffer.byteLength(edit.newText) - Buffer.byteLength(edit.oldText))
+            if (bytes > GFS_FILE_LIMITS.maxFileBytes) {
+              return {
+                success: false,
+                error: `edit ${index} would make the file ${bytes} bytes, above the ${GFS_FILE_LIMITS.maxFileBytes}-byte limit of a GFS file. Nothing was written`,
               }
             }
             hunks.push({

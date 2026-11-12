@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import JSZip from 'jszip'
 import { VisualInputError } from '../visualInput/policy'
 import { EDIT_SCOPE_SENTENCE, type GfscWriteClient, buildGfsEditTools } from './gfs'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 
 function fakeClient(bytes: Buffer, version = 7) {
   const release = vi.fn()
@@ -161,6 +162,28 @@ describe('clerum__gfs_edit_text', () => {
     const after = Buffer.from(written(client), 'utf8')
     expect(after.subarray(0, 3)).toEqual(Buffer.from([0xef, 0xbb, 0xbf]))
     expect(after.subarray(3).toString()).toBe('line one\r\nline 2\r\n')
+  })
+
+  it('refuses an edit that would make the file larger than a GFS file may be, and writes nothing', async () => {
+    const newText = 'x'.repeat(65_536)
+    const fit = Math.floor(GFS_FILE_LIMITS.maxFileBytes / newText.length)
+    const over = fakeClient(Buffer.from('a'.repeat(fit + 1)))
+    const refused = await edit(over.client, {
+      edits: [{ oldText: 'a', newText, replaceAll: true }],
+    })
+    expect(refused.error).toBe(
+      `edit 0 would make the file ${(fit + 1) * newText.length} bytes, above the ${GFS_FILE_LIMITS.maxFileBytes}-byte limit of a GFS file. Nothing was written`
+    )
+    expect(over.client.read).toHaveBeenCalledTimes(1)
+    expect(over.client.write).not.toHaveBeenCalled()
+    expect(over.release).toHaveBeenCalledTimes(1)
+    // Witness: one match fewer fits within the limit and is written.
+    const within = fakeClient(Buffer.from('a'.repeat(fit)))
+    const written = await edit(within.client, {
+      edits: [{ oldText: 'a', newText, replaceAll: true }],
+    })
+    expect(written.success, written.error).toBe(true)
+    expect(within.client.write).toHaveBeenCalledTimes(1)
   })
 
   it('refuses edits past its limits before reading, and names the shell and sourcePath route', async () => {
