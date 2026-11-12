@@ -127,12 +127,15 @@ Critical variables:
 - `RPC_PROXY_CONTROL_API_CACHE_TTL_MS`
 
 Required secrets, with no code default in any `NODE_ENV` (startup fails when one
-is unset, empty or a `replace-with-*` placeholder):
+is unset, empty, only whitespace or a `replace-with-*` placeholder; surrounding
+whitespace is trimmed):
 
 - `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`: must match the `rpc-proxy` entry in
   control-api's `CONTROL_API_INTERNAL_SERVICE_TOKENS`.
-- `RPC_PROXY_DESKTOP_COOKIE_SECRET`: signs the Desktop session cookie.
-- `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`: signs the sandbox UI session cookie.
+- `RPC_PROXY_DESKTOP_COOKIE_SECRET`: signs the Desktop session cookie. At least
+  32 bytes.
+- `RPC_PROXY_SANDBOX_UI_COOKIE_SECRET`: signs the sandbox UI session cookie. At
+  least 32 bytes.
 
 `RPC_PROXY_JWT_PUBLIC_KEY` must match the public key for `CONTROL_API_RPC_JWT_PRIVATE_KEY`.
 
@@ -153,7 +156,8 @@ CLERUM_DEV_MODE=true npm run dev
 
 `dev-rpc-proxy-token` is the `rpc-proxy` entry of control-api's development
 token map, which control-api uses only outside `NODE_ENV=production`. The two
-cookie secrets have no default either; any random value works locally.
+cookie secrets have no default either; any random value of 32 bytes or more
+works locally (`openssl rand -hex 32` gives 64).
 
 `make dev` also opts into this local mode and needs the same exports. It is
 rejected with `NODE_ENV=production`. Without this opt-in, set

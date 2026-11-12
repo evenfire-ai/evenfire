@@ -45,7 +45,7 @@ Environment variables:
 - `EXTERNAL_REST_API_CORS_ORIGIN`: Allowed CORS origin for browser requests (`*` allows all origins).
 - `EXTERNAL_REST_API_GOOGLE_CLIENT_ID`: Google OAuth client ID used to verify incoming Google ID tokens.
 - `EXTERNAL_REST_API_CONTROL_API_BASE_URL`: Base URL for internal calls to `control-api` (typically through the profile control funnel).
-- `EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN`: Shared bearer token used when `external-rest-api` authenticates to `control-api`. Required, no default in any `NODE_ENV`: startup fails when it is unset, empty or a `replace-with-*` placeholder.
+- `EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN`: Shared bearer token used when `external-rest-api` authenticates to `control-api`. Required, no default in any `NODE_ENV`: startup fails when it is unset, empty, only whitespace or a `replace-with-*` placeholder. Surrounding whitespace is trimmed.
 - `EXTERNAL_REST_API_CONTROL_API_SERVICE_NAME`: Service identity sent in `x-service-token` for `control-api` internal auth checks (default `external-rest-api`).
 - `EXTERNAL_REST_API_MEMBER_REGISTRATION_SERVICE_BASE_URL`: Base URL for internal calls to `member-registration-service`.
 - `EXTERNAL_REST_API_MEMBER_REGISTRATION_SERVICE_SERVICE_TOKEN`: Shared bearer token used when `external-rest-api` authenticates to `member-registration-service`.

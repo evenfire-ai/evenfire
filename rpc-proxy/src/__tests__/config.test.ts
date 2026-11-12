@@ -367,4 +367,89 @@ describe('secrets have no code default in any NODE_ENV', () => {
       )
     }
   )
+
+  it.each(SECRETS)('refuses to start when %s is empty', async name => {
+    vi.stubEnv(name, '')
+
+    await expect(importConfig()).rejects.toThrow(`Missing required environment variable: ${name}`)
+  })
+
+  it.each(SECRETS.flatMap(secret => [[...secret, '   '] as const, [...secret, '\n'] as const]))(
+    'refuses to start when %s is only whitespace',
+    async (name, _field, _writer, value) => {
+      vi.stubEnv(name, value)
+
+      await expect(importConfig()).rejects.toThrow(`Missing required environment variable: ${name}`)
+    }
+  )
+
+  it.each(SECRETS)(
+    'refuses a replace-with-* placeholder in %s after trimming surrounding spaces',
+    async (name, _field, writer) => {
+      vi.stubEnv(name, '  replace-with-a-real-value')
+
+      await expect(importConfig()).rejects.toThrow(
+        new RegExp(
+          `${name} has placeholder value .*Run deploy/scripts/${writer.replace('.', '\\.')}`
+        )
+      )
+    }
+  )
+
+  it.each(SECRETS)('loads %s without its surrounding whitespace', async (name, field) => {
+    const value = `${name.toLowerCase()}-value`
+    vi.stubEnv(name, `  ${value}\n`)
+
+    expect((await importConfig())[field]).toBe(value)
+  })
+
+  // The two cookie secrets are the HMAC keys of the desktop and sandbox-UI session cookies.
+  const COOKIE_SECRETS = SECRETS.filter(([name]) => name.endsWith('_COOKIE_SECRET'))
+
+  it('covers both cookie secrets', () => {
+    expect(COOKIE_SECRETS.map(([name]) => name)).toEqual([
+      'RPC_PROXY_DESKTOP_COOKIE_SECRET',
+      'RPC_PROXY_SANDBOX_UI_COOKIE_SECRET',
+    ])
+  })
+
+  it.each(COOKIE_SECRETS)(
+    'refuses to start when %s is shorter than 32 bytes, without echoing it',
+    async name => {
+      const short = 'q'.repeat(31)
+      vi.stubEnv(name, short)
+
+      const failure = importConfig()
+      await expect(failure).rejects.toThrow(
+        new RegExp(`${name} must be at least 32 bytes\\. Run deploy/scripts/gen-jwt-keys\\.sh`)
+      )
+      await expect(failure).rejects.not.toThrow(short)
+      await expect(failure).rejects.not.toThrow(/\b31\b/)
+    }
+  )
+
+  it.each(COOKIE_SECRETS)('accepts %s of exactly 32 bytes', async (name, field) => {
+    const value = 'q'.repeat(32)
+    vi.stubEnv(name, value)
+
+    expect((await importConfig())[field]).toBe(value)
+  })
+
+  it.each(COOKIE_SECRETS)(
+    'measures the %s minimum in UTF-8 bytes, not characters',
+    async (name, field) => {
+      // 16 characters, 32 bytes in UTF-8.
+      const value = 'é'.repeat(16)
+      vi.stubEnv(name, value)
+
+      expect((await importConfig())[field]).toBe(value)
+    }
+  )
+
+  it('sets no minimum length on the service token', async () => {
+    const value = 'nine-byte'
+    vi.stubEnv('RPC_PROXY_CONTROL_API_SERVICE_TOKEN', value)
+
+    expect((await importConfig()).controlApiServiceToken).toBe(value)
+  })
 })

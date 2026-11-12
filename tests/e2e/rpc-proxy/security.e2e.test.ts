@@ -252,8 +252,9 @@ describe('rpc-proxy e2e security suite', () => {
         RPC_PROXY_CONTROL_API_BASE_URL: `http://127.0.0.1:${controlApiPort}/api/v1`,
         RPC_PROXY_CONTROL_API_SERVICE_TOKEN: 'e2e-service-token',
         RPC_PROXY_CONTROL_API_SERVICE_NAME: 'rpc-proxy',
-        RPC_PROXY_DESKTOP_COOKIE_SECRET: 'e2e-desktop-cookie-secret',
-        RPC_PROXY_SANDBOX_UI_COOKIE_SECRET: 'e2e-sandbox-ui-cookie-secret',
+        // rpc-proxy requires at least 32 bytes for each cookie secret.
+        RPC_PROXY_DESKTOP_COOKIE_SECRET: 'e2e-desktop-cookie-secret-32-bytes-min',
+        RPC_PROXY_SANDBOX_UI_COOKIE_SECRET: 'e2e-sandbox-ui-cookie-secret-32-bytes-min',
         RPC_PROXY_CONTROL_API_CACHE_TTL_MS: '5',
       },
       stdio: ['ignore', 'pipe', 'pipe'],

@@ -110,11 +110,26 @@ function assertNotPlaceholder(label: string, value: string, writerScript: string
   }
 }
 
+// HMAC keys of the desktop and sandbox-UI session cookies: at least the HS256 key size
+// (32 bytes, RFC 7518 section 3.2). gen-jwt-keys.sh writes 64 bytes.
+const COOKIE_SECRET_MIN_BYTES = 32
+
 // Secret material has no code default in any NODE_ENV: a known default would let anyone
-// who reads this file authenticate to control-api or forge a session cookie.
-function requiredSecret(name: string, writerScript: string): string {
-  const value = required(name)
+// who reads this file authenticate to control-api or forge a session cookie. The value is
+// trimmed, as webhook-proxy does, so a whitespace-only value counts as unset and a trailing
+// newline from a hand-made Secret is not part of the secret. Error messages never echo the
+// value or its length.
+function requiredSecret(name: string, writerScript: string, minBytes = 0): string {
+  const value = (process.env[name] ?? '').trim()
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`)
+  }
   assertNotPlaceholder(name, value, writerScript)
+  if (Buffer.byteLength(value, 'utf8') < minBytes) {
+    throw new Error(
+      `${name} must be at least ${minBytes} bytes. Run deploy/scripts/${writerScript} or write a value from \`openssl rand -hex 32\`.`
+    )
+  }
   return value
 }
 
@@ -328,7 +343,11 @@ export const config: Config = {
   hostNamespace: requiredOrDevDefault('RPC_PROXY_HOST_NAMESPACE', 'mcp-host'),
   desktopCookieName: process.env.RPC_PROXY_DESKTOP_COOKIE_NAME || 'clerum_desktop_session',
   desktopCookieMaxAgeMs: Number(process.env.RPC_PROXY_DESKTOP_COOKIE_MAX_AGE_MS || 3_600_000),
-  desktopCookieSecret: requiredSecret('RPC_PROXY_DESKTOP_COOKIE_SECRET', 'gen-jwt-keys.sh'),
+  desktopCookieSecret: requiredSecret(
+    'RPC_PROXY_DESKTOP_COOKIE_SECRET',
+    'gen-jwt-keys.sh',
+    COOKIE_SECRET_MIN_BYTES
+  ),
   desktopPort: Number(process.env.RPC_PROXY_DESKTOP_PORT || 3000),
   desktopApiToken: process.env.RPC_PROXY_DESKTOP_API_TOKEN || '',
   sandboxUiNamespace: process.env.RPC_PROXY_SANDBOX_UI_NAMESPACE || 'sandbox-ui',
@@ -339,7 +358,11 @@ export const config: Config = {
     process.env.RPC_PROXY_SANDBOX_UI_REGISTRY_CACHE_TTL_MS || 5000
   ),
   sandboxUiCookieName: process.env.RPC_PROXY_SANDBOX_UI_COOKIE_NAME || 'clerum_sandbox_ui_session',
-  sandboxUiCookieSecret: requiredSecret('RPC_PROXY_SANDBOX_UI_COOKIE_SECRET', 'gen-jwt-keys.sh'),
+  sandboxUiCookieSecret: requiredSecret(
+    'RPC_PROXY_SANDBOX_UI_COOKIE_SECRET',
+    'gen-jwt-keys.sh',
+    COOKIE_SECRET_MIN_BYTES
+  ),
   // 5 minute TTL on the UI session cookie.
   sandboxUiCookieMaxAgeSec: Number(process.env.RPC_PROXY_SANDBOX_UI_COOKIE_MAX_AGE_SEC || 300),
   // Defence-in-depth: even though the NetworkPolicy

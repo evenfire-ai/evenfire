@@ -8,8 +8,8 @@ export type ReleaseManifest = {
 
 export const releaseManifest: ReleaseManifest = {
   releaseId: 'v0.12.0',
-  externalRestApiVersion: '0.1.182',
-  rpcProxyVersion: '0.1.141',
+  externalRestApiVersion: '0.1.183',
+  rpcProxyVersion: '0.1.142',
   desktopVersion: '0.12.0',
   minimumDesktopVersion: '0.1.252',
 }

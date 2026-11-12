@@ -62,10 +62,14 @@ data:
   RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST: "3"
   RPC_PROXY_HCC_BASE_URL: "http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081"
   RPC_PROXY_HOST_NAMESPACE: "mcp-host"
+  # RPC_PROXY_DESKTOP_COOKIE_SECRET and RPC_PROXY_SANDBOX_UI_COOKIE_SECRET
+  # (spec §11.5 sandbox-ui session cookie) are HMAC keys: at least 32 bytes
+  # each, enforced at start-up by requiredSecret in rpc-proxy/src/config.ts.
+  # RPC_PROXY_DESKTOP_API_TOKEN, between them, is a bearer token with no
+  # minimum length; it must equal HCC's CONTEXT_MAPPER_DESKTOP_API_TOKEN
+  # (patches/dynamic-images.yaml).
   RPC_PROXY_DESKTOP_COOKIE_SECRET: "minikube-desktop-cookie-secret-32bytes"
   RPC_PROXY_DESKTOP_API_TOKEN: "minikube-desktop-api-token-shared-xxxxxxxx"
-  # Spec §11.5 sandbox-ui session cookie HMAC key. ≥32 bytes per
-  # rpc-proxy/src/config.ts validation.
   RPC_PROXY_SANDBOX_UI_COOKIE_SECRET: "minikube-sandbox-ui-cookie-secret-32by"
   # Spec §9.9 OAuth callback URL base — control-api's public host as the
   # user's browser sees it. In minikube this is the port-forward at
