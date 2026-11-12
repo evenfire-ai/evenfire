@@ -1,7 +1,14 @@
 name: Release images
 
-# Promotes dev-proven digests to a release tag. Never rebuilds -- prod promotes
+# Promotes proven digests to a release tag. Never rebuilds -- prod promotes
 # what dev proved, per the rule build-publish.yml states in its own header.
+#
+# Each image is resolved through a candidate chain: :latest first, then the
+# main-built sha-<c7> images at the exact commits since the previous release,
+# then the previous release's own tag. Every candidate must pass the ancestor
+# and source_paths checks against the tag commit, and promotion is
+# all-or-nothing: if any image cannot be resolved, none is promoted and no
+# version tag moves.
 #
 # Prerequisite: no image carries an org.opencontainers.image.revision
 # annotation until build-publish.yml has run at least once with
