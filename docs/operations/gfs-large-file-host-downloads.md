@@ -50,9 +50,9 @@ without discarding the path, checksum, version or retained original.
 | Environment variable                       |    Default |     Ceiling | Meaning                                                            |
 | ------------------------------------------ | ---------: | ----------: | ------------------------------------------------------------------ |
 | `MCP_HOST_GFS_MAX_FILE_BYTES`              | `16777216` | `209715200` | Largest GFS source admitted by MCP Host.                           |
-| `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT`    |       `70` |       `100` | Retained download budget, as a percentage of the workspace volume. |
+| `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT`    |       `70` |       `100` | Retained download budget, as a percentage of the workspace volume; it also counts the files the Host keeps for each caller. |
 | `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY` |        `1` |         `2` | Simultaneous active transfers per caller.                          |
-| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`          |      `168` |      `8760` | Retention period for a completed copy.                             |
+| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`          |      `168` |      `8760` | Retention period for a completed copy and for each kept file. |
 
 All values are parsed as positive decimal byte/percent/count/hour integers. Empty, zero, fractional, negative, exponent, padded, partial, non-integer, and above-ceiling values fail startup; the storage percent therefore accepts 1 to 100.
 
@@ -345,7 +345,11 @@ affected.
 
 The store has one retained-storage limit: Host bytes. Usage is the sum of
 complete copies, the reservations of active transfers and the duplicates a
-sweep could not remove, in every caller's directory. The budget is
+sweep could not remove, in every caller's directory, plus the files the Host
+keeps for each caller in `users/<key>/.clerum-outputs` (generated files and
+their save records). Kept files are never evicted: each leaves once the
+retention period has passed since the later of its record's time and its own
+modification time. The budget is
 `floor(volume bytes × MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT / 100)`, where the
 volume bytes are `blocks × bsize` from the same `statfs` of the Host root that
 the free-space check reads at each admission, so a resized volume counts from
@@ -445,8 +449,8 @@ transfers at once, and a caller at most its configured concurrency; beyond that
 admission returns `download_busy`.
 
 If `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT` is lowered or the volume shrinks,
-existing copies remain charged and new admissions evict or are refused until
-usage falls below the new budget.
+existing copies and kept files remain charged and new admissions evict copies
+or are refused until usage falls below the new budget.
 Lowering `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS` or `MCP_HOST_GFS_MAX_FILE_BYTES` is
 different: a `meta.json` is validated against the limits in force, so after the
 restart every copy whose size or retention exceeds the new value is incomplete
@@ -462,6 +466,18 @@ included. It never touches a directory that is an active transfer of this proces
 and it never replaces a published copy: another directory carrying the same ID
 is removed. A `.gfs-downloads` that is a symlink or not a directory is removed
 by the sweep without following it and recreated on the next admission.
+
+The same sweep walks each caller's kept folder, `users/*/.clerum-outputs`: its
+top level (generated files) and `.save-ledger/` (their save records), and no
+other folder of the caller. A regular file there expires once the retention
+period has passed since the later of its record's `createdAt` and its own
+modification time, each taken as now when it is in the future; a file with no
+readable record (a record itself, a temporary file) ages by its modification
+time. An expired file is removed together with its record, only if it is still
+the file the sweep judged. A kept folder that is a symlink is not entered and
+is never removed; the count of removed kept files is logged as
+`removedKeptFiles`. Generated files that existed before this sweep, and are
+older than the retention period, are removed by the first sweep.
 
 An admission replaces a caller's `.gfs-downloads`, deleting every copy in it
 (pinned ones included), only when the check answers about the directory itself:
