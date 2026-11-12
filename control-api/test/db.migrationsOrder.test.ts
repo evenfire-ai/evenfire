@@ -79,7 +79,8 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 2)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
-    expect(versions.at(-1)).toBe(task106.at(-1))
+    expect(versions[versions.indexOf(task106.at(-1)!) + 1]).toBe('0139_gfs_resource_changed_notify')
+    expect(versions.at(-1)).toBe('0139_gfs_resource_changed_notify')
   })
 
   it('keeps legacy aliases unique and distinct from current versions', async () => {

@@ -45,6 +45,7 @@ import {
   applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
+import { applyGfsResourceChangedSchema } from './services/gfsWatch/resourceChangedSchema.js'
 import {
   applyGrokCatalogModelsSchema,
   applyGrokSubscriptionConnectionSchema,
@@ -6421,6 +6422,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0138_legacy_password_security_epoch_backfill',
     apply: backfillLegacyPasswordSecurityEpochs,
+  },
+  {
+    version: '0139_gfs_resource_changed_notify',
+    apply: applyGfsResourceChangedSchema,
   },
 ]
 
