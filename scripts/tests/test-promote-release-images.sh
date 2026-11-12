@@ -342,6 +342,158 @@ assert_an_arch_verification_failure_for_one_image_does_not_abort_the_loop() {
   rm -rf "$d"
 }
 
+# shellcheck source=lib/release-registry-stub.sh
+. "$REPO_ROOT/scripts/tests/lib/release-registry-stub.sh"
+
+PROMOTE_SRC='ghcr.io/evenfire-ai'
+DIGEST_A='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+DIGEST_B='sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+DIGEST_OLD='sha256:0000000000000000000000000000000000000000000000000000000000000000'
+
+# stub_two_images <d>: a two-image repo whose :latest indexes both carry the
+# tag commit as their revision and are multi-arch. Sets HEAD_SHA.
+stub_two_images() {
+  local d=$1
+  make_repo_two_images "$d"
+  HEAD_SHA="$( cd "$d" && git rev-parse HEAD )"
+  stub_install "$d"
+  stub_image "$d" widget-a latest "$DIGEST_A" "$HEAD_SHA"
+  stub_image "$d" widget-b latest "$DIGEST_B" "$HEAD_SHA"
+}
+
+# run_promote <d> <dry-run> <ref>: sets out and rc.
+run_promote() {
+  local d=$1 dry=$2 ref=$3
+  out="$( cd "$d" && PATH="$d/bin:$PATH" DRY_RUN="$dry" RELEASE_REF="$ref" \
+        bash scripts/release/promote-release-images.sh 2>&1 )" && rc=0 || rc=$?
+}
+
+assert_a_refused_image_means_zero_copies() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # widget-b has no rows at all: nothing in the registry.
+  : > "$d/registry.tsv"
+  stub_image "$d" widget-a latest "$DIGEST_A" "$HEAD_SHA"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] && grep -q 'promoted nothing' <<< "$out"; then
+    pass "an image the resolver refuses blocks every copy"
+  else
+    fail "expected rc=1, empty copy-log, 'promoted nothing'; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_multi_arch_failure_in_pass_one_means_zero_copies() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  stub_image "$d" widget-b latest "$DIGEST_B" "$HEAD_SHA" amd64
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] && grep -q 'expected amd64,arm64' <<< "$out"; then
+    pass "a single-arch image in pass one blocks every copy, even the healthy sibling"
+  else
+    fail "expected rc=1 and empty copy-log; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_an_existing_version_tag_with_another_digest_blocks_every_copy() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  printf '%s\t%s\t%s\n' "$PROMOTE_SRC/widget-a:v0.2.0" digest "$DIGEST_OLD" >> "$d/registry.tsv"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] \
+      && grep -qF "::error::widget-a:v0.2.0 already points at $DIGEST_OLD; refusing to move a published version tag to $DIGEST_A" <<< "$out"; then
+    pass "a published version tag pointing elsewhere blocks every copy"
+  else
+    fail "expected rc=1, empty copy-log, 'already points at'; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_any_other_version_tag_lookup_error_blocks_every_copy() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  stub_error "$d" "$PROMOTE_SRC/widget-b:v0.2.0" "Error: GET https://ghcr.io: DENIED: denied"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] && grep -q 'promoted nothing' <<< "$out"; then
+    pass "a version-tag lookup error other than MANIFEST_UNKNOWN fails the image and blocks every copy"
+  else
+    fail "expected rc=1 and empty copy-log; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_rerun_after_a_complete_promotion_is_idempotent() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  printf '%s\t%s\t%s\n' "$PROMOTE_SRC/widget-a:v0.2.0" digest "$DIGEST_A" >> "$d/registry.tsv"
+  printf '%s\t%s\t%s\n' "$PROMOTE_SRC/widget-b:v0.2.0" digest "$DIGEST_B" >> "$d/registry.tsv"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 0 ] && [ "$(wc -l < "$d/copy-log" | tr -d ' ')" = 4 ]; then
+    pass "a rerun after a complete promotion succeeds and re-copies the same digests"
+  else
+    fail "expected rc=0 and 4 copies; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+# R7: the full source and destination refs, so a tab or candidate suffix
+# leaking into a ref turns this red.
+assert_the_full_registry_refs_are_pinned() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  local out rc; run_promote "$d" false v0.2.0
+  local want
+  want="$(printf '%s\n' \
+    "$PROMOTE_SRC/widget-a@$DIGEST_A $PROMOTE_SRC/widget-a:v0.2.0" \
+    "$PROMOTE_SRC/widget-b@$DIGEST_B $PROMOTE_SRC/widget-b:v0.2.0" \
+    "$PROMOTE_SRC/widget-a@$DIGEST_A $PROMOTE_SRC/widget-a:stable" \
+    "$PROMOTE_SRC/widget-b@$DIGEST_B $PROMOTE_SRC/widget-b:stable")"
+  if [ "$rc" -eq 0 ] && [ "$(cat "$d/copy-log")" = "$want" ] \
+      && grep -qxF "manifest $PROMOTE_SRC/widget-a@$DIGEST_A" "$d/crane-calls" \
+      && grep -qxF "manifest $PROMOTE_SRC/widget-b@$DIGEST_B" "$d/crane-calls" \
+      && grep -qxF "digest $PROMOTE_SRC/widget-a:v0.2.0" "$d/crane-calls" \
+      && ! grep -q "$(printf '\t')" "$d/crane-calls"; then
+    pass "every crane manifest, digest and copy ref is the exact registry/name@digest or :tag, with no tab or candidate suffix"
+  else
+    fail "expected exact refs; got rc=$rc copy-log='$(cat "$d/copy-log")' calls='$(cat "$d/crane-calls")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_every_version_tag_is_copied_before_any_stable() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  local out rc; run_promote "$d" false v0.2.0
+  local last_version first_stable
+  last_version="$(grep -n ':v0.2.0$' "$d/copy-log" | tail -1 | cut -d: -f1)"
+  first_stable="$(grep -n ':stable$' "$d/copy-log" | head -1 | cut -d: -f1)"
+  if [ "$rc" -eq 0 ] && [ -n "$last_version" ] && [ -n "$first_stable" ] && [ "$last_version" -lt "$first_stable" ]; then
+    pass "every :v0.2.0 copy lands before the first :stable copy"
+  else
+    fail "expected all version copies before stable; got rc=$rc copy-log='$(cat "$d/copy-log")'"
+  fi
+  rm -rf "$d"
+}
+
+assert_stable_does_not_move_backwards() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  ( cd "$d" && git tag v0.3.0 )
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 0 ] && grep -q ':v0.2.0$' "$d/copy-log" && ! grep -q ':stable$' "$d/copy-log"; then
+    pass "promoting a version below the highest published tag does not move :stable"
+  else
+    fail "expected version copies and no :stable; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d"
+}
+
+assert_a_raw_sha_rehearsal_names_candidates_and_never_moves_stable() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  local out rc; run_promote "$d" true "$HEAD_SHA"
+  if [ "$rc" -eq 0 ] && [ ! -s "$d/copy-log" ] \
+      && grep -q "would promote widget-a@sha256:" <<< "$out" \
+      && grep -q ' via latest -> :v' <<< "$out"; then
+    pass "a raw-SHA dry run names the candidate tag and copies nothing"
+  else
+    fail "expected 'would promote widget-a@sha256:... via latest -> :v' and no copies; got rc=$rc out='$out'"
+  fi
+  rm -rf "$d"
+}
+
 assert_every_defined_case_is_invoked() {
   # comm -23 over sorted lists -- same pattern as
   # test-resolve-release-images.sh and test-release-coordinates.sh.
@@ -364,6 +516,15 @@ assert_an_empty_image_list_fails_loudly
 assert_stable_does_not_move_for_a_pre_release
 assert_a_single_arch_index_is_rejected
 assert_an_arch_verification_failure_for_one_image_does_not_abort_the_loop
+assert_a_refused_image_means_zero_copies
+assert_a_multi_arch_failure_in_pass_one_means_zero_copies
+assert_an_existing_version_tag_with_another_digest_blocks_every_copy
+assert_any_other_version_tag_lookup_error_blocks_every_copy
+assert_a_rerun_after_a_complete_promotion_is_idempotent
+assert_the_full_registry_refs_are_pinned
+assert_every_version_tag_is_copied_before_any_stable
+assert_stable_does_not_move_backwards
+assert_a_raw_sha_rehearsal_names_candidates_and_never_moves_stable
 assert_every_defined_case_is_invoked
 
 exit $FAIL

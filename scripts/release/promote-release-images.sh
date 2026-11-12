@@ -19,10 +19,23 @@ VERSION="${RELEASE_REF#v}"
 TAG="v${VERSION}"
 TAG_SHA="$(git rev-parse "$RELEASE_REF^{commit}")"
 
-# :stable moves only for a strict release. A v0.6.0-rc dry run must not
-# re-point the tag the documentation tells people to use.
+# :stable moves only for a strict release that is not older than the highest
+# strict release tag already in the repo, so promoting a patch for an older
+# line (or a rerun of one) can never move :stable backwards. A v0.6.0-rc dry
+# run must not re-point the tag the documentation tells people to use either.
 MOVE_STABLE=false
-[[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && MOVE_STABLE=true
+if [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  if ! MOVE_STABLE="$(VERSION="$VERSION" node --input-type=module -e '
+    import { compareVersions } from "'"$SCRIPT_DIR"'/release-coordinates.mjs"
+    import { execFileSync } from "node:child_process"
+    const strict = execFileSync("git", ["tag", "--list", "v*"], { encoding: "utf8" })
+      .split("\n").filter(t => /^v\d+\.\d+\.\d+$/.test(t)).map(t => t.slice(1))
+    const highest = strict.reduce((a, b) => (a === null || compareVersions(b, a) > 0 ? b : a), null)
+    console.log(highest === null || compareVersions(process.env.VERSION, highest) >= 0)')"; then
+    echo "::error::could not compare $RELEASE_REF against the existing release tags" >&2
+    exit 1
+  fi
+fi
 
 # Captured into a variable, not read via `mapfile -t IMAGES < <(...)`.
 # Process substitution hides the reader's exit status from `set -e`: a
@@ -48,13 +61,19 @@ fi
 
 mapfile -t IMAGES <<< "$IMAGES_TSV"
 
+# Pass one: resolve and verify every image, and promote nothing. A release is
+# all images or none, so a single refused image must leave the registry exactly
+# as it was.
 failed=0
+PROMOTE_NAMES=(); PROMOTE_DIGESTS=()
 for row in "${IMAGES[@]}"; do
   name="${row%%$'\t'*}"; paths="${row#*$'\t'}"
-  if ! digest="$(node scripts/release/resolve-release-images.mjs \
+  if ! resolved="$(node "$SCRIPT_DIR/resolve-release-images.mjs" \
         --image "$name" --source-paths "$paths" --tag-sha "$TAG_SHA")"; then
-    failed=1; continue
+    failed=$((failed + 1)); continue
   fi
+  # The resolver prints "<digest>\t<candidate tag>".
+  digest="${resolved%%$'\t'*}"; via="${resolved#*$'\t'}"; via="${via%$'\n'}"
 
   # Verify the INDEX we are about to promote is multi-arch. Existence alone
   # would let a single-platform copy through, which is the exact gap this
@@ -63,14 +82,13 @@ for row in "${IMAGES[@]}"; do
   # Guarded the same way as the resolver call above: a bare assignment here
   # let a transient `crane manifest` failure or a node parse error abort the
   # WHOLE loop under `set -euo pipefail`, instead of marking just this one
-  # image failed and continuing -- the opposite of the pattern one line up,
-  # and it makes a partial-promotion state MORE likely, not less.
+  # image failed and continuing.
   if ! platforms="$(crane manifest "$REGISTRY/$name@$digest" \
         | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
             const m=JSON.parse(s).manifests||[];
             console.log(m.map(x=>x.platform?.architecture).filter(a=>a&&a!=="unknown").sort().join(","))})')"; then
     echo "::error::$name: could not verify the multi-arch manifest at $digest (crane manifest or the platform parse failed)"
-    failed=1; continue
+    failed=$((failed + 1)); continue
   fi
   # Subset match, not exact equality against "amd64,arm64": check-image-
   # visibility.mjs's guard already treats a third platform as still
@@ -82,17 +100,45 @@ for row in "${IMAGES[@]}"; do
   case ",$platforms," in *,arm64,*) has_arm64=true ;; esac
   if [ "$has_amd64" != true ] || [ "$has_arm64" != true ]; then
     echo "::error::$name@$digest is [$platforms], expected amd64,arm64"
-    failed=1; continue
+    failed=$((failed + 1)); continue
+  fi
+
+  # A published version tag is immutable. Not found passes (first promotion),
+  # the same digest passes (a rerun), anything else fails the image.
+  if existing="$(crane digest "$REGISTRY/$name:$TAG" 2>&1)"; then
+    if [ "$existing" != "$digest" ]; then
+      echo "::error::$name:$TAG already points at $existing; refusing to move a published version tag to $digest"
+      failed=$((failed + 1)); continue
+    fi
+  elif [[ "$existing" != *MANIFEST_UNKNOWN* ]]; then
+    echo "::error::$name:$TAG: could not check the existing version tag: $existing"
+    failed=$((failed + 1)); continue
   fi
 
   if [ "$DRY_RUN" = "true" ]; then
-    echo "would promote $name@$digest -> :$TAG ($platforms)"
-    continue
+    echo "would promote $name@$digest via $via -> :$TAG ($platforms)"
   fi
-
-  crane copy "$REGISTRY/$name@$digest" "$REGISTRY/$name:$TAG"
-  [ "$MOVE_STABLE" = "true" ] && crane copy "$REGISTRY/$name@$digest" "$REGISTRY/$name:stable"
-  echo "promoted $name@$digest -> :$TAG"
+  PROMOTE_NAMES+=("$name"); PROMOTE_DIGESTS+=("$digest")
 done
 
-exit $failed
+if [ "$DRY_RUN" = "true" ]; then
+  exit "$failed"
+fi
+
+if [ "$failed" -ne 0 ]; then
+  echo "::error::$failed image(s) failed; promoted nothing"
+  exit 1
+fi
+
+# Pass two: every version tag first, then every :stable, so :stable never
+# moves unless all the version tags landed.
+for i in "${!PROMOTE_NAMES[@]}"; do
+  crane copy "$REGISTRY/${PROMOTE_NAMES[$i]}@${PROMOTE_DIGESTS[$i]}" "$REGISTRY/${PROMOTE_NAMES[$i]}:$TAG"
+  echo "promoted ${PROMOTE_NAMES[$i]}@${PROMOTE_DIGESTS[$i]} -> :$TAG"
+done
+if [ "$MOVE_STABLE" = "true" ]; then
+  for i in "${!PROMOTE_NAMES[@]}"; do
+    crane copy "$REGISTRY/${PROMOTE_NAMES[$i]}@${PROMOTE_DIGESTS[$i]}" "$REGISTRY/${PROMOTE_NAMES[$i]}:stable"
+    echo "promoted ${PROMOTE_NAMES[$i]}@${PROMOTE_DIGESTS[$i]} -> :stable"
+  done
+fi
