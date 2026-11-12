@@ -7,7 +7,7 @@ import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
-import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { externalEntityChangesStreamRateLimit } from '../../middleware/externalWatchRateLimit.js'
 import type { ExternalSessionAuthentication } from '../../services/auth/externalSessionAuthentication.js'
 import {
   type ExternalSessionCurrentness,
@@ -33,15 +33,7 @@ export function createExternalEntityChangesRouter(): Router {
     '/external/entity-changes/stream',
     ...edgeLimits,
     requireValidExternalSessionToken,
-    rateLimitMiddleware({
-      bucketType: 'external_user',
-      maxPerMinute: config.approvalRlExternalPerMin,
-      onBackendUnavailable: 'closed',
-      getBucketKey: req => {
-        const claims = (req as ExternalAuthedRequest).externalAuth
-        return claims ? `user:${claims.userId}:entity-changes` : null
-      },
-    }),
+    externalEntityChangesStreamRateLimit(),
     asyncHandler(async (req: Request, res: Response) => {
       const externalReq = req as ExternalAuthedRequest
       const claims = externalReq.externalAuth

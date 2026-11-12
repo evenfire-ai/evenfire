@@ -13,6 +13,7 @@ import {
   readEntityChangeCheckpoint,
   subscribeEntityChangeFeedWake,
 } from '../services/entityChangeService.js'
+import { setStreamHeaders } from './streamHeaders.js'
 
 const logger = rootLogger.child({ module: 'entity-change-stream' })
 const MAX_BUFFERED_BYTES = 64 * 1024
@@ -66,15 +67,6 @@ export function parseRequestedEntityChangeCursor(req: Request): string | null | 
   const raw = String(req.query?.cursor || '').trim()
   if (!raw) return null
   return isEntityChangeCursor(raw) ? raw : false
-}
-
-function setStreamHeaders(res: Response): void {
-  res.status(200)
-  res.setHeader('content-type', 'application/x-ndjson; charset=utf-8')
-  res.setHeader('cache-control', 'no-cache, no-transform')
-  res.setHeader('connection', 'keep-alive')
-  res.setHeader('x-accel-buffering', 'no')
-  res.flushHeaders?.()
 }
 
 export function streamEntityChanges(

@@ -1,5 +1,5 @@
 import { type Response as ExpressResponse, type NextFunction, type Request, Router } from 'express'
-import { type RateLimitInfo, ipKeyGenerator, rateLimit } from 'express-rate-limit'
+import { MemoryStore, type RateLimitInfo, ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   GFS_DELETE_SCOPE,
@@ -18,6 +18,7 @@ import {
   attachExternalGfsUserLifecycle,
   signCurrentExternalGfsUserToken,
 } from '../../gfs/externalAuthority.js'
+import { mintExternalGfsReadToken } from '../../gfs/externalGfsRead.js'
 import { isValidHostSubjectId, makeHostSubjectId } from '../../gfs/hostSubject.js'
 import { DbResolveStore } from '../../gfs/resolve.js'
 import {
@@ -99,7 +100,7 @@ type ExternalGfsRequest = ExternalAuthedRequest & {
 
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-function attachExternalGfsRequestId(
+export function attachExternalGfsRequestId(
   req: import('express').Request,
   res: import('express').Response,
   next: NextFunction
@@ -348,6 +349,60 @@ async function assertHostTargetsWithinCallerAgents(
   next()
 }
 
+// The express-rate-limit MemoryStore window starts at the first hit for a
+// key, while the Postgres limiters in externalGfsRateLimit.ts use windows
+// aligned to floor(now / 60_000). A burst that straddles a minute boundary
+// can stay under the limit in each clock window and still exceed this one,
+// so a backstop can be the first, and sometimes the only, denier for such a
+// burst. That is why its denials report here rather than via reportDecision.
+//
+// express-rate-limit sets req.rateLimit before it calls the handler, with
+// the key it counted and the window's reset time. `used` includes denied
+// requests, so `used === limit + 1` is the first denial in the window.
+export const edgeRateLimitHandler =
+  (guard: ExternalGfsEdgeGuard) =>
+  (req: Request, res: ExpressResponse): void => {
+    const info = (req as Request & { rateLimit?: RateLimitInfo }).rateLimit
+    if (info === undefined || info.resetTime === undefined) {
+      throw new Error(`external GFS ${guard} backstop denied without rate limit state`)
+    }
+    const retryAfterSeconds = Math.max(1, Math.ceil((info.resetTime.getTime() - Date.now()) / 1000))
+    reportEdgeBackstopDenial({
+      req,
+      guard,
+      key: info.key,
+      retryAfterSeconds,
+      // Only the ingress and token backstops are mounted before
+      // attachExternalGfsAuthority; the other seven run after it.
+      authorityResolutionAvoided: guard === 'ingress' || guard === 'token',
+      firstDenialInWindow: info.used === info.limit + 1,
+    })
+    res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
+  }
+
+const externalGfsIngressRateLimitStore = new MemoryStore()
+
+/**
+ * The all-route source-IP backstop, one instance per process. Every router that
+ * serves `/external/gfs/*` mounts this same instance: a second instance would
+ * grant each source IP a second, independent budget. The limit is read per
+ * request so it follows `config` the way a per-router instance read it.
+ */
+export const externalGfsIngressRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: () => config.externalGfsIngressRlPerMin,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  keyGenerator: externalGfsIngressRateKey,
+  handler: edgeRateLimitHandler('ingress'),
+  store: externalGfsIngressRateLimitStore,
+})
+
+/** The ingress counter outlives any one router; tests reset it between cases. */
+export function __resetExternalGfsIngressRateLimitForTests(): void {
+  externalGfsIngressRateLimitStore.resetAll()
+}
+
 /**
  * End-user (folder-owner) gfs surface on the `/external` plane — the Session-JWT
  * plane (external-rest-api ← desktop-app / profile-ui) of the platform's defined
@@ -375,39 +430,6 @@ export function createExternalGfsRouter(): Router {
   // still expose a bounded Retry-After body/header so Desktop can recover
   // without treating the backstop as an opaque 500.
   //
-  // The express-rate-limit MemoryStore window starts at the first hit for a
-  // key, while the Postgres limiters in externalGfsRateLimit.ts use windows
-  // aligned to floor(now / 60_000). A burst that straddles a minute boundary
-  // can stay under the limit in each clock window and still exceed this one,
-  // so a backstop can be the first, and sometimes the only, denier for such a
-  // burst. That is why its denials report here rather than via reportDecision.
-  //
-  // express-rate-limit sets req.rateLimit before it calls the handler, with
-  // the key it counted and the window's reset time. `used` includes denied
-  // requests, so `used === limit + 1` is the first denial in the window.
-  const edgeRateLimitHandler =
-    (guard: ExternalGfsEdgeGuard) =>
-    (req: Request, res: ExpressResponse): void => {
-      const info = (req as Request & { rateLimit?: RateLimitInfo }).rateLimit
-      if (info === undefined || info.resetTime === undefined) {
-        throw new Error(`external GFS ${guard} backstop denied without rate limit state`)
-      }
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil((info.resetTime.getTime() - Date.now()) / 1000)
-      )
-      reportEdgeBackstopDenial({
-        req,
-        guard,
-        key: info.key,
-        retryAfterSeconds,
-        // Only the ingress and token backstops are mounted before
-        // attachExternalGfsAuthority; the other seven run after it.
-        authorityResolutionAvoided: guard === 'ingress' || guard === 'token',
-        firstDenialInWindow: info.used === info.limit + 1,
-      })
-      res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
-    }
   const resourceRateKey = externalGfsActorRateKey('resource')
   const proxyReadRateKey = externalGfsActorRateKey('proxy-read')
   const resourceMutationRateKey = externalGfsActorRateKey('resource-mutation')
@@ -415,14 +437,6 @@ export function createExternalGfsRouter(): Router {
   const grantsMutationRateKey = externalGfsActorRateKey('grants-mutation')
   const sharesReadRateKey = externalGfsActorRateKey('shares-read')
   const sharesMutationRateKey = externalGfsActorRateKey('shares-mutation')
-  const externalGfsIngressRateLimit = rateLimit({
-    windowMs: 60_000,
-    limit: config.externalGfsIngressRlPerMin,
-    standardHeaders: 'draft-7',
-    legacyHeaders: false,
-    keyGenerator: externalGfsIngressRateKey,
-    handler: edgeRateLimitHandler('ingress'),
-  })
   const externalGfsTokenRouteRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsTokenUserRlPerMin,
@@ -1070,34 +1084,21 @@ async function proxyReadToGfsc(
   gfscPath: string
 ): Promise<void> {
   const authority = authorityOf(req as ExternalGfsRequest)
-  let token: string
-  if (authority.kind === 'linked-admin') {
-    token = signGfsToken({
-      subject: authority.tokenSubject,
-      drive,
-      scopes: [GFS_READ_SCOPE],
-      ...(authority.authGeneration === undefined
-        ? {}
-        : { authGeneration: authority.authGeneration }),
-      principalType: 'control-admin',
-      brokeredAuthority: {
-        desktopUserId: authority.desktopUserId,
-        controlAdminId: authority.controlAdminId,
-        authoritySource: authority.authoritySource,
-        linkLineageId: authority.linkLineageId,
-        linkGeneration: authority.linkGeneration,
-        desktopUserGeneration: authority.desktopUserGeneration,
-      },
-    }).token
-  } else {
-    const issued = await signCurrentUserToken(req, res, {
-      subject: authority.tokenSubject,
-      drive,
-      scopes: [GFS_READ_SCOPE],
-    })
-    if (!issued) return
-    token = issued.token
+  let issued: { token: string } | null
+  try {
+    issued = await mintExternalGfsReadToken(req.externalSessionAuthentication, authority, drive)
+  } catch (error) {
+    if (error instanceof ExternalGfsAuthorityError) {
+      res.status(error.status).json({ error: error.code })
+      return
+    }
+    throw error
   }
+  if (!issued) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const token = issued.token
   const target = `${config.gfscBaseUrl.replace(/\/+$/, '')}${gfscPath}`
   let upstream: Response
   // Header-only deadline: bound the wait for gfsc to START responding, but never
