@@ -42,7 +42,7 @@ const W_IDS = DIRECT_PROVIDERS.filter(id => envelopeOf(id) === 'W')
 
 const NOTION_CANONICALS = NOTION_TOOLS.map(t => `${NOTION_SERVER}__${t.name}`)
 const QUERY = `${NOTION_SERVER}__notion-query-multiple-data-sources`
-const DIGIT_FIRST = '1password__item_get'
+const DIGIT_FIRST = '1keychain__item_get'
 const WITH_DOT = 'notion.v2__search'
 const OVER_128 = `${NOTION_SERVER}__${'x'.repeat(129 - NOTION_SERVER.length - 2)}`
 

@@ -92,7 +92,7 @@ const NON_DNS_SERVERS = [
   'notion.v2',
   'my_srv',
   'srv___x',
-  '1password',
+  '1keychain',
   'a'.repeat(50) + '.' + 'b'.repeat(7),
 ]
 // Same code-unit length, same sanitized head, equal under localeCompare.
@@ -124,7 +124,7 @@ const nameArb = fc.oneof(
   goldenName,
   nonDnsName,
   aliasShapedName,
-  fc.constantFrom(...LOCALE_EQUAL_PAIRS.flat(), '1password__item_get', 'file_read', '')
+  fc.constantFrom(...LOCALE_EQUAL_PAIRS.flat(), '1keychain__item_get', 'file_read', '')
 )
 
 /**
@@ -189,8 +189,8 @@ describe('T-W1 · control aliases', () => {
     expect(
       wireToolAlias('mcp-evenfire-atlassian-remote-u-338995f5__getJiraIssueRemoteIssueLinks', 'W_g')
     ).toBe('mcp-evenfire-atlassian-remote-u-338995f5__getJiraIs_e8dea3b5f0f1')
-    expect(wireToolAlias('1password-connect-vault-integration-engineering__item_get', 'W_g')).toBe(
-      '_1password-connect-vault-integration-engineering_it_4adbcea87d1d'
+    expect(wireToolAlias('1keychain-connect-vault-integration-engineering__item_get', 'W_g')).toBe(
+      '_1keychain-connect-vault-integration-engineering_it_10b118fcacd7'
     )
   })
 })
@@ -370,17 +370,17 @@ describe('T-W1 · alias function properties', () => {
 
 describe('T-W1b · forced collisions with an injected hash', () => {
   const fixed: Hash = () => 'aaaaaaaaaaaa'
-  const U = '1password-connect-vault-integration-engineering__item_get'
+  const U = '1keychain-connect-vault-integration-engineering__item_get'
 
   it('the in-test cand_j oracle matches the fixed strings', () => {
     expect(oracleCand(U, null, fixed)).toBe(
-      '_1password-connect-vault-integration-engineering_it_aaaaaaaaaaaa'
+      '_1keychain-connect-vault-integration-engineering_it_aaaaaaaaaaaa'
     )
     expect(oracleCand(U, 0, fixed)).toBe(
-      '_1password-connect-vault-integration-engineering_aaaaaaaaaaaa_0'
+      '_1keychain-connect-vault-integration-engineering_aaaaaaaaaaaa_0'
     )
     expect(oracleCand(U, 36, fixed)).toBe(
-      '_1password-connect-vault-integration-engineering_aaaaaaaaaaaa_10'
+      '_1keychain-connect-vault-integration-engineering_aaaaaaaaaaaa_10'
     )
   })
 
@@ -408,7 +408,7 @@ describe('T-W1b · forced collisions with an injected hash', () => {
     const map = new ToolWireNameMap(names, 'W_g', { hash: fixed })
     const expected = oracleCand(U, n - 2, fixed)
     if (n === 38) {
-      expect(expected).toBe('_1password-connect-vault-integration-engineering_aaaaaaaaaaaa_10')
+      expect(expected).toBe('_1keychain-connect-vault-integration-engineering_aaaaaaaaaaaa_10')
     }
     expect(map.toWire(U)).toBe(expected)
     expect(map.fromWire(expected)).toBe(U)

@@ -24,7 +24,7 @@ import {
 const GOLDEN = join(__dirname, 'fixtures', 'wireIdentity.golden.json')
 const UPDATE = process.env.UPDATE_WIRE_GOLDENS === '1'
 
-const DIGIT_FIRST = '1password__item_get'
+const DIGIT_FIRST = '1keychain__item_get'
 const SIXTY_FOUR = `${ATLASSIAN_SERVER}__${'getJiraIssueRemoteIssueLinks'.slice(0, 62 - ATLASSIAN_SERVER.length)}`
 const NOTION_CANONICALS = NOTION_TOOLS.map(t => `${NOTION_SERVER}__${t.name}`)
 const LONG_LETTER = `${NOTION_SERVER}__notion-link-meeting-note-to-calendar-event`
