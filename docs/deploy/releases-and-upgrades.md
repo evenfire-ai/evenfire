@@ -307,6 +307,8 @@ Read the notes for every release you skip over, not only the target release.
 | [User access foundation upgrade](user-access-foundation-upgrade.md)                | You upgrade to the release with External REST user sessions. It has a required order: edge before control-api.                             |
 | [Changed code defaults](#changed-code-defaults-first-release-after-v0120)          | You run HCC, WRC, control-api, control-ui or the approval reader with a variable unset. The pull Secret change restarts Host pods once; plan a window. |
 | [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.   |
+| [HCC NetworkPolicy pass bounds](#hcc-networkpolicy-pass-bounds) | You upgrade host-context-controller. It can now exit and restart when a NetworkPolicy pass reaches its hard limit. No RBAC change. |
+| [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor) | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`. |
 
 #### Snippet runner Node permissions
 
@@ -428,3 +430,81 @@ only, for example
 `kubectl -n rpc-proxy get secret rpc-proxy-secrets -o go-template='{{range $k, $v := .data}}{{$k}}{{"\n"}}{{end}}'`;
 do not print its values. rpc-proxy reads these values at startup, so the new
 default and the cap check apply when the new pods start.
+
+### HCC NetworkPolicy pass bounds
+
+This release bounds every host-context-controller (HCC) NetworkPolicy pass
+(#1338). A pass is single-flight, so one pass that never finished used to block
+every later pass. Two settings are new. `deploy/base` sets neither, so both
+take their code defaults:
+
+| Variable                        | Default            | Meaning                                                                                                                                                                                                                                                                                     |
+| ------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HCC_K8S_REQUEST_TIMEOUT_MS`    | `30000`            | Deadline in milliseconds for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding reconcilers and of the watcher's McpServer/Context and Secret clients. A timed-out request fails with error code `HCC_K8S_REQUEST_TIMEOUT`, and the pass fails and retries. |
+| `HCC_NETPOL_PASS_HARD_LIMIT_MS` | `1800000` (30 min) | Longest a NetworkPolicy pass may run. It must be above `300000`, the 5-minute overrun mark.                                                                                                                                                                                                  |
+
+Both fail startup when set to `""` or to a value out of range; the
+[HCC README](../../host-context-controller/README.md#networkpolicy) has the full
+rules.
+
+A pass still running after 5 minutes logs `networkpolicy-pass-overrun` and
+increments `clerum_hcc_networkpolicy_pass_overruns_total{severity="warn"}`, and
+again every 5 minutes. At the hard limit HCC logs
+`networkpolicy-pass-hard-limit`, increments the same counter with
+`severity="fatal"` and **exits with status 1**. Kubernetes restarts the
+container, so the HCC pod's restart count grows, and the startup pass converges
+again. Such a restart is expected behaviour, not a crash to roll back; look at
+the `networkpolicy-pass-hard-limit` log line for the stage and the pending
+effect the pass was waiting on.
+
+Timeouts on the Host path now use the same error code and name as the other
+bounded clients: `HCC_K8S_REQUEST_TIMEOUT` and `K8sRequestTimeoutError`, where
+earlier releases used `HCC_HOST_K8S_REQUEST_TIMEOUT` and
+`HostK8sRequestTimeoutError`. Update any log filter or alert that matches the
+old names.
+
+**No RBAC change.** This release does not change the HCC Role, ClusterRole or
+their bindings in `deploy/base`. Roll out the new HCC image as usual; no RBAC
+manifest needs to be applied first.
+
+### mcp-host authority staleness floor
+
+mcp-host keeps its MCP fleet while host-context-controller (HCC) is unreachable
+for at most `HCC_AUTHORITY_MAX_STALENESS_MS` after the last successful HCC poll.
+Before this release mcp-host only required that bound to be above
+`CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`. A bound that small tolerates no missed
+poll, so a short HCC restart could revoke every healthy Host fleet (#1350). In
+cluster mode mcp-host now refuses to start unless the bound, after the 600000 ms
+cap, absorbs two missed polls:
+
+```
+HCC_AUTHORITY_MAX_STALENESS_MS >= interval + 2 × max(interval, 10000) + 10000 + 1000
+```
+
+`10000` is the inventory request timeout and `1000` a scheduling allowance, both
+in milliseconds. At the default 30000 ms interval the minimum is 101000 ms.
+
+The bound is measured on the wall clock. A step of the Host's clock moves it:
+after a forward step, the next failed poll can revoke the fleet before the bound
+has passed; after a backward step, the revocation comes later by the size of
+the step.
+
+The poll interval must be a positive whole number of milliseconds in plain
+digits, at most 2147483647, in every mode, including dev mode. `30s`, `3e4` and
+`30_000` used to be read as 30 ms, 3 ms and 30 ms, and now stop startup. So do
+`030000`, ` 30000`, `+30000` and `30000.5`, which work today as 30 s.
+
+The rule also caps the poll interval. With the default
+`HCC_AUTHORITY_MAX_STALENESS_MS` (180000 ms) the poll interval may be at most
+56333 ms. A larger interval needs a larger bound, up to the 600000 ms cap, which
+allows intervals up to 196333 ms. The general ceiling is
+`floor((bound − 10000 − 1000) / (1 + 2))` for intervals of at least 10000 ms.
+
+The 101000 ms floor is a validity check, not a recommended value. Keep the
+180000 ms default, which absorbs four missed polls: HCC outages longer than two
+polls have been observed. The minikube `mcp-host-config` set `60000` before this
+release. If your `mcp-host-config` started as a copy of it, raise
+`HCC_AUTHORITY_MAX_STALENESS_MS` or remove the key before you roll out the new
+mcp-host image; otherwise every Host refuses to start. mcp-host reads both
+values at startup through `envFrom`, so a ConfigMap change applies when each
+Host pod starts again.

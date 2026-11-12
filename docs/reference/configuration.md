@@ -14,6 +14,9 @@ Full per-service variable lists live in each service's README (see
 > you create it. Only the minikube overlay ships one
 > (`deploy/overlays/minikube/configmaps/mcp-host-config.yaml`); copy it and
 > review each value (see [Production deployment](../deploy/production.md)).
+> `HCC_AUTHORITY_MAX_STALENESS_MS` must satisfy the
+> [mcp-host authority staleness floor](../deploy/releases-and-upgrades.md#mcp-host-authority-staleness-floor),
+> or every agent pod refuses to start.
 > Variables you leave out take mcp-host's code defaults: the mcp-host rows in
 > the two "Off" tables below stay off unless your ConfigMap sets them, and the
 > mcp-host rows under [On by default](#on-by-default) stay on.
@@ -85,6 +88,19 @@ or failed, probes models.dev again with backoff (30 s doubling up to 1 h) and
 reconciles once it does. `MODELS_DEV_API_URL` must be `https://`, must not point
 at an internal host and must not contain credentials; control-api refuses to
 start otherwise.
+
+## Bounds on by default
+
+host-context-controller bounds every NetworkPolicy pass with two settings that
+`deploy/base` does not set, so their code defaults apply:
+
+| Variable                        | Default            | Effect                                                                                                                                       |
+| ------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HCC_K8S_REQUEST_TIMEOUT_MS`    | `30000`            | Deadline for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding work; a timed-out request fails the pass, which retries |
+| `HCC_NETPOL_PASS_HARD_LIMIT_MS` | `1800000` (30 min) | A pass still running at this limit makes HCC exit, so its container restarts and the startup pass converges again                           |
+
+See the [upgrade note](../deploy/releases-and-upgrades.md#hcc-networkpolicy-pass-bounds)
+and the [HCC README](../../host-context-controller/README.md#networkpolicy).
 
 ## Where every variable is documented
 
