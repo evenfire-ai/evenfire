@@ -206,3 +206,82 @@ describe('clerum__gfs_edit_text', () => {
     expect(client.read).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('clerum__gfs_edit_text with many matches', () => {
+  const BOUND_REFUSAL = 'matched more than 10000 times'
+
+  it('refuses a replaceAll that matches more than 10,000 times, on a dry run and for real', async () => {
+    // 2 MiB with 1,048,576 matches.
+    const text = 'a,'.repeat(1_048_576)
+    const dry = fakeClient(Buffer.from(text))
+    const preview = await edit(dry.client, {
+      edits: [{ oldText: ',', newText: ';', replaceAll: true }],
+      dryRun: true,
+    })
+    expect(preview.success).toBe(false)
+    expect(preview.error).toBe(
+      `edit 0 ${BOUND_REFUSAL}; this tool is ${EDIT_SCOPE_SENTENCE}. Nothing was written`
+    )
+    const real = fakeClient(Buffer.from(text))
+    const refused = await edit(real.client, {
+      edits: [{ oldText: ',', newText: ';', replaceAll: true }],
+    })
+    expect(refused.error).toContain(BOUND_REFUSAL)
+    // Witness: the file was read, and the release ran, before the refusal.
+    expect(real.client.read).toHaveBeenCalledTimes(1)
+    expect(real.release).toHaveBeenCalledTimes(1)
+    expect(real.client.write).not.toHaveBeenCalled()
+  })
+
+  it('applies a replaceAll that matches exactly 10,000 times', async () => {
+    const text = 'x,'.repeat(10_000)
+    const { client } = fakeClient(Buffer.from(text))
+    const result = await edit(client, {
+      edits: [{ oldText: ',', newText: '; ', replaceAll: true }],
+    })
+    expect(result.success, result.error).toBe(true)
+    expect(client.write).toHaveBeenCalledTimes(1)
+    const expected = 'x; '.repeat(10_000)
+    expect(written(client)).toBe(expected)
+    expect(JSON.parse(result.content!)).toMatchObject({
+      bytesBefore: text.length,
+      bytesAfter: expected.length,
+    })
+  })
+
+  it('names the bound without replaceAll above 10,000 matches, and the exact count below it', async () => {
+    const many = fakeClient(Buffer.from('a,'.repeat(20_000)))
+    const refused = await edit(many.client, { edits: [{ oldText: ',', newText: ';' }] })
+    expect(refused.error).toContain(`edit 0 ${BOUND_REFUSAL}`)
+    expect(many.client.write).not.toHaveBeenCalled()
+    const seven = fakeClient(Buffer.from('a,'.repeat(7)))
+    expect((await edit(seven.client, { edits: [{ oldText: ',', newText: ';' }] })).error).toBe(
+      'edit 0 matched 7 times; it must match exactly once. Nothing was written'
+    )
+  })
+
+  it('reports the line of the first match in the diff', async () => {
+    const { client } = fakeClient(Buffer.from('one\ntwo\nthree\nfour target\nfive target\n'))
+    const result = await edit(client, {
+      edits: [{ oldText: 'target', newText: 'goal', replaceAll: true }],
+      dryRun: true,
+    })
+    expect(JSON.parse(result.content!).diff).toContain('@@ edit 0 line 4\n')
+    const lines = 1024 * 1024
+    const deep = fakeClient(Buffer.from('\n'.repeat(lines) + 'end'))
+    const last = await edit(deep.client, {
+      edits: [{ oldText: 'end', newText: 'END' }],
+      dryRun: true,
+    })
+    expect(JSON.parse(last.content!).diff).toContain(`@@ edit 0 line ${lines + 1}\n`)
+  })
+
+  it('writes replacement text literally, with no replacement patterns', async () => {
+    const { client } = fakeClient(Buffer.from('cost: 5, cost: 6'))
+    const result = await edit(client, {
+      edits: [{ oldText: 'cost', newText: '$&-$1-$$', replaceAll: true }],
+    })
+    expect(result.success, result.error).toBe(true)
+    expect(written(client)).toBe('$&-$1-$$: 5, $&-$1-$$: 6')
+  })
+})

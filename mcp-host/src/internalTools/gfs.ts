@@ -1373,8 +1373,18 @@ export function buildKeptFilesListTool(callerRoot: string | undefined): Internal
   }
 }
 
-/** Bounds of one partial edit; a call past them is refused before anything is read. */
-const EDIT_LIMITS = { maxEdits: 50, maxOldTextBytes: 4096, maxNewTextBytes: 65_536 }
+/**
+ * Bounds of one partial edit. A call past the count or the text lengths is
+ * refused before anything is read; an edit that matches more than
+ * `maxMatchesPerEdit` times is refused as it is applied, before any text is
+ * built for it.
+ */
+const EDIT_LIMITS = {
+  maxEdits: 50,
+  maxOldTextBytes: 4096,
+  maxNewTextBytes: 65_536,
+  maxMatchesPerEdit: 10_000,
+}
 /** The largest diff returned; a longer one is cut and marked truncated. */
 const EDIT_DIFF_MAX_CHARS = 16_384
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf])
@@ -1388,15 +1398,37 @@ interface TextEdit {
   replaceAll?: boolean
 }
 
-function occurrences(text: string, needle: string): number[] {
-  const at: number[] = []
+/**
+ * Matches of `needle` in `text`, left to right and not overlapping, counted
+ * up to `stopAfter` without storing them; `first` is the index of the first
+ * match, -1 when there is none.
+ */
+function countMatches(
+  text: string,
+  needle: string,
+  stopAfter: number
+): { count: number; first: number } {
+  const first = text.indexOf(needle)
+  let count = 0
   for (
-    let index = text.indexOf(needle);
-    index !== -1;
+    let index = first;
+    index !== -1 && count < stopAfter;
     index = text.indexOf(needle, index + needle.length)
   )
-    at.push(index)
-  return at
+    count += 1
+  return { count, first }
+}
+
+/** The 1-based line of `offset`: the line feeds before it, counted without building a string. */
+function lineAt(text: string, offset: number): number {
+  let line = 1
+  for (
+    let index = text.indexOf('\n');
+    index !== -1 && index < offset;
+    index = text.indexOf('\n', index + 1)
+  )
+    line += 1
+  return line
 }
 
 /**
@@ -1413,7 +1445,7 @@ export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefiniti
       description:
         `Replace parts of a text file in gfs and get a diff, ${EDIT_SCOPE_SENTENCE}. ` +
         'A small change (a typo, a sentence, a paragraph) is one or more edits; for a file above 8 KiB take oldText from a bounded excerpt of the downloaded copy with an approved shell command, and pass the downloaded version as ifMatch. ' +
-        'Edits apply in order, each to the result of the previous one; each oldText must match exactly once unless replaceAll. dryRun returns the diff without writing.',
+        'Edits apply in order, each to the result of the previous one; each oldText must match exactly once unless replaceAll, and an edit that matches more than 10,000 times is refused. dryRun returns the diff without writing.',
       parameters: {
         type: 'object',
         required: ['drive', 'resourceId', 'ifMatch', 'edits'],
@@ -1423,7 +1455,8 @@ export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefiniti
           ifMatch: { type: 'number', description: 'The version being edited.' },
           edits: {
             type: 'array',
-            description: '1 to 50 edits; each oldText at most 4,096 bytes.',
+            description:
+              '1 to 50 edits; each oldText at most 4,096 bytes and matching at most 10,000 times.',
             items: {
               type: 'object',
               required: ['oldText', 'newText'],
@@ -1493,17 +1526,28 @@ export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefiniti
           const hunks: Array<{ edit: number; line: number; removed: string[]; added: string[] }> =
             []
           for (const [index, edit] of (edits as TextEdit[]).entries()) {
-            const found = occurrences(text, edit.oldText)
-            if (edit.replaceAll ? found.length < 1 : found.length !== 1) {
+            // Counting stops one past the bound, so a text with millions of
+            // matches costs no more than the bound to refuse.
+            const { count, first } = countMatches(
+              text,
+              edit.oldText,
+              EDIT_LIMITS.maxMatchesPerEdit + 1
+            )
+            if (count > EDIT_LIMITS.maxMatchesPerEdit) {
               return {
                 success: false,
-                error: `edit ${index} matched ${found.length} times; it must match ${
+                error: `edit ${index} matched more than ${EDIT_LIMITS.maxMatchesPerEdit} times; this tool is ${EDIT_SCOPE_SENTENCE}. Nothing was written`,
+              }
+            }
+            if (edit.replaceAll ? count < 1 : count !== 1) {
+              return {
+                success: false,
+                error: `edit ${index} matched ${count} times; it must match ${
                   edit.replaceAll ? 'at least once' : 'exactly once'
                 }. Nothing was written`,
               }
             }
-            bytes +=
-              found.length * (Buffer.byteLength(edit.newText) - Buffer.byteLength(edit.oldText))
+            bytes += count * (Buffer.byteLength(edit.newText) - Buffer.byteLength(edit.oldText))
             if (bytes > GFS_FILE_LIMITS.maxFileBytes) {
               return {
                 success: false,
@@ -1512,13 +1556,13 @@ export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefiniti
             }
             hunks.push({
               edit: index,
-              line: text.slice(0, found[0]).split('\n').length,
+              line: lineAt(text, first),
               removed: edit.oldText.split('\n'),
               added: edit.newText.split('\n'),
             })
             text = edit.replaceAll
               ? text.split(edit.oldText).join(edit.newText)
-              : text.slice(0, found[0]) + edit.newText + text.slice(found[0]! + edit.oldText.length)
+              : text.slice(0, first) + edit.newText + text.slice(first + edit.oldText.length)
           }
           const content = (bom ? '﻿' : '') + text
           let diff = hunks
