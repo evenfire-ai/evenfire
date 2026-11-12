@@ -123,7 +123,10 @@ function pdfRunner(pages: string[], windowPages: number): RunDocumentJob {
   }
 }
 
-const SECRET = 'SECRET-TOKEN-4242'
+// A synthetic configured value. It keeps the 17 characters the pinned chain
+// digests were generated with: every occurrence is masked, so only its length
+// reaches a result.
+const SECRET = 'FIXTURE-TOKEN-424'
 const secretRedactor: AttachmentReadRedactor = {
   toolOutputRedactionRanges: (_tool, value) => {
     const ranges: RedactionRange[] = []
