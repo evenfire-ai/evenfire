@@ -80,7 +80,16 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
     expect(versions[versions.indexOf(task106.at(-1)!) + 1]).toBe('0139_gfs_resource_changed_notify')
-    expect(versions.at(-1)).toBe('0139_gfs_resource_changed_notify')
+    const watchTriggers = [
+      '0140_gfs_authz_grants_notify',
+      '0141_gfs_authz_shares_notify',
+      '0142_gfs_authz_operator_links_notify',
+      '0143_gfs_authz_control_admins_notify',
+      '0144_gfs_authz_team_members_notify',
+      '0145_gfs_watch_session_users_notify',
+    ]
+    const after0139 = versions.indexOf('0139_gfs_resource_changed_notify') + 1
+    expect(versions.slice(after0139)).toEqual(watchTriggers)
   })
 
   it('keeps legacy aliases unique and distinct from current versions', async () => {

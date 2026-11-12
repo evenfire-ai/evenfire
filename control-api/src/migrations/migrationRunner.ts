@@ -1,4 +1,5 @@
 import type { DbClient } from '../db.js'
+import { rootLogger } from '../observability/logger.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
@@ -6,6 +7,12 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0137_user_access_foundation',
   '0138_legacy_password_security_epoch_backfill',
   '0139_gfs_resource_changed_notify',
+  '0140_gfs_authz_grants_notify',
+  '0141_gfs_authz_shares_notify',
+  '0142_gfs_authz_operator_links_notify',
+  '0143_gfs_authz_control_admins_notify',
+  '0144_gfs_authz_team_members_notify',
+  '0145_gfs_watch_session_users_notify',
 ] as const)
 
 // The one bound between initDb's single dev batch and this runner: every migration
@@ -57,6 +64,8 @@ export type MigrationDescriptor = {
   version: string
   legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
+  /** Extra attempts of the whole transaction after it lost a lock wait. */
+  lockRetries?: number
 }
 
 type ApplyPendingPr1MigrationsInput = {
@@ -64,6 +73,21 @@ type ApplyPendingPr1MigrationsInput = {
   migrations: readonly MigrationDescriptor[]
   appliedVersions: Set<string>
   recordMigration: (db: DbClient, version: string) => Promise<void>
+  /** Test seam for the pause between lock retries. */
+  sleep?: (ms: number) => Promise<void>
+}
+
+const log = rootLogger.child({ module: 'database-migration' })
+const LOCK_RETRY_DELAY_MS = 1_000
+
+const defaultSleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+const MAX_LOCK_RETRIES = 3
+
+// 55P03: lock_timeout expired. Nothing is applied after the ROLLBACK, so the
+// whole transaction is retried and holds no lock between attempts.
+function isLockWaitTimeout(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === '55P03'
 }
 
 async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): Promise<void> {
@@ -161,11 +185,21 @@ export async function applyPendingPr1Migrations({
   migrations,
   appliedVersions,
   recordMigration,
+  sleep = defaultSleep,
 }: ApplyPendingPr1MigrationsInput): Promise<void> {
   const byVersion = new Map(migrations.map(migration => [migration.version, migration]))
   const canonicalVersions = new Set(byVersion.keys())
   const aliasOwners = new Map<string, string>()
   for (const migration of migrations) {
+    const { lockRetries } = migration
+    if (
+      lockRetries !== undefined &&
+      !(Number.isInteger(lockRetries) && lockRetries >= 0 && lockRetries <= MAX_LOCK_RETRIES)
+    ) {
+      throw new Error(
+        `Migration ${migration.version} lockRetries must be an integer from 0 to ${MAX_LOCK_RETRIES}`
+      )
+    }
     for (const alias of migration.legacyVersions ?? []) {
       if (canonicalVersions.has(alias)) {
         throw new Error(`Migration alias collides with canonical version: ${alias}`)
@@ -206,10 +240,23 @@ export async function applyPendingPr1Migrations({
     }
 
     await preparePr1Migration(db, version)
-    await runBoundedTransaction(db, async () => {
-      await migration.apply(db)
-      await recordMigration(db, version)
-    })
+    const retries = migration.lockRetries ?? 0
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await runBoundedTransaction(db, async () => {
+          await migration.apply(db)
+          await recordMigration(db, version)
+        })
+        break
+      } catch (error) {
+        if (attempt >= retries || !isLockWaitTimeout(error)) throw error
+        log.warn(
+          { err: error, version, attempt: attempt + 1, retries },
+          'Migration lost a lock wait; retrying'
+        )
+        await sleep(LOCK_RETRY_DELAY_MS * (attempt + 1))
+      }
+    }
     appliedVersions.add(version)
   }
 }

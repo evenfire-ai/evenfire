@@ -45,6 +45,14 @@ import {
   applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
+import {
+  applyGfsAuthzControlAdminsSchema,
+  applyGfsAuthzGrantsSchema,
+  applyGfsAuthzOperatorLinksSchema,
+  applyGfsAuthzSharesSchema,
+  applyGfsAuthzTeamMembersSchema,
+  applyGfsWatchSessionUsersSchema,
+} from './services/gfsWatch/authzChangedSchema.js'
 import { applyGfsResourceChangedSchema } from './services/gfsWatch/resourceChangedSchema.js'
 import {
   applyGrokCatalogModelsSchema,
@@ -141,6 +149,8 @@ type DbMigration = {
   // Equivalent names used before a branch merge renumbered the same migration body.
   legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
+  // Extra attempts when the transaction loses a lock wait (runner versions only).
+  lockRetries?: number
 }
 
 export type { BoundedPoolBudget, PoolConstructor } from './boundedPgPool.js'
@@ -6426,6 +6436,34 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0139_gfs_resource_changed_notify',
     apply: applyGfsResourceChangedSchema,
+  },
+  {
+    version: '0140_gfs_authz_grants_notify',
+    apply: applyGfsAuthzGrantsSchema,
+  },
+  {
+    version: '0141_gfs_authz_shares_notify',
+    apply: applyGfsAuthzSharesSchema,
+  },
+  {
+    version: '0142_gfs_authz_operator_links_notify',
+    apply: applyGfsAuthzOperatorLinksSchema,
+  },
+  {
+    version: '0143_gfs_authz_control_admins_notify',
+    apply: applyGfsAuthzControlAdminsSchema,
+  },
+  {
+    version: '0144_gfs_authz_team_members_notify',
+    apply: applyGfsAuthzTeamMembersSchema,
+    // Every login writes users and team_members: CREATE TRIGGER on them can
+    // lose its lock wait at a busy moment, which should not fail the Job.
+    lockRetries: 2,
+  },
+  {
+    version: '0145_gfs_watch_session_users_notify',
+    apply: applyGfsWatchSessionUsersSchema,
+    lockRetries: 2,
   },
 ]
 

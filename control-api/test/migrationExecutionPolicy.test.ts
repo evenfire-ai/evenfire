@@ -50,6 +50,12 @@ describe('D34 migration execution policy', () => {
       '0137_user_access_foundation',
       '0138_legacy_password_security_epoch_backfill',
       '0139_gfs_resource_changed_notify',
+      '0140_gfs_authz_grants_notify',
+      '0141_gfs_authz_shares_notify',
+      '0142_gfs_authz_operator_links_notify',
+      '0143_gfs_authz_control_admins_notify',
+      '0144_gfs_authz_team_members_notify',
+      '0145_gfs_watch_session_users_notify',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -335,6 +341,122 @@ describe('D34 PR1 migration runner', () => {
     expect(query).toHaveBeenCalledWith('ROLLBACK')
   })
 
+  it('rejects a lockRetries outside 0..3 before applying anything', async () => {
+    for (const lockRetries of [-1, 4, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const apply = vi.fn(async () => undefined)
+      const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+      await expect(
+        applyPendingPr1Migrations({
+          db: { query },
+          migrations: PR1_MIGRATION_VERSIONS.map((version, index) => ({
+            version,
+            ...(index === PR1_MIGRATION_VERSIONS.length - 1 ? { lockRetries } : {}),
+            apply,
+          })),
+          appliedVersions: new Set(),
+          recordMigration: async () => undefined,
+        }),
+        String(lockRetries)
+      ).rejects.toThrow(/lockRetries must be an integer from 0 to 3/)
+      expect(apply).not.toHaveBeenCalled()
+      expect(query).not.toHaveBeenCalled()
+    }
+    // The bounds themselves are accepted.
+    for (const lockRetries of [0, 3]) {
+      await applyPendingPr1Migrations({
+        db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },
+        migrations: PR1_MIGRATION_VERSIONS.map(version => ({
+          version,
+          lockRetries,
+          apply: async () => undefined,
+        })),
+        appliedVersions: new Set(PR1_MIGRATION_VERSIONS),
+        recordMigration: async () => undefined,
+      })
+    }
+  })
+
+  it('registers lock retries only on the users and team_members trigger migrations', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const withRetries = CONTROL_API_MIGRATIONS.filter(
+      migration => (migration as { lockRetries?: number }).lockRetries !== undefined
+    ).map(migration => [migration.version, (migration as { lockRetries?: number }).lockRetries])
+    expect(withRetries).toEqual([
+      ['0144_gfs_authz_team_members_notify', 2],
+      ['0145_gfs_watch_session_users_notify', 2],
+    ])
+  })
+
+  // The SQLSTATE of a lost lock wait comes from real PostgreSQL in
+  // gfsWatch.authzSessionTriggers.realPostgres.integration.test.ts; these cases
+  // pin the runner's bounds around it.
+  describe('lock retries', () => {
+    const retried = PR1_MIGRATION_VERSIONS[PR1_MIGRATION_VERSIONS.length - 1]
+
+    function lockFailingRun(failures: Array<{ code?: string }>, lockRetries?: number) {
+      const transactions: string[] = []
+      const sleeps: number[] = []
+      const recorded: string[] = []
+      let calls = 0
+      const migrations = PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        ...(version === retried && lockRetries !== undefined ? { lockRetries } : {}),
+        apply: vi.fn(async () => {
+          if (version !== retried) return
+          const failure = failures[calls]
+          calls += 1
+          if (failure) throw Object.assign(new Error('lock'), failure)
+        }),
+      }))
+      const run = applyPendingPr1Migrations({
+        db: {
+          query: vi.fn(async (sql: string) => {
+            if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') transactions.push(sql)
+            return { rows: [], rowCount: 0 }
+          }),
+        },
+        migrations,
+        appliedVersions: new Set(PR1_MIGRATION_VERSIONS.filter(version => version !== retried)),
+        recordMigration: async (_db, version) => {
+          recorded.push(version)
+        },
+        sleep: async ms => {
+          sleeps.push(ms)
+        },
+      })
+      return { run, transactions, sleeps, recorded, attempts: () => calls }
+    }
+
+    it('retries the whole transaction after a lock timeout and then records once', async () => {
+      const r = lockFailingRun([{ code: '55P03' }, { code: '55P03' }], 2)
+      await r.run
+      expect(r.attempts()).toBe(3)
+      expect(r.recorded).toEqual([retried])
+      expect(r.transactions).toEqual(['BEGIN', 'ROLLBACK', 'BEGIN', 'ROLLBACK', 'BEGIN', 'COMMIT'])
+      expect(r.sleeps).toEqual([1_000, 2_000])
+    })
+
+    it('gives up after its retries and surfaces the lock error', async () => {
+      const r = lockFailingRun([{ code: '55P03' }, { code: '55P03' }, { code: '55P03' }], 2)
+      await expect(r.run).rejects.toMatchObject({ code: '55P03' })
+      expect(r.attempts()).toBe(3)
+      expect(r.recorded).toEqual([])
+    })
+
+    it('does not retry other errors, nor a version without lockRetries', async () => {
+      for (const code of ['57014', '40P01']) {
+        const other = lockFailingRun([{ code }], 2)
+        await expect(other.run).rejects.toMatchObject({ code })
+        expect(other.attempts(), code).toBe(1)
+      }
+
+      const noRetries = lockFailingRun([{ code: '55P03' }])
+      await expect(noRetries.run).rejects.toMatchObject({ code: '55P03' })
+      expect(noRetries.attempts()).toBe(1)
+      expect(noRetries.sleeps).toEqual([])
+    })
+  })
+
   it('fails closed for an unclassified migration after the dev batch', async () => {
     await expect(
       applyPendingPr1Migrations({
@@ -534,6 +656,12 @@ describe('PR1 earlier-head guard', () => {
     expect(recorded).toEqual([
       '0138_legacy_password_security_epoch_backfill',
       '0139_gfs_resource_changed_notify',
+      '0140_gfs_authz_grants_notify',
+      '0141_gfs_authz_shares_notify',
+      '0142_gfs_authz_operator_links_notify',
+      '0143_gfs_authz_control_admins_notify',
+      '0144_gfs_authz_team_members_notify',
+      '0145_gfs_watch_session_users_notify',
     ])
   })
 })

@@ -99,6 +99,61 @@ export function parseResourceChanged(payload: unknown): ResourceChanged | null {
   }
 }
 
+/** `subject_type` values the CHECK constraint of gfs_grants and gfs_shares admits. */
+export type AuthzSubjectType = 'operator' | 'user' | 'team' | 'host' | 'context'
+
+/**
+ * One `gfs_authz_changed` key. `u` a user (memberships, operator links), `a` a
+ * control admin, `s` a grant or share subject. Only `user` and `team`
+ * subjects carry an id; the others are emitted with an empty one.
+ */
+export type AuthzKey =
+  | { kind: 'u'; id: Uuid }
+  | { kind: 'a'; id: Uuid }
+  | { kind: 's'; t: 'user' | 'team'; id: Uuid | null }
+  | { kind: 's'; t: 'operator' | 'host' | 'context' }
+
+/** `gfs_authz_changed` payload: exactly one key per NOTIFY. */
+export function parseAuthzKey(payload: unknown): AuthzKey | null {
+  if (typeof payload !== 'string') return null
+  if (payload.startsWith('u:') || payload.startsWith('a:')) {
+    const id = normUid(payload.slice(2))
+    if (id === null) return null
+    return payload[0] === 'u' ? { kind: 'u', id } : { kind: 'a', id }
+  }
+  if (!payload.startsWith('s:')) return null
+  const sep = payload.indexOf(':', 2)
+  if (sep < 0) return null
+  const t = payload.slice(2, sep)
+  // subject_id is TEXT, so everything after the type belongs to it, ':' included.
+  const sid = payload.slice(sep + 1)
+  if (t === 'user' || t === 'team') {
+    // A subject id that is not a uuid names no user or team (gfsc compares it
+    // with their ids): a valid payload that affects nobody, not an invalid one.
+    return { kind: 's', t, id: normUid(sid) }
+  }
+  if (t === 'operator' || t === 'host' || t === 'context') return { kind: 's', t }
+  return null
+}
+
+export type SessionLifecycleState = 'active' | 'retired' | 'deleted'
+
+/** A user lifecycle change; `deleted` comes from the DELETE trigger with the last version. */
+export type SessionHint = { uid: Uuid; state: SessionLifecycleState; version: number }
+
+/** `gfs_watch_session` payload: "<user_id>:<state>:<lifecycle_version>". */
+export function parseSessionHint(payload: unknown): SessionHint | null {
+  if (typeof payload !== 'string') return null
+  const fields = payload.split(':')
+  if (fields.length !== 3) return null
+  const uid = normUid(fields[0])
+  const state =
+    fields[1] === 'active' || fields[1] === 'retired' || fields[1] === 'deleted' ? fields[1] : null
+  const version = positiveGeneration(fields[2])
+  if (uid === null || state === null || version === null) return null
+  return { uid, state, version }
+}
+
 export type WatchPing = { instanceId: string; epoch: number; n: number }
 
 const INSTANCE_ID_RE = /^[0-9a-f]{32}$/
