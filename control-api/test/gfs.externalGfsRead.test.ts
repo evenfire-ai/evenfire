@@ -3,7 +3,7 @@ import { createPublicKey } from 'node:crypto'
 import { once } from 'node:events'
 import { type Server, createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { toResponse } from '../../gfs-controller/src/api/envelope.js'
+import { ok, toResponse } from '../../gfs-controller/src/api/envelope.js'
 import { GfsError, type GfsErrorCode } from '../../gfs-controller/src/api/errors.js'
 import { loadVerificationKey } from '../../gfs-controller/src/auth/keys.js'
 import { verifyGfsToken } from '../../gfs-controller/src/auth/verify.js'
@@ -17,13 +17,14 @@ import { mintExternalGfsReadToken, readGfsc } from '../src/gfs/externalGfsRead.j
 // a principal denial yet.
 
 const RID = '0123456789abcdef0123456789abcdef'
+const REQUEST_ID = '6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b'
 
 let server: Server
 let baseUrl = ''
 let nextError: GfsError | null = null
 let hang = false
 // Raw 2xx behaviours of a misbehaving upstream, outside gfsc's envelope.
-let rawOk: 'stalled-body' | 'not-json' | null = null
+let rawOk: 'stalled-body' | 'not-json' | 'oversized' | null = null
 let lastRequest: { url?: string; authorization?: string; requestId?: string } = {}
 
 beforeAll(async () => {
@@ -37,6 +38,12 @@ beforeAll(async () => {
     if (rawOk === 'stalled-body') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.write('{')
+      return
+    }
+    if (rawOk === 'oversized') {
+      // gfsc's own envelope, padded past what a stat answer can be.
+      const body = JSON.stringify(ok({ kind: 'file', padding: 'x'.repeat(70 * 1024) }))
+      res.writeHead(200, { 'content-type': 'application/json' }).end(body)
       return
     }
     if (rawOk === 'not-json') {
@@ -62,7 +69,7 @@ afterAll(async () => {
 
 async function readWith(
   error: GfsError | null,
-  options: { signal?: AbortSignal; timeoutMs?: number; base?: string } = {}
+  options: { signal?: AbortSignal; timeoutMs?: number; base?: string; requestId?: string } = {}
 ) {
   nextError = error
   const previous = config.gfscBaseUrl
@@ -71,7 +78,7 @@ async function readWith(
     return await readGfsc(
       RID,
       'token-value',
-      'request-id-value',
+      options.requestId ?? REQUEST_ID,
       options.signal ?? new AbortController().signal,
       options.timeoutMs ?? 2_000
     )
@@ -86,8 +93,31 @@ describe('readGfsc', () => {
     expect(lastRequest).toEqual({
       url: `/v1/resources/${RID}`,
       authorization: 'Bearer token-value',
-      requestId: 'request-id-value',
+      requestId: REQUEST_ID,
     })
+  })
+
+  it('replaces a request id that is not a uuid, which gfsc would refuse with a 400', async () => {
+    await readWith(new GfsError('not_found', 'missing'), { requestId: 'request-id-value' })
+    expect(lastRequest.requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    )
+    await readWith(new GfsError('not_found', 'missing'), { requestId: REQUEST_ID.toUpperCase() })
+    expect(lastRequest.requestId).toBe(REQUEST_ID)
+  })
+
+  it('treats a 2xx body above the size cap as transient without buffering it whole', async () => {
+    rawOk = 'oversized'
+    try {
+      expect(await readWith(null)).toEqual({
+        status: 'transient',
+        httpStatus: 200,
+        principalDenied: false,
+        responded: true,
+      })
+    } finally {
+      rawOk = null
+    }
   })
 
   it('flags principalDenied only for a 403 that carries that reason', async () => {

@@ -212,6 +212,12 @@ export const gfsWatchTickFailedTotal = getOrCreateCounter({
   labelNames: ['name'] as const as Array<'name'>,
 })
 
+export const gfsWatchCmdDroppedTotal = getOrCreateCounter({
+  name: 'gfs_watch_cmd_dropped_total',
+  help: 'Valid GFS watch commands the owning replica refused (binding mismatch, seq jump).',
+  labelNames: ['reason'] as const as Array<'reason'>,
+})
+
 export const gfsWatchTotalFailedTotal = getOrCreateCounter({
   name: 'gfs_watch_total_failed_total',
   help: 'GFS watch awaited steps that failed, classified as transient infrastructure or defect.',

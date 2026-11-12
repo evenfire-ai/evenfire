@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { GFS_READ_SCOPE, signGfsToken } from '../auth/gfsToken.js'
 import { config } from '../config.js'
 import {
@@ -74,6 +75,40 @@ function transientResponse(httpStatus: number): GfscReadResult {
   return { status: 'transient', httpStatus, principalDenied: false, responded: true }
 }
 
+/**
+ * A stat answer is a few hundred bytes. Anything far larger is not gfsc's
+ * envelope, and buffering it whole would let one misbehaving upstream hold
+ * megabytes per in-flight read.
+ */
+export const GFSC_READ_MAX_BODY_BYTES = 64 * 1024
+
+/** The body as text, or null once it exceeds the cap (the stream is cancelled). */
+async function readCappedText(response: Response): Promise<string | null> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > GFSC_READ_MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => {})
+      return null
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/** gfsc answers 400 to an x-request-id that is not a uuid. */
+function requestIdHeader(requestId: string): string {
+  const lower = requestId.toLowerCase()
+  return UUID_RE.test(lower) ? lower : randomUUID()
+}
+
 function parseJson(text: string): unknown {
   try {
     return JSON.parse(text)
@@ -109,18 +144,19 @@ export async function readGfsc(
     try {
       response = await fetch(target, {
         method: 'GET',
-        headers: { authorization: `Bearer ${token}`, 'x-request-id': requestId },
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': requestIdHeader(requestId) },
         signal: deadline,
       })
     } catch {
       return GFSC_READ_TRANSIENT_NO_RESPONSE
     }
-    let text: string
+    let text: string | null
     try {
-      text = await response.text()
+      text = await readCappedText(response)
     } catch {
       return transientResponse(response.status)
     }
+    if (text === null) return transientResponse(response.status)
     const status = response.status
     if (status >= 200 && status < 300) {
       const data = (parseJson(text) as { ok?: unknown; data?: { kind?: unknown } } | undefined)
