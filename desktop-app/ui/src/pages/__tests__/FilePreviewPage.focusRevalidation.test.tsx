@@ -2,7 +2,7 @@
 import { type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { isPermissionErrorAcknowledged } from '@components/Common/permissionErrorAcknowledgement'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
@@ -24,6 +24,107 @@ afterEach(() => {
 })
 
 describe('FilePreviewPage focus revalidation', () => {
+  it('keeps the dismissed Preview failure recoverable through a transient resolver error', async () => {
+    const parentFailure = new Error(
+      "Error invoking remote method 'gfs:affordances': 503 Unavailable httpStatus=503"
+    )
+    const resourceFailure = new Error('preview resolver temporarily unavailable httpStatus=503')
+    const resolved = resolveResource({
+      resourceId,
+      rid: resourceId,
+      gfsUri: uri,
+      drive: 'main',
+      parentResourceId: 'source-parent',
+      name: 'diagram.png',
+      kind: 'file',
+      version: 7,
+      bytes: 1,
+    })
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(resolved)
+      .mockRejectedValueOnce(resourceFailure)
+      .mockResolvedValue(resolved)
+    const affordances = vi.fn(async (id: string) => {
+      if (id === 'source-parent') throw parentFailure
+      return delegationAffordances(new Set(['read', 'write', 'delete']), false)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          affordances,
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      accessState: 'active',
+      sessionScope: 'preview-focus-user:main',
+      sessionGeneration: 1,
+      authorityPending: false,
+      handleAuthorityFailure: vi.fn(() => false),
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const parentPermissionKey = desktopQueryKeys.gfsAffordances(
+      'preview-focus-user:main',
+      'source-parent',
+      'main',
+      1
+    )
+    const resourceKey = [
+      ...desktopQueryKeys.gfsRoot,
+      'preview-focus-user:main',
+      'preview-resource',
+      uri,
+      { sessionGeneration: 1 },
+    ] as const
+    function FocusAwarePreview() {
+      useWindowFocusBridge()
+      return (
+        <FilePreviewPage
+          gfsUri={uri}
+          fileName="diagram.png"
+          fileKind="image"
+          mimeType="image/png"
+          byteLength={1}
+        />
+      )
+    }
+    try {
+      render(<FocusAwarePreview />, {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+        ),
+      })
+      const dialog = await screen.findByRole('alertdialog', {
+        name: 'Could not verify permissions',
+      })
+      expect(dialog.textContent).toContain('Could not verify move permissions')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+      await screen.findByRole('button', {
+        name: 'Permission check failed; open recovery options',
+      })
+
+      fireEvent.focus(window)
+      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(queryClient.getQueryState(resourceKey)?.status).toBe('error'))
+      expect(queryClient.getQueryState(parentPermissionKey)?.status).toBe('error')
+      const retainedRecoveryCue = screen.getByRole('button', {
+        name: 'Permission check failed; open recovery options',
+      })
+
+      fireEvent.click(retainedRecoveryCue)
+      const recoveredDialog = await screen.findByRole('alertdialog', {
+        name: 'Could not verify permissions',
+      })
+      expect(recoveredDialog.textContent).toContain('Could not verify move permissions')
+    } finally {
+      queryClient.clear()
+    }
+  })
+
   it('deduplicates active permission reads inside the 15-second freshness window', async () => {
     const resolve = vi.fn(async () =>
       resolveResource({

@@ -4,7 +4,9 @@ import { EmptyState, PermissionErrorDialog, PermissionStatusIndicator } from '@c
 import {
   installPermissionErrorTracking,
   isPermissionErrorAcknowledged,
+  isPermissionErrorRecoveryRequested,
   permissionErrorToken,
+  requestPermissionErrorRecovery,
   usePermissionErrorAcknowledgementSnapshot,
 } from '@components/Common/permissionErrorAcknowledgement'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
@@ -301,8 +303,21 @@ export function FilePreviewPage({
     token: permissionErrorToken(error),
   }))
   const visiblePermissionErrors = tokenizedPermissionErrors.filter(
-    error => !isPermissionErrorAcknowledged(error)
+    error => !isPermissionErrorAcknowledged(error) || isPermissionErrorRecoveryRequested(error)
   )
+  const acknowledgedPreviewError = tokenizedPermissionErrors.find(isPermissionErrorAcknowledged)
+  const previewRecoveryCue = acknowledgedPreviewError ? (
+    <button
+      aria-haspopup="dialog"
+      aria-label="Permission check failed; open recovery options"
+      className="da-permission-error-recovery-cue"
+      onClick={() => requestPermissionErrorRecovery(acknowledgedPreviewError)}
+      title="Permission check failed; open recovery options"
+      type="button"
+    >
+      !
+    </button>
+  ) : null
   const permissionProgressLabel = !permissionPresentationAvailable
     ? ''
     : previewResourceActions.permissionProgress.length > 1
@@ -427,6 +442,7 @@ export function FilePreviewPage({
                         previewResourceActions.actionDialogOpen
                       }
                       label={permissionProgressLabel}
+                      children={previewRecoveryCue}
                     />
                   }
                   onCopyContentReady={handleCopyContentReady}
@@ -449,6 +465,7 @@ export function FilePreviewPage({
                         previewResourceActions.actionDialogOpen
                       }
                       label={permissionProgressLabel}
+                      children={previewRecoveryCue}
                     />
                   }
                   onCopyContentReady={handleCopyContentReady}
@@ -472,6 +489,7 @@ export function FilePreviewPage({
                         previewResourceActions.actionDialogOpen
                       }
                       label={permissionProgressLabel}
+                      children={previewRecoveryCue}
                     />
                   }
                   titleActions={fileActionsMenu}

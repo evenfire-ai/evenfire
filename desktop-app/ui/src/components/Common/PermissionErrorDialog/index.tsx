@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Button } from '../Button'
 import {
   acknowledgePermissionErrors,
+  clearPermissionErrorRecovery,
   recordPermissionRetry,
 } from '../permissionErrorAcknowledgement'
 import type { PermissionErrorDialogProps } from './types'
@@ -112,6 +113,7 @@ export function PermissionErrorDialog({
           event.preventDefault()
           event.stopPropagation()
           acknowledgePermissionErrors(latestRef.current.errors)
+          clearPermissionErrorRecovery(latestRef.current.errors)
           latestRef.current.onDismiss(latestRef.current.errors.map(error => error.id))
         }}
         ref={dialogRef}
@@ -157,6 +159,7 @@ export function PermissionErrorDialog({
             onClick={() => {
               const committed = latestRef.current
               acknowledgePermissionErrors(committed.errors)
+              clearPermissionErrorRecovery(committed.errors)
               committed.onDismiss(committed.errors.map(error => error.id))
             }}
             variant="outline"

@@ -16072,6 +16072,52 @@ pre {
   outline-offset: 2px;
 }
 
+.da-permission-error-recovery-cue {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: grid;
+  width: 1.25rem;
+  height: 1.25rem;
+  place-items: center;
+  border: 1px solid var(--danger);
+  border-radius: 50%;
+  background: var(--bg-elev);
+  color: var(--danger);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1;
+}
+
+.da-permission-error-recovery-cue:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.da-permission-error-recovery-cue {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: grid;
+  width: 1.25rem;
+  height: 1.25rem;
+  place-items: center;
+  border: 1px solid var(--danger);
+  border-radius: 50%;
+  background: var(--bg-elev);
+  color: var(--danger);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1;
+}
+
+.da-permission-error-recovery-cue:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 .da-permission-status-spinner {
   width: 0.75rem;
   height: 0.75rem;
