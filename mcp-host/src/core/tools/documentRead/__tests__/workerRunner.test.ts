@@ -109,6 +109,27 @@ async function control(): Promise<void> {
   expect((await runDocumentJob(job(await valuesWorkbook(witnessCode())))).ok).toBe(true)
 }
 
+/** Well below the slot cases' test timeout, so a held slot fails with its own message. */
+const NEXT_JOB_DEADLINE_MS = 10_000
+
+/**
+ * Proves the single reader slot was released: a following real job starts its
+ * child and settles before the deadline. A held slot would queue that job
+ * forever and hang every later read; the deadline signal takes it back out of
+ * the queue, so the case fails here instead of on the test timeout.
+ */
+async function nextJobStartsAndSettles(): Promise<void> {
+  const bytes = await valuesWorkbook(witnessCode())
+  vi.mocked(spawn).mockClear()
+  const outcome = await runDocumentJob(job(bytes), AbortSignal.timeout(NEXT_JOB_DEADLINE_MS)).catch(
+    (error: unknown) => ({ rejected: error })
+  )
+  expect(spawn, 'the next job never started: the reader slot is still held').toHaveBeenCalledTimes(
+    1
+  )
+  expect(outcome, 'the next job did not settle before the deadline').toMatchObject({ ok: true })
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true }))
@@ -245,6 +266,68 @@ describe('document reader child runner', () => {
     ).rejects.toBe(reason)
     expect(spawn).not.toHaveBeenCalled()
     await control()
+  })
+
+  // Every exit path between admission and a live child must give the single
+  // reader slot back; a path that keeps it would hang every later read.
+  it('releases the reader slot when a pre-spawn premise throws, then runs the next job', async () => {
+    const sampler = vi.spyOn(residentMemory, 'residentMemorySampler').mockImplementationOnce(() => {
+      throw new Error('resident memory sampler unavailable')
+    })
+    await expect(runDocumentJob(job(await valuesWorkbook(witnessCode())))).rejects.toThrow(
+      'Document reader worker failed'
+    )
+    // The premise ran with the slot held, and nothing was spawned.
+    expect(sampler).toHaveBeenCalledTimes(1)
+    expect(spawn).not.toHaveBeenCalled()
+    await nextJobStartsAndSettles()
+  }, 30_000)
+
+  it('releases the reader slot on an abort after admission and before spawn, then runs the next job', async () => {
+    const controller = new AbortController()
+    const reason = new Error('document read cancelled after admission')
+    // The sampler factory runs only after the slot is held, and before spawn:
+    // the abort lands past both pre-admission checks.
+    const sampler = vi.spyOn(residentMemory, 'residentMemorySampler').mockImplementationOnce(() => {
+      controller.abort(reason)
+      return async () => ({ rssBytes: 0, vmDataBytes: null })
+    })
+    await expect(
+      runDocumentJob(job(await valuesWorkbook(witnessCode())), controller.signal)
+    ).rejects.toBe(reason)
+    expect(sampler).toHaveBeenCalledTimes(1)
+    expect(spawn).not.toHaveBeenCalled()
+    await nextJobStartsAndSettles()
+  }, 30_000)
+
+  it('releases the reader slot when spawn throws synchronously, then runs the next job', async () => {
+    // Node throws from spawn() itself for errors such as ENOMEM instead of
+    // emitting `error` on a child, so no child exists to observe an exit.
+    vi.mocked(spawn).mockImplementationOnce(() => {
+      throw Object.assign(new Error('spawn ENOMEM'), {
+        code: 'ENOMEM',
+        errno: -12,
+        syscall: 'spawn',
+      })
+    })
+    await expect(runDocumentJob(job(await valuesWorkbook(witnessCode())))).rejects.toThrow(
+      'Document reader worker failed'
+    )
+    expect(spawn).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(spawn).mock.results[0]?.type).toBe('throw')
+    await nextJobStartsAndSettles()
+  }, 30_000)
+
+  it('stops the RSS sampling interval when the job settles', async () => {
+    const intervals = vi.spyOn(globalThis, 'setInterval')
+    const cleared = vi.spyOn(globalThis, 'clearInterval')
+    await control()
+    const started = intervals.mock.results.flatMap(result =>
+      result.type === 'return' ? [result.value] : []
+    )
+    // Liveness: the job sampled its live child on an interval.
+    expect(started).toHaveLength(1)
+    expect(cleared).toHaveBeenCalledWith(started[0])
   })
 
   it('maps V8 heap exhaustion to heap while the same bytes parse under a normal heap', async () => {

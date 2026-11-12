@@ -12,9 +12,12 @@ import { join } from 'node:path'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
 import type { IncomingMessage } from '../../../server'
-import { AttachmentReadLedger } from '../../attachments/attachmentReadBudget'
+import {
+  AttachmentReadLedger,
+  MAX_ATTACHMENT_READS_PER_TURN,
+} from '../../attachments/attachmentReadBudget'
 import type { NativeToolConfig } from '../../interfaces'
-import { BasicSafety } from '../../safety/safety'
+import { BasicSafety, type SecretEntriesProvider } from '../../safety/safety'
 import type { Attachment } from '../../types'
 import { NativeToolRegistry } from '../nativeToolRegistry'
 
@@ -92,7 +95,10 @@ function message(attachment?: Attachment): IncomingMessage {
   }
 }
 
-function registryFor(attachment?: Attachment): NativeToolRegistry {
+function registryFor(
+  attachment?: Attachment,
+  turn: { ledger?: AttachmentReadLedger; secretEntriesProvider?: SecretEntriesProvider } = {}
+): NativeToolRegistry {
   return new NativeToolRegistry(
     config,
     'conversation-1',
@@ -103,8 +109,9 @@ function registryFor(attachment?: Attachment): NativeToolRegistry {
     undefined,
     {
       maxBytes: 3_145_728,
-      ledger: new AttachmentReadLedger(),
+      ledger: turn.ledger ?? new AttachmentReadLedger(),
       contextWindowTokens: 100_000,
+      ...(turn.secretEntriesProvider ? { secretEntriesProvider: turn.secretEntriesProvider } : {}),
     }
   )
 }
@@ -281,5 +288,84 @@ describe('NativeToolRegistry — clerum__document_read (#656)', () => {
       message:
         'The document is password-protected and cannot be read. The file name or declared media type does not match its detected content.',
     })
+  })
+
+  // The registry must hand document_read the redactor built from the turn's
+  // ConfigStore secrets. The assertions read the tool's own output: the loop's
+  // later sanitizer pass is left out on purpose, because it masks a whole
+  // literal by itself and would hide a redactor that lacks the secrets.
+  it('masks a ConfigStore secret in the document text with the turn secretEntriesProvider', async () => {
+    const TOOL = 'clerum__document_read'
+    const configLiteral = 'CfgDocumentSecretValue7c6b5a'
+    const attachment = await fileAttachment(
+      'secret-document',
+      'report.pdf',
+      'application/pdf',
+      await pdfWithText(`before ${configLiteral} after`)
+    )
+    const read = async (secretEntriesProvider?: SecretEntriesProvider) => {
+      const output = await registryFor(attachment, { secretEntriesProvider })
+        .get(TOOL)!
+        .execute({ attachmentId: attachment.id }, executionContext(TOOL))
+      const result = JSON.parse(output.content) as {
+        status: string
+        pages?: Array<{ text?: string }>
+      }
+      expect(result.status).toBe('ok')
+      expect(output.is_error).toBe(false)
+      return {
+        content: output.content,
+        text: result.pages?.map(page => page.text ?? '').join('\n') ?? '',
+      }
+    }
+
+    // Control: the literal matches no built-in secret pattern, so without the
+    // turn's secrets it reaches the result in clear.
+    const plain = await read()
+    expect(plain.text).toContain(configLiteral)
+
+    const masked = await read(() => [{ name: 'CFG_DOCUMENT_TOKEN', value: configLiteral }])
+    expect(masked.content).not.toContain(configLiteral)
+    expect(masked.text).toContain('[REDACTED:CFG_DOCUMENT_TOKEN]')
+    // Liveness: the text around the secret is still delivered.
+    expect(masked.text).toContain('before')
+    expect(masked.text).toContain('after')
+  })
+
+  // The two attachment readers draw from one turn ledger, so neither can
+  // spend reads the other already took.
+  it('charges the turn ledger that clerum__attachment_read also draws from', async () => {
+    const attachment = await fileAttachment(
+      'shared-ledger',
+      'report.pdf',
+      'application/pdf',
+      await pdfWithText(bodyToken())
+    )
+    const ledger = new AttachmentReadLedger()
+    const registry = registryFor(attachment, { ledger })
+    const attachmentRead = registry.get('clerum__attachment_read')!
+    const documentRead = registry.get('clerum__document_read')!
+    const call = async (tool: typeof documentRead) =>
+      JSON.parse(
+        (await tool.execute({ attachmentId: attachment.id }, executionContext(tool.name()))).content
+      ) as Record<string, unknown>
+
+    // attachment_read spends every read of the turn but the last one. It
+    // points a PDF at document_read without decoding it, but still counts.
+    for (let read = 1; read < MAX_ATTACHMENT_READS_PER_TURN; read += 1) {
+      expect(await call(attachmentRead)).toMatchObject({
+        kind: 'binary',
+        reason: 'read_with_document_read',
+      })
+    }
+    expect(ledger.snapshot().reads).toBe(MAX_ATTACHMENT_READS_PER_TURN - 1)
+
+    // document_read takes the last read from the same ledger.
+    expect(await call(documentRead)).toMatchObject({ status: 'ok', format: 'pdf' })
+    expect(ledger.snapshot().reads).toBe(MAX_ATTACHMENT_READS_PER_TURN)
+
+    // Each tool now sees the reads the other one spent.
+    expect(await call(attachmentRead)).toMatchObject({ kind: 'read_budget_exhausted' })
+    expect(await call(documentRead)).toMatchObject({ status: 'read_budget_exhausted' })
   })
 })
