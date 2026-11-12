@@ -98,7 +98,7 @@ const REASON_MESSAGES: Record<DocumentReadReason, string> = {
   visual_not_supported:
     'The current model does not accept image input, so mode "visual" is unavailable.',
   host_memory_unavailable:
-    'The Host could not start the document reader: it has too little free memory, or it lacks a configuration the reader requires. The document is not the cause. Retrying later may help; if it keeps failing, an administrator can find the reason in the Host log.',
+    'This Host cannot start the document reader: it has too little free memory, or it lacks a configuration the reader requires. The document is not the cause. An administrator can find the reason in the Host log.',
 }
 
 /**

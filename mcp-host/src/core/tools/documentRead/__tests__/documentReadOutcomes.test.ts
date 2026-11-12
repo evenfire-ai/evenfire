@@ -463,6 +463,24 @@ describe('document reader admission order (zach88 R2-L5)', () => {
   }, 30_000)
 })
 
+describe('document reader memory refusal text (review R1-M1)', () => {
+  it('tells the model the Host cannot start the reader without promising a retry', async () => {
+    const file = admittedFile('refused', await textPdf(['refused']), 'application/pdf')
+    const refuse: RunDocumentJob = async () =>
+      ({ ok: false, reason: 'host_memory_unavailable' }) as never
+    const output = await tool(file, documentLimits(), refuse).execute(
+      { attachmentId: file.id },
+      context()
+    )
+    const body = JSON.parse(output.content)
+    expect(body).toMatchObject({ status: 'error', reason: 'host_memory_unavailable' })
+    // A missing kernel setting, cgroup or calibration never clears on retry.
+    expect(body.message).not.toMatch(/retry/i)
+    expect(body.message).toMatch(/^This Host cannot start the document reader/)
+    expect(body.message).toMatch(/Host log/)
+  })
+})
+
 describe('sparse XLSX gaps through the real worker and the Tool (review M6)', () => {
   it('crosses a 200k-row gap in one call by following the cursor', async () => {
     const worksheet =
