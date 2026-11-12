@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import Anthropic from '@anthropic-ai/sdk'
 import { logger, redactUnknown } from '../../../logger'
 import type { ChatMessage, ToolDefinition } from '../../types'
 import { AnthropicTokenCounter } from '../anthropicTokenCounter'
@@ -47,11 +48,20 @@ describe('AnthropicTokenCounter', () => {
   it('logs the countTokens failure through the Error redaction, not its message text', async () => {
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
     try {
+      // Built by the SDK itself, so the fields asserted below are the ones a real 429 carries.
+      const rateLimited = Anthropic.APIError.generate(
+        429,
+        {
+          type: 'error',
+          error: { type: 'rate_limit_error', message: 'provider echoed sk-ant-payload-secret' },
+        },
+        undefined,
+        { 'request-id': 'req_unit' }
+      )
+      expect(rateLimited).toBeInstanceOf(Anthropic.RateLimitError)
+      expect(rateLimited.message).toContain('sk-ant-payload-secret')
       const client = makeClient(() => {
-        throw Object.assign(new Error('provider echoed sk-ant-payload-secret'), {
-          name: 'RateLimitError',
-          status: 429,
-        })
+        throw rateLimited
       })
       const counter = new AnthropicTokenCounter(client, 'claude-opus-4-7')
       await counter.count([{ role: 'user', content: 'hi' }])
@@ -64,7 +74,7 @@ describe('AnthropicTokenCounter', () => {
       expect(JSON.parse(line)).toMatchObject({
         provider: 'claude',
         reason: 'rate_limit',
-        err: { name: 'RateLimitError', status: 429 },
+        err: { name: rateLimited.name, status: 429 },
       })
     } finally {
       warn.mockRestore()
