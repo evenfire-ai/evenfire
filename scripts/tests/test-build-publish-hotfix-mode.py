@@ -248,6 +248,14 @@ def case_validate_env_exact() -> None:
     check("${{" not in str(step.get("run")), "validate run body contains an inline ${{ }} expression")
 
 
+def case_validate_never_soft_fails() -> None:
+    step = require_step("detect", "Validate manual run")
+    check(
+        "continue-on-error" not in step,
+        f"Validate manual run must fail detect, never continue on error: {step.get('continue-on-error')!r}",
+    )
+
+
 def case_validate_known_list_matches_matrix() -> None:
     step = require_step("detect", "Validate manual run")
     check(
@@ -279,6 +287,8 @@ def case_validate_rejects_bare_main() -> None:
 def case_validate_rejects_dev_ref_hotfix() -> None:
     expect_refused("refs/heads/dev", "false", "control-ui")
     expect_refused("refs/heads/feat/some-branch", "false", "control-ui")
+    # The ref must be main exactly, not a branch whose name starts with main.
+    expect_refused("refs/heads/main-x", "false", "control-ui", mention="not refs/heads/main-x")
 
 
 def case_validate_rejects_build_all_with_hotfix() -> None:
@@ -378,8 +388,9 @@ def case_select_hotfix_in_list() -> None:
 
 def case_select_hotfix_not_in_list() -> None:
     expect_select("control-ui, profile-ui", "mcp-host", "true", "true", "false")
-    # mcp-host is a prefix of mcp-host-slim; only an exact name selects.
+    # mcp-host is a prefix of mcp-host-slim; only an exact name selects, either way round.
     expect_select("mcp-host-slim", "mcp-host", "true", "true", "false")
+    expect_select("mcp-host", "mcp-host-slim", "true", "true", "false")
 
 
 def case_select_normal_changed() -> None:
@@ -394,6 +405,17 @@ def case_select_normal_unchanged() -> None:
     expect_select("", "control-ui", "", "false", "false")
 
 
+def case_gated_jobs_need_detect() -> None:
+    # A job-level `if` (e.g. always()) would run build-push or merge after a
+    # failed "Validate manual run"; needing detect is what stops them.
+    for job in GATED_JOBS:
+        spec = jobs(WF).get(job) or {}
+        check("if" not in spec, f"{job} must have no job-level if (got {spec.get('if')!r})")
+        needs = spec.get("needs")
+        needs = [needs] if isinstance(needs, str) else list(needs or [])
+        check("detect" in needs, f"{job} must need detect (got {spec.get('needs')!r})")
+
+
 def case_all_steps_gated_on_select() -> None:
     offenders = []
     for job in GATED_JOBS:
@@ -403,6 +425,13 @@ def case_all_steps_gated_on_select() -> None:
                 label = step.get("name") or step.get("uses") or index
                 offenders.append(f"{job}/{label}: {step.get('if')!r}")
     check(not offenders, f"every non-select step must use exactly {SELECT_GATE!r}: {offenders}")
+
+
+def case_push_builds_dev_only() -> None:
+    # A push to main never builds; a bare manual run on main is refused in validate.
+    trigger = WF.get("on") if "on" in WF else WF.get(True)
+    branches = ((trigger or {}).get("push") or {}).get("branches")
+    check(branches == ["dev"], f"build-publish must build on push to dev only, got branches {branches!r}")
 
 
 # ─── merge: tags ────────────────────────────────────────────────────────────
@@ -514,6 +543,7 @@ CASES = [
     ("input_declared", case_input_declared),
     ("hotfix_input_only_via_env", case_hotfix_input_only_via_env),
     ("validate_env_exact", case_validate_env_exact),
+    ("validate_never_soft_fails", case_validate_never_soft_fails),
     ("validate_known_list_matches_matrix", case_validate_known_list_matches_matrix),
     ("validate_rejects_bare_main", case_validate_rejects_bare_main),
     ("validate_rejects_dev_ref_hotfix", case_validate_rejects_dev_ref_hotfix),
@@ -529,6 +559,8 @@ CASES = [
     ("select_hotfix_not_in_list", case_select_hotfix_not_in_list),
     ("select_normal_changed", case_select_normal_changed),
     ("select_normal_unchanged", case_select_normal_unchanged),
+    ("gated_jobs_need_detect", case_gated_jobs_need_detect),
+    ("push_builds_dev_only", case_push_builds_dev_only),
     ("all_steps_gated_on_select", case_all_steps_gated_on_select),
     ("tag_env_exact", case_tag_env_exact),
     ("latest_skipped_in_hotfix", case_latest_skipped_in_hotfix),
