@@ -33,9 +33,9 @@ describe('extracted helpers (behavior parity with coordinator)', () => {
 })
 
 describe('classifyPluginImage', () => {
-  it('accepts current first-party + evenfire images against the default allowlist', () => {
+  it('accepts the deploy/base images and the Evenfire registry against the default allowlist', () => {
     for (const img of [
-      'us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest',
+      'ghcr.io/evenfire-ai/airtable-mcp-server:1.0.0',
       'registry.evenfire.ai/acme/forecast:1.2.3',
       'mongodb/mongodb-mcp-server:latest',
       'mcr.microsoft.com/playwright/mcp@sha256:' + 'a'.repeat(64),
@@ -44,11 +44,22 @@ describe('classifyPluginImage', () => {
       expect(classifyPluginImage(img, { allowedPrefixes: DEFAULTS })).toEqual({ ok: true })
     }
   })
-  it('denies an unlisted host', () => {
-    expect(classifyPluginImage('docker.io/evil/x:1', { allowedPrefixes: DEFAULTS })).toEqual({
-      ok: false,
-      reason: 'host_not_allowed',
-    })
+  it('denies an unlisted host, including the placeholder Artifact Registry path', () => {
+    for (const img of [
+      'docker.io/evil/x:1',
+      'us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest',
+    ]) {
+      expect(classifyPluginImage(img, { allowedPrefixes: DEFAULTS })).toEqual({
+        ok: false,
+        reason: 'host_not_allowed',
+      })
+    }
+    // Witness: the same default list accepts a listed host.
+    expect(
+      classifyPluginImage('ghcr.io/evenfire-ai/airtable-mcp-server:1.0.0', {
+        allowedPrefixes: DEFAULTS,
+      })
+    ).toEqual({ ok: true })
   })
   it('flags empty / non-string image', () => {
     expect(classifyPluginImage('', { allowedPrefixes: DEFAULTS })).toEqual({
@@ -88,13 +99,13 @@ describe('classifyPluginImage', () => {
 })
 
 describe('DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES', () => {
-  it('covers the current fleet hosts + evenfire', () => {
+  it('equals the deploy/base list plus the Evenfire registry', () => {
     expect(DEFAULTS).toEqual([
-      'us-central1-docker.pkg.dev/your-gcp-project/clerum/',
-      'registry.evenfire.ai/',
+      'ghcr.io/evenfire-ai/',
       'mongodb/',
       'mcr.microsoft.com/',
       'clerum/',
+      'registry.evenfire.ai/',
     ])
   })
 })

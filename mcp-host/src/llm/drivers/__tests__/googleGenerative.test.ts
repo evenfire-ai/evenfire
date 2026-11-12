@@ -290,7 +290,8 @@ describe('classifyGoogleError', () => {
     [{ status: 401 }, LlmErrorCode.AuthenticationFailed, false],
     [{ status: 404 }, LlmErrorCode.ModelNotAvailable, false],
     [{ status: 503 }, LlmErrorCode.ModelOverloaded, true],
-    [{ status: 400 }, LlmErrorCode.ApiCallFailed, false],
+    [{ status: 400 }, LlmErrorCode.UpstreamRejected, false],
+    [{ code: 400 }, LlmErrorCode.UpstreamRejected, false],
   ] as const)('maps http status %o', (err, code, retryable) => {
     const c = classifyGoogleError(err)
     expect(c.code).toBe(code)
@@ -303,7 +304,8 @@ describe('classifyGoogleError', () => {
     ['UNAUTHENTICATED', LlmErrorCode.AuthenticationFailed, false],
     ['NOT_FOUND', LlmErrorCode.ModelNotAvailable, false],
     ['UNAVAILABLE', LlmErrorCode.ModelOverloaded, true],
-    ['INVALID_ARGUMENT', LlmErrorCode.ApiCallFailed, false],
+    ['INVALID_ARGUMENT', LlmErrorCode.UpstreamRejected, false],
+    ['FAILED_PRECONDITION', LlmErrorCode.UpstreamRejected, false],
   ] as const)('maps gRPC status string %s', (status, code, retryable) => {
     const c = classifyGoogleError({ status })
     expect(c.code).toBe(code)

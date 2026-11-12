@@ -385,6 +385,12 @@ export function FilesPage({
   const [gfsDeepLinkRetry, setGfsDeepLinkRetry] = useState<{ id: number; request: number } | null>(
     null
   )
+  const pendingGfsDeepLinkEffectRef = useRef<{
+    id: number
+    uri: string
+    retryRequest: number
+    cleanupVersion: number
+  } | null>(null)
   const [refreshingCurrent, setRefreshingCurrent] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
@@ -1697,9 +1703,35 @@ export function FilesPage({
   useEffect(() => {
     const link = pendingGfsDeepLink
     if (!link) return
-    let current = true
+    const retryRequest = deepLinkRetryRequest
+    const releaseAfterEffectReplay = (
+      owner: NonNullable<typeof pendingGfsDeepLinkEffectRef.current>
+    ) => {
+      const cleanupVersion = ++owner.cleanupVersion
+      void Promise.resolve().then(() => {
+        if (
+          owner.cleanupVersion === cleanupVersion &&
+          pendingGfsDeepLinkEffectRef.current === owner
+        ) {
+          pendingGfsDeepLinkEffectRef.current = null
+        }
+      })
+    }
+    const existingOwner = pendingGfsDeepLinkEffectRef.current
+    if (
+      existingOwner?.id === link.id &&
+      existingOwner.uri === link.uri &&
+      existingOwner.retryRequest === retryRequest
+    ) {
+      // React StrictMode replays effect setup after its development cleanup.
+      // Retain the first real request so the replay cannot issue a second read.
+      existingOwner.cleanupVersion += 1
+      return () => releaseAfterEffectReplay(existingOwner)
+    }
+    const owner = { id: link.id, uri: link.uri, retryRequest, cleanupVersion: 0 }
+    pendingGfsDeepLinkEffectRef.current = owner
     const isCurrent = () =>
-      current &&
+      pendingGfsDeepLinkEffectRef.current === owner &&
       pageActiveRef.current &&
       (!pendingGfsDeepLinkOwnerTabId || pendingGfsDeepLinkOwnerTabId === workspaceTabId) &&
       (isPendingGfsDeepLinkCurrent?.() ?? true)
@@ -1708,9 +1740,7 @@ export function FilesPage({
 
     if (!isCurrent()) {
       onPendingGfsDeepLinkOutcome?.(link.id, 'superseded')
-      return () => {
-        current = false
-      }
+      return () => releaseAfterEffectReplay(owner)
     }
 
     if (normalizeGfsResourceUri(link.uri) !== link.uri) {
@@ -1720,9 +1750,7 @@ export function FilesPage({
         retryable: false,
       })
       onPendingGfsDeepLinkOutcome?.(link.id, 'terminal')
-      return () => {
-        current = false
-      }
+      return () => releaseAfterEffectReplay(owner)
     }
 
     const reportFailure = (failure: GfsUriOpenFailure) => {
@@ -1766,9 +1794,7 @@ export function FilesPage({
         : undefined
     ).catch(error => reportFailure({ kind: 'error', error }))
 
-    return () => {
-      current = false
-    }
+    return () => releaseAfterEffectReplay(owner)
     // The callback intentionally follows the active queue item and explicit
     // retry request. The page-level handlers close over the current resource.
     // eslint-disable-next-line react-hooks/exhaustive-deps

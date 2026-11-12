@@ -1,7 +1,15 @@
+/**
+ * Chat Completions behavior of the OpenAI wire-family driver. The official
+ * endpoint speaks Responses, whose equivalents live in
+ * `openaiFamily/__tests__/responsesProtocol.test.ts`; these cases pin the
+ * official profile to Chat so the serializer Azure still uses stays covered.
+ */
 import { describe, expect, it, vi } from 'vitest'
 import { type ChatMessage, FinishReason, type ToolDefinition } from '../../core/types'
 import { TOOL_RESULT_IMAGE_TEXT } from '../../visualInput/messageProjection'
 import { OpenAIProvider } from '../openai'
+import { officialChatProfile } from '../openaiFamily/__tests__/familyHarness'
+import { recordedResponse } from '../openaiFamily/__tests__/responsesFixtures'
 
 function createMockOpenAIClient() {
   return {
@@ -55,7 +63,7 @@ describe('OpenAI completeSingleTurnWithTools', () => {
   it('should pass tools as undefined when tool list is empty', async () => {
     const mockClient = createMockOpenAIClient()
     mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('Hello'))
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     await provider.completeSingleTurnWithTools([{ role: 'user', content: 'Hi' }], [])
 
@@ -67,7 +75,7 @@ describe('OpenAI completeSingleTurnWithTools', () => {
   it('should pass populated tools array when tools are provided', async () => {
     const mockClient = createMockOpenAIClient()
     mockClient.chat.completions.create.mockResolvedValue(openAITextResponse("I'll search that"))
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const tools: ToolDefinition[] = [
       {
@@ -98,7 +106,7 @@ describe('OpenAI argument parsing', () => {
         },
       ])
     )
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const result = await provider.completeSingleTurnWithTools(
       [{ role: 'user', content: 'Search' }],
@@ -123,7 +131,7 @@ describe('OpenAI argument parsing', () => {
         },
       ])
     )
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const result = await provider.completeSingleTurnWithTools(
       [{ role: 'user', content: 'Search' }],
@@ -145,7 +153,7 @@ describe('OpenAI tool_call_id preservation', () => {
         { id: 'call_002', name: 'read', arguments: '{"path":"/tmp"}' },
       ])
     )
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const result = await provider.completeSingleTurnWithTools(
       [{ role: 'user', content: 'Do both' }],
@@ -166,7 +174,7 @@ describe('OpenAI message conversion', () => {
   it('should convert tool result messages to OpenAI format', async () => {
     const mockClient = createMockOpenAIClient()
     mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('Got it'))
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const messages: ChatMessage[] = [
       { role: 'user', content: 'Search for X' },
@@ -190,7 +198,7 @@ describe('OpenAI message conversion', () => {
   it('should convert assistant tool_calls back to OpenAI function format', async () => {
     const mockClient = createMockOpenAIClient()
     mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('Done'))
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const messages: ChatMessage[] = [
       { role: 'user', content: 'Do X' },
@@ -212,9 +220,12 @@ describe('OpenAI message conversion', () => {
   })
 
   it('should omit ZAI reasoning_content from native OpenAI requests', async () => {
-    const mockClient = createMockOpenAIClient()
-    mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('Done'))
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const create = vi.fn(async (_payload: unknown) => recordedResponse('v1-text-gpt-4.1'))
+    const chatCreate = vi.fn()
+    const provider = new OpenAIProvider(
+      { responses: { create }, chat: { completions: { create: chatCreate } } } as never,
+      'gpt-4.1'
+    )
 
     const messages: ChatMessage[] = [
       { role: 'user', content: 'Continue after a ZAI fallback' },
@@ -229,10 +240,18 @@ describe('OpenAI message conversion', () => {
 
     await provider.completeSingleTurnWithTools(messages, [])
 
-    const callArgs = mockClient.chat.completions.create.mock.calls[0][0]
-    const assistantMsg = callArgs.messages.find((m: any) => m.role === 'assistant' && m.tool_calls)
-    expect(assistantMsg).toBeDefined()
-    expect(assistantMsg).not.toHaveProperty('reasoning_content')
+    expect(chatCreate).not.toHaveBeenCalled()
+    const payload = create.mock.calls[0]![0] as { input: Array<Record<string, unknown>> }
+    expect(payload.input.filter(item => item.type === 'function_call')).toEqual([
+      {
+        type: 'function_call',
+        call_id: 'tc_zai',
+        name: 'search',
+        arguments: '{"query":"fallback"}',
+      },
+    ])
+    expect(JSON.stringify(payload)).not.toContain('reasoning_content')
+    expect(JSON.stringify(payload)).not.toContain('Prior ZAI reasoning')
   })
 })
 
@@ -240,7 +259,7 @@ describe('OpenAI contentParts in user messages (screenshot images)', () => {
   it('should convert user message with contentParts to array with image_url parts', async () => {
     const mockClient = createMockOpenAIClient()
     mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('I see the screenshot'))
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const messages: ChatMessage[] = [
       { role: 'user', content: 'Take a screenshot' },
@@ -298,7 +317,7 @@ describe('OpenAI finish_reason mapping', () => {
       choices: [{ message: { role: 'assistant', content: 'Hi' }, finish_reason: apiReason }],
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     })
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const result = await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }])
 
@@ -310,7 +329,7 @@ describe('OpenAI token limit parameter compatibility', () => {
   it('uses max_completion_tokens for the GPT-5 family', async () => {
     const mockClient = createMockOpenAIClient()
     mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('OK'))
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-5.4-mini')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-5.4-mini', officialChatProfile())
 
     await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }], { max_tokens: 8 })
 
@@ -322,7 +341,7 @@ describe('OpenAI token limit parameter compatibility', () => {
   it('keeps max_tokens for established native models', async () => {
     const mockClient = createMockOpenAIClient()
     mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('OK'))
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }], { max_tokens: 8 })
 
@@ -334,7 +353,7 @@ describe('OpenAI token limit parameter compatibility', () => {
   it('uses max_completion_tokens for GPT-5 tool calls', async () => {
     const mockClient = createMockOpenAIClient()
     mockClient.chat.completions.create.mockResolvedValue(openAITextResponse('OK'))
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-5.4-mini')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-5.4-mini', officialChatProfile())
 
     await provider.completeSingleTurnWithTools(
       [{ role: 'user', content: 'Use the tool' }],
@@ -355,7 +374,7 @@ describe('OpenAI token usage mapping', () => {
       choices: [{ message: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 42, completion_tokens: 18, total_tokens: 60 },
     })
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const result = await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }])
 
@@ -372,7 +391,7 @@ describe('OpenAI token usage mapping', () => {
     mockClient.chat.completions.create.mockResolvedValue({
       choices: [{ message: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }],
     })
-    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o')
+    const provider = new OpenAIProvider(mockClient as any, 'gpt-4o', officialChatProfile())
 
     const result = await provider.completeSingleTurn([{ role: 'user', content: 'Hi' }])
 

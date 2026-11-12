@@ -37,6 +37,18 @@ function stripSystemRole(messages: ChatMessage[] | undefined): ChatMessage[] {
 }
 
 /**
+ * A copy of `message` without the opaque provider state. Hooks are third-party
+ * code and must never see or inject it. Never `delete` instead: the messages
+ * reach the projection by alias from the live tool-loop history, and mutating
+ * them would erase the state before the provider call that replays it.
+ */
+export function withoutProviderState(message: ChatMessage): ChatMessage {
+  if (!('provider_continuation' in message)) return message
+  const { provider_continuation: _opaque, ...rest } = message
+  return rest
+}
+
+/**
  * Project a request: always drop the system prompt + internal fields; include the
  * non-system messages only when `includeMessages` (the content flavor). Keeps
  * params + tool schemas (`tools`, `temperature`, `max_tokens`, `tool_choice`).
@@ -47,7 +59,9 @@ function projectRequest(
 ): Record<string, unknown> {
   const projected: Record<string, unknown> = { ...(request as unknown as Record<string, unknown>) }
   for (const f of REQUEST_FIELDS_NEVER_SENT) delete projected[f]
-  if (includeMessages) projected.messages = stripSystemRole(request.messages)
+  if (includeMessages) {
+    projected.messages = stripSystemRole(request.messages).map(withoutProviderState)
+  }
   return projected
 }
 

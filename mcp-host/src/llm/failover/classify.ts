@@ -31,11 +31,16 @@ export const ALL_FAILOVER_CLASSES: readonly FailoverClass[] = [
  *   - `ApiCallFailed ∧ retryable` → provider_unavailable (timeout / network;
  *     also `classifyUnknown`'s default bucket — restrict `triggerOn` to avoid
  *     firing on unrecognised errors)
- *   - `ApiCallFailed ∧ !retryable` → null (400 / validation / content-policy —
- *     never trigger; masking these would hide bugs)
+ *   - `ApiCallFailed ∧ !retryable` → null (terminal failures with no class
+ *     of their own, for example the Host's `image_source_invalid`, a
+ *     subscription proxy's `request_timeout` or `invalid_request`, a replayed
+ *     or invalid subscription ticket — never trigger; masking these would
+ *     hide bugs). A provider HTTP 400 is `UpstreamRejected` since #1433,
+ *     below.
  *   - everything else (InvalidResponse, ContextLengthExceeded, ContentFiltered,
  *     ModelNotAvailable, ToolCallLimitExceeded, StreamDurationExceeded,
- *     UpstreamRejected) → null
+ *     UpstreamRejected, RequestTextRejected — the Host refused the request's
+ *     text before dispatch, #1433) → null
  */
 export function classifyFailoverClass(
   code: LlmErrorCode,

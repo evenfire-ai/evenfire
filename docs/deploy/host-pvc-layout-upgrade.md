@@ -53,6 +53,19 @@ With the old release still running:
 deploy/scripts/host-layout-merge.sh inventory --context <ctx>
 ```
 
+A PVC without a Host Deployment (an orphan claim, or a Host that has no
+Deployment) is read by a check Pod that takes its image and pull Secret from
+the HCC Deployment's env. This script treats an unset
+`CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET` as no pull Secret, the HCC default
+since the first release after v0.12.0; v0.12.0 and earlier releases default it
+to `clerum`. If your Host image needs the `clerum` pull Secret and the variable is
+unset on HCC, set it to `clerum` on HCC before you run `inventory`, as the
+[release notes](releases-and-upgrades.md#changed-code-defaults-first-release-after-v0120)
+require before the upgrade. The old HCC then renders the same Host pod
+templates and no Host restarts. Otherwise those check Pods cannot pull the
+image and their PVCs report `UNREADABLE` with `ErrImagePull` or
+`ImagePullBackOff`.
+
 `PRE_825=yes` is expected: the old Host Deployments render
 `workspace-layout-init` and `subPath` mounts. Each `PVC` line ends with a
 result:
