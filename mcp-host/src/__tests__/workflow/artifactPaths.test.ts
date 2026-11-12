@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync, spawn } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -117,6 +118,42 @@ describe('artifact path resolution', () => {
       return
     }
     throw new Error('expected directory artifact to be rejected')
+  })
+
+  it('refuses a FIFO under an artifact name at once instead of waiting for a writer', async () => {
+    outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-artifact-paths-'))
+    const fifo = path.join(outputDir, 'pipe.md')
+    execFileSync('mkfifo', [fifo])
+    expect(fs.lstatSync(fifo).isFIFO()).toBe(true)
+    // A blocking open would wait for a writer; this peer opens the write end
+    // after RELEASE_MS, so a blocked open ends late instead of hanging the run.
+    const RELEASE_MS = 1_500
+    const peer = spawn(process.execPath, [
+      '-e',
+      `setTimeout(() => { try { require('fs').openSync(${JSON.stringify(fifo)}, ` +
+        `require('fs').constants.O_WRONLY | require('fs').constants.O_NONBLOCK) } catch {} }, ${RELEASE_MS})`,
+    ])
+    try {
+      const started = Date.now()
+      let caught: unknown
+      try {
+        openExistingArtifactFile(outputDir, 'pipe.md')
+      } catch (err) {
+        caught = err
+      }
+      const elapsed = Date.now() - started
+      expect(caught).toBeInstanceOf(ArtifactPathError)
+      expect((caught as ArtifactPathError).status).toBe(404)
+      expect(elapsed).toBeLessThan(RELEASE_MS / 2)
+    } finally {
+      peer.kill()
+    }
+    // The same name as a regular file opens.
+    fs.rmSync(fifo)
+    fs.writeFileSync(fifo, 'text')
+    const opened = openExistingArtifactFile(outputDir, 'pipe.md')
+    fs.closeSync(opened.fd)
+    expect(opened.stat.size).toBe(4)
   })
 
   it('rejects artifacts over the maximum download size before opening bytes', () => {

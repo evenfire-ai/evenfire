@@ -174,7 +174,7 @@ class InternalToolAdapter implements Tool {
         (this.attachmentOptions.secretEntriesProvider?.().length ?? 0) > 0
           ? await boilerplateTexts(format)
           : undefined
-      const attachment =
+      const delivery =
         result.success && result.artifact
           ? buildGeneratedArtifactAttachment({
               sourceTool: this.def.name,
@@ -191,6 +191,7 @@ class InternalToolAdapter implements Tool {
               writtenSha256: result.writtenSha256,
             })
           : null
+      const attachment = delivery && 'attachment' in delivery ? delivery.attachment : null
       const images = result.success
         ? (result.images?.map(image => ({
             id: `gfs-${image.source.resourceId}-${image.source.version}`,
