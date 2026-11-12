@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OpenAITokenCounter, createTokenCounter } from '../../core/tokenizer'
 import type { ChatMessage, ToolDefinition } from '../../core/types'
-import type { ClaudeProvider } from '../claude'
+import { ClaudeProvider } from '../claude'
 import { makeProvider } from '../registry'
 import { NOTION_TOOLS } from './fixtures/remoteMcpToolLists'
 import {
@@ -120,6 +120,34 @@ describe('Claude token counter (offline=false)', () => {
     for (const t of params.tools) expect(t.name).toMatch(W_C)
     expect(params.tools).toEqual(sent.tools)
     expect(params.messages).toEqual(sent.messages)
+  })
+
+  it('(c) the counter takes the envelope of the provider that creates it', async () => {
+    // No production subclass narrows the envelope today, so the provider's own
+    // envelope and the counter's default coincide; a subclass is the only way
+    // to see whether createTokenCounter hands its envelope over.
+    class NarrowEnvelopeClaude extends ClaudeProvider {
+      protected override toolNameEnvelope() {
+        return 'W' as const
+      }
+    }
+    const cap = buildCapturingProvider('claude')
+    const provider = new NarrowEnvelopeClaude(cap.client as never, 'claude-unit')
+    const name = `${NOTION_SERVER}__${'y'.repeat(100 - NOTION_SERVER.length - 2)}`
+    expect(name).toMatch(W_C)
+    expect(name).not.toMatch(W)
+
+    cap.respondWith(null)
+    await provider.completeSingleTurnWithTools([{ role: 'user', content: 'q' }], [toolDef(name)])
+    await provider
+      .createTokenCounter('claude-unit')
+      .count([{ role: 'user', content: 'q' }], [toolDef(name)])
+    const sent = cap.bodies[cap.methods.indexOf('messages')] as { tools: Array<{ name: string }> }
+    const params = cap.bodies[cap.methods.indexOf('countTokens')] as {
+      tools: Array<{ name: string }>
+    }
+    expect(sent.tools[0]!.name).toMatch(W)
+    expect(params.tools.map(t => t.name)).toEqual(sent.tools.map(t => t.name))
   })
 })
 
