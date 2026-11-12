@@ -7,9 +7,10 @@
  * each canonical name to a name the provider accepts — identity when it already
  * fits — and resolves the provider's tool calls back, per request.
  *
- * The map is a value local to one completion call: the alias is a pure function
- * of the canonical name, and history is always stored canonical, so nothing
- * needs to survive between requests.
+ * The map is a value local to one completion call. An alias depends on the
+ * canonical name and, only when two names collide, on the rest of that
+ * request's names (the collision suffix). History is always stored canonical,
+ * so nothing needs to survive between requests.
  *
  * Only type imports from mcp-host, so the file can move to a shared package
  * unchanged.
@@ -40,7 +41,11 @@ type HashFn = (c: string) => string
 // The suffix `_<base36>` can never be confused with the base only because the
 // hash is exactly 12 lowercase hex digits.
 const HASH_FORMAT = /^[0-9a-f]{12}$/
-// Same shape the MCP manager's server names have; `-` at the end is allowed.
+// A server segment kept verbatim in the alias: a single lowercase label that
+// already passes every envelope (letter first, no `.`), with no `_`, so the
+// alias's first `__` is still the boundary `callTool`-style splitting reads as
+// the server. Dotted DNS subdomains do not match and take the prefix-less form.
+// A trailing `-` is harmless and allowed.
 const PREFIX_SERVER = /^[a-z][a-z0-9-]*$/
 const MAX_PREFIX_SERVER = 50
 const HEAD_BUDGET = 51

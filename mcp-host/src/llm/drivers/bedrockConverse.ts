@@ -94,8 +94,9 @@ export class BedrockConverseDriver implements SingleTurnProvider {
     return classifyBedrockError(err)
   }
 
-  // The 64 limit belongs to the Converse API types, whatever the model: Claude
-  // on Bedrock does not get Anthropic's 128.
+  // AWS's Converse API reference caps a tool name at 64 characters whatever the
+  // model, so Claude on Bedrock does not get Anthropic's 128. The SDK's types do
+  // not encode the limit.
   protected toolNameEnvelope(): ToolNameEnvelopeKey {
     return 'W'
   }
