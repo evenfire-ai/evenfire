@@ -1362,7 +1362,7 @@ describe('HostReconciler resource rollout bootstrap', () => {
       }
     })
 
-    it('fails the pass at the mutation read, without a mint or a write, when the dry-run fails', async () => {
+    it('fails the pass at the mutation read, without a mint or a write, when the dry-run request fails', async () => {
       const fixture = await runtime()
       config.hostImage = NEW_IMAGE
       const replace = fixture.appsApi.replaceNamespacedDeployment.getMockImplementation()!

@@ -1623,8 +1623,12 @@ export class HostReconciler {
    * without a pod template, an answer body that is not JSON. It fails the
    * provisioning attempt, and when the retries fail too that provisioning
    * call renews nothing; a renewal made earlier in the same pass stays in
-   * the Secret. At the mutation read and the write gate, any of these errors
-   * fails the pass before the Deployment write.
+   * the Secret. The code is a proxy for where the error came from, not a
+   * proof: a client error raised without a system error (a redirect loop, an
+   * oversized body) has no code and takes the HCC-failure path, and an HCC
+   * exception that carries a code would take the failed-request path. At the
+   * mutation read and the write gate, any of these errors fails the pass
+   * before the Deployment write.
    *
    * Known gap (accepted): HCC never writes `paused`, so its write unpauses a
    * Deployment someone paused by hand. A template edit held by that pause, in
@@ -2452,8 +2456,10 @@ export class HostReconciler {
             // parse) or cannot use the answer (no pod template, a body that is
             // not JSON). Fail this attempt; when the retries fail too, this
             // provisioning call renews nothing. The test is `undefined`, not
-            // "not a number": a request that got no answer carries a string
-            // code (ECONNREFUSED, HCC_HOST_K8S_REQUEST_TIMEOUT).
+            // "not a number": a refused or reset connection and HCC's request
+            // deadline carry a string code (ECONNREFUSED,
+            // HCC_HOST_K8S_REQUEST_TIMEOUT). A client error raised without a
+            // system error (a redirect loop) has no code and lands here too.
             if (code === undefined) throw error
             // Any other code is taken as a failed dry-run request: rejected, or
             // no answer. Nothing is prepared for the change and the renewal
