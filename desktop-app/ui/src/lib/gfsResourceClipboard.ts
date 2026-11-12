@@ -19,7 +19,9 @@ export function sameGfsResourceBinding(
 export async function copyGfsResourceId(
   uri: string,
   kind: GfsBrowserChild['kind'],
-  pushToast: GfsResourceToast
+  pushToast: GfsResourceToast,
+  formatError: (error: unknown) => string = error =>
+    error instanceof Error ? error.message : 'clipboard is unavailable'
 ): Promise<void> {
   const resourceType = kind === 'directory' ? 'folder' : 'file'
   const resourceTypeTitle = kind === 'directory' ? 'Folder' : 'File'
@@ -27,8 +29,7 @@ export async function copyGfsResourceId(
     await navigator.clipboard.writeText(uri)
     pushToast(`${resourceTypeTitle} ID copied`, 'success')
   } catch (clipboardError) {
-    const message =
-      clipboardError instanceof Error ? clipboardError.message : 'clipboard is unavailable'
+    const message = formatError(clipboardError)
     pushToast(`Could not copy the ${resourceType} ID: ${message}`, 'error')
   }
 }

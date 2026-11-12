@@ -14,6 +14,7 @@ import {
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
+import * as gfsResourceClipboard from '@lib/gfsResourceClipboard'
 import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
@@ -1038,6 +1039,143 @@ describe('FilePreviewPage', () => {
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(uri))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(uri))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
+  })
+
+  it('routes Preview Copy ID through the shared clipboard owner exactly once', async () => {
+    const uri = 'gfs://main/10101010101010101010101010101010'
+    let finishClipboardWrite!: () => void
+    const clipboardWrite = new Promise<void>(resolve => {
+      finishClipboardWrite = resolve
+    })
+    const writeText = vi.fn(() => clipboardWrite)
+    const pushToast = vi.fn()
+    const copyOperation = vi.spyOn(gfsResourceClipboard, 'copyGfsResourceId')
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubGfs({
+      downloadPreview: async () => ({
+        bytes: new TextEncoder().encode('# Owner check').buffer,
+      }),
+      resolve: async () => ({ kind: 'file' }),
+    })
+
+    render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="owner-check.txt"
+        fileKind="markdown"
+        byteLength={13}
+        pushToast={pushToast}
+      />
+    )
+
+    await screen.findByRole('button', { name: 'Options for owner-check.txt' })
+    clickPreviewAction('owner-check.txt', 'Copy file ID')
+
+    await waitFor(() => expect(copyOperation).toHaveBeenCalledTimes(1))
+    expect(copyOperation).toHaveBeenCalledWith(
+      uri,
+      'file',
+      expect.any(Function),
+      expect.any(Function)
+    )
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(writeText).toHaveBeenCalledWith(uri)
+    expect(pushToast).not.toHaveBeenCalled()
+
+    finishClipboardWrite()
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('File ID copied', 'success'))
+
+    clickPreviewAction('owner-check.txt', 'Copy file ID')
+    await waitFor(() => expect(copyOperation).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(pushToast).toHaveBeenCalledTimes(2))
+    expect(writeText).toHaveBeenNthCalledWith(2, uri)
+  })
+
+  it.each([
+    { rejection: new Error('permission denied'), message: 'permission denied' },
+    { rejection: 'clipboard refused', message: 'clipboard refused' },
+  ])(
+    'preserves Preview clipboard rejection feedback for $message',
+    async ({ rejection, message }) => {
+      const uri = 'gfs://main/20202020202020202020202020202020'
+      let rejectClipboard!: (reason: unknown) => void
+      const pendingClipboard = new Promise<void>((_resolve, reject) => {
+        rejectClipboard = reject
+      })
+      const writeText = vi.fn(() => pendingClipboard)
+      const pushToast = vi.fn()
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      hookMock.useGfsBrowserController.mockReturnValue(controller())
+      stubGfs({
+        downloadPreview: async () => ({
+          bytes: new TextEncoder().encode('# Rejection check').buffer,
+        }),
+        resolve: async () => ({ kind: 'file' }),
+      })
+
+      render(
+        <FilePreviewPage
+          gfsUri={uri}
+          fileName="rejection-check.txt"
+          fileKind="markdown"
+          byteLength={16}
+          pushToast={pushToast}
+        />
+      )
+      await screen.findByRole('button', { name: 'Options for rejection-check.txt' })
+      clickPreviewAction('rejection-check.txt', 'Copy file ID')
+
+      expect(pushToast).not.toHaveBeenCalled()
+      rejectClipboard(rejection)
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(`Could not copy the file ID: ${message}`, 'error')
+      )
+      expect(writeText).toHaveBeenCalledTimes(1)
+      expect(writeText).toHaveBeenCalledWith(uri)
+    }
+  )
+
+  it('keeps Preview Copy ID feedback when the clipboard API is unavailable', async () => {
+    const uri = 'gfs://main/30303030303030303030303030303030'
+    const pushToast = vi.fn()
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubGfs({
+      downloadPreview: async () => ({
+        bytes: new TextEncoder().encode('# Clipboard unavailable').buffer,
+      }),
+      resolve: async () => ({ kind: 'file' }),
+    })
+
+    render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="clipboard-unavailable.txt"
+        fileKind="markdown"
+        byteLength={23}
+        pushToast={pushToast}
+      />
+    )
+    await screen.findByRole('button', { name: 'Options for clipboard-unavailable.txt' })
+    clickPreviewAction('clipboard-unavailable.txt', 'Copy file ID')
+
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.stringMatching(/^Could not copy the file ID: /),
+        'error'
+      )
+    )
   })
 
   it('copies the loaded image bytes through the filename menu', async () => {
