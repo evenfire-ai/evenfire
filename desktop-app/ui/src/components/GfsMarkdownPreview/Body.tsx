@@ -3,6 +3,7 @@ import { StatusBanner } from '@components/Common'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
+import { decodeMarkdownSource } from '@lib/markdownSourceCodec'
 import { GfsMarkdownDocument } from './MarkdownAdapter'
 import type { GfsMarkdownPreviewBodyProps } from './types'
 
@@ -71,7 +72,10 @@ export function GfsMarkdownPreviewBody({
           assertGfsMarkdownPreviewSize(bytes.byteLength)
           const after = await window.clerum.gfs.resolve(gfsUri, expectedSessionGeneration)
           if (before.version === after.version) {
-            stable = { content: new TextDecoder().decode(bytes), version: after.version }
+            stable = {
+              content: decodeMarkdownSource(new Uint8Array(bytes)),
+              version: after.version,
+            }
           }
         }
         if (!stable) throw new Error('The file changed while loading. Refresh to try again.')
