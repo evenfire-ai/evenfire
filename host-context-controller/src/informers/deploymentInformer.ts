@@ -3,8 +3,12 @@
  * namespace and reports each one's current rollout state to a consumer.
  *
  * It is level-triggered and holds no object cache: its consumer asks only
- * "what is this Deployment's rollout now", so no event needs a diff. Its state
- * is the resume point, the attempt count, the request and the reconnect timer.
+ * "what is this Deployment's rollout now", so no event needs a diff for a
+ * Deployment that exists. Absence is not reported: a Deployment deleted during
+ * a gap that ends in 410 is missing from the relist and produces no event. The
+ * watcher's periodic re-read of each terminal verdict reports it instead. Its
+ * state is the resume point, the attempt count, the request and the reconnect
+ * timer.
  *
  * A reconnect resumes from the last resourceVersion seen. When a resume is
  * impossible (410 Gone) the next connect lists once and delivers every listed

@@ -505,9 +505,10 @@ export class McpServerReconciler {
    * completed reconcile that read after the event (seq <= the watermark taken
    * when that reconcile started), by a completed delete, or by pruning when
    * the name leaves the inventory (hasSecretChangeEvidence). Only MODIFIED and
-   * DELETED events record it. A SecretInformer reconnect replays every Secret
-   * as ADDED, which is not evidence, so a change made while its watch was
-   * disconnected is not recorded.
+   * DELETED events record it. The mcp-server SecretInformer resumes after a
+   * disconnect, or relists and diffs after a 410, so a change made while its
+   * watch was down still arrives as one of them. A change made while HCC was
+   * down is not recorded: the start list emits ADDED, which is not evidence.
    */
   private secretEvidenceSeq = 0
   private readonly secretChangeEvidence = new Map<string, number>()
@@ -1075,7 +1076,8 @@ export class McpServerReconciler {
         // the status write below, so a reconcile arriving during that await
         // opens a fresh observation window instead of flagging a re-check
         // this dying tick would never honor) so reconcile() keeps the verdict
-        // sticky until the Deployment informer or a pass re-enqueues the server.
+        // sticky until the Deployment informer, the watcher's 60 s re-read of
+        // the Deployment, or a pass re-enqueues the server.
         state.ticking = false
         state.exhausted = true
         hccLogger.warn('McpServer not ready after polls — giving up', {
@@ -3399,7 +3401,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         ? rollout.detail
         : undefined
     // Registered before the status writes, which await API calls: a Deployment
-    // event during them must find the name, or it would be ignored and lost.
+    // event during them must find the name, or it would be ignored until the
+    // watcher's next periodic re-read (every 60 s).
     if (exhaustedDetail !== undefined && !pollLive()) {
       this.verdictsAwaitingExternalChange.set(server.name, 'RolloutIncomplete')
       hccLogger.warn('McpServer rollout still incomplete', {
@@ -3445,7 +3448,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // readiness this is the normal path right after any Deployment write —
     // including a credential rotation — so the poll owns the terminal verdict
     // on the CRD. An idle terminal verdict opens no window: the Deployment
-    // informer re-enqueues the server when its rollout moves. pollLive() is
+    // informer, or the watcher's 60 s re-read, re-enqueues the server when its
+    // rollout moves. pollLive() is
     // read again because a live tick can end during the writes above; a tick
     // that ended terminal keeps its entry, and one that ended ready removed it,
     // so this write may have overwritten its verdict and a window must correct it.

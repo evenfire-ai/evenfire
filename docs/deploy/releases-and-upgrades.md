@@ -441,7 +441,7 @@ take their code defaults:
 
 | Variable                        | Default            | Meaning                                                                                                                                                                                                                                                                                     |
 | ------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HCC_K8S_REQUEST_TIMEOUT_MS`    | `30000`            | Deadline in milliseconds for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding reconcilers and of the watcher's McpServer/Context and Secret clients. A timed-out request fails with error code `HCC_K8S_REQUEST_TIMEOUT`, and the pass fails and retries. |
+| `HCC_K8S_REQUEST_TIMEOUT_MS`    | `30000`            | Deadline in milliseconds for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding reconcilers, of the watcher's McpServer/Context and Secret clients, and of the list requests of the mcp-server SecretInformer and the Deployment informer. A timed-out request fails with error code `HCC_K8S_REQUEST_TIMEOUT`, and the pass fails and retries. |
 | `HCC_NETPOL_PASS_HARD_LIMIT_MS` | `1800000` (30 min) | Longest a NetworkPolicy pass may run. It must be above `300000`, the 5-minute overrun mark.                                                                                                                                                                                                  |
 
 Both fail startup when set to `""` or to a value out of range; the
@@ -478,10 +478,11 @@ the new HCC image. If your CD identity may not patch Roles, re-run
 If the image rolls first, the list succeeds, the watch answers 403, and the
 informer retries at up to 30 s with a warning per attempt, with
 `clerum_hcc_deployment_informer_running` at 0. HCC readiness does not depend on
-the informer. While the informer is down, a stuck rollout recovers only at the
-next NetworkPolicy pass, and a Control UI credential rotation that converges
-between 120 s and 180 s reports a false failure, because the condition stays
-False until that pass.
+the informer. While the informer is down, a rollout that converges after its
+readiness budget is published at HCC's next re-read of the Deployment (every
+60 s) instead of within seconds. Control UI can still report a false failure
+for a credential rotation that converges between 120 s and 180 s when that
+correction arrives after 180 s.
 
 ### mcp-host authority staleness floor
 
