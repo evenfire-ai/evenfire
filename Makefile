@@ -309,6 +309,7 @@ minikube-build-image-capabilities-fixture-body:
 
 .PHONY: minikube-run-image-capabilities minikube-restore-image-capabilities
 minikube-run-image-capabilities: ## Run the visible image journey with an isolated external-provider fixture and restore the Host
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		IMAGE_CAPABILITIES_LANE=image \
@@ -316,9 +317,18 @@ minikube-run-image-capabilities: ## Run the visible image journey with an isolat
 
 .PHONY: minikube-run-document-upload
 minikube-run-document-upload: ## Run the visible Desktop document-upload journey (issue #678) with the isolated external-provider fixture and restore the Host
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		IMAGE_CAPABILITIES_LANE=document-upload \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
+
+.PHONY: minikube-run-attachment-gfs-save
+minikube-run-attachment-gfs-save: ## Run the visible Desktop attachment GFS-save journey with the isolated external-provider fixture and restore the Host
+	@npm --prefix desktop-app run verify:electron
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		IMAGE_CAPABILITIES_LANE=attachment-gfs-save \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
 
 minikube-restore-image-capabilities: ## Resume restoration of a recorded image fixture run (IMAGE_CAPABILITIES_RUN_DIR=<dir printed by minikube-run-image-capabilities>)
@@ -347,11 +357,13 @@ minikube-build-codex-approved-tools-fixtures-body:
 
 .PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools
 minikube-prepare-codex-approved-tools: ## Prepare isolated deterministic tools fixtures; requires prior image acquisition and fresh run directory
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
 
 minikube-run-codex-approved-tools: ## Prepare, run visible deterministic E2E and restore production proxy image in owned Minikube
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
@@ -479,6 +491,14 @@ minikube-deploy-all-body:
 	@# rpc-proxy-secrets after each full overlay apply so Desktop/rpc-proxy/mcp-host
 	@# stay on the same JWT validation key.
 	@MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" $(MAKE) --no-print-directory minikube-sync-auth-key
+	@# external-rest-api's browser mutation guard compares the request Origin with
+	@# EXTERNAL_REST_API_CORS_ORIGIN, and the base manifest pins localhost:3001. A
+	@# branch profile serves Profile UI on a generated port, so the overlay apply
+	@# above would otherwise leave every profile UI login on a 403 (review C-8,
+	@# OD-8). Re-assert the profile-owned origin after the apply; the script is a
+	@# no-op without a branch profile ports.env. Plain bash, not $(MAKE), so a
+	@# dry run never executes it.
+	@bash scripts/minikube/sync-external-rest-api-cors-origin.sh --context=$(MINIKUBE_PROFILE)
 	@# The pre-overlay helper migrates legacy last-applied ownership without
 	@# removing the provisioning-owned connection-string. When the GFS stack is
 	@# deployed AND control-api is Ready (migration 0048 applied), re-provision
@@ -723,6 +743,10 @@ minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube aut
 .PHONY: minikube-sync-codex-subscription-url
 minikube-sync-codex-subscription-url: ## Resolve branch Control UI URL and sync CONTROL_API_CONTROL_UI_BASE_URL for Codex OAuth
 	@bash scripts/minikube/sync-codex-subscription-control-ui-url.sh --context=$(MINIKUBE_PROFILE)
+
+.PHONY: minikube-sync-external-rest-api-cors-origin
+minikube-sync-external-rest-api-cors-origin: ## Align profiles/external-rest-api EXTERNAL_REST_API_CORS_ORIGIN with a branch profile's Profile UI
+	@bash scripts/minikube/sync-external-rest-api-cors-origin.sh --context=$(MINIKUBE_PROFILE)
 
 # ── Minikube Port Forwards ──────────────────────────────────────────
 .PHONY: minikube-pf-control-ui
@@ -1401,6 +1425,40 @@ test-e2e-stateless-suspend-wake: ## Run stateless suspend/wake E2E gate (Phase 1
 	@echo "Running stateless suspend/wake E2E gate..."
 	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-suspend-wake.sh
 
+.PHONY: test-e2e-hcc-storage-layout-switch
+test-e2e-hcc-storage-layout-switch: ## Run the #825 storage-layout gate across lifecycle switches (needs an owned branch profile, E2E_PROFILE_PORTS_ENV, E2E_DEV_LOGIN_EMAIL, forwards held)
+	@echo "Running HCC storage-layout switch E2E gate..."
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-hcc-storage-layout-switch.sh
+
+.PHONY: test-e2e-hcc-layout-upgrade
+test-e2e-hcc-layout-upgrade: ## Run the #825 upgrade lane from v0.11.0 to this head (UPGRADE_MODE=main|control; fresh owned branch profile, E2E_PROFILE_PORTS_ENV, E2E_DEV_LOGIN_EMAIL, E2E_UPGRADE_EVIDENCE_DIR)
+	@echo "Running HCC layout upgrade E2E lane ($(UPGRADE_MODE))..."
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-hcc-layout-upgrade.sh "$(UPGRADE_MODE)"
+
+.PHONY: test-e2e-825-desktop-continuity
+test-e2e-825-desktop-continuity: ## Run the #825 Desktop journey across stateful/stateless switches (owned branch profile, forwards held, real model turns)
+	@set -eu; \
+	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
+	. scripts/e2e/e2e-lib.sh; \
+	is_branch_scoped_e2e_context "$$ctx" || { echo "Refusing #825 Desktop E2E: context '$$ctx' is not a branch-scoped Minikube profile (KUBECONTEXT=<profile>)" >&2; exit 1; }; \
+	test -n "$${E2E_DEV_LOGIN_EMAIL:-}" || { echo "Set E2E_DEV_LOGIN_EMAIL to the seeded Desktop login (admin@evenfire.local on a T2 profile)" >&2; exit 1; }; \
+	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
+	report="$${E2E_825_DESKTOP_REPORT:-$(CURDIR)/desktop-app/test-results/e2e-825-desktop-continuity.json}"; \
+	mkdir -p "$$(dirname "$$report")"; rm -f "$$report"; \
+	cd desktop-app && npm run verify:electron && npm run build; \
+	status=0; \
+	env -u ELECTRON_RUN_AS_NODE KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_825_DESKTOP_CONTINUITY=1 \
+		PLAYWRIGHT_JSON_OUTPUT_NAME="$$report" ./node_modules/.bin/playwright test \
+		--config test/e2e-playwright/playwright.config.ts --reporter=list,json --retries=0 \
+		stateful-stateless-switch-continuity.spec.ts || status=$$?; \
+	echo "E2E_825_DESKTOP_PLAYWRIGHT_EXIT=$$status"; \
+	node "$(CURDIR)/scripts/e2e/playwright-report-gate.mjs" E2E_825_DESKTOP_STATS "$$report" || status=1; \
+	if [ "$$status" = 0 ]; then echo E2E_825_DESKTOP_RESULT=PASS; else echo E2E_825_DESKTOP_RESULT=FAIL; fi; \
+	exit $$status
+
 .PHONY: test-e2e-stateless-wake-recovery
 test-e2e-stateless-wake-recovery: ## Run stateless wake-recovery latency gate (R1 warm draining / R2 cold suspended / R3 drained-window p95 budgets; needs port-forwards + seeded chatllm-stateless)
 	@echo "Running stateless wake-recovery latency gate..."
@@ -1506,6 +1564,14 @@ test-playwright-control-ui: ## Run Playwright tests for Control UI only (require
 test-playwright-desktop: ## Run Playwright tests for Desktop App only (requires: cd desktop-app && npm run build)
 	@echo "Running Playwright Desktop App tests..."
 	cd tests/e2e/playwright && npx playwright test --project=desktop
+
+.PHONY: test-playwright-profile-ui-recovery
+test-playwright-profile-ui-recovery: ## Audit and run the Profile UI password-recovery browser journey
+	@for spec in tests/e2e/playwright/profile-ui-recovery/*.spec.ts; do \
+		python3 tools/e2e_static_audit.py "$$spec" || exit $$?; \
+	done
+	@npm --prefix external-rest-api run build
+	@cd tests/e2e/playwright && node run-profile-ui-recovery.mjs
 
 .PHONY: test-playwright-headed
 test-playwright-headed: ## Run Control UI Playwright tests in headed mode (visible browser)

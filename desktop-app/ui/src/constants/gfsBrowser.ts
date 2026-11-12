@@ -2,3 +2,24 @@ export const GFS_BREADCRUMB_MAX_DEPTH = 64
 
 /** Drive the desktop Files page browses (single-drive user plane today). */
 export const GFS_DRIVE_MAIN = 'main'
+
+/** Internal EvenDrive drag payload type, shared by the Files page and the
+ * sidebar file explorer. Carries the resourceId as an identity POINTER only:
+ * handlers never derive authority or copy from payload data — the active
+ * in-window drag descriptor is the source of identity (rev-2 §4). */
+export const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
+
+/** Hovering a collapsed folder for this long expands it through its existing
+ * loader; canceled on leave/drop/drag end (rev-2 §4.1). */
+export const FOLDER_HOVER_EXPAND_DELAY_MS = 600
+
+/** A cold hover target is checked only after this dwell, so sweeping the tree
+ * does not spend feature requests (rev-2 §4.1). */
+export const DRAG_COLD_CHECK_DEBOUNCE_MS = 150
+
+/** At most this many NEW cold destination checks per drag; beyond it targets
+ * stay "checking" and receive a priority check on drop (rev-2 §4.1). */
+export const DRAG_COLD_CHECK_BUDGET = 8
+
+/** Concurrent cold-hover probe chains per gesture, shared across both surfaces. */
+export const DRAG_COLD_CHECK_MAX_CONCURRENCY = 2

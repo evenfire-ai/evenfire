@@ -15,13 +15,26 @@ named `chatllm` you can message immediately.
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl**
 - **python3** (used by the JWT key sync)
-- **Node.js 24+** (service builds; desktop app)
+- **Node.js 24.22.1 or later** (use the Node 24 version pinned in `.nvmrc` for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration
   overlay; ships with macOS, `apt-get install ruby` on Debian/Ubuntu)
-- One LLM API key from any of the 22 supported providers (e.g. OpenAI,
-  Anthropic Claude, Google Gemini, Groq, Mistral, Z.AI, Alibaba Bailian) —
-  optional for setup (it boots with placeholders), but the agent can't call a
-  model without one. Full list: [../deploy/llm-providers.md](../deploy/llm-providers.md)
+- One LLM API key. Setup picks the agent's provider automatically from
+  `OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY` or `BAILIAN_API_KEY`
+  (first one set wins). For any other supported provider (Gemini, Groq,
+  Mistral, … see [the full list](../llm-providers/README.md)) put its key in
+  `.env` **and** set `CLERUM_MODEL_PROVIDER` and `CLERUM_MODEL_NAME`. The pair
+  must be enabled in the model allowlist, or setup stops with
+  `HOST_MODEL_UNKNOWN` (pair not in the allowlist) or `HOST_MODEL_DISABLED`
+  (pair listed but disabled). Setup only writes the four keys above to the cluster,
+  so after `make minikube-setup` run `make minikube-apply-secrets` and then
+  `kubectl rollout restart deployment/chatllm -n mcp-host --context clerum-test`.
+  Without any key, setup still boots, but the agent can't reply until you add
+  one.
+
+Run `make prereqs` (alias `make doctor`) to check all of these at once. It
+prints the install command for anything missing and flags a `.env` without
+`ADMIN_PASSWORD` or an LLM key. `make minikube-setup` runs it first (skip with
+`SKIP_PREREQS=true`).
 
 ## 1. Configure
 
@@ -51,15 +64,26 @@ CLERUM_MODEL_PROVIDER=openai     # optional with one key: openai | claude | zai 
 > `ZAI_API_KEY`, `BAILIAN_API_KEY`, uses that provider's default model, and logs
 > the choice. With several keys the first one in that order wins, so set
 > `CLERUM_MODEL_PROVIDER` when you want another. `CLERUM_MODEL_NAME` without
-> `CLERUM_MODEL_PROVIDER` stops setup with an error naming both, and so does a
-> pair that is not enabled in the model allowlist. With no key at all, the
-> seeded agent gets `openai/gpt-5.4-mini` with placeholder credentials and will
-> not reply.
+> `CLERUM_MODEL_PROVIDER` stops setup with an error naming both. With no key at
+> all, the seeded agent gets `openai/gpt-5.4-mini` with placeholder credentials
+> and will not reply.
+
+> ⚠️ **Model allowlist:** no model catalog ships with the install. control-api
+> fetches it from models.dev at startup, so setup needs outbound access to
+> models.dev, and it waits for that first sync (up to 3 minutes,
+> `CLERUM_CATALOG_WAIT_SECONDS`). When the catalog did not enable the agent's
+> model, setup adds or enables it through the admin API. That is the case for
+> the zai default `glm-5.1`, which models.dev does not list, and for Bailian,
+> whose models are not auto-enabled with the default policy. Setup then stops
+> if the model is still not enabled. A model added this way has no price, so cost budgets do not
+> limit it until you price it under **Cost → LLM prices**. Details, warning
+> codes, and the reused-DB and no-egress cases:
+> [LLM providers § 4.7](../llm-providers/README.md#47-local-minikube-make-minikube-setup).
 
 ## 2. Set up the cluster (one command)
 
 ```bash
-MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the override note below
+make minikube-setup
 ```
 
 This runs an idempotent 12-step setup: minikube cluster (Calico) → namespaces →
@@ -67,16 +91,16 @@ CRDs → JWT signing keys → secrets from `.env` → service images pulled from
 `ghcr.io/evenfire-ai` → deploy → readiness wait with auto-recovery → seed →
 verify.
 
-**You do not build images.** The 23 service images are published for
+**You do not build images.** The 25 service images are published for
 `linux/amd64` and `linux/arm64`, so an Apple Silicon Mac pulls a native image
 instead of compiling anything. MCP servers are not loaded into the cluster at
 all — they are installed on demand from the evenfire registry.
 
-`MINIKUBE_IMAGE_TAG=latest` is required today. The cluster manifests pin the
-next release tag, whose images are created by promotion _on_ that tag, so the
-pin currently names something that does not exist yet. Without the override the
-pull fails with a message naming the image, the tag, and this variable. Drop the
-override once that release is tagged and promoted.
+The manifests pin a release tag. Right after a release bump, that tag's images
+may not be promoted yet, and the pull fails with a message naming the image, the
+tag, and `MINIKUBE_IMAGE_TAG`. In that case run
+`MINIKUBE_IMAGE_TAG=latest make minikube-setup` to use the newest `dev` images
+instead. See [Releases and upgrades](../deploy/releases-and-upgrades.md).
 
 To build every image from source instead, use `make minikube-setup-local`
 (equivalently `IMAGE_SOURCE=local`). That path needs no tag override.
@@ -87,7 +111,11 @@ It seeds for you:
   install connectors from the registry) + a CommunicationChannel
 - one account, using the `ADMIN_PASSWORD` you set in `.env`: username
   **`admin`** for the Control UI and email **`admin@evenfire.local`** for the
-  Desktop App — the same account, and the sole Desktop App member
+  Desktop App — the same account, and the sole Desktop App member. It is also
+  the initial EvenDrive (GFS) operator. A default re-run of setup rebuilds
+  the control database, so it seeds a fresh link. With `REUSE_DB=true` it
+  keeps the database and never recreates a revoked operator link or adds a
+  second member; if the link is missing, setup stops with an actionable error.
 
 Verify:
 
@@ -95,8 +123,11 @@ Verify:
 make minikube-status    # every deployment should show READY
 ```
 
-Useful re-runs: `make minikube-setup ARGS="--skip-build"` (redeploy in ~1 min) ·
-`ARGS="--reset-db"` (fix postgres after a cold-start crash) ·
+Useful re-runs (setup rebuilds the database by default, so keep it with
+`REUSE_DB=true` on an existing cluster):
+`make minikube-setup REUSE_DB=true ARGS="--skip-build"` (redeploy in ~1 min) ·
+`ARGS="--reset-db"` with `CONTROL_DB_RESET_PVC_UID` (fix postgres after a
+cold-start crash; see the troubleshooting table) ·
 `ARGS="--force-keys"` (regenerate the JWT chain) ·
 `ARGS="--seed-profile=e2e"` or `make minikube-setup-e2e` (adds the E2E fixture
 set: test user, `e2e-*` recipes, demo MCP servers).
@@ -118,30 +149,10 @@ screen — live activity, artifacts, sandbox UIs — see
 
 ## 4. Say hello — the API
 
-The headless path exercises the production JWT chain end to end. With
-`make minikube-pf-all` holding port-forwards in another terminal
-(control-api :8090, external-rest-api :8091, rpc-proxy :8094, mcp-host :8080)
-on the shared `clerum-test` profile. For a branch-owned profile, first-hand
-entry point `scripts/minikube-profiles/branch.mk`:
-
-```bash
-MINIKUBE_PROFILE=<owned-profile> \
-  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
-
-MINIKUBE_PROFILE=<owned-profile> \
-  make -f scripts/minikube-profiles/branch.mk branch-profile-health
-```
-
-Implementation: `scripts/minikube-profiles/branch-profile.sh`.
-HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
-This is the host-side hold for Control UI / Desktop. Profile-owned random
-ports only (never shared `:3000`/`:8090`). `make minikube-pf-all-bg` is a
-gate refresh only; it must not replace `branch-profile-pf`. Do not start UI
-PFs from a sandboxed agent shell. Run the make target on the host. Do not
-kill this lane's `branch-profile-pf`. `branch-profile-pf-health` starts PFs
-then STOPS them on EXIT — do not use it as the lasting hold.
-
-Shared-profile curl example (fixed ports):
+The headless path exercises the production JWT chain end to end. Keep
+`make minikube-pf-all` running in another terminal; it holds the
+port-forwards open (control-api :8090, external-rest-api :8091,
+rpc-proxy :8094, mcp-host :8080). Then:
 
 ```bash
 EXT=http://localhost:8091  RPC=http://localhost:8094  HOST=chatllm
@@ -186,10 +197,15 @@ curl -s -X POST "$RPC/api/v1/rpc/hosts/$HOST/approvals/approve" \
 
 ## 5. Optional: chat from Telegram
 
-1. Create a bot with [@BotFather](https://t.me/BotFather); get your numeric
-   user id (e.g. via `@userinfobot`).
-2. Set `CLERUM_TELEGRAM_BOT_TOKEN` and `CLERUM_TELEGRAM_USER_ID` in `.env`.
-3. Re-run `make minikube-setup ARGS="--skip-build"` and message your bot.
+1. Create a bot with [@BotFather](https://t.me/BotFather); copy the bot token
+   and its `@handle`.
+2. In the Control UI, open **External Channels** and create a channel: pick the
+   `chatllm` agent, choose Telegram, and paste the bot token and handle. The
+   token is stored as a write-only channel credential.
+3. Grant your Telegram account chat access, then message your bot.
+
+Setup does not read Telegram values from `.env`; channel credentials are set
+only through the Control UI (or the admin API).
 
 Approval requests arrive on Telegram with inline **Approve / Deny** buttons.
 Details: [Connect Telegram](../how-to/connect-telegram.md).
@@ -199,10 +215,10 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 | Symptom                                    | Fix                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Agent never replies                        | No real LLM key in `.env`; with several keys, set `CLERUM_MODEL_PROVIDER` explicitly (see step 1)                                                                                                                                                                                                                           |
-| `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 MINIKUBE_IMAGE_TAG=latest make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default)                                                                                                              |
+| `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default)                                                                                                              |
 | Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                                                                                                                                                                                                                                               |
-| postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                                                                                                                                                                                                                                                        |
-| Port-forwards die                          | Shared profile: re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops). Branch-owned profile: `MINIKUBE_PROFILE=<owned-profile> make -f scripts/minikube-profiles/branch.mk branch-profile-pf` (do not use `branch-profile-pf-health` as the lasting hold; do not replace it with `make minikube-pf-all-bg`) |
+| postgres CrashLoopBackOff after cold start | Rebuild the DB — this deletes all its data. First print and check the volume's UID: `kubectl --context clerum-test -n control-plane get pvc control-postgres-data -o jsonpath='{.metadata.uid}'`. Then paste it: `CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-setup ARGS="--reset-db --skip-build"` ([details](../deploy/minikube.md#postgres-crashloopbackoff-wal-corruption)) |
+| Port-forwards die                          | Re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops) |
 
 ## Next steps
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { SingleTurnProvider } from '../../../llm'
 import { ClaudeProvider } from '../../../llm/claude'
 import { OpenAIProvider } from '../../../llm/openai'
+import { officialChatProfile } from '../../../llm/openaiFamily/__tests__/familyHarness'
 import { LlmError, LlmErrorCode } from '../../errors'
 import { FinishReason } from '../../types'
 import { LlmPortAdapter } from '../llmPortAdapter'
@@ -621,7 +622,8 @@ describe('Cross-provider ToolCall normalization', () => {
       ],
       usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
     })
-    const openai = new OpenAIProvider(openaiClient as any, 'gpt-4o')
+    // The Chat decode; the Responses one is pinned in responsesProtocol.test.ts.
+    const openai = new OpenAIProvider(openaiClient as any, 'gpt-4o', officialChatProfile())
     const openaiResult = await openai.completeSingleTurnWithTools(
       [{ role: 'user', content: 'Search' }],
       [{ name: 'search', description: 'Search', parameters: {} }]

@@ -17,20 +17,27 @@
  * truth for the data.
  */
 import type { ProviderCredentials } from '../types'
-import { AzureOpenAIProvider } from './azure'
 import { ClaudeProvider } from './claude'
 import { type CodexSubscriptionDeps, CodexSubscriptionProvider } from './codexSubscription'
 import { buildBedrockConverseDriver } from './drivers/bedrockConverse'
 import { buildGoogleGenerativeDriver } from './drivers/googleGenerative'
 import { type GrokSubscriptionDeps, GrokSubscriptionProvider } from './grokSubscription'
 import { OpenAIProvider } from './openai'
-import { OpenAICompatibleProvider } from './openaiCompatible'
+import { azureProfile, compatibleProfile } from './openaiFamily/endpointProfiles'
+import { type ProviderEnvLookup, processEnvLookup } from './providerEnv'
 import { type LlmProvider, descriptorFor, primarySlot } from './registryCore'
 import type { SingleTurnProvider } from './types'
+import { withWellFormedRequestText } from './wellFormedRequestText'
 
 export type MakeProviderOptions = {
   codex?: CodexSubscriptionDeps
   grok?: GrokSubscriptionDeps
+  /**
+   * Source for the provider's declared non-secret env (AWS_REGION, Vertex
+   * project/location, Azure endpoint/api-version). Defaults to process.env; a
+   * Host pod passes the per-Host env from ConfigStore (see ./providerEnv).
+   */
+  env?: ProviderEnvLookup
 }
 
 export {
@@ -62,13 +69,14 @@ export {
  * primary slot via {@link primarySlot} (confined here — the exclusion boundary
  * uses the full slot set instead).
  */
-export function makeProvider(
+function constructProvider(
   provider: LlmProvider,
   credentials: ProviderCredentials,
   model?: string,
   options?: MakeProviderOptions
 ): SingleTurnProvider {
   const d = descriptorFor(provider)
+  const env = options?.env ?? processEnvLookup
   switch (provider) {
     case 'openai':
       return new OpenAIProvider(credentials[primarySlot(d).dataKey], model)
@@ -76,18 +84,19 @@ export function makeProvider(
       return new ClaudeProvider(credentials[primarySlot(d).dataKey], model)
     case 'vertex':
       // Own-SDK arm — lazy require lives inside the driver builder.
-      return buildGoogleGenerativeDriver(credentials, model ?? d.defaultModel ?? '')
+      return buildGoogleGenerativeDriver(credentials, model ?? d.defaultModel ?? '', env)
     case 'bedrock':
       // Own-SDK arm — lazy require lives inside the driver builder.
-      return buildBedrockConverseDriver(credentials, model ?? d.defaultModel ?? '')
+      return buildBedrockConverseDriver(credentials, model ?? d.defaultModel ?? '', env)
     case 'azure':
       // Light-driver arm: OpenAI wire shape but per-resource host
       // (AZURE_OPENAI_ENDPOINT) + `api-key` header + deployment-name-as-model, so
       // it deliberately has NO static baseURL and must not hit the data arm
       // below. Fails closed (throws) if the operator omitted the endpoint.
-      return new AzureOpenAIProvider(
+      return new OpenAIProvider(
         credentials[primarySlot(d).dataKey],
-        model ?? d.defaultModel ?? ''
+        model ?? d.defaultModel ?? '',
+        azureProfile(env)
       )
     case 'codex-subscription':
       if (process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true') {
@@ -118,11 +127,28 @@ export function makeProvider(
     if (!d.defaultModel) {
       throw new Error(`[LLM] makeProvider: provider '${d.id}' requires a defaultModel`)
     }
-    return new OpenAICompatibleProvider(
-      { id: d.id, baseURL: d.baseURL, defaultModel: d.defaultModel },
+    return new OpenAIProvider(
       credentials[primarySlot(d).dataKey],
-      model
+      model ?? d.defaultModel,
+      compatibleProfile({ id: d.id, baseURL: d.baseURL })
     )
   }
   throw new Error(`[LLM] makeProvider: no factory registered for provider '${String(provider)}'`)
+}
+
+/**
+ * The single place that hands out LLM providers. Every provider it returns
+ * sends only well-formed text: lone UTF-16 surrogates in messages, tool
+ * definitions and system prompt parts are replaced with U+FFFD, with a `warn`
+ * log and a counter. A request whose repair would make two keys of one object
+ * equal is refused before dispatch with `LLM_REQUEST_TEXT_REJECTED` (see
+ * ./wellFormedRequestText, issue #1433).
+ */
+export function makeProvider(
+  provider: LlmProvider,
+  credentials: ProviderCredentials,
+  model?: string,
+  options?: MakeProviderOptions
+): SingleTurnProvider {
+  return withWellFormedRequestText(constructProvider(provider, credentials, model, options))
 }

@@ -486,9 +486,6 @@ async function dispatchUpstreamStream(
     if (response.status !== 401 && errorBody.complete && isContextOverflowBody(errorBody.text)) {
       throw new GrokTransportError('context_length_exceeded', 'upstream context window exceeded')
     }
-    if (response.status === 400) {
-      throw new GrokTransportError('invalid_request', 'upstream rejected the Grok request')
-    }
     if (response.status === 401) {
       throw new GrokTransportError(
         'connection_unavailable',
@@ -512,9 +509,12 @@ async function dispatchUpstreamStream(
         retryAfter === undefined ? undefined : { retryAfterSeconds: retryAfter }
       )
     }
-    // G1-3 (#720): any other 4xx, including a 402/403 entitlement refusal, is
-    // what the same request would get again, so it is not retried or failed
-    // over from. A 408 is transient.
+    // G1-3 (#720): any other 4xx, including a 400 request rejection and a
+    // 402/403 entitlement refusal, is what the same request would get again,
+    // so it is not retried or failed over from. A 408 is transient. A 400 is
+    // reported as `upstream_rejected` too (#1433): `invalid_request` stays the
+    // code for a request this proxy's own contract refused, so the Host does
+    // not show an upstream rejection as a connection error.
     if (response.status >= 400 && response.status < 500 && response.status !== 408) {
       throw new GrokTransportError(
         'upstream_rejected',

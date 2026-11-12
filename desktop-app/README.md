@@ -68,7 +68,7 @@ The app now auto-populates default RPC `hostRefs` from authorized agent names re
 
 - `EXTERNAL_REST_API_BASE_URL` (default: `http://127.0.0.1:8091`)
 - `RPC_PROXY_BASE_URL` (default: `http://127.0.0.1:8094`)
-- `MEMBER_REGISTRATION_SERVICE_BASE_URL` (no working default — falls back to the placeholder `https://example.com`, so set it explicitly; locally this is usually `http://127.0.0.1:8092`)
+- `MEMBER_REGISTRATION_SERVICE_BASE_URL` (default: `https://registration.evenfire.ai`, the hosted service — set it when you run your own; locally this is usually `http://127.0.0.1:8092`)
 - `REQUEST_TIMEOUT_MS` (default: `60000`)
 
 ## Authentication Transition Ownership
@@ -125,6 +125,37 @@ npm run build
 npm run start
 ```
 
+## Package and Sign
+
+Desktop builds need Node 24.22.1 or later in the Node 24 line, an `npm ci` with lifecycle scripts enabled (never
+`--ignore-scripts`), and a passing `npm run verify:electron` before any build or
+test result counts. Electron 42 and later download the runtime on first use
+instead of in `postinstall`; `verify:electron` triggers that download and checks
+the result. Packaged macOS builds require macOS 13 or later; Electron 44 dropped
+macOS 12 support.
+
+```bash
+npm ci
+npm run verify:electron
+npm run make:mac:arm64   # or make:mac:x64, make:windows:x64, make:windows:arm64, make:linux:x64, make:linux:arm64
+```
+
+Each `make:*` script runs `electron-forge make` for one platform/arch and builds
+first via the forge `prePackage` hook (`EVENFIRE_SKIP_PACKAGE_BUILD=1` skips that).
+Output goes to `out/`. The makers are zip (all platforms), dmg (macOS), squirrel
+(Windows), and deb/rpm (Linux). This directory's `Makefile` has no packaging
+targets.
+
+macOS signing and notarization are opt-in and run only on a macOS build host:
+set `ENABLE_APPLE_CODESIGN=1`, optionally `APPLE_CODESIGN_IDENTITY` and
+`APPLE_KEYCHAIN`, plus either `APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`
+or `APPLE_KEYCHAIN_PROFILE` (the config throws if neither is set).
+`APPLE_BUNDLE_ID` overrides the default `ai.evenfire.desktop`. Windows and Linux
+packages are unsigned. No workflow in this repo builds or publishes installers.
+
+Signing details, release tags, and how the app detects required updates are in
+[Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users).
+
 ## Port-forward Remote Cluster Services
 
 The root launcher already starts the required port-forwards for normal local development.
@@ -157,6 +188,62 @@ kubectl -n profiles port-forward svc/profile-ui 3001:3001
 cd desktop-app
 npm run test          # vitest — IPC handler unit tests
 ```
+
+### Workspace Tab Overflow Verification
+
+Use Node 24.22.1 or later in the Node 24 line. From the repository root:
+
+```bash
+cd desktop-app
+node --version
+npm ci
+npm run verify:electron
+npx playwright install chromium
+
+# Component and synthetic geometry tests (jsdom)
+npm test -- ui/src/components/WorkspaceTabStrip
+
+# Real Chromium component tests
+npm test -- test/browser/workspaceTabOverflow
+
+# Both groups together
+npm test -- ui/src/components/WorkspaceTabStrip test/browser/workspaceTabOverflow
+```
+
+Install dependencies with lifecycle scripts enabled; do not use `--ignore-scripts`.
+Electron verification must pass before test
+results count. Playwright installs a separate Chromium binary for the browser
+suites; these tests do not launch the packaged Electron application. Linux hosts
+may need Playwright's system dependencies (`npx playwright install --with-deps chromium`).
+No cluster, port-forward, account or application build is needed for these selections.
+
+The component tests are in
+`ui/src/components/WorkspaceTabStrip/WorkspaceTabStrip.test.tsx` and
+`WorkspaceTabStrip.observer.test.tsx` in the same directory. They cover navigation,
+wheel normalization, delayed identity reveals, manual scrolling, observer wiring
+and cleanup. `__fixtures__/tabStripLayout.ts` supplies synthetic jsdom geometry,
+including arbitrary widths for stress tests. It does not run the browser's CSS
+flex layout or establish that every assigned rectangle is reachable in Chromium.
+
+`test/browser/workspaceTabOverflow*.browser.test.ts` mounts the real component with
+store-produced tabs and renderer CSS. The Geometry, Boundary and FixtureContract
+suites check actual flex dimensions, full-width fit, stable arrow presence and
+live viewport bounds. Focus and FocusTransitions cover keyboard/pointer focus
+and intentional external focus. ScrollCost checks scrolling results alongside
+full-measurement work; Operations checks retained measurement and identity
+operations. Some operation assertions count DOM commands or exercise defensive
+style input; they do not establish an additional visible benefit for every line.
+
+The observation harness in ScrollCost transforms exact hook source text, so hook
+formatting changes can require test maintenance or fail bundle setup. Existing
+observer wiring assertions do not establish a separately discriminating native
+list-only resize case: current chat badges can change without resizing the list.
+
+These checked-in suites are reproducible from this repository. Supplementary
+model-based and mutation validation whose executable source is absent from the
+checkout is separate evidence, not an additional repository test command.
+These suites do not establish authenticated full-app behavior or full Electron
+visual QA.
 
 ### E2E Tests (Phase 1 — IPC Harness)
 
@@ -207,16 +294,16 @@ npm run test:e2e:all          # Phase 1 + Phase 2
 
 ### Environment Configuration (`.env.e2e`)
 
-| Variable                               | Default                                      | Description                                                                                                          |
-| -------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `EXTERNAL_REST_API_BASE_URL`           | `http://localhost:8091`                      | external-rest-api URL                                                                                                |
-| `RPC_PROXY_BASE_URL`                   | `http://localhost:8094`                      | rpc-proxy URL                                                                                                        |
-| `MEMBER_REGISTRATION_SERVICE_BASE_URL` | `https://example.com` (placeholder — set it) | member-registration-service activation URL. There is no working default: unset, it silently points at `example.com`. |
-| `E2E_DEV_LOGIN_EMAIL`                  | `test@clerum.io`                             | Test-only login email (must have agent access)                                                                       |
-| `E2E_DEV_LOGIN_EMAIL_2`                | `test2@clerum.io`                            | Second user, required by the cross-device session tests                                                              |
-| `E2E_DEV_LOGIN_NAME`                   | `Test User`                                  | Test-only login display name                                                                                         |
-| `E2E_HOST_REF`                         | `chatllm`                                    | Agent hostRef to test against                                                                                        |
-| `E2E_ALLOW_DEV_PORT_FORWARD`           | unset (off)                                  | Set to `1`/`true` to let the Playwright global-setup guard accept localhost port-forward URLs                        |
+| Variable                               | Default                            | Description                                                                                                                |
+| -------------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `EXTERNAL_REST_API_BASE_URL`           | `http://localhost:8091`            | external-rest-api URL                                                                                                      |
+| `RPC_PROXY_BASE_URL`                   | `http://localhost:8094`            | rpc-proxy URL                                                                                                              |
+| `MEMBER_REGISTRATION_SERVICE_BASE_URL` | `https://registration.evenfire.ai` | member-registration-service activation URL. Unset or empty, it points at the hosted evenfire service; set it for your own. |
+| `E2E_DEV_LOGIN_EMAIL`                  | `test@clerum.io`                   | Test-only login email (must have agent access)                                                                             |
+| `E2E_DEV_LOGIN_EMAIL_2`                | `test2@clerum.io`                  | Second user, required by the cross-device session tests                                                                    |
+| `E2E_DEV_LOGIN_NAME`                   | `Test User`                        | Test-only login display name                                                                                               |
+| `E2E_HOST_REF`                         | `chatllm`                          | Agent hostRef to test against                                                                                              |
+| `E2E_ALLOW_DEV_PORT_FORWARD`           | unset (off)                        | Set to `1`/`true` to let the Playwright global-setup guard accept localhost port-forward URLs                              |
 
 ## Notes
 

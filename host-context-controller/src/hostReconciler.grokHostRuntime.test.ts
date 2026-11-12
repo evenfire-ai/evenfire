@@ -338,6 +338,8 @@ describe('HostReconciler Grok Host runtime gating', () => {
         'MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE',
         'MCP_HOST_RUNTIME_AUTH_STATE_DIR',
         'MCP_HOST_GATEWAY_URL',
+        'CLERUM_SESSION_STORE',
+        'CLERUM_SESSION_DB_DIR',
       ])
     }
   )

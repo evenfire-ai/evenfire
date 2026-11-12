@@ -1,6 +1,11 @@
 import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
+import { STATUS_CODES } from 'node:http'
 import { config } from './config.js'
+import { ControlApiError, ControlApiPathError } from './controlApiClient.js'
+import { invitationPasswordErrorHandler } from './http/passwordAdmissionError.js'
+import { sendPublicApiError } from './http/publicApiError.js'
+import { requireTrustedBrowserMutation } from './middleware/browserMutationGuard.js'
 import { withExternalRequestContext } from './requestContext.js'
 import { createAuthRouter } from './routes/auth.js'
 import { createContextSharedFilesystemsRouter } from './routes/contextSharedFilesystems.js'
@@ -28,6 +33,51 @@ import { createExternalWorkflowsRouter } from './routes/workflows.js'
 // binary body can be consumed by the global JSON parser and produce a parser
 // error before the canonical 4xx path is reached.
 const GFS_UPLOAD_PART_PATH = /^\/api\/v1\/me\/gfs\/uploads\/[^/]+\/parts\/[0-9]+$/i
+
+// Retry guidance the global handler relays from a ControlApiError. The client
+// has already filtered the upstream headers; the allowlist is repeated at this
+// last hop (as routes/gfs.ts does) so a hand-built ControlApiError cannot
+// publish arbitrary headers. `x-request-id` is never relayed here.
+const RETRY_AFTER_STATUSES = new Set([408, 425, 429, 502, 503, 504])
+const RATE_LIMIT_NUMERIC_HEADERS = [
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+] as const
+// The IETF RateLimit fields are structured (`limit=30, remaining=0, reset=17`,
+// `30;w=60`), so they are relayed as control-api wrote them, like routes/gfs.ts.
+const RATE_LIMIT_STRUCTURED_HEADERS = ['ratelimit', 'ratelimit-policy'] as const
+const UNSIGNED_INTEGER_HEADER = /^\d{1,10}$/
+const MAX_RETRY_AFTER_SECONDS = 86_400
+
+function unsignedIntegerHeader(raw: string | undefined): number | undefined {
+  if (!raw || !UNSIGNED_INTEGER_HEADER.test(raw)) return undefined
+  const value = Number(raw)
+  return Number.isSafeInteger(value) ? value : undefined
+}
+
+function relayControlApiRetryHeaders(err: ControlApiError, res: Response): void {
+  const headers = err.headers
+  if (RETRY_AFTER_STATUSES.has(err.status)) {
+    const retryAfter = unsignedIntegerHeader(headers['retry-after'])
+    if (retryAfter !== undefined && retryAfter >= 1 && retryAfter <= MAX_RETRY_AFTER_SECONDS) {
+      res.setHeader('retry-after', String(retryAfter))
+    }
+  }
+  if (err.status === 429) {
+    for (const name of RATE_LIMIT_NUMERIC_HEADERS) {
+      const value = unsignedIntegerHeader(headers[name])
+      if (value !== undefined) res.setHeader(name, String(value))
+    }
+    for (const name of RATE_LIMIT_STRUCTURED_HEADERS) {
+      const value = headers[name]
+      if (value) res.setHeader(name, value)
+    }
+  }
+  if (err.status === 503 && headers['cache-control']?.trim().toLowerCase() === 'no-store') {
+    res.setHeader('cache-control', 'no-store')
+  }
+}
 
 export function createApp() {
   const app = express()
@@ -57,6 +107,7 @@ export function createApp() {
     }
     jsonBodyParser(req, res, next)
   })
+  app.use(requireTrustedBrowserMutation)
 
   app.use(createHealthRouter())
 
@@ -68,7 +119,9 @@ export function createApp() {
   api.use(createContextSharedFilesystemsRouter())
   api.use(createGfsRouter())
   api.use(createTeamRouter())
-  api.use(createInvitationsRouter())
+  const invitationsRouter = createInvitationsRouter()
+  invitationsRouter.use(invitationPasswordErrorHandler)
+  api.use(invitationsRouter)
   api.use(createDirectoryRouter())
   api.use(createRpcRouter())
   api.use(createNotificationsRouter())
@@ -85,23 +138,49 @@ export function createApp() {
     res.status(404).json({ error: 'Not Found' })
   })
 
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const status =
-      err instanceof Error && typeof (err as Error & { status?: unknown }).status === 'number'
-        ? (err as Error & { status: number }).status
-        : undefined
-    if (status !== undefined && status >= 400 && status < 500) {
-      res.status(status).json({
-        error: err instanceof Error ? err.message : 'Bad Request',
-      })
-      return
-    }
-
-    res.status(500).json({
-      error: 'Internal Server Error',
-      message: err instanceof Error ? err.message : 'Unknown error',
-    })
-  })
+  app.use(externalRestPublicErrorHandler)
 
   return app
+}
+
+export function externalRestPublicErrorHandler(
+  err: unknown,
+  req: Request,
+  res: Response,
+  _next: NextFunction
+): void {
+  // 1. A caller-influenced control-api path is this edge's own client error. It
+  // must be answered before the ControlApiError rule because
+  // ControlApiPathError extends ControlApiError.
+  if (err instanceof ControlApiPathError) {
+    sendPublicApiError(req, res, 400, 'invalid_request', 'The request is not valid.')
+    return
+  }
+
+  // 2. Forward control-api's own status and body. Never `String(err.message)`:
+  // for a ControlApiError that is the internal request wrapper, which exposes
+  // control-api paths and ids (#190).
+  if (err instanceof ControlApiError) {
+    relayControlApiRetryHeaders(err, res)
+    if (err.body !== null && typeof err.body === 'object') {
+      res.status(err.status).json(err.body)
+      return
+    }
+    res.status(err.status).json({ error: STATUS_CODES[err.status] })
+    return
+  }
+
+  // 3. Any other client error keeps dev's message (body-parser SyntaxError 400,
+  // `entity.too.large` 413).
+  const status =
+    err instanceof Error && typeof (err as Error & { status?: unknown }).status === 'number'
+      ? (err as Error & { status: number }).status
+      : undefined
+  if (status !== undefined && status >= 400 && status < 500) {
+    res.status(status).json({ error: err instanceof Error ? err.message : 'Bad Request' })
+    return
+  }
+
+  // 4. Everything else keeps the sanitized 500 envelope.
+  sendPublicApiError(req, res, 500, 'internal_error', 'The request could not be completed.')
 }

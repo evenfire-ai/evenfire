@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { once } from 'node:events'
 import request from 'supertest'
+import { createApp } from '../src/app.js'
+import { ControlApiError } from '../src/controlApiClient.js'
 import { createMembersRouter } from '../src/routes/members.js'
 
 const authTokenMock = vi.hoisted(() => ({
@@ -47,7 +49,7 @@ describe('routes/members', () => {
     Object.values(memberManagementMock).forEach(fn => fn.mockReset())
   })
 
-  it('forwards invitee name to the managed invitation service', async () => {
+  it('forwards the trimmed invitee name to the managed invitation service', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     memberManagementMock.inviteManagedMember.mockResolvedValueOnce({ id: 'inv-1' })
 
@@ -69,20 +71,147 @@ describe('routes/members', () => {
     )
   })
 
-  it('rejects overlong invitee names', async () => {
+  it('filters invitation role candidates by TEAM_ROLES and defaults to member', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockResolvedValueOnce({ id: 'inv-roles' })
 
     await request(makeApp())
       .post('/members/invite')
       .set('authorization', 'Bearer good-token')
       .send({
         email: 'invitee@example.com',
-        name: 'a'.repeat(121),
+        teams: [
+          { teamId: 'team-admin', role: 'admin' },
+          { teamId: 'team-alias', role: 'leader' },
+          { teamId: 'team-case', role: 'ADMIN' },
+          { teamId: 'team-invalid', role: 'unexpected' },
+          { teamId: 'team-default' },
+        ],
+      })
+      .expect(201, { id: 'inv-roles' })
+
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
+      'invitee@example.com',
+      '',
+      [
+        { teamId: 'team-admin', role: 'admin' },
+        { teamId: 'team-default', role: 'member' },
+      ],
+      'good-token'
+    )
+  })
+
+  it('rejects raw invitation emails longer than 320 characters before Control API work', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    const overlongEmail = `${'a'.repeat(315)}@a.com`
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({
+        email: overlongEmail,
         teams: [{ teamId: 'team-1', role: 'member' }],
       })
-      .expect(400, { error: 'Name is too long' })
+      .expect(400, { error: 'Valid email is required' })
 
     expect(memberManagementMock.inviteManagedMember).not.toHaveBeenCalled()
+  })
+
+  it('rejects pathological overlong invitation email input before Control API work', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({
+        email: `!@!${'!.'.repeat(200)}@`,
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(400, { error: 'Valid email is required' })
+
+    expect(memberManagementMock.inviteManagedMember).not.toHaveBeenCalled()
+  })
+
+  it('rejects non-string invitation email input before Control API work', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({
+        email: { address: 'invitee@example.com' },
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(400, { error: 'Valid email is required' })
+
+    expect(memberManagementMock.inviteManagedMember).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'a malformed email',
+      { email: 'not-an-email', teams: [{ teamId: 'team-1', role: 'member' }] },
+      'Valid email is required',
+    ],
+    [
+      'an overlong name',
+      {
+        email: 'invitee@example.com',
+        name: 'a'.repeat(121),
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      },
+      'Name is too long',
+    ],
+    [
+      'too many teams',
+      {
+        email: 'invitee@example.com',
+        teams: Array.from({ length: 51 }, (_, index) => ({
+          teamId: `team-${index}`,
+          role: 'member',
+        })),
+      },
+      'Too many teams selected',
+    ],
+    [
+      'no valid team assignment',
+      { email: 'invitee@example.com', teams: [{ teamId: 'team-1', role: 'unexpected' }] },
+      'Email and at least one team are required',
+    ],
+  ] as const)('rejects %s locally before any Control API work', async (_case, body, message) => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send(body)
+      .expect(400, { error: message })
+
+    expect(memberManagementMock.inviteManagedMember).not.toHaveBeenCalled()
+  })
+
+  it('lets a valid invitation reach the managed invitation service', async () => {
+    // Witness for the local rejections above: every input that passes the edge
+    // checks still reaches control-api through the service.
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockResolvedValueOnce({ id: 'inv-ok' })
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({
+        email: 'invitee@example.com',
+        name: `${' '.repeat(121)}Alice`,
+        teams: [{ teamId: 'team-1', role: 'member' }],
+      })
+      .expect(201, { id: 'inv-ok' })
+
+    expect(memberManagementMock.inviteManagedMember).toHaveBeenCalledWith(
+      'invitee@example.com',
+      'Alice',
+      [{ teamId: 'team-1', role: 'member' }],
+      'good-token'
+    )
   })
 
   it('forwards a governed member-retirement reason, replay key, and correlation id', async () => {
@@ -106,6 +235,52 @@ describe('routes/members', () => {
         correlationId: '11111111-1111-4111-8111-111111111111',
       }
     )
+  })
+
+  it.each(['reason_required', 'idempotency_key_required'])(
+    'forwards the exact Control API retirement code %s',
+    async code => {
+      authTokenMock.verifyToken.mockReturnValueOnce(claims)
+      const body = { error: code, correlationId: 'retirement-correlation' }
+      memberManagementMock.deleteManagedUser.mockRejectedValueOnce(
+        new ControlApiError('Control API rejected retirement', 400, body)
+      )
+
+      await request(makeApp())
+        .delete(`/members/${TARGET_USER_ID}`)
+        .set('authorization', 'Bearer good-token')
+        .set('Idempotency-Key', 'retire-user-2-v1')
+        .set('x-correlation-id', '11111111-1111-4111-8111-111111111111')
+        .send({ reason: 'team access no longer required' })
+        .expect(400, body)
+    }
+  )
+
+  it('does not treat a non-string Control API error as a stable retirement code', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.deleteManagedUser.mockRejectedValueOnce(
+      new ControlApiError(
+        `Control API DELETE /external/members/${TARGET_USER_ID} failed (400): reason_required`,
+        400,
+        { error: ['reason_required'] }
+      )
+    )
+    const response = await request(createApp())
+      .delete(`/api/v1/members/${TARGET_USER_ID}`)
+      .set('authorization', 'Bearer good-token')
+      .set('Idempotency-Key', 'retire-user-2-v1')
+      .send({ reason: 'team access no longer required' })
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({
+      error: {
+        code: 'internal_error',
+        message: 'The request could not be completed.',
+        correlationId: expect.any(String),
+        retryable: false,
+      },
+    })
+    expect(JSON.stringify(response.body)).not.toMatch(/reason_required|Control API|unsupported/)
   })
 
   it.each([

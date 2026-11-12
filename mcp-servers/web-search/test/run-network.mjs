@@ -85,7 +85,7 @@ try {
       `type=bind,src=${realpathSync(path.join(root, part))},dst=/app/${part},readonly`
     )
   args.push(
-    image ?? 'node:24-alpine',
+    image ?? 'node:24.22.1-alpine',
     'sh',
     '-ec',
     'ip addr add 11.198.0.2/32 dev lo; ip -6 addr add 2606:4700::198/128 dev lo; test -z "$(ip -6 route show default)"; test -z "$(ip route show default)"; printf "nameserver 127.0.0.1\\n" > /etc/resolv.conf; node --test /app/test/mcp.network.mjs'

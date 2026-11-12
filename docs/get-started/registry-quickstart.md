@@ -90,13 +90,16 @@ press **Install**.
 
 | Field           | Notes                                                                                             |
 | --------------- | ------------------------------------------------------------------------------------------------- |
-| **Name**        | Optional. Left blank, it is generated from the entry name and version. Must be a valid K8s name.  |
-| **Context**     | **Required.** The agent context that gets the tool.                                               |
+| **Server name** | Under **Configuration**. Optional. Left blank, it is generated from the entry name and version.   |
 | **Credentials** | Only if the entry declares them. Fill in **all** fields or **none** (empty installs it pending).  |
 | **Egress**      | Review the external hosts the connector needs. Default-deny networking means unlisted hosts fail. |
 
-The install runs as a server-side saga: it verifies the bundle digest, creates
-the `McpServer`, wires it into the context, and rolls back if a step fails.
+The install runs as a server-side saga: it creates the `McpServer` with its own
+private access scope and rolls back the Secrets and `McpServer` it created if a
+later step fails. For a `local` (bundle) entry it also compares the bundle to
+the registry's published digest and stops on a mismatch; when the registry
+returns no digest, or the lookup fails, the install continues without that
+check. Afterwards, grant it to agents from **Installed Connectors**.
 
 Verify it landed:
 
@@ -184,7 +187,8 @@ A **local** connector runs from an image the registry hosts under your org. Push
 it before publishing the entry that points at it. Recipes have no image and skip
 this step.
 
-**Publisher → Docker credentials** (`/publisher/credentials`) generates a push
+**Marketplace → _your org_ → Credentials** (`/marketplace/org/credentials`,
+formerly Publisher → Docker credentials) generates a push
 credential and shows your exact coordinate. Log in with the literal username
 `_`, then push into `<org>/<name>`:
 

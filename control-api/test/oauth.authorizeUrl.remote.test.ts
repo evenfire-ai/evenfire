@@ -4,6 +4,11 @@ import type { McpServerOAuthReader, McpServerOAuthSubject } from '../src/oauth/c
 import { type DiscoveryResult, discoverRemoteOAuth } from '../src/oauth/discovery.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
+import {
+  type InstalledMcpServer,
+  WORKIQ_URL_SCOPE,
+  installWorkIqServer,
+} from './fixtures/perServerInstall.js'
 import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
 
 /**
@@ -84,5 +89,59 @@ describe('buildAuthorizeUrl — remote mcp subject (DEC-23)', () => {
     // No secret material, and the client-id Secret was never read (public client).
     expect(url.searchParams.get('client_secret')).toBeNull()
     expect(secretRead).not.toHaveBeenCalled()
+  })
+})
+
+describe('buildAuthorizeUrl — entra-v2 profile (I5, I7)', () => {
+  const ENTRA_AUTHORIZE =
+    'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/authorize'
+  let workIq: InstalledMcpServer
+
+  beforeAll(async () => {
+    workIq = await installWorkIqServer({ scopes: [WORKIQ_URL_SCOPE] })
+  })
+
+  async function authorizeUrlFor(server: InstalledMcpServer): Promise<URL> {
+    const resolved = resolveServerOAuthSubject(server, 'consent')
+    if (!resolved) throw new Error('fixture: the Work IQ CR did not resolve')
+    const secretRead = vi.fn(async () => ({}))
+    const result = await buildAuthorizeUrl(
+      {
+        subjectKind: 'mcp',
+        mcpServerName: server.metadata.name,
+        oauthClientId: String(server.spec.oauth.id),
+        userId: 'user-9',
+        grantKind: 'user',
+        background: false,
+        redirectUri: `https://control.example.com/api/v1/oauth-callback/remote/${server.metadata.name}`,
+      },
+      {
+        recipeReader: { read: vi.fn(async () => null) },
+        mcpServerReader: { read: vi.fn(async () => ({ namespace: MCP_NS, ...resolved })) },
+        secretReader: { read: secretRead } as unknown as BuildAuthorizeUrlDeps['secretReader'],
+        stateSecret: STATE_SECRET,
+      }
+    )
+    if (result.kind !== 'ok') throw new Error(`authorize-url failed: ${result.kind}`)
+    expect(secretRead).not.toHaveBeenCalled()
+    return new URL(result.authorizeUrl)
+  }
+
+  it('no resource, PKCE S256 and offline_access in scope', async () => {
+    expect(workIq.spec.oauth.resource).toBe('https://workiq.svc.cloud.microsoft/mcp')
+    const url = await authorizeUrlFor(workIq)
+    expect(`${url.origin}${url.pathname}`).toBe(ENTRA_AUTHORIZE)
+    expect(url.searchParams.has('resource')).toBe(false)
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256')
+    expect(url.searchParams.get('scope')).toBe(`${WORKIQ_URL_SCOPE} offline_access`)
+  })
+
+  it('a CR edited to drop offline_access still asks for it', async () => {
+    const edited: InstalledMcpServer = {
+      ...workIq,
+      spec: { ...workIq.spec, oauth: { ...workIq.spec.oauth, scopes: [WORKIQ_URL_SCOPE] } },
+    }
+    const url = await authorizeUrlFor(edited)
+    expect(url.searchParams.get('scope')).toBe(`${WORKIQ_URL_SCOPE} offline_access`)
   })
 })

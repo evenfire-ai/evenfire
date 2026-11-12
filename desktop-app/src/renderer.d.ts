@@ -15,6 +15,7 @@ import {
   ChatMessage,
   ChatMetadata,
   ContextBreakdownResult,
+  DeepLinkAcknowledgmentAuthority,
   DesktopAppInfo,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
@@ -40,6 +41,7 @@ import {
   RpcConnectorsResult,
   SandboxUiApp,
   SandboxUiDeepLinkEnvelope,
+  SandboxUiReleasedEvent,
   SessionLifecycleState,
   SessionMessagesQuery,
   SessionMessagesResult,
@@ -112,6 +114,7 @@ declare global {
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
         onExternalLogout: (callback: () => void) => () => void
+        onSessionCleared: (callback: () => void) => () => void
         logout: () => Promise<{ ok: true; sessionGeneration: number }>
       }
       team: {
@@ -122,6 +125,28 @@ declare global {
         switch: (teamId: string) => Promise<SessionState>
       }
       gfs: {
+        getUserNavigationGeneration?: () => number | null
+        advanceUserNavigationGeneration?: () => number | null
+        copyDeepLink?: (uri: string) => Promise<{ url: string }>
+        listPendingDeepLinks?: () => Promise<{
+          links: Array<{
+            id: number
+            uri: string
+            userNavigationGenerationAtActivation: number
+          }>
+        }>
+        clearPendingDeepLinks?: () => Promise<number>
+        acknowledgeDeepLink?: {
+          (id: number): Promise<void>
+          (id: number, authority: DeepLinkAcknowledgmentAuthority): Promise<boolean>
+        }
+        onDeepLink?: (
+          callback: (link: {
+            id: number
+            uri: string
+            userNavigationGenerationAtActivation: number
+          }) => void
+        ) => () => void
         resolve: (uri: string) => Promise<{
           drive: string
           resourceId: string
@@ -136,7 +161,10 @@ declare global {
           bytes?: number
           updatedAt?: string
         }>
-        download: (uri: string) => Promise<{
+        download: (
+          uri: string,
+          options?: { maxBytes?: number; signal?: AbortSignal }
+        ) => Promise<{
           resource: {
             drive: string
             resourceId: string
@@ -200,7 +228,8 @@ declare global {
         listChildren: (
           resourceId: string,
           drive?: string,
-          cursor?: string
+          cursor?: string,
+          options?: { signal?: AbortSignal }
         ) => Promise<{
           items: Array<{
             resourceId: string
@@ -226,6 +255,26 @@ declare global {
           grantableBits: string[]
           canCreateShare: boolean
         }>
+        zipStream: {
+          start: () => Promise<{ jobId: string }>
+          append: (jobId: string, name: string, bytes: ArrayBuffer) => Promise<{ name: string }>
+          /**
+           * Appends one entry by URI: the main process fetches the resource
+           * and writes it into the archive chunk by chunk, so the payload
+           * never crosses the IPC boundary (R1-H2).
+           */
+          appendFromUri: (
+            jobId: string,
+            name: string,
+            uri: string,
+            options?: { maxBytes?: number; signal?: AbortSignal }
+          ) => Promise<{ name: string; bytes: number }>
+          finish: (
+            jobId: string,
+            suggestedName: string
+          ) => Promise<{ saved: boolean; filePath: string | null; entryCount: number }>
+          abort: (jobId: string) => Promise<{ aborted: boolean }>
+        }
         createFolder: (
           parentResourceId: string,
           name: string,
@@ -380,8 +429,10 @@ declare global {
         moveResource: (
           resourceId: string,
           destinationId: string,
-          drive?: string,
-          ifMatch?: number
+          drive: string | undefined,
+          ifMatch: number | undefined,
+          newName: string | undefined,
+          expectedSessionGeneration: number
         ) => Promise<{ resourceId: string; version: number }>
         deleteResource: (
           resourceId: string,
@@ -734,6 +785,8 @@ declare global {
         ) => Promise<ChatMessage[]>
         appendMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
         upsertMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
+        /** Removes local user turns with no stored sign of a server answer and resolves the number removed. Rejects when a requested message that is stored is anything else. A deleted or missing chat removes nothing and resolves 0. */
+        removeMessages: (agentRef: string, chatId: string, messageIds: string[]) => Promise<number>
         replaceMessages: (
           agentRef: string,
           chatId: string,
@@ -750,7 +803,7 @@ declare global {
         getIndex: (agentRef: string) => Promise<ChatIndex>
         reconcileServerSessions: (
           agentRef: string,
-          sessions: Array<{ chatId: string; lastActivityAt?: string }>
+          sessions: Array<{ chatId: string; lastActivityAt?: string; title?: string }>
         ) => Promise<number>
         dismissOnboarding: (agentRef: string) => Promise<void>
         markUnreadTerminal: (agentRef: string, chatId: string) => Promise<void>
@@ -767,17 +820,23 @@ declare global {
           defaultPath?: string
           routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
-          // Echoed by main on `onClosed` / `onRefreshError` / `onTitleChanged`
-          // for the view this open mounts.
+          // Echoed by main on `onReleased` / `onRefreshError` / `onRefreshRecovered` /
+          // `onTitleChanged` for the view this open mounts.
           launchId: string
         }) => Promise<void>
-        close: () => Promise<void>
-        reload: () => Promise<void>
-        getLocation: () => Promise<{ appRef: string; routePath?: string } | null>
+        // Closes that launch's view only if it is still the live one.
+        close: (args: { launchId: string }) => Promise<void>
+        // Reloads that launch's view in place only if it is still the live one.
+        reload: (args: { launchId: string }) => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
-        listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
+        listPendingDeepLinks: () => Promise<{
+          links: Array<SandboxUiDeepLinkEnvelope & { userNavigationGenerationAtActivation: number }>
+        }>
         clearPendingDeepLinks: () => Promise<void>
-        acknowledgeDeepLink: (id: number) => Promise<void>
+        acknowledgeDeepLink: {
+          (id: number): Promise<void>
+          (id: number, authority: DeepLinkAcknowledgmentAuthority): Promise<boolean>
+        }
         setBounds: (bounds: {
           x: number
           y: number
@@ -811,10 +870,27 @@ declare global {
             finalUpdate: boolean
           }) => void
         ) => () => void
-        onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
-        onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => () => void
+        onDeepLink: (
+          callback: (
+            args: SandboxUiDeepLinkEnvelope & { userNavigationGenerationAtActivation: number }
+          ) => void
+        ) => () => void
+        onSessionInvalidated: (
+          callback: (event: {
+            sessionGeneration: number
+            appDeepLinkMinimumId: number
+            gfsDeepLinkMinimumId: number
+          }) => void
+        ) => () => void
+        // Once per view main tears down, whatever the reason, with the route it
+        // represented (`null`: unreadable, keep the last known one).
+        onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void
         onRefreshError: (
           callback: (args: { appRef: string; launchId: string; message: string }) => void
+        ) => () => void
+        // A refresh that `onRefreshError` reported as failed succeeded later.
+        onRefreshRecovered: (
+          callback: (args: { appRef: string; launchId: string }) => void
         ) => () => void
         onTitleChanged: (
           callback: (args: { appRef: string; launchId: string; title: string }) => void

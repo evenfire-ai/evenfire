@@ -61,7 +61,7 @@ import {
   mcpHostRuntimeTokenSecretName,
 } from './secretFactory'
 import {
-  buildWorkspaceLayoutInitContainer,
+  buildWorkspaceLayoutMergeContainer,
   decodeJwtExpMs,
   effectiveRotateBeforeMs,
   resolveStatelessImagePullPolicy,
@@ -426,9 +426,27 @@ const LEGACY_EMPTY_RUNTIME_TOKEN_REVISION = createHash('sha256')
 const WORKFLOW_TOKEN_MOUNT_PATH = '/var/run/clerum/workflow-tokens'
 const MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE_PATH = `${WORKFLOW_TOKEN_MOUNT_PATH}/${MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY}`
 const MCP_HOST_RUNTIME_AUTH_STATE_PATH = '/var/run/clerum/workflow-auth'
-// ─── Stateless lifecycle (Stage 2) ─────────────────────────────────────────
-/** Durable session-state dir, mounted from the workspace PVC's state/ subPath. */
-const STATE_MOUNT_PATH = '/var/lib/clerum/state'
+/**
+ * Restricted-PSA-compliant container securityContext shared by the mcp-host
+ * container and the workspace-layout-merge initContainer. MCC shared-tenant
+ * namespaces (mcp-host-<slug>) enforce the `restricted` PodSecurity standard;
+ * without these fields the ReplicaSet gets FailedCreate and never schedules a
+ * pod. UID/GID 1001 = the image's baked-in `nodejs` user; it must match the
+ * pod-level securityContext and the existing workspace PVC ownership so
+ * re-rolls don't EACCES. readOnlyRootFilesystem is intentionally NOT set —
+ * mcp-host writes outside its mounted /tmp + workspace volumes and restricted
+ * PSA does not require it.
+ */
+function hostContainerSecurityContext(): k8s.V1SecurityContext {
+  return {
+    allowPrivilegeEscalation: false,
+    runAsNonRoot: true,
+    runAsUser: 1001,
+    runAsGroup: 1001,
+    capabilities: { drop: ['ALL'] },
+    seccompProfile: { type: 'RuntimeDefault' },
+  }
+}
 const log = hccLogger.child({ module: 'host-reconciler' })
 
 function throwCleanupFailures(failures: unknown[], message: string): void {
@@ -3051,7 +3069,11 @@ export class HostReconciler {
         },
       },
       spec: {
-        storageClassName: config.hostWorkspaceStorageClassName,
+        // Unset: omit the field so the cluster's default StorageClass applies.
+        // An explicit "" is kept; in Kubernetes it disables dynamic provisioning.
+        ...(config.hostWorkspaceStorageClassName !== undefined
+          ? { storageClassName: config.hostWorkspaceStorageClassName }
+          : {}),
         accessModes: ['ReadWriteOnce'],
         resources: {
           requests: {
@@ -3553,8 +3575,8 @@ export class HostReconciler {
     const isStateless = effectiveLifecycle.stateless
     const image = isDesktop ? config.desktopImage : config.hostImage
     const resources = isDesktop ? config.desktopResources : config.hostResources
-    // Stage 6 (W5): stateless pods may override the pull policy (guarded —
-    // see resolveStatelessImagePullPolicy). Non-stateless pods keep the
+    // Stage 6 (W5): stateless pods may override the pull policy (a mutable
+    // image is reported, not refused — see resolveStatelessImagePullPolicy). Non-stateless pods keep the
     // global policy so their manifest stays byte-identical.
     const imagePullPolicy = isStateless
       ? this.statelessImagePullPolicyForHost(host, image)
@@ -3576,7 +3598,6 @@ export class HostReconciler {
       '/tmp',
       WORKFLOW_TOKEN_MOUNT_PATH,
       MCP_HOST_RUNTIME_AUTH_STATE_PATH,
-      ...(isStateless ? [STATE_MOUNT_PATH] : []),
     ]
     const contextMounts = mounts.filter(m => {
       const reason = HostReconciler.contextMountPathRejectionReason(m.mountPath, reservedMountPaths)
@@ -3649,11 +3670,16 @@ export class HostReconciler {
     if (grokExecutionEnabled) {
       env.push({ name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED', value: 'true' })
     }
+    // One storage layout for every lifecycle (issue #825): the conversation
+    // database lives at the workspace PVC root, so a lifecycle flip changes
+    // compute only and never where the history is read from.
+    env.push(
+      { name: 'CLERUM_SESSION_STORE', value: 'sqlite' },
+      { name: 'CLERUM_SESSION_DB_DIR', value: workspacePath }
+    )
     if (isStateless) {
       env.push(
         { name: 'CLERUM_STATELESS_LIFECYCLE', value: 'true' },
-        { name: 'CLERUM_SESSION_STORE', value: 'sqlite' },
-        { name: 'CLERUM_SESSION_DB_DIR', value: STATE_MOUNT_PATH },
         // Stage 3: the heartbeat emitter requires its own pod UID so HCC
         // can discard heartbeats from stale pods after a wake.
         {
@@ -3765,13 +3791,10 @@ export class HostReconciler {
         // (event + resync): the state lives in the CRD status, so neither a
         // routine reconcile nor an HCC restart resurrects it.
         replicas: isStateless && effectiveLifecycle.state === 'suspended' ? 0 : 1,
-        strategy: {
-          type: 'RollingUpdate',
-          rollingUpdate: {
-            maxSurge: 0,
-            maxUnavailable: 1,
-          },
-        },
+        // Recreate: the old Pod is gone before the new one starts, so two
+        // Pods never share the RWO workspace PVC (a RollingUpdate with
+        // maxSurge 0 still starts the new Pod while the old one terminates).
+        strategy: { type: 'Recreate' },
         selector: {
           matchLabels: { app: host.name },
         },
@@ -3795,12 +3818,19 @@ export class HostReconciler {
             imagePullSecrets: config.hostImagePullSecretName
               ? [{ name: config.hostImagePullSecretName }]
               : undefined,
-            // Stage 1.2: stateless Hosts migrate the workspace PVC to the
-            // dual-subPath layout before mcp-host starts. Non-stateless pods
-            // keep the pre-stateless shape untouched.
-            ...(isStateless
-              ? { initContainers: [buildWorkspaceLayoutInitContainer(image, imagePullPolicy)] }
-              : {}),
+            // While CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE is on, every Host
+            // merges a PVC split by the earlier stateless layout back to the
+            // root layout before mcp-host starts; on any other tree the init
+            // exits 0 without touching it.
+            initContainers: config.workspaceLayoutMerge
+              ? [
+                  buildWorkspaceLayoutMergeContainer(
+                    image,
+                    imagePullPolicy,
+                    hostContainerSecurityContext()
+                  ),
+                ]
+              : undefined,
             containers: [
               {
                 name: 'mcp-host',
@@ -3810,14 +3840,7 @@ export class HostReconciler {
                 envFrom: [{ configMapRef: { name: config.hostConfigMapName } }],
                 env,
                 volumeMounts: [
-                  ...(isStateless
-                    ? [
-                        // Same PVC mounted twice: workspace/ at the workspace
-                        // path, state/ at the durable session-state dir.
-                        { name: 'workspace', mountPath: workspacePath, subPath: 'workspace' },
-                        { name: 'workspace', mountPath: STATE_MOUNT_PATH, subPath: 'state' },
-                      ]
-                    : [{ name: 'workspace', mountPath: workspacePath }]),
+                  { name: 'workspace', mountPath: workspacePath },
                   {
                     name: 'mcp-host-runtime-tokens',
                     mountPath: WORKFLOW_TOKEN_MOUNT_PATH,
@@ -3859,24 +3882,7 @@ export class HostReconciler {
                     cpu: resources.limits.cpu,
                   },
                 },
-                // Restricted-PSA-compliant container securityContext. MCC
-                // shared-tenant namespaces (mcp-host-<slug>) enforce the
-                // `restricted` PodSecurity standard; without these fields the
-                // ReplicaSet gets FailedCreate and never schedules a pod.
-                // readOnlyRootFilesystem is intentionally NOT set — mcp-host
-                // writes outside its mounted /tmp + workspace volumes and
-                // restricted PSA does not require it.
-                securityContext: {
-                  allowPrivilegeEscalation: false,
-                  runAsNonRoot: true,
-                  // UID/GID 1001 = the image's baked-in `nodejs` user. Must
-                  // match the pod-level securityContext above and the existing
-                  // workspace PVC ownership so re-rolls don't EACCES.
-                  runAsUser: 1001,
-                  runAsGroup: 1001,
-                  capabilities: { drop: ['ALL'] },
-                  seccompProfile: { type: 'RuntimeDefault' },
-                },
+                securityContext: hostContainerSecurityContext(),
               },
             ],
             securityContext,
@@ -4123,6 +4129,21 @@ export class HostReconciler {
           revalidate?.()
           if (existing.spec?.volumeName) return
           pvc.metadata!.resourceVersion = existing.metadata?.resourceVersion
+          // Keep what other controllers wrote on the Pending claim: the scheduler's
+          // volume.kubernetes.io/selected-node, the provisioner annotations and the
+          // kubernetes.io/pvc-protection finalizer. buildPvc has none of them.
+          pvc.metadata!.annotations = existing.metadata?.annotations
+          pvc.metadata!.finalizers = existing.metadata?.finalizers
+          // With no class configured the claim defers to the cluster: the
+          // DefaultStorageClass admission plugin sets the class on create, or the
+          // PV controller sets it later. The apiserver allows only nil -> class on
+          // update, so the replace keeps the class the cluster chose.
+          if (
+            config.hostWorkspaceStorageClassName === undefined &&
+            existing.spec?.storageClassName !== undefined
+          ) {
+            pvc.spec!.storageClassName = existing.spec.storageClassName
+          }
           await this.coreApi.replaceNamespacedPersistentVolumeClaim({
             namespace: host.namespace,
             name,

@@ -1,9 +1,12 @@
 import { Router } from 'express'
+import { ControlApiError } from '../controlApiClient.js'
+import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import {
   type AuthedRequest,
   extractAuthToken,
   requireAuth,
   requireSelf,
+  requireSessionAuth,
 } from '../middleware/auth.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
@@ -16,6 +19,8 @@ import {
   updatePassword,
   updateProfile,
 } from '../services/meService.js'
+import { setProfileSessionCookie } from '../sessionCookie.js'
+import { PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE } from './mePasswordErrors.js'
 
 const teamDirectoryRateLimit = createRateLimiter({
   windowMs: 60_000,
@@ -69,13 +74,18 @@ export function createMeRouter(): Router {
         res.status(403).json({ error: 'You are not a member of this team' })
         return
       }
-      res.status(200).json(result)
+      const browserRequest = Boolean(req.header('origin') || req.header('sec-fetch-site'))
+      if (browserRequest) setProfileSessionCookie(req, res, result.token)
+      res.status(200).json(browserRequest ? { team: result.team } : result)
     } catch (error) {
       next(error)
     }
   })
 
-  router.get('/me', requireAuth, async (req: AuthedRequest, res, next) => {
+  // The session probe: an ended session leaves this route as a 401 with the
+  // `invalid_session` envelope, from this edge's token check or forwarded from
+  // control-api. Clients decide by the status, not by the envelope.
+  router.get('/me', requireSessionAuth, async (req: AuthedRequest, res, next) => {
     try {
       const auth = req.auth!
       const sessionToken = extractAuthToken(req)
@@ -148,6 +158,13 @@ export function createMeRouter(): Router {
         return
       }
       if (message.includes('(409)')) {
+        const upstreamError = error instanceof ControlApiError ? error.code : null
+        if (upstreamError === 'credential_changed') {
+          res
+            .status(PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE.status)
+            .json(PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE.body)
+          return
+        }
         res.status(409).json({ error: 'Password is not set' })
         return
       }
@@ -155,6 +172,7 @@ export function createMeRouter(): Router {
         res.status(400).json({ error: 'Password must be between 8 and 256 characters' })
         return
       }
+      if (sendPasswordAuthorityError(error, res)) return
       next(error)
     }
   })

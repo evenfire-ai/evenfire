@@ -10,7 +10,9 @@ export type GfsDriveResource = GfsBrowserChild & {
 
 export interface FilesPageProps {
   /** App-level toast dispatcher for success feedback (desktop-app/ui rule). */
-  pushToast?: (message: string, tone: Tone) => void
+  pushToast?: (message: string, tone: Tone, options?: { durationMs?: number }) => void
+  /** Native titlebar action slot supplied by the app shell. */
+  titlebarLeadingTarget?: HTMLElement | null
   /**
    * A `gfs://` link handed over from elsewhere in the app — today, a plugin
    * asking to open a resource this page can show better than an overlay can
@@ -18,6 +20,19 @@ export interface FilesPageProps {
    */
   pendingGfsUri?: string | null
   onPendingGfsUriHandled?: () => void
+  /** App-queued deep link whose resolve outcome controls main-process acknowledgment. */
+  pendingGfsDeepLink?: { id: number; uri: string } | null
+  /** Stable destination tab captured by the App navigation authority. */
+  workspaceTabId?: string
+  pendingGfsDeepLinkOwnerTabId?: string
+  /** Live owner/session/intent fence for this queued request. */
+  isPendingGfsDeepLinkCurrent?: () => boolean
+  /** App-owned intent ordering for explicit navigation within this Files tab. */
+  onExplicitNavigationIntent?: () => void
+  onPendingGfsDeepLinkOutcome?: (
+    id: number,
+    outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
+  ) => void
   /**
    * Reports the browser's live location so the owning files tab can persist it
    * (mini-spec 06 §3). Emits the current leaf `gfsUri` (the stable identity) and
@@ -34,7 +49,16 @@ export interface FilesPageProps {
    * the file kind and hands the descriptor up to the tab store through this
    * callback. Absent ⇒ no preview surface is available (the file downloads).
    */
-  onOpenPreview?: (preview: GfsPreviewResource) => void
+  onOpenPreview?: (preview: GfsPreviewResource) => void | boolean
+  /** Guarded preview completion for the queued resource-link request. */
+  onOpenPendingGfsPreview?: (
+    id: number,
+    preview: GfsPreviewResource,
+    returnLocation: { gfsUri: string | null; name: string | null }
+  ) => boolean
+  /** Monotonic App request to open the existing route-entry dialog. */
+  routeDialogRequestId?: number
+  onRouteDialogRequestHandled?: (requestId: number) => void
 }
 
 /**

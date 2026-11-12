@@ -8,8 +8,15 @@ import {
   MCP_HOST_CREDENTIAL_CAPABILITY,
   MCP_HOST_HCC_AUDIENCE,
   MCP_HOST_WORKFLOW_AUDIENCE,
+  verifyMcpHostControlJwt,
 } from '../src/utils/auth/mcpHostJwtToken.js'
+import { captureRequestLogs } from './helpers/requestLogCapture.js'
 import { MockGateway } from './mockGateway.js'
+
+// Every scope except the broker one: what a non-HCC control token may carry.
+const NON_BROKER_CONTROL_SCOPES = ALL_MCP_HOST_CONTROL_SCOPES.filter(
+  scope => scope !== 'oauth:user-token'
+)
 
 vi.mock('../src/services/notificationEmitter.js', () => ({
   emitNotification: vi.fn().mockResolvedValue(undefined),
@@ -98,12 +105,61 @@ describe('routes/auth/mcp-host issue', () => {
     const accessClaims = jwt.decode(res.body.mcpHostAccessToken) as Record<string, unknown>
     const refreshClaims = jwt.decode(res.body.mcpHostRefreshToken) as Record<string, unknown>
     expect(controlClaims.typ).toBe('service')
-    expect(controlClaims.scopes).toEqual(ALL_MCP_HOST_CONTROL_SCOPES)
+    // The broker scope is HCC-only; access and refresh keep the requested set.
+    expect(controlClaims.scopes).toEqual(NON_BROKER_CONTROL_SCOPES)
     expect(accessClaims.workflowControlScopes).toEqual(ALL_MCP_HOST_CONTROL_SCOPES)
     expect(refreshClaims.workflowControlScopes).toEqual(ALL_MCP_HOST_CONTROL_SCOPES)
     expect(controlClaims.scope).toBeUndefined()
     expect(controlClaims.aud).toBe('mcp-host')
     expect(controlClaims.hostRefs).toEqual(['sandbox-recipes/test-recipe'])
+    expect(controlClaims.host_uid).toBeUndefined()
+  })
+
+  it('E1: strips oauth:user-token from a WRC control token, keeps it on access/refresh, and logs it', async () => {
+    const logs = captureRequestLogs()
+    try {
+      const res = await request(app)
+        .post('/api/v1/auth/mcp-host/sandbox-recipes/test-recipe/tokens')
+        .set('Authorization', `Bearer ${signInternalControlJwt('wrc')}`)
+        .send({
+          includeMcpHostControlToken: true,
+          workflowControlScopes: ['workflow:list', 'oauth:user-token'],
+        })
+
+      expect(res.status).toBe(200)
+      const control = verifyMcpHostControlJwt(res.body.mcpHostControlToken)
+      expect(control).not.toBeNull()
+      expect(control!.scopes).toEqual(['workflow:list'])
+      expect(control!.host_uid).toBeUndefined()
+      for (const encoded of [res.body.mcpHostAccessToken, res.body.mcpHostRefreshToken]) {
+        const claims = jwt.decode(encoded) as Record<string, unknown>
+        expect(claims.workflowControlScopes).toEqual(['workflow:list', 'oauth:user-token'])
+      }
+      expect(logs.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'oauth_user_token_scope_stripped', route: 'issue' }),
+        expect.any(String)
+      )
+    } finally {
+      logs.restore()
+    }
+  })
+
+  it('does not log a scope strip when a WRC control token never asked for oauth:user-token', async () => {
+    const logs = captureRequestLogs()
+    try {
+      const res = await request(app)
+        .post('/api/v1/auth/mcp-host/sandbox-recipes/test-recipe/tokens')
+        .set('Authorization', `Bearer ${signInternalControlJwt('wrc')}`)
+        .send({ includeMcpHostControlToken: true, workflowControlScopes: ['workflow:list'] })
+
+      expect(res.status).toBe(200)
+      expect(logs.warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'oauth_user_token_scope_stripped' }),
+        expect.any(String)
+      )
+    } finally {
+      logs.restore()
+    }
   })
 
   it('does not expose the old workflow auth issuance route', async () => {
@@ -141,8 +197,32 @@ describe('routes/auth/mcp-host issue', () => {
       expect(claims.mcpCapabilities).toEqual([MCP_HOST_CREDENTIAL_CAPABILITY])
       expect(claims.hostRefs).toEqual(['trader'])
     }
-    expect(controlClaims.host_uid).toBeUndefined()
+    // F2a: the control token is bound to the Host uid HCC sent, but never
+    // carries the credential-reader capability.
+    expect(controlClaims.host_uid).toBe('host-uid-trader')
     expect(controlClaims.mcpCapabilities).toBeUndefined()
+    expect(verifyMcpHostControlJwt(res.body.mcpHostControlToken)?.host_uid).toBe('host-uid-trader')
+  })
+
+  it('F2f: a control token for a Host literally named standalone still authenticates on workflow routes', async () => {
+    const issued = await request(app)
+      .post('/api/v1/auth/mcp-host/mcp-host/standalone/tokens')
+      .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
+      .send({
+        includeMcpHostControlToken: true,
+        workflowControlScopes: ['workflow:list'],
+        host: 'standalone',
+        hostUid: 'host-uid-standalone',
+      })
+    expect(issued.status).toBe(200)
+
+    const res = await request(app)
+      .get('/api/v1/workflows')
+      .set('Authorization', `Bearer ${issued.body.mcpHostControlToken}`)
+
+    expect(res.status).not.toBe(401)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ items: [], count: 0 })
   })
 
   it('uses the workflowControlScopes declared by the trusted provisioner', async () => {

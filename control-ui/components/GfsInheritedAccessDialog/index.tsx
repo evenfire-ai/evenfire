@@ -61,10 +61,19 @@ export function GfsInheritedAccessDialog({
   const isRemove = request.mode === 'remove'
   const nextLabel = isRemove ? 'Remove' : request.nextRole ? ROLE_LABELS[request.nextRole] : ''
   const confirmLabel = isRemove ? 'Remove' : 'Update role'
-  const title = isRemove ? 'Remove from parent folder?' : 'Update role on parent folder?'
+  // A role change that touches no parent folder (only this item's own grant
+  // can be rewritten) must not promise a cascade that does not happen.
+  const touchesParentFolder = request.folders.length > 0
+  const title = isRemove
+    ? 'Remove from parent folder?'
+    : touchesParentFolder
+      ? 'Update role on parent folder?'
+      : 'Update role?'
   const lead = isRemove
     ? `Removing ${request.memberLabel} from this item will also remove them from a parent folder.`
-    : `Changing ${request.memberLabel}'s permissions on this item will also change permissions on a parent folder.`
+    : touchesParentFolder
+      ? `Changing ${request.memberLabel}'s permissions on this item will also change permissions on a parent folder.`
+      : `Changing ${request.memberLabel}'s permissions on this item changes this item's own access only.`
 
   return (
     <div
@@ -135,6 +144,12 @@ export function GfsInheritedAccessDialog({
                 </span>
               </div>
             </div>
+            {request.residualEditorFolderNames && request.residualEditorFolderNames.length > 0 ? (
+              <p className="cu-gfs-parent-update__residual">
+                Sharing entries on {request.residualEditorFolderNames.join(', ')} still grant Editor
+                access. This change does not remove them.
+              </p>
+            ) : null}
           </>
         )}
         <div className="cu-modal-panel__foot">

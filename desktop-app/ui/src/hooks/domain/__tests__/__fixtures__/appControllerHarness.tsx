@@ -57,7 +57,9 @@ function createDeferred<T>(): Deferred<T> {
 }
 
 function createSessionState(authenticated: boolean, me = HARNESS_ME) {
-  return authenticated ? { authenticated: true, me } : { authenticated: false, me: null }
+  return authenticated
+    ? { authenticated: true, me, sessionGeneration: 1 }
+    : { authenticated: false, me: null, sessionGeneration: 1 }
 }
 
 function createCatalog(agentNames: string[]) {
@@ -332,6 +334,7 @@ export function extendMockClerumForAppController(
       onDesktopSetupToken: vi.fn(() => () => undefined),
       onDesktopEnvironmentSetup,
       onExternalLogout: vi.fn(() => () => undefined),
+      onSessionCleared: vi.fn(() => () => undefined),
     },
     team: {
       list: vi.fn(async () => teamDirectoryPayload),

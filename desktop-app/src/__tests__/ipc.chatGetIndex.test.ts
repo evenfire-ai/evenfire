@@ -1,10 +1,10 @@
 /**
  * `chat:getIndex` must keep returning the index WITH its tombstones when the
- * deleted-chat cleanup retry that precedes it fails (scope changed mid-flight,
+ * background deleted-chat cleanup retry fails (scope changed mid-flight,
  * no session, unreadable chats directory). The renderer filters deleted chats
  * with those tombstones; a rejected read leaves them visible.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -60,13 +60,26 @@ beforeAll(async () => {
   binding.__setChatStoreBaseDirForTests(base)
   await binding.bindChatStoreForUser('user-a', 'env-a', { teamId: 'team-a' })
   const { registerIpcHandlers } = await import('../ipc.js')
-  registerIpcHandlers(service as unknown as AppService)
+  registerIpcHandlers(service as unknown as AppService, async () => 0)
   await call('chat:create', { agentRef: 'agent-1', chatId: 'deleted-chat' })
   const fence = await call('chat:captureDeleteFence', { expectedAuthorityScope: TEAM_A })
   await call('chat:delete', { version: 3, fence, agentRef: 'agent-1', chatId: 'deleted-chat' })
 })
 
-afterEach(() => {
+beforeEach(async () => {
+  const binding = await import('../chatStoreBinding.js')
+  vi.spyOn(binding.requireChatStore(), 'retryPendingDeleteCleanups')
+  service.getChatDeletionFenceAuthority.mockClear()
+})
+
+async function settleCleanupRetries(): Promise<void> {
+  const binding = await import('../chatStoreBinding.js')
+  const retry = vi.mocked(binding.requireChatStore().retryPendingDeleteCleanups)
+  await Promise.allSettled(retry.mock.results.map(result => result.value))
+}
+
+afterEach(async () => {
+  await settleCleanupRetries()
   authority = { authorityScope: TEAM_A, sessionGeneration: 1 }
   vi.restoreAllMocks()
 })
@@ -83,13 +96,44 @@ const tombstones = (index: unknown) =>
 
 describe('chat:getIndex', () => {
   it('returns the tombstones when the cleanup retry runs normally', async () => {
+    const binding = await import('../chatStoreBinding.js')
+    const retry = vi.mocked(binding.requireChatStore().retryPendingDeleteCleanups)
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
     const index = await call('chat:getIndex', { agentRef: 'agent-1' })
+    await settleCleanupRetries()
 
     expect(tombstones(index)).toEqual(['deleted-chat'])
     expect(service.getChatDeletionFenceAuthority).toHaveBeenCalled()
+    expect(retry).toHaveBeenCalledWith(TEAM_A, 'agent-1')
     expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('returns the index while the cleanup retry is still pending', async () => {
+    const binding = await import('../chatStoreBinding.js')
+    const retry = vi.mocked(binding.requireChatStore().retryPendingDeleteCleanups)
+    let releaseCleanup!: () => void
+    let done = false
+    retry.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          releaseCleanup = () => {
+            done = true
+            resolve()
+          }
+        })
+    )
+
+    const index = await call('chat:getIndex', { agentRef: 'agent-1' })
+
+    // Witness: the retry was started for this agent and is still pending.
+    expect(retry).toHaveBeenCalledWith(TEAM_A, 'agent-1')
+    expect(done).toBe(false)
+    expect(tombstones(index)).toEqual(['deleted-chat'])
+
+    releaseCleanup()
+    await settleCleanupRetries()
+    expect(done).toBe(true)
   })
 
   it('still returns the tombstones when the session scope changed during the retry', async () => {
@@ -101,6 +145,7 @@ describe('chat:getIndex', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
     const index = await call('chat:getIndex', { agentRef: 'agent-1' })
+    await settleCleanupRetries()
 
     // Liveness witness: the retry ran and failed, and the failure was reported.
     const report = warn.mock.calls.find(entry => String(entry[0]).includes('[chat:getIndex]'))
@@ -111,13 +156,16 @@ describe('chat:getIndex', () => {
 
   it('runs the cleanup retry without a failure report after a team switch of the same user', async () => {
     authority = { authorityScope: TEAM_B, sessionGeneration: 2 }
-    service.getChatDeletionFenceAuthority.mockClear()
+    const binding = await import('../chatStoreBinding.js')
+    const retry = vi.mocked(binding.requireChatStore().retryPendingDeleteCleanups)
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
     const index = await call('chat:getIndex', { agentRef: 'agent-1' })
+    await settleCleanupRetries()
 
-    // Liveness witness: the retry consulted the authority (it did run) and returned the index.
+    // Liveness witness: the retry ran with the new team's authority and returned the index.
     expect(service.getChatDeletionFenceAuthority).toHaveBeenCalledTimes(1)
+    expect(retry).toHaveBeenCalledWith(TEAM_B, 'agent-1')
     expect(tombstones(index)).toEqual(['deleted-chat'])
     expect(warn).not.toHaveBeenCalled()
   })
@@ -127,6 +175,7 @@ describe('chat:getIndex', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
     const index = await call('chat:getIndex', { agentRef: 'agent-1' })
+    await settleCleanupRetries()
 
     const report = warn.mock.calls.find(entry => String(entry[0]).includes('[chat:getIndex]'))
     expect(String((report?.[1] as Error).message)).toBe('Not authenticated')
@@ -140,6 +189,7 @@ describe('chat:getIndex', () => {
     const readdir = vi.spyOn(fs, 'readdir')
 
     const index = await call('chat:getIndex', { agentRef: 'agent-1' })
+    await settleCleanupRetries()
 
     expect(retry).toHaveBeenCalledWith(TEAM_A, 'agent-1')
     expect(readdir.mock.calls.map(entry => String(entry[0]))).not.toContain(
@@ -159,12 +209,14 @@ describe('chat:getIndex', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
     const index = await call('chat:getIndex', { agentRef: 'agent-1' })
+    await settleCleanupRetries()
 
     const report = warn.mock.calls.find(entry => String(entry[0]).includes('[chat:getIndex]'))
     expect(String(report?.[0])).toContain('(EACCES)')
     expect(tombstones(index)).toEqual(['deleted-chat'])
     // The sweep that failed stays armed: the next read walks the directory again.
     await call('chat:getIndex', { agentRef: 'agent-1' })
+    await settleCleanupRetries()
     const userDir = join(base, 'env-a', 'user-a')
     expect(readdir.mock.calls.map(entry => String(entry[0]))).toEqual([userDir, userDir])
   })

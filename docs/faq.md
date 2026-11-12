@@ -48,7 +48,7 @@ Details (category-level, no product rankings):
 
 - The #1 cause: no real LLM API key in `.env`. With no key, setup gives the
   Host `openai/gpt-5.4-mini` with a placeholder key and warns that the agent
-  will not reply. Fix `.env`, then `make minikube-setup ARGS="--skip-build"`.
+  will not reply. Fix `.env`, then `make minikube-setup REUSE_DB=true ARGS="--skip-build"`.
 - How setup picks the Host model: an explicit `CLERUM_MODEL_PROVIDER` wins
   (with `CLERUM_MODEL_NAME`, or that provider's default model). Without it,
   setup takes the provider of the first key present, in the order
@@ -56,10 +56,25 @@ Details (category-level, no product rankings):
   that provider's default model. Several keys do **not** stop setup: the
   first one in that order wins, so set `CLERUM_MODEL_PROVIDER` when that is
   not the provider you want.
-- Setup stops (exit 1, before the Host is applied) when `CLERUM_MODEL_NAME` is
-  set without `CLERUM_MODEL_PROVIDER`, or when the resulting pair is not an
-  enabled row of the model allowlist (`HOST_MODEL_UNKNOWN`,
-  `HOST_MODEL_DISABLED`, `HOST_MODEL_CHECK_FAILED`). See
+- Setup stops (exit 1) when `CLERUM_MODEL_NAME` is set without
+  `CLERUM_MODEL_PROVIDER`.
+- No model catalog ships with the install: control-api enables models from
+  models.dev, so setup needs egress to models.dev and waits for the first
+  sync. `CATALOG_SYNC_VENDORED_ONLY` or `CATALOG_SYNC_PENDING` in the output
+  means that sync used only the offline snapshot or had not run yet (no egress,
+  or `MODELS_DEV_API_URL` unreachable). Nothing is auto-enabled then.
+- On minikube, setup adds or enables the Host's model through the admin API in
+  Step 10 when the catalog did not (the zai default `glm-5.1` is not on
+  models.dev; with the default policy, Bailian models are not auto-enabled).
+  It then stops if the model is still not enabled (`HOST_MODEL_UNKNOWN`, `HOST_MODEL_DISABLED`,
+  `HOST_MODEL_CHECK_FAILED`), or if the admin API refused
+  (`LLM_MODEL_ENSURE_FAILED`). On a reused DB (`REUSE_DB=true`) it does not
+  re-enable a model that was already disabled, or re-create one an operator
+  removed (`HOST_MODEL_DISABLED`, `HOST_MODEL_DISMISSED`); enable it under
+  **LLM models** in the Control UI. `LLM_MODEL_ENSURE_BEFORE_CATALOG` means the
+  model was added before the live catalog synced, so it has no catalog price.
+  With `--defer-bootstrap-seed` setup only warns (`HOST_MODEL_PENDING`).
+  Outside minikube, an admin enables the model by hand. See
   [LLM providers](llm-providers/README.md#47-local-minikube-make-minikube-setup).
 - `make minikube-status` — every deployment should show READY.
 - With `make minikube-pf-all` running:
@@ -72,9 +87,11 @@ allowlist it in the Context: [Add an MCP server](how-to/add-mcp-server.md).
 
 ### Telegram bot ignores me
 
-Your numeric user id must be allowlisted
-(`CLERUM_TELEGRAM_USER_ID` in `.env`, or CRD `userIds`). Usernames alone are
-not enough. See [Connect Telegram](how-to/connect-telegram.md).
+The sender must be allowed on the channel: the access list of a channel
+created in the Control UI's External Channels page, or the numeric Telegram
+user ids in CRD `userIds` (usernames alone are not enough). On minikube,
+`.env` Telegram variables do not configure the channel; create it in the
+Control UI. See [Connect Telegram](how-to/connect-telegram.md).
 
 ## Platform
 
@@ -113,7 +130,7 @@ dmg/squirrel/deb/rpm/zip, covering macOS, Windows, and Linux. See
 
 ### How many CRDs are there?
 
-Eight under `clerum.io`: Host, Context, McpServer, CommunicationChannel,
+Nine under `clerum.io`: Host, Context, McpServer, LlmHook, CommunicationChannel,
 WorkflowRecipe, WorkflowRecipePolicy, SharedFileSystem, GlobalFileSystem.
 Index: [CRDs](crds/README.md).
 

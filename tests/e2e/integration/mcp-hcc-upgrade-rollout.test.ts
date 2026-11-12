@@ -31,7 +31,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   MCP_SERVERS_NAMESPACE,
   ROLLOUT_TIMEOUT_MS,
-  TEST_CONTEXT_REF,
   adminLogin,
   clusterDiagnostics,
   deleteMcpServerFixture,
@@ -288,7 +287,6 @@ metadata:
   name: ${name}
   namespace: ${MCP_SERVERS_NAMESPACE}
 spec:
-  contextRef: ${TEST_CONTEXT_REF}
   description: "issue #223 upgrade E2E fixture — no envSecret, must never roll"
   image: clerum/mock-mcp-server:test
   transport:

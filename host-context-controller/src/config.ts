@@ -93,18 +93,19 @@ export interface Config {
   hostImage: string
   hostImagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
   // Pull policy override for STATELESS host pods (Stage 6, W5). Empty =
-  // inherit hostImagePullPolicy. IfNotPresent is honored only for immutable
-  // image references (@sha256: digest or a sha-<gitsha> tag); a mutable
-  // reference is refused loudly (error log + StatelessPullPolicyRejected
-  // condition) and the pod keeps Always — see hostReconciler's
-  // resolveStatelessImagePullPolicy.
+  // inherit hostImagePullPolicy. The configured policy is always applied.
+  // IfNotPresent on a mutable image reference (no @sha256: digest, tag not
+  // sha-<gitsha>) is only reported: a once-per-(host,image) warning and the
+  // advisory StatelessPullPolicyRejected=True condition. Always is not
+  // enforced — see resolveStatelessImagePullPolicy.
   statelessImagePullPolicy: '' | 'Always' | 'IfNotPresent' | 'Never'
   mcpServerImagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
   hostImagePullSecretName: string
   hostPort: number
   hostConfigMapName: string
   hostServiceAccountName: string
-  hostWorkspaceStorageClassName: string
+  // Unset: the PVC omits storageClassName and the cluster default class applies.
+  hostWorkspaceStorageClassName: string | undefined
   hostWorkspaceStorageSize: string
   hostWorkspacePath: string
   hostResources: {
@@ -205,6 +206,10 @@ export interface Config {
   // per-Host events (ADDED/MODIFIED/DELETED/wake) are admitted outside this
   // budget. Integer 1..8, default 2 (see parseHostFullReconcileConcurrency).
   hostFullReconcileConcurrency: number
+
+  // Render the `workspace-layout-merge` init on every Host (see
+  // parseWorkspaceLayoutMerge). Default true.
+  workspaceLayoutMerge: boolean
 
   // Periodic SharedFileSystem fullReconcile interval (seconds). The SFS watch
   // fires only on SFS CRD changes, not on PVC binding / wfc pod readiness, so
@@ -389,6 +394,22 @@ export function parseHostFullReconcileConcurrency(raw: string | undefined): numb
   return parsed
 }
 
+/**
+ * CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE — whether Host Deployments render the
+ * `workspace-layout-merge` init that moves a PVC split by the earlier stateless
+ * layout back to the root layout. The merge is needed once per Host; a cluster
+ * turns it off once every Host has started with it. Unset or empty means true,
+ * so a deploy that ships this HCC merges without an overlay change. Only the
+ * exact strings 'true' and 'false' are accepted: a typo read as false would
+ * start split Hosts on an empty database without any error.
+ */
+export function parseWorkspaceLayoutMerge(raw: string | undefined): boolean {
+  if (raw === undefined || raw === '') return true
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE must be 'true' or 'false', got '${raw}'`)
+}
+
 export function validateRemovedStatelessCommunicationChannelPolicy(raw: string | undefined): void {
   if (raw === undefined || raw.trim() === '') return
   throw new Error(
@@ -406,7 +427,7 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
 
 /**
  * Parse CLERUM_MCP_SERVERS JSON for dev mode.
- * Format: [{"name": "...", "spec": {"contextRef": "...", "transport": {...}}}]
+ * Format: [{"name": "...", "spec": {"image": "...", "transport": {...}}}]
  */
 function parseDevMcpServers(): McpServerCRD[] {
   const serversJson = process.env.CLERUM_MCP_SERVERS
@@ -633,9 +654,15 @@ export const config: Config = {
   // (deploy/base/llm-hooks/networkpolicies.yaml: deny-all ingress + egress),
   // with per-pod-key ingress and scoped CoreDNS emitted by LlmHookReconciler
   // only for hooks that declare egressBindings.
+  //
+  // mcp-host is not listed either: it keeps static policies
+  // (deploy/base/mcp-host/networkpolicies.yaml) under the names HCC would
+  // write; they carry no HCC ownership label, so listing mcp-host makes HCC's
+  // startup NetworkPolicy pass fail on conflicting ownership. The default
+  // equals the deploy/base value.
   runtimeNamespaces: getEnv(
     'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
-    'mcp-server,mcp-host,sandbox-recipes,rpc-proxy'
+    'mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui'
   )!.split(','),
 
   // DNS infrastructure CIDR for GKE NodeLocal DNSCache / kube-dns. Empty
@@ -648,8 +675,9 @@ export const config: Config = {
   // allow-k8s-api. Use this for namespaces whose pods are not K8s clients
   // and don't consume the HCC discovery API (e.g. third-party UI workloads
   // that only need to serve HTTP back to a single ingress source).
-  // Empty by default → all runtime namespaces get the full infra set.
-  minimalInfraNamespaces: getEnv('CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES', '')!
+  // Defaults to sandbox-ui, matching deploy/base. Set "" to give every runtime
+  // namespace the full infra set.
+  minimalInfraNamespaces: getEnv('CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES', 'sandbox-ui')!
     .split(',')
     .map(s => s.trim())
     .filter(s => s.length > 0),
@@ -685,14 +713,11 @@ export const config: Config = {
     | 'Always'
     | 'IfNotPresent'
     | 'Never',
-  hostImagePullSecretName: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', 'clerum')!,
+  hostImagePullSecretName: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', '')!,
   hostPort: getEnvInt('CONTEXT_MAPPER_HOST_PORT', 8080),
   hostConfigMapName: getEnv('CONTEXT_MAPPER_HOST_CONFIGMAP_NAME', 'mcp-host-config')!,
   hostServiceAccountName: getEnv('CONTEXT_MAPPER_HOST_SERVICE_ACCOUNT', 'mcp-host')!,
-  hostWorkspaceStorageClassName: getEnv(
-    'CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS',
-    'do-block-storage-retain'
-  )!,
+  hostWorkspaceStorageClassName: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS'),
   hostWorkspaceStorageSize: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_SIZE', '10Gi')!,
   hostWorkspacePath: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_PATH', '/workspace')!,
   hostResources: {
@@ -732,7 +757,7 @@ export const config: Config = {
     | 'Always'
     | 'IfNotPresent'
     | 'Never',
-  wfcImagePullSecretName: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET', 'clerum')!,
+  wfcImagePullSecretName: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET', '')!,
   wfcPort: getEnvInt('CONTEXT_MAPPER_WFC_PORT', 8086),
   wfcInitImage: getEnv('CONTEXT_MAPPER_WFC_INIT_IMAGE', 'busybox:1.36')!,
   wfcResources: {
@@ -816,6 +841,9 @@ export const config: Config = {
   hostFullReconcileConcurrency: parseHostFullReconcileConcurrency(
     getEnv('HCC_HOST_FULL_RECONCILE_CONCURRENCY')
   ),
+  workspaceLayoutMerge: parseWorkspaceLayoutMerge(
+    process.env.CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE
+  ),
 
   // Periodic SharedFileSystem resync (default 60s). Re-evaluates PVC bind + wfc
   // readiness so a transient Initializing/Degraded converges to Ready (#592).
@@ -834,22 +862,24 @@ export const config: Config = {
   runtimeTokenRotateBeforeSec: getEnvInt('CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S', 86_400),
 
   // Periodic external-egress DNS resync. Lowered from the legacy 5 min to 60s so
-  // it sits below the 300s overlap window: accumulated IPs are refreshed before
-  // they expire, closing the #299 rotation gap. 0 disables (reintroduces the
-  // stale-snapshot risk; only for operators who explicitly opt out).
+  // it sits at or below half the overlap window (default 3600s): accumulated IPs
+  // are refreshed before they expire, closing the #299 rotation gap. 0 disables
+  // (reintroduces the stale-snapshot risk; only for operators who explicitly
+  // opt out).
   externalEgressResyncIntervalSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 60),
   externalEgressDnsResolveTimeoutMs: parseExternalEgressDnsTimeoutMs(
     getEnv('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS')
   ),
-  externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 300),
+  externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 3600),
   externalEgressRefreshFloorSec: getExternalEgressEnvInt(
     'HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC',
     5
   ),
   externalEgressMaxEntries: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_MAX_ENTRIES', 128),
 
-  // Plugin image-host allowlist (Phase 2.3). Permissive default = current
-  // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit mode).
+  // Plugin image-host allowlist (Phase 2.3). Default from @clerum/image-policy:
+  // the deploy/base list plus registry.evenfire.ai/; enforce defaults to false
+  // (audit mode).
   allowedPluginImagePrefixes: getEnv(
     'CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES',
     [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES].join(',')

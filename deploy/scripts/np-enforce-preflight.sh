@@ -4,7 +4,8 @@
 #
 # Read-only. Run this and get a clean exit BEFORE flipping enforcement — the
 # 2026-05-15 attempt was rolled back because allow-k8s-api-egress-* targeted
-# the wrong IP. See docs/deploy/gcp.md §7 for the full runbook.
+# the wrong IP. See docs/deploy/production.md (Recommended rollout order /
+# Security non-negotiables) for the surrounding production guidance.
 #
 # Checks (blockers fail the run; the label audit is a WARN):
 #   0. Current NetworkPolicy enforcement state            (informational)
@@ -76,34 +77,7 @@ if [ -n "$OVERLAY" ]; then
     exit 2
   fi
   DERIVED="$(
-    kubectl kustomize "$OVERLAY_DIR" 2>/dev/null | RUBYOPT=--disable=gems ruby -ryaml -e '
-      docs = YAML.load_stream(STDIN.read).select { |doc| doc.is_a?(Hash) }
-      quote = lambda { |value| "'"'"'" + value.gsub("'"'"'", "'"'"'\\\\'"'"''"'"'") + "'"'"'" }
-      namespaces = docs
-        .select { |doc| doc["kind"] == "Namespace" && (doc.dig("metadata", "labels") || {})["app.kubernetes.io/part-of"] == "clerum" }
-        .map { |doc| doc.dig("metadata", "name") }
-        .compact
-        .uniq
-        .sort
-      static_k8s = docs
-        .select { |doc| doc["kind"] == "NetworkPolicy" }
-        .map { |doc| [doc.dig("metadata", "namespace"), doc.dig("metadata", "name")] }
-        .select { |_ns, name| name&.start_with?("allow-k8s-api-egress-") }
-        .map(&:first)
-        .compact
-      hcc = docs.find { |doc| doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "host-context-controller" }
-      env = (((hcc || {}).dig("spec", "template", "spec", "containers") || []).first || {})["env"] || []
-      env_value = lambda do |name|
-        item = env.find { |entry| entry["name"] == name }
-        (item && item["value"] || "").split(",").map(&:strip).reject(&:empty?)
-      end
-      runtime = env_value.call("CONTEXT_MAPPER_RUNTIME_NAMESPACES")
-      minimal = env_value.call("CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES")
-      k8s_api = (static_k8s + (runtime - minimal)).uniq.sort
-      puts "ALL_NAMESPACES=#{quote.call(namespaces.join(" "))}"
-      puts "K8S_API_NAMESPACES=#{quote.call(k8s_api.join(" "))}"
-      puts "RUNTIME_NAMESPACES=#{quote.call(runtime.join(" "))}"
-    '
+    kubectl kustomize "$OVERLAY_DIR" | RUBYOPT=--disable=gems ruby -ryaml "$REPO_ROOT/deploy/scripts/np-preflight-inventory.rb"
   )"
   if [ -z "$DERIVED" ]; then
     echo "ERROR: failed to derive namespace inventory from overlay $OVERLAY" >&2

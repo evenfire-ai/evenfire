@@ -3,8 +3,6 @@
   "body": {
     "serverName": "atlassian",
     "namespace": "mcp-server",
-    "contextRef": "research",
-    "contextUpdated": true,
     "clientMode": "public",
     "registrationMode": "dcr",
     "callbackVariant": "per-server",

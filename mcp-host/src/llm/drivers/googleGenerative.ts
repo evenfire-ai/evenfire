@@ -26,6 +26,7 @@ import {
 } from '../../core/types'
 import type { ProviderCredentials } from '../../types'
 import { classifyUnknown } from '../errorClassification'
+import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
 import type { LlmProvider } from '../registryCore'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
 
@@ -316,8 +317,13 @@ export function classifyGoogleError(err: unknown): ClassifiedError {
       return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
     if (httpStatus >= 500 && httpStatus < 600)
       return { code: LlmErrorCode.ModelOverloaded, retryable: true, message, ...diag }
+    // #1433: an HTTP 400 on the call. Either Vertex refused the request, or
+    // Google's token endpoint refused the service-account credential
+    // (`invalid_grant`) and no request reached Vertex (#1437). Both are
+    // reported as a rejected request, not retryable. Same label as the other
+    // providers' HTTP 400.
     if (httpStatus === 400)
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
+      return { code: LlmErrorCode.UpstreamRejected, retryable: false, message, ...diag }
   }
 
   switch (statusString) {
@@ -333,9 +339,10 @@ export function classifyGoogleError(err: unknown): ClassifiedError {
     case 'NOT_FOUND':
       // gRPC equivalent of a 404 — retired/inaccessible model.
       return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
+    // gRPC equivalents of the HTTP 400 above (#1433).
     case 'INVALID_ARGUMENT':
     case 'FAILED_PRECONDITION':
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
+      return { code: LlmErrorCode.UpstreamRejected, retryable: false, message, ...diag }
   }
 
   return classifyUnknown(err)
@@ -361,7 +368,9 @@ export interface VertexClientOptions {
 }
 
 /**
- * Pure: derive the Vertex client options from the credential bag + pod env,
+ * Pure: derive the Vertex client options from the credential bag + the
+ * non-secret provider env (`env`: per-Host `host-<ref>-env` via ConfigStore in a
+ * Host pod, `process.env` by default),
  * constructing the auth credentials IN MEMORY from the service-account JSON —
  * never via a `GOOGLE_APPLICATION_CREDENTIALS` file. `VERTEX_PROJECT_ID`
  * (falling back to the JSON's `project_id`) is required; `VERTEX_LOCATION`
@@ -370,7 +379,10 @@ export interface VertexClientOptions {
  * {@link buildGoogleGenerativeDriver} so all the wiring is testable without the
  * SDK.
  */
-export function buildVertexClientOptions(credentials: ProviderCredentials): VertexClientOptions {
+export function buildVertexClientOptions(
+  credentials: ProviderCredentials,
+  env: ProviderEnvLookup = processEnvLookup
+): VertexClientOptions {
   const rawJson = credentials['vertex-service-account-json']
   if (!rawJson) throw new Error('vertex: missing service-account JSON credential')
 
@@ -385,9 +397,9 @@ export function buildVertexClientOptions(credentials: ProviderCredentials): Vert
     throw new Error('vertex: service-account JSON missing client_email/private_key')
   }
 
-  const projectId = process.env.VERTEX_PROJECT_ID || sa.project_id
+  const projectId = env('VERTEX_PROJECT_ID')?.trim() || sa.project_id
   if (!projectId) throw new Error('vertex: VERTEX_PROJECT_ID is required')
-  const location = process.env.VERTEX_LOCATION || 'us-central1'
+  const location = env('VERTEX_LOCATION')?.trim() || 'us-central1'
 
   return {
     vertexai: true,
@@ -409,9 +421,10 @@ export function buildVertexClientOptions(credentials: ProviderCredentials): Vert
  */
 export function buildGoogleGenerativeDriver(
   credentials: ProviderCredentials,
-  model: string
+  model: string,
+  env: ProviderEnvLookup = processEnvLookup
 ): SingleTurnProvider {
-  const options = buildVertexClientOptions(credentials)
+  const options = buildVertexClientOptions(credentials, env)
 
   // Lazy CommonJS require — only reached for a Vertex Host.
 

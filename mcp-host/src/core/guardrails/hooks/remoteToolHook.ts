@@ -7,11 +7,14 @@
  *
  * `pre_tool_use` request body = `{ tool, arguments }` (the resolved identity +
  * args); response = `{ decision?, reasonCode?, updatedInput?, additionalContext? }`.
- * Phase 3 increment: PreToolUse; PostToolUse (post-execution result transform)
- * is a later increment.
+ * Every dial goes through the shared guarded transport (`guardHookFetcher`), so
+ * the tool lane honours quarantine (§8.2), the §8.6 circuit breaker and the hard
+ * deadline exactly like the LLM lane.
  */
 import type { ToolIdentity } from '../tool/provenance'
 import type { Capability, Contributor } from '../types'
+import { DEFAULT_HOOK_HARD_DEADLINE_MS, guardHookFetcher } from './guardedFetch'
+import { type HookBreakerRegistry, defaultBreakerRegistry } from './hookBreaker'
 import type { HookDescriptor, HookFetcher } from './types'
 
 type ToolContributor = Contributor<Record<string, unknown>, string>
@@ -27,10 +30,19 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 export class RemoteToolHook {
+  private readonly fetch: HookFetcher
+
   constructor(
     private readonly descriptor: HookDescriptor,
-    private readonly fetch: HookFetcher
-  ) {}
+    fetch: HookFetcher,
+    /** Shared with the LLM lane so a trip is per-hook, not per-lane (§8.6). */
+    breakers: HookBreakerRegistry = defaultBreakerRegistry,
+    /** Injectable clock for deterministic breaker tests. */
+    now: () => number = () => Date.now(),
+    hardDeadlineMs: number = DEFAULT_HOOK_HARD_DEADLINE_MS
+  ) {
+    this.fetch = guardHookFetcher({ descriptor, fetch, breakers, now, hardDeadlineMs })
+  }
 
   private has(cap: Capability): boolean {
     return this.descriptor.capabilities.includes(cap)

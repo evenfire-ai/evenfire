@@ -1,16 +1,17 @@
 {
   "name": "workload-recipes-controller",
-  "version": "0.1.479",
+  "version": "0.1.493",
   "description": "Workload Recipes Controller (WRC) - WorkloadRecipe lifecycle management and MCP server interface",
   "main": "dist/main.js",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.22.1"
   },
   "scripts": {
     "build": "tsc -b",
     "build:docker": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "dev": "ts-node src/main.ts",
+    "pretest": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "cd tests/e2e && npx vitest run --config vitest.config.ts",

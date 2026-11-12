@@ -27,7 +27,7 @@ No API keys or secrets are required.
 docker build -t doc-generator-mcp:latest .
 ```
 
-Multi-stage `node:24-alpine` build; runs as a non-root `mcp` user (uid 1001) that owns `/output`. That command is the only way this image comes into being: build it yourself and push it wherever your cluster pulls from.
+Multi-stage `node:24.22.1-alpine` build; runs as a non-root `mcp` user (uid 1001) that owns `/output`. That command is the only way this image comes into being: build it yourself and push it wherever your cluster pulls from.
 
 This image is not part of the repo's image system. It has no row in `deploy/images.json`, no entry in the `.github/workflows/build-publish.yml` publish matrix, and no `ghcr.io/evenfire-ai/doc-generator-mcp` to pull — nothing ever pushed one. Minikube setup neither builds it nor pulls it. Its sibling MCP servers (`airtable-mcp-server`, `web-search-mcp`, `playwright-server`) are published to ghcr, which is what lets the evenfire registry install them on demand; this one was never published, so the row was removed rather than left pointing at an image obtainable nowhere.
 

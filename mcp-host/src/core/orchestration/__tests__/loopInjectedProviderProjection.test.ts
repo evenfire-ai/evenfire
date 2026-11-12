@@ -13,6 +13,8 @@ import { ClaudeProvider } from '../../../llm/claude'
 import { CodexSubscriptionProvider } from '../../../llm/codexSubscription'
 import { GrokSubscriptionProvider } from '../../../llm/grokSubscription'
 import { OpenAIProvider } from '../../../llm/openai'
+import { officialChatProfile } from '../../../llm/openaiFamily/__tests__/familyHarness'
+import { recordedResponse } from '../../../llm/openaiFamily/__tests__/responsesFixtures'
 import type { ChatMessage } from '../../types'
 import { isLoopInjectedMessage, loopInjectedUserMessage } from '../toolUseLoopMessages'
 
@@ -43,12 +45,16 @@ function expectNoMarker(body: unknown): void {
 }
 
 describe('LM1 the loopInjected marker never reaches a provider request body', () => {
-  it('OpenAI chat completions', async () => {
+  it('OpenAI Chat serializer (official profile pinned to Chat)', async () => {
     const create = vi.fn().mockResolvedValue({
       choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
     })
-    const provider = new OpenAIProvider({ chat: { completions: { create } } } as never, 'gpt-4o')
+    const provider = new OpenAIProvider(
+      { chat: { completions: { create } } } as never,
+      'gpt-4o',
+      officialChatProfile()
+    )
 
     await provider.completeSingleTurnWithTools(conversation(), TOOLS)
 
@@ -58,6 +64,22 @@ describe('LM1 the loopInjected marker never reaches a provider request body', ()
       { role: 'user', content: GENUINE_TEXT },
       { role: 'assistant', content: ASSISTANT_TEXT },
       { role: 'user', content: INJECTED_TEXT },
+    ])
+    expectNoMarker(body)
+  })
+
+  it('OpenAI responses (the official endpoint)', async () => {
+    const create = vi.fn(async (_body: unknown) => recordedResponse('v1-text-gpt-4.1'))
+    const provider = new OpenAIProvider({ responses: { create } } as never, 'gpt-4.1')
+
+    await provider.completeSingleTurnWithTools(conversation(), TOOLS)
+
+    expect(create).toHaveBeenCalledTimes(1)
+    const body = create.mock.calls[0]![0] as { input: unknown[] }
+    expect(body.input).toEqual([
+      { type: 'message', role: 'user', content: GENUINE_TEXT },
+      { type: 'message', role: 'assistant', content: ASSISTANT_TEXT },
+      { type: 'message', role: 'user', content: INJECTED_TEXT },
     ])
     expectNoMarker(body)
   })

@@ -146,3 +146,89 @@ describe('discoverAuthorizationServerMetadata — kernel §4 (inv.6)', () => {
     expect(outcome.error.kind).toBe('kernel_rejected')
   })
 })
+
+describe('discoverAuthorizationServerMetadata — issuer identity (RFC 8414 §3.3 / §2)', () => {
+  const notionWellKnown = 'https://mcp.notion.com/.well-known/oauth-authorization-server'
+
+  // The operator's typed URL only locates the well-known documents (built from its
+  // origin and path); its query, fragment or userinfo are not part of the issuer the
+  // AS must declare.
+  for (const typed of [
+    'https://mcp.notion.com?tenant=x',
+    'https://mcp.notion.com?',
+    'https://mcp.notion.com#',
+    'https://u:p@mcp.notion.com',
+  ]) {
+    it(`accepts the bare issuer when the operator types ${typed}`, async () => {
+      const outcome = await discoverAuthorizationServerMetadata(
+        typed,
+        deps(asOnlyTransport(notionWellKnown, NOTION_AS_JSON))
+      )
+      expect(outcome.ok).toBe(true)
+      if (outcome.ok) expect(outcome.result.issuer).toBe('https://mcp.notion.com')
+    })
+  }
+
+  // The PRM fallback follows `authorization_servers[0]`, a third party's claim of the
+  // AS identifier: it stays strict, so a decorated one never matches a bare issuer.
+  const prmFallback = (advertised: string) => {
+    const asJson = JSON.stringify({
+      ...JSON.parse(NOTION_AS_JSON),
+      issuer: 'https://as.example.com',
+    })
+    const pilot = {
+      ...PILOTS.notion,
+      prm: {
+        ...PILOTS.notion.prm,
+        json: JSON.stringify({
+          ...JSON.parse(PILOTS.notion.prm.json),
+          authorization_servers: [advertised],
+        }),
+      },
+      as: { url: 'https://as.example.com/.well-known/oauth-authorization-server', json: asJson },
+      asExtra: [
+        {
+          url: 'https://as.example.com/.well-known/openid-configuration',
+          status: 200,
+          json: asJson,
+        },
+      ],
+    }
+    // The typed MCP URL has a path, so issuer-first finds no AS and the PRM decides.
+    return discoverAuthorizationServerMetadata(pilot.mcpUrl, deps(makeDiscoveryTransport(pilot)))
+  }
+
+  it('control: the PRM fallback accepts a bare authorization_servers[0]', async () => {
+    const outcome = await prmFallback('https://as.example.com')
+    expect(outcome.ok).toBe(true)
+    if (outcome.ok) expect(outcome.result.issuer).toBe('https://as.example.com')
+  })
+
+  for (const advertised of ['https://as.example.com?', 'https://u:p@as.example.com']) {
+    it(`rejects a PRM authorization_servers[0] of ${advertised}`, async () => {
+      const outcome = await prmFallback(advertised)
+      expect(outcome.ok).toBe(false)
+      if (!outcome.ok) expect(outcome.error.kind).toBe('issuer_mismatch')
+    })
+  }
+
+  for (const issuer of [
+    'https://mcp.notion.com?',
+    'https://mcp.notion.com#f',
+    'https://u:p@mcp.notion.com',
+  ]) {
+    it(`rejects an AS whose issuer is ${issuer}`, async () => {
+      const asJson = JSON.stringify({ ...JSON.parse(NOTION_AS_JSON), issuer })
+      const transport: PinnedTransport = async ({ url }) =>
+        url === notionWellKnown || url === 'https://mcp.notion.com/.well-known/openid-configuration'
+          ? { status: 200, headers: { 'content-type': 'application/json' }, bodyText: asJson }
+          : { status: 404, headers: {}, bodyText: 'not found' }
+      const outcome = await discoverAuthorizationServerMetadata(
+        'https://mcp.notion.com',
+        deps(transport)
+      )
+      expect(outcome.ok).toBe(false)
+      if (!outcome.ok) expect(outcome.error.kind).toBe('issuer_mismatch')
+    })
+  }
+})

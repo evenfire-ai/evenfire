@@ -62,6 +62,7 @@ done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh"
+CODEX_SCRATCH_ROOT="$TMP_ROOT" node --test "$ROOT/scripts/tests/password-recovery-suite-contract.test.mjs"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
@@ -91,10 +92,14 @@ finally:
         pass
 PY
 grep -Fq 't0.sh' "$T2"
+# T1 keeps durable reporter evidence (structure and results, no free text) and
+# fails when it cannot be written.
+grep -Fq 't1-reporter-projection.py' "$T1"
+grep -Fq 'T1 reporter evidence could not be persisted' "$T1"
 grep -Fq 'T0_SHELLCHECK=PASS' "$T0"
 grep -Fq 'npm run build' "$T0"
 grep -Fq 'npm test' "$T0"
-grep -Fq 'if [ "${#package_dirs[@]}" -gt 0 ]' "$T0"
+grep -Fq 'if [ -n "$package_list" ]' "$T0"
 grep -Fq 'Ready pod owner ReplicaSet could not be verified' "$ROOT/deploy/scripts/lib/gfs-credential-rollout.sh"
 grep -Fq 'treating marker as stale' "$ROOT/scripts/minikube/pre-gate-sync.sh"
 for identity_file in "$COMMON" "$ROOT/scripts/minikube/sync-auth-key.sh" "$ROOT/scripts/minikube/require-t2-mutation-lock.sh" "$ROOT/scripts/minikube/pre-gate-sync.sh"; do
@@ -440,6 +445,52 @@ cleanup() {
   rm -rf "$tmp"
 }
 trap cleanup EXIT
+
+# The parent T2 record names the T1 evidence it relies on: a stubbed T1 child
+# prints a passing result, the real run_t1 parses it, and the PASS detail that
+# t2_evidence_init's record receives must end with that evidence path.
+ops6_project="$tmp/t1-evidence-project"
+mkdir -p "$ops6_project/scripts/e2e"
+cp "$T1_LOCAL_PREFLIGHT" "$ops6_project/scripts/e2e/real-postgres-local-preflight.sh"
+cat >"$ops6_project/scripts/e2e/minikube-real-postgres.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'invoked\n' >"$OPS6_STUB_MARKER"
+printf 'T1_STATUS=PASS\nT1_TESTS=3\nT1_PASSED_TESTS=3\nT1_PENDING_TESTS=0\n'
+printf 'T1_EXPECTED_FILES=2\nT1_REPORTED_FILES=2\nT1_DURATION_SECONDS=1\n'
+printf 'T1_EVIDENCE=%s\n' "$OPS6_CHILD_EVIDENCE"
+EOF
+ops6_child_evidence="$ops6_project/child-evidence/evidence.json"
+if ! T2_PROJECT_DIR="$ops6_project" T2_EVIDENCE_ROOT="$tmp/t1-evidence-records" T2_TMP_ROOT="$tmp" \
+  T2_HEAD=0123456789abcdef T2_RUN_T1=true MINIKUBE_PROFILE=clerum-t1-evidence T2_CONTEXT=clerum-t1-evidence \
+  OPS6_STUB_MARKER="$tmp/t1-evidence-stub-invoked" OPS6_CHILD_EVIDENCE="$ops6_child_evidence" \
+  bash -c '
+    source "$1"
+    t2_evidence_init
+    run_t1
+    printf "%s\n" "$T2_EVIDENCE_FILE" >"$2"
+  ' bash "$T2" "$tmp/t1-evidence-record-path" >"$tmp/t1-evidence-run.out" 2>&1; then
+  cat "$tmp/t1-evidence-run.out" >&2
+  echo 'FAIL: run_t1 did not accept the stubbed passing T1 result' >&2
+  exit 1
+fi
+if [ ! -f "$tmp/t1-evidence-stub-invoked" ] || ! grep -Fxq "T1_EVIDENCE=$ops6_child_evidence" "$tmp/t1-evidence-run.out"; then
+  echo 'FAIL: the stubbed T1 child did not run or did not print T1_EVIDENCE=' >&2
+  exit 1
+fi
+python3 - "$(cat "$tmp/t1-evidence-record-path")" "$ops6_child_evidence" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+record = json.loads(Path(sys.argv[1]).read_text())
+expected_suffix = "; t1Evidence=" + sys.argv[2]
+last = record["phases"][-1]
+assert last["name"] == "T1" and last["status"] == "PASS", last
+assert last["detail"].endswith(expected_suffix), last["detail"]
+assert record["phase"] == "T1" and record["detail"] == last["detail"], record
+PY
+
 T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=clerum-test-contract T2_CONTEXT=clerum-test-contract \
 T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
 T2_ORIGIN_DEV=0123456789abcdef T2_MERGE_BASE=0123456789abcdef \
@@ -653,6 +704,8 @@ for exit_code in 1 2 7 126 137; do
     source "$1"
     PROJECT_DIR="$T1_EXIT_ROOT"
     T1_TMP_DIR="$(mktemp -d)"
+    # Production T1 always calls t2_evidence_init before any suite runs.
+    T2_EVIDENCE_DIR="$T1_TMP_DIR/evidence"
     trap '\''rm -rf "$T1_TMP_DIR"'\'' EXIT
     list_real_pg_files() {
       printf "%s\\n" "$T1_EXIT_ROOT/control-api/test/fake.realPostgres.test.ts"
@@ -687,6 +740,73 @@ if T2_PUBLIC_BASE_REF=nonexistent-ref-for-contract \
   exit 1
 fi
 
+fixture_repo="$tmp/public-fixture-repo"
+mkdir -p "$fixture_repo/control-api/test" "$fixture_repo/external-rest-api/src/__tests__"
+git init -q -b dev "$fixture_repo"
+git -C "$fixture_repo" config user.email test@example.invalid
+git -C "$fixture_repo" config user.name boundary-test
+printf 'base\n' >"$fixture_repo/README.md"
+git -C "$fixture_repo" add README.md
+git -C "$fixture_repo" commit -q -m base
+fixture_base="$(git -C "$fixture_repo" rev-parse HEAD)"
+{
+  printf '%s\n' "const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL ?? 'postgresql://postgres@127.0.0.1/postgres'"
+  printf '%s\n' "const databaseUrl = 'postgresql://postgres@127.0.0.7:5432/postgres'"
+  printf '%s\n' "const localDatabaseUrl = 'postgresql://localhost/tracing_test'"
+  printf '%s\n' "const issued = { token: 'synthetic-replacement-token', password: 'synthetic-valid-password' }"
+  printf '%s\n' "const callbackUrl = 'http://127.0.0.1:36148/callback'"
+} >"$fixture_repo/control-api/test/example.realPostgres.integration.test.ts"
+if ! T2_PUBLIC_ROOT="$fixture_repo" T2_PUBLIC_BASE_REF="$fixture_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh"; then
+  echo 'FAIL: public boundary rejected synthetic source/test fixtures' >&2
+  exit 1
+fi
+
+assert_public_boundary_rejects_source_fixture() {
+  local name="$1" source_line="$2" expected_reason="$3"
+  local case_repo="$tmp/public-source-${name}"
+  mkdir -p "$case_repo/control-api/test"
+  git init -q -b dev "$case_repo"
+  git -C "$case_repo" config user.email test@example.invalid
+  git -C "$case_repo" config user.name boundary-test
+  printf 'base\n' >"$case_repo/README.md"
+  git -C "$case_repo" add README.md
+  git -C "$case_repo" commit -q -m base
+  local case_base
+  case_base="$(git -C "$case_repo" rev-parse HEAD)"
+  printf '%s\n' "$source_line" >"$case_repo/control-api/test/sourceFixture.test.ts"
+  if T2_PUBLIC_ROOT="$case_repo" T2_PUBLIC_BASE_REF="$case_base" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+    >"$tmp/${name}.out" 2>"$tmp/${name}.err"; then
+    echo "FAIL: public boundary accepted unsafe source fixture: $name" >&2
+    exit 1
+  fi
+  grep -Fq "$expected_reason" "$tmp/${name}.err"
+}
+
+assert_public_boundary_rejects_source_fixture \
+  nearby-admin-url \
+  "const adminUrl = 'postgresql://postgres@database.""internal/catalog'" \
+  'private PostgreSQL URL'
+assert_public_boundary_rejects_source_fixture \
+  nearby-example \
+  "const example = 'postgresql://postgres@10.""20.30.40/catalog'" \
+  'private PostgreSQL URL'
+assert_public_boundary_rejects_source_fixture \
+  later-private-url \
+  "const urls = ['postgresql://localhost/catalog', 'postgresql://database.""internal/catalog']" \
+  'private PostgreSQL URL'
+assert_public_boundary_rejects_source_fixture \
+  credentialed-loopback \
+  "const fixture = 'postgresql://app:""secret@127.0.0.1/catalog'" \
+  'credentialed PostgreSQL URL'
+# A test path does not exempt a credential value: only the shared fixture
+# marker convention (for example a `synthetic-` value) does.
+assert_public_boundary_rejects_source_fixture \
+  unmarked-test-credential \
+  "const issued = { pass""word: 'valid-password' }" \
+  'credential assignment'
+
 public_repo="$tmp/public-repo"
 mkdir -p "$public_repo"
 git init -q -b dev "$public_repo"
@@ -702,6 +822,36 @@ if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
   echo 'FAIL: public boundary ignored a secret in an untracked file' >&2
   exit 1
 fi
+malicious_repo="$tmp/public-malicious-repo"
+mkdir -p "$malicious_repo"
+git init -q -b dev "$malicious_repo"
+git -C "$malicious_repo" config user.email test@example.invalid
+git -C "$malicious_repo" config user.name boundary-test
+printf 'base\n' >"$malicious_repo/README.md"
+git -C "$malicious_repo" add README.md
+git -C "$malicious_repo" commit -q -m base
+malicious_base="$(git -C "$malicious_repo" rev-parse HEAD)"
+# Split literals keep these values out of this script's own diff, which the
+# boundary scans; the materialized file holds them whole.
+printf '%s\n' \
+  'DATABASE_URL=postgresql://db_user:''prod_password@127.0.0.1/postgres' \
+  'PUBLIC_CALLBACK=http://127.0.0.1:18443/status' \
+  'pass''word: "ProdCustomerPassword123"' \
+  'Authorization: Bear''er abcdefghijklmnopqrstuvwxyz1234567890' \
+  '-----BEGIN PRIVATE'' KEY-----' \
+  >"$malicious_repo/materialized.txt"
+printf 'empty\n' >"$malicious_repo/.env"
+if T2_PUBLIC_ROOT="$malicious_repo" T2_PUBLIC_BASE_REF="$malicious_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/malicious-public.err"; then
+  echo 'FAIL: public boundary accepted materialized private boundary values' >&2
+  exit 1
+fi
+grep -Fq 'credentialed PostgreSQL URL' "$tmp/malicious-public.err"
+grep -Fq 'private runtime URL' "$tmp/malicious-public.err"
+grep -Fq 'credential assignment' "$tmp/malicious-public.err"
+grep -Fq 'bearer token' "$tmp/malicious-public.err"
+grep -Fq 'private key' "$tmp/malicious-public.err"
+grep -Fq 'sensitive file name' "$tmp/malicious-public.err"
 
 # A logger test asserts the redaction marker under a secret-named key; that is
 # not a credential. A real value, or one that merely contains the marker, is.
@@ -777,6 +927,85 @@ for leaked in \
     exit 1
   fi
 done
+bearer_repo="$tmp/public-bearer-fixture-repo"
+mkdir -p "$bearer_repo"
+git init -q -b dev "$bearer_repo"
+git -C "$bearer_repo" config user.email test@example.invalid
+git -C "$bearer_repo" config user.name boundary-test
+printf 'base\n' >"$bearer_repo/README.md"
+git -C "$bearer_repo" add README.md
+git -C "$bearer_repo" commit -q -m base
+bearer_base="$(git -C "$bearer_repo" rev-parse HEAD)"
+bearer_fixture_path='tests/e2e/playwright/profile-ui-recovery-fixture.mjs'
+bearer_other_path='tests/e2e/playwright/other-fixture.mjs'
+bearer_value='synthetic-profile-recovery-token'
+bearer_prefix='Bearer '
+bearer_marker='PUBLIC_SYNTHETIC_BEARER_FIXTURE'
+exact_bearer_line="const syntheticBearer = '${bearer_prefix}${bearer_value}' // $bearer_marker"
+bearer_fixtures_dir="$bearer_repo/tests/e2e/playwright"
+mkdir -p "$bearer_fixtures_dir"
+printf '%s\n' "$exact_bearer_line" >"$bearer_repo/$bearer_fixture_path"
+if ! T2_PUBLIC_ROOT="$bearer_repo" T2_PUBLIC_BASE_REF="$bearer_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/bearer-boundary.out" 2>"$tmp/bearer-boundary.err"; then
+  echo 'FAIL: public boundary rejected the exact marked synthetic bearer fixture' >&2
+  cat "$tmp/bearer-boundary.err" >&2
+  exit 1
+fi
+if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/bearer-boundary.out"; then
+  echo 'FAIL: marked synthetic bearer fixture passed without PUBLIC_BOUNDARY_PASS' >&2
+  exit 1
+fi
+reject_bearer_fixture() {
+  local relative_path="$1"
+  shift
+  local fixture="$bearer_repo/$relative_path"
+  rm -f -- "$bearer_repo/$bearer_fixture_path" "$bearer_repo/$bearer_other_path"
+  mkdir -p "$(dirname "$fixture")"
+  printf '%s\n' "$@" >"$fixture"
+  if T2_PUBLIC_ROOT="$bearer_repo" T2_PUBLIC_BASE_REF="$bearer_base" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+      >"$tmp/bearer-boundary.out" 2>"$tmp/bearer-boundary.err"; then
+    echo "FAIL: public boundary accepted an unauthorized bearer fixture at $relative_path" >&2
+    exit 1
+  fi
+  if ! grep -Fq -- "- $relative_path: bearer token" "$tmp/bearer-boundary.err"; then
+    echo "FAIL: public boundary rejected $relative_path for another reason" >&2
+    cat "$tmp/bearer-boundary.err" >&2
+    exit 1
+  fi
+}
+unmarked_bearer_line="const syntheticBearer = '${bearer_prefix}${bearer_value}'"
+reject_bearer_fixture "$bearer_fixture_path" "$unmarked_bearer_line"
+reject_bearer_fixture "$bearer_other_path" "$exact_bearer_line"
+altered_bearer_line="const syntheticBearer = '${bearer_prefix}${bearer_value}-altered' // $bearer_marker"
+reject_bearer_fixture "$bearer_fixture_path" "$altered_bearer_line"
+extra_bearer_value='synthetic-added-token-value'
+extra_bearer_line="const extraBearer = '${bearer_prefix}${extra_bearer_value}'"
+reject_bearer_fixture "$bearer_fixture_path" "$exact_bearer_line" "$extra_bearer_line"
+case_variant_repo="$tmp/public-bearer-case-variant-repo"
+mkdir -p "$case_variant_repo"
+git init -q -b dev "$case_variant_repo"
+git -C "$case_variant_repo" config user.email test@example.invalid
+git -C "$case_variant_repo" config user.name boundary-test
+printf 'base\n' >"$case_variant_repo/README.md"
+git -C "$case_variant_repo" add README.md
+git -C "$case_variant_repo" commit -q -m base
+case_variant_base="$(git -C "$case_variant_repo" rev-parse HEAD)"
+case_variant_path='Tests/E2E/Playwright/profile-ui-recovery-fixture.mjs'
+mkdir -p "$(dirname "$case_variant_repo/$case_variant_path")"
+printf '%s\n' "$exact_bearer_line" >"$case_variant_repo/$case_variant_path"
+if T2_PUBLIC_ROOT="$case_variant_repo" T2_PUBLIC_BASE_REF="$case_variant_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+    >"$tmp/bearer-case-variant-boundary.out" 2>"$tmp/bearer-case-variant-boundary.err"; then
+  echo 'FAIL: public boundary accepted the case-variant synthetic bearer fixture path' >&2
+  exit 1
+fi
+if ! grep -Fq -- "- $case_variant_path: bearer token" "$tmp/bearer-case-variant-boundary.err"; then
+  echo 'FAIL: case-variant fixture was rejected for another reason' >&2
+  cat "$tmp/bearer-case-variant-boundary.err" >&2
+  exit 1
+fi
+echo 'PASS: public boundary accepts only the exact marked synthetic bearer fixture'
 echo 'PASS: public boundary reads a string-literal key as data and still rejects real assignments'
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh"

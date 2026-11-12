@@ -5,7 +5,6 @@ kind: McpServer
 metadata:
   name: github-server
 spec:
-  contextRef: context1
   description: Provides GitHub repository management tools
   image: mcp/github:latest
   transport:

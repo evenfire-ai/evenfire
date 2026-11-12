@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { AppService } from '../appService.js'
 import { config } from '../config.js'
 import { ApiError } from '../httpClient.js'
 
 const {
   mockCancelSandboxUiRefresh,
+  mockGetActiveDeploymentProfileUiBaseUrl,
   mockGetActiveSandboxUi,
   mockGetActiveSandboxUiLocation,
   mockInstallSandboxUiCookie,
@@ -13,6 +15,7 @@ const {
   mockUnmountSandboxUiView,
 } = vi.hoisted(() => ({
   mockCancelSandboxUiRefresh: vi.fn(),
+  mockGetActiveDeploymentProfileUiBaseUrl: vi.fn(() => 'https://profile.example.com'),
   mockGetActiveSandboxUi: vi.fn(),
   mockGetActiveSandboxUiLocation: vi.fn(),
   mockInstallSandboxUiCookie: vi.fn(),
@@ -49,8 +52,10 @@ vi.mock('../sandboxUiSessionRefresh.js', () => ({
 }))
 
 vi.mock('../config.js', () => ({
+  getActiveDeploymentProfileUiBaseUrl: mockGetActiveDeploymentProfileUiBaseUrl,
   getActiveRuntimeConfigOptionId: () => null,
   getActiveEnvKey: () => 'test-env',
+  getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -179,6 +184,7 @@ describe('AppService.listSandboxUiApps', () => {
 
 describe('AppService sandbox UI lifecycle serialization', () => {
   const openArgs = (recipeName: string) => ({
+    launchId: crypto.randomUUID(),
     recipeNs: 'sandbox-recipes',
     recipeName,
     bounds: { x: 0, y: 0, width: 400, height: 300 },
@@ -188,8 +194,17 @@ describe('AppService sandbox UI lifecycle serialization', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockMountSandboxUiView.mockImplementation(
-      async ({ recipeNs, recipeName }: { recipeNs: string; recipeName: string }) => {
+      async ({
+        launchId,
+        recipeNs,
+        recipeName,
+      }: {
+        launchId: string
+        recipeNs: string
+        recipeName: string
+      }) => {
         mockGetActiveSandboxUi.mockReturnValue({
+          launchId,
           recipeNs,
           recipeName,
           appRef: `${recipeNs}/${recipeName}`,
@@ -301,6 +316,32 @@ describe('AppService sandbox UI lifecycle serialization', () => {
     const finalCancelOrder = mockCancelSandboxUiRefresh.mock.invocationCallOrder[1]!
     expect(finalUnmountOrder).toBeGreaterThan(mountOrder)
     expect(finalCancelOrder).toBeGreaterThan(refreshStartOrder)
+  })
+
+  it('refuses a refresh that lands after the session changed, without minting for the next session', async () => {
+    const service = makeService() as unknown as {
+      mintSandboxUiSession: ReturnType<typeof vi.fn>
+      openSandboxUi: AppService['openSandboxUi']
+      clearAuthenticatedSessionState(): void
+      sessionToken: string | null
+    }
+    service.mintSandboxUiSession = vi.fn().mockResolvedValue({
+      setCookie:
+        'clerum_sandbox_ui_session=first;' + ' Path=/api/v1/sandbox-ui/sandbox-recipes/first-app/',
+    })
+    await service.openSandboxUi(openArgs('first-app'))
+    const { refresh } = mockStartSandboxUiRefresh.mock.calls[0]![0] as {
+      refresh: (ns: string, name: string) => Promise<{ setCookie: string }>
+    }
+
+    service.clearAuthenticatedSessionState()
+    // A new user is signed in by the time the stale loop fires.
+    service.sessionToken = 'next-session-token'
+
+    await expect(refresh('sandbox-recipes', 'first-app')).rejects.toThrow(
+      'The session changed while this app request was in flight'
+    )
+    expect(service.mintSandboxUiSession).toHaveBeenCalledOnce()
   })
 })
 
@@ -424,9 +465,60 @@ describe('AppService profile UI link authority', () => {
   beforeEach(() => {
     config.desktopProfileUiBaseUrl = 'https://profile.example.com'
     config.desktopProfileUiBaseUrlExplicit = false
+    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://profile.example.com')
   })
 
-  it('uses and memoizes the authenticated invitation profile for shareable links', async () => {
+  it('builds App and GFS links from the active deployment when the build profile points elsewhere', async () => {
+    config.externalRestApiBaseUrl = 'https://api.dev.example.test'
+    config.desktopProfileUiBaseUrl = 'https://profile.prod.example.test'
+    config.desktopProfileUiBaseUrlExplicit = true
+    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://profile.dev.example.test')
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      createSandboxUiDeepLink: () => Promise<{ url: string }>
+      createGfsResourceDeepLink: (uri: string) => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockResolvedValue({
+        profileUiBaseUrl: 'https://profile.prod.example.test',
+      }),
+    }
+    mockGetActiveSandboxUiLocation.mockReturnValue({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+      path: '/tasks/42',
+    })
+
+    await expect(service.createSandboxUiDeepLink()).resolves.toEqual({
+      url: 'https://profile.dev.example.test/open/apps/sandbox-recipes/task-board?path=%2Ftasks%2F42',
+    })
+    await expect(
+      service.createGfsResourceDeepLink('gfs://main/0123456789abcdef0123456789abcdef')
+    ).resolves.toEqual({
+      url: buildGfsResourceWebLink(
+        'https://profile.dev.example.test',
+        'gfs://main/0123456789abcdef0123456789abcdef'
+      ),
+    })
+
+    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://profile.prod.example.test')
+    config.externalRestApiBaseUrl = 'https://api.prod.example.test'
+    await expect(service.createSandboxUiDeepLink()).resolves.toMatchObject({
+      url: expect.stringMatching(/^https:\/\/profile\.prod\.example\.test\//),
+    })
+    await expect(
+      service.createGfsResourceDeepLink('gfs://main/abcdef0123456789abcdef0123456789')
+    ).resolves.toEqual({
+      url: buildGfsResourceWebLink(
+        'https://profile.prod.example.test',
+        'gfs://main/abcdef0123456789abcdef0123456789'
+      ),
+    })
+  })
+
+  it('keeps invitation profile lookup separate from active-deployment share links', async () => {
     const service = makeService() as unknown as {
       me: { id: string; email: string }
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
@@ -448,7 +540,7 @@ describe('AppService profile UI link authority', () => {
     await expect(service.resolveProfileUiBaseUrl()).resolves.toBe('https://profile.tenant.example')
     await expect(service.createSandboxUiDeepLink('team-1')).resolves.toEqual({
       url:
-        'https://profile.tenant.example/open/apps/sandbox-recipes/task-board' +
+        'https://profile.example.com/open/apps/sandbox-recipes/task-board' +
         '?path=%2Ftasks%2F42&team=team-1',
     })
     expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledTimes(1)
@@ -457,9 +549,10 @@ describe('AppService profile UI link authority', () => {
     )
   })
 
-  it('uses an explicit Profile UI base for shareable links without registration lookup', async () => {
+  it('does not let a build-time Profile origin override the active deployment', async () => {
     config.desktopProfileUiBaseUrl = 'https://profile.self-hosted.example'
     config.desktopProfileUiBaseUrlExplicit = true
+    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://profile.dev.example')
     const service = makeService() as unknown as {
       me: { id: string; email: string }
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
@@ -477,15 +570,64 @@ describe('AppService profile UI link authority', () => {
 
     await expect(service.createSandboxUiDeepLink('team-1')).resolves.toEqual({
       url:
-        'https://profile.self-hosted.example/open/apps/sandbox-recipes/task-board' +
+        'https://profile.dev.example/open/apps/sandbox-recipes/task-board' +
         '?path=%2Ftasks%2F42&team=team-1',
     })
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })
 
-  it('fails closed when the explicit Profile UI base is invalid', async () => {
+  it('waits for logout before creating a link and refuses the retired session', async () => {
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      sessionGeneration: number
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+      logout: () => Promise<number>
+      createGfsResourceDeepLink: (uri: string) => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    let finishSuspension!: () => void
+    service.suspendDesktopGfsUploadsForAuthBoundary = () =>
+      new Promise<void>(resolve => {
+        finishSuspension = resolve
+      })
+
+    const logout = service.logout()
+    await vi.waitFor(() => expect(service.sessionGeneration).toBe(1))
+    const link = service.createGfsResourceDeepLink('gfs://main/0123456789abcdef0123456789abcdef')
+    finishSuspension()
+    await logout
+
+    await expect(link).rejects.toThrow('Not authenticated')
+  })
+
+  it('creates a shareable GFS link with the canonical resource identity', async () => {
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      createGfsResourceDeepLink: (uri: string) => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockResolvedValue({
+        profileUiBaseUrl: 'https://profile.tenant.example',
+      }),
+    }
+    const resourceUri = 'gfs://main/0123456789abcdef0123456789ABCDEF'
+
+    await expect(service.createGfsResourceDeepLink(resourceUri)).resolves.toEqual({
+      url: buildGfsResourceWebLink('https://profile.example.com', resourceUri),
+    })
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the active deployment has no verified Profile origin', async () => {
     config.desktopProfileUiBaseUrl = 'javascript:alert(1)'
     config.desktopProfileUiBaseUrlExplicit = true
+    mockGetActiveDeploymentProfileUiBaseUrl.mockImplementation(() => {
+      throw new Error(
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+      )
+    })
     const service = makeService() as unknown as {
       me: { id: string; email: string }
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
@@ -504,12 +646,12 @@ describe('AppService profile UI link authority', () => {
     })
 
     await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-      'PROFILE_UI_BASE_URL must be an origin URL with a root pathname'
+      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
     )
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })
 
-  it('fails visibly instead of copying a localhost fallback after a lookup error', async () => {
+  it('fails visibly instead of copying a fallback for an unknown deployment', async () => {
     const service = makeService() as unknown as {
       me: { id: string; email: string }
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
@@ -519,6 +661,11 @@ describe('AppService profile UI link authority', () => {
     service.memberRegistrationServiceClient = {
       getInvitationProfile: vi.fn().mockRejectedValue(new Error('network unavailable')),
     }
+    mockGetActiveDeploymentProfileUiBaseUrl.mockImplementation(() => {
+      throw new Error(
+        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+      )
+    })
     mockGetActiveSandboxUiLocation.mockReturnValue({
       recipeNs: 'sandbox-recipes',
       recipeName: 'task-board',
@@ -526,7 +673,7 @@ describe('AppService profile UI link authority', () => {
     })
 
     await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-      'Cannot resolve a shareable Profile UI link'
+      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
     )
   })
 
@@ -548,11 +695,11 @@ describe('AppService profile UI link authority', () => {
     })
 
     await expect(service.createSandboxUiDeepLink('team-1')).resolves.toEqual({
-      url: 'https://profile.tenant.example/open/apps/sandbox-recipes/task-board' + '?team=team-1',
+      url: 'https://profile.example.com/open/apps/sandbox-recipes/task-board' + '?team=team-1',
     })
   })
 
-  it('fails visibly when a successful profile lookup omits the Profile UI URL', async () => {
+  it('does not use invitation lookup results for shareable Profile URLs', async () => {
     const service = makeService() as unknown as {
       me: { id: string; email: string }
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
@@ -568,13 +715,10 @@ describe('AppService profile UI link authority', () => {
       path: '/',
     })
 
-    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-      'the invitation profile did not provide a Profile UI URL'
-    )
-    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-      'the invitation profile did not provide a Profile UI URL'
-    )
-    expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledTimes(2)
+    await expect(service.createSandboxUiDeepLink()).resolves.toMatchObject({
+      url: expect.stringMatching(/^https:\/\/profile\.example\.com\//),
+    })
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })
 
   it('surfaces an invalid active app URL instead of copying its initial route', async () => {
@@ -597,60 +741,5 @@ describe('AppService profile UI link authority', () => {
       'Cannot read the current app route'
     )
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
-  })
-})
-
-// Round-trip of the renderer's route-persistence read (mini-spec 05 §1/§2). The
-// driver output shapes fed to the mock are the ones the REAL producer emits:
-// `{ recipeNs, recipeName, path }` where `path` is what `resolveSandboxUiSharePath`
-// returns (see sandboxUiDriver.test.ts — a non-default route yields '/tickets/42',
-// a default route yields undefined, an out-of-prefix URL throws).
-describe('AppService.getSandboxUiLocation', () => {
-  it('reshapes a non-default route into { appRef, routePath }', async () => {
-    const service = makeService() as unknown as {
-      getSandboxUiLocation: () => Promise<{ appRef: string; routePath?: string } | null>
-    }
-    mockGetActiveSandboxUiLocation.mockReturnValue({
-      recipeNs: 'ns',
-      recipeName: 'app',
-      path: '/tickets/42',
-    })
-
-    await expect(service.getSandboxUiLocation()).resolves.toEqual({
-      appRef: 'ns/app',
-      routePath: '/tickets/42',
-    })
-  })
-
-  it('omits routePath when the active app is on its default route', async () => {
-    const service = makeService() as unknown as {
-      getSandboxUiLocation: () => Promise<{ appRef: string; routePath?: string } | null>
-    }
-    // Default route → the driver omits `path`.
-    mockGetActiveSandboxUiLocation.mockReturnValue({ recipeNs: 'ns', recipeName: 'app' })
-
-    await expect(service.getSandboxUiLocation()).resolves.toEqual({ appRef: 'ns/app' })
-  })
-
-  it('returns null when no embed is mounted or its webContents is destroyed', async () => {
-    const service = makeService() as unknown as {
-      getSandboxUiLocation: () => Promise<{ appRef: string; routePath?: string } | null>
-    }
-    mockGetActiveSandboxUiLocation.mockReturnValue(null)
-
-    await expect(service.getSandboxUiLocation()).resolves.toBeNull()
-  })
-
-  it('propagates the out-of-prefix throw so the renderer falls back to default', async () => {
-    const service = makeService() as unknown as {
-      getSandboxUiLocation: () => Promise<{ appRef: string; routePath?: string } | null>
-    }
-    mockGetActiveSandboxUiLocation.mockImplementation(() => {
-      throw new Error('Cannot read the current app route')
-    })
-
-    await expect(service.getSandboxUiLocation()).rejects.toThrow(
-      'Cannot read the current app route'
-    )
   })
 })

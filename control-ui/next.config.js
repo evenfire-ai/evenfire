@@ -6,6 +6,11 @@ const nextConfig = {
   transpilePackages: ['@clerum/frontend-components'],
   experimental: {
     globalNotFound: true,
+    // Next 16.4 defaults this to 'security': when it detects a coding agent,
+    // `next build`/`next dev` check npm advisories and can block the build
+    // until the agent upgrades Next. Dependency upgrades here go through
+    // reviewed PRs, so builds must not depend on that live advisory lookup.
+    agentUpgrade: false,
   },
   // Keep Turbopack rooted at the monorepo so it can resolve the linked
   // @clerum packages without guessing from whichever lockfile it finds first.

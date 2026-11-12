@@ -323,8 +323,14 @@ export class LlmPortAdapter implements LlmPort {
       const images = allImages(current)
       const dimensionLimit = visualDimensionLimit(limits, images.length)
       const totalImageBytes = images.reduce((total, part) => total + imageBytes(part), 0)
+      // Opaque provider state is replayed only to the driver that produced it,
+      // so most attempts (any failover target) never send it and it must not
+      // demote their images. The owner's encoded payload, blobs included, is
+      // re-measured by the driver's own request-size check. Measured on a rest
+      // copy: the driver still needs the field.
       const requestBytes = current.reduce(
-        (total, message) => total + Buffer.byteLength(JSON.stringify(message), 'utf8'),
+        (total, { provider_continuation: _replayedOnlyToOwner, ...message }) =>
+          total + Buffer.byteLength(JSON.stringify(message), 'utf8'),
         'tools' in request ? Buffer.byteLength(JSON.stringify(request.tools ?? []), 'utf8') : 0
       )
       return (

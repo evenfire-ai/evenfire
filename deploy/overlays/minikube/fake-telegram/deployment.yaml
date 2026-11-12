@@ -24,7 +24,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: server
-          image: node:24-alpine
+          image: node:24.22.1-alpine
           imagePullPolicy: IfNotPresent
           command: ["node", "/app/server.cjs"]
           securityContext:

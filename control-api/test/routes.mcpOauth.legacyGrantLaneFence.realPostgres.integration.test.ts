@@ -26,7 +26,8 @@ import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { resolveBatchGrantExistence } from '../src/routes/mcpOauth.js'
 import { resolveInvocableMcpServersForContexts } from '../src/services/access/mcpInvocable.js'
-import { issueMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
+import { seedActiveMember, seedAgentHost } from './fixtures/contextAllowlist.js'
+import { mintHccControlToken, resolveHccHostBinding } from './fixtures/hccControlToken.js'
 import {
   CONTEXT,
   NS,
@@ -56,6 +57,8 @@ vi.mock('../src/db.js', async () => {
       query: (text: string, values?: unknown[]) => current().query(text, values),
       connect: () => current().connect(),
     },
+    withTransaction: (work: Parameters<typeof actual.withTransaction>[0]) =>
+      actual.withTransaction(work, current()),
   }
 })
 
@@ -87,20 +90,16 @@ function databaseUrl(baseUrl: string, database: string): string {
 
 const KEY = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
 const LEGACY_AT = 'LEGACY-AT-google'
-const USER = 'alice'
+const HOST = 'agent-host'
 type Flavor = 'user' | 'context'
-
-function controlToken(): string {
-  return issueMcpHostControlJwt('mcp-host', 'standalone', ['mcp-host/standalone'], {
-    scopes: ['oauth:user-token'],
-  }).token
-}
 
 describeRealPostgres('legacy grants seen by the broker, gate and sweep (real Postgres)', () => {
   const database = `control_api_legacy_lane_routes_${randomUUID().replace(/-/g, '')}`
   let adminPool: Pool
   let dbPool: Pool
   let db: DbClient
+  // An active user who enters HOST, the Host of CONTEXT that calls the broker.
+  let USER: string
   const originalBrokerEnabled = config.mcpOauthBrokerEnabled
 
   beforeAll(async () => {
@@ -111,6 +110,7 @@ describeRealPostgres('legacy grants seen by the broker, gate and sweep (real Pos
     await initDb({ connect: () => dbPool.connect() })
     db = { query: (text, values) => dbPool.query(text, values) }
     testDb.pool = dbPool
+    USER = await seedActiveMember(db, { agents: [HOST] })
   })
 
   afterAll(async () => {
@@ -158,22 +158,42 @@ describeRealPostgres('legacy grants seen by the broker, gate and sweep (real Pos
       { metadata: { name: CONTEXT }, spec: { contextId: CONTEXT, mcpServers: [name] } },
       NS
     )
+    await seedAgentHost(gateway, HOST, CONTEXT)
     return { name, gateway }
   }
 
-  const userToken = (gateway: MockGateway, name: string) =>
-    request(createApp(gateway as never))
+  const userToken = async (gateway: MockGateway, name: string) => {
+    const app = createApp(gateway as never)
+    const token = await mintHccControlToken(app, gateway, HOST)
+    return request(app)
       .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
+      .set('Authorization', `Bearer ${token}`)
       .send({ mcpServerName: name, userId: USER })
+  }
 
   const invocable = async (gateway: MockGateway) =>
-    (await resolveInvocableMcpServersForContexts(gateway, NS, [CONTEXT], USER, db)).map(s => s.name)
+    (
+      await resolveInvocableMcpServersForContexts(
+        gateway,
+        NS,
+        [CONTEXT],
+        USER,
+        db,
+        config.contextsNamespace
+      )
+    ).map(s => s.name)
 
-  const sweep = (gateway: MockGateway, name: string) =>
-    resolveBatchGrantExistence({ db, gateway, mcpServersNamespace: NS }, [
-      { mcpServerName: name, userId: USER },
-    ])
+  const sweep = async (gateway: MockGateway, name: string) =>
+    resolveBatchGrantExistence(
+      {
+        db,
+        gateway,
+        binding: await resolveHccHostBinding(gateway, HOST),
+        mcpServersNamespace: NS,
+        contextsNamespace: NS,
+      },
+      [{ mcpServerName: name, userId: USER }]
+    )
 
   describe.each<Flavor>(['user', 'context'])('%s flavor', flavor => {
     it('user-token: a generic reinstall gets 404 no_grant, not the legacy access token', async () => {

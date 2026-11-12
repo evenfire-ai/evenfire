@@ -462,6 +462,14 @@ export class ChatStore {
   private compatibilityWindows = new Map<string, ChatMessage[]>()
   private compatibilityWindowBytes = new Map<string, number>()
   private compatibilityWindowsTotalBytes = 0
+  /**
+   * Server titles of sessions the catalog reported before they were in the
+   * index, keyed by agent then chat. `createChat` reads (and drops) the entry
+   * when the user opens such a chat, so hydration stores the title the
+   * catalog already showed instead of the 'New Chat' placeholder. Written and
+   * read only inside `serializeIndex` for the agent.
+   */
+  private serverOnlyTitles = new Map<string, Map<string, string>>()
 
   private dropCompatibilityWindow(key: string): void {
     this.compatibilityWindows.delete(key)
@@ -1755,6 +1763,7 @@ export class ChatStore {
     return this.serializeIndex(agentRef, async () => {
       const index = await this.getIndex(agentRef)
       if (this.isDeletedInScope(index, chatId)) return
+      if (index.lastActiveChatId === chatId) return
       index.lastActiveChatId = chatId
       await this.saveIndex(agentRef, index)
     })
@@ -1777,10 +1786,13 @@ export class ChatStore {
       const existing = index.chats.find(c => c.id === chatId)
       if (existing) return existing
 
+      const rememberedTitles = this.serverOnlyTitles.get(agentRef)
+      const serverTitle = rememberedTitles?.get(chatId)
+      rememberedTitles?.delete(chatId)
       const now = new Date().toISOString()
       const meta: ChatMetadata = {
         id: chatId,
-        title: 'New Chat',
+        title: serverTitle ?? 'New Chat',
         createdAt: now,
         updatedAt: now,
         messageCount: 0,
@@ -1931,6 +1943,20 @@ export class ChatStore {
     }
     let artifactsRemoved = false
     try {
+      // Every catalog read starts a retry pass from its own snapshot of the
+      // queue, so overlapping passes reach the same tombstone. Retry passes
+      // are serialized per chat (`retryAgentPendingDeleteCleanups`); the later
+      // one finds it already dequeued and stops. `deleteChat` calls this
+      // outside `serializeChat`, so a catalog read racing the delete can still
+      // remove twice; the removal is idempotent (`force`) and can cost one
+      // more index save.
+      const index = await this.getIndex(agentRef)
+      const stillPending = (index.pendingChatCleanup ?? []).some(
+        existing =>
+          existing.chatId === tombstone.chatId &&
+          sameChatDeletionIdentity(existing.authorityScope, tombstone.authorityScope)
+      )
+      if (!stillPending) return true
       artifactsRemoved = await this.removeChatArtifacts(
         agentRef,
         tombstone.chatId,
@@ -2212,6 +2238,60 @@ export class ChatStore {
   }
 
   /**
+   * Remove local user turns that carry no stored sign of a server answer, such
+   * as the optimistic turn of a send the server rejected or that was never
+   * posted. The store cannot ask the server; it checks what is stored. Each
+   * requested message that is stored must be a user turn with no server turn
+   * number and no task id, with no assistant message lacking a server turn
+   * number stored after it (for example a synchronous reply, a legacy reply,
+   * an error reply, or the reply of an earlier task stored before its turn
+   * number is known). Numbered server turns after it are the normal result of
+   * a reconcile and do not count. If any requested message fails the rule,
+   * the call throws and removes nothing. Ids that are not stored are ignored.
+   * A deleted or missing chat is not created.
+   *
+   * Returns the number of messages removed. The indexed message count is not
+   * lowered: the index keeps the maximum because it can count server turns the
+   * local pages do not hold.
+   */
+  async removeMessages(agentRef: string, chatId: string, messageIds: string[]): Promise<number> {
+    return this.serializeChat(agentRef, chatId, async () => {
+      const index = await this.getIndex(agentRef)
+      if (this.isDeletedInScope(index, chatId)) return 0
+      const existingMeta = await this.readOrMigratePagedChatUnlocked(agentRef, chatId)
+      if (!existingMeta) return 0
+      const existingMessages = await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
+      const requested = new Set(messageIds)
+      existingMessages.forEach((message, position) => {
+        if (!requested.has(message.id)) return
+        const answeredLocally = existingMessages
+          .slice(position + 1)
+          .some(later => later.role === 'assistant' && messageServerTurnNumber(later) === undefined)
+        if (
+          message.role !== 'user' ||
+          messageServerTurnNumber(message) !== undefined ||
+          message.task_id ||
+          answeredLocally
+        ) {
+          throw new Error(`Chat message ${message.id} is not an unanswered local user turn`)
+        }
+      })
+      const remaining = existingMessages.filter(message => !requested.has(message.id))
+      const removed = existingMessages.length - remaining.length
+      if (removed === 0) return 0
+      const indexedCount = await this.indexedMessageCount(agentRef, chatId)
+      await this.writePagedChatUnlocked(agentRef, chatId, remaining, {
+        messageCount: Math.max(remaining.length, indexedCount ?? 0),
+      })
+      await this.updateChatIndexFromMessages(agentRef, chatId, remaining, {
+        preserveExistingTotals: true,
+        touchUpdatedAt: false,
+      })
+      return removed
+    })
+  }
+
+  /**
    * Flag that a task terminated while the chat was not the active view (D.5).
    * Idempotent: a no-op when already flagged, so a noisy task can't spam FS writes.
    */
@@ -2235,14 +2315,20 @@ export class ChatStore {
    * Deliberately does NOT create entries for server-only sessions: the sidebar's
    * in-memory merge (`useChatListController`) already surfaces those, and a local
    * `deleteChat` doesn't remove the server session — eagerly re-persisting it
-   * would resurrect a chat the user just deleted. Titles are never touched here:
-   * the server title is applied by the in-memory §2.2 catalog merge in
-   * `useChatListController`, not persisted into this local index. Returns the
-   * count of entries reconciled.
+   * would resurrect a chat the user just deleted. Their titles are only kept in
+   * memory (`serverOnlyTitles`) so `createChat` can use them on first open.
+   *
+   * `title`, when present, is the server's own title for the session. It is
+   * stored so a cold start paints the last title the server reported instead of
+   * the hydration placeholder; the next catalog page overwrites it, so it never
+   * diverges from the server for longer than one load. The caller omits it while
+   * a local rename is pending. A title change does not touch `updatedAt`: the
+   * sidebar order stays driven by server activity. Returns the count of entries
+   * changed.
    */
   async upsertServerSessions(
     agentRef: string,
-    sessions: Array<{ chatId: string; lastActivityAt?: string }>
+    sessions: Array<{ chatId: string; lastActivityAt?: string; title?: string }>
   ): Promise<number> {
     if (!sessions.length) return 0
     return this.serializeIndex(agentRef, async () => {
@@ -2251,17 +2337,44 @@ export class ChatStore {
       let changed = 0
       for (const session of sessions) {
         const chat = byId.get(session.chatId)
-        if (!chat) continue // server-only session — do not resurrect a local delete
-        const lastActivityAt = session.lastActivityAt
-        if (!lastActivityAt) continue
-        if (new Date(lastActivityAt).getTime() > new Date(chat.updatedAt).getTime()) {
-          chat.updatedAt = lastActivityAt
-          changed += 1
+        if (!chat) {
+          // Server-only session: never create an entry (that would resurrect a
+          // local delete). Remember its title for `createChat`; a session sent
+          // without one (e.g. a pending local rename) forgets the old title.
+          this.rememberServerOnlyTitle(agentRef, session.chatId, session.title)
+          continue
         }
+        let chatChanged = false
+        const lastActivityAt = session.lastActivityAt
+        if (
+          lastActivityAt &&
+          new Date(lastActivityAt).getTime() > new Date(chat.updatedAt).getTime()
+        ) {
+          chat.updatedAt = lastActivityAt
+          chatChanged = true
+        }
+        if (session.title && session.title !== chat.title) {
+          chat.title = session.title
+          chatChanged = true
+        }
+        if (chatChanged) changed += 1
       }
       if (changed > 0) await this.saveIndex(agentRef, index)
       return changed
     })
+  }
+
+  private rememberServerOnlyTitle(agentRef: string, chatId: string, title?: string): void {
+    let titles = this.serverOnlyTitles.get(agentRef)
+    if (!title) {
+      titles?.delete(chatId)
+      return
+    }
+    if (!titles) {
+      titles = new Map()
+      this.serverOnlyTitles.set(agentRef, titles)
+    }
+    titles.set(chatId, title)
   }
 
   /** Clear the unread-terminal flag (D.5), e.g. when the user opens the chat. */

@@ -7,6 +7,17 @@ function Trigger() {
   return <button onClick={() => showToast('Saved', { durationMs: 1_000 })}>Show toast</button>
 }
 
+function WarningTrigger() {
+  const { showToast } = useToast()
+  return (
+    <button
+      onClick={() => showToast('Check your connection.', { tone: 'warning', durationMs: 1_000 })}
+    >
+      Show warning
+    </button>
+  )
+}
+
 describe('ToastProvider lifecycle', () => {
   afterEach(() => {
     vi.useRealTimers()
@@ -26,5 +37,19 @@ describe('ToastProvider lifecycle', () => {
     unmount()
     expect(() => vi.advanceTimersByTime(1_000)).not.toThrow()
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('renders the warning tone for honestly-unknown move outcomes', () => {
+    vi.useFakeTimers()
+    render(
+      <ToastProvider>
+        <WarningTrigger />
+      </ToastProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show warning' }))
+    const toast = screen.getByRole('status')
+    expect(toast).toHaveTextContent('Check your connection.')
+    expect(toast).toHaveClass('cu-toast--warning')
   })
 })

@@ -13,7 +13,7 @@ describe('rpcService.issueRpcAccessToken', () => {
     clientMock.controlApiRequest.mockReset()
   })
 
-  it('surfaces the control-api denial reason on a 403 instead of collapsing to null', async () => {
+  it('relays a control-api 403 body as a result value', async () => {
     clientMock.controlApiRequest.mockRejectedValueOnce(
       new ControlApiError(
         'Control API POST /external/rpc/token failed (403): desktop_requires_team',
@@ -22,9 +22,25 @@ describe('rpcService.issueRpcAccessToken', () => {
       )
     )
 
-    const result = await issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])
+    await expect(issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])).resolves.toEqual({
+      error: 'desktop_requires_team',
+    })
+  })
 
-    expect(result).toEqual({ error: 'desktop_requires_team' })
+  it('maps malformed 403 bodies to the generic forbidden reason', async () => {
+    for (const body of [{ error: ['desktop_requires_team'] }, { error: 42 }]) {
+      clientMock.controlApiRequest.mockRejectedValueOnce(
+        new ControlApiError(
+          `Control API POST /external/rpc/token failed (403): ${String(body.error)}`,
+          403,
+          body
+        )
+      )
+
+      await expect(
+        issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])
+      ).resolves.toEqual({ error: 'forbidden' })
+    }
   })
 
   it('returns the issued token unchanged on success', async () => {
@@ -50,6 +66,8 @@ describe('rpcService.issueRpcAccessToken', () => {
       })
     )
 
-    await expect(issueRpcAccessToken('session', ['host:message:invoke'], ['pro-agent'])).rejects.toThrow()
+    await expect(
+      issueRpcAccessToken('session', ['host:message:invoke'], ['pro-agent'])
+    ).rejects.toThrow()
   })
 })

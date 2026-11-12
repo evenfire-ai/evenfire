@@ -6,7 +6,12 @@ import { useToast } from '@components/Toast'
 import { IconCheck, IconCopy } from '@components/icons'
 import { Button, Field, SelectInput, TextAreaInput, TextInput } from '@components/ui'
 import { OAUTH_PROVIDER_DOC_URLS, oauthProviderLabel } from '@constants/oauthProviders'
-import { getOAuthCredentialManifest, installFromRegistry, listMcpSecrets } from '@lib/api'
+import {
+  getOAuthCallbackConfig,
+  getOAuthCredentialManifest,
+  installFromRegistry,
+  listMcpSecrets,
+} from '@lib/api'
 import { copyTextToClipboard } from '@lib/clipboard'
 import { isValidK8sName, toK8sName } from '@lib/k8sValidation'
 import {
@@ -25,7 +30,6 @@ import {
   buildOAuthRedirectUri,
   deriveOAuthClientIdPreview,
   formatScopesForInput,
-  oauthCallbackBaseUrl,
   parseScopesInput,
   referenceSecretIssue,
   scopesAreSatisfied,
@@ -37,7 +41,6 @@ import type {
   OAuthInstallSubmit,
   OAuthSecretInput,
 } from '@lib/oauthInstall.types'
-import { createPrivateContext } from '@lib/privateContext'
 import { GenericEndpointsStep } from './GenericEndpointsStep'
 import type { OAuthInstallFormProps } from './types'
 
@@ -137,6 +140,9 @@ export function OAuthInstallForm({
   const [submitError, setSubmitError] = useState('')
   const [installed, setInstalled] = useState(false)
   const installInFlightRef = useRef(false)
+  const [callbackStatus, setCallbackStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [callbackTemplate, setCallbackTemplate] = useState('')
+  const [callbackError, setCallbackError] = useState('')
 
   const genericMode = isGeneric ? effectiveClientMode(genericState) : 'confidential'
   const genericPublic = isGeneric && genericMode === 'public'
@@ -182,12 +188,37 @@ export function OAuthInstallForm({
     }
   }, [provider, isGeneric, genericMode])
 
+  // The callback is deployment config owned by control-api, read once at runtime. A
+  // failed read is surfaced as its own error (not "not configured") and, like an
+  // unconfigured callback, blocks the install.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const config = await getOAuthCallbackConfig()
+        if (cancelled) return
+        setCallbackTemplate(config.configured ? (config.redirectUriTemplate ?? '') : '')
+        setCallbackStatus('ready')
+      } catch (error) {
+        if (cancelled) return
+        setCallbackError(
+          error instanceof Error
+            ? error.message
+            : 'Failed to load the OAuth callback configuration.'
+        )
+        setCallbackStatus('error')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const derivedId = useMemo(() => deriveOAuthClientIdPreview(serverName), [serverName])
-  const callbackBase = oauthCallbackBaseUrl()
-  const callbackConfigured = callbackBase.length > 0
+  const callbackConfigured = callbackStatus === 'ready' && callbackTemplate.length > 0
   const redirectUri = useMemo(
-    () => buildOAuthRedirectUri(callbackBase, derivedId),
-    [callbackBase, derivedId]
+    () => buildOAuthRedirectUri(callbackTemplate, derivedId),
+    [callbackTemplate, derivedId]
   )
   const nameValid = isValidK8sName(serverName)
 
@@ -337,16 +368,8 @@ export function OAuthInstallForm({
     setInstalling(true)
     setSubmitError('')
     try {
-      const contextRef = await createPrivateContext(
-        {
-          subject: serverName || entry.name,
-          description: `Connector access scope for ${serverName || entry.name}`,
-        },
-        'We couldn’t prepare this connector’s access — please try again.'
-      )
       await installFromRegistry({
         serverName: serverName || undefined,
-        contextRef,
         registryEntryName: entry.name,
         registryEntryVersion: entry.version,
         oauth: buildOAuthSubmit(),
@@ -431,7 +454,15 @@ export function OAuthInstallForm({
                 label="Redirect URI"
                 description="Register this exact URI in the provider’s OAuth app."
               >
-                {!callbackConfigured ? (
+                {callbackStatus === 'loading' ? (
+                  <p className="cu-field__hint" role="status">
+                    Loading the OAuth callback configuration…
+                  </p>
+                ) : callbackStatus === 'error' ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    Could not load the OAuth callback configuration: {callbackError}
+                  </div>
+                ) : !callbackConfigured ? (
                   // Real config error: the deployment has no public callback base URL.
                   <div className="cu-banner cu-banner--warn" role="alert">
                     The public OAuth callback URL is not configured for this deployment

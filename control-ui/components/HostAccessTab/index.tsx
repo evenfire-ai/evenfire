@@ -19,7 +19,6 @@ import {
   getAdminUsers,
   getAgentTeams,
   getAgentUsers,
-  getContexts,
   getHosts,
   updateAdminTeamAgents,
   updateAdminTeamContexts,
@@ -137,11 +136,8 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
   )
 
   async function loadCompatibilityResources() {
-    const [contextsData, hostsData] = await Promise.all([getContexts(), getHosts()])
-    return {
-      contexts: Array.isArray(contextsData.items) ? contextsData.items : [],
-      hosts: Array.isArray(hostsData.items) ? hostsData.items : [],
-    }
+    const hostsData = await getHosts()
+    return { hosts: Array.isArray(hostsData.items) ? hostsData.items : [] }
   }
 
   async function grantUserAccess() {

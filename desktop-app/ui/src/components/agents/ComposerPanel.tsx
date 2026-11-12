@@ -157,6 +157,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     agentError,
     failedAgentSend,
     activeChatId,
+    workspaceChatTabId,
     activeMessageCount,
     composerFocusRequestId,
   } = useChatComposerStateContext()
@@ -169,6 +170,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     handleRemoveComposerFileAttachment: onRemoveComposerFileAttachment,
     handleAddComposerReferenceAttachments: onAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment: onRemoveComposerReferenceAttachment,
+    handleClearComposerAttachments: onClearComposerAttachments,
     handleSendAgentMessage: onSend,
     handleRetryFailedAgentSend: onRetryFailedSend,
     handleRecoverFailedAgentSend: onRecoverFailedSend,
@@ -202,8 +204,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Per-chat draft from the module-scoped store. Typing only re-renders this
   // component (it's the sole subscriber); the value is restored automatically when
   // activeChatId changes and survives the inline→docked composer swap.
-  const [draft, setDraft] = useComposerDraft(activeChatId, selectedAgent ?? undefined)
+  const [draft, setDraft] = useComposerDraft(
+    activeChatId,
+    selectedAgent ?? undefined,
+    workspaceChatTabId
+  )
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const autoFocusFrameRef = useRef<number | null>(null)
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerMenuRef = useRef<HTMLSpanElement | null>(null)
@@ -380,9 +387,25 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Auto-focus composer after sending
   useEffect(() => {
     if (!activeChatId || activeMessageCount > 0 || agentSending) return
-    window.requestAnimationFrame(() => {
+    autoFocusFrameRef.current = window.requestAnimationFrame(() => {
+      autoFocusFrameRef.current = null
+      const activeElement = document.activeElement
+      if (
+        activeElement instanceof HTMLElement &&
+        activeElement.matches(
+          '.compact-navigation-toggle, .sidebar-compact-close, [data-compact-navigation-focus-owner="true"]'
+        )
+      ) {
+        return
+      }
       composerInputRef.current?.focus()
     })
+    return () => {
+      if (autoFocusFrameRef.current !== null) {
+        window.cancelAnimationFrame(autoFocusFrameRef.current)
+        autoFocusFrameRef.current = null
+      }
+    }
   }, [activeChatId, activeMessageCount, agentSending])
 
   useEffect(() => {
@@ -394,10 +417,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const handleDraftChange = useCallback(
     (value: string) => {
-      setDraft(value)
+      const result = setDraft(value)
       // Clear any pending send error as the user resumes typing. No re-render up-tree
       // unless an error is actually present.
-      clearComposerSendError()
+      if (result.accepted) clearComposerSendError()
     },
     [clearComposerSendError, setDraft]
   )
@@ -417,9 +440,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // until each chip is ready or removed.
   const filesBlockedForSend = composerFileAttachments.some(file => file.status !== 'ready')
   const handleSend = useCallback(() => {
-    if (imagesBlockedForSend || filesBlockedForSend) return
-    void onSend(draft)
-  }, [onSend, draft, imagesBlockedForSend, filesBlockedForSend])
+    if (imagesBlockedForSend || filesBlockedForSend) {
+      return
+    }
+    if (workspaceChatTabId) void onSend(draft, workspaceChatTabId)
+    else void onSend(draft)
+  }, [onSend, draft, imagesBlockedForSend, filesBlockedForSend, workspaceChatTabId])
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1092,6 +1118,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             </span>
             {hasComposerAttachments ? (
               <span className="composer-attachments-list composer-attachments-list--inline">
+                <span
+                  className="composer-attachments-count"
+                  data-testid="composer-attachments-count"
+                >
+                  {composerAttachmentItems.length}{' '}
+                  {composerAttachmentItems.length === 1 ? 'attachment' : 'attachments'}
+                </span>
                 {composerAttachmentItems.map(item => {
                   if (item.kind === 'reference') {
                     const attachment = item.attachment
@@ -1187,6 +1220,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     </span>
                   )
                 })}
+                <button
+                  type="button"
+                  className="composer-attachments-clear"
+                  onClick={onClearComposerAttachments}
+                  aria-label="Clear all attachments"
+                >
+                  Clear all
+                </button>
               </span>
             ) : null}
           </span>
@@ -1310,7 +1351,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       {failedAgentSend ? (
         <div className="composer-footer">
           <div className="action-row">
-            <Button onClick={onRecoverFailedSend} disabled={agentSending} size="xs" variant="ghost">
+            <Button
+              onClick={() => onRecoverFailedSend(workspaceChatTabId)}
+              disabled={agentSending}
+              size="xs"
+              variant="ghost"
+            >
               {failedAgentSend.answeredWithoutFiles ? 'Recover files' : 'Recover input'}
             </Button>
             <Button onClick={onDiscardFailedSend} disabled={agentSending} size="xs" variant="ghost">

@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { z } from 'zod'
+import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
 import {
@@ -13,8 +14,13 @@ import {
   isKnownOAuthProvider,
 } from '../../oauth/providers.js'
 import { rootLogger } from '../../observability/logger.js'
+import { buildPublicCallbackUrl } from '../external/oauthCallback.js'
 
 const log = rootLogger.child({ module: 'admin-oauth-providers' })
+
+// Stand-in callback id handed to the redirect-URI builder; it is URL-safe (encodes to
+// itself) and is replaced by the `{oauthClientId}` placeholder in the template.
+const TEMPLATE_OAUTH_CLIENT_ID = 'oauth-client-id'
 
 const discoverBodySchema = z.object({ url: z.string().min(1) })
 
@@ -56,6 +62,28 @@ export function createAdminOauthProvidersRouter(deps: AdminOauthProvidersDeps = 
       res.status(200).json({ provider: id, fields: getCredentialManifest(id) })
     })
   )
+
+  // GET /admin/oauth/callback
+  // The exact redirect URI a Marketplace (baked or generic) OAuth install registers,
+  // as a template over the derived callback id. control-ui reads it at runtime instead
+  // of a build-time mirror of CONTROL_API_OAUTH_CALLBACK_BASE_URL. `configured` follows
+  // the registry install gate (blank/whitespace base is unconfigured, and the install
+  // is rejected); it deliberately never falls back to the request Host, which behind
+  // the public proxy chain is an internal hostname.
+  router.get('/admin/oauth/callback', (req, res) => {
+    const base = config.oauthCallbackBaseUrl
+    if (!base || base.trim().length === 0) {
+      res.status(200).json({ configured: false })
+      return
+    }
+    // Render through the same builder the install/authorize path uses, so the URI
+    // the operator copies is byte-identical to the one sent to the provider.
+    const sample = buildPublicCallbackUrl(req, TEMPLATE_OAUTH_CLIENT_ID, base)
+    res.status(200).json({
+      configured: true,
+      redirectUriTemplate: `${sample.slice(0, -TEMPLATE_OAUTH_CLIENT_ID.length)}{oauthClientId}`,
+    })
+  })
 
   // POST /admin/oauth/discover — dry-run generic AS discovery, no writes (D-A6/E-19.5).
   router.post(

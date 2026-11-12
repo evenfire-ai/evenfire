@@ -121,6 +121,7 @@ export function makeSqliteStore(
   const persistQueue = new PersistQueue(worker.worker, {
     syncTimeoutMs: 2000,
     asyncTimeoutMs: 5000,
+    stallTimeoutMs: 30_000,
   })
   const store = new SqliteConversationStore(persistQueue, {
     cacheSize: opts.cacheSize ?? 8,

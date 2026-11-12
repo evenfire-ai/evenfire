@@ -15,7 +15,7 @@ vi.mock('../src/config.js', () => ({
 }))
 
 // Password orchestration now runs against the real credential producer in
-// bug192.passwordLogin.realPostgres.integration.test.ts. Google stays isolated here.
+// passwordLogin.realPostgres.integration.test.ts. Google stays isolated here.
 describe('directory Google login without team memberships', () => {
   beforeEach(() => {
     dbMocks.txQuery.mockReset()
@@ -60,6 +60,10 @@ describe('directory Google login without team memberships', () => {
     expect(dbMocks.txQuery).toHaveBeenCalledWith(
       expect.stringContaining("WHERE team_members.status <> 'deleted'"),
       ['u1', 'a@b.com']
+    )
+    expect(dbMocks.txQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining("i.status = 'pending'"),
+      expect.anything()
     )
   })
 

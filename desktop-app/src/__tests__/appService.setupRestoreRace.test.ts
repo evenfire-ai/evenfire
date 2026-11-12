@@ -4,6 +4,7 @@ import {
   createNativeCommitTestHarness,
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
+import { bindChatStoreForUser } from '../chatStoreBinding.js'
 import type { SessionMe } from '../types.js'
 
 afterEach(cleanupNativeCommitTestHarness)
@@ -29,7 +30,11 @@ describe('AppService setup and saved-session ownership', () => {
       getMe: vi.fn().mockRejectedValue(new Error('synthetic network failure')),
     }
 
-    await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.getSessionState()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: 0,
+    })
     expect(app.getSessionGeneration()).toBe(0)
   })
 
@@ -77,7 +82,11 @@ describe('AppService setup and saved-session ownership', () => {
         provider === 'Google'
           ? service.googleLogin('synthetic-google-login-b')
           : service.passwordLogin('user-b@example.test', 'synthetic-password-b')
-      await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+      await expect(service.getSessionState()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+        sessionGeneration: 1,
+      })
       expect(app.authClient.getMe).not.toHaveBeenCalled()
 
       loginResponse.resolve({ token: 'synthetic-login-session-b', me: loginUser })
@@ -200,9 +209,54 @@ describe('AppService setup and saved-session ownership', () => {
     await setup
     restoredUser.resolve(user)
 
-    await expect(restore).resolves.toEqual({ authenticated: false, me: null })
+    await expect(restore).resolves.toEqual({
+      authenticated: false,
+      me: null,
+      sessionGeneration: 2,
+    })
     expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restB)
     expect(app.sessionToken).toBeNull()
+    expect(app.me).toBeNull()
+  })
+
+  it('does not relabel a restored identity with a queued logout generation', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    const restoredUser = {
+      id: 'user-a',
+      email: 'user-a@example.test',
+      name: 'User A',
+      picture: null,
+      teamId: 'team-a',
+      teamName: 'Team A',
+      role: 'member',
+    }
+    const response = deferred<typeof restoredUser>()
+    const app = service as unknown as {
+      authClient: { getMe: ReturnType<typeof vi.fn> }
+      tokenStore: { getSessionToken: ReturnType<typeof vi.fn> }
+      getSessionGeneration: () => number
+    }
+    app.tokenStore.getSessionToken.mockResolvedValue('synthetic-saved-session-a')
+    app.authClient = { getMe: vi.fn(() => response.promise) }
+    let logout: Promise<number> | null = null
+    vi.mocked(bindChatStoreForUser).mockImplementation(async () => {
+      logout = service.logout()
+    })
+
+    const observedPromise = service.getSessionState()
+    await vi.waitFor(() => expect(app.authClient.getMe).toHaveBeenCalledOnce())
+    response.resolve(restoredUser)
+    const observed = await observedPromise
+    if (!logout) throw new Error('the restore commit did not schedule logout')
+    await logout
+
+    expect(observed).toEqual({
+      authenticated: true,
+      me: restoredUser,
+      sessionGeneration: 1,
+    })
+    expect(app.getSessionGeneration()).toBe(3)
+    expect(service.sessionToken).toBeNull()
     expect(app.me).toBeNull()
   })
 })

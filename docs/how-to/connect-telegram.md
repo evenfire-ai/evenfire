@@ -6,21 +6,18 @@ Reach an evenfire agent from Telegram.
 
 1. Complete the [Quickstart](../get-started/quickstart.md) so the platform runs.
 2. Create a bot via [@BotFather](https://t.me/BotFather); copy the bot token.
-3. Find your numeric Telegram **user id** (not username), e.g. via `@userinfobot`.
-4. Set in `.env`:
+3. In the Control UI, open **External Channels** (`/external-channels`) →
+   **Create**, pick your Host and the Telegram provider, enter the bot handle,
+   paste the bot token as the write-only credential, and grant access to the
+   users who may use it. See
+   [In the Control UI](#in-the-control-ui) below.
+4. Message the bot from the allowed user account.
 
-```bash
-CLERUM_TELEGRAM_BOT_TOKEN=<bot-token>
-CLERUM_TELEGRAM_USER_ID=<your-numeric-user-id>
-```
-
-5. Re-apply secrets and redeploy:
-
-```bash
-make minikube-setup ARGS="--skip-build"
-```
-
-6. Message the bot from the allowed user account.
+Putting `CLERUM_TELEGRAM_BOT_TOKEN` / `CLERUM_TELEGRAM_USER_ID` in `.env` and
+re-running `make minikube-setup` does **not** enable Telegram: setup no longer
+writes channel credentials from `.env`, and the default minikube
+`CommunicationChannel` declares no Telegram entry. channel-reader reads those
+variables only in its standalone dev mode.
 
 `channel-reader` polls Telegram and forwards allowed senders to `mcp-host`.
 Users not in the allowlist are dropped.
@@ -58,7 +55,7 @@ API server rejects the resource without them.
 
 ## In the Control UI
 
-External Channels → `/communication-channels` → **Create** builds the same
+External Channels → `/external-channels` → **Create** builds the same
 `CommunicationChannel` resource as the CRD path above: pick the host, the
 Telegram provider, add the bot token as a write-only credential, and grant
 access to specific users/teams — writing `spec.access.users` /

@@ -70,6 +70,42 @@ describe('models.dev catalog URL egress guard', () => {
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['username and password', 'https://user:s3cret@stub.example.com/api.json'],
+    ['username only', 'https://s3cret@stub.example.com/api.json'],
+    ['password only', 'https://:s3cret@stub.example.com/api.json'],
+  ])(
+    'rejects credentials in the URL (%s), never echoes them, never fetches',
+    async (_label, url) => {
+      const { loadModelsDevCatalog } = await loadWith(url)
+      const fetchImpl = vi.fn()
+      const rejection = loadModelsDevCatalog({ fetchImpl: fetchImpl as never })
+      await expect(rejection).rejects.toThrow('models.dev catalog URL must not contain credentials')
+      await expect(rejection).rejects.not.toThrow('s3cret')
+      expect(fetchImpl).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not echo a malformed URL that carries a secret', async () => {
+    const { loadModelsDevCatalog } = await loadWith('https://user:s3cret@ bad host/api.json')
+    const fetchImpl = vi.fn()
+    const rejection = loadModelsDevCatalog({ fetchImpl: fetchImpl as never })
+    await expect(rejection).rejects.toThrow('models.dev catalog URL is not a valid URL')
+    await expect(rejection).rejects.not.toThrow('s3cret')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('lets a public URL with no credentials reach the fetch', async () => {
+    const { loadModelsDevCatalog } = await loadWith('https://stub.example.com/api.json')
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('network down')
+    })
+    const res = await loadModelsDevCatalog({ fetchImpl: fetchImpl as never })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl).toHaveBeenCalledWith('https://stub.example.com/api.json', expect.anything())
+    expect(res.source).toBe('vendored')
+  })
+
   it('passes the guard for the default https host (fetch IS attempted)', async () => {
     const { loadModelsDevCatalog } = await loadWith(undefined) // default https://models.dev/api.json
     // A throwing fetch proves the guard let us THROUGH to the network; the loader

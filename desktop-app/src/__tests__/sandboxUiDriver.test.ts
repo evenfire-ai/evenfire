@@ -198,9 +198,8 @@ describe('sandbox UI route normalization', () => {
   })
 
   it('returns the in-prefix pathname for a non-default route (mini-spec 05 §2)', () => {
-    // The real producer of the route the renderer persists on deactivation:
-    // a nested view URL yields its pathname (leading-slash share form). This is
-    // the value `appService.getSandboxUiLocation` reshapes into `routePath`.
+    // The real producer of the route a released view reports and a deep link
+    // carries: a nested view URL yields its pathname (leading-slash share form).
     expect(
       resolveSandboxUiSharePath({
         currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/tickets/42',

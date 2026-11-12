@@ -1,7 +1,7 @@
 export function formatRemaining(expiresAt: string, now: number): string {
   const target = new Date(expiresAt).getTime()
   if (Number.isNaN(target)) {
-    return '48 hours'
+    return ''
   }
 
   const diffMs = target - now

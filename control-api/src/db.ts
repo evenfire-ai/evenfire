@@ -5,11 +5,25 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG } from './data/llmCatalogLegacySeeds.js'
+import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
+import {
+  LAST_DEV_MIGRATION_VERSION,
+  applyPendingPr1Migrations,
+} from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
+import {
+  applyUserAccessFoundationSchema,
+  backfillLegacyPasswordSecurityEpochs,
+} from './services/access/userAccessFoundationSchema.js'
 import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
 import {
   applyPasswordAdmissionSchema,
   applyPasswordEvaluationRetentionSchema,
+  applyPasswordSuccessAdmissionSchema,
+  assertPasswordAdmissionRolloutReady,
+  passwordVerificationOwnerCount,
+  preparePasswordAdmissionRolloutFence,
 } from './services/auth/passwordAdmissionSchema.js'
 import { applyPasswordWorkOwnershipSchema } from './services/auth/passwordWorkOwnershipSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
@@ -86,8 +100,31 @@ export type DbTransactionClient = DbClient & {
   readonly [dbTransactionClientBrand]: 'transaction'
 }
 
+export type DbTransactionOptions = {
+  signal?: AbortSignal
+  onDatabaseFailure?: (error: unknown) => unknown
+  /** Called only after PostgreSQL acknowledges COMMIT. Must be synchronous and non-throwing. */
+  onCommitAcknowledged?: () => void
+  /** Called when COMMIT was sent but PostgreSQL did not acknowledge its outcome. */
+  onCommitOutcomeUnknown?: () => void
+}
+
+const UNKNOWN_COMMIT_OUTCOME_SQLSTATES = new Set(['08007', '40003'])
+
+function isDefinitivePostgresCommitErrorResponse(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const response = error as { name?: unknown; code?: unknown; severity?: unknown }
+  return (
+    response.name === 'error' &&
+    typeof response.code === 'string' &&
+    /^[0-9A-Z]{5}$/.test(response.code) &&
+    response.severity === 'ERROR' &&
+    !UNKNOWN_COMMIT_OUTCOME_SQLSTATES.has(response.code)
+  )
+}
+
 type DbSessionClient = DbClient & {
-  release: () => void
+  release: (destroy?: boolean | Error) => void
 }
 
 type DbConnector = {
@@ -95,6 +132,8 @@ type DbConnector = {
 }
 
 const INIT_DB_LOCK_KEY_SQL = "hashtext('control-api-init-db-v1')::bigint"
+const migrationLogger = rootLogger.child({ module: 'database-migration' })
+const PASSWORD_SUCCESS_ADMISSION_MIGRATION = '0130_password_login_success_admission'
 
 type DbMigration = {
   version: string
@@ -3460,35 +3499,15 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
           ON llm_model_prices (provider, model) WHERE enabled;
       `)
 
-      // Seed convenience prices (USD per 1,000,000 tokens) for the providers/
-      // models the repo ships with by default, plus a couple of well-known
-      // public models, so cost-unit budgets have example rows to work with out
-      // of the box. ON CONFLICT DO NOTHING keeps this idempotent and never
-      // clobbers an admin-edited price on re-run.
-      //
-      // !!! APPROXIMATE — ADMIN MUST REVIEW. These are plausible public-list
-      // figures, not contractually exact. Some default model ids (e.g.
-      // gpt-5.4-mini, glm-5.1, qwen3-coder-plus) have no published price yet;
-      // values below are best-effort placeholders. Anthropic cache pricing is
-      // modeled as ~0.1x input (cache read) and ~1.25x input (cache write).
-      await db.query(`
-        INSERT INTO llm_model_prices
-          (provider, model, input_token_price, output_token_price, cache_read_token_price, cache_write_token_price)
-        VALUES
-          -- openai (default model gpt-5.4-mini is unreleased → placeholder)
-          ('openai', 'gpt-5.4-mini', 0.15, 0.60, 0.075, 0.15),
-          ('openai', 'gpt-4o', 2.50, 10.00, 1.25, 0),
-          ('openai', 'gpt-4o-mini', 0.15, 0.60, 0.075, 0),
-          -- claude (default model claude-sonnet-4-6 is forward-named → placeholder)
-          ('claude', 'claude-sonnet-4-6', 3.00, 15.00, 0.30, 3.75),
-          ('claude', 'claude-3-5-sonnet', 3.00, 15.00, 0.30, 3.75),
-          ('claude', 'claude-3-5-haiku', 0.80, 4.00, 0.08, 1.00),
-          -- zai / z.ai (glm-5.1 unreleased → placeholder)
-          ('zai', 'glm-5.1', 0.60, 2.20, 0.11, 0),
-          -- bailian / Alibaba Model Studio (qwen3-coder-plus → placeholder)
-          ('bailian', 'qwen3-coder-plus', 1.00, 5.00, 0.20, 0)
-        ON CONFLICT DO NOTHING;
-      `)
+      // The placeholder prices this migration used to seed are retired: a new
+      // installation prices models from the catalog sync, which loads `cost`
+      // when it inserts a model. Installations that already applied the seed
+      // keep those rows: the sync never writes a price for a pair that already
+      // has a price row, and never prices an allowlist row it did not insert,
+      // so removing them would leave the seeded allowlist pairs at $0 in cost
+      // budgets. What the
+      // seed wrote is kept as data in LEGACY_SEEDED_MODEL_PRICES
+      // (src/data/llmCatalogLegacySeeds.ts).
     },
   },
   {
@@ -3718,122 +3737,32 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         );
       `)
 
-      // Seed the current static catalog (control-ui/lib/llm.ts LLM_MODELS_BY_
-      // PROVIDER, 25 models) so the upgrade is a behavior no-op — the allowlist
-      // reintroduces the model gate R1 removed without disrupting deployed
-      // Hosts. `vendor` is set per row. ON CONFLICT DO NOTHING keeps this
-      // idempotent and never clobbers an admin-edited row on re-run.
-      await db.query(`
-        INSERT INTO llm_allowed_models (provider, model, vendor)
-        VALUES
-          -- openai (runtime) → OpenAI (vendor)
-          ('openai', 'gpt-5.5', 'OpenAI'),
-          ('openai', 'gpt-5.4', 'OpenAI'),
-          ('openai', 'gpt-5.4-mini', 'OpenAI'),
-          ('openai', 'gpt-5.4-nano', 'OpenAI'),
-          ('openai', 'gpt-5.1-codex', 'OpenAI'),
-          ('openai', 'gpt-5.1-codex-mini', 'OpenAI'),
-          -- claude (runtime) → Anthropic (vendor)
-          ('claude', 'claude-opus-4-7', 'Anthropic'),
-          ('claude', 'claude-sonnet-4-6', 'Anthropic'),
-          ('claude', 'claude-haiku-4-5', 'Anthropic'),
-          ('claude', 'claude-opus-4-6', 'Anthropic'),
-          ('claude', 'claude-sonnet-4-5', 'Anthropic'),
-          -- zai (runtime) → Zhipu (vendor)
-          ('zai', 'glm-5.2', 'Zhipu'),
-          ('zai', 'glm-5.1', 'Zhipu'),
-          ('zai', 'glm-5', 'Zhipu'),
-          ('zai', 'glm-5-turbo', 'Zhipu'),
-          ('zai', 'glm-4.7', 'Zhipu'),
-          -- bailian (runtime) hosts multiple vendors under one platform
-          ('bailian', 'qwen3-coder-plus', 'Alibaba'),
-          ('bailian', 'qwen3.5-plus', 'Alibaba'),
-          ('bailian', 'qwen3-coder-next', 'Alibaba'),
-          ('bailian', 'qwen3-max-2026-01-23', 'Alibaba'),
-          ('bailian', 'MiniMax-M2.5', 'MiniMax'),
-          ('bailian', 'glm-5.1', 'Zhipu'),
-          ('bailian', 'glm-5', 'Zhipu'),
-          ('bailian', 'glm-4.7', 'Zhipu'),
-          ('bailian', 'kimi-k2.5', 'Moonshot')
-        ON CONFLICT DO NOTHING;
-      `)
+      // The static catalog this migration used to seed is retired: a new
+      // installation gets its initial catalog from the boot catalog sync.
+      // Installations that already applied the seed keep its rows; 0135
+      // reclassifies the ones models.dev lists. What the seed wrote is kept as
+      // data in LEGACY_SEEDED_ALLOWED_MODELS (src/data/llmCatalogLegacySeeds.ts).
     },
   },
   {
     version: '0057_llm_allowed_models_vertex_bedrock',
-    apply: async db => {
-      // R4: seed a curated allowlist for the two new providers (Google Vertex AI
-      // and Amazon Bedrock). enabled=true — a provider without credentials is
-      // unusable regardless (the "provider usable" chip is an R4.5 concern), so
-      // enabling the rows just makes them selectable once creds are configured.
-      // ON CONFLICT DO NOTHING keeps this idempotent and never clobbers an
-      // admin-edited row. Bedrock model ids are runtime-specific (distinct from
-      // the native `claude` ids); the sonnet id matches registryCore's
-      // bedrock defaultModel (B1).
-      await db.query(`
-        INSERT INTO llm_allowed_models (provider, model, vendor)
-        VALUES
-          -- vertex (runtime) → Google (vendor)
-          ('vertex', 'gemini-2.5-pro', 'Google'),
-          ('vertex', 'gemini-2.5-flash', 'Google'),
-          -- bedrock (runtime) → Anthropic (vendor); Bedrock model ids
-          ('bedrock', 'anthropic.claude-sonnet-4-6-v1:0', 'Anthropic'),
-          ('bedrock', 'anthropic.claude-haiku-4-5-v1:0', 'Anthropic')
-        ON CONFLICT DO NOTHING;
-      `)
-    },
+    // This migration only seeded default allowlist rows, so it is a no-op now:
+    // a new installation gets its initial catalog from the boot catalog sync.
+    // The version stays because installations that applied it have it recorded;
+    // their rows are untouched here and 0135 reclassifies the ones models.dev
+    // lists. What it wrote is kept as data in LEGACY_SEEDED_ALLOWED_MODELS
+    // (src/data/llmCatalogLegacySeeds.ts).
+    apply: async () => {},
   },
   {
     version: '0058_llm_allowed_models_new_providers',
-    apply: async db => {
-      // Seed one sensible default model per new provider added in the LLM
-      // provider expansion (packages/llm-providers now carries 21 ids). Same
-      // shape as 0056/0057: enabled=true (a provider without credentials is
-      // unusable regardless), a `vendor` label for UI grouping, and ON CONFLICT
-      // DO NOTHING to stay idempotent and never clobber an admin-edited row.
-      //
-      // Model strings that embed `/` (together, fireworks, deepinfra, nebius,
-      // novita, openrouter) are plain data — the allowlist keys on
-      // (provider, model) and url-encoding is handled via the surrogate id, so
-      // the slashes carry no routing meaning here.
-      //
-      // azure is intentionally NOT seeded: its `model` is an Azure OpenAI
-      // deployment name, not a catalog id, so there is no sensible default —
-      // the operator registers their own deployment names via /llm-models.
-      await db.query(`
-        INSERT INTO llm_allowed_models (provider, model, vendor)
-        VALUES
-          -- openrouter (runtime) is an aggregator; vendor = model creator
-          ('openrouter', 'anthropic/claude-sonnet-latest', 'OpenRouter'),
-          -- gemini (runtime) → Google (vendor)
-          ('gemini', 'gemini-2.5-flash', 'Google'),
-          -- deepseek (runtime) → DeepSeek (vendor)
-          ('deepseek', 'deepseek-v4-flash', 'DeepSeek'),
-          -- groq (runtime) hosts Meta's Llama
-          ('groq', 'llama-3.3-70b-versatile', 'Meta'),
-          -- together (runtime) hosts Meta's Llama
-          ('together', 'meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Meta'),
-          -- fireworks (runtime) hosts Meta's Llama
-          ('fireworks', 'accounts/fireworks/models/llama-v3p3-70b-instruct', 'Meta'),
-          -- mistral (runtime) → Mistral (vendor)
-          ('mistral', 'mistral-medium-latest', 'Mistral'),
-          -- xai (runtime) → xAI (vendor)
-          ('xai', 'grok-4.3', 'xAI'),
-          -- cerebras (runtime) hosts OpenAI's gpt-oss
-          ('cerebras', 'gpt-oss-120b', 'OpenAI'),
-          -- deepinfra (runtime) hosts DeepSeek
-          ('deepinfra', 'deepseek-ai/DeepSeek-V3.2', 'DeepSeek'),
-          -- perplexity (runtime) → Perplexity (vendor)
-          ('perplexity', 'sonar-pro', 'Perplexity'),
-          -- moonshot (runtime) → Moonshot (vendor)
-          ('moonshot', 'kimi-k2.6', 'Moonshot'),
-          -- nebius (runtime) hosts Alibaba's Qwen
-          ('nebius', 'Qwen/Qwen3-235B-A22B-Instruct-2507', 'Alibaba'),
-          -- novita (runtime) hosts DeepSeek
-          ('novita', 'deepseek/deepseek-v3.2', 'DeepSeek')
-        ON CONFLICT DO NOTHING;
-      `)
-    },
+    // This migration only seeded default allowlist rows, so it is a no-op now:
+    // a new installation gets its initial catalog from the boot catalog sync.
+    // The version stays because installations that applied it have it recorded;
+    // their rows are untouched here and 0135 reclassifies the ones models.dev
+    // lists. What it wrote is kept as data in LEGACY_SEEDED_ALLOWED_MODELS
+    // (src/data/llmCatalogLegacySeeds.ts).
+    apply: async () => {},
   },
   {
     version: '0059_llm_allowed_models_catalog_lifecycle',
@@ -6130,21 +6059,13 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   },
   {
     version: '0100_seed_minimax_allowed_model',
-    apply: async db => {
-      // Seed one sensible default model for the newly added `minimax` provider
-      // (packages/llm-providers). Same shape as 0056/0057/0058: enabled=true (a
-      // provider without credentials is unusable regardless), a `vendor` label
-      // for UI grouping, and ON CONFLICT DO NOTHING so the migration stays
-      // idempotent and never clobbers an admin-edited row. `MiniMax-M2` mirrors
-      // registryCore's minimax defaultModel. Operators curate the rest via
-      // /llm-models.
-      await db.query(`
-        INSERT INTO llm_allowed_models (provider, model, vendor)
-        VALUES
-          ('minimax', 'MiniMax-M2', 'MiniMax')
-        ON CONFLICT DO NOTHING;
-      `)
-    },
+    // This migration only seeded default allowlist rows, so it is a no-op now:
+    // a new installation gets its initial catalog from the boot catalog sync.
+    // The version stays because installations that applied it have it recorded;
+    // their rows are untouched here and 0135 reclassifies the ones models.dev
+    // lists. What it wrote is kept as data in LEGACY_SEEDED_ALLOWED_MODELS
+    // (src/data/llmCatalogLegacySeeds.ts).
+    apply: async () => {},
   },
   {
     version: '0101_codex_multi_connection',
@@ -6377,7 +6298,179 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0129_workflow_schedules_concurrency_policy',
     apply: applyWorkflowScheduleConcurrencyPolicyMigration,
   },
+  {
+    version: '0130_password_login_success_admission',
+    apply: applyPasswordSuccessAdmissionSchema,
+  },
+  {
+    version: '0131_llm_provider_catalog_settings',
+    apply: async db => {
+      // Operator overrides of the per-provider catalog auto-enable policy. No
+      // CHECK on `provider`: a row for a provider later removed from the code
+      // must not block the migration, and the service only writes known ids.
+      // `auto_enable` NULL means "no override": the provider follows the code
+      // default, including a later change of it. The runtime role has no
+      // DELETE, so a reset to the default is an UPDATE to NULL.
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS llm_provider_catalog_settings (
+          provider TEXT PRIMARY KEY,
+          auto_enable BOOLEAN,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_by TEXT
+        );
+
+        REVOKE ALL ON TABLE llm_provider_catalog_settings
+          FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+        GRANT SELECT, INSERT, UPDATE ON TABLE llm_provider_catalog_settings
+          TO control_api_runtime;
+      `)
+    },
+  },
+  {
+    version: '0132_llm_catalog_dismissed',
+    apply: async db => {
+      // Pairs an operator removed from the allowlist (DELETE or rename), so the
+      // catalog sync never re-enables them on its own. Append-only for the
+      // runtime: a later CREATE of the same pair deliberately leaves the row,
+      // because it only gates automatic enabling, never an operator's choice.
+      // No FK to llm_allowed_models: the row this records is already gone.
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS llm_catalog_dismissed (
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          dismissed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (provider, model)
+        );
+
+        REVOKE ALL ON TABLE llm_catalog_dismissed
+          FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+        GRANT SELECT, INSERT ON TABLE llm_catalog_dismissed TO control_api_runtime;
+      `)
+    },
+  },
+  {
+    version: '0133_llm_allowed_models_catalog_status',
+    apply: async db => {
+      // The lifecycle tag models.dev puts on a discovered model, so the attention
+      // feed can flag an enabled model the catalog now calls deprecated. Not part
+      // of the served allowlist. Anything outside the known tags is stored as NULL
+      // by the sync, so the CHECK can never fail a run on upstream data. The
+      // runtime's table-level grant (legacy DML) already covers a new column.
+      await db.query(`
+        ALTER TABLE llm_allowed_models
+          ADD COLUMN IF NOT EXISTS catalog_status TEXT NULL;
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+             WHERE conname = 'llm_allowed_models_catalog_status_check'
+               AND conrelid = 'llm_allowed_models'::regclass
+          ) THEN
+            ALTER TABLE llm_allowed_models
+              ADD CONSTRAINT llm_allowed_models_catalog_status_check
+              CHECK (catalog_status IS NULL OR catalog_status IN ('deprecated', 'alpha', 'beta'));
+          END IF;
+        END
+        $$;
+      `)
+    },
+  },
+  {
+    version: '0134_llm_catalog_sync_runs_provider_counts',
+    apply: async db => {
+      // Per-provider outcome of each catalog sync run (inserted, auto-enabled,
+      // skipped, ineligible by rule, dismissed, priced). JSONB rather than one
+      // column per counter: the breakdown is diagnostic, read whole, and its keys
+      // follow the eligibility rules, which may grow. NULL on runs recorded before
+      // this column existed. The runtime's append grant on the table covers it.
+      await db.query(`
+        ALTER TABLE llm_catalog_sync_runs
+          ADD COLUMN IF NOT EXISTS provider_counts JSONB NULL;
+      `)
+    },
+  },
+  {
+    version: '0135_llm_retire_seeded_catalog',
+    apply: applyRetireSeededLlmCatalog,
+  },
+  {
+    version: '0136_llm_catalog_dismissed_backfill',
+    apply: async db => {
+      // A pair an operator deleted before llm_catalog_dismissed existed has no
+      // tombstone, so the first catalog sync with its provider's auto-enable on
+      // would insert it enabled again. Every DELETE through the admin API has
+      // always written an audit row with action 'delete', so those removals are
+      // recovered from it. A pair renamed away before the upgrade cannot be:
+      // the audit row of a rename names only the new pair. No filter on the
+      // pair being present again: the runtime keeps a tombstone after a later
+      // CREATE too, and it only gates enabling a pair the sync inserts.
+      await db.query(`
+        INSERT INTO llm_catalog_dismissed (provider, model, dismissed_at)
+        SELECT provider, model, MIN(created_at)
+          FROM llm_allowed_models_audit
+         WHERE action = 'delete'
+         GROUP BY provider, model
+        ON CONFLICT (provider, model) DO NOTHING;
+      `)
+    },
+  },
+  {
+    version: '0137_user_access_foundation',
+    apply: applyUserAccessFoundationSchema,
+  },
+  {
+    version: '0138_legacy_password_security_epoch_backfill',
+    apply: backfillLegacyPasswordSecurityEpochs,
+  },
 ]
+
+/**
+ * Hands the retired seed catalog over to the catalog sync on installations that
+ * applied the seeds, without deleting or disabling anything a Host may use.
+ *
+ * - Seeded pairs models.dev lists become `source='discovery'`, so the sync
+ *   tracks them (`last_seen_at`, `stale`, the deprecated status). The match is
+ *   the explicit pair list, never `source='manual'` alone: that would also take
+ *   pairs an operator added by hand (Azure deployments, Bedrock inference
+ *   profiles), which the sync would then mark stale. Pairs models.dev does not
+ *   list stay `manual` for the same reason. `enabled`, display name and context
+ *   window are not written here. The sync never changes `enabled` on an
+ *   existing row, and never the display name or context window of an enabled
+ *   one; on a disabled one it only fills them while they are NULL.
+ * - 0044's placeholder prices are left in place. The sync loads a catalog
+ *   price only when it inserts the model, and never over an existing price
+ *   row. Half of these pairs are seeded allowlist rows the sync will never
+ *   insert, so a deleted placeholder would leave them unpriced and cost
+ *   budgets would count their usage as $0, opening the spend control. An
+ *   approximate price keeps it counting until an admin reviews it under
+ *   Cost -> LLM prices.
+ *
+ * Retiring the seeds is an exception to the fix-forward rule (which keeps
+ * existing and fresh installations on the same data): the shipped migrations
+ * were edited in place (0044's price seed, the allowlist seeds of 0056, 0057,
+ * 0058 and 0100). A migration added
+ * after the seeds cannot make a fresh install empty without also deleting rows
+ * that Hosts on upgraded installs may be serving. So the two differ by design:
+ * a fresh install starts with no seeded rows and no prices, an upgraded one
+ * keeps the seeded rows (the ones models.dev lists handed to the sync, the rest
+ * left manual) and the placeholder prices. `schema_migrations` keys each
+ * applied migration by version name, with no checksum of its body, so editing
+ * the bodies does not make an upgraded install run them again.
+ */
+async function applyRetireSeededLlmCatalog(db: DbClient): Promise<void> {
+  await db.query(
+    `UPDATE llm_allowed_models AS t
+        SET source = 'discovery'
+       FROM unnest($1::text[], $2::text[]) AS s(provider, model)
+      WHERE t.provider = s.provider
+        AND t.model = s.model
+        AND t.source = 'manual'`,
+    [
+      SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG.map(([provider]) => provider),
+      SEEDED_ALLOWED_MODELS_LISTED_BY_CATALOG.map(([, model]) => model),
+    ]
+  )
+}
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
   // `workflow_recipe_allowed_users` and `user_workflow_triggers` had identical
@@ -6690,11 +6783,14 @@ async function recordMigration(db: DbClient, version: string): Promise<void> {
   )
 }
 
-async function applyPendingMigrations(db: DbClient): Promise<void> {
+async function applyPendingLegacyMigrations(db: DbClient): Promise<Set<string>> {
   await ensureSchemaMigrationsTable(db)
   const appliedVersions = await loadAppliedMigrationVersions(db)
 
   for (const migration of CONTROL_API_MIGRATIONS) {
+    // Everything through this bound runs in this single transaction; the versions
+    // after it belong to the PR1 runner (migrations/migrationRunner.ts).
+    if (migration.version > LAST_DEV_MIGRATION_VERSION) break
     if (appliedVersions.has(migration.version)) continue
     if (migration.legacyVersions?.some(version => appliedVersions.has(version))) {
       await recordMigration(db, migration.version)
@@ -6705,30 +6801,153 @@ async function applyPendingMigrations(db: DbClient): Promise<void> {
     await recordMigration(db, migration.version)
     appliedVersions.add(migration.version)
   }
+  return appliedVersions
+}
+
+async function preparePasswordAdmissionMigrationFence(
+  db: DbClient,
+  appliedVersions: Set<string>
+): Promise<boolean> {
+  if (appliedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)) return false
+
+  const result = await db.query(`
+    SELECT to_regclass('public.password_identifier_state') AS identifier_state,
+           to_regclass('public.password_verification_work') AS work_owner,
+           to_regclass('public.users') AS users
+  `)
+  const tables = result.rows[0] as
+    | { identifier_state: string | null; work_owner: string | null; users: string | null }
+    | undefined
+  if (!tables?.identifier_state) {
+    if (appliedVersions.size > 0 || tables?.users) {
+      throw new Error(
+        'password admission upgrade is blocked: pre-existing application schema or migration history has no identifier admission state to establish a legacy fence; ' +
+          'deploy the owner-aware release that applies migrations 0126_bug192_password_admission, 0127_password_evaluation_retention, and 0128_password_work_ownership, complete its Recreate rollout, and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission'
+      )
+    }
+    return false
+  }
+  if (!tables.work_owner) {
+    throw new Error(
+      'password admission upgrade is blocked: existing identifier state has no durable verifier owner; ' +
+        'deploy the release that applies migration 0128_password_work_ownership, complete its Recreate rollout, and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission'
+    )
+  }
+
+  const requiredAdmissionMigrations = [
+    '0126_bug192_password_admission',
+    '0127_password_evaluation_retention',
+    '0128_password_work_ownership',
+  ]
+  const requiredAdmissionMigrationReceipts = requiredAdmissionMigrations.flatMap(version => {
+    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
+    return migration ? [version, ...(migration.legacyVersions ?? [])] : [version]
+  })
+  const receiptResult = await db.query(
+    `SELECT version FROM schema_migrations
+      WHERE version = ANY($1::text[])
+      /* password-admission-required-receipts */`,
+    [requiredAdmissionMigrationReceipts]
+  )
+  const recordedAdmissionMigrations = new Set(
+    receiptResult.rows.map(row => String((row as { version: string }).version))
+  )
+  const missingAdmissionMigrations = requiredAdmissionMigrations.filter(version => {
+    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
+    return (
+      !migration ||
+      (!recordedAdmissionMigrations.has(version) &&
+        !migration.legacyVersions?.some(legacyVersion =>
+          recordedAdmissionMigrations.has(legacyVersion)
+        ))
+    )
+  })
+  if (missingAdmissionMigrations.length > 0) {
+    throw new Error(
+      'password admission upgrade is blocked: existing admission tables lack required migration receipts ' +
+        `${missingAdmissionMigrations.join(', ')}; complete the owner-aware Recreate rollout and verify old verifier processes cannot resume before retrying migration 0130_password_login_success_admission`
+    )
+  }
+
+  // dev set only a 60 s lock timeout here and inherited the pool's 15 s
+  // statement timeout. The migration session sets its own 15 s statement
+  // bound, so this transaction raises both to 60 s for the fence wait.
+  await db.query("SET LOCAL lock_timeout = '60s'")
+  await db.query("SET LOCAL statement_timeout = '60s'")
+  await preparePasswordAdmissionRolloutFence(db)
+  return true
+}
+
+async function waitForPasswordVerifierDrain(db: DbClient): Promise<void> {
+  for (;;) {
+    if ((await passwordVerificationOwnerCount(db)) === 0) return
+    // The surrounding Kubernetes migration Job provides the established finite
+    // rollout deadline. Never clear or age-reclaim a durable owner here.
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
 }
 
 export async function initDb(db: DbConnector = pool): Promise<void> {
   const client = await db.connect()
   let locked = false
   let inTransaction = false
+  let destroySession = false
 
   try {
+    for (const sql of migrationSessionBoundsSql(false)) {
+      await client.query(sql)
+    }
     await client.query(`SELECT pg_advisory_lock(${INIT_DB_LOCK_KEY_SQL})`)
     locked = true
 
+    // Ensure the rollout fence is durably committed before the schema transaction
+    // can alter the old verifier's admission state. The session advisory lock is
+    // held across both phases and the owner drain, but no database transaction is.
     await client.query('BEGIN')
     inTransaction = true
-
-    await applyPendingMigrations(client)
-
+    await client.query('SET LOCAL synchronous_commit = on')
+    await ensureSchemaMigrationsTable(client)
+    const initialAppliedVersions = await loadAppliedMigrationVersions(client)
+    const drainLegacyVerifiers = await preparePasswordAdmissionMigrationFence(
+      client,
+      initialAppliedVersions
+    )
     await client.query('COMMIT')
     inTransaction = false
+
+    if (drainLegacyVerifiers) await waitForPasswordVerifierDrain(client)
+
+    await client.query('BEGIN')
+    inTransaction = true
+    await client.query('SET LOCAL synchronous_commit = on')
+    await client.query("SET LOCAL app.password_admission_rollout_migration = 'v2'")
+    const appliedVersions = await applyPendingLegacyMigrations(client)
+    // The explicit readiness probe is meaningful after the migration row is
+    // visible in PostgreSQL. Lightweight migration fakes do not persist rows;
+    // startup still performs this probe through assertDbReady().
+    const completedVersions = await loadAppliedMigrationVersions(client)
+    if (
+      !initialAppliedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION) &&
+      completedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)
+    ) {
+      await assertPasswordAdmissionRolloutReady(client)
+    }
+    await client.query('COMMIT')
+    inTransaction = false
+
+    await applyPendingPr1Migrations({
+      db: client,
+      migrations: CONTROL_API_MIGRATIONS,
+      appliedVersions,
+      recordMigration,
+    })
   } catch (error) {
+    destroySession = true
     if (inTransaction) {
       try {
         await client.query('ROLLBACK')
       } catch (rollbackError) {
-        rootLogger.warn({ err: rollbackError }, 'Control API migration rollback failed')
+        migrationLogger.warn({ err: rollbackError }, 'Database migration rollback failed')
       }
     }
     throw error
@@ -6737,10 +6956,11 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       try {
         await client.query(`SELECT pg_advisory_unlock(${INIT_DB_LOCK_KEY_SQL})`)
       } catch (unlockError) {
-        rootLogger.warn({ err: unlockError }, 'Control API migration advisory unlock failed')
+        destroySession = true
+        migrationLogger.warn({ err: unlockError }, 'Database migration advisory unlock failed')
       }
     }
-    client.release()
+    client.release(destroySession)
   }
 }
 
@@ -6756,9 +6976,10 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   if (missing.length) {
     throw new Error(`Control API database is not ready: missing migrations ${missing.join(', ')}`)
   }
+  if (applied.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)) {
+    await assertPasswordAdmissionRolloutReady(db)
+  }
 }
-
-export type DbTransactionOptions = { signal?: AbortSignal }
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
@@ -6768,16 +6989,15 @@ export async function withTransaction<T>(
   options: DbTransactionOptions = {}
 ): Promise<T> {
   const signal = options.signal
+  const mapDatabaseFailure = (error: unknown): unknown =>
+    options.onDatabaseFailure ? options.onDatabaseFailure(error) : error
   signal?.throwIfAborted()
-  // The pool's existing finite connection timeout owns a pending borrow. An
-  // abort cannot release its caller until acquisition has settled, including
-  // disposal of a client delivered after the signal fired.
   let client: PoolClient & Pick<Client, 'end' | 'connection'>
   try {
     client = (await txPool.connect()) as typeof client
   } catch (error) {
     signal?.throwIfAborted()
-    throw error
+    throw mapDatabaseFailure(error)
   }
   let transactionStarted = false
   let commitSent = false
@@ -6785,16 +7005,10 @@ export async function withTransaction<T>(
   let originalIdleTimeout: string | undefined
   let releaseError: Error | boolean | undefined
 
-  // pg-pool detaches its own idle 'error' listener from a client while it is
-  // checked out, so an out-of-band backend error on the borrowed client (e.g.
-  // Postgres terminating the backend on idle_in_transaction_session_timeout,
-  // 25P03, while the transaction awaits an external POST with no query running)
-  // arrives with NO 'error' listener. Node's EventEmitter then THROWS in that
-  // tick — an async event outside any await stack, so no try/catch here or in a
-  // caller can catch it — and with no process-level handler it exits the process.
-  // The carrier owns the client for the whole checkout, so it holds the listener:
-  // capture the async error and fold it into releaseError so pg-pool DESTROYS the
-  // poisoned connection instead of returning it to the pool.
+  // pg-pool removes its idle 'error' listener while a client is checked out.
+  // Hold one for the transaction lifetime so out-of-band backend termination
+  // cannot become an uncaught EventEmitter error, and destroy the poisoned
+  // connection on release.
   let asyncClientError: Error | undefined
   const onClientError = (err: unknown): void => {
     asyncClientError ??= err instanceof Error ? err : new Error(String(err))
@@ -6806,14 +7020,8 @@ export async function withTransaction<T>(
     releaseError ??= reason
     if (termination) return
     termination = client.end().catch(error => {
-      releaseError = error instanceof Error ? error : true
+      releaseError ??= error instanceof Error ? error : true
     })
-    // pg Client.end() destroys an active query's socket, but an idle client
-    // waits for the peer's EOF. Explicit cancellation must also end a half-open
-    // idle checkout. Client.connection.stream is the pinned driver's typed
-    // transport; Duplex.destroy() is idempotent and its socket close drives the
-    // driver's connection end event awaited by Client.end(). Do not evict or
-    // finish the caller ahead of that event.
     client.connection.stream.destroy()
   }
   const onAbort = (): void => {
@@ -6822,11 +7030,39 @@ export async function withTransaction<T>(
   signal?.addEventListener('abort', onAbort, { once: true })
   if (signal?.aborted) onAbort()
 
+  const executeQuery = async (
+    text: string,
+    values?: unknown[],
+    checkSignalAfter = true
+  ): Promise<{ rows: unknown[]; rowCount: number | null }> => {
+    signal?.throwIfAborted()
+    try {
+      const result = await client.query(text, values)
+      if (checkSignalAfter) signal?.throwIfAborted()
+      return result
+    } catch (error) {
+      if (
+        text === 'COMMIT' &&
+        commitSent &&
+        !transactionFinished &&
+        !isDefinitivePostgresCommitErrorResponse(error)
+      ) {
+        options.onCommitOutcomeUnknown?.()
+      }
+      signal?.throwIfAborted()
+      throw mapDatabaseFailure(error)
+    }
+  }
+
+  const transactionClient: DbClient =
+    signal || options.onDatabaseFailure
+      ? Object.assign(Object.create(client) as DbClient, {
+          query: (text: string, values?: unknown[]) => executeQuery(text, values),
+        })
+      : (client as DbClient)
   try {
     signal?.throwIfAborted()
     if (signal) {
-      // Read normalized milliseconds from this backend, not from client startup
-      // options: a role/database default or a reused session can be different.
       const settings = await client.query<{
         statement_timeout_ms: string | null
         idle_timeout_ms: string | null
@@ -6834,14 +7070,10 @@ export async function withTransaction<T>(
         (SELECT setting FROM pg_settings WHERE name = 'statement_timeout') AS statement_timeout_ms,
         (SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout') AS idle_timeout_ms`)
       signal.throwIfAborted()
-      const setting = settings.rows[0]
-      const statementTimeout = setting?.statement_timeout_ms
-      const idleTimeout = setting?.idle_timeout_ms
+      const statementTimeout = settings.rows[0]?.statement_timeout_ms
+      const idleTimeout = settings.rows[0]?.idle_timeout_ms
       const statementMs = Number(statementTimeout)
       const idleMs = Number(idleTimeout)
-      // These are the existing createBoundedPgPoolForConnection startup bounds.
-      // An unbounded or invalid effective server setting cannot supply a finite
-      // remote cleanup backstop, so this cancellable transaction must fail loud.
       if (
         typeof statementTimeout !== 'string' ||
         !/^\d+$/.test(statementTimeout) ||
@@ -6855,11 +7087,6 @@ export async function withTransaction<T>(
         throw new Error('Invalid effective PostgreSQL cancellation timeout bounds')
       }
       if (idleMs === 0 || idleMs > statementMs) {
-        // This must be SESSION scope before BEGIN. AbortTransaction restores a
-        // SET LOCAL value before entering idle-in-transaction (aborted), which
-        // would remove the very backstop needed when a blackhole hides our FIN.
-        // Record the original before sending: a missing set_config reply is also
-        // uncertain, and that checkout must be ended rather than returned healthy.
         originalIdleTimeout = idleTimeout
         await client.query('SELECT set_config($1, $2, false)', [
           'idle_in_transaction_session_timeout',
@@ -6868,38 +7095,23 @@ export async function withTransaction<T>(
         signal.throwIfAborted()
       }
     }
-    await client.query('BEGIN')
+    await executeQuery('BEGIN', undefined, false)
     transactionStarted = true
+    signal?.throwIfAborted()
     if (signal) {
       signal.throwIfAborted()
-      // PostgreSQL 16 on the service's Linux runtime supports socket polling
-      // during queries. Its default (0) can leave a disconnected writer running
-      // until statement_timeout; this scoped setting detects our transport stop
-      // promptly. Unsupported servers fail this transaction instead of silently
-      // omitting cancellation. The existing statement_timeout stays in force.
       await client.query("SET LOCAL client_connection_check_interval = '100ms'")
     }
     // The brand is nominal-only (a declared unique symbol); the checked-out
     // client IS the transaction session, so this cast is the single blessed
     // point where the brand is minted (issue #375 M3).
     signal?.throwIfAborted()
-    const transaction = signal
-      ? ({
-          query: async (text: string, values?: unknown[]) => {
-            signal.throwIfAborted()
-            const result = await client.query(text, values)
-            signal.throwIfAborted()
-            return result
-          },
-        } as unknown as DbTransactionClient)
-      : (client as unknown as DbTransactionClient)
-    const result = await work(transaction)
+    const result = await work(transactionClient as unknown as DbTransactionClient)
     signal?.throwIfAborted()
     commitSent = true
-    await client.query('COMMIT')
+    await executeQuery('COMMIT', undefined, false)
     transactionFinished = true
-    // An acknowledged COMMIT is the outcome, even if the signal aborted
-    // meanwhile: the finally still evicts the session instead of restoring it.
+    options.onCommitAcknowledged?.()
     return result
   } catch (error) {
     if (commitSent || !transactionStarted) {
@@ -6909,18 +7121,14 @@ export async function withTransaction<T>(
         await client.query('ROLLBACK')
         transactionFinished = true
       } catch (rollbackError) {
-        releaseError = rollbackError instanceof Error ? rollbackError : true
+        if (!signal?.aborted) {
+          releaseError = rollbackError instanceof Error ? rollbackError : true
+        }
       }
     }
-    // Once COMMIT was sent, a missing reply is an unknown durable outcome.
-    // Cancellation does not establish rollback, no spend or no dispatch.
     signal?.throwIfAborted()
     throw error
   } finally {
-    // Work (including its own finally) and any rollback have already unwound.
-    // Only an acknowledged, healthy transaction may restore session state and
-    // return to the pool. Lost COMMIT/ROLLBACK replies leave the server backstop
-    // installed; local transport completion is not remote cleanup observation.
     if (
       originalIdleTimeout !== undefined &&
       transactionFinished &&
@@ -6934,8 +7142,6 @@ export async function withTransaction<T>(
           originalIdleTimeout,
         ])
       } catch (restoreError) {
-        // Do not replace the work outcome or relabel an acknowledged COMMIT as
-        // a rollback. A session that failed restoration is physically ended.
         releaseError = restoreError instanceof Error ? restoreError : true
       }
     }
@@ -6948,7 +7154,6 @@ export async function withTransaction<T>(
           : (releaseError ?? asyncClientError ?? true)
       )
     }
-    // Keep both listeners and the checkout until physical termination completes.
     if (termination) await termination
     signal?.removeEventListener('abort', onAbort)
     client.removeListener('error', onClientError)
@@ -6958,9 +7163,6 @@ export async function withTransaction<T>(
     // always reaches release() and pg-pool never recycles the bad connection.
     if (asyncClientError && !releaseError) {
       releaseError = asyncClientError
-    }
-    if (signal?.aborted) {
-      releaseError = signal.reason instanceof Error ? signal.reason : true
     }
     client.release(releaseError)
   }

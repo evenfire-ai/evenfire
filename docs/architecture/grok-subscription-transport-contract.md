@@ -205,7 +205,7 @@ both, not a proven minimum. The manifest therefore sets
 `--max-old-space-size=768`, a 2048Mi limit and a 768Mi request, and
 `grok-llm-proxy/test/deployManifest.test.ts` requires the limit to be at least
 1.25 × the largest peak (`ceil(1481.6 × 1.25)` = 1852 MiB). The in-cluster peak
-is not measured (keyper-labs/evenfire-infra#102). The heap cap is a resource
+is not measured yet. The heap cap is a resource
 change only: the resident heap after GC at that load was 420.8 MiB, above the
 200 MiB target recorded for
 `BODY_STRUCTURE_LIMITS`, so lowering the resident set needs a code change
@@ -697,16 +697,18 @@ code the proxy constructs, and every code it refuses a request with
   the SSE error frame) and in the log line's `details`. The Host classifies
   the code as `LLM_UPSTREAM_REJECTED` ("Provider Rejected Request"), not
   retryable and without failover, and exposes the upstream status as the
-  classified error's `httpStatus`. The upstream status mapping is: 400
-  `invalid_request`, 401 `connection_unavailable`, 426
-  `client_upgrade_required`, 429 `rate_limited`, any other 4xx except 408
+  classified error's `httpStatus`. The upstream status mapping is: 401
+  `connection_unavailable`, 426 `client_upgrade_required`, 429
+  `rate_limited`, any other 4xx except 408, 400 included (#1433),
   `upstream_rejected`, anything else (408 and 5xx included)
   `provider_unavailable`.
 - `control_plane_unavailable`: HTTP 503. No control-plane process answered
   the redeem; see "Control-plane outage" below.
 
 - `invalid_request`: the request body failed the transport schema (HTTP 400
-  before redeem), or the upstream answered the completion with HTTP 400.
+  before redeem). An upstream HTTP 400 on the completion is
+  `upstream_rejected` with `upstreamStatus: 400` (#1433), so the Host shows it
+  as a rejected request, not as a connection error.
 - `sse_buffer_exceeded`: the upstream sent more than 1 MiB without the blank
   line that ends an SSE event.
 - `stream_duration_exceeded`: the attempt reached `maxStreamDurationMs` (the
@@ -871,7 +873,7 @@ code the proxy constructs, and every code it refuses a request with
   transport keys on the `[input_too_large]` marker inside the `error` string.
   It reads a non-success body once, up to 16 KiB, for both the log hint and
   the marker; a 401, a body past the bound, and any other body keep the
-  status mapping (`invalid_request` for 400). The proxy answers HTTP 400
+  status mapping (`upstream_rejected` for 400). The proxy answers HTTP 400
   `{"error":"context_length_exceeded"}`, and the Host maps it to
   `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, failover class `null`. The
   provider attempt was spent: the upstream received the request.

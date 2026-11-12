@@ -10,24 +10,28 @@ import {
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { rootLogger } from '../../observability/logger.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
   filterAccessValues,
   listActiveContextIds,
 } from '../../services/directory/accessReconciliation.js'
 import {
-  createInvitation,
+  createManagedInvitationForUser,
   createTeamForUser,
+  deleteManagedMemberForUser,
+  externalManagedInvitationResponse,
   findMemberRole,
   getCurrentTeam,
   getTeamAgents,
   getTeamContexts,
   listMembers,
   renameTeam,
-  softDeleteMember,
-  updateMemberRole,
+  updateManagedMemberRoleForUser,
 } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
+
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function sendInvitationServiceError(
   res: { status: (code: number) => { json: (body: unknown) => unknown } },
@@ -78,6 +82,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.put(
     '/external/teams/:teamId/name',
     requireExternalTeamParamMatch(),
+    requireExternalRole(['admin']),
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
       try {
@@ -114,9 +119,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         try {
           active = new Set(await listActiveContextIds(gateway))
         } catch (err) {
-          console.warn(
-            `[external/teams] context reconciliation failed for ${req.params.teamId}:`,
-            err
+          ;(req.log ?? rootLogger).warn(
+            { err, module: 'external-teams', teamId: req.params.teamId },
+            'context reconciliation failed'
           )
         }
         return res.status(200).json({
@@ -146,6 +151,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           // agent access as the gate — no context-level scoping needed.
           agents = await resolveMcpServersForAgents(gateway, {
             mcpServersNamespace: config.mcpServersNamespace,
+            contextsNamespace: config.contextsNamespace,
             hostsNamespace: config.hostsNamespace,
             agentNames: authorizedAgentNames,
           })
@@ -156,9 +162,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           // Spec §7.2: never fail the catalog purely because Kubernetes is
           // unavailable. Preserve the names authorized by the directory DB;
           // omit enriched DTOs because their live Host identity is unverified.
-          console.warn(
-            `[external/teams] MCP server enrichment failed for team ${req.params.teamId}:`,
-            err
+          ;(req.log ?? rootLogger).warn(
+            { err, module: 'external-teams', teamId: req.params.teamId },
+            'MCP server enrichment failed'
           )
           agents = []
         }
@@ -192,16 +198,18 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
       try {
         const role = normalizeTeamRoleInput(req.body?.role)
         if (!role) return res.status(400).json({ error: 'invalid role' })
-        return res
-          .status(200)
-          .json(
-            await updateMemberRole(
-              req.params.teamId,
-              req.params.userId,
-              role,
-              (req as ExternalAuthedRequest).externalAuth!.userId
-            )
-          )
+        const result = await updateManagedMemberRoleForUser(
+          (req as ExternalAuthedRequest).externalAuth!.userId,
+          req.params.userId,
+          req.params.teamId,
+          role
+        )
+        if ('error' in result) {
+          if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
+          if (result.error === 'not_found') return res.status(404).json({ error: 'not_found' })
+          return res.status(400).json({ error: result.error })
+        }
+        return res.status(200).json(result.membership)
       } catch (error) {
         return next(error)
       }
@@ -224,9 +232,18 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'invalid invitation payload' })
         }
         const fallbackName = email.split('@')[0] || email
+        const result = await createManagedInvitationForUser(
+          (req as ExternalAuthedRequest).externalAuth!.userId,
+          email,
+          [{ teamId: req.params.teamId, role }],
+          name || fallbackName
+        )
+        if ('error' in result) {
+          return res.status(result.error === 'forbidden' ? 403 : 400).json({ error: result.error })
+        }
         return res
           .status(200)
-          .json(await createInvitation(req.params.teamId, name || fallbackName, email, role))
+          .json(externalManagedInvitationResponse(result.invitation as Record<string, unknown>))
       } catch (error) {
         return next(error)
       }
@@ -239,13 +256,22 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     requireExternalRole(['admin']),
     async (req, res, next) => {
       try {
-        const deleted = await softDeleteMember(
-          req.params.teamId,
+        // The membership service trims its target, so a padded copy of the
+        // caller's own id would otherwise delete a real membership. Reject any
+        // id that is not already canonical instead of normalising it.
+        if (!CANONICAL_UUID_RE.test(req.params.userId)) {
+          return res.status(400).json({ error: 'invalid_target' })
+        }
+        const result = await deleteManagedMemberForUser(
+          (req as ExternalAuthedRequest).externalAuth!.userId,
           req.params.userId,
-          (req as ExternalAuthedRequest).externalAuth!.userId
+          req.params.teamId
         )
-        if (!deleted) return res.status(404).json({ error: 'not_found' })
-        return res.status(200).json(deleted)
+        if ('error' in result) {
+          if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
+          return res.status(404).json({ error: 'not_found' })
+        }
+        return res.status(200).json(result.deleted)
       } catch (error) {
         return next(error)
       }

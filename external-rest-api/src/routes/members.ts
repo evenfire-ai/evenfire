@@ -1,7 +1,7 @@
 import { type NextFunction, type Response, Router } from 'express'
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { randomUUID } from 'node:crypto'
-import { ControlApiError } from '../controlApiClient.js'
+import { ControlApiError, ControlApiUnexpectedResponseError } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
   cancelManagedInvitation,
@@ -17,6 +17,7 @@ import {
 } from '../services/memberManagementService.js'
 import { TEAM_ROLES, TeamRole } from '../types.js'
 
+const MAX_INVITATION_EMAIL_LENGTH = 320
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MAX_INVITATION_TEAM_ASSIGNMENTS = 50
 const MAX_INVITEE_NAME_LENGTH = 120
@@ -150,9 +151,14 @@ export function createMembersRouter(): Router {
 
   router.post('/members/invite', requireAuth, async (req: AuthedRequest, res, next) => {
     try {
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
+      // The 320-character bound comes first: EMAIL_PATTERN alone accepts longer
+      // addresses, and control-api rejects them.
+      const rawEmail = req.body?.email
+      if (typeof rawEmail !== 'string' || rawEmail.length > MAX_INVITATION_EMAIL_LENGTH) {
+        res.status(400).json({ error: 'Valid email is required' })
+        return
+      }
+      const email = rawEmail.trim().toLowerCase()
       const name = String(req.body?.name || '').trim()
       const teams: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
       if (!EMAIL_PATTERN.test(email)) {
@@ -315,12 +321,13 @@ export function createMembersRouter(): Router {
       } catch (error) {
         const message = error instanceof Error ? error.message : ''
         if (error instanceof ControlApiError && error.status === 400) {
-          const code =
-            error.body && typeof error.body === 'object' && 'error' in error.body
-              ? String((error.body as { error: unknown }).error)
-              : ''
+          const code = error.code ?? ''
           if (code === 'reason_required' || code === 'idempotency_key_required') {
             res.status(400).json(error.body)
+            return
+          }
+          if (error.code === null) {
+            next(new ControlApiUnexpectedResponseError())
             return
           }
         }

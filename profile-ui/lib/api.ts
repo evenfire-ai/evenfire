@@ -32,6 +32,58 @@ let globalHandleAuthError: (() => void) | null = null
 
 type ApiRequestOptions = {
   silentUnauthorized?: boolean
+  /**
+   * Allows one invitation-proof request through the unconfirmed-logout fence.
+   * Two token-plus-email proofs use it, and neither reads the surviving cookie:
+   * - a password-reset submission clears that cookie server-side, so the screen
+   *   releases the fence after the server accepts the recovery action;
+   * - an invitation acceptance that is not a replay sets a new session cookie
+   *   for the invitee, which replaces the fenced cookie, so `acceptInvitation`
+   *   releases the fence; a replay sets no cookie and keeps it.
+   * Ordinary session requests must not bypass the fence.
+   */
+  allowUnconfirmedLogout?: boolean
+}
+
+const PROFILE_LOGOUT_UNCONFIRMED_KEY = 'profile_logout_unconfirmed'
+let logoutUnconfirmedInMemory = false
+
+function hasUnconfirmedLogout(): boolean {
+  if (typeof window === 'undefined') return false
+  if (logoutUnconfirmedInMemory) return true
+  try {
+    return window.localStorage.getItem(PROFILE_LOGOUT_UNCONFIRMED_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function markLogoutUnconfirmed(): boolean {
+  if (typeof window === 'undefined') return false
+  logoutUnconfirmedInMemory = true
+  try {
+    window.localStorage.setItem(PROFILE_LOGOUT_UNCONFIRMED_KEY, 'true')
+  } catch {
+    // Only this page is fenced; the caller must not report a durable sign-out.
+    return false
+  }
+  return true
+}
+
+/**
+ * Clears the logout fence. The fence is released only after a successful
+ * password login (parsed response), a confirmed logout, an accepted recovery submission, or a
+ * non-replay invitation acceptance that set a new session cookie; a recovery page view never
+ * releases it.
+ */
+export function clearUnconfirmedLogout(): void {
+  if (typeof window === 'undefined') return
+  logoutUnconfirmedInMemory = false
+  try {
+    window.localStorage.removeItem(PROFILE_LOGOUT_UNCONFIRMED_KEY)
+  } catch {
+    // A successful login remains usable for the current page even if storage is unavailable.
+  }
 }
 
 export class AuthExpiredError extends Error {
@@ -41,6 +93,17 @@ export class AuthExpiredError extends Error {
   constructor() {
     super('Session expired')
     this.name = 'AuthExpiredError'
+  }
+}
+
+export class ProfileApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+    message: string
+  ) {
+    super(message)
+    this.name = 'ProfileApiError'
   }
 }
 
@@ -67,6 +130,39 @@ function handleUnauthorized(): never {
   throw new AuthExpiredError()
 }
 
+// The public envelope may carry an object `error` with a code, or the legacy
+// `error` field. A top-level `code` is the stable machine code invitation
+// routes publish for responses whose `error` is an English sentence; it must
+// win over that sentence so classification never depends on display copy.
+function publicErrorFields(text: string): { code?: string; detail?: string } {
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (!parsed || typeof parsed !== 'object') return {}
+    const body = parsed as Record<string, unknown>
+    const envelope =
+      body.error && typeof body.error === 'object'
+        ? (body.error as Record<string, unknown>)
+        : undefined
+    const code =
+      typeof body.code === 'string'
+        ? body.code
+        : typeof envelope?.code === 'string'
+          ? envelope.code
+          : typeof body.error === 'string'
+            ? body.error
+            : undefined
+    const message =
+      typeof envelope?.message === 'string'
+        ? envelope.message
+        : typeof body.message === 'string'
+          ? body.message
+          : undefined
+    return { code, detail: message || code }
+  } catch {
+    return { detail: text }
+  }
+}
+
 async function parseJsonResponse(res: Response): Promise<unknown> {
   const text = await res.text()
   if (!text.trim()) return undefined
@@ -77,9 +173,17 @@ export function clearToken(): void {
   if (typeof window === 'undefined') return
   // Clear legacy browser-readable storage for users upgrading from the old
   // token flow. The active profile session is now an HttpOnly cookie.
-  window.localStorage.removeItem(EXTERNAL_SESSION_TOKEN_KEY)
-  window.localStorage.removeItem(EXTERNAL_SESSION_TOKEN_EXPIRES_AT_KEY)
-  document.cookie = `${EXTERNAL_SESSION_TOKEN_KEY}=; path=/; max-age=0; SameSite=Lax`
+  try {
+    window.localStorage.removeItem(EXTERNAL_SESSION_TOKEN_KEY)
+    window.localStorage.removeItem(EXTERNAL_SESSION_TOKEN_EXPIRES_AT_KEY)
+  } catch {
+    // Continue local logout even when browser storage is unavailable.
+  }
+  try {
+    document.cookie = `${EXTERNAL_SESSION_TOKEN_KEY}=; path=/; max-age=0; SameSite=Lax`
+  } catch {
+    // The server-owned HttpOnly cookie is expired by the logout response.
+  }
 }
 
 export async function apiGet(
@@ -87,6 +191,13 @@ export async function apiGet(
   q: Record<string, string | undefined> = {},
   options: ApiRequestOptions = {}
 ) {
+  if (hasUnconfirmedLogout()) {
+    if (options.silentUnauthorized) {
+      clearToken()
+      throw new AuthExpiredError()
+    }
+    handleUnauthorized()
+  }
   const res = await fetch(`${EXTERNAL_REST_API_BASE_URL}${path}${query(q)}`, {
     cache: 'no-store',
     credentials: 'include',
@@ -109,8 +220,10 @@ export async function apiSend(
   path: string,
   body?: unknown,
   q: Record<string, string | undefined> = {},
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  options: ApiRequestOptions = {}
 ) {
+  if (hasUnconfirmedLogout() && !options.allowUnconfirmedLogout) handleUnauthorized()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...extraHeaders,
@@ -125,28 +238,33 @@ export async function apiSend(
   if (!res.ok) {
     const text = await res.text()
     if (res.status === 401) handleUnauthorized()
-    let detail: string
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
-      detail = String(parsed.message || parsed.error || text)
-    } catch {
-      detail = text
-    }
+    const publicError = publicErrorFields(text)
+    const detail = publicError.detail || res.statusText
     // Substring match is REQUIRED here (not === like control-ui): profile-ui reaches
     // control-api through external-rest-api, whose error middleware collapses any 5xx
     // into { message: "Control API ... failed (503): <code>" }, so the code arrives
     // embedded in a wrapper string rather than as the bare { error: '<code>' } body.
-    if (detail.includes('member_registration_unavailable')) {
+    if (
+      publicError.code === 'member_registration_unavailable' ||
+      detail.includes('member_registration_unavailable')
+    ) {
       throw new Error(
         "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
       )
     }
-    if (detail.includes('member_registration_misconfigured')) {
+    if (
+      publicError.code === 'member_registration_misconfigured' ||
+      detail.includes('member_registration_misconfigured')
+    ) {
       throw new Error(
         'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
       )
     }
-    throw new Error(`${res.status} ${res.statusText} - ${detail}`)
+    throw new ProfileApiError(
+      res.status,
+      publicError.code ?? null,
+      `${res.status} ${res.statusText} - ${detail}`
+    )
   }
   if (res.status === 204) {
     return null
@@ -166,28 +284,44 @@ export async function loginWithPassword(
   })
   if (!res.ok) {
     const text = await res.text()
-    let detail: string
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
-      detail = String(parsed.message || parsed.error || text)
-    } catch {
-      detail = text
-    }
+    const detail = publicErrorFields(text).detail || res.statusText
     throw new Error(`${res.status} ${res.statusText} - ${detail}`)
   }
+  const body = (await res.json()) as PasswordLoginResponse
   clearToken()
-  return (await res.json()) as PasswordLoginResponse
+  clearUnconfirmedLogout()
+  return body
 }
 
-export async function logoutProfileUI(): Promise<void> {
+export async function logoutProfileUI(): Promise<{
+  revocationConfirmed: boolean
+  fencePersisted: boolean
+  sessionAbsent: boolean
+}> {
+  const fencePersisted = markLogoutUnconfirmed()
+  let revocationConfirmed = false
+  let sessionAbsent = false
   try {
-    await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/auth/logout`, {
+    const response = await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/auth/logout`, {
       method: 'POST',
       credentials: 'include',
     })
+    if (response.ok) {
+      // The edge also answers 200 when the request carried no session, for example after
+      // an earlier failed logout expired the cookie. Only an answer for a presented
+      // session confirms revocation; a missing field confirms nothing.
+      const body = (await response.json()) as { sessionPresented?: unknown }
+      revocationConfirmed = body.sessionPresented === true
+      sessionAbsent = body.sessionPresented === false
+    }
+  } catch {
+    // The browser cannot expire an HttpOnly cookie without a server response.
+    // The local marker prevents that cookie from restoring or authorizing Profile state.
   } finally {
     clearToken()
   }
+  if (revocationConfirmed) clearUnconfirmedLogout()
+  return { revocationConfirmed, fencePersisted, sessionAbsent }
 }
 
 export async function requestPasswordReset(email: string): Promise<{ requested: true }> {
@@ -212,11 +346,18 @@ export async function acceptInvitation(
   invitationUrlId: string,
   email: string
 ): Promise<AcceptInvitationResponse> {
-  const response = (await apiSend('POST', '/api/v1/invitations/accept', {
-    token: invitationUrlId,
-    email,
-  })) as AcceptInvitationResponse
+  const response = (await apiSend(
+    'POST',
+    '/api/v1/invitations/accept',
+    { token: invitationUrlId, email },
+    {},
+    {},
+    { allowUnconfirmedLogout: true }
+  )) as AcceptInvitationResponse
   clearToken()
+  // A non-replay accept set a new session cookie for the invitee, replacing the
+  // cookie the fence protected. A replay sets no cookie, so the fence stays.
+  if (!response.replay) clearUnconfirmedLogout()
   return response
 }
 
@@ -230,6 +371,29 @@ export async function setupInvitationPassword(
 }
 
 export async function setupInvitationPasswordWithToken(
+  invitationUrlId: string,
+  email: string,
+  invitationId: string,
+  password: string
+): Promise<InvitationPreview & { passwordUpdated: boolean }> {
+  const response = (await apiSend(
+    'POST',
+    '/api/v1/invitations/password-reset',
+    {
+      token: invitationUrlId,
+      email,
+      invitationId,
+      password,
+    },
+    {},
+    {},
+    { allowUnconfirmedLogout: true }
+  )) as InvitationPreview & { passwordUpdated: boolean }
+  clearToken()
+  return response
+}
+
+export async function setupAcceptedInvitationPasswordWithToken(
   invitationUrlId: string,
   email: string,
   invitationId: string,

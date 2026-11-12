@@ -24,7 +24,8 @@
  *
  * Updates fire `onChange` with `{llmKeyChanged, envChanged}` so subscribers
  * can skip work that doesn't concern them (e.g. shell-tool spawn cares about
- * envChanged; LLM provider factory cares about llmKeyChanged).
+ * envChanged; LLM provider factory cares about llmKeyChanged, plus envChanged
+ * when the provider's declared non-secret env — e.g. AWS_REGION — changed).
  *
  * Reconnect strategy: watches that disconnect are restarted with exponential
  * backoff; on "too old" the watch falls back to a fresh list and resumes.

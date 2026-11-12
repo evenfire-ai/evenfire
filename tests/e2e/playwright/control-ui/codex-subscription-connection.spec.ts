@@ -78,12 +78,14 @@ test.describe('Codex subscription connection', () => {
   })
 
   test('J2 authenticated deep link and legacy redirect; unauth is AuthGate', async ({ page }) => {
+    // E2E_GUARDIAN_NAVIGATION: negative-route-guard — protected page must stay at AuthGate
     await page.goto('/secrets/llm/subscriptions')
     await expect(page.getByLabel('Username or email')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByRole('button', { name: 'Add subscription' })).toHaveCount(0)
 
     await page.goto('/')
     await loginControlUiVisible(page)
+    // E2E_GUARDIAN_NAVIGATION: negative-route-guard — legacy route must redirect to canonical view
     await page.goto('/secrets/subscription')
     await expect(page).toHaveURL(/\/secrets\/llm\/subscriptions$/)
     await expect(page.getByRole('tab', { name: 'Subscriptions', selected: true })).toBeVisible()

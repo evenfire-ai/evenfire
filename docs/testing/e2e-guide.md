@@ -16,7 +16,7 @@ From root `README.md` §Testing prerequisites:
 - **Docker Desktop** running
 - **minikube** installed (`brew install minikube`)
 - **kubectl** configured
-- **Node.js 24+** for unit tests
+- **Node.js 24.22.1 or later in the Node 24 line** for unit tests
 - `.env` file at repo root with LLM API keys:
 
   | Variable                | Required For                                     | How to Get                              |
@@ -116,17 +116,11 @@ phase. Direct `npx vitest` runs still require a held port-forward terminal:
 make minikube-pf-all
 ```
 
-For Control UI / Desktop on a branch-owned profile, the first-hand entry
-point `scripts/minikube-profiles/branch.mk` is the
-host-side hold. Implementation:
-`scripts/minikube-profiles/branch-profile.sh`.
-HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
-Profile-owned random ports only (never shared `:3000`/`:8090`).
-`make minikube-pf-all-bg` is a gate refresh only; it must not replace
-`branch-profile-pf`. Do not start UI PFs from a sandboxed agent shell. Run
-the make target on the host. Do not kill this lane's `branch-profile-pf`.
-`branch-profile-pf-health` starts PFs then STOPS them on EXIT — do not use
-it as the lasting hold.
+On a branch-owned profile, use `scripts/minikube-profiles/branch.mk` instead
+of the shared `:3000`/`:8090` mapping. It forwards on profile-owned random
+ports and must run on the host. `branch-profile-pf` is the lasting hold;
+`branch-profile-pf-health` stops its forwards on exit, and
+`make minikube-pf-all-bg` (a gate refresh) does not replace either.
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
@@ -254,13 +248,7 @@ This ensures E2E tests validate the real production flow, not a weakened test-mo
 
 ## Unit test suites
 
-Every service in the root Makefile's `TEST_SERVICES` list ships its own vitest suite (mcp-host, workflow-recipes, mcp-servers, control-api, host-context-controller, rpc-proxy, desktop-app, and the rest). Exact per-service counts drift as code changes, so this guide does not pin them — count them yourself, or run the suite:
-
-```bash
-make test-counts          # prints unit-test file and case counts
-                          # (it()/test() cases in *.test.ts, excluding
-                          #  node_modules, tests/e2e, and dist)
-```
+Every service in the root Makefile's `TEST_SERVICES` list ships its own vitest suite (mcp-host, workflow-recipes, mcp-servers, control-api, host-context-controller, rpc-proxy, desktop-app, and the rest). Exact per-service counts drift as code changes, so this guide does not pin them; run the suites to see them.
 
 `npm test` inside each service directory is the source of truth for what actually passes.
 
@@ -312,6 +300,7 @@ Common test-related issues:
 - **`401: "Invalid token"` from chatllm** → `make minikube-gen-keys` followed by `make minikube-sync-auth-key` (auto-syncs + restarts). See the JWT auth chain notes at the top of the root `Makefile`.
 - **Port-forward drops after pod restart** → re-run `make minikube-pf-desktop`
 - **Desktop app shows no agents after login** → `scripts/minikube/seed-test-data.sh`
+- **`403 model_not_allowed` on an E2E lane** → a fresh DB enables only what the models.dev catalog sync enabled. The e2e seed profile enables every pair in `scripts/e2e/e2e-llm-models.txt` through the admin API (minikube only). Add the pair there, since `scripts/tests/test-e2e-llm-models-manifest.sh` fails when a spec names one that is missing, then re-run `scripts/minikube/seed-test-data.sh`. Run directly (only on `clerum-test` or a hashed branch profile), the seed creates missing pairs but does not re-enable a row that is already disabled; enable that one under **LLM models** in the Control UI.
 - **NetworkPolicy Phase 6 passes when it shouldn't** → ensure minikube was started with `--cni=calico`; the default `kindnet` CNI silently ignores NetworkPolicy. Cross-check the rendered policies from the active overlay (`kubectl kustomize deploy/overlays/minikube`).
 - **Approval times out (`e2e-approval-flow.sh` Phase 4/5)** → check mcp-host logs for the `awaiting_approval` entry. The runner approves with `{ toolCallId }` only; for rpc-proxy callers mcp-host derives the approving user from the `x-clerum-edge-user-id` header, not from the request body — so check the identity the RPC token was minted for.
 

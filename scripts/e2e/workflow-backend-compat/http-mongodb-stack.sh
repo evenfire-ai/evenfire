@@ -334,9 +334,10 @@ else
   fail "Transport Service '${mcp_server_name}' not found"
 fi
 
-# Verify the Context that the delegated McpServer actually references.
+# Verify the allowlist of the Context WRC stamped on the delegated McpServer;
+# the server itself carries no owner Context.
 context_ref=$(kctl get mcpserver "$mcp_server_name" -n "$MCP_SERVER_NS" \
-  -o jsonpath='{.spec.contextRef}' 2>/dev/null || echo "")
+  -o jsonpath='{.metadata.labels.clerum\.io/context}' 2>/dev/null || echo "")
 elapsed=0
 context_timeout="${TIMEOUT_CONTEXT:-180}"
 context_allowlisted=false

@@ -10,11 +10,14 @@
  * A snapshot is keyed by the send identity `(agentRef, chatId, userMessageId)`
  * and released only on an explicit terminal outcome: its own successful reply
  * or cancel, a user-initiated discard (which also drops the older failures of
- * that chat), or a newer send for the same chat that reaches a successful
- * terminal, which supersedes every failure recorded before it. Documents the
- * Host never received are the exception (#678 D13): only a discard, recovery or
- * retry of that snapshot itself, or a store reset, releases them. A snapshot still
- * awaiting its own terminal is never released by another send. Receiving a
+ * that chat), a newer send for the same chat that reaches a successful
+ * terminal, which supersedes every failure recorded before it, or a send that
+ * the server rejected, or that ended before it was handed to the main process
+ * while its agent was on hold, and whose payload went back to the composer.
+ * Documents the Host never received are the exception (#678 D13): only a
+ * discard, recovery or retry of that snapshot itself, or a store reset, releases
+ * them. A snapshot still awaiting its own terminal is never released by another
+ * send. Receiving a
  * `taskId` is NOT a terminal acknowledgement — a started task can still fail —
  * so it never releases the snapshot by itself.
  *
@@ -108,6 +111,11 @@ export function createRetainedSendStore(changed: () => void) {
       if (!latest || snapshot.timestamp >= latest.timestamp) latest = snapshot
     }
     return latest
+  }
+
+  /** All snapshots currently held for a task (copy; caller decides what next). */
+  function getRetainedSendsForTask(taskId: string): RetainedSendSnapshot[] {
+    return [...snapshots.values()].filter(snapshot => snapshot.taskId === taskId)
   }
 
   /** Attaches the task id once the async task is accepted (still retained). */
@@ -295,6 +303,7 @@ export function createRetainedSendStore(changed: () => void) {
     retainSendSnapshot,
     getRetainedSendSnapshot,
     getLatestRetainedSendSnapshotForChat,
+    getRetainedSendsForTask,
     attachTaskIdToRetainedSend,
     releaseRetainedSend,
     releaseRetainedSendsForTask,

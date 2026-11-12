@@ -212,6 +212,25 @@ export interface InternalToolResult {
    */
   content?: string
   error?: string
+  /**
+   * Text the file shows that its arguments do not spell, such as the value
+   * labels a chart image draws. The attachment check reads it with the
+   * arguments; it is never sent to the model.
+   */
+  shownText?: string[]
+  /**
+   * The SHA-256 of the bytes the generator wrote, so the attachment check
+   * delivers those bytes and not a file written under the same name since. It
+   * is never sent to the model.
+   */
+  writtenSha256?: string
+  /**
+   * Arguments the schema does not declare that the generator took under
+   * another name, or named in a note of its own, as paths ("images",
+   * "data.team[0].label"). The ignored-arguments note leaves them out. It is
+   * never sent to the model.
+   */
+  aliasedArguments?: string[]
 }
 
 /**

@@ -9,15 +9,17 @@ import {
   useRef,
   useState,
 } from 'react'
-import { Button } from '@components/Button'
-import { FormField } from '@components/FormField'
-import { TextInput } from '@components/TextInput'
 import { PROFILE_ROUTES } from '@constants/routes'
 import {
+  AuthExpiredError,
+  ProfileApiError,
   acceptInvitation,
+  clearUnconfirmedLogout,
   getEvenfireDownloadUrl,
+  setupAcceptedInvitationPasswordWithToken,
   setupInvitationPasswordWithToken,
 } from '@lib/api'
+import { isTerminalPasswordError } from '@lib/invitationErrors'
 import {
   buildInvitationHeading,
   buildInvitationTeamsLabel,
@@ -25,7 +27,10 @@ import {
 } from '@lib/invitations'
 import { formatTeamRole } from '@lib/teamRoles'
 import type { InvitationPreview } from '@/app/types/api'
+import { InvitationActionPanel } from './InvitationActionPanel'
 import type { InvitationClientProps } from './types'
+
+type PasswordPhase = 'editing' | 'submitting' | 'updated' | 'outcome_unknown' | 'terminal'
 
 function statusForInvitation(invitation: InvitationPreview): string {
   if (invitation.purpose === 'password_reset') {
@@ -68,6 +73,17 @@ function statusForInvitation(invitation: InvitationPreview): string {
   return `Accept your Evenfire invitation for ${teamLabel}.`
 }
 
+function isAmbiguousRecoveryOutcome(value: unknown): boolean {
+  if (!(value instanceof Error)) return true
+  if (value instanceof TypeError || value.name === 'SyntaxError') return true
+  if (!(value instanceof ProfileApiError)) return false
+  if (value.code === 'recovery_outcome_unknown') return true
+  if (value.status === 500 && value.code === 'internal_error') return false
+  if (value.code === 'authority_unavailable' || value.code === 'rate_limited') return false
+  if (value.status === 429) return false
+  return value.status >= 500
+}
+
 export function InvitationClient({
   invitationToken,
   initialInvitation,
@@ -82,6 +98,7 @@ export function InvitationClient({
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [submitting, setSubmitting] = useState<'accept' | 'password' | null>(null)
+  const [passwordPhase, setPasswordPhase] = useState<PasswordPhase>('editing')
   const actionInFlightRef = useRef(false)
 
   useEffect(() => {
@@ -95,6 +112,10 @@ export function InvitationClient({
     setStatus(initialInvitation ? statusForInvitation(initialInvitation) : '')
   }, [initialInvitation, initialError])
 
+  useEffect(() => {
+    setPasswordPhase('editing')
+  }, [invitationToken])
+
   const invitationExpired = useMemo(() => {
     if (!invitation || invitation.status !== 'pending') return false
     return formatRemaining(invitation.expiresAt, now) === 'expired'
@@ -103,12 +124,10 @@ export function InvitationClient({
   const expirationText = useMemo(() => {
     if (!invitation || invitation.status !== 'pending') return ''
     const remaining = formatRemaining(invitation.expiresAt, now)
-    return remaining === 'expired'
-      ? 'This invitation has expired.'
-      : `This invitation will expire in ${remaining}.`
+    if (remaining === 'expired') return 'This invitation has expired.'
+    return remaining ? `This invitation will expire in ${remaining}.` : ''
   }, [invitation, now])
 
-  const downloadUrl = getEvenfireDownloadUrl()
   const isPasswordReset = invitation?.purpose === 'password_reset'
   const teamLabel = invitation
     ? buildInvitationTeamsLabel(invitation.teams, invitation.teamName)
@@ -120,15 +139,90 @@ export function InvitationClient({
         ? [invitation.teamName]
         : []
   const hasMultipleTeams = teamNames.length > 1
+  const downloadUrl = getEvenfireDownloadUrl()
   const profileLoginHref = PROFILE_ROUTES.login({
     email: invitation?.email.trim().toLowerCase(),
   })
+  const forgotPasswordHref = PROFILE_ROUTES.forgotPassword({
+    email: invitation?.email.trim().toLowerCase(),
+  })
   const busy = submitting !== null
+  const passwordUpdated = passwordPhase === 'updated'
+  const recoveryOutcomeUnknown = isPasswordReset && passwordPhase === 'outcome_unknown'
+  const passwordTerminal = passwordPhase === 'terminal'
+  const invitationUsed = Boolean(
+    invitation && invitation.status === 'accepted' && !invitation.passwordPending
+  )
+  const showPasswordSetup = Boolean(
+    invitation &&
+    !passwordUpdated &&
+    !recoveryOutcomeUnknown &&
+    !passwordTerminal &&
+    !invitationUsed &&
+    !invitationExpired &&
+    ((isPasswordReset && invitation.status === 'pending') ||
+      (invitation.status === 'accepted' && invitation.passwordPending))
+  )
+  const pageTitle = passwordUpdated
+    ? 'Password updated'
+    : isPasswordReset
+      ? 'Reset password'
+      : buildInvitationHeading(invitation?.teamName)
+  const pageStatus = passwordUpdated
+    ? 'Your password has been updated.'
+    : passwordTerminal
+      ? 'Sign in to continue with your account.'
+      : invitationUsed
+        ? 'This invitation has already been used.'
+        : status || (error ? 'We could not open this invitation.' : 'Invitation loaded.')
 
-  function friendlyInvitationError(value: unknown): string {
+  function friendlyInvitationError(value: unknown, isRecovery = false): string {
     if (!(value instanceof Error)) return 'Failed to update invitation.'
+    if (isRecovery) {
+      if (!(value instanceof ProfileApiError)) {
+        return 'We could not update your password. Please try again.'
+      }
+      if (value.code === 'invalid_password') return 'Password must be between 8 and 256 characters.'
+      if (value.code === 'invalid_invitation') return 'This recovery link is invalid or expired.'
+      if (value.code === 'invitation_not_accepted')
+        return 'Accept the invitation before setting a password.'
+      if (value.code === 'invitation_not_pending' || value.code === 'invitation_not_ready')
+        return 'This invitation has already been used.'
+      if (value.code === 'expired' || value.status === 410) return 'This invitation has expired.'
+      if (value.code === 'forbidden' || value.status === 403)
+        return 'Invitation email does not match.'
+      if (value.code === 'not_found' || value.status === 404) return 'Invitation not found.'
+      if (value.code === 'rate_limited' || value.status === 429) {
+        return 'Account recovery is temporarily busy. Please wait a moment and try again.'
+      }
+      if (value.code === 'authority_unavailable') {
+        return 'Account recovery is temporarily unavailable. Please try again shortly.'
+      }
+      if (value.code === 'recovery_outcome_unknown') {
+        return 'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.'
+      }
+      if (value.status === 400 || value.status === 401) {
+        return 'This recovery link is invalid or expired.'
+      }
+      return 'We could not update your password. Please try again.'
+    }
+    if (value instanceof ProfileApiError && value.code) {
+      if (value.code === 'invalid_password') return 'Password must be between 8 and 256 characters.'
+      if (value.code === 'invalid_invitation') return 'This recovery link is invalid or expired.'
+      if (value.code === 'invitation_not_accepted')
+        return 'Accept the invitation before setting a password.'
+      if (value.code === 'invitation_not_pending' || value.code === 'invitation_not_ready')
+        return 'This invitation has already been used.'
+      if (value.code === 'expired') return 'This invitation has expired.'
+      if (value.code === 'forbidden') return 'Invitation email does not match.'
+      if (value.code === 'not_found') return 'Invitation not found.'
+      if (value.code === 'password_already_set') {
+        return 'This account already has a password. Sign in instead.'
+      }
+    }
     const message = value.message.replace(/^\d{3}\s+[A-Za-z ]+\s+-\s+/, '')
     if (message === 'invalid_password') return 'Password must be between 8 and 256 characters.'
+    if (message === 'invalid_invitation') return 'This recovery link is invalid or expired.'
     if (message === 'invitation_not_accepted')
       return 'Accept the invitation before setting a password.'
     if (message === 'invitation_not_pending') return 'This invitation has already been used.'
@@ -137,6 +231,13 @@ export function InvitationClient({
     if (message === 'expired') return 'This invitation has expired.'
     if (message === 'forbidden') return 'Invitation email does not match.'
     if (message === 'not_found') return 'Invitation not found.'
+    if (message === 'rate_limited')
+      return 'Account recovery is temporarily busy. Please wait a moment and try again.'
+    if (message === 'authority_unavailable')
+      return 'Account recovery is temporarily unavailable. Please try again shortly.'
+    if (message === 'recovery_outcome_unknown') {
+      return 'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.'
+    }
     return message
   }
 
@@ -185,9 +286,18 @@ export function InvitationClient({
   }
 
   async function handlePasswordSubmit() {
-    if (!invitation || busy || actionInFlightRef.current) return
+    if (
+      !invitation ||
+      busy ||
+      actionInFlightRef.current ||
+      passwordPhase === 'updated' ||
+      passwordPhase === 'outcome_unknown'
+    ) {
+      return
+    }
     setError('')
-    if (password.length < 8 || password.length > 256) {
+    const normalizedPasswordLength = password.trim().length
+    if (normalizedPasswordLength < 8 || normalizedPasswordLength > 256) {
       setError('Password must be between 8 and 256 characters.')
       return
     }
@@ -197,21 +307,50 @@ export function InvitationClient({
     }
     actionInFlightRef.current = true
     setSubmitting('password')
+    setPasswordPhase('submitting')
     try {
-      const response = await setupInvitationPasswordWithToken(
-        invitationToken,
-        invitation.email,
-        invitation.id,
-        password
-      )
-      applyInvitationUpdate({
-        ...invitation,
-        ...response,
-        status: response.status || 'accepted',
-        passwordPending: false,
-      })
+      const setupPassword = isPasswordReset
+        ? setupInvitationPasswordWithToken
+        : setupAcceptedInvitationPasswordWithToken
+      await setupPassword(invitationToken, invitation.email, invitation.id, password)
+      // The server accepted the recovery proof. Only that authoritative result
+      // releases the logout fence: a page view or a client-clock expiry is not
+      // proof that the surviving session can be discarded safely.
+      if (isPasswordReset) clearUnconfirmedLogout()
+      // The backend issues no session from password setup. The screen must send
+      // the person to the ordinary login instead of hydrating a recovery session.
+      setPasswordPhase('updated')
+      setStatus('Your password has been updated.')
+      setPassword('')
+      setConfirmPassword('')
     } catch (nextError) {
-      setError(friendlyInvitationError(nextError))
+      if (isPasswordReset && isAmbiguousRecoveryOutcome(nextError)) {
+        setPasswordPhase('outcome_unknown')
+        setPassword('')
+        setConfirmPassword('')
+        setError(
+          'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.'
+        )
+      } else if (!isPasswordReset && nextError instanceof AuthExpiredError) {
+        // The accepted-invitation password call does not pass the logout fence:
+        // the edge treats a presented session cookie as its only proof, and the
+        // fenced cookie may belong to another user. Resubmitting the form would
+        // hit the same fence, so end at Sign in and the recovery link instead.
+        setPasswordPhase('terminal')
+        setPassword('')
+        setConfirmPassword('')
+        setError(friendlyInvitationError(nextError, isPasswordReset))
+      } else if (isTerminalPasswordError(nextError)) {
+        // The proof was invalidated after this screen loaded. Offering the same
+        // dead form again would trap the person, so end at a usable action.
+        setPasswordPhase('terminal')
+        setPassword('')
+        setConfirmPassword('')
+        setError(friendlyInvitationError(nextError, isPasswordReset))
+      } else {
+        setPasswordPhase('editing')
+        setError(friendlyInvitationError(nextError, isPasswordReset))
+      }
     } finally {
       actionInFlightRef.current = false
       setSubmitting(null)
@@ -232,30 +371,20 @@ export function InvitationClient({
     void handlePasswordSubmit()
   }
 
-  function buttonLabel(kind: 'accept' | 'password', label: string) {
-    if (submitting !== kind) return label
-    return (
-      <span className="cu-btn__content">
-        <span className="cu-btn__spinner" aria-hidden="true" />
-        <span>{kind === 'accept' ? 'Accepting...' : 'Saving...'}</span>
-      </span>
-    )
-  }
-
   return (
     <main className="center-page">
       <section className="page-card">
         <div className="stack-tight">
           <p className="eyebrow">Evenfire Invitation</p>
-          <h1 className="page-title page-title--large">
-            {isPasswordReset ? 'Reset password' : buildInvitationHeading(invitation?.teamName)}
-          </h1>
-          <p className="body-copy">
-            {status || (error ? 'We could not open this invitation.' : 'Invitation loaded.')}
-          </p>
+          <h1 className="page-title page-title--large">{pageTitle}</h1>
+          <p className="body-copy">{pageStatus}</p>
         </div>
 
-        {error ? <div className="message message--error">{error}</div> : null}
+        {error ? (
+          <div className="message message--error" role="alert" aria-live="assertive">
+            {error}
+          </div>
+        ) : null}
 
         {invitation ? (
           <div className="invite-card">
@@ -292,80 +421,57 @@ export function InvitationClient({
           </div>
         ) : null}
 
-        {!invitation ? null : (isPasswordReset && invitation.status === 'pending') ||
-          (invitation.status === 'accepted' && invitation.passwordPending) ? (
-          <div className="stack">
-            <div className="form-card">
-              <strong>{isPasswordReset ? 'Set a new password' : 'Set your password'}</strong>
-              <div className="muted">
-                Use at least 8 characters. This password stays with your Evenfire account.
-              </div>
-              <FormField label="Password">
-                <TextInput
-                  name="password"
-                  type="password"
-                  placeholder="At least 8 characters"
-                  value={password}
-                  onChange={event => setPassword(event.currentTarget.value)}
-                  onKeyDown={handlePasswordKeyDown}
-                  disabled={busy}
-                  minLength={8}
-                  required
-                />
-              </FormField>
-              <FormField label="Confirm password">
-                <TextInput
-                  name="confirmPassword"
-                  type="password"
-                  placeholder="Repeat your password"
-                  value={confirmPassword}
-                  onChange={event => setConfirmPassword(event.currentTarget.value)}
-                  onKeyDown={handlePasswordKeyDown}
-                  disabled={busy}
-                  minLength={8}
-                  required
-                />
-              </FormField>
-            </div>
-            <Button
-              type="button"
-              disabled={busy}
-              onClick={handlePasswordAction}
-              onPointerDown={handlePasswordAction}
-            >
-              {buttonLabel(
-                'password',
-                isPasswordReset ? 'Reset password' : 'Set password and continue'
-              )}
-            </Button>
-          </div>
-        ) : invitation.status === 'accepted' ? (
-          <div className="stack">
-            <a
-              className="cu-btn cu-btn--primary"
-              href={downloadUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Download Evenfire
-            </a>
-            <a className="cu-btn" href={profileLoginHref}>
-              Manage Profile
-            </a>
-          </div>
+        {!invitation ? (
+          <InvitationActionPanel mode="link-error" loginHref={profileLoginHref} />
+        ) : passwordUpdated ? (
+          <InvitationActionPanel
+            mode="password-updated"
+            loginHref={profileLoginHref}
+            downloadUrl={downloadUrl}
+            isPasswordReset={isPasswordReset}
+          />
+        ) : recoveryOutcomeUnknown ? (
+          <InvitationActionPanel
+            mode="outcome-unknown"
+            loginHref={profileLoginHref}
+            forgotPasswordHref={forgotPasswordHref}
+          />
+        ) : passwordTerminal ? (
+          <InvitationActionPanel
+            mode="terminal"
+            loginHref={profileLoginHref}
+            forgotPasswordHref={forgotPasswordHref}
+          />
+        ) : invitationUsed ? (
+          <InvitationActionPanel
+            mode="used"
+            loginHref={profileLoginHref}
+            downloadUrl={downloadUrl}
+            isPasswordReset={isPasswordReset}
+            forgotPasswordHref={forgotPasswordHref}
+          />
         ) : invitationExpired ? (
-          <div className="message message--error-plain">This invitation has expired.</div>
+          <InvitationActionPanel mode="expired" loginHref={profileLoginHref} />
+        ) : showPasswordSetup ? (
+          <InvitationActionPanel
+            mode="password-setup"
+            isPasswordReset={isPasswordReset}
+            busy={busy}
+            submitting={submitting}
+            password={password}
+            confirmPassword={confirmPassword}
+            onPasswordChange={setPassword}
+            onConfirmPasswordChange={setConfirmPassword}
+            onPasswordKeyDown={handlePasswordKeyDown}
+            onPasswordAction={handlePasswordAction}
+          />
         ) : (
-          <div>
-            <Button
-              type="button"
-              disabled={busy}
-              onClick={handleAcceptAction}
-              onPointerDown={handleAcceptAction}
-            >
-              {buttonLabel('accept', 'Accept invitation')}
-            </Button>
-          </div>
+          <InvitationActionPanel
+            mode="accept"
+            busy={busy}
+            submitting={submitting}
+            onAcceptAction={handleAcceptAction}
+          />
         )}
       </section>
     </main>
