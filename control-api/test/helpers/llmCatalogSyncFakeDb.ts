@@ -76,6 +76,9 @@ export interface FakeRow {
   vendor: string | null
   image_input: ImageInputCapability | null
   catalog_status: string | null
+  enabled_managed_by: 'catalog' | 'operator'
+  auto_disabled_at: string | null
+  attention_ack: unknown
   discovered_at: string | null
   last_seen_at: string | null
   created_at: string
@@ -130,6 +133,7 @@ export interface SeedRow {
   vendor?: string | null
   image_input?: ImageInputCapability | null
   catalog_status?: string | null
+  enabled_managed_by?: 'catalog' | 'operator'
 }
 
 export interface FakeDbSeed {
@@ -254,7 +258,7 @@ const SQL = {
   materializerRead:
     "SELECT provider, model, vendor, display_name, context_window_tokens, image_input FROM llm_allowed_models WHERE enabled AND NOT (provider = 'codex-subscription' AND stale) ORDER BY provider ASC, model ASC",
   syncInsert:
-    "INSERT INTO llm_allowed_models (provider, model, enabled, source, discovered_at, last_seen_at, stale, context_window_tokens, display_name, image_input, catalog_status) VALUES ($1, $2, $6::boolean AND NOT EXISTS ( SELECT 1 FROM llm_catalog_dismissed d WHERE d.provider = $1 AND d.model = $2 ), 'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7) ON CONFLICT (provider, model) DO NOTHING RETURNING enabled, EXISTS ( SELECT 1 FROM llm_catalog_dismissed d WHERE d.provider = $1 AND d.model = $2 ) AS dismissed",
+    "INSERT INTO llm_allowed_models (provider, model, enabled, source, discovered_at, last_seen_at, stale, context_window_tokens, display_name, image_input, catalog_status, enabled_managed_by) VALUES ($1, $2, $6::boolean AND NOT EXISTS ( SELECT 1 FROM llm_catalog_dismissed d WHERE d.provider = $1 AND d.model = $2 ), 'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7, 'catalog') ON CONFLICT (provider, model) DO NOTHING RETURNING enabled, EXISTS ( SELECT 1 FROM llm_catalog_dismissed d WHERE d.provider = $1 AND d.model = $2 ) AS dismissed",
   syncManualUpdate: `UPDATE llm_allowed_models AS t SET image_input = ${guard(2, 3)} FROM llm_allowed_models AS prev WHERE t.id = $1 AND prev.id = t.id AND t.source = 'manual' AND t.provider = $4 AND t.model = $5 RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed`,
   syncDiscoveryUpdate: `UPDATE llm_allowed_models AS t SET last_seen_at = NOW(), stale = false, context_window_tokens = CASE WHEN t.enabled THEN t.context_window_tokens ELSE COALESCE(t.context_window_tokens, $2) END, display_name = CASE WHEN t.enabled THEN t.display_name ELSE COALESCE(t.display_name, $3) END, image_input = ${guard(4, 5)}, catalog_status = CASE WHEN $6::boolean THEN $7::text ELSE t.catalog_status END FROM llm_allowed_models AS prev WHERE t.id = $1 AND prev.id = t.id AND t.source = 'discovery' AND t.provider = $8 AND t.model = $9 RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed`,
   syncStale:
@@ -476,6 +480,9 @@ export function makeFakeDb(
       vendor: s.vendor ?? null,
       image_input: s.image_input ?? null,
       catalog_status: s.catalog_status ?? null,
+      enabled_managed_by: s.enabled_managed_by ?? 'operator',
+      auto_disabled_at: null,
+      attention_ack: null,
       discovered_at: null,
       last_seen_at: null,
       created_at: now(),
@@ -679,6 +686,9 @@ export function makeFakeDb(
           vendor: null,
           image_input: parseJsonb(imageInput),
           catalog_status: status ?? null,
+          enabled_managed_by: 'catalog',
+          auto_disabled_at: null,
+          attention_ack: null,
           discovered_at: now(),
           last_seen_at: now(),
           created_at: now(),
@@ -813,6 +823,9 @@ export function makeFakeDb(
           source: 'manual',
           stale: false,
           catalog_status: null,
+          enabled_managed_by: 'operator',
+          auto_disabled_at: null,
+          attention_ack: null,
           discovered_at: null,
           last_seen_at: null,
           created_at: now(),
@@ -999,6 +1012,9 @@ export function makeFakeDb(
       else if (item === "source = 'manual'") next.source = 'manual'
       else if (item === 'stale = false') next.stale = false
       else if (item === 'last_seen_at = NULL') next.last_seen_at = null
+      else if (item === "enabled_managed_by = 'operator'") next.enabled_managed_by = 'operator'
+      else if (item === 'auto_disabled_at = NULL') next.auto_disabled_at = null
+      else if (item === 'attention_ack = NULL') next.attention_ack = null
       else if (item === 'updated_at = NOW()') next.updated_at = now()
       else throw new Error(`llmCatalogSyncFakeDb: unrecognized SET item in admin UPDATE: ${item}`)
     }

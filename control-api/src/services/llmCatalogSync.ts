@@ -407,17 +407,19 @@ async function insertDiscoveredModel(
 ): Promise<InsertOutcome> {
   // ON CONFLICT DO NOTHING guards only a concurrent manual insert (never DO
   // UPDATE → never clobbers manual), and then RETURNING yields no row, so
-  // nothing below runs for a pair this run did not create.
+  // nothing below runs for a pair this run did not create. The row's
+  // `enabled` is the sync's decision, so it is 'catalog'-managed.
   const ins = await client.query(
     `INSERT INTO llm_allowed_models
        (provider, model, enabled, source, discovered_at, last_seen_at, stale,
-        context_window_tokens, display_name, image_input, catalog_status)
+        context_window_tokens, display_name, image_input, catalog_status,
+        enabled_managed_by)
      VALUES ($1, $2,
              $6::boolean AND NOT EXISTS (
                SELECT 1 FROM llm_catalog_dismissed d
                 WHERE d.provider = $1 AND d.model = $2
              ),
-             'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7)
+             'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7, 'catalog')
      ON CONFLICT (provider, model) DO NOTHING
      RETURNING enabled,
                EXISTS (

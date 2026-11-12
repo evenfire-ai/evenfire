@@ -52,6 +52,7 @@ import {
   applyGrokSubscriptionTerminalConnectionKeySchema,
   applyLlmProviderAttemptsGrokBrokerSchema,
 } from './services/grokSubscriptionSchema.js'
+import { applyLlmCatalogPruneStateSchema } from './services/llmCatalogPruneStateSchema.js'
 import {
   applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptConnectionIntegritySchema,
@@ -6421,6 +6422,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0138_legacy_password_security_epoch_backfill',
     apply: backfillLegacyPasswordSecurityEpochs,
+  },
+  {
+    version: '0139_llm_catalog_prune_state',
+    apply: applyLlmCatalogPruneStateSchema,
   },
 ]
 

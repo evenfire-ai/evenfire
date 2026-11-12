@@ -151,6 +151,12 @@ export const createLlmAllowedModelSchema = z.object({
 // Update: every field optional, but reject an empty body so PUT always changes
 // something. `.strict()` keeps unknown keys out (no silent typos). vendor,
 // display_name and context_window_tokens accept null to explicitly clear them.
+//
+// `pinEnabled` is not a column: it makes the operator the authority over
+// `enabled` even when the value sent equals the stored one (keeping a stale
+// model on, or keeping a pruned one off). It is only accepted together with
+// `enabled`, so a pin always fixes a value the operator chose, never one the
+// catalog sync wrote between the page load and the click.
 export const updateLlmAllowedModelSchema = z
   .object({
     provider: providerField,
@@ -160,15 +166,28 @@ export const updateLlmAllowedModelSchema = z
     context_window_tokens: contextWindowField.nullable(),
     image_input: imageInputField.nullable(),
     enabled: z.boolean(),
+    pinEnabled: z.boolean(),
   })
   .partial()
   .strict()
   .refine(obj => Object.keys(obj).length > 0, { message: 'no fields to update' })
+  .refine(obj => obj.pinEnabled === undefined || obj.enabled !== undefined, {
+    message: 'pinEnabled requires enabled',
+    path: ['pinEnabled'],
+  })
 
 export type CreateLlmAllowedModelInput = z.infer<typeof createLlmAllowedModelSchema>
 export type UpdateLlmAllowedModelInput = z.infer<typeof updateLlmAllowedModelSchema>
 
-export type LlmAllowedModelAuditAction = 'create' | 'update' | 'disable' | 'delete'
+export type LlmAllowedModelAuditAction =
+  | 'create'
+  | 'update'
+  | 'disable'
+  | 'delete'
+  | 'auto_disable'
+  | 'auto_enable'
+  | 'attention_ack'
+  | 'attention_unack'
 
 /**
  * Canonical storage form for the capability column. `unknown` WITHOUT evidence
@@ -427,7 +446,7 @@ export async function updateAllowedModel(
   // Build the SET list dynamically from whichever fields were provided. Keys
   // come from the zod-validated, `.strict()` schema — never raw request input —
   // so this is a fixed allowlist of column names, not caller-controlled SQL.
-  const columnByField: Record<keyof UpdateLlmAllowedModelInput, string> = {
+  const columnByField: Record<Exclude<keyof UpdateLlmAllowedModelInput, 'pinEnabled'>, string> = {
     provider: 'provider',
     model: 'model',
     vendor: 'vendor',
@@ -447,7 +466,7 @@ export async function updateAllowedModel(
   const params: unknown[] = []
   let idx = 1
   for (const [field, column] of Object.entries(columnByField) as [
-    keyof UpdateLlmAllowedModelInput,
+    keyof typeof columnByField,
     string,
   ][]) {
     const value = input[field]
@@ -475,6 +494,19 @@ export async function updateAllowedModel(
   ) {
     sets.push(`source = 'manual'`, 'stale = false', 'last_seen_at = NULL')
   }
+  // Authority over `enabled`, decided on the locked row: the route's earlier
+  // read is unlocked, and the catalog prune or re-enable can commit in
+  // between. Only a real change of the value, or an explicit pin, is an
+  // operator decision. The edit form resends `enabled` unchanged with every
+  // save, and that must not take the row away from the catalog. A rename
+  // also hands the row to the operator and drops the prune token and the
+  // acknowledgements: both belong to the old pair.
+  const operatorDecidesEnabled =
+    input.enabled !== undefined && (input.enabled !== existing.enabled || input.pinEnabled === true)
+  if (operatorDecidesEnabled || renamed) {
+    sets.push(`enabled_managed_by = 'operator'`, 'auto_disabled_at = NULL')
+  }
+  if (renamed) sets.push('attention_ack = NULL')
   if (sets.length === 0) return existing
 
   sets.push(`updated_at = NOW()`)

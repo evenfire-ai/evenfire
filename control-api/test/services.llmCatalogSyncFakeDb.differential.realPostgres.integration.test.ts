@@ -157,7 +157,7 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
     // The fake starts from the state the real migrations leave behind.
     const seeded = await corePool.query(
       `SELECT provider, model, enabled, source, stale, context_window_tokens,
-              display_name, vendor, image_input, catalog_status
+              display_name, vendor, image_input, catalog_status, enabled_managed_by
          FROM llm_allowed_models`
     )
     const seededPrices = await corePool.query(
@@ -261,7 +261,10 @@ describeRealPostgres('strict catalog fake DB vs real PostgreSQL (differential)',
               'display_name',
               'vendor',
               'catalog_status',
+              'enabled_managed_by',
             ]),
+            auto_disabled: r.auto_disabled_at !== null,
+            acknowledged: r.attention_ack !== null,
             image_input: canonical(r.image_input),
             discovered: r.discovered_at !== null,
             seen: r.last_seen_at !== null,
