@@ -16,6 +16,7 @@ import {
 } from '../grokLlmProxyClient'
 import { GrokSubscriptionProvider } from '../grokSubscription'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
+import { UPSTREAM_REQUEST_REJECTED_MESSAGE } from '../upstreamRejected'
 import { closedPortUrl, fetchFailure, silentServer } from './connectFailureFixtures'
 import { GROK_PNG_2X2_BASE64 } from './grokImageFixtures'
 
@@ -1058,6 +1059,37 @@ describe('GrokSubscriptionProvider G1 classification', () => {
       code: 'LLM_UPSTREAM_REJECTED',
       httpStatus: 402,
     })
+  })
+
+  // #1433: an upstream 400 reads as a rejected request, not "Connection Error",
+  // with a fixed sentence that is true for every 400. Other 4xx keep their text.
+  it('G1-8f gives an upstream 400 the rejected-request text, on HTTP and on SSE', async () => {
+    const http = await proxyReply(
+      Response.json({ error: 'upstream_rejected', upstreamStatus: 400 }, { status: 422 })
+    )
+    const frame = await proxyReply(
+      new Response(sse([{ type: 'error', code: 'upstream_rejected', upstreamStatus: 400 }]), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    )
+    for (const err of [http, frame]) {
+      expect(err).toMatchObject({
+        code: 'upstream_rejected',
+        upstreamStatus: 400,
+        message: UPSTREAM_REQUEST_REJECTED_MESSAGE,
+      })
+      expect(provider.classifyError(err)).toMatchObject({
+        code: 'LLM_UPSTREAM_REJECTED',
+        retryable: false,
+        httpStatus: 400,
+        message: UPSTREAM_REQUEST_REJECTED_MESSAGE,
+      })
+    }
+    const entitlement = await proxyReply(
+      Response.json({ error: 'upstream_rejected', upstreamStatus: 403 }, { status: 422 })
+    )
+    expect((entitlement as Error).message).toBe('proxy stream failed with 422 (upstream_rejected)')
   })
 
   // Review round 2 L11: both ends of 400..499 are accepted.
