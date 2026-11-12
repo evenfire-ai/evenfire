@@ -61,19 +61,53 @@ describe('WRC request body limit over a real socket', () => {
   })
 
   it('drops a chunked upload without Content-Length once it passes the drain cap', async () => {
-    const chunk = new Uint8Array(64 * 1024).fill(0x78)
-    let sent = 0
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        if (sent > MAX_DRAIN_BYTES * 2) return controller.close()
-        sent += chunk.length
-        controller.enqueue(chunk)
-      },
+    // Bytes the client produced say nothing about the server: socket buffers
+    // absorb megabytes before the reset reaches the producer. Observe the server
+    // side instead: the size of every chunk it read and what parseJsonBody resolved.
+    type Parsed = Awaited<ReturnType<typeof parseJsonBody>>
+    const received: number[] = []
+    let reportParsed!: (result: Parsed) => void
+    const parsed = new Promise<Parsed>(resolve => {
+      reportParsed = resolve
     })
-    await expect(
-      fetch(`${baseUrl}/status`, { method: 'POST', body, duplex: 'half' } as RequestInit)
-    ).rejects.toThrow('fetch failed')
-    expect(sent).toBeLessThan(MAX_DRAIN_BYTES * 2)
+    const observed = http.createServer(async (req, res) => {
+      req.on('data', (chunk: Buffer) => received.push(chunk.length))
+      const result = await parseJsonBody(req)
+      reportParsed(result)
+      res.writeHead(result.ok ? 200 : 413)
+      res.end()
+    })
+    await new Promise<void>(resolve => observed.listen(0, '127.0.0.1', resolve))
+    try {
+      const url = `http://127.0.0.1:${(observed.address() as AddressInfo).port}/status`
+      const chunk = new Uint8Array(64 * 1024).fill(0x78)
+      let sent = 0
+      // Finite on purpose: twice the drain cap is enough to cross it, and the
+      // upload ends by itself if the server never drops the connection.
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent > MAX_DRAIN_BYTES * 2) return controller.close()
+          sent += chunk.length
+          controller.enqueue(chunk)
+        },
+      })
+      await expect(
+        fetch(url, { method: 'POST', body, duplex: 'half' } as RequestInit)
+      ).rejects.toThrow('fetch failed')
+      const result = await parsed
+      // The chunk that takes the running total past the cap is the last one read.
+      let read = 0
+      for (const length of received) {
+        read += length
+        if (read > MAX_DRAIN_BYTES) break
+      }
+      expect(read).toBeGreaterThan(MAX_DRAIN_BYTES)
+      expect(result).toEqual({ ok: false, reason: 'too_large', bytesRead: read })
+      expect(received.reduce((total, length) => total + length, 0)).toBe(read)
+    } finally {
+      observed.closeAllConnections()
+      await new Promise(resolve => observed.close(resolve))
+    }
   })
 })
 
