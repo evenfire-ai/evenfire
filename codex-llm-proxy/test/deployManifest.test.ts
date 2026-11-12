@@ -109,7 +109,9 @@ describe('codex-llm-proxy base manifest', () => {
     expect(limit).toBeGreaterThanOrEqual(Math.ceil(CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
   })
 
-  it('T-DEP-3 ships the Codex subscription on in base, and the deployment repository CI checks the same', () => {
+  it('T-DEP-3 ships the Codex subscription on in base', () => {
+    // The deployment repository's CI reads these base values and has its own
+    // assertion on them, so a change here needs the matching change there.
     expect(scalar(MANIFEST, 'CODEX_LLM_PROXY_EXECUTION_ENABLED')).toBe('true')
     expect(scalar(CONTROL_PLANE_CONFIG, 'CONTROL_API_CODEX_SUBSCRIPTION_ENABLED')).toBe('true')
     // Witness for the absence below: the file is the control-plane config that

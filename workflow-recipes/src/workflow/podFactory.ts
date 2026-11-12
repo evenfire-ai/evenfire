@@ -768,6 +768,10 @@ export function buildMcpHostPod(
               name: 'CODEX_LLM_PROXY_RUNTIME_URL',
               value: 'http://codex-llm-proxy.control-plane.svc.cluster.local:8080',
             },
+            // The Grok entries follow the WRC switch and the recipe's
+            // declaration. Leaving them out does not make mcp-host refuse the
+            // Grok provider (its switch is on when unset); the recipe verdict
+            // withholds the scope, the proxy egress and the binding.
             ...(options.grokSubscriptionEnabled &&
             (options.recipeDeclaresGrok === true ||
               options.recipeAgentProvider === 'grok-subscription')

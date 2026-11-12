@@ -12,8 +12,12 @@ An admin signs in once from Control UI. Agents (Hosts) and workflow recipes
 then pick that sign-in, and the account's subscription entitlement pays for the
 calls instead of metered API billing. Both providers are **on by default**:
 their switches are on when unset, and `deploy/base` sets them to `"true"`. No
-model call runs until an admin signs in and a Host or recipe uses that
-connection.
+model call runs without a connected account that a Host or recipe uses.
+Connections and assignments are kept while a switch is off, so turning it back
+on, or upgrading to a release where it is on by default, lets them make calls
+again without a new sign-in, unless the saved sign-in has expired. The
+[release notes](../deploy/releases-and-upgrades.md#changed-code-defaults-first-release-after-v0120)
+list the three cases in which this happens at the upgrade.
 
 This page covers the operator workflow. For the wire format, limits and error
 taxonomy, see the [Codex transport contract](../architecture/codex-subscription-transport-contract.md)
@@ -52,7 +56,7 @@ To turn a subscription off, set its control-api and proxy switches to
 | `GROK_LLM_PROXY_EXECUTION_ENABLED`       | ConfigMap `grok-llm-proxy-config` (ns `control-plane`)                            | Grok     | `"true"`                                |
 | `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED`    | ConfigMap `mcp-host-config` (ns `mcp-host`)                                       | Codex    | on when unset                           |
 | `WRC_GROK_SUBSCRIPTION_ENABLED`          | `env` on the `workflow-recipes` Deployment (not a ConfigMap key)                  | Grok     | `"true"`                                |
-| `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`     | Leave unset, or `"false"` in `mcp-host-config` for per-Host gating (see below)    | Grok     | on when unset; HCC injects it per Host  |
+| `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`     | Leave unset, or `"false"` in `mcp-host-config` to limit provider construction on Hosts (see below) | Grok     | on when unset; HCC injects it per Host  |
 
 Notes:
 
@@ -65,11 +69,28 @@ Notes:
   controller (HCC) loads it into every Host's `mcp-host` container with
   `envFrom`, so your overlay must provide it. The minikube overlay does
   (`deploy/overlays/minikube/configmaps/mcp-host-config.yaml`).
+- `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED` and `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`
+  decide whether mcp-host builds the provider; `"false"` refuses it. Leaving
+  them on does not by itself allow a model call: a call needs the execute
+  permission, the proxy egress policy and a connected account, and those are
+  granted per Host and per recipe.
 - HCC adds `MCP_HOST_GROK_SUBSCRIPTION_ENABLED=true` only to Hosts that are
   actually configured for Grok, once control-api has Grok on. The switch is
-  also on when unset, so you do not need to set it. To limit Grok provider
-  construction to those Hosts, set it to `"false"` in `mcp-host-config`; the
-  value HCC adds to an eligible Host overrides the ConfigMap.
+  also on when unset, so a Host without that entry can build the Grok provider
+  too; its calls are refused before they reach the proxy, because it has no
+  Grok permission and no egress policy to the proxy. To make such a Host
+  refuse to build the provider instead, set the switch to `"false"` in
+  `mcp-host-config`; the value HCC adds to an eligible Host overrides the
+  ConfigMap. If such a Host is asked to build the Grok provider, it then logs
+  `Failed to construct LLM provider` with `reason: subscription_switch_off`,
+  which is expected.
+- Recipe pods do not load `mcp-host-config`, so a value there does not reach
+  them. WRC sets the Codex switch to `true` on every recipe pod, and the Grok
+  switch on recipe pods that declare Grok while `WRC_GROK_SUBSCRIPTION_ENABLED`
+  is on. mcp-host in a recipe pod without the Grok entry can still build the
+  provider; with the WRC switch off its calls are refused before they reach
+  the proxy, because the recipe gets no Grok permission, no binding and no
+  egress policy to the proxy.
 - Each proxy needs its inter-service token in `codex-llm-proxy-secrets` or
   `grok-llm-proxy-secrets`. `deploy/scripts/apply-inter-service-tokens.sh`
   creates both.
@@ -239,8 +260,11 @@ Both providers are valid for `spec.agent.provider` and step agents in a
   `clerum.io/subscription-connection-ref` only.
 - Grok recipes also need `WRC_GROK_SUBSCRIPTION_ENABLED` on `workflow-recipes`
   to be on: unset, empty, `true` in any case or `1`. `false` or any other
-  value turns Grok recipes off. That switch controls the recipe's Grok permission,
-  egress policy and pod environment.
+  value turns Grok recipes off. That switch controls the recipe's Grok permission
+  and egress policy, and whether WRC adds the Grok entries to the pod
+  environment. With it off, mcp-host in the recipe pod can still build the Grok
+  provider; the recipe's Grok calls are refused before they reach the proxy,
+  because the recipe gets no Grok permission, no binding and no egress policy.
 
 ## Refresh, reconnect and revoke
 
@@ -279,7 +303,7 @@ Both providers are valid for `spec.agent.provider` and step agents in a
 | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | No **LLM Subscriptions** content, or API `404 {"error":"disabled"}`                    | `CONTROL_API_*_SUBSCRIPTION_ENABLED` is `false`                      | Remove it or set it to `true` in `control-api-config`, then restart control-api           |
 | Calls fail although sign-in worked; proxy answers `404 disabled`                       | `*_LLM_PROXY_EXECUTION_ENABLED` is `false`                           | Remove it or set it to `true` in the proxy's ConfigMap, then restart the proxy            |
-| Codex Host cannot build its provider                                                   | `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED` is `false` or invalid          | Remove it or set it to `true` in `mcp-host-config`, then let HCC roll the Host            |
+| Codex Host cannot build its provider (log `Failed to construct LLM provider` with `reason` and `envVar`) | `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED` is `false` (`reason: subscription_switch_off`) or set to a value other than `true`, `false` or empty (`subscription_switch_invalid`) | Remove it or set it to `true` in `mcp-host-config`, then let HCC roll the Host            |
 | Grok recipe is refused or cannot reach the proxy                                       | `WRC_GROK_SUBSCRIPTION_ENABLED` is off                               | Remove it or set it to `true` on the `workflow-recipes` Deployment                        |
 | `browser_oauth_unregistered`                                                           | Browser OAuth with the default public client                         | Use device code, or register an OpenAI client and set `CONTROL_API_CODEX_OAUTH_CLIENT_ID` |
 | "… sign-in expired / denied / timed out"                                               | Device code was not confirmed in time                                | Click **Sign in** again                                                                   |

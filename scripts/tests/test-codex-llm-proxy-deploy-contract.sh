@@ -224,9 +224,10 @@ if "clerum/codex-llm-proxy" not in active(ghcr):
 if "clerum/codex-llm-proxy" not in active(minikube):
     errors.append("minikube overlay images: missing codex-llm-proxy")
 
-# The public base ships Codex subscriptions on, matching the code default; the
-# deployment repository's CI checks the same values. The minikube overlay also
-# states both switches (#739).
+# The public base ships Codex subscriptions on, matching the code default. The
+# deployment repository's CI reads these base values and has its own assertion
+# on them, so a change here needs the matching change there. The minikube
+# overlay also states both switches (#739).
 if "CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'true'" not in cm:
     errors.append("base control-api config must ship Codex subscriptions enabled")
 if 'CODEX_LLM_PROXY_EXECUTION_ENABLED: "true"' not in text:

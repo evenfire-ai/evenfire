@@ -110,7 +110,9 @@ export function projectCodexRecipeVerdict(input: {
    * WRC_GROK_SUBSCRIPTION_ENABLED. REQUIRED so the local master switch is part
    * of the one Grok verdict: off is a DECISION (`ineligible`/`wrc_flag_off`),
    * so scopes, grok-proxy egress and the bootstrap binding cannot follow an
-   * eligible Control API annotation while the pod env is withheld.
+   * eligible Control API annotation while WRC is off. The verdict is the gate:
+   * the pod env that `buildMcpHostPod` leaves out on the same flag does not
+   * stop mcp-host from building the provider (its switch is on when unset).
    */
   grokSubscriptionEnabled: boolean
   log?: {

@@ -144,9 +144,10 @@ if "location = /api/v1/internal/llm/grok/provider-attempts/finalize" not in cm:
     errors.append("rpc gateway missing exact Grok finalize location")
 if re.search(r"location\s+/api/v1/internal/llm/grok", cm):
     errors.append("Grok redeem/finalize paths must stay exact-match, not a prefix wildcard")
-# The public base ships every Grok switch on, matching the code default; the
-# deployment repository's CI checks the same values. The minikube overlay also
-# states them (#739). The Host switch (MCP_HOST_GROK_SUBSCRIPTION_ENABLED) is
+# The public base ships every Grok switch on, matching the code default. The
+# deployment repository's CI reads these base values and has its own assertion
+# on them, so a change here needs the matching change there. The minikube
+# overlay also states them (#739). The Host switch (MCP_HOST_GROK_SUBSCRIPTION_ENABLED) is
 # not here: mcp-host treats it as on unless it is "false", and HCC also sets
 # it on eligible Hosts.
 if "CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'true'" not in cm:

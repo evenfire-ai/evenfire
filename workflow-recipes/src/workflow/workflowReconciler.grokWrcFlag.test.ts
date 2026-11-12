@@ -309,6 +309,9 @@ describe('WorkflowReconciler Grok WRC switch', () => {
       expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: GROK_PROXY_POLICY })
       )
+      // The entries are absent from the pod. This is not a refusal by mcp-host
+      // (its Grok switch is on when unset); the withheld scope and egress above
+      // are what stop a call.
       const env = mcpHostEnvNames(coreApi)
       expect(env).not.toContain('MCP_HOST_GROK_SUBSCRIPTION_ENABLED')
       expect(env).not.toContain('GROK_LLM_PROXY_RUNTIME_URL')

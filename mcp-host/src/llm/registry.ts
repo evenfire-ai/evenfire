@@ -54,11 +54,32 @@ export {
 // so one bad value in the shared Host ConfigMap does not stop every Host).
 // Unset, empty and `true` mean on; `false` means off; any other value refuses
 // to build the provider.
-function subscriptionSwitchOn(name: string): boolean {
+export type SubscriptionSwitchName =
+  | 'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED'
+  | 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED'
+export type SubscriptionSwitchRefusal = 'subscription_switch_invalid' | 'subscription_switch_off'
+
+/** A subscription switch refused construction. `reason` and `envVar` are fixed strings, safe to log. */
+export class SubscriptionSwitchError extends Error {
+  constructor(
+    message: string,
+    readonly reason: SubscriptionSwitchRefusal,
+    readonly envVar: SubscriptionSwitchName
+  ) {
+    super(message)
+    this.name = 'SubscriptionSwitchError'
+  }
+}
+
+function subscriptionSwitchOn(name: SubscriptionSwitchName): boolean {
   const raw = process.env[name]
   if (raw === undefined || raw === '' || raw === 'true') return true
   if (raw === 'false') return false
-  throw new Error(`[LLM] makeProvider: ${name} must be 'true' or 'false'`)
+  throw new SubscriptionSwitchError(
+    `[LLM] makeProvider: ${name} must be 'true' or 'false'`,
+    'subscription_switch_invalid',
+    name
+  )
 }
 
 /**
@@ -110,7 +131,11 @@ export function makeProvider(
       )
     case 'codex-subscription':
       if (!subscriptionSwitchOn('MCP_HOST_CODEX_SUBSCRIPTION_ENABLED')) {
-        throw new Error('[LLM] makeProvider: codex-subscription is disabled')
+        throw new SubscriptionSwitchError(
+          '[LLM] makeProvider: codex-subscription is disabled',
+          'subscription_switch_off',
+          'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED'
+        )
       }
       if (!model?.trim() || !options?.codex) {
         throw new Error(
@@ -120,7 +145,11 @@ export function makeProvider(
       return new CodexSubscriptionProvider(model, options.codex)
     case 'grok-subscription':
       if (!subscriptionSwitchOn('MCP_HOST_GROK_SUBSCRIPTION_ENABLED')) {
-        throw new Error('[LLM] makeProvider: grok-subscription is disabled')
+        throw new SubscriptionSwitchError(
+          '[LLM] makeProvider: grok-subscription is disabled',
+          'subscription_switch_off',
+          'MCP_HOST_GROK_SUBSCRIPTION_ENABLED'
+        )
       }
       if (!model?.trim() || !options?.grok) {
         throw new Error(

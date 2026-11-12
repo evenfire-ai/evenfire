@@ -553,7 +553,7 @@ type DeploymentMutationState = {
   runtimeTokenRevision: string
   freshBootstrapPrepared?: boolean
   // Captured in the same synchronous step as the stable scope-hash check so
-  // the pod's Grok factory switch and the minted llm:grok:execute scope agree.
+  // the pod's Grok env entry and the minted llm:grok:execute scope agree.
   grokExecutionEnabled: boolean
 }
 

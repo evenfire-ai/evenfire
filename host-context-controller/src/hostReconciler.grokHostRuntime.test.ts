@@ -227,12 +227,16 @@ function grokPolicyCalls(networkingApi: ReturnType<typeof createMockNetworkingAp
   ].filter(named)
 }
 
+// These cases prove whether HCC adds the mcp-host Grok env entry and mints
+// `llm:grok:execute`. A missing entry does not make mcp-host refuse the provider
+// (the switch is on when unset); the withheld scope and egress policy are what
+// stop a call.
 describe('HostReconciler Grok Host runtime gating', () => {
   beforeEach(() => {
     vi.mocked(issueMcpHostRuntimeTokens).mockClear()
   })
 
-  it('sets the mcp-host Grok factory flag when the Host projection derives llm:grok:execute', async () => {
+  it('sets the mcp-host Grok env entry and mints llm:grok:execute when the Host projection derives it', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     wireAllowlist(
       coreApi,
@@ -251,7 +255,7 @@ describe('HostReconciler Grok Host runtime gating', () => {
     expect(flag).toEqual([{ name: GROK_FLAG_ENV, value: 'true' }])
   })
 
-  it('omits the Grok factory flag when clerum.io/grok-enabled is false', async () => {
+  it('withholds llm:grok:execute and the mcp-host Grok env entry when clerum.io/grok-enabled is false', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     wireAllowlist(
       coreApi,
@@ -266,7 +270,7 @@ describe('HostReconciler Grok Host runtime gating', () => {
     )
   })
 
-  it('omits the Grok factory flag when the assigned Grok connection is not connected', async () => {
+  it('withholds llm:grok:execute and the mcp-host Grok env entry when the assigned Grok connection is not connected', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     wireAllowlist(
       coreApi,

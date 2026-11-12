@@ -66,7 +66,7 @@ for (const [provider, flag] of [
     })
 
     it('refuses a switch value that is neither true nor false', () => {
-      for (const value of ['TRUE', '0', 'off']) {
+      for (const value of ['TRUE', '0', 'off', 'true\n']) {
         process.env[flag] = value
         expect(() => makeProvider(provider, {}), value).toThrow(
           new RegExp(`${flag} must be 'true' or 'false'`)

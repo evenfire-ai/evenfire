@@ -184,6 +184,8 @@ describe('eager Grok policy gate', () => {
     })
     const envNames = (pod.spec?.containers?.[0].env ?? []).map(env => env.name)
     // Name-level: a flag-off pod must carry neither variable, whatever its value.
+    // Absence is all this proves: mcp-host still builds the Grok provider without
+    // the entry.
     expect(envNames).not.toContain('MCP_HOST_GROK_SUBSCRIPTION_ENABLED')
     expect(envNames).not.toContain('GROK_LLM_PROXY_RUNTIME_URL')
   })
