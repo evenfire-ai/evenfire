@@ -1395,7 +1395,8 @@ describe('desktop status service-token auth', () => {
       header: string | undefined
       // The denial reason, or null when the request reaches the handler.
       reason: string | null
-      // True when the header has the length of the expected value, so the two are compared.
+      // True when a token is configured and the header has the length of the expected value,
+      // so the two are compared. With no token the comparison never runs.
       compared: boolean
     }
     // Outcomes with DESKTOP_TOKEN configured; they are the same in dev mode and outside it.
