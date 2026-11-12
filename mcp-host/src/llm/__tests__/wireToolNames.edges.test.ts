@@ -304,3 +304,45 @@ describe('proxied providers keep canonical names in the attempt contract', () =>
     expect(QUERY).not.toMatch(W)
   })
 })
+
+// `makeProvider` repairs lone surrogates to U+FFFD before the wire-name
+// projection runs, so on this path the projection works on the repaired name.
+// Accepted cost: a tool whose canonical name carries a lone surrogate resolves
+// back to the repaired name, which no registered tool has, and two names that
+// differ only in the surrogate share one wire name. These pin that behaviour so
+// a change to either layer has to revisit it.
+describe('canonical names with lone surrogates on the makeProvider path', () => {
+  const HIGH = 'srv__weird\uD800tool'
+  const LOW = 'srv__weird\uDBFFtool'
+  const REPAIRED = 'srv__weird�tool'
+
+  it('resolves the call back to the repaired name, not the registered one', async () => {
+    const cap = buildCapturingProvider('claude')
+    const call = (name: string | null) => {
+      cap.respondWith(name)
+      return cap.provider.completeSingleTurnWithTools(
+        [{ role: 'user', content: 'q' }],
+        [toolDef(HIGH)]
+      )
+    }
+    await call(null)
+    const [sent] = wireToolDecls('claude', cap.bodies[0])
+    expect(sent.name).toMatch(W_C)
+
+    const response = await call(sent.name)
+    expect(response.tool_calls?.[0]?.name).toBe(REPAIRED)
+    expect(response.tool_calls?.[0]?.name).not.toBe(HIGH)
+  })
+
+  it('sends one wire name for two canonicals that differ only in the surrogate', async () => {
+    const cap = buildCapturingProvider('claude')
+    cap.respondWith(null)
+    await cap.provider.completeSingleTurnWithTools(
+      [{ role: 'user', content: 'q' }],
+      [toolDef(HIGH), toolDef(LOW)]
+    )
+    const names = wireToolDecls('claude', cap.bodies[0]).map(t => t.name)
+    expect(names).toHaveLength(2)
+    expect(names[0]).toBe(names[1])
+  })
+})
