@@ -23,10 +23,12 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../../core/types'
+import { logger } from '../../logger'
 import type { ProviderCredentials } from '../../types'
 import { classifyByHttpStatus, classifyUnknown } from '../errorClassification'
 import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
 import type { LlmProvider } from '../registryCore'
+import { type ToolNameEnvelopeKey, fromWireResponse, toWireRequest } from '../toolWireNames'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
 
 // ─── SDK-agnostic wire shapes (Converse API) ─────────────────────────────────
@@ -81,7 +83,7 @@ export class BedrockConverseDriver implements SingleTurnProvider {
   constructor(client: BedrockConverseClient, defaultModel: string) {
     this.client = client
     this.defaultModel = defaultModel
-    console.log(`[Bedrock] Initialized with model: ${defaultModel}`)
+    logger.info({ model: defaultModel }, 'Bedrock transport initialized')
   }
 
   getProviderType(): LlmProvider {
@@ -90,6 +92,12 @@ export class BedrockConverseDriver implements SingleTurnProvider {
 
   classifyError(err: unknown): ClassifiedError {
     return classifyBedrockError(err)
+  }
+
+  // The 64 limit belongs to the Converse API types, whatever the model: Claude
+  // on Bedrock does not get Anthropic's 128.
+  protected toolNameEnvelope(): ToolNameEnvelopeKey {
+    return 'W'
   }
 
   // ─── Single-Turn Methods ────────────────────────────────────────────────
@@ -127,11 +135,12 @@ export class BedrockConverseDriver implements SingleTurnProvider {
       signal?: AbortSignal
     }
   ): Promise<ToolCompletionResponse> {
-    const { system, converseMessages } = this.toBedrockMessages(messages)
+    const wire = toWireRequest(messages, tools, this.toolNameEnvelope())
+    const { system, converseMessages } = this.toBedrockMessages(wire.messages)
     const toolConfig =
-      tools.length > 0
+      wire.tools.length > 0
         ? {
-            tools: tools.map(t => ({
+            tools: wire.tools.map(t => ({
               toolSpec: {
                 name: t.name,
                 description: t.description,
@@ -161,12 +170,15 @@ export class BedrockConverseDriver implements SingleTurnProvider {
         arguments: (b.toolUse!.input ?? {}) as Record<string, unknown>,
       }))
 
-    return {
-      content: extractText(response),
-      tool_calls: toolCalls.length > 0 ? toolCalls : null,
-      usage: mapUsage(response),
-      finish_reason: mapStopReason(response.stopReason),
-    }
+    return fromWireResponse(
+      {
+        content: extractText(response),
+        tool_calls: toolCalls.length > 0 ? toolCalls : null,
+        usage: mapUsage(response),
+        finish_reason: mapStopReason(response.stopReason),
+      },
+      wire.names
+    )
   }
 
   // ─── Message translation ─────────────────────────────────────────────────
