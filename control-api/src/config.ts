@@ -353,8 +353,8 @@ type Config = {
   gfscWriteBaseUrl: string
   // Timeout (ms) for the control-api→gfsc proxied fetch. Homologous with the browser
   // client (GFS_UPLOAD_TIMEOUT_MS, 300s) and the control-ui server proxy
-  // (CONTROL_API_PROXY_TIMEOUT_MS, set to 300s in the deployment; its route.ts code
-  // fallback is 30s). This one defaults to 300s in code. Raise all three together.
+  // (CONTROL_API_PROXY_TIMEOUT_MS, 300s in deploy/base and as its route.ts code
+  // default). This one defaults to 300s in code. Raise all three together.
   gfscProxyTimeoutMs: number
   // Upload-v2 edge admission. These are transport-abuse budgets, separate
   // from the 200 MiB product/file limit and GFSC's 4/16 stream authority.
@@ -918,7 +918,7 @@ export const config: Config = {
   // desktopGfsOperatorLinkingEnabled. Missing/'false' → OFF; only 'true' enables.
   mcpOauthBrokerEnabled: failClosedBooleanFromEnv('MCP_OAUTH_BROKER_ENABLED'),
   userApprovalRequestDefaultTtlSec: Number(process.env.WORKFLOW_APPROVAL_DEFAULT_TTL_SEC || 86400),
-  userApprovalRequestMaxTtlSec: Number(process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC || 604800),
+  userApprovalRequestMaxTtlSec: Number(process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC || 172800),
   userApprovalRequestExpiryIntervalMs: Number(
     process.env.WORKFLOW_APPROVAL_EXPIRY_INTERVAL_MS || 60000
   ),
@@ -1451,9 +1451,9 @@ export const config: Config = {
   wfcServiceUrlTemplate:
     process.env.CONTROL_API_WFC_SERVICE_URL_TEMPLATE ||
     'http://wfc-{hash}.mcp-host.svc.cluster.local:8086',
-  // Plugin image-host allowlist (Phase 2.3). Permissive default = current
-  // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit
-  // mode). NOT parseCsvList — that lowercases, which would corrupt prefixes.
+  // Plugin image-host allowlist (Phase 2.3). Default from @clerum/image-policy:
+  // the deploy/base list plus registry.evenfire.ai/; enforce defaults to false
+  // (audit mode). NOT parseCsvList — that lowercases, which would corrupt prefixes.
   allowedPluginImagePrefixes: (
     process.env.CONTROL_API_ALLOWED_IMAGE_PREFIXES ??
     [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES].join(',')

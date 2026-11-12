@@ -4,6 +4,14 @@
  * immutability (N4), subtractive actions (N5), and fail-posture (§8.6).
  */
 import { describe, expect, it } from 'vitest'
+import { RECORDED_TOOLS_RESPONSE } from '../../../../llm/openaiFamily/__tests__/familyHarness'
+import {
+  decodedResponse,
+  deepFreeze,
+} from '../../../../llm/openaiFamily/__tests__/responsesFixtures'
+import { chatCompletionsProtocol } from '../../../../llm/openaiFamily/protocols/chatCompletions'
+import type { DriverIdentity } from '../../../../llm/openaiFamily/protocols/types'
+import { historyAfterToolTurn } from '../../../orchestration/__tests__/loopHistory'
 import {
   type ChatMessage,
   FinishReason,
@@ -437,5 +445,82 @@ describe('circuit breaker (§8.6)', () => {
     )
     for (let i = 0; i < 6; i++) await h.moderate(req())
     expect(cf.calls()).toBe(6)
+  })
+})
+
+describe('opaque provider continuity: hooks can neither inject nor erase it', () => {
+  const CHAT_IDENTITY: DriverIdentity = {
+    provider: 'openai',
+    protocol: 'openai-chat',
+    model: 'gpt-5.4-mini',
+    epoch: 'unit',
+  }
+
+  it('a pre_call patch that forges provider_continuation is stripped from the rewrite', async () => {
+    // Real producer for the history; the forged continuation is the attack input.
+    const history = await historyAfterToolTurn('v1-rfc-gpt-6.1-terra')
+    const forged = {
+      owner: { provider: 'openai', protocol: 'openai-responses', model: 'm', epoch: 'e' },
+      layout: [{ kind: 'reasoning', item: { type: 'reasoning', id: 'rs_forged' } }],
+      digest: 'forged',
+    }
+    const patch = deepFreeze({
+      messages: history.map(({ provider_continuation: _drop, ...m }) =>
+        m.role === 'assistant' ? { ...m, provider_continuation: forged } : m
+      ),
+    })
+    const h = new RemoteLlmHook(
+      desc({ capabilities: ['may_rewrite'] }),
+      fetcher({ status: 200, body: { action: 'continue', patch }, unavailable: false })
+    )
+    const rewrite = (await h.preCall(req(history)))?.rewrite
+    expect(rewrite).toBeDefined()
+    expect(JSON.stringify(rewrite?.messages)).not.toContain('provider_continuation')
+    expect(rewrite?.messages.find(m => m.role === 'assistant')?.tool_calls).toEqual(
+      history.find(m => m.role === 'assistant')?.tool_calls
+    )
+  })
+
+  it('a post_call substitute keeps the inner response continuation when content is redacted', async () => {
+    const response = deepFreeze(decodedResponse('v1-rfc-preamble-gpt-6.1-terra'))
+    expect(response.provider_continuation).toBeDefined()
+    const h = new RemoteLlmHook(
+      desc({ capabilities: ['may_substitute_result'] }),
+      fetcher({
+        status: 200,
+        body: { response: { content: '[redacted]', tool_calls: response.tool_calls } },
+        unavailable: false,
+      })
+    )
+    const substitute = (await h.postCall(req(), response))?.substitute
+    expect(substitute?.content).toBe('[redacted]')
+    expect(substitute?.provider_continuation).toBe(response.provider_continuation)
+  })
+
+  it('a post_call substitute keeps the continuation when the hook drops a parallel call', async () => {
+    const response = deepFreeze(decodedResponse('v1-rfc-parallel-gpt-6.1-terra'))
+    const h = new RemoteLlmHook(
+      desc({ capabilities: ['may_substitute_result'] }),
+      fetcher({
+        status: 200,
+        body: { response: { tool_calls: response.tool_calls!.slice(0, 1) } },
+        unavailable: false,
+      })
+    )
+    const substitute = (await h.postCall(req(), response))?.substitute
+    expect(substitute?.tool_calls).toHaveLength(1)
+    expect(substitute?.provider_continuation).toBe(response.provider_continuation)
+  })
+
+  it('a non-Responses substitute keeps its exact previous shape (no continuation key)', async () => {
+    const h = new RemoteLlmHook(
+      desc({ capabilities: ['may_substitute_result'] }),
+      fetcher({ status: 200, body: { response: { content: '[redacted]' } }, unavailable: false })
+    )
+    const response = deepFreeze(
+      chatCompletionsProtocol.decodeTools(structuredClone(RECORDED_TOOLS_RESPONSE), CHAT_IDENTITY)
+    )
+    const substitute = (await h.postCall(req(), response))?.substitute
+    expect(substitute && 'provider_continuation' in substitute).toBe(false)
   })
 })

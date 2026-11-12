@@ -442,6 +442,9 @@ describe('sharedFileSystemFactory — buildDeployment (controller + root initCon
   it('omits imagePullSecrets when the WFC pull reference config is empty', () => {
     const dep = buildDeployment(makeSfs(), { ...config, wfcImagePullSecretName: '' })
     expect(dep.spec?.template.spec?.imagePullSecrets).toBeUndefined()
+    // Witness: a non-empty name is emitted by the same builder.
+    const named = buildDeployment(makeSfs(), { ...config, wfcImagePullSecretName: 'regcred' })
+    expect(named.spec?.template.spec?.imagePullSecrets).toEqual([{ name: 'regcred' }])
   })
 
   it('selects pods by app=workspace-files-controller plus SFS identity', () => {

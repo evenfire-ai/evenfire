@@ -5,3 +5,4 @@ playwright-report
 test-results
 package-lock.json
 *next-env.d.ts
+mcp-host/src/llm/openaiFamily/__tests__/__fixtures__/chatPayloads.base.json

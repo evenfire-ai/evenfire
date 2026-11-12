@@ -42,6 +42,7 @@ import {
   type DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfig,
   EntityChangeStreamEvent,
+  GfsResourceDeepLinkEnvelope,
   HostActivityStreamEvent,
   HostMessageAttachment,
   HostMessageRequest,
@@ -398,6 +399,16 @@ export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): v
   if (!isFileSender && !isDevSender) {
     throw new Error('Untrusted IPC sender')
   }
+}
+
+/** Register the trusted renderer's read-only snapshot of the native GFS inbox. */
+export function registerGfsDeepLinkListHandler(queue: {
+  list(): GfsResourceDeepLinkEnvelope[]
+}): void {
+  ipcMain.handle('gfs:listPendingDeepLinks', event => {
+    assertTrustedSender(event)
+    return { links: queue.list() }
+  })
 }
 
 /**

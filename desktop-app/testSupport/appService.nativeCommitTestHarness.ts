@@ -40,6 +40,13 @@ export type NativeCommitTestService = {
   listGfsUploadSessions: () => Promise<unknown>
 }
 
+export type NativeCommitTestHarnessOptions = {
+  configuredRest?: string
+  profileUiBaseUrl?: string
+  restA?: string
+  restB?: string
+}
+
 const originalEnvironment = {
   appData: process.env.APPDATA,
   configPath: process.env.CLERUM_DESKTOP_CONFIG_PATH,
@@ -49,13 +56,19 @@ const originalEnvironment = {
 }
 const tempDirs = new Set<string>()
 
-export async function createNativeCommitTestHarness() {
+export async function createNativeCommitTestHarness(options: NativeCommitTestHarnessOptions = {}) {
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-native-commit-'))
   tempDirs.add(userDataDir)
   delete process.env.CLERUM_DESKTOP_CONFIG_PATH
   delete process.env.EXTERNAL_REST_API_BASE_URL
   delete process.env.RPC_PROXY_BASE_URL
   delete process.env.PROFILE_UI_BASE_URL
+  if (options.configuredRest) {
+    process.env.EXTERNAL_REST_API_BASE_URL = options.configuredRest
+  }
+  if (options.profileUiBaseUrl) {
+    process.env.PROFILE_UI_BASE_URL = options.profileUiBaseUrl
+  }
   vi.resetModules()
   vi.doMock('electron', () => ({
     app: {
@@ -73,8 +86,8 @@ export async function createNativeCommitTestHarness() {
     import('../src/appService.js'),
     import('../src/config.js'),
   ])
-  const restA = 'https://api-a.example.test'
-  const restB = 'https://api-b.example.test'
+  const restA = options.restA || 'https://api-a.example.test'
+  const restB = options.restB || 'https://api-b.example.test'
   await runtimeConfig.saveDesktopRuntimeConfig({
     externalRestApiBaseUrl: restA,
     rpcProxyBaseUrl: 'https://rpc-a.example.test',
