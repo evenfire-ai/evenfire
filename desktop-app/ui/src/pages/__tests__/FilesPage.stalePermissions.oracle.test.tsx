@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { isPermissionErrorAcknowledged } from '@components/Common/permissionErrorAcknowledgement'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -1897,6 +1898,12 @@ describe('FilesPage stale permission action oracle', () => {
     )
     const children = await listChildrenPage([])
     let sourceParentReads = 0
+    let rejectAutomaticRefetch!: (error: Error) => void
+    const pendingAutomaticRefetch = new Promise<Awaited<ReturnType<typeof heldPermissionResponse>>>(
+      (_resolve, reject) => {
+        rejectAutomaticRefetch = reject
+      }
+    )
     const rateLimited = await affordancesApiError(
       429,
       { code: 'rate_limited', message: 'Too Many Requests' },
@@ -1906,6 +1913,7 @@ describe('FilesPage stale permission action oracle', () => {
       if (resourceId === 'source-parent') {
         sourceParentReads += 1
         if (sourceParentReads === 2) return Promise.reject(rateLimited)
+        if (sourceParentReads === 3) return pendingAutomaticRefetch
       }
       return Promise.resolve(heldPermissionResponse(['read', 'write', 'delete']))
     })
@@ -1976,9 +1984,37 @@ describe('FilesPage stale permission action oracle', () => {
     expect(sourceParentReads).toBe(2)
     expect(moveResource).not.toHaveBeenCalled()
 
+    let automaticRequest!: Promise<void>
+    act(() => {
+      automaticRequest = client.refetchQueries({ exact: true, queryKey: sourceKey })
+      expect(client.getQueryState(sourceKey)?.fetchStatus).toBe('fetching')
+      expect(screen.getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+      expect(sourceParentReads).toBe(3)
+      const retryQuery = client.getQueryCache().find({ queryKey: sourceKey, exact: true })
+      expect(
+        isPermissionErrorAcknowledged({
+          id: 'source-parent-retry',
+          message: 'Too many file requests',
+          queryIdentity: retryQuery,
+          errorUpdateCount: retryQuery?.state.errorUpdateCount,
+        })
+      ).toBe(false)
+      expect(pushToast).toHaveBeenLastCalledWith(
+        'Too many file requests — try again in 7s.',
+        'error'
+      )
+    })
+    await act(async () => {
+      rejectAutomaticRefetch(rateLimited)
+      await automaticRequest
+    })
+    await waitFor(() => expect(client.getQueryState(sourceKey)?.fetchStatus).toBe('idle'))
+    expect(screen.getByText(/Could not verify Move permissions:/)).toBeTruthy()
+
     vi.setSystemTime(Date.now() + 7_000)
     fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
-    await waitFor(() => expect(sourceParentReads).toBe(3))
+    await waitFor(() => expect(sourceParentReads).toBe(4))
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.queryByRole('dialog', { name: 'Move folder Reports' })).toBeNull()
     expect(moveResource).not.toHaveBeenCalled()

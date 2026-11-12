@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
-import { QueryClient } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import fc from 'fast-check'
+import { type Query, QueryClient } from '@tanstack/react-query'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { PermissionErrorDialog } from '@components/Common'
-import type { PermissionErrorItem } from '../PermissionErrorDialog/types'
+import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
+import { affordancesApiError } from '@/gfs/__fixtures__/permissionProducerFixtures'
+import type { PermissionErrorItem, PermissionRetryAttempt } from '../PermissionErrorDialog/types'
 import {
   acknowledgePermissionErrors,
   isPermissionErrorAcknowledged,
@@ -13,93 +14,136 @@ import {
 
 afterEach(cleanup)
 
-type Model = {
-  generation: number
-  acknowledged: Set<number>
-  dismissed: boolean
-}
+type PermissionQuery = Query
 
-type Real = {
-  query: { state: { fetchStatus: string } }
-  generation: number
-  dismissed: boolean
-  rerender: () => void
-}
-
-function item(real: Real): PermissionErrorItem {
+function permissionError(
+  queryIdentity: PermissionQuery,
+  retry?: () => PermissionRetryAttempt
+): PermissionErrorItem {
   return {
-    id: `resource:${real.generation}`,
+    id: `resource:${queryIdentity.state.errorUpdateCount}`,
     message: 'Could not verify permissions for report.txt.',
-    errorUpdateCount: real.generation,
-    queryIdentity: real.query,
-    retry: () => {
-      real.query.state.fetchStatus = 'fetching'
-    },
+    errorUpdateCount: queryIdentity.state.errorUpdateCount,
+    queryIdentity,
+    retry,
   }
 }
 
-function projectedErrors(real: Real): PermissionErrorItem[] {
-  const current = item(real)
-  return real.dismissed || isPermissionErrorAcknowledged(current) ? [] : [current]
+function Presenter({
+  queryIdentity,
+  retry,
+}: {
+  queryIdentity: PermissionQuery
+  retry?: () => PermissionRetryAttempt
+}) {
+  const [locallyDismissed, setLocallyDismissed] = useState(false)
+  const error = permissionError(queryIdentity, retry)
+  const errors = locallyDismissed || isPermissionErrorAcknowledged(error) ? [] : [error]
+  return <PermissionErrorDialog errors={errors} onDismiss={() => setLocallyDismissed(true)} />
 }
 
-class RetryCurrentFailure implements fc.Command<Model, Real> {
-  check(model: Readonly<Model>): boolean {
-    return !model.dismissed && !model.acknowledged.has(model.generation)
-  }
+describe('permission error acknowledgement with real Query state', () => {
+  it('does not acknowledge a guard-rejected Retry during an automatic Query fetch', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    const queryKey = ['permission-retry-guard', 'resource-a'] as const
+    const rateLimited = await affordancesApiError(
+      429,
+      { code: 'rate_limited', message: 'Too Many Requests' },
+      'resource-a'
+    )
+    queryClient.setQueryData(queryKey, { permission: true })
+    await expect(
+      queryClient.fetchQuery({ queryKey, queryFn: async () => Promise.reject(rateLimited) })
+    ).rejects.toBe(rateLimited)
+    const queryIdentity = queryClient.getQueryCache().find({ queryKey, exact: true })
+    if (!queryIdentity) throw new Error('QueryClient did not retain the failed permission Query')
+    const errorUpdateCount = queryIdentity.state.errorUpdateCount
+    let settleAutomaticFetch!: (value: { permission: true }) => void
+    const automaticFetch = queryClient.fetchQuery({
+      queryKey,
+      queryFn: () =>
+        new Promise<{ permission: true }>(resolve => {
+          settleAutomaticFetch = resolve
+        }),
+    })
+    expect(queryIdentity.state.fetchStatus).toBe('fetching')
+    expect(queryIdentity.state.errorUpdateCount).toBe(errorUpdateCount)
 
-  run(model: Model, real: Real): void {
-    fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
-    model.acknowledged.add(model.generation)
-    real.rerender()
-    expect(screen.queryByRole('alertdialog')).toBeNull()
-  }
-
-  toString(): string {
-    return 'retry the current failed permission query'
-  }
-}
-
-class DismissCurrentFailure implements fc.Command<Model, Real> {
-  check(model: Readonly<Model>): boolean {
-    return !model.dismissed && !model.acknowledged.has(model.generation)
-  }
-
-  run(model: Model, real: Real): void {
-    fireEvent.keyDown(document, { key: 'Escape' })
-    model.acknowledged.add(model.generation)
-    model.dismissed = true
-    real.rerender()
-    expect(screen.queryByRole('alertdialog')).toBeNull()
-  }
-
-  toString(): string {
-    return 'dismiss the current permission failure'
-  }
-}
-
-class ResolveAsNewFailure implements fc.Command<Model, Real> {
-  check(model: Readonly<Model>): boolean {
-    return model.dismissed || model.acknowledged.has(model.generation)
-  }
-
-  run(model: Model, real: Real): void {
-    model.generation += 1
-    model.acknowledged.delete(model.generation)
-    model.dismissed = false
-    real.generation = model.generation
-    real.dismissed = false
-    real.query.state.fetchStatus = 'idle'
-    real.rerender()
+    let retryAdmissions = 0
+    const retry = () => {
+      try {
+        assertGfsAuthorityRetryAllowed(queryClient, queryKey)
+        retryAdmissions += 1
+        return { admitted: true }
+      } catch {
+        return { admitted: false }
+      }
+    }
+    const view = render(<Presenter queryIdentity={queryIdentity} retry={retry} />)
     expect(screen.getByRole('alertdialog')).toBeTruthy()
-  }
+    fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+    expect(retryAdmissions).toBe(0)
+    expect(queryIdentity.state.fetchStatus).toBe('fetching')
+    view.rerender(<Presenter queryIdentity={queryIdentity} retry={retry} />)
+    const dialog = screen.getByRole('alertdialog')
+    expect(within(dialog).getByText(/Could not verify permissions for report.txt/)).toBeTruthy()
 
-  toString(): string {
-    return 'settle a later permission request with a new error generation'
-  }
-}
+    await act(async () => {
+      settleAutomaticFetch({ permission: true })
+      await automaticFetch
+    })
+    queryClient.clear()
+  })
 
-describe('permission error acknowledgement oracle', () => {
+  it('acknowledges only after a real QueryClient Retry enters fetching', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    const queryKey = ['permission-retry', 'resource-a'] as const
+    await expect(
+      queryClient.fetchQuery({
+        queryKey,
+        queryFn: async () => {
+          throw new Error('permission service unavailable')
+        },
+      })
+    ).rejects.toThrow('permission service unavailable')
+    const queryIdentity = queryClient.getQueryCache().find({ queryKey, exact: true })
+    expect(queryIdentity?.state.status).toBe('error')
+    expect(queryIdentity?.state.fetchStatus).toBe('idle')
+    if (!queryIdentity) throw new Error('QueryClient did not retain the failed permission Query')
+
+    let settleRetry!: (value: { permission: boolean }) => void
+    const retryResult = new Promise<{ permission: boolean }>(resolve => {
+      settleRetry = resolve
+    })
+    let retryPromise: Promise<{ permission: boolean }> | undefined
+    const retry = () => {
+      retryPromise = queryClient.fetchQuery({
+        queryKey,
+        queryFn: () => retryResult,
+      })
+      return { admitted: true, completion: retryPromise }
+    }
+
+    const view = render(<Presenter queryIdentity={queryIdentity} retry={retry} />)
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+
+    expect(queryIdentity.state.fetchStatus).toBe('fetching')
+    view.rerender(<Presenter queryIdentity={queryIdentity} retry={retry} />)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    await act(async () => {
+      settleRetry({ permission: true })
+      await retryPromise
+    })
+    expect(queryIdentity.state.status).toBe('success')
+    queryClient.clear()
+  })
+
   it('keeps a real Query failure acknowledged across presenter unmount and remount', async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -117,93 +161,24 @@ describe('permission error acknowledgement oracle', () => {
     expect(queryIdentity?.state.status).toBe('error')
     expect(queryIdentity?.state.errorUpdateCount).toBe(1)
     if (!queryIdentity) throw new Error('QueryClient did not retain the failed permission Query')
+    const retainedQuery = queryIdentity
 
-    function Presenter() {
+    function RemountingPresenter() {
       const [locallyDismissed, setLocallyDismissed] = useState(false)
-      const error: PermissionErrorItem = {
-        id: 'permission-remount:resource-a',
-        message: 'Could not verify permissions for resource-a.',
-        queryIdentity,
-        errorUpdateCount: queryIdentity.state.errorUpdateCount,
-      }
+      const error = permissionError(retainedQuery)
       const errors = locallyDismissed || isPermissionErrorAcknowledged(error) ? [] : [error]
       return <PermissionErrorDialog errors={errors} onDismiss={() => setLocallyDismissed(true)} />
     }
 
-    const firstMount = render(<Presenter />)
+    const firstMount = render(<RemountingPresenter />)
     expect(screen.getByRole('alertdialog')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Close' }))
     expect(screen.queryByRole('alertdialog')).toBeNull()
     firstMount.unmount()
 
-    render(<Presenter />)
+    render(<RemountingPresenter />)
     expect(screen.queryByRole('alertdialog')).toBeNull()
-    expect(
-      isPermissionErrorAcknowledged({
-        id: 'permission-remount:resource-a',
-        message: 'Could not verify permissions for resource-a.',
-        queryIdentity,
-        errorUpdateCount: queryIdentity.state.errorUpdateCount,
-      })
-    ).toBe(true)
+    expect(isPermissionErrorAcknowledged(permissionError(retainedQuery))).toBe(true)
     queryClient.clear()
-  })
-
-  it('matches the independent generation model through generated UI events', () => {
-    fc.assert(
-      fc.property(
-        fc.commands(
-          [
-            fc.constant(new RetryCurrentFailure()),
-            fc.constant(new DismissCurrentFailure()),
-            fc.constant(new ResolveAsNewFailure()),
-          ],
-          { maxCommands: 18 }
-        ),
-        commands => {
-          const model: Model = { generation: 1, acknowledged: new Set(), dismissed: false }
-          const real: Real = {
-            query: { state: { fetchStatus: 'idle' } },
-            generation: 1,
-            dismissed: false,
-            rerender: () => undefined,
-          }
-          const view = render(
-            <PermissionErrorDialog
-              errors={projectedErrors(real)}
-              onDismiss={() => {
-                real.dismissed = true
-              }}
-            />
-          )
-          real.rerender = () =>
-            view.rerender(
-              <PermissionErrorDialog
-                errors={projectedErrors(real)}
-                onDismiss={() => {
-                  real.dismissed = true
-                }}
-              />
-            )
-          expect(screen.getByRole('alertdialog')).toBeTruthy()
-          fc.modelRun(() => ({ model, real }), commands)
-          expect(projectedErrors(real).length).toBe(
-            model.dismissed || model.acknowledged.has(model.generation) ? 0 : 1
-          )
-          cleanup()
-        }
-      ),
-      { numRuns: 25 }
-    )
-  })
-
-  it('does not let acknowledging one query generation hide its later failure', () => {
-    const queryIdentity = {}
-    const first = { id: 'resource:1', message: 'failed', queryIdentity, errorUpdateCount: 1 }
-    const next = { ...first, id: 'resource:2', errorUpdateCount: 2 }
-    expect(isPermissionErrorAcknowledged(first)).toBe(false)
-    acknowledgePermissionErrors([first])
-    expect(isPermissionErrorAcknowledged(first)).toBe(true)
-    expect(isPermissionErrorAcknowledged(next)).toBe(false)
   })
 })

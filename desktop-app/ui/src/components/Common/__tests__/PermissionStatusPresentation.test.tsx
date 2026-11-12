@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { PermissionErrorDialog, PermissionStatusIndicator } from '@components/Common'
 
@@ -33,7 +34,7 @@ describe('EvenDrive permission status presentation', () => {
   })
 
   it('traps keyboard focus, dismisses on Escape, and retains the exact Retry callback', () => {
-    const retry = vi.fn()
+    const retry = vi.fn(() => ({ admitted: false }))
     const onDismiss = vi.fn()
     render(
       <PermissionErrorDialog
@@ -56,8 +57,12 @@ describe('EvenDrive permission status presentation', () => {
   })
 
   it('aggregates duplicate observations of one permission query into one retry target', () => {
-    const queryIdentity = { state: { fetchStatus: 'idle' } }
-    const retry = vi.fn()
+    const queryClient = new QueryClient()
+    const queryKey = ['permission-aggregation', 'parent-folder'] as const
+    queryClient.setQueryData(queryKey, { held: ['read'] })
+    const queryIdentity = queryClient.getQueryCache().find({ queryKey, exact: true })
+    if (!queryIdentity) throw new Error('QueryClient did not create the permission Query')
+    const retry = vi.fn(() => ({ admitted: false }))
     render(
       <PermissionErrorDialog
         errors={[
@@ -84,5 +89,6 @@ describe('EvenDrive permission status presentation', () => {
     expect(screen.getAllByRole('button', { name: 'Retry permission check' })).toHaveLength(1)
     fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
     expect(retry).toHaveBeenCalledOnce()
+    queryClient.clear()
   })
 })

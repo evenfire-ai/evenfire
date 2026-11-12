@@ -123,12 +123,10 @@ export function PermissionErrorDialog({
               {error.retry ? (
                 <Button
                   onClick={() => {
-                    const retry = error.retry?.()
-                    const state = (
-                      error.queryIdentity as { state?: { fetchStatus?: string } } | undefined
-                    )?.state
-                    if (state?.fetchStatus === 'fetching') acknowledgePermissionErrors([error])
-                    void Promise.resolve(retry).catch(() => undefined)
+                    const attempt = error.retry?.()
+                    if (!attempt) return
+                    if (attempt.admitted) acknowledgePermissionErrors([error])
+                    void attempt.completion?.catch(() => undefined)
                   }}
                   size="sm"
                   variant="outline"

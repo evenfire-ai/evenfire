@@ -2,9 +2,11 @@
 import { type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { isPermissionErrorAcknowledged } from '@components/Common/permissionErrorAcknowledgement'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
+import { gfsAuthorityRetryPauseRemainingMs } from '@lib/gfsAuthorityQueryPolicy'
 import { resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
@@ -124,6 +126,12 @@ describe('FilePreviewPage focus revalidation', () => {
 
   it('surfaces a source-parent 429 and suppresses focus retries until Retry-After expires', async () => {
     const sourceReads: string[] = []
+    let rejectAutomaticRefetch!: (error: Error) => void
+    const automaticRefetch = new Promise<Awaited<ReturnType<typeof delegationAffordances>>>(
+      (_resolve, reject) => {
+        rejectAutomaticRefetch = reject
+      }
+    )
     const limited = new Error(
       "Error invoking remote method 'gfs:affordances': Error: 429 Too Many Requests " +
         'httpStatus=429 retryAfterSeconds=7'
@@ -145,6 +153,7 @@ describe('FilePreviewPage focus revalidation', () => {
       if (id === 'source-parent') {
         sourceReads.push(id)
         if (sourceReads.length === 2) throw limited
+        if (sourceReads.length === 3) return automaticRefetch
       }
       return delegationAffordances(new Set(['read', 'write', 'delete']), false)
     })
@@ -218,6 +227,43 @@ describe('FilePreviewPage focus revalidation', () => {
     })
     expect(sourceReads).toHaveLength(2)
 
+    const sourceQueryKey = desktopQueryKeys.gfsAffordances(
+      'preview-focus-user:main',
+      'source-parent',
+      'main',
+      1
+    )
+    const sourceQueryState = queryClient.getQueryState(sourceQueryKey)
+    expect(sourceQueryState?.error).toBe(limited)
+    expect(
+      gfsAuthorityRetryPauseRemainingMs(
+        sourceQueryState?.error,
+        sourceQueryState?.errorUpdatedAt ?? 0
+      )
+    ).toBeGreaterThan(0)
+    let automaticRequest!: Promise<void>
+    act(() => {
+      automaticRequest = queryClient.refetchQueries({ exact: true, queryKey: sourceQueryKey })
+      expect(queryClient.getQueryState(sourceQueryKey)?.fetchStatus).toBe('fetching')
+      expect(screen.getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+      expect(sourceReads).toHaveLength(3)
+      const retryQuery = queryClient.getQueryCache().find({ queryKey: sourceQueryKey, exact: true })
+      expect(
+        isPermissionErrorAcknowledged({
+          id: 'source-parent-retry',
+          message: 'Too many file requests',
+          queryIdentity: retryQuery,
+          errorUpdateCount: retryQuery?.state.errorUpdateCount,
+        })
+      ).toBe(false)
+    })
+    await act(async () => {
+      rejectAutomaticRefetch(limited)
+      await automaticRequest
+    })
+    expect(screen.getByText(/Too many file requests/)).toBeTruthy()
+
     await act(async () => {
       await vi.advanceTimersByTimeAsync(7_000)
       window.dispatchEvent(new Event('blur'))
@@ -228,7 +274,7 @@ describe('FilePreviewPage focus revalidation', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1)
     })
-    expect(sourceReads).toHaveLength(3)
+    expect(sourceReads).toHaveLength(4)
     expect(screen.queryByText(/Too many file requests/)).toBeNull()
     queryClient.clear()
   })

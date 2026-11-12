@@ -267,7 +267,7 @@ export function useFilePreviewResourceActions({
   const sharePermissionError = affordancesQuery.error
     ? describeGfsReadError(affordancesQuery.error).message
     : null
-  const retryPermissionCheck = async (
+  const retryPermissionCheck = (
     queryKey: QueryKey,
     refetch: () => Promise<{ isError: boolean; error: unknown }>
   ) => {
@@ -276,20 +276,9 @@ export function useFilePreviewResourceActions({
       !isGfsSessionGeneration(captured.sessionGeneration) ||
       !hasGfsSessionGeneration(queryKey, captured.sessionGeneration)
     )
-      return
+      return { admitted: false }
     try {
       assertGfsAuthorityRetryAllowed(queryClient, queryKey)
-      const result = await refetch()
-      if (result.isError) throw result.error
-      if (
-        !isGfsSessionAuthorityCurrent(
-          captured.sessionScope,
-          captured.sessionGeneration,
-          moveContextRef.current.sessionScope,
-          moveContextRef.current.sessionGeneration
-        )
-      )
-        return
     } catch (error) {
       if (
         !isGfsSessionAuthorityCurrent(
@@ -298,10 +287,39 @@ export function useFilePreviewResourceActions({
           moveContextRef.current.sessionScope,
           moveContextRef.current.sessionGeneration
         )
-      )
-        return
+      ) {
+        return { admitted: false }
+      }
       pushToast?.(describeGfsReadError(error).message, 'error')
+      return { admitted: false }
     }
+    const completion = (async () => {
+      try {
+        const result = await refetch()
+        if (result.isError) throw result.error
+        if (
+          !isGfsSessionAuthorityCurrent(
+            captured.sessionScope,
+            captured.sessionGeneration,
+            moveContextRef.current.sessionScope,
+            moveContextRef.current.sessionGeneration
+          )
+        )
+          return
+      } catch (error) {
+        if (
+          !isGfsSessionAuthorityCurrent(
+            captured.sessionScope,
+            captured.sessionGeneration,
+            moveContextRef.current.sessionScope,
+            moveContextRef.current.sessionGeneration
+          )
+        )
+          return
+        pushToast?.(describeGfsReadError(error).message, 'error')
+      }
+    })()
+    return { admitted: true, completion }
   }
   const permissionNotices = [
     affordancesQuery.isFetching && affordancesQuery.data

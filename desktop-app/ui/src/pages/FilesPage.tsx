@@ -832,7 +832,12 @@ export function FilesPage({
       ),
     [ctrl.handleAuthorityFailure, ctrl.sessionGeneration, sessionScope]
   )
-  const fetchRowAuthority = async (resourceId: string, resourceName: string, drive: string) => {
+  const fetchRowAuthority = async (
+    resourceId: string,
+    resourceName: string,
+    drive: string,
+    onAdmitted?: () => void
+  ) => {
     const requestedScope = sessionScope
     const requestedGeneration = ctrl.sessionGeneration
     if (!requestedScope || accessRevoked || !isGfsSessionGeneration(requestedGeneration)) {
@@ -847,6 +852,7 @@ export function FilesPage({
     )
     try {
       assertGfsAuthorityRetryAllowed(queryClient, queryKey)
+      onAdmitted?.()
       const authority = await queryClient.fetchQuery({
         queryKey,
         queryFn: () => window.clerum.gfs.affordances(resourceId, drive),
@@ -3140,12 +3146,18 @@ export function FilesPage({
           : `Could not verify permissions for ${selectedAffordanceResourceName ?? current?.name ?? 'this resource'}: access could not be confirmed.`,
       retry:
         ctrl.affordancesHttpStatus === 429
-          ? () =>
-              fetchRowAuthority(
+          ? () => {
+              let admitted = false
+              const completion = fetchRowAuthority(
                 selectedAffordanceResourceId,
                 selectedAffordanceResourceName ?? current?.name ?? 'this resource',
-                GFS_DRIVE_MAIN
+                GFS_DRIVE_MAIN,
+                () => {
+                  admitted = true
+                }
               )
+              return { admitted, completion }
+            }
           : undefined,
     })
   }
@@ -3157,7 +3169,18 @@ export function FilesPage({
       queryIdentity: status.queryIdentity,
       errorUpdateCount: status.errorUpdateCount,
       message: `Could not verify Move permissions: ${status.error}`,
-      retry: () => fetchRowAuthority(resourceId, 'the source folder', GFS_DRIVE_MAIN),
+      retry: () => {
+        let admitted = false
+        const completion = fetchRowAuthority(
+          resourceId,
+          'the source folder',
+          GFS_DRIVE_MAIN,
+          () => {
+            admitted = true
+          }
+        )
+        return { admitted, completion }
+      },
     })
   }
   const itemNames = new Map(items.map(item => [item.resourceId, item.name || item.drive]))

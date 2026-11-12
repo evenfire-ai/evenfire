@@ -171,7 +171,7 @@ export interface GfsRowPermissionStatus {
   isEnabled?: boolean
   isFetching?: boolean
   isSessionAuthorityFailure?: boolean
-  queryIdentity?: object
+  queryIdentity?: Query
 }
 
 export interface GfsBrowserControllerOptions {
@@ -1056,7 +1056,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         isFetching: boolean
         errorUpdateCount: number
         isSessionAuthorityFailure: boolean
-        queryIdentity?: object
+        queryIdentity?: Query
       }
     > = {}
     if (authorityPending || accessState === 'revoked') return byId
