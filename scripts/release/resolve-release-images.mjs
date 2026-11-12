@@ -2,7 +2,8 @@
 // than guessing.
 //
 //   node scripts/release/resolve-release-images.mjs \
-//     --image control-api --source-paths 'control-api/**' --tag-sha <sha>
+//     --image control-api --source-paths 'control-api/**' --tag-sha <sha> \
+//     [--release-tag vX.Y.Z]
 //
 // Prints `<digest>\t<candidate tag>` on success -- the digest to promote and
 // the registry tag it was resolved through. Prints nothing on stdout and
@@ -25,10 +26,14 @@
 // were ever the one missing while another platform's was present).
 //
 // The candidate chain: candidates() yields registry tags in priority order
-// (:latest, then main's first-parent commits since the previous release as
-// sha-<c7> tags, then the previous release's version tag), and
-// evaluateCandidate() checks each one. Every outcome of that check is one of
-// two kinds, and a bare `catch` cannot tell them apart:
+// (the release's own --release-tag when given, then :latest, then main's
+// first-parent commits since the previous release as sha-<c7> tags, then the
+// previous release's version tag), and evaluateCandidate() checks each one.
+// The release's own tag comes first so a re-run after a copy pass that failed
+// midway converges on the digests it already published, even when :latest or
+// a sha- tag has moved since; on a first run it does not exist yet and is
+// rejected like any missing tag. Every outcome of that check is one of two
+// kinds, and a bare `catch` cannot tell them apart:
 //   - Reject the candidate, and try the next one. The tag does not exist
 //     (crane says MANIFEST_UNKNOWN), carries no revision annotation, is a
 //     sha-<c7> tag built from a commit other than the one its tag names, was
@@ -184,8 +189,10 @@ function firstParentCommits(prev, tagSha) {
 
 // Checks one candidate tag of one image against the release commit. Returns
 // { ok: true, digest } or { ok: false, reason }; throws ImageFailure when the
-// answer is an error rather than a verdict on this candidate.
-function evaluateCandidate({ image, tag, expectRevision, tagSha, sourcePaths }) {
+// answer is an error rather than a verdict on this candidate. `role` is
+// 'release' for the release's own tag and 'previous' for the previous
+// release's tag, so a reason only gives advice that fits the candidate.
+function evaluateCandidate({ image, tag, role, expectRevision, tagSha, sourcePaths }) {
   // Resolve the tag to an immutable digest ONCE, and read everything else
   // through the digest. A tag like :latest is re-pointed on every dev push,
   // so reading it twice -- once to verify, once to copy -- can verify one
@@ -194,7 +201,9 @@ function evaluateCandidate({ image, tag, expectRevision, tagSha, sourcePaths }) 
   const digest = craneDigest(ref)
   if (digest === null) {
     let reason = `${ref} does not exist (the registry answered MANIFEST_UNKNOWN)`
-    if (RELEASE_TAG_RE.test(tag)) {
+    if (role === 'release') {
+      reason += `, so this release has not promoted ${image} yet`
+    } else if (role === 'previous') {
       // A release tag whose promotion failed still counts as the previous
       // release, so every image that needs this fallback is refused until it
       // is cleared.
@@ -321,7 +330,13 @@ function evaluateCandidate({ image, tag, expectRevision, tagSha, sourcePaths }) 
 // rejected: the previous release is looked up only once :latest has failed.
 // `found` is filled in as a side effect: found.previousRelease is the version
 // tag, or null when none is reachable, so a refusal can say so.
-function* candidates(tagSha, found) {
+//
+// releaseTag, when given, is the version tag this run promotes to. It goes
+// through the same checks as every other candidate, but with no exact-revision
+// requirement: it was copied from whichever candidate won the run that wrote
+// it, so its revision can be any ancestor of tagSha.
+function* candidates(tagSha, found, releaseTag) {
+  if (releaseTag) yield { tag: releaseTag, role: 'release' }
   yield { tag: 'latest' }
   const prev = previousRelease(tagSha)
   found.previousRelease = prev
@@ -329,7 +344,7 @@ function* candidates(tagSha, found) {
   for (const commit of firstParentCommits(prev, tagSha)) {
     yield { tag: `sha-${commit.slice(0, 7)}`, expectRevision: commit }
   }
-  yield { tag: prev }
+  yield { tag: prev, role: 'previous' }
 }
 
 function fail(message) {
@@ -341,6 +356,7 @@ function main() {
   const image = argValue('--image')
   const sourcePaths = argValue('--source-paths')
   const tagSha = argValue('--tag-sha')
+  const releaseTag = argValue('--release-tag')
 
   if (!image || !tagSha) return fail('--image and --tag-sha are required')
 
@@ -350,7 +366,7 @@ function main() {
   // candidates, when the error comes from producing the next one.
   let checking = null
   try {
-    for (const candidate of candidates(tagSha, found)) {
+    for (const candidate of candidates(tagSha, found, releaseTag)) {
       checking = candidate.tag
       const result = evaluateCandidate({ ...candidate, image, tagSha, sourcePaths })
       if (result.ok) {

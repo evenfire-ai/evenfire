@@ -3,12 +3,13 @@ name: Release images
 # Promotes proven digests to a release tag. Never rebuilds -- prod promotes
 # what dev proved, per the rule build-publish.yml states in its own header.
 #
-# Each image is resolved through a candidate chain: :latest first, then the
-# main-built sha-<c7> images at the exact commits since the previous release,
-# then the previous release's own tag. Every candidate must pass the ancestor
-# and source_paths checks against the tag commit, and promotion is
+# Each image is resolved through a candidate chain: the release's own version
+# tag if a previous run already wrote it, then :latest, then the main-built
+# sha-<c7> images at the exact commits since the previous release, then the
+# previous release's own tag. Every candidate must pass the ancestor and
+# source_paths checks against the tag commit, and promotion is
 # all-or-nothing: if any image cannot be resolved, none is promoted and no
-# version tag moves.
+# version tag moves. :stable only moves forward.
 #
 # Prerequisite: no image carries an org.opencontainers.image.revision
 # annotation until build-publish.yml has run at least once with
@@ -26,6 +27,14 @@ on:
 
 permissions:
   contents: read
+
+# Two runs for the same ref (a tag deleted and pushed again while its first
+# run is still copying) would race on the same version tags, so they queue.
+# Runs for different tags still overlap; promote-release-images.sh fetches the
+# tags again right before it moves :stable.
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   promote:

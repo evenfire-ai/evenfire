@@ -89,7 +89,7 @@ make_stub() {
 #!/usr/bin/env bash
 COPY_LOG="$dir/copy-log"
 case "\$1" in
-  digest)   echo "sha256:widgetdigest00000000000000000000000000000000000000000000000000" ;;
+  digest)   echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ;;
   manifest) echo '{"annotations":{"org.opencontainers.image.revision":"$revision"},"manifests":$manifests}' ;;
   copy)     echo "\$2 \$3" >> "\$COPY_LOG"; echo "copied \$2 -> \$3" ;;
   *)        exit 1 ;;
@@ -293,7 +293,7 @@ make_stub_manifest_fails_for() {
 COPY_LOG="$dir/copy-log"
 CALL_COUNT_FILE="$dir/$failing-manifest-calls"
 case "\$1" in
-  digest)   echo "sha256:widgetdigest00000000000000000000000000000000000000000000000000" ;;
+  digest)   echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ;;
   manifest)
     case "\$2" in
       *"$failing@"*)
@@ -396,7 +396,10 @@ assert_a_multi_arch_failure_in_pass_one_means_zero_copies() {
 
 assert_an_existing_version_tag_with_another_digest_blocks_every_copy() {
   local d; d="$(mktemp -d)"; stub_two_images "$d"
-  printf '%s\t%s\t%s\n' "$PROMOTE_SRC/widget-a:v0.2.0" digest "$DIGEST_OLD" >> "$d/registry.tsv"
+  # :v0.2.0 already exists, but its index carries no revision annotation, so
+  # the resolver rejects it as a candidate and :latest wins. A :v0.2.0 that
+  # passed the checks would win instead and never move (see the re-run case).
+  stub_image "$d" widget-a v0.2.0 "$DIGEST_OLD" -
   local out rc; run_promote "$d" false v0.2.0
   if [ "$rc" -eq 1 ] && [ ! -s "$d/copy-log" ] \
       && grep -qF "::error::widget-a:v0.2.0 already points at $DIGEST_OLD; refusing to move a published version tag to $DIGEST_A" <<< "$out"; then
