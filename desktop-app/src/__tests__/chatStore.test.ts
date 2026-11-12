@@ -2723,6 +2723,30 @@ describe('removeMessages', () => {
     expect(await storedPageIds('tombstoned')).toEqual(['kept', 'pending'])
   })
 
+  it('runs in order with replaceMessages on the same chat, so a withdrawn turn stays removed', async () => {
+    const window = [user('turn-1-user'), assistant('turn-1-assistant')]
+
+    // Witness: a replace whose window omits a stored local turn keeps that turn,
+    // so the cases below depend on the removal, not on the replace dropping it.
+    await seed('replace-alone', [...window, user('pending')])
+    await store.replaceMessages('agent-1', 'replace-alone', window)
+    expect(await ids('replace-alone')).toEqual(['turn-1-user', 'turn-1-assistant', 'pending'])
+
+    await seed('remove-then-replace', [...window, user('pending')])
+    await Promise.all([
+      store.removeMessages('agent-1', 'remove-then-replace', ['pending']),
+      store.replaceMessages('agent-1', 'remove-then-replace', window),
+    ])
+    expect(await ids('remove-then-replace')).toEqual(['turn-1-user', 'turn-1-assistant'])
+
+    await seed('replace-then-remove', [...window, user('pending')])
+    await Promise.all([
+      store.replaceMessages('agent-1', 'replace-then-remove', window),
+      store.removeMessages('agent-1', 'replace-then-remove', ['pending']),
+    ])
+    expect(await ids('replace-then-remove')).toEqual(['turn-1-user', 'turn-1-assistant'])
+  })
+
   it('runs in order with upsertMessages on the same chat', async () => {
     await seed('ordered-a', [user('turn-1-user'), assistant('turn-1-assistant')])
     const upsertThenRemove = [
