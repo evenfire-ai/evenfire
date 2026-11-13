@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { boundToolsCalledForStatus } from '@clerum/workflow-runtime-core'
 import {
   type AuthenticatedRequest,
   createWorkflowEndpointHandlers,
@@ -356,6 +357,101 @@ describe('postStepStatus — step-level update', () => {
     const result = step.toolsCalled?.[0]?.result
     expect(result).toMatchObject({ truncated: true })
     expect((result as { preview?: string }).preview).toHaveLength(1024)
+  })
+
+  it('stores a coordinator-bounded toolsCalled report exactly like the raw report', async () => {
+    const toolsCalled: Array<Record<string, unknown>> = Array.from({ length: 60 }, (_, i) => ({
+      serverName: 'git',
+      toolName: 'read_file',
+      args: { path: `src/file-${i}.ts`, padding: 'p'.repeat(i % 2 ? 2048 : 10) },
+      result: [{ type: 'text', text: 'x'.repeat(i % 3 ? 4096 : 10) }],
+      durationMs: i,
+    }))
+    // An artifact past the 50 stored calls must still reach status.artifacts.
+    toolsCalled[55] = {
+      serverName: 'clerum',
+      toolName: 'generate_docx',
+      args: { path: 'report', padding: 'c'.repeat(4096) },
+      result: {
+        success: true,
+        artifact: {
+          name: 'report.docx',
+          format: 'docx',
+          path: '/output/report.docx',
+          sizeBytes: 2048,
+          createdAt: '2026-10-16T00:00:00.000Z',
+        },
+      },
+      durationMs: 55,
+    }
+    const stored = async (calls: unknown[]) => {
+      const customApi = makeCustomApi({
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { name: 'my-recipe', resourceVersion: '1' },
+          spec: { steps: [{ id: 's1' }] },
+          status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+        }),
+      })
+      const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+      const result = await h.postStepStatus('my-recipe', makeClaims(), {
+        stepId: 's1',
+        phase: 'completed',
+        toolsCalled: calls as never,
+      })
+      expect(result.status).toBe(200)
+      const patchOps = getStatusPatchOps(customApi)
+      return {
+        toolsCalled: (
+          patchOps.find(op => op.path === '/status/steps/-')?.value as {
+            toolsCalled?: unknown[]
+          }
+        ).toolsCalled,
+        artifact: patchOps.find(op => op.path === '/status/artifacts/-')?.value,
+      }
+    }
+
+    const fromRaw = await stored(toolsCalled)
+    const fromBounded = await stored(boundToolsCalledForStatus(toolsCalled))
+
+    expect(fromRaw.artifact).toMatchObject({ name: 'report.docx' })
+    expect(fromBounded).toEqual(fromRaw)
+  })
+
+  it('still extracts an artifact whose tool result is too large for a preview', async () => {
+    const customApi = makeCustomApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'my-recipe', resourceVersion: '1' },
+        spec: { steps: [{ id: 's1' }] },
+        status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+      }),
+    })
+    const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+    const artifact = {
+      name: 'big.pdf',
+      format: 'pdf',
+      path: '/output/big.pdf',
+      sizeBytes: 4096,
+      createdAt: '2026-10-16T00:00:00.000Z',
+    }
+
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 's1',
+      phase: 'completed',
+      toolsCalled: boundToolsCalledForStatus([
+        {
+          serverName: 'clerum',
+          toolName: 'generate_pdf',
+          args: {},
+          result: { success: true, artifact, content: 'q'.repeat(5_000) },
+          durationMs: 1,
+        },
+      ]) as never,
+    })
+
+    expect(result.status).toBe(200)
+    expect(
+      getStatusPatchOps(customApi).find(op => op.path === '/status/artifacts/-')?.value
+    ).toEqual(artifact)
   })
 
   it('patches only the touched step so stale reads cannot overwrite sibling step status', async () => {
@@ -2103,5 +2199,121 @@ describe('deleteArtifactFile — per-file artifact delete', () => {
       })
     )
     expect(result.status).toBe(403)
+  })
+})
+
+// ─── postStepStatus — output bounded by the coordinator ─────────────────────
+
+describe('postStepStatus — output bounded by the coordinator', () => {
+  function makeEmitApi(): k8s.CustomObjectsApi {
+    return makeCustomApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'my-recipe', resourceVersion: '1' },
+        spec: { steps: [{ id: 'emit' }] },
+        status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+      }),
+    })
+  }
+
+  function customArtifact(i: number, path = `/output/result-${i}.json`) {
+    return {
+      name: `result-${i}.json`,
+      format: 'json',
+      path,
+      sizeBytes: 42,
+      createdAt: '2026-05-06T00:00:00.000Z',
+    }
+  }
+
+  function storedStep(api: k8s.CustomObjectsApi): Record<string, unknown> {
+    return getStatusPatchOps(api).find(op => op.path === '/status/steps/-')?.value as Record<
+      string,
+      unknown
+    >
+  }
+
+  function storedArtifacts(api: k8s.CustomObjectsApi): unknown[] {
+    return getStatusPatchOps(api)
+      .filter(op => op.path === '/status/artifacts/-')
+      .map(op => op.value)
+  }
+
+  it('stores the same step and artifacts as before for a body without the new fields', async () => {
+    const api = makeEmitApi()
+    const h = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
+
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      output: { artifacts: [customArtifact(0)] },
+    })
+
+    expect(result.status).toBe(200)
+    const output = JSON.stringify({ artifacts: [customArtifact(0)] })
+    expect(storedStep(api)).toEqual({
+      id: 'emit',
+      phase: 'completed',
+      output,
+      outputTruncated: false,
+      outputLength: output.length,
+      outputPreviewMaxChars: 32_768,
+      executor: 'custom',
+    })
+    expect(storedArtifacts(api)).toEqual([customArtifact(0)])
+  })
+
+  it('adds valid outputArtifacts, drops invalid ones, caps them at 20 and skips repeated paths', async () => {
+    const api = makeEmitApi()
+    const h = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
+
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      output: { artifact: customArtifact(0) },
+      outputArtifacts: [
+        customArtifact(99, '/output/result-0.json'),
+        customArtifact(1, '/etc/passwd'),
+        'not-an-object',
+        ...Array.from({ length: 25 }, (_, i) => customArtifact(i + 2)),
+      ],
+    } as Parameters<typeof h.postStepStatus>[2])
+
+    expect(result.status).toBe(200)
+    const paths = (storedArtifacts(api) as Array<{ path: string }>).map(a => a.path)
+    // Output artifact first; of the first 20 entries, the repeated path, the
+    // invalid path and the non-object are dropped, leaving result-2..result-18.
+    expect(paths).toEqual([
+      '/output/result-0.json',
+      ...Array.from({ length: 17 }, (_, i) => `/output/result-${i + 2}.json`),
+    ])
+    expect(paths).not.toContain('/etc/passwd')
+  })
+
+  it('stores the original length of an output the coordinator cut', async () => {
+    const api = makeEmitApi()
+    const h = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
+    const original = JSON.stringify({ report: 'r'.repeat(200_000), artifact: customArtifact(0) })
+    const cut = original.slice(0, 65_536)
+
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      output: cut,
+      outputLength: original.length,
+      outputTruncated: true,
+      outputArtifacts: [customArtifact(0)],
+    } as Parameters<typeof h.postStepStatus>[2])
+
+    expect(result.status).toBe(200)
+    const step = storedStep(api)
+    expect(step.output).toBe(original.slice(0, 32_768))
+    expect(step.outputLength).toBe(original.length)
+    expect(step.outputTruncated).toBe(true)
+    expect(step).not.toHaveProperty('outputArtifacts')
+    // The cut output no longer parses, so the artifact comes from outputArtifacts.
+    expect(storedArtifacts(api)).toEqual([customArtifact(0)])
   })
 })

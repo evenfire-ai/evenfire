@@ -1,3 +1,5 @@
+import { serializeOutputForStatus } from '@clerum/workflow-runtime-core'
+
 export interface StatusOutputPreview {
   output: string
   outputTruncated: boolean
@@ -5,34 +7,33 @@ export interface StatusOutputPreview {
   outputPreviewMaxChars: number
 }
 
-export function buildStatusOutputPreview(value: unknown, maxChars: number): StatusOutputPreview {
-  const serialized = serializeStatusOutput(value)
-  const outputLength = serialized.length
-  const outputTruncated = outputLength > maxChars
+/**
+ * `reported` is what the client says about the output before it cut it. It is
+ * honoured only when it marks the output as truncated and declares a length at
+ * least as long as what WRC received, so a client can report a longer original
+ * output, never a shorter one, and cannot mark an output WRC cut as complete.
+ */
+export function buildStatusOutputPreview(
+  value: unknown,
+  maxChars: number,
+  reported?: { outputLength?: unknown; outputTruncated?: unknown }
+): StatusOutputPreview {
+  const serialized = serializeOutputForStatus(value)
+  const localLength = serialized.length
+  const localTruncated = localLength > maxChars
+  const reportedLength =
+    reported?.outputTruncated === true &&
+    typeof reported.outputLength === 'number' &&
+    Number.isSafeInteger(reported.outputLength) &&
+    reported.outputLength >= localLength
+      ? reported.outputLength
+      : undefined
 
   return {
-    output: outputTruncated ? serialized.slice(0, maxChars) : serialized,
-    outputTruncated,
-    outputLength,
+    output: localTruncated ? serialized.slice(0, maxChars) : serialized,
+    outputTruncated:
+      localTruncated || (reportedLength !== undefined && reportedLength > localLength),
+    outputLength: reportedLength ?? localLength,
     outputPreviewMaxChars: maxChars,
-  }
-}
-
-function serializeStatusOutput(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (value === undefined) return 'undefined'
-
-  const seen = new WeakSet<object>()
-  try {
-    const serialized = JSON.stringify(value, (_key, nested) => {
-      if (typeof nested === 'object' && nested !== null) {
-        if (seen.has(nested)) return '[Circular]'
-        seen.add(nested)
-      }
-      return nested
-    })
-    return serialized ?? String(value)
-  } catch {
-    return String(value)
   }
 }
