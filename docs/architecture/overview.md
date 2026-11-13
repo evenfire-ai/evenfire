@@ -790,7 +790,8 @@ with the 10 s inventory request timeout. That is 101 s at the 30 s interval; the
 180 s default absorbs four missed polls and allows a poll interval of at most
 56333 ms (see the [upgrade note](../deploy/releases-and-upgrades.md#mcp-host-authority-staleness-floor)).
 mcp-host rejects a pair that breaks the
-rule, or an interval that is not plain digits, at startup rather than letting a short HCC
+rule, an interval that is not plain digits, or a staleness value that is not plain
+digits (in every mode; unset or `""` means the default), at startup rather than letting a short HCC
 restart revoke a healthy MCP fleet (issue #1350). The staleness window governs only the
 `unavailable` failure class (HCC unreachable / 5xx): it is sized to absorb a
 normal HCC `Recreate` rollout without tearing down the MCP fleet. Identity/401

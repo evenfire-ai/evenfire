@@ -3065,7 +3065,7 @@ const H3_TRANSIENT_FAILURES: Array<[string, () => unknown]> = [
 ]
 
 /**
- * A stateful cluster: Deployments and Services persist what HCC writes, so a
+ * A stateful cluster: Deployments, Services and ConfigMaps persist what HCC writes, so a
  * second reconcile of an unchanged server reads objects that already match
  * desired and attempts no write. Status conditions persist too.
  */
@@ -4422,7 +4422,7 @@ describe('#1338: transient failures of the other managed reconcile calls', () =>
     return { ...server, spec: { ...server.spec, remote: { baseUrl: 'https://api.example.com' } } }
   }
 
-  it('keeps ready for an unchanged remote server whose ConfigMap needs no write keeps ready when the rollout read times out', async () => {
+  it('keeps ready for an unchanged remote server whose ConfigMap needs no write when the rollout read times out', async () => {
     const server = remoteH3Server()
     const f = await h3ReadyCluster(server)
     expect(f.configMaps.has('h3-server-nginx-conf')).toBe(true)

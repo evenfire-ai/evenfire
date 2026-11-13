@@ -92,7 +92,9 @@ start otherwise.
 ## Bounds on by default
 
 host-context-controller bounds every NetworkPolicy pass with two settings that
-`deploy/base` does not set, so their code defaults apply:
+`deploy/base` does not set, so their code defaults apply. The table also lists
+`HCC_HOST_K8S_REQUEST_TIMEOUT_MS`, which `deploy/base` sets to `30000`, because
+it must stay below the hard limit too:
 
 | Variable                          | Default            | Effect                                                                                                                                                                                                       |
 | --------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

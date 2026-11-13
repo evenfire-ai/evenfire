@@ -428,10 +428,11 @@ export function parseNetPolPassHardLimitMs(raw: string | undefined): number {
 }
 
 /**
- * A request that runs to its deadline must fail the NetworkPolicy pass, so the
- * pass can retry, before the pass hard limit exits the process. Both deadlines
- * can hold the pass: Host convergence queued on a Context identity uses the
- * Host deadline.
+ * A request timeout at or above the pass hard limit can never fail the pass
+ * before the hard limit exits the process, so this refuses it at startup. It
+ * does not guarantee the converse: a request that starts late in a pass can
+ * still be running when the hard limit fires. Both deadlines can hold the pass:
+ * Host convergence queued on a Context identity uses the Host deadline.
  */
 export function assertRequestTimeoutsBelowPassHardLimit(
   timeouts: { name: string; valueMs: number }[],
