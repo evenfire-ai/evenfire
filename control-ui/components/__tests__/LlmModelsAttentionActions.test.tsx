@@ -337,13 +337,24 @@ describe('catalog attention dialog actions', () => {
     await act(async () => finishPut())
   })
 
-  it('counts only items still to review in the banner', async () => {
+  it('counts only items still to review in the banner, and keeps a reviewed one reachable for Undo', async () => {
     acked.add(keyOf(deprecated))
     renderSurface()
 
     const banner = await screen.findByText(BANNER_TEXT)
     expect(banner).toHaveTextContent('Models need review: 2 still referenced')
     expect(banner).not.toHaveTextContent('deprecated')
+
+    // The reviewed item still reaches the client, but only in the Reviewed section.
+    const dialog = await openReview()
+    expect(
+      within(reviewedSection(dialog)).getByRole('button', {
+        name: `Undo review: ${itemName(deprecated)}`,
+      })
+    ).toBeInTheDocument()
+    expect(
+      within(dialog).queryByRole('button', { name: `Mark reviewed: ${itemName(deprecated)}` })
+    ).not.toBeInTheDocument()
   })
 
   it('shows a neutral line, not the review warning, when every item is reviewed; Undo stays reachable', async () => {
