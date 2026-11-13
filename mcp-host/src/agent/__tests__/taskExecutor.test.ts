@@ -1425,6 +1425,107 @@ describe('TaskExecutor', () => {
     expect(rebuilt!.spillover_ref).toBeUndefined()
   })
 
+  it('P1: a second suspension in the same turn sends no answered tool result again', async () => {
+    const frame = createImageAttachment({
+      id: 'frame-1',
+      mimeType: 'image/png',
+      dataBase64: PNG_2X2_BASE64,
+      filename: 'frame.png',
+      width: 2,
+      height: 2,
+    })
+    const firstBatch = [
+      { id: 'call-capture', name: 'capture', arguments: {} },
+      { id: 'call-approve-1', name: 'shell_exec', arguments: { command: 'one' } },
+    ]
+    const secondCall = { id: 'call-approve-2', name: 'shell_exec', arguments: { command: 'two' } }
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-first',
+          tool_name: 'shell_exec',
+          parameters: { command: 'one' },
+          description: 'Shell command',
+          tool_call_id: 'call-approve-1',
+          context_snapshot: [
+            { role: 'user', content: 'Capture, then run two commands' },
+            { role: 'assistant', content: '', tool_calls: firstBatch },
+          ],
+          completed_results: [
+            {
+              tool_call_id: 'call-capture',
+              name: 'capture',
+              content: 'Captured',
+              is_error: false,
+              attachments: [frame],
+            },
+          ],
+        },
+      } as any)
+      // The resumed loop suspends again. As toolUseLoopToolBatch does, it
+      // freezes the messages it was given plus its new tool-call message, with
+      // no result of the new batch completed before the suspended call.
+      .mockImplementationOnce(async (_config, messages) => ({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-second',
+          tool_name: 'shell_exec',
+          parameters: secondCall.arguments,
+          description: 'Shell command',
+          tool_call_id: secondCall.id,
+          context_snapshot: [
+            ...structuredClone(messages),
+            { role: 'assistant', content: '', tool_calls: [secondCall] },
+          ],
+          completed_results: [],
+        },
+      }))
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    vi.mocked(executeSingleTool)
+      .mockResolvedValueOnce({
+        tool_call_id: 'call-approve-1',
+        name: 'shell_exec',
+        content: 'one',
+        is_error: false,
+      })
+      .mockResolvedValueOnce({
+        tool_call_id: 'call-approve-2',
+        name: 'shell_exec',
+        content: 'two',
+        is_error: false,
+      })
+    const executor = new TaskExecutor(createTask('Capture, then run two commands'), createDeps())
+    await executor.run()
+    await executor.resumeAfterApproval(false)
+    expect(executor.executorState).toBe('waiting_approval')
+    await executor.resumeAfterApproval(false)
+    expect(executor.executorState).toBe('completed')
+
+    // Every tool message answers an open call of the tool-call message before
+    // it; providers reject a tool result that answers none (review round 2, P1).
+    const messages = vi.mocked(runToolUseLoop).mock.calls[2]![1] as ChatMessage[]
+    const unanswered: string[] = []
+    let open = new Set<string>()
+    for (const message of messages) {
+      if (message.role === 'assistant') open = new Set(message.tool_calls?.map(c => c.id) ?? [])
+      if (message.role !== 'tool') continue
+      if (!open.delete(message.tool_call_id!)) unanswered.push(message.tool_call_id!)
+    }
+    expect(unanswered).toEqual([])
+    expect(messages.filter(m => m.role === 'tool').map(m => m.tool_call_id)).toEqual([
+      'call-capture',
+      'call-approve-1',
+      'call-approve-2',
+    ])
+    // The frame reaches the request once, and the second approved call is
+    // charged for it once.
+    expect(
+      messages.flatMap(m => (m.contentParts ?? []).filter(part => part.type === 'image'))
+    ).toHaveLength(1)
+    expect(vi.mocked(executeSingleTool).mock.calls[1]![4]).toMatchObject({ images: 1 })
+  })
+
   it('U5: a 401 on resume re-suspends as connect_required, then re-executes on connect (no double approval)', async () => {
     vi.mocked(runToolUseLoop)
       // Round A — the LLM calls an oauth MCP tool → approval_required.

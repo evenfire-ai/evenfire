@@ -315,6 +315,30 @@ interface TaskToolRegistry {
   bridge?: LoopConfig['bridge']
 }
 
+/**
+ * The batch results a resume appends after its frozen messages: those that
+ * answer a call of the snapshot's last tool-call message and that no tool
+ * message after it answers yet. A suspension inside a resumed turn freezes
+ * messages that already hold the earlier batch, while its `completed_results`
+ * keep that batch too (they carry its attachments through a cold restart).
+ * Appending those again would answer no open call, which providers reject
+ * (independent review round 2, P1).
+ */
+function unansweredBatchResults(snapshot: ChatMessage[], results: ToolResult[]): ToolResult[] {
+  let callIndex = snapshot.length - 1
+  while (callIndex >= 0) {
+    const message = snapshot[callIndex]!
+    if (message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0) break
+    callIndex -= 1
+  }
+  if (callIndex < 0) return results
+  const open = new Set(snapshot[callIndex]!.tool_calls!.map(call => call.id))
+  for (const message of snapshot.slice(callIndex + 1)) {
+    if (message.role === 'tool' && message.tool_call_id) open.delete(message.tool_call_id)
+  }
+  return results.filter(result => open.has(result.tool_call_id))
+}
+
 export class TaskExecutor {
   private readonly responseSafety: BasicSafety
   readonly taskId: string
@@ -817,13 +841,18 @@ export class TaskExecutor {
       // it through either approval gate. The local frozen approval still owns
       // message reconstruction and any connect_required re-suspension below.
       this.conversation.pending_approval = undefined
+      // The batch results the frozen messages do not hold yet.
+      const batchResults = unansweredBatchResults(
+        approval.context_snapshot,
+        resolvedCompletedResults
+      )
       // The frozen request: its messages plus the batch results before this call.
       const toolResult = await executeSingleTool(
         suspendedCall,
         loopConfig,
         undefined,
         undefined,
-        requestImageUsage(approval.context_snapshot, resolvedCompletedResults)
+        requestImageUsage(approval.context_snapshot, batchResults)
       )
       collectToolAttachments([toolResult], this.completedAttachments)
       this.executionBudget.assertTime()
@@ -879,7 +908,8 @@ export class TaskExecutor {
       // Reconstruct messages using the resolved completed_results.
       // `resolvedCompletedResults` is `approval.completed_results` with any
       // spillover refs swapped in for their blob bodies (invariant #2), so the
-      // rebuilt tool messages carry no ref. The batch is appended the way the
+      // rebuilt tool messages carry no ref. Only the results the snapshot does
+      // not answer yet are appended (P1). The batch is appended the way the
       // loop appends it, image parts included: a visual read's pages reach
       // the model and match the image count forwarded above (review M1). The
       // scratch collection starts from the turn's attachments before this
@@ -888,7 +918,7 @@ export class TaskExecutor {
       const messages: ChatMessage[] = [...approval.context_snapshot]
       appendToolResults(
         messages,
-        [...resolvedCompletedResults, toolResult].map(result => ({
+        [...batchResults, toolResult].map(result => ({
           ...result,
           spillover_ref: undefined,
         })),
