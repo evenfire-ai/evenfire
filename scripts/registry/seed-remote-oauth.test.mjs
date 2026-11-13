@@ -643,9 +643,8 @@ describe('unparseable answers', () => {
       assert.equal(exitCode, 1)
       assert.ok(!/unparseable/.test(output), output)
       assert.ok(
-        lines.some(l =>
-          /\[FAIL\] @evenfire\/clickup-remote 1\.0\.0: TypeError: terminated/.test(l)
-        ),
+        // The exact text is the runtime's network error, which varies across Node releases.
+        lines.some(l => /\[FAIL\] @evenfire\/clickup-remote 1\.0\.0: \S/.test(l)),
         output
       )
     } finally {
