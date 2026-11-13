@@ -4,10 +4,17 @@ import { runFitScenarios } from './fitScenarios'
 
 /**
  * Independent review M2 cut the measures of the XLSX row probes and of the
- * budget fit. Neither may change what a read returns: these are digests of
- * every result of each read chain, produced by the implementation before that
- * change (5af3a16ce). A change here is a change in what the model reads, and
- * needs its own justification.
+ * budget fit. Under a measure that grows with the result, as this byte-count
+ * measure does, neither changes what a read returns: these are digests of
+ * every result of each read chain, produced by the `index.ts` of f34977657,
+ * the commit before that change. A change here is a change in what the model
+ * reads, and needs its own justification.
+ *
+ * The production token measure does not always grow with the result: one
+ * more character can cost one token less. Where the cost dips, the aimed
+ * search and a bisection can settle on different sizes, so a result can hold
+ * a few characters more or fewer than before; it never exceeds the allowance
+ * (independent review round 2, N1).
  */
 describe('document read results are unchanged by the M2 measure cuts', () => {
   it('emits the same results through every scenario chain', async () => {

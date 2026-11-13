@@ -59,7 +59,8 @@ async function inkPixels(png) {
 
 // The document reader's shipped modules, in two parts:
 // - In process: pdfjs-dist text extraction, and a page render through the
-//   image's canvas binding and the standard font data pdfjs-dist ships.
+//   image's canvas binding (the render's ink does not prove which font face
+//   drew it; see below).
 // - As a child: one pdf_text job through the dist runner. It spawns dist
 //   worker.js as a real child with the empty environment (`env: {}`) the
 //   runner gives it, sends the job and reads the outcome over IPC. On Linux
@@ -100,8 +101,10 @@ async function documentReaderSmoke() {
   })
   assert.equal(visual.ok, true, JSON.stringify(visual))
   assert.equal(visual.images.length, 1)
-  // A PNG signature, and a page with ink on it: the glyphs were drawn from
-  // the shipped font data, not left blank.
+  // A PNG signature, and a page with ink on it: the canvas binding drew the
+  // text instead of leaving the page blank. Ink does not show which face drew
+  // it: when the standard font data cannot be read, pdf.js falls back to a
+  // built-in face that also draws ink.
   assert.deepEqual([...visual.images[0].png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
   const { ink, pixels } = await inkPixels(visual.images[0].png)
   assert.ok(ink > 0 && ink < pixels, `rendered page ink: ${ink} of ${pixels} pixels`)
