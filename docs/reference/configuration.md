@@ -98,7 +98,7 @@ host-context-controller bounds every NetworkPolicy pass with two settings that
 | --------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `HCC_K8S_REQUEST_TIMEOUT_MS`      | `30000`            | Deadline for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding work; a timed-out request fails the pass, which retries. Plain digits, below `HCC_NETPOL_PASS_HARD_LIMIT_MS` |
 | `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` | `30000`            | Deadline for each finite Kubernetes request on the Host convergence path. Plain digits, below `HCC_NETPOL_PASS_HARD_LIMIT_MS`                                                                                |
-| `HCC_NETPOL_PASS_HARD_LIMIT_MS`   | `1800000` (30 min) | A pass still running at this limit makes HCC exit, so its container restarts and the startup pass converges again                                                                                            |
+| `HCC_NETPOL_PASS_HARD_LIMIT_MS`   | `1800000` (30 min) | A pass still running at this limit makes HCC exit, so its container restarts and the startup pass converges again; consumers can fail closed before it (see the upgrade note)                                |
 
 See the [upgrade note](../deploy/releases-and-upgrades.md#hcc-networkpolicy-pass-bounds)
 and the [HCC README](../../host-context-controller/README.md#networkpolicy).

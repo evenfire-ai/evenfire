@@ -483,6 +483,16 @@ again. Such a restart is expected behaviour, not a crash to roll back; look at
 the `networkpolicy-pass-hard-limit` log line for the stage and the pending
 effect the pass was waiting on.
 
+The hard limit restarts HCC; it does not keep consumers serving until then.
+Once a Context or McpServer changes while a pass is stuck, or when the stuck
+pass is the startup pass, HCC's request lane answers 503: mcp-host revokes each
+Host's MCP fleet `HCC_AUTHORITY_MAX_STALENESS_MS` (180 s by default) after that
+Host's last successful poll, and mcp-proxy fails readiness 300 s after its last
+successful poll, until HCC exits and its startup pass certifies. A stuck
+Kubernetes request ends at its 30 s deadline and the pass retries; act on the
+first `networkpolicy-pass-overrun` line (5 minutes) and treat the exit as the
+backstop.
+
 Timeouts on the Host path now use the same error code and name as the other
 bounded clients: `HCC_K8S_REQUEST_TIMEOUT` and `K8sRequestTimeoutError`, where
 earlier releases used `HCC_HOST_K8S_REQUEST_TIMEOUT` and
