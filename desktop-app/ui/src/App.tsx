@@ -537,7 +537,6 @@ export function App() {
   const sandboxUiDeepLinkClosedOriginEmbedsRef = React.useRef(new Set<number>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
-  workspaceTabsRef.current = workspaceTabs
   const availableSandboxUiAppsRef = React.useRef(availableSandboxUiApps)
   availableSandboxUiAppsRef.current = availableSandboxUiApps
   const setWorkspaceTabsRef = React.useRef(setWorkspaceTabs)
