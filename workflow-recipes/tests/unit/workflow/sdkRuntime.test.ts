@@ -470,6 +470,71 @@ describe('sdk workflow runtime', () => {
     )
   })
 
+  it('waits for the snippet runner on resume when a snippet step was left running by a replaced coordinator', async () => {
+    // A coordinator that crashes mid-step leaves that step persisted as `running`: the executor
+    // reports `running` before it calls the runner, and coordinator replacement patches only
+    // status.workflowExecution. The step still has to run, so the runner must be ready first.
+    const { status } = makeStatus({
+      workflowPhase: 'recovering',
+      steps: [
+        { id: 'seed', phase: 'completed', output: '{"value":"a"}' },
+        {
+          id: 'after',
+          phase: 'running',
+          executor: 'snippet',
+          startedAt: '2026-11-13T10:00:00.000Z',
+        },
+      ],
+    })
+    const statusMock = status as unknown as {
+      getWorkflowStatus: ReturnType<typeof vi.fn>
+      reportWorkflowStatus: ReturnType<typeof vi.fn>
+    }
+    const snippetRunner = makeSnippetRunner(async () => ({ status: 'completed', output: {} }))
+    snippetRunner.healthCheck
+      .mockResolvedValueOnce({ status: 'unhealthy' })
+      .mockResolvedValueOnce({ status: 'healthy' })
+
+    const result = await runWorkflowRuntime({
+      config: runtimeConfig(),
+      spec: {
+        name: 'runtime-test',
+        namespace: 'sandbox-recipes',
+        steps: [
+          { id: 'seed', run: snippetRun() },
+          { id: 'after', dependsOn: ['seed'], run: snippetRun() },
+        ],
+      },
+      coordinator: new StepCoordinator(),
+      status,
+      signals: makeSignals(),
+      mcpHost: null,
+      snippetRunner: snippetRunner as never,
+      modelInjection: vi.fn(),
+      snippetRunnerReadyAttempts: 2,
+      snippetRunnerReadyDelayMs: 0,
+    })
+
+    expect(result).toEqual({ exitCode: 0, workflowPhase: 'completed' })
+    expect(statusMock.getWorkflowStatus).toHaveBeenCalledTimes(1)
+    // Liveness witness: the step persisted as running runs again; the completed one does not.
+    expect(snippetRunner.execute).toHaveBeenCalledTimes(1)
+    expect(snippetRunner.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ stepId: 'after', previousOutputs: { seed: '{"value":"a"}' } })
+    )
+    expect(snippetRunner.healthCheck).toHaveBeenCalledTimes(2)
+    expect(snippetRunner.healthCheck.mock.invocationCallOrder[1]).toBeLessThan(
+      snippetRunner.execute.mock.invocationCallOrder[0]
+    )
+    const runningCall = statusMock.reportWorkflowStatus.mock.calls.findIndex(
+      call => call[0] === 'running'
+    )
+    expect(runningCall).toBeGreaterThanOrEqual(0)
+    expect(snippetRunner.healthCheck.mock.invocationCallOrder[1]).toBeLessThan(
+      statusMock.reportWorkflowStatus.mock.invocationCallOrder[runningCall]
+    )
+  })
+
   it('reads the workflow status before waiting for the snippet runner and reports running after it', async () => {
     const { status } = makeStatus()
     const statusMock = status as unknown as {
