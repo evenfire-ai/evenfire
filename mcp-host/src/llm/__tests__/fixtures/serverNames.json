@@ -1,0 +1,25 @@
+{
+  "registry": [
+    {
+      "entryName": "@evenfire/notion-remote",
+      "version": "1.0.0",
+      "name": "mcp-evenfire-notion-remote-v1-0-0-b234d024"
+    },
+    {
+      "entryName": "@evenfire/atlassian-remote",
+      "version": "1.0.0",
+      "name": "mcp-evenfire-atlassian-remote-v1-0-0-c97292b3"
+    },
+    {
+      "entryName": "@evenfire/google-workspace-admin-directory-remote",
+      "version": "1.0.0",
+      "name": "mcp-evenfire-google-workspace-admin-director-v1-0-0-b72c85dd"
+    },
+    {
+      "entryName": "@evenfire/google-workspace-admin-directory-remote",
+      "version": "10.20.300-beta.12",
+      "name": "mcp-evenfire-google-workspace-admin-director-v10-20-300-beta-12"
+    }
+  ],
+  "catalog": []
+}
