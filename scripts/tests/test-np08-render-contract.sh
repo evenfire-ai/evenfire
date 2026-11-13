@@ -63,7 +63,7 @@ for rendered in "$@"; do
     allowance_ms = extract.call("HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS", /^export const HCC_AUTHORITY_SCHEDULING_ALLOWANCE_MS = ([0-9_]+)$/)
     missed_polls = extract.call("HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS", /^export const HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS = ([0-9_]+)$/)
     ceiling_ms = extract.call("HCC_AUTHORITY_MAX_STALENESS_CEILING_MS", /^export const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = ([0-9_]+)(?: \/\/.*)?$/)
-    default_bound_ms = extract.call("HCC_AUTHORITY_MAX_STALENESS_MS default", /getEnvNumber\(\x27HCC_AUTHORITY_MAX_STALENESS_MS\x27, ([0-9_]+)\)/)
+    default_bound_ms = extract.call("HCC_AUTHORITY_MAX_STALENESS_MS default", /^export const HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS = ([0-9_]+)$/)
     default_interval_ms = extract.call("CLERUM_CONTEXT_MAPPER_POLL_INTERVAL default", /getEnv\(\x27CLERUM_CONTEXT_MAPPER_POLL_INTERVAL\x27, \x27([0-9_]+)\x27\)/)
 
     bound_raw = host_config.dig("data", "HCC_AUTHORITY_MAX_STALENESS_MS")

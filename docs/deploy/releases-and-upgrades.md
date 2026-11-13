@@ -520,6 +520,12 @@ digits, at most 2147483647, in every mode, including dev mode. `30s`, `3e4` and
 `30_000` used to be read as 30 ms, 3 ms and 30 ms, and now stop startup. So do
 `030000`, ` 30000`, `+30000` and `30000.5`, which work today as 30 s.
 
+`HCC_AUTHORITY_MAX_STALENESS_MS` follows the same plain-digit grammar, in every
+mode; unset or `""` means the 180000 ms default. It used to be read with
+`parseInt`: `abc`, `0` or `-5` fell back to the default with a warning, and
+`180s` or `1e5` were read as 180 ms and 1 ms (in dev mode they started that
+way). Every such value now stops startup.
+
 The rule also caps the poll interval. With the default
 `HCC_AUTHORITY_MAX_STALENESS_MS` (180000 ms) the poll interval may be at most
 56333 ms. A larger interval needs a larger bound, up to the 600000 ms cap, which

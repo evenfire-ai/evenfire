@@ -6,10 +6,16 @@ const originalEnv = process.env
 
 async function loadAuthorityMaxStaleness(
   value: string | undefined,
-  pollInterval = '30000'
+  pollInterval = '30000',
+  devMode = false
 ): Promise<number> {
   vi.resetModules()
   process.env = { ...originalEnv }
+  if (devMode) {
+    process.env.CLERUM_DEV_MODE = 'true'
+  } else {
+    delete process.env.CLERUM_DEV_MODE
+  }
   process.env.CLERUM_CONTEXT_MAPPER_POLL_INTERVAL = pollInterval
   if (value === undefined) {
     delete process.env.HCC_AUTHORITY_MAX_STALENESS_MS
@@ -45,8 +51,54 @@ describe('HCC_AUTHORITY_MAX_STALENESS_MS', () => {
     await expect(loadAuthorityMaxStaleness('700000')).resolves.toBe(600_000)
   })
 
-  it('uses the default window for an invalid value', async () => {
-    await expect(loadAuthorityMaxStaleness('not-a-duration')).resolves.toBe(180_000)
+  it('refuses to start on a value that is not plain digits, instead of using the default', async () => {
+    await expect(loadAuthorityMaxStaleness('not-a-duration')).rejects.toThrow(
+      'HCC_AUTHORITY_MAX_STALENESS_MS ("not-a-duration") must be a positive whole number of milliseconds in plain digits; refusing to start'
+    )
+  })
+
+  it.each([false, true])(
+    'defaults to 180000 when set to an empty string (dev mode: %s)',
+    async dev => {
+      await expect(loadAuthorityMaxStaleness('', '30000', dev)).resolves.toBe(180_000)
+    }
+  )
+
+  const misspelt = [
+    ' ',
+    '0',
+    '-5',
+    'abc',
+    'NaN',
+    'Infinity',
+    '180000ms',
+    '180s',
+    '1e5',
+    '18e4',
+    '180_000',
+    '+180000',
+    ' 180000',
+    '180000 ',
+    '180000\n',
+    '0180000',
+    '180000.9',
+    '0x2BF20',
+  ]
+  it.each(misspelt)("refuses '%s' in cluster mode with the grammar message", async raw => {
+    await expect(loadAuthorityMaxStaleness(raw)).rejects.toThrow(
+      'must be a positive whole number of milliseconds in plain digits; refusing to start'
+    )
+  })
+  it.each(misspelt)("refuses '%s' in dev mode too", async raw => {
+    await expect(loadAuthorityMaxStaleness(raw, '30000', true)).rejects.toThrow(
+      'must be a positive whole number of milliseconds in plain digits; refusing to start'
+    )
+  })
+
+  it('keeps the floor check out of dev mode', async () => {
+    // Liveness witness: the same value refuses in cluster mode.
+    await expect(loadAuthorityMaxStaleness('60000')).rejects.toThrow('= 101000ms')
+    await expect(loadAuthorityMaxStaleness('60000', '30000', true)).resolves.toBe(60_000)
   })
 })
 

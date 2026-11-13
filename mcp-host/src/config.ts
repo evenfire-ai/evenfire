@@ -651,6 +651,25 @@ export const HCC_AUTHORITY_MIN_TOLERATED_MISSED_POLLS = 2
 /** Hard upper bound applied to HCC_AUTHORITY_MAX_STALENESS_MS before validation. */
 export const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = 600_000 // 10 min
 
+/** Default of HCC_AUTHORITY_MAX_STALENESS_MS. */
+export const HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS = 180_000
+
+/**
+ * Reads HCC_AUTHORITY_MAX_STALENESS_MS in every mode, dev included. Unset or ""
+ * means the default; anything else must be plain decimal digits. parseInt would
+ * read '180s' as 180 and '1e5' as 1, and a fallback to the default would hide
+ * the misconfiguration.
+ */
+export function parseHccAuthorityMaxStalenessMs(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS
+  if (!/^[1-9][0-9]*$/.test(raw)) {
+    throw new Error(
+      `HCC_AUTHORITY_MAX_STALENESS_MS ("${raw}") must be a positive whole number of milliseconds in plain digits; refusing to start`
+    )
+  }
+  return Math.min(Number(raw), HCC_AUTHORITY_MAX_STALENESS_CEILING_MS)
+}
+
 function assertPositiveSafeIntegerMs(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(
@@ -684,8 +703,9 @@ function assertPositiveSafeIntegerMs(name: string, value: number): void {
  * - cold start before the first success: no deadline is armed until then, so S
  *   does not govern it.
  *
- * Every argument must be a positive safe integer: parseInt returns NaN for a
- * non-numeric poll interval, and setInterval(fn, NaN) polls every 1 ms.
+ * Every argument must be a positive safe integer, so a value that did not come
+ * through the strict parsers in this file still fails closed: setInterval(fn, NaN)
+ * polls every 1 ms.
  * Failing startup closed is safer than retaining or revoking authority on a
  * cadence the bound was never checked against.
  */
@@ -899,9 +919,8 @@ const contextMapperPollInterval = parseContextMapperPollIntervalMs(
 // recommended value; the 180s default absorbs 4 missed polls. With the 180s
 // default the poll interval may be at most 56333ms (196333ms at the 600s cap);
 // see docs/deploy/releases-and-upgrades.md, "mcp-host authority staleness floor".
-const hccAuthorityMaxStalenessMs = Math.min(
-  getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 180_000),
-  HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
+const hccAuthorityMaxStalenessMs = parseHccAuthorityMaxStalenessMs(
+  getEnv('HCC_AUTHORITY_MAX_STALENESS_MS')
 )
 
 // Dev mode does not retain a Kubernetes-authoritative MCP fleet, so the
