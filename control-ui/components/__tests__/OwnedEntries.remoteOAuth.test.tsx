@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen } from '@testing-library/react'
 import { CONTROL_ROUTES } from '../../app/constants/routes'
 import * as api from '../../lib/api'
+import type { RegistryCatalogResponse } from '../../lib/api'
 import { CATALOG_SLOTS } from '../../test/fixtures/catalogRemoteOAuthWire'
 import { OwnedEntries } from '../PublisherView/OwnedEntries'
 import { ToastProvider } from '../Toast'
@@ -108,6 +109,57 @@ describe('OwnedEntries for remote-OAuth entries', () => {
     )
     fireEvent.click(
       await screen.findByRole('button', { name: 'Actions for @acme/notion-remote v0.9.0' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Install (per user)' }))
+    expect(navigation.push).toHaveBeenCalledWith(
+      CONTROL_ROUTES.connectors.remoteNew({
+        entry: '@acme/notion-remote',
+        version: '1.0.0',
+        scope: 'user',
+      })
+    )
+  })
+
+  it("uses each listed version's own catalog row when several versions are in the catalog", async () => {
+    const remoteOAuthRow = CATALOG_SLOTS.data.find(row => row.name === '@acme/notion-remote')!
+    const plainRow = CATALOG_SLOTS.data.find(row => row.name === '@evenfire/plain-remote')!
+    // An older version of the same entry, published before it was a remote-OAuth connector:
+    // control-api's plain remote row under that name. Listed first, so a name-only lookup
+    // would pick it for both versions.
+    const catalog: RegistryCatalogResponse = {
+      ...CATALOG_SLOTS,
+      data: [{ ...plainRow, name: '@acme/notion-remote', version: '0.9.0' }, remoteOAuthRow],
+    }
+    vi.mocked(api.getRegistryCatalog).mockResolvedValue(catalog)
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: ['0.9.0', '1.0.0'].map(version => ({
+        name: '@acme/notion-remote',
+        version,
+        visibility: 'public',
+        status: 'published',
+        entryType: 'mcp-server',
+        serverMode: 'remote',
+      })),
+    })
+    rtlRender(
+      <ToastProvider>
+        <OwnedEntries orgScope="@acme" />
+      </ToastProvider>
+    )
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for @acme/notion-remote v0.9.0' })
+    )
+    expect(screen.queryByRole('menuitem', { name: 'Install (per user)' })).toBeNull()
+    cleanup()
+
+    rtlRender(
+      <ToastProvider>
+        <OwnedEntries orgScope="@acme" />
+      </ToastProvider>
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for @acme/notion-remote v1.0.0' })
     )
     fireEvent.click(screen.getByRole('menuitem', { name: 'Install (per user)' }))
     expect(navigation.push).toHaveBeenCalledWith(
