@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import { dirname, join } from 'node:path'
 import { parseVerifierMaterial } from '@clerum/jwt-key-policy'
 import { readDevVerifierMaterial, resolveDevKeyStoreDir } from '@clerum/jwt-key-policy/dev-store'
@@ -50,7 +51,11 @@ function requiredOrDevDefault(name: string, devDefault: string): string {
 
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '')
-  return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.')
+  return (
+    normalized === 'localhost' ||
+    normalized === '::1' ||
+    (isIP(normalized) === 4 && normalized.startsWith('127.'))
+  )
 }
 
 function isPrivateIpv4(hostname: string): boolean {
