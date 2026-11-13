@@ -167,6 +167,11 @@ export interface GfsBrowserAffordances {
 export interface GfsRowPermissionStatus {
   status: 'checking' | 'stale' | 'error' | 'ready'
   message: string | null
+  errorUpdateCount?: number
+  isEnabled?: boolean
+  isFetching?: boolean
+  isSessionAuthorityFailure?: boolean
+  queryIdentity?: object
 }
 
 export interface GfsBrowserControllerOptions {
@@ -1049,6 +1054,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         rateLimited: boolean
         retryAfterSeconds: number | null
         isFetching: boolean
+        errorUpdateCount: number
+        isSessionAuthorityFailure: boolean
+        queryIdentity?: object
       }
     > = {}
     if (authorityPending || accessState === 'revoked') return byId
@@ -1062,6 +1070,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         rateLimited: rawError ? isRateLimited(rawError) : false,
         retryAfterSeconds: rawError ? parseRetryAfterSeconds(rawError) : null,
         isFetching: Boolean(query?.isFetching),
+        errorUpdateCount: query?.errorUpdateCount ?? 0,
+        isSessionAuthorityFailure: Boolean(
+          rawError && isGfsSessionAuthorityFailure(rawError, 'operation')
+        ),
+        queryIdentity: query
+          ? queryClient.getQueryCache().find({
+              queryKey: desktopQueryKeys.gfsAffordances(
+                sessionScope ?? 'anonymous',
+                resourceId,
+                DRIVE,
+                sessionGeneration
+              ),
+              exact: true,
+            })
+          : undefined,
       }
     })
     return byId
@@ -1154,32 +1177,87 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             error?: unknown
             isError?: boolean
             isFetching?: boolean
+            isEnabled?: boolean
             isStale?: boolean
+            errorUpdateCount?: number
           }
-        | undefined
+        | undefined,
+      resourceId: string
     ) => {
-      if (query?.isFetching) return { status: 'checking', message: null } as const
+      const queryIdentity = queryClient.getQueryCache().find({
+        queryKey: desktopQueryKeys.gfsAffordances(
+          sessionScope ?? 'anonymous',
+          resourceId,
+          DRIVE,
+          sessionGeneration
+        ),
+        exact: true,
+      })
+      if (query?.isFetching)
+        return {
+          status: 'checking',
+          message: null,
+          errorUpdateCount: query.errorUpdateCount ?? 0,
+          isEnabled: query.isEnabled ?? false,
+          isFetching: query.isFetching ?? false,
+          isSessionAuthorityFailure: isGfsSessionAuthorityFailure(
+            query.error instanceof Error ? query.error.message : String(query.error ?? ''),
+            'operation'
+          ),
+          queryIdentity,
+        } as const
       if (query?.isError) {
         return {
           status: 'error',
           message: toPresentedMessage(query.error),
+          errorUpdateCount: query.errorUpdateCount ?? 0,
+          isEnabled: query.isEnabled ?? false,
+          isFetching: query.isFetching ?? false,
+          isSessionAuthorityFailure: isGfsSessionAuthorityFailure(
+            query.error instanceof Error ? query.error.message : String(query.error ?? ''),
+            'operation'
+          ),
+          queryIdentity,
         } as const
       }
-      if (!query?.data) return { status: 'checking', message: null } as const
-      if (query.isStale) return { status: 'stale', message: null } as const
-      return { status: 'ready', message: null } as const
+      if (!query?.data)
+        return {
+          status: 'checking',
+          message: null,
+          errorUpdateCount: query?.errorUpdateCount ?? 0,
+          isEnabled: query?.isEnabled ?? false,
+          isFetching: query?.isFetching ?? false,
+          queryIdentity,
+        } as const
+      if (query.isStale)
+        return {
+          status: 'stale',
+          message: null,
+          errorUpdateCount: query.errorUpdateCount ?? 0,
+          isEnabled: query.isEnabled ?? false,
+          isFetching: query.isFetching ?? false,
+          queryIdentity,
+        } as const
+      return {
+        status: 'ready',
+        message: null,
+        errorUpdateCount: query.errorUpdateCount ?? 0,
+        isEnabled: query.isEnabled ?? false,
+        isFetching: query.isFetching ?? false,
+        queryIdentity,
+      } as const
     }
     items.forEach((item, index) => {
       byResourceId[item.resourceId] =
         authorityPending || accessState === 'revoked'
-          ? { status: 'checking', message: null }
-          : queryStatus(rowAffordancesQueries[index])
+          ? { status: 'checking', message: null, isEnabled: false, isFetching: false }
+          : queryStatus(rowAffordancesQueries[index], item.resourceId)
     })
     accessibleResources.forEach(resource => {
       byResourceId[resource.resourceId] =
         authorityPending || accessState === 'revoked'
-          ? { status: 'checking', message: null }
-          : queryStatus(accessibleQuery)
+          ? { status: 'checking', message: null, isEnabled: false, isFetching: false }
+          : queryStatus(accessibleQuery, resource.resourceId)
     })
     return byResourceId
   }, [
@@ -1827,7 +1905,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     affordancesHttpStatus: affordancesQuery.error
       ? parseHttpStatus(toMessage(affordancesQuery.error))
       : null,
+    affordancesSessionAuthorityFailure: affordancesQuery.error
+      ? isGfsSessionAuthorityFailure(toMessage(affordancesQuery.error), 'operation')
+      : false,
     loadingAffordances: affordancesQuery.isFetching,
+    affordancesEnabled: affordancesQuery.isEnabled,
+    affordancesErrorUpdateCount: affordancesQuery.errorUpdateCount,
     rowAffordancesByResourceId,
     rowPermissionStatusByResourceId,
     moveSourceParentAffordancesById,
@@ -1843,6 +1926,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       rowAffordancesQuery.isStale
         ? null
         : ((rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
+    rowAffordancesEnabled: rowAffordancesQuery.isEnabled,
+    rowAffordancesFetching: rowAffordancesQuery.isFetching,
     rowAffordancesError: rowAffordancesQuery.error
       ? toPresentedMessage(rowAffordancesQuery.error)
       : null,

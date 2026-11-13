@@ -320,9 +320,25 @@ export function useFilePreviewResourceActions({
               () => affordancesQuery.refetch()
             ),
         }
-      : affordancesQuery.error
+      : affordancesQuery.error &&
+          !isGfsSessionAuthorityFailure(
+            affordancesQuery.error instanceof Error
+              ? affordancesQuery.error.message
+              : String(affordancesQuery.error),
+            'operation'
+          )
         ? {
-            id: 'resource-permissions',
+            id: `resource-permissions:${sessionScope}:${sessionGeneration}:${resourceId || gfsUri}:${affordancesQuery.errorUpdateCount}`,
+            queryIdentity: queryClient.getQueryCache().find({
+              queryKey: desktopQueryKeys.gfsAffordances(
+                sessionScope,
+                resourceId || gfsUri,
+                drive,
+                sessionGeneration
+              ),
+              exact: true,
+            }),
+            errorUpdateCount: affordancesQuery.errorUpdateCount,
             message: `Could not verify file permissions: ${describeGfsReadError(affordancesQuery.error).message}`,
             pending: false,
             retry: () =>
@@ -340,7 +356,17 @@ export function useFilePreviewResourceActions({
     sourceParentId
       ? sourceParentAffordancesQuery.isFetching && sourceParentAffordancesQuery.data
         ? {
-            id: 'move-source-permissions',
+            id: `move-source-permissions:${sessionScope}:${sessionGeneration}:${sourceParentId}:${sourceParentAffordancesQuery.errorUpdateCount}`,
+            queryIdentity: queryClient.getQueryCache().find({
+              queryKey: desktopQueryKeys.gfsAffordances(
+                sessionScope,
+                sourceParentId,
+                drive,
+                sessionGeneration
+              ),
+              exact: true,
+            }),
+            errorUpdateCount: sourceParentAffordancesQuery.errorUpdateCount,
             message: 'Checking move permissions…',
             pending: true,
             retry: () =>
@@ -354,9 +380,25 @@ export function useFilePreviewResourceActions({
                 () => sourceParentAffordancesQuery.refetch()
               ),
           }
-        : sourceParentAffordancesQuery.error
+        : sourceParentAffordancesQuery.error &&
+            !isGfsSessionAuthorityFailure(
+              sourceParentAffordancesQuery.error instanceof Error
+                ? sourceParentAffordancesQuery.error.message
+                : String(sourceParentAffordancesQuery.error),
+              'operation'
+            )
           ? {
-              id: 'move-source-permissions',
+              id: `move-source-permissions:${sessionScope}:${sessionGeneration}:${sourceParentId}:${sourceParentAffordancesQuery.errorUpdateCount}`,
+              queryIdentity: queryClient.getQueryCache().find({
+                queryKey: desktopQueryKeys.gfsAffordances(
+                  sessionScope,
+                  sourceParentId,
+                  drive,
+                  sessionGeneration
+                ),
+                exact: true,
+              }),
+              errorUpdateCount: sourceParentAffordancesQuery.errorUpdateCount,
               message: `Could not verify move permissions: ${describeGfsReadError(sourceParentAffordancesQuery.error).message}`,
               pending: false,
               retry: () =>
@@ -373,6 +415,14 @@ export function useFilePreviewResourceActions({
           : null
       : null,
   ].filter((notice): notice is NonNullable<typeof notice> => notice !== null)
+  const permissionProgress = [
+    affordancesQuery.isEnabled && affordancesQuery.isFetching ? 'file permissions' : null,
+    sourceParentId &&
+    sourceParentAffordancesQuery.isEnabled &&
+    sourceParentAffordancesQuery.isFetching
+      ? 'move permissions'
+      : null,
+  ].filter((label): label is string => label !== null)
 
   const grantsQuery = useQuery({
     queryKey: desktopQueryKeys.gfsGrants(
@@ -1738,6 +1788,8 @@ export function useFilePreviewResourceActions({
     handlers,
     dialogs,
     permissionNotices,
+    permissionProgress,
+    actionDialogOpen: shareOpen || renameOpen || moveOpen || deleteOpen,
     canShare,
     canRename,
     canMove,

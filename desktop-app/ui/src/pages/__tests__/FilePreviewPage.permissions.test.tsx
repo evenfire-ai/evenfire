@@ -249,6 +249,47 @@ describe('FilePreviewPage permission-derived actions', () => {
     expect(pushToast).not.toHaveBeenCalledWith('Access granted to 1 subject', 'success')
   })
 
+  it('defers a permission error dialog while the existing Share dialog is open', async () => {
+    let rejectParent!: (error: Error) => void
+    const pendingParent = new Promise<Awaited<ReturnType<typeof delegationAffordances>>>(
+      (_resolve, reject) => {
+        rejectParent = reject
+      }
+    )
+    const affordances = vi.fn(async (id: string) =>
+      id === 'preview-parent' ? pendingParent : activeAffordances
+    )
+    const { dialog, queryClient } = await openShareDialogWithInheritedAccess({
+      resolve: async uri => {
+        if (uri === resourceUri) return await inheritedTarget('preview-parent')
+        if (uri === 'gfs://main/preview-parent') {
+          return await inheritedParent('preview-parent', 'Parent folder', null)
+        }
+        throw new Error(`Unexpected resolve: ${uri}`)
+      },
+      listGrants: async () => grantsListPage([]),
+      listShares: async () => sharesListPage([]),
+      affordances,
+    })
+
+    try {
+      await act(async () => {
+        rejectParent(new Error('source permission service unavailable'))
+      })
+
+      expect(dialog.isConnected).toBe(true)
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close share dialog' }))
+      const permissionDialog = await screen.findByRole('alertdialog', {
+        name: 'Could not verify permissions',
+      })
+      expect(within(permissionDialog).getByText(/Could not verify move permissions/)).toBeTruthy()
+    } finally {
+      queryClient.clear()
+    }
+  })
+
   it('gates Share, Rename, Move, and Delete from resource and parent affordances', async () => {
     const readOnly = renderWithPermissions(['read'], ['read'])
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()

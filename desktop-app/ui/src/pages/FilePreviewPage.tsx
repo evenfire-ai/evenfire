@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Button, EmptyState, StatusBanner } from '@components/Common'
+import { EmptyState, PermissionErrorDialog, PermissionStatusIndicator } from '@components/Common'
+import { isPermissionErrorAcknowledged } from '@components/Common/permissionErrorAcknowledgement'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
@@ -79,6 +80,7 @@ export function FilePreviewPage({
   const [denied, setDenied] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [copyContentReady, setCopyContentReady] = useState(false)
+  const [dismissedPermissionErrors, setDismissedPermissionErrors] = useState<string[]>([])
   const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
   const accessRevoked = ctrl.accessState === 'revoked'
   const liveAuthorityRef = useRef({
@@ -283,6 +285,27 @@ export function FilePreviewPage({
   const fileActionsMenu = (
     <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={menuResourceName} />
   )
+  const permissionPresentationAvailable =
+    !denied && !unavailable && !accessRevoked && !ctrl.authorityPending
+  const permissionErrors = permissionPresentationAvailable
+    ? previewResourceActions.permissionNotices.filter(notice => !notice.pending)
+    : []
+  const activePermissionErrorSignature = permissionErrors.map(error => error.id).join('|')
+  const visiblePermissionErrors = permissionErrors.filter(
+    error => !dismissedPermissionErrors.includes(error.id) && !isPermissionErrorAcknowledged(error)
+  )
+  const permissionProgressLabel = !permissionPresentationAvailable
+    ? ''
+    : previewResourceActions.permissionProgress.length > 1
+      ? 'Checking file and move permissions'
+      : previewResourceActions.permissionProgress[0] === 'file permissions'
+        ? 'Checking file permissions'
+        : previewResourceActions.permissionProgress.length > 0
+          ? 'Checking move permissions'
+          : ''
+  useEffect(() => {
+    if (!activePermissionErrorSignature) setDismissedPermissionErrors([])
+  }, [activePermissionErrorSignature])
 
   const revalidateAccess = useCallback(async () => {
     if (denied || accessRevoked || !isGfsSessionGeneration(ctrl.sessionGeneration)) return
@@ -364,24 +387,19 @@ export function FilePreviewPage({
       />
       <div className="da-gfs-preview-page">
         {previewResourceActions.dialogs}
-        {previewResourceActions.permissionNotices.map(notice => (
-          <div key={notice.id} role={notice.pending ? 'status' : 'alert'}>
-            <StatusBanner tone={notice.pending ? 'info' : 'error'} text={notice.message} />
-            {!notice.pending ? (
-              <Button
-                onClick={() =>
-                  void Promise.resolve()
-                    .then(notice.retry)
-                    .catch(() => undefined)
-                }
-                size="sm"
-                variant="outline"
-              >
-                Retry permission check
-              </Button>
-            ) : null}
-          </div>
-        ))}
+        <PermissionErrorDialog
+          errors={visiblePermissionErrors}
+          suspended={previewResourceActions.actionDialogOpen}
+          progress={
+            visiblePermissionErrors.length > 0 && permissionProgressLabel
+              ? [permissionProgressLabel]
+              : []
+          }
+          onDismiss={ids =>
+            setDismissedPermissionErrors(current => [...new Set([...current, ...ids])])
+          }
+          title="Could not verify permissions"
+        />
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <>
@@ -398,6 +416,16 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
+                  permissionProgress={
+                    <PermissionStatusIndicator
+                      active={Boolean(permissionProgressLabel)}
+                      announce={
+                        visiblePermissionErrors.length === 0 ||
+                        previewResourceActions.actionDialogOpen
+                      }
+                      label={permissionProgressLabel}
+                    />
+                  }
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
                   headingLevel={2}
@@ -410,6 +438,16 @@ export function FilePreviewPage({
                   fileName={fileName}
                   gfsUri={gfsUri}
                   onDownloadError={handleDownloadError}
+                  permissionProgress={
+                    <PermissionStatusIndicator
+                      active={Boolean(permissionProgressLabel)}
+                      announce={
+                        visiblePermissionErrors.length === 0 ||
+                        previewResourceActions.actionDialogOpen
+                      }
+                      label={permissionProgressLabel}
+                    />
+                  }
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
                   headingLevel={2}
@@ -423,6 +461,16 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
+                  permissionProgress={
+                    <PermissionStatusIndicator
+                      active={Boolean(permissionProgressLabel)}
+                      announce={
+                        visiblePermissionErrors.length === 0 ||
+                        previewResourceActions.actionDialogOpen
+                      }
+                      label={permissionProgressLabel}
+                    />
+                  }
                   titleActions={fileActionsMenu}
                   headingLevel={2}
                 />

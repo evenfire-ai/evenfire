@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import fc from 'fast-check'
 import { ToastStack } from '@components/Common/ToastStack'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useToastController } from '@hooks/domain/useToastController'
@@ -187,6 +188,935 @@ async function openPreviewActions() {
 }
 
 describe('FilePreviewPage move permission contract', () => {
+  it('runs R19 acknowledgement commands against the real Preview Queries and QueryClient', async () => {
+    type Model = { dialogVisible: boolean; generation: number }
+    type Real = {
+      client: QueryClient
+      fileKey: ReturnType<typeof desktopQueryKeys.gfsAffordances>
+      getFileReads: () => number
+      setNextFileOutcome: (outcome: 'success' | 'error') => void
+      remount: () => void
+    }
+
+    class RetryFileError implements fc.AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>): boolean {
+        return model.dialogVisible
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        state.setNextFileOutcome('success')
+        const dialog = screen.getByRole('alertdialog')
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+        await waitFor(() => expect(state.getFileReads()).toBeGreaterThanOrEqual(2))
+        await waitFor(() =>
+          expect(state.client.getQueryState(state.fileKey)?.status).toBe('success')
+        )
+        model.dialogVisible = false
+        expect(screen.queryByRole('alertdialog')).toBeNull()
+        expect(screen.getByAltText('Preview of diagram.png')).toBeTruthy()
+      }
+      toString(): string {
+        return 'retry the exact Preview file permission query'
+      }
+    }
+
+    class DismissFileError implements fc.AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>): boolean {
+        return model.dialogVisible
+      }
+      async run(model: Model): Promise<void> {
+        fireEvent.click(
+          within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Close' })
+        )
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+        model.dialogVisible = false
+      }
+      toString(): string {
+        return 'dismiss the current Preview error generation'
+      }
+    }
+
+    class RemountPreview implements fc.AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>): boolean {
+        return !model.dialogVisible
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        state.remount()
+        await screen.findByAltText('Preview of diagram.png')
+        if (model.dialogVisible) await screen.findByRole('alertdialog')
+        else expect(screen.queryByRole('alertdialog')).toBeNull()
+        expect(
+          state.client.getQueryCache().find({ queryKey: state.fileKey, exact: true })
+        ).toBeTruthy()
+      }
+      toString(): string {
+        return 'remount Preview while retaining the cached Query identity'
+      }
+    }
+
+    class PublishNewFileFailure implements fc.AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>): boolean {
+        return !model.dialogVisible
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        state.setNextFileOutcome('error')
+        await act(async () => {
+          await state.client.refetchQueries({ exact: true, queryKey: state.fileKey })
+        })
+        await screen.findByRole('alertdialog')
+        model.generation += 1
+        model.dialogVisible = true
+        expect(state.client.getQueryState(state.fileKey)?.errorUpdateCount).toBe(model.generation)
+        expect(screen.getByAltText('Preview of diagram.png')).toBeTruthy()
+      }
+      toString(): string {
+        return 'publish a distinct later Query error generation'
+      }
+    }
+
+    const commands = fc.commands<Model, Real, false>(
+      [
+        fc.constant(new RetryFileError()),
+        fc.constant(new DismissFileError()),
+        fc.constant(new RemountPreview()),
+        fc.constant(new PublishNewFileFailure()),
+      ],
+      { maxCommands: 12 }
+    )
+    await fc.assert(
+      fc.asyncProperty(commands, async scheduledCommands => {
+        let fileReads = 0
+        let nextFileOutcome: 'success' | 'error' = 'success'
+        installGfs({
+          resourceAffordances: async () => {
+            fileReads += 1
+            const outcome = nextFileOutcome
+            nextFileOutcome = 'success'
+            if (outcome === 'error') throw new Error('file authority service unavailable')
+            return fullAccess
+          },
+        })
+        installController()
+        const client = new QueryClient({
+          defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+        })
+        const fileKey = desktopQueryKeys.gfsAffordances(
+          'preview-test-user:main',
+          resourceId,
+          'main',
+          1
+        )
+        let view = render(
+          <QueryClientProvider client={client}>
+            <FilePreviewPage
+              gfsUri={uri}
+              fileName="diagram.png"
+              fileKind="image"
+              mimeType="image/png"
+              byteLength={1}
+            />
+          </QueryClientProvider>
+        )
+        const real: Real = {
+          client,
+          fileKey,
+          getFileReads: () => fileReads,
+          setNextFileOutcome: outcome => {
+            nextFileOutcome = outcome
+          },
+          remount: () => {
+            view.unmount()
+            installController()
+            view = render(
+              <QueryClientProvider client={client}>
+                <FilePreviewPage
+                  gfsUri={uri}
+                  fileName="diagram.png"
+                  fileKind="image"
+                  mimeType="image/png"
+                  byteLength={1}
+                />
+              </QueryClientProvider>
+            )
+          },
+        }
+        try {
+          await waitFor(() => expect(client.getQueryState(fileKey)?.status).toBe('success'))
+          const initialQuery = client.getQueryCache().find({ queryKey: fileKey, exact: true })
+          expect(initialQuery).toBeTruthy()
+          nextFileOutcome = 'error'
+          await act(async () => {
+            await client.refetchQueries({ exact: true, queryKey: fileKey })
+          })
+          const dialog = await screen.findByRole('alertdialog', {
+            name: 'Could not verify permissions',
+          })
+          expect(within(dialog).getByText(/Could not verify file permissions/)).toBeTruthy()
+          expect(client.getQueryState(fileKey)?.errorUpdateCount).toBe(1)
+          const model: Model = { dialogVisible: true, generation: 1 }
+          await fc.asyncModelRun(() => ({ model, real }), scheduledCommands)
+          expect(screen.queryByRole('alertdialog') !== null).toBe(model.dialogVisible)
+          expect(client.getQueryState(fileKey)?.errorUpdateCount).toBe(model.generation)
+          expect(client.getQueryState(fileKey)?.data).toBeTruthy()
+          expect(client.getQueryCache().find({ queryKey: fileKey, exact: true })).toBe(initialQuery)
+        } finally {
+          view.unmount()
+          client.clear()
+          cleanup()
+        }
+      }),
+      { numRuns: 18 }
+    )
+  })
+
+  it.each(['file', 'parent'] as const)(
+    'closes the aggregate after the other error clears while the %s Retry remains pending',
+    async retryKind => {
+      let retryFile!: (value: ReturnType<typeof delegationAffordances>) => void
+      let retryParent!: (value: ReturnType<typeof delegationAffordances>) => void
+      const pendingFileRetry = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+        retryFile = resolve
+      })
+      const pendingParentRetry = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+        retryParent = resolve
+      })
+      let fileReads = 0
+      let parentReads = 0
+      const installed = installGfs({
+        resourceAffordances: async () => {
+          fileReads += 1
+          if (fileReads === 1) throw new Error('file authority service unavailable')
+          return retryKind === 'file' && fileReads === 2 ? pendingFileRetry : fullAccess
+        },
+        source: async () => {
+          parentReads += 1
+          if (parentReads === 1) throw new Error('source authority service unavailable')
+          return retryKind === 'parent' && parentReads === 2 ? pendingParentRetry : fullAccess
+        },
+      })
+      installController()
+      const { queryClient } = renderPreview()
+      const fileKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        resourceId,
+        'main',
+        1
+      )
+      const parentKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        parentId,
+        'main',
+        1
+      )
+      try {
+        const dialog = await screen.findByRole('alertdialog', {
+          name: 'Could not verify permissions',
+        })
+        await waitFor(() => expect(queryClient.getQueryState(fileKey)?.status).toBe('error'))
+        await waitFor(() => expect(queryClient.getQueryState(parentKey)?.status).toBe('error'))
+        const errorText =
+          retryKind === 'file'
+            ? /Could not verify file permissions/i
+            : /Could not verify Move permissions/i
+        const retryRow = within(dialog)
+          .getByText(errorText)
+          .closest('.da-permission-error-dialog__item') as HTMLElement
+        const otherKey = retryKind === 'file' ? parentKey : fileKey
+        const retryKey = retryKind === 'file' ? fileKey : parentKey
+        const fetchingLabel =
+          retryKind === 'file' ? 'Checking file permissions' : 'Checking move permissions'
+        const retryFunction = retryKind === 'file' ? retryFile : retryParent
+
+        fireEvent.click(within(retryRow).getByRole('button', { name: 'Retry permission check' }))
+        await waitFor(() =>
+          expect(queryClient.getQueryState(retryKey)?.fetchStatus).toBe('fetching')
+        )
+        expect(
+          within(screen.getByRole('alertdialog')).getByRole('status', { name: fetchingLabel })
+        ).toBeTruthy()
+        expect(
+          within(screen.getByRole('alertdialog')).getByText(
+            retryKind === 'file'
+              ? /Could not verify Move permissions/i
+              : /Could not verify file permissions/i
+          )
+        ).toBeTruthy()
+
+        await act(async () => {
+          await queryClient.refetchQueries({ exact: true, queryKey: otherKey })
+        })
+        await waitFor(() => expect(queryClient.getQueryState(otherKey)?.status).toBe('success'))
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+        expect(screen.getByRole('status', { name: fetchingLabel })).toBeTruthy()
+        expect(screen.getAllByRole('status')).toHaveLength(1)
+        expect(
+          document.activeElement instanceof HTMLElement && document.activeElement.isConnected
+        ).toBe(true)
+        expect(fileReads).toBe(2)
+        expect(parentReads).toBe(2)
+        expect(installed.moveResource).not.toHaveBeenCalled()
+
+        await act(async () => {
+          retryFunction(fullAccess)
+          await (retryKind === 'file' ? pendingFileRetry : pendingParentRetry)
+        })
+        await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+        expect(screen.getByAltText('Preview of diagram.png')).toBeTruthy()
+        expect(installed.moveResource).not.toHaveBeenCalled()
+      } finally {
+        retryFile(fullAccess)
+        retryParent(fullAccess)
+        queryClient.clear()
+      }
+    }
+  )
+
+  it('aggregates file and Move verification failures in one dismissible overlay', async () => {
+    installGfs({
+      resourceAffordances: async () => {
+        throw new Error('file authority service unavailable')
+      },
+      source: async () => {
+        throw new Error('source authority service unavailable')
+      },
+    })
+    installController()
+    const { queryClient } = renderPreview()
+    try {
+      const dialog = await screen.findByRole('alertdialog', {
+        name: 'Could not verify permissions',
+      })
+      expect(within(dialog).getByText(/Could not verify file permissions/)).toBeTruthy()
+      expect(within(dialog).getByText(/Could not verify move permissions/)).toBeTruthy()
+      expect(screen.queryByText('Checking file permissions…')).toBeNull()
+      expect(screen.queryByText('Checking move permissions…')).toBeNull()
+      expect(screen.getByAltText('Preview of diagram.png')).toBeTruthy()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+      expect(screen.getByAltText('Preview of diagram.png')).toBeTruthy()
+    } finally {
+      queryClient.clear()
+    }
+  })
+
+  it.each(['success', 'failure'] as const)(
+    'projects a Preview background refetch inside its open permission dialog (%s)',
+    async outcome => {
+      let fileReads = 0
+      let releaseFile!: (value: ReturnType<typeof delegationAffordances>) => void
+      let rejectFile!: (error: Error) => void
+      const pendingFile = new Promise<ReturnType<typeof delegationAffordances>>(
+        (resolve, reject) => {
+          releaseFile = resolve
+          rejectFile = reject
+        }
+      )
+      const installed = installGfs({
+        resourceAffordances: async () => {
+          fileReads += 1
+          if (fileReads === 1) throw new Error('file authority service unavailable')
+          return pendingFile
+        },
+        source: async () => {
+          throw new Error('source authority service unavailable')
+        },
+      })
+      installController()
+      const { queryClient } = renderPreview()
+      const fileKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        resourceId,
+        'main',
+        1
+      )
+      const parentKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        parentId,
+        'main',
+        1
+      )
+      try {
+        const dialog = await screen.findByRole('alertdialog', {
+          name: 'Could not verify permissions',
+        })
+        await waitFor(() => expect(queryClient.getQueryState(fileKey)?.status).toBe('error'))
+        await waitFor(() => expect(queryClient.getQueryState(parentKey)?.status).toBe('error'))
+        const fileQuery = queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })
+        const parentQuery = queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })
+        const fileGeneration = queryClient.getQueryState(fileKey)?.errorUpdateCount
+        const parentGeneration = queryClient.getQueryState(parentKey)?.errorUpdateCount
+        const parentRow = within(dialog)
+          .getByText(/Could not verify Move permissions/i)
+          .closest('.da-permission-error-dialog__item') as HTMLElement
+        expect(
+          within(parentRow).getByRole('button', { name: 'Retry permission check' })
+        ).toBeTruthy()
+
+        await act(async () => {
+          void queryClient.refetchQueries({ exact: true, queryKey: fileKey })
+        })
+        await waitFor(() => expect(fileReads).toBe(2))
+        await waitFor(() =>
+          expect(queryClient.getQueryState(fileKey)?.fetchStatus).toBe('fetching')
+        )
+        expect(screen.getByRole('alertdialog')).toBe(dialog)
+        expect(within(dialog).queryByText(/Could not verify file permissions/i)).toBeNull()
+        expect(
+          within(dialog).getByRole('status', { name: 'Checking file permissions' })
+        ).toBeTruthy()
+        expect(within(dialog).getByText(/Could not verify Move permissions/i)).toBeTruthy()
+        expect(
+          within(parentRow).getByRole('button', { name: 'Retry permission check' })
+        ).toBeTruthy()
+        expect(screen.getAllByRole('status')).toHaveLength(1)
+        expect(queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })).toBe(fileQuery)
+        expect(queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })).toBe(
+          parentQuery
+        )
+        expect(queryClient.getQueryState(fileKey)?.errorUpdateCount).toBe(fileGeneration)
+        expect(queryClient.getQueryState(parentKey)?.errorUpdateCount).toBe(parentGeneration)
+        expect(installed.affordances.mock.calls).toEqual([
+          [resourceId, 'main'],
+          [parentId, 'main'],
+          [resourceId, 'main'],
+        ])
+
+        await act(async () => {
+          if (outcome === 'success') {
+            releaseFile(fullAccess)
+            await pendingFile
+          } else {
+            rejectFile(new Error('file authority service unavailable again'))
+            await pendingFile.catch(() => undefined)
+          }
+        })
+        await waitFor(() =>
+          expect(queryClient.getQueryState(fileKey)?.status).toBe(
+            outcome === 'success' ? 'success' : 'error'
+          )
+        )
+        expect(screen.getByRole('alertdialog')).toBe(dialog)
+        expect(within(dialog).queryByRole('status')).toBeNull()
+        expect(within(dialog).getByText(/Could not verify Move permissions/i)).toBeTruthy()
+        if (outcome === 'failure') {
+          expect(within(dialog).getByText(/Could not verify file permissions/i)).toBeTruthy()
+          expect(queryClient.getQueryState(fileKey)?.errorUpdateCount).toBeGreaterThan(
+            fileGeneration ?? 0
+          )
+        } else {
+          expect(within(dialog).queryByText(/Could not verify file permissions/i)).toBeNull()
+        }
+        expect(screen.getAllByRole('alertdialog')).toHaveLength(1)
+
+        fireEvent.click(within(parentRow).getByRole('button', { name: 'Retry permission check' }))
+        await waitFor(() =>
+          expect(queryClient.getQueryState(parentKey)?.errorUpdateCount).toBeGreaterThan(
+            parentGeneration ?? 0
+          )
+        )
+        expect(installed.affordances.mock.calls).toEqual([
+          [resourceId, 'main'],
+          [parentId, 'main'],
+          [resourceId, 'main'],
+          [parentId, 'main'],
+        ])
+        expect(screen.getByRole('alertdialog')).toBe(dialog)
+      } finally {
+        releaseFile(fullAccess)
+        queryClient.clear()
+      }
+    }
+  )
+
+  it.each(['success', 'failure'] as const)(
+    'projects a source-parent refetch inside the Preview permission dialog (%s)',
+    async outcome => {
+      let parentReads = 0
+      let releaseParent!: (value: ReturnType<typeof delegationAffordances>) => void
+      let rejectParent!: (error: Error) => void
+      const pendingParent = new Promise<ReturnType<typeof delegationAffordances>>(
+        (resolve, reject) => {
+          releaseParent = resolve
+          rejectParent = reject
+        }
+      )
+      const installed = installGfs({
+        resourceAffordances: async () => {
+          throw new Error('file authority service unavailable')
+        },
+        source: async () => {
+          parentReads += 1
+          if (parentReads === 1) throw new Error('source authority service unavailable')
+          return pendingParent
+        },
+      })
+      installController()
+      const { queryClient } = renderPreview()
+      const fileKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        resourceId,
+        'main',
+        1
+      )
+      const parentKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        parentId,
+        'main',
+        1
+      )
+      try {
+        const dialog = await screen.findByRole('alertdialog', {
+          name: 'Could not verify permissions',
+        })
+        await waitFor(() => expect(queryClient.getQueryState(fileKey)?.status).toBe('error'))
+        await waitFor(() => expect(queryClient.getQueryState(parentKey)?.status).toBe('error'))
+        const fileQuery = queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })
+        const parentQuery = queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })
+        const fileGeneration = queryClient.getQueryState(fileKey)?.errorUpdateCount
+        const parentGeneration = queryClient.getQueryState(parentKey)?.errorUpdateCount
+        const fileRow = within(dialog)
+          .getByText(/Could not verify file permissions/i)
+          .closest('.da-permission-error-dialog__item') as HTMLElement
+
+        await act(async () => {
+          void queryClient.refetchQueries({ exact: true, queryKey: parentKey })
+        })
+        await waitFor(() => expect(parentReads).toBe(2))
+        await waitFor(() =>
+          expect(queryClient.getQueryState(parentKey)?.fetchStatus).toBe('fetching')
+        )
+        expect(screen.getByRole('alertdialog')).toBe(dialog)
+        expect(
+          within(dialog).getByRole('status', { name: 'Checking move permissions' })
+        ).toBeTruthy()
+        expect(within(dialog).queryByText(/Could not verify Move permissions/i)).toBeNull()
+        expect(within(fileRow).getByText(/Could not verify file permissions/i)).toBeTruthy()
+        expect(within(fileRow).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+        expect(queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })).toBe(fileQuery)
+        expect(queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })).toBe(
+          parentQuery
+        )
+        expect(queryClient.getQueryState(fileKey)?.errorUpdateCount).toBe(fileGeneration)
+        expect(queryClient.getQueryState(parentKey)?.errorUpdateCount).toBe(parentGeneration)
+        expect(installed.affordances.mock.calls).toEqual([
+          [resourceId, 'main'],
+          [parentId, 'main'],
+          [parentId, 'main'],
+        ])
+
+        await act(async () => {
+          if (outcome === 'success') {
+            releaseParent(fullAccess)
+            await pendingParent
+          } else {
+            rejectParent(new Error('source authority service unavailable again'))
+            await pendingParent.catch(() => undefined)
+          }
+        })
+        await waitFor(() => expect(queryClient.getQueryState(parentKey)?.fetchStatus).toBe('idle'))
+        expect(screen.getByRole('alertdialog')).toBe(dialog)
+        expect(within(dialog).queryByRole('status')).toBeNull()
+        expect(within(dialog).getByText(/Could not verify file permissions/i)).toBeTruthy()
+        if (outcome === 'success') {
+          expect(queryClient.getQueryState(parentKey)?.status).toBe('success')
+          expect(within(dialog).queryByText(/Could not verify Move permissions/i)).toBeNull()
+        } else {
+          expect(queryClient.getQueryState(parentKey)?.errorUpdateCount).toBeGreaterThan(
+            parentGeneration ?? 0
+          )
+          expect(within(dialog).getByText(/Could not verify Move permissions/i)).toBeTruthy()
+        }
+      } finally {
+        releaseParent(fullAccess)
+        queryClient.clear()
+      }
+    }
+  )
+
+  it.each(['success', 'failure', 'blocked-429'] as const)(
+    'keeps the other eligible error and its Retry target during a file Retry (%s)',
+    async outcome => {
+      if (outcome === 'blocked-429') vi.useFakeTimers({ toFake: ['Date'] })
+      let fileReads = 0
+      let parentReads = 0
+      let releaseFile!: (value: ReturnType<typeof delegationAffordances>) => void
+      let rejectFile!: (error: Error) => void
+      const pendingFile = new Promise<ReturnType<typeof delegationAffordances>>(
+        (resolve, reject) => {
+          releaseFile = resolve
+          rejectFile = reject
+        }
+      )
+      const fileCalls: string[] = []
+      const parentCalls: string[] = []
+      const pushToast = vi.fn()
+      const limited = new Error(
+        "Error invoking remote method 'gfs:affordances': 429 Too Many Requests " +
+          'httpStatus=429 retryAfterSeconds=7'
+      )
+      installGfs({
+        resourceAffordances: async () => {
+          fileReads += 1
+          fileCalls.push(resourceId)
+          if (fileReads === 1 && outcome === 'blocked-429') throw limited
+          if (fileReads === 1) {
+            throw new Error('file authority service unavailable')
+          }
+          return pendingFile
+        },
+        source: async () => {
+          parentReads += 1
+          parentCalls.push(parentId)
+          if (parentReads === 1) throw new Error('source authority service unavailable')
+          return fullAccess
+        },
+      })
+      installController()
+      const { queryClient } = renderPreview(pushToast)
+      const fileKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        resourceId,
+        'main',
+        1
+      )
+      const parentKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        parentId,
+        'main',
+        1
+      )
+      try {
+        const dialog = await screen.findByRole('alertdialog', {
+          name: 'Could not verify permissions',
+        })
+        await waitFor(() => expect(queryClient.getQueryState(fileKey)?.status).toBe('error'))
+        await waitFor(() => expect(queryClient.getQueryState(parentKey)?.status).toBe('error'))
+        const fileQuery = queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })
+        const parentQuery = queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })
+        const initialGeneration = queryClient.getQueryState(fileKey)?.errorUpdateCount
+        expect(within(dialog).getByText(/Could not verify Move permissions/i)).toBeTruthy()
+        const fileRow = within(dialog)
+          .getByText(/Could not verify file permissions/i)
+          .closest('.da-permission-error-dialog__item') as HTMLElement
+
+        fireEvent.click(within(fileRow).getByRole('button', { name: 'Retry permission check' }))
+        if (outcome === 'blocked-429') {
+          await waitFor(() =>
+            expect(pushToast).toHaveBeenCalledWith(
+              'Too many file requests — try again in 7s.',
+              'error'
+            )
+          )
+          expect(queryClient.getQueryState(fileKey)?.fetchStatus).toBe('idle')
+          expect(queryClient.getQueryState(fileKey)?.errorUpdateCount).toBe(initialGeneration)
+          expect(queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })).toBe(
+            fileQuery
+          )
+          expect(queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })).toBe(
+            parentQuery
+          )
+          const rateLimitedFileRow = within(dialog)
+            .getByText(/Could not verify file permissions/i)
+            .closest('.da-permission-error-dialog__item') as HTMLElement
+          expect(
+            within(rateLimitedFileRow).getByRole('button', { name: 'Retry permission check' })
+          ).toBeTruthy()
+          expect(within(dialog).getByText(/Could not verify Move permissions/i)).toBeTruthy()
+          expect(fileReads).toBe(1)
+
+          vi.setSystemTime(Date.now() + 7_001)
+          const currentFileRow = within(dialog)
+            .getByText(/Could not verify file permissions/i)
+            .closest('.da-permission-error-dialog__item') as HTMLElement
+          fireEvent.click(
+            within(currentFileRow).getByRole('button', { name: 'Retry permission check' })
+          )
+        }
+
+        await waitFor(() => expect(fileReads).toBe(2))
+        await waitFor(() =>
+          expect(queryClient.getQueryState(fileKey)?.fetchStatus).toBe('fetching')
+        )
+        expect(queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })).toBe(fileQuery)
+        expect(queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })).toBe(
+          parentQuery
+        )
+        expect(parentReads).toBe(1)
+        expect(parentCalls).toEqual([parentId])
+        expect(fileCalls).toEqual([resourceId, resourceId])
+        expect(screen.getByRole('alertdialog')).toBe(dialog)
+        expect(
+          within(dialog).getByRole('status', { name: 'Checking file permissions' })
+        ).toBeTruthy()
+        expect(within(dialog).getByText(/Could not verify Move permissions/i)).toBeTruthy()
+        const pendingParentRow = within(dialog)
+          .getByText(/Could not verify Move permissions/i)
+          .closest('.da-permission-error-dialog__item') as HTMLElement
+        expect(
+          within(pendingParentRow).getByRole('button', { name: 'Retry permission check' })
+        ).toBeTruthy()
+
+        await act(async () => {
+          if (outcome === 'failure') {
+            rejectFile(new Error('file authority service unavailable again'))
+            await pendingFile.catch(() => undefined)
+          } else {
+            releaseFile(fullAccess)
+            await pendingFile
+          }
+        })
+        await waitFor(() => expect(queryClient.getQueryState(fileKey)?.fetchStatus).toBe('idle'))
+
+        if (outcome === 'failure') {
+          expect(queryClient.getQueryState(fileKey)?.errorUpdateCount).toBeGreaterThan(
+            initialGeneration ?? 0
+          )
+          expect(
+            within(screen.getByRole('alertdialog')).getByText(/Could not verify file permissions/i)
+          ).toBeTruthy()
+          const failedFileRow = within(screen.getByRole('alertdialog'))
+            .getByText(/Could not verify file permissions/i)
+            .closest('.da-permission-error-dialog__item') as HTMLElement
+          expect(
+            within(failedFileRow).getByRole('button', { name: 'Retry permission check' })
+          ).toBeTruthy()
+        } else {
+          expect(queryClient.getQueryState(fileKey)?.status).toBe('success')
+          expect(queryClient.getQueryState(fileKey)?.errorUpdateCount).toBe(initialGeneration)
+          expect(
+            within(screen.getByRole('alertdialog')).queryByText(
+              /Could not verify file permissions/i
+            )
+          ).toBeNull()
+          expect(
+            within(screen.getByRole('alertdialog')).getByText(/Could not verify Move permissions/i)
+          ).toBeTruthy()
+        }
+        expect(screen.getAllByRole('alertdialog')).toHaveLength(1)
+      } finally {
+        releaseFile(fullAccess)
+        queryClient.clear()
+      }
+    }
+  )
+
+  it.each(['success', 'failure', 'blocked-429'] as const)(
+    'keeps the file error and Retry target during a Move-source Retry (%s)',
+    async outcome => {
+      if (outcome === 'blocked-429') vi.useFakeTimers({ toFake: ['Date'] })
+      let fileReads = 0
+      let parentReads = 0
+      let releaseParent!: (value: ReturnType<typeof delegationAffordances>) => void
+      let rejectParent!: (error: Error) => void
+      const pendingParent = new Promise<ReturnType<typeof delegationAffordances>>(
+        (resolve, reject) => {
+          releaseParent = resolve
+          rejectParent = reject
+        }
+      )
+      const limited = new Error(
+        "Error invoking remote method 'gfs:affordances': 429 Too Many Requests " +
+          'httpStatus=429 retryAfterSeconds=7'
+      )
+      const pushToast = vi.fn()
+      const installed = installGfs({
+        resourceAffordances: async () => {
+          fileReads += 1
+          throw new Error('file authority service unavailable')
+        },
+        source: async () => {
+          parentReads += 1
+          if (parentReads === 1) {
+            if (outcome === 'blocked-429') throw limited
+            throw new Error('source authority service unavailable')
+          }
+          return pendingParent
+        },
+      })
+      installController()
+      const { queryClient } = renderPreview(pushToast)
+      const fileKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        resourceId,
+        'main',
+        1
+      )
+      const parentKey = desktopQueryKeys.gfsAffordances(
+        'preview-test-user:main',
+        parentId,
+        'main',
+        1
+      )
+      try {
+        const dialog = await screen.findByRole('alertdialog', {
+          name: 'Could not verify permissions',
+        })
+        await waitFor(() => expect(queryClient.getQueryState(fileKey)?.status).toBe('error'))
+        await waitFor(() => expect(queryClient.getQueryState(parentKey)?.status).toBe('error'))
+        const fileRow = within(dialog)
+          .getByText(/Could not verify file permissions/i)
+          .closest('.da-permission-error-dialog__item') as HTMLElement
+        const parentRow = within(dialog)
+          .getByText(/Could not verify Move permissions/i)
+          .closest('.da-permission-error-dialog__item') as HTMLElement
+        const fileQuery = queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })
+        const parentQuery = queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })
+        const parentGeneration = queryClient.getQueryState(parentKey)?.errorUpdateCount
+
+        fireEvent.click(within(parentRow).getByRole('button', { name: 'Retry permission check' }))
+        if (outcome === 'blocked-429') {
+          await waitFor(() =>
+            expect(pushToast).toHaveBeenCalledWith(
+              'Too many file requests — try again in 7s.',
+              'error'
+            )
+          )
+          expect(parentReads).toBe(1)
+          expect(queryClient.getQueryState(parentKey)?.fetchStatus).toBe('idle')
+          expect(queryClient.getQueryState(parentKey)?.errorUpdateCount).toBe(parentGeneration)
+          expect(
+            within(parentRow).getByRole('button', { name: 'Retry permission check' })
+          ).toBeTruthy()
+          expect(within(dialog).getByText(/Could not verify file permissions/i)).toBeTruthy()
+          expect(queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })).toBe(
+            parentQuery
+          )
+
+          vi.setSystemTime(Date.now() + 7_001)
+          const currentParentRow = within(dialog)
+            .getByText(/Could not verify Move permissions/i)
+            .closest('.da-permission-error-dialog__item') as HTMLElement
+          fireEvent.click(
+            within(currentParentRow).getByRole('button', { name: 'Retry permission check' })
+          )
+        }
+
+        await waitFor(() => expect(parentReads).toBe(2))
+        await waitFor(() =>
+          expect(queryClient.getQueryState(parentKey)?.fetchStatus).toBe('fetching')
+        )
+        expect(screen.getByRole('alertdialog')).toBe(dialog)
+        expect(
+          within(dialog).getByRole('status', { name: 'Checking move permissions' })
+        ).toBeTruthy()
+        expect(within(fileRow).getByText(/Could not verify file permissions/i)).toBeTruthy()
+        expect(within(fileRow).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+        expect(queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })).toBe(fileQuery)
+        expect(queryClient.getQueryCache().find({ exact: true, queryKey: parentKey })).toBe(
+          parentQuery
+        )
+        expect(fileReads).toBe(1)
+        expect(installed.affordances.mock.calls).toEqual([
+          [resourceId, 'main'],
+          [parentId, 'main'],
+          [parentId, 'main'],
+        ])
+
+        await act(async () => {
+          if (outcome === 'failure') {
+            rejectParent(new Error('source authority service unavailable again'))
+            await pendingParent.catch(() => undefined)
+          } else {
+            releaseParent(fullAccess)
+            await pendingParent
+          }
+        })
+        await waitFor(() => expect(queryClient.getQueryState(parentKey)?.fetchStatus).toBe('idle'))
+        expect(screen.getByRole('alertdialog')).toBe(dialog)
+        expect(within(dialog).getByText(/Could not verify file permissions/i)).toBeTruthy()
+        const remainingFileRow = within(dialog)
+          .getByText(/Could not verify file permissions/i)
+          .closest('.da-permission-error-dialog__item') as HTMLElement
+        expect(
+          within(remainingFileRow).getByRole('button', { name: 'Retry permission check' })
+        ).toBeTruthy()
+        if (outcome === 'failure') {
+          expect(queryClient.getQueryState(parentKey)?.errorUpdateCount).toBeGreaterThan(
+            parentGeneration ?? 0
+          )
+          expect(within(dialog).getByText(/Could not verify Move permissions/i)).toBeTruthy()
+        } else {
+          expect(queryClient.getQueryState(parentKey)?.status).toBe('success')
+          expect(within(dialog).queryByText(/Could not verify Move permissions/i)).toBeNull()
+        }
+      } finally {
+        releaseParent(fullAccess)
+        queryClient.clear()
+      }
+    }
+  )
+
+  it('shows a reserved combined permission progress indicator without an in-flow banner', async () => {
+    let resolvePermissions!: (value: ReturnType<typeof delegationAffordances>) => void
+    const pendingPermissions = new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+      resolvePermissions = resolve
+    })
+    installGfs({
+      resourceAffordances: async () => pendingPermissions,
+      source: async () => pendingPermissions,
+    })
+    installController()
+    const { queryClient } = renderPreview()
+    try {
+      const status = await screen.findByRole('status', {
+        name: /checking file and move permissions/i,
+      })
+      expect(status.closest('.da-gfs-preview-title-row')).toBeTruthy()
+      expect(screen.queryByText('Checking file permissions…')).toBeNull()
+      expect(screen.queryByText('Checking move permissions…')).toBeNull()
+      await act(async () => resolvePermissions(fullAccess))
+      await waitFor(() =>
+        expect(
+          screen.queryByRole('status', { name: /checking file and move permissions/i })
+        ).toBeNull()
+      )
+    } finally {
+      queryClient.clear()
+    }
+  })
+
+  it('tracks the remaining permission operation under scheduled completion orders', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.scheduler(), async scheduler => {
+        const completed: string[] = []
+        installGfs({
+          resourceAffordances: () =>
+            scheduler.schedule(Promise.resolve(fullAccess), 'file permission check').then(value => {
+              completed.push('file')
+              return value
+            }),
+          source: () =>
+            scheduler.schedule(Promise.resolve(fullAccess), 'Move permission check').then(value => {
+              completed.push('move')
+              return value
+            }),
+        })
+        installController()
+        const { queryClient } = renderPreview()
+        try {
+          await waitFor(() => expect(scheduler.count()).toBe(2))
+          expect(
+            screen.getByRole('status', { name: 'Checking file and move permissions' })
+          ).toBeTruthy()
+
+          await act(async () => scheduler.waitNext(1))
+          await waitFor(() => expect(completed).toHaveLength(1))
+          const remainingLabel =
+            completed[0] === 'file' ? 'Checking move permissions' : 'Checking file permissions'
+          expect(screen.getByRole('status', { name: remainingLabel })).toBeTruthy()
+
+          await act(async () => scheduler.waitIdle())
+          await waitFor(() =>
+            expect(screen.queryByRole('status', { name: /Checking .* permissions/ })).toBeNull()
+          )
+        } finally {
+          queryClient.clear()
+          cleanup()
+        }
+      }),
+      { numRuns: 12 }
+    )
+  })
+
   it('keeps cached Preview actions visible during a background permission refetch', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     let resourceReads = 0
@@ -527,6 +1457,7 @@ describe('FilePreviewPage move permission contract', () => {
   })
 
   it('reports a Retry-After pause when Preview permission retry is not yet allowed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
     const limited = new Error(
       "Error invoking remote method 'gfs:affordances': 429 Too Many Requests " +
         'httpStatus=429 retryAfterSeconds=7'
@@ -537,18 +1468,43 @@ describe('FilePreviewPage move permission contract', () => {
     const { affordances } = installGfs({ source })
     installController()
     const pushToast = vi.fn()
-    renderPreview(pushToast)
+    const { queryClient } = renderPreview(pushToast)
+    const sourceKey = desktopQueryKeys.gfsAffordances('preview-test-user:main', parentId, 'main', 1)
 
     await screen.findByAltText('Preview of diagram.png')
     const notice = await screen.findByText(/Could not verify move permissions/)
     expect(notice).toBeTruthy()
+    const dialog = screen.getByRole('alertdialog')
+    const queryIdentity = queryClient.getQueryCache().find({ queryKey: sourceKey, exact: true })
+    const errorGeneration = queryClient.getQueryState(sourceKey)?.errorUpdateCount
+    expect(source).toHaveBeenCalledTimes(1)
     expect(affordances).toHaveBeenCalledWith(parentId, 'main')
-    fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
 
     await waitFor(() =>
       expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
     )
-    expect(affordances).toHaveBeenCalledTimes(2)
+    expect(source).toHaveBeenCalledTimes(1)
+    expect(queryClient.getQueryState(sourceKey)?.errorUpdateCount).toBe(errorGeneration)
+    expect(queryClient.getQueryCache().find({ queryKey: sourceKey, exact: true })).toBe(
+      queryIdentity
+    )
+    expect(screen.getByRole('alertdialog')).toBe(dialog)
+    expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+
+    vi.setSystemTime(Date.now() + 7_001)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    await waitFor(() => expect(source).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(queryClient.getQueryState(sourceKey)?.errorUpdateCount).toBe(
+        (errorGeneration ?? 0) + 1
+      )
+    )
+    expect(queryClient.getQueryCache().find({ queryKey: sourceKey, exact: true })).toBe(
+      queryIdentity
+    )
+    expect(screen.getByRole('alertdialog')).toBe(dialog)
+    queryClient.clear()
   })
 
   it('hides Move until the source parent has server-derived write and delete bits', async () => {

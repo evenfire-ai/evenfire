@@ -17,7 +17,18 @@ import {
   normalizeGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
 import { isEditorGfsPermissions, planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
-import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  IconButton,
+  PermissionErrorDialog,
+  type PermissionErrorItem,
+  PermissionStatusIndicator,
+  StatusBanner,
+  TextInput,
+} from '@components/Common'
+import { isPermissionErrorAcknowledged } from '@components/Common/permissionErrorAcknowledgement'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
@@ -394,6 +405,7 @@ export function FilesPage({
   const [refreshingCurrent, setRefreshingCurrent] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
+  const [dismissedPermissionErrors, setDismissedPermissionErrors] = useState<string[]>([])
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
   // Pending parent-folder confirmation (role change or removal) for a member
   // whose file access is inherited from ancestor folders. change-role carries
@@ -540,29 +552,6 @@ export function FilesPage({
         resource.version,
       ])
     ),
-  }
-  const rowPermissionNoticeFor = (resourceId: string, resourceName: string) => {
-    // Shared-root rows inherit status from one accessible-list query. A
-    // background refresh of that shared query is not a separate permission
-    // check for every row, and its page-level feedback must not be repeated
-    // in twenty row live regions.
-    if (!currentIsFolder && accessibleRootResourceIds.has(resourceId)) return null
-    const statuses = ctrl.rowPermissionStatusByResourceId
-    if (!statuses) return null
-    const status = statuses[resourceId]
-    if (status?.status === 'ready' || status?.status === 'stale') return null
-    if (status?.status === 'error') {
-      return {
-        role: 'alert' as const,
-        tone: 'error' as const,
-        message: `Could not verify permissions for ${resourceName}: ${status.message}`,
-      }
-    }
-    return {
-      role: 'status' as const,
-      tone: 'info' as const,
-      message: `Checking permissions for ${resourceName}…`,
-    }
   }
   const moveWorkspaceRef = useRef({
     sessionScope,
@@ -3131,6 +3120,187 @@ export function FilesPage({
     void handleDownload(resource.gfsUri, resource.name)
   }
 
+  const actionDialogOpen = Boolean(
+    createFolderOpen ||
+    renameOpen ||
+    renameTarget ||
+    deleteOpen ||
+    deleteTarget ||
+    moveTarget ||
+    openLinkOpen ||
+    manageOpen ||
+    shareDetailsOpen ||
+    parentUpdate ||
+    pendingFolderMove
+  )
+  const permissionErrorItems: PermissionErrorItem[] = []
+  const selectedAffordanceResourceId = current?.resourceId ?? ctrl.rowAffordancesResourceId
+  const selectedAffordanceResourceName = selectedAffordanceResourceId
+    ? [...items, ...accessibleResources].find(
+        resource => resource.resourceId === selectedAffordanceResourceId
+      )?.name
+    : undefined
+  if (
+    ctrl.accessState === 'active' &&
+    !ctrl.authorityPending &&
+    selectedAffordanceResourceId &&
+    affordancesError &&
+    !ctrl.affordancesSessionAuthorityFailure &&
+    [429, 403, 404].includes(ctrl.affordancesHttpStatus ?? 0)
+  ) {
+    permissionErrorItems.push({
+      id: `current:${ctrl.sessionScope}:${ctrl.sessionGeneration}:${selectedAffordanceResourceId}:${ctrl.affordancesErrorUpdateCount}`,
+      queryIdentity: queryClient.getQueryCache().find({
+        queryKey: desktopQueryKeys.gfsAffordances(
+          ctrl.sessionScope ?? 'anonymous',
+          selectedAffordanceResourceId,
+          GFS_DRIVE_MAIN,
+          ctrl.sessionGeneration
+        ),
+        exact: true,
+      }),
+      errorUpdateCount: ctrl.affordancesErrorUpdateCount,
+      message:
+        ctrl.affordancesHttpStatus === 429
+          ? 'Too many file requests. Wait before retrying permissions.'
+          : `Could not verify permissions for ${selectedAffordanceResourceName ?? current?.name ?? 'this resource'}: access could not be confirmed.`,
+      retry:
+        ctrl.affordancesHttpStatus === 429
+          ? () =>
+              fetchRowAuthority(
+                selectedAffordanceResourceId,
+                selectedAffordanceResourceName ?? current?.name ?? 'this resource',
+                GFS_DRIVE_MAIN
+              )
+          : undefined,
+    })
+  }
+  for (const [resourceId, status] of Object.entries(ctrl.moveSourceParentStatusById ?? {})) {
+    if (!status.error || status.isSessionAuthorityFailure || resourceId === current?.resourceId)
+      continue
+    permissionErrorItems.push({
+      id: `move:${ctrl.sessionScope}:${ctrl.sessionGeneration}:${resourceId}:${status.errorUpdateCount}`,
+      queryIdentity: status.queryIdentity,
+      errorUpdateCount: status.errorUpdateCount,
+      message: `Could not verify Move permissions: ${status.error}`,
+      retry: () => fetchRowAuthority(resourceId, 'the source folder', GFS_DRIVE_MAIN),
+    })
+  }
+  const itemNames = new Map(items.map(item => [item.resourceId, item.name || item.drive]))
+  const resourceNames = new Map(
+    [
+      ...items,
+      ...accessibleResources,
+      ...(current ? [{ resourceId: current.resourceId, name: current.name }] : []),
+    ].map(resource => [resource.resourceId, resource.name])
+  )
+  for (const [resourceId, status] of Object.entries(ctrl.rowPermissionStatusByResourceId ?? {})) {
+    if (
+      status.status !== 'error' ||
+      status.isSessionAuthorityFailure ||
+      status.isEnabled !== true ||
+      status.isFetching ||
+      (!currentIsFolder && accessibleRootResourceIds.has(resourceId)) ||
+      !itemNames.has(resourceId)
+    )
+      continue
+    permissionErrorItems.push({
+      id: `row:${ctrl.sessionScope}:${ctrl.sessionGeneration}:${resourceId}:${status.errorUpdateCount}`,
+      queryIdentity: status.queryIdentity,
+      errorUpdateCount: status.errorUpdateCount,
+      message: `Could not verify permissions for ${itemNames.get(resourceId)}: ${status.message}`,
+    })
+  }
+  const permissionErrorSignature = permissionErrorItems.map(item => item.id).join('|')
+  useEffect(() => {
+    setDismissedPermissionErrors(current =>
+      current.filter(id => permissionErrorItems.some(item => item.id === id))
+    )
+  }, [permissionErrorSignature])
+  const visiblePermissionErrorItems = permissionErrorItems.filter(
+    item => !dismissedPermissionErrors.includes(item.id) && !isPermissionErrorAcknowledged(item)
+  )
+  const activeMovePermissionQueries = Object.entries(ctrl.moveSourceParentStatusById ?? {}).filter(
+    ([, status]) => status.isFetching
+  )
+  const currentPermissionProgress = Boolean(
+    current && ctrl.affordancesEnabled && loadingAffordances
+  )
+  const currentPermissionLabel = currentPermissionProgress
+    ? `Checking permissions for ${current?.name}`
+    : ''
+  const movePermissionNames = activeMovePermissionQueries.map(
+    ([resourceId]) => resourceNames.get(resourceId) ?? 'source folder'
+  )
+  const movePermissionLabel = movePermissionNames.length
+    ? `Checking Move permissions for ${movePermissionNames.join(', ')}`
+    : ''
+  const activePermissionProgressByQuery = new Map<object, Set<string>>()
+  const unkeyedPermissionProgress = new Set<string>()
+  const addPermissionProgress = (queryIdentity: object | undefined, label: string) => {
+    if (!queryIdentity) {
+      unkeyedPermissionProgress.add(label)
+      return
+    }
+    const labels = activePermissionProgressByQuery.get(queryIdentity) ?? new Set<string>()
+    labels.add(label)
+    activePermissionProgressByQuery.set(queryIdentity, labels)
+  }
+  if (currentPermissionLabel && selectedAffordanceResourceId) {
+    addPermissionProgress(
+      queryClient.getQueryCache().find({
+        queryKey: desktopQueryKeys.gfsAffordances(
+          ctrl.sessionScope ?? 'anonymous',
+          selectedAffordanceResourceId,
+          GFS_DRIVE_MAIN,
+          ctrl.sessionGeneration
+        ),
+        exact: true,
+      }),
+      currentPermissionLabel
+    )
+  }
+  for (const [resourceId, status] of activeMovePermissionQueries) {
+    addPermissionProgress(
+      status.queryIdentity,
+      `Checking Move permissions for ${resourceNames.get(resourceId) ?? 'source folder'}`
+    )
+  }
+  if (ctrl.rowAffordancesResourceId && ctrl.rowAffordancesEnabled && ctrl.rowAffordancesFetching) {
+    addPermissionProgress(
+      queryClient.getQueryCache().find({
+        queryKey: desktopQueryKeys.gfsAffordances(
+          ctrl.sessionScope ?? 'anonymous',
+          ctrl.rowAffordancesResourceId,
+          GFS_DRIVE_MAIN,
+          ctrl.sessionGeneration
+        ),
+        exact: true,
+      }),
+      `Checking permissions for ${resourceNames.get(ctrl.rowAffordancesResourceId) ?? 'resource'}`
+    )
+  }
+  if (!ctrl.authorityPending && ctrl.accessState === 'active') {
+    for (const [resourceId, status] of Object.entries(ctrl.rowPermissionStatusByResourceId ?? {})) {
+      if (
+        status.status !== 'checking' ||
+        !status.isEnabled ||
+        !status.isFetching ||
+        !resourceNames.has(resourceId) ||
+        (!currentIsFolder && accessibleRootResourceIds.has(resourceId))
+      )
+        continue
+      addPermissionProgress(
+        status.queryIdentity,
+        `Checking permissions for ${resourceNames.get(resourceId)}`
+      )
+    }
+  }
+  const activePermissionProgressLabels = [
+    ...[...activePermissionProgressByQuery.values()].map(labels => [...labels].join('; ')),
+    ...unkeyedPermissionProgress,
+  ]
+
   const resourceMenuActionsFor = (resource: GfsDriveResource) => {
     const isDirectory = resource.kind === 'directory'
     const canPreview =
@@ -3188,6 +3358,15 @@ export function FilesPage({
 
   return (
     <section className="page da-gfs-page">
+      <PermissionErrorDialog
+        errors={visiblePermissionErrorItems}
+        progress={visiblePermissionErrorItems.length > 0 ? activePermissionProgressLabels : []}
+        onDismiss={ids =>
+          setDismissedPermissionErrors(current => [...new Set([...current, ...ids])])
+        }
+        suspended={actionDialogOpen}
+        title="Could not verify EvenDrive permissions"
+      />
       <GfsResourceTitlebarActions
         target={titlebarLeadingTarget}
         onRefresh={current ? () => void handleRefreshCurrent() : () => void ctrl.retryDiscovery()}
@@ -3308,6 +3487,11 @@ export function FilesPage({
                   resourceName={current.name}
                 />
               ) : null}
+              <PermissionStatusIndicator
+                active={Boolean(!currentIsFile && (currentPermissionLabel || movePermissionLabel))}
+                announce={visiblePermissionErrorItems.length === 0 || actionDialogOpen}
+                label={[currentPermissionLabel, movePermissionLabel].filter(Boolean).join('; ')}
+              />
             </div>
             <div className="da-gfs-drive__upload-input">
               <input
@@ -3369,58 +3553,6 @@ export function FilesPage({
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
-          {current && loadingAffordances ? (
-            <div role="status">
-              <StatusBanner tone="info" text={`Checking permissions for ${current.name}…`} />
-            </div>
-          ) : null}
-          {current &&
-          affordancesError &&
-          (ctrl.affordancesHttpStatus === 429 ||
-            ctrl.affordancesHttpStatus === 403 ||
-            ctrl.affordancesHttpStatus === 404) ? (
-            <div role="alert">
-              <StatusBanner
-                tone="error"
-                text={
-                  ctrl.affordancesHttpStatus === 429
-                    ? 'Too many file requests. Wait before retrying permissions.'
-                    : 'Could not verify permissions for ' +
-                      current.name +
-                      ': access could not be confirmed.'
-                }
-              />
-              {ctrl.affordancesHttpStatus === 429 ? (
-                <Button
-                  color="secondary"
-                  onClick={() =>
-                    void fetchRowAuthority(current.resourceId, current.name, GFS_DRIVE_MAIN)
-                  }
-                >
-                  Retry permission check
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-          {Object.entries(ctrl.moveSourceParentStatusById ?? {}).map(([resourceId, status]) => {
-            if (!status.error || resourceId === current?.resourceId) return null
-            const rateLimited = status.rateLimited && status.httpStatus === 429
-            return (
-              <div key={resourceId} role="alert">
-                <StatusBanner tone={rateLimited ? 'warn' : 'error'}>
-                  <span>Could not verify Move permissions: {status.error}</span>
-                </StatusBanner>
-                <Button
-                  color="secondary"
-                  onClick={() =>
-                    void fetchRowAuthority(resourceId, 'the source folder', GFS_DRIVE_MAIN)
-                  }
-                >
-                  Retry permission check
-                </Button>
-              </div>
-            )
-          })}
           {pendingGfsDeepLinkFailure ? (
             <div role="alert">
               <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
@@ -3515,6 +3647,13 @@ export function FilesPage({
                         actions={getGfsMenuActions(currentResourceActions)}
                         resourceName={current.name}
                       />
+                      <PermissionStatusIndicator
+                        active={Boolean(currentPermissionLabel || movePermissionLabel)}
+                        announce={visiblePermissionErrorItems.length === 0 || actionDialogOpen}
+                        label={[currentPermissionLabel, movePermissionLabel]
+                          .filter(Boolean)
+                          .join('; ')}
+                      />
                     </>
                   )}
                 </div>
@@ -3569,7 +3708,6 @@ export function FilesPage({
               <div className="da-grid__body">
                 {visibleResources.map(resource => {
                   const resourceName = resource.name || resource.drive
-                  const permissionNotice = rowPermissionNoticeFor(resource.resourceId, resourceName)
                   const isDragging =
                     draggingResourceId === resource.resourceId ||
                     movingResourceId === resource.resourceId
@@ -3683,11 +3821,6 @@ export function FilesPage({
                             <Badge tone="neutral">No access</Badge>
                           ) : null}
                         </span>
-                        {permissionNotice ? (
-                          <span className="muted" role={permissionNotice.role}>
-                            {permissionNotice.message}
-                          </span>
-                        ) : null}
                       </span>
                       <span className="da-gfs-drive__size da-grid__cell da-grid__cell--right">
                         {formatSharedFileSize(resource.bytes)}

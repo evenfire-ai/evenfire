@@ -502,6 +502,29 @@ describe('FilesPage', () => {
     expect(handled).toHaveBeenCalledOnce()
   })
 
+  it('keeps selected-file permission progress beside that file name and menu', async () => {
+    const file = await resolveResource(
+      resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'Current report.txt')
+    )
+    const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: fileCrumb,
+      loadingAffordances: true,
+      affordancesEnabled: true,
+      rowAffordancesResourceId: file.resourceId,
+    })
+
+    renderFilesPage()
+
+    const heading = await screen.findByRole('heading', { name: 'Current report.txt', level: 3 })
+    const status = screen.getByRole('status', {
+      name: 'Checking permissions for Current report.txt',
+    })
+    expect(heading.parentElement?.contains(status)).toBe(true)
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+  })
+
   it.each([
     ['initial GFS discovery', { loadingAccessible: true, loadingCurrentView: true }],
     [
@@ -2137,6 +2160,32 @@ describe('FilesPage', () => {
       expect(renameResource).toHaveBeenCalledWith('file-1', 'report-renamed.txt', 7)
     )
     expect(pushToast).toHaveBeenCalledWith('Renamed to report-renamed.txt', 'success')
+  })
+
+  it('renders the current-file title menu before the final permission status slot', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'file-1',
+        gfsUri: 'gfs://main/file-1',
+        name: 'report.txt',
+        kind: 'file',
+        version: 7,
+      },
+      loadingAffordances: true,
+    })
+
+    const { container } = renderFilesPage()
+    const titleRow = container.querySelector('.da-gfs-current-file__title-row')
+    expect(titleRow).toBeTruthy()
+    expect(
+      Array.from(titleRow!.children).map(child => {
+        if (child.matches('h3')) return 'filename'
+        if (child.querySelector('.da-gfs-resource-menu__trigger')) return 'menu'
+        if (child.matches('.da-permission-status-slot')) return 'spinner'
+        return 'other'
+      })
+    ).toEqual(['filename', 'menu', 'spinner'])
   })
 
   it.each(['admin', 'inviter', 'member'] as const)(
@@ -7212,11 +7261,50 @@ describe('FilesPage', () => {
     // below describe a presented failure and not an unmounted branch.
     expect(screen.getByText('Could not load your files')).toBeTruthy()
     expect(screen.getByText(/503 Service Unavailable: upstream_unreachable/)).toBeTruthy()
+    expect(screen.getByText(/503 Service Unavailable: upstream_unreachable/)).toBeTruthy()
     expect(screen.queryByText(/Error invoking remote method/)).toBeNull()
     // No window was named, so nothing pretends to know one.
     expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
     const retry = screen.getByRole('button', { name: /retry file listing/i }) as HTMLButtonElement
     expect(retry.disabled).toBe(false)
+  })
+
+  it('keeps shared Home listing failures on the generic discovery surface', () => {
+    const resources = [
+      accessibleResource('home-file-1', 'Report.pdf', 'file'),
+      accessibleResource('home-file-2', 'Notes.md', 'file'),
+    ]
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      items: resources,
+      accessibleResources: resources,
+      accessibleError: '503 Service Unavailable: listing unavailable',
+      discoveryFailure: {
+        kind: 'failed',
+        message: '503 Service Unavailable: listing unavailable',
+        retryAvailableAt: null,
+      },
+      rowPermissionStatusByResourceId: Object.fromEntries(
+        resources.map(resource => [
+          resource.resourceId,
+          {
+            status: 'error',
+            message: '503 Service Unavailable: listing unavailable',
+            errorUpdateCount: 1,
+            isEnabled: true,
+            isFetching: false,
+            isSessionAuthorityFailure: false,
+            queryIdentity: {},
+          },
+        ])
+      ),
+    })
+
+    renderFilesPage()
+
+    expect(screen.getByText(/503 Service Unavailable: listing unavailable/)).toBeTruthy()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(screen.queryByRole('status', { name: /Checking permissions for/ })).toBeNull()
   })
 
   it('stops reporting the drive as busy once discovery has settled into a failure', () => {

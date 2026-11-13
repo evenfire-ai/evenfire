@@ -387,7 +387,8 @@ vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/ChatDrawer', () => ({
   ChatDrawer: ({ children }: { children: ReactNode }) => <>{children}</>,
 }))
-vi.mock('@components/Common', async () => {
+vi.mock('@components/Common', async importOriginal => {
+  const actualCommon = await importOriginal<typeof import('@components/Common')>()
   const React = await import('react')
   const IconButton = React.forwardRef<HTMLButtonElement, Record<string, unknown>>((props, ref) => {
     if (
@@ -415,6 +416,7 @@ vi.mock('@components/Common', async () => {
     )
   })
   return {
+    ...actualCommon,
     StatusBanner: (props: { tone: string; text?: string; children?: ReactNode }) => (
       <div role="status" data-tone={props.tone}>
         {props.text ?? props.children}

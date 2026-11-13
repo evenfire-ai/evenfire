@@ -663,8 +663,15 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     await waitFor(() => expect(reportCalls).toBe(2))
     await waitFor(() => expect(childFolderCalls).toBe(2))
     await waitFor(() => {
-      expect(screen.getByText('Checking permissions for report.txt…')).toBeTruthy()
-      expect(screen.getByText('Checking permissions for Child folder…')).toBeTruthy()
+      expect(client.getQueryState(reportKey)?.fetchStatus).toBe('fetching')
+      expect(client.getQueryState(folderKey)?.fetchStatus).toBe('fetching')
+      expect(
+        screen.queryByRole('status', { name: /Checking permissions for report\.txt/ })
+      ).toBeNull()
+      expect(
+        screen.queryByRole('status', { name: /Checking permissions for Child folder/ })
+      ).toBeNull()
+      expect(document.querySelector('.da-gfs-drive__grid .da-permission-status-slot')).toBeNull()
     })
     expectFolderRowMutationMenu('Child folder', true)
 
@@ -893,7 +900,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       screen.getByRole('menu', { name: 'Share options for Reports' })
     )
     expect(folderShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
-    expect(screen.getByText('Checking permissions for Reports…')).toBeTruthy()
+    expect(screen.getByRole('status', { name: 'Checking permissions for Reports' })).toBeTruthy()
 
     await act(async () => {
       rejectRefresh(new Error(rateLimitMessage))
@@ -983,7 +990,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     await waitFor(() => expect(client.getQueryState(key)?.fetchStatus).toBe('fetching'))
     const manageInput = screen.getByRole('combobox', { name: 'Add people, teams, or agents' })
     expect(manageInput).toBeTruthy()
-    expect(screen.getByText('Checking permissions…')).toBeTruthy()
+    expect(screen.getByRole('status', { name: /Checking permissions for/ })).toBeTruthy()
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.bin' }))
@@ -1006,19 +1013,21 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       screen.getByRole('menu', { name: 'Share options for notes.bin' })
     )
     expect(fileShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
-    expect(screen.getByText('Checking permissions for notes.bin…')).toBeTruthy()
+    expect(screen.getByRole('status', { name: /Checking permissions for notes.bin/ })).toBeTruthy()
 
     await act(async () => {
       rejectRefresh(new Error(rateLimitMessage))
       await Promise.resolve()
     })
     expect(
-      await screen.findByText('Too many file requests. Wait before retrying permissions.')
-    ).toBeTruthy()
+      screen.queryByRole('alertdialog', { name: 'Could not verify EvenDrive permissions' })
+    ).toBeNull()
     expect(screen.getByRole('combobox', { name: 'Add people, teams, or agents' })).toBe(manageInput)
+    fireEvent.click(screen.getByRole('button', { name: 'Close share dialog' }))
     expect(
-      await screen.findByText('Too many file requests. Wait before retrying permissions.')
-    ).toBeTruthy()
+      screen.queryByRole('alertdialog', { name: 'Could not verify EvenDrive permissions' })
+    ).toBeNull()
+    expect(client.getQueryState(key)?.status).toBe('error')
     expect(renameResource).not.toHaveBeenCalled()
     expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
     client.clear()
