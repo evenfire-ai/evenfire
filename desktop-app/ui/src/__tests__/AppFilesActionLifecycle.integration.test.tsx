@@ -2852,6 +2852,73 @@ describe('App → Files action lifecycle integration', () => {
     expect(writeText).not.toHaveBeenCalled()
   })
 
+  it('A01 M1: retires pending Copy ID permission across completed team switches without changing tabs', async () => {
+    const file = await resolveResource(
+      resolvedFile('20202020202020202020202020202020', 'a01-team-switch-pending-copy.txt')
+    )
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs, clerum, sessionAuthority } = await renderActualA01App(
+      [file],
+      writeText
+    )
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    const teamBridge = clerum as unknown as {
+      team: { switch: ReturnType<typeof vi.fn> }
+    }
+    teamBridge.team.switch.mockImplementation(async (teamId: string) => {
+      sessionAuthority.me.teamId = teamId
+      sessionAuthority.generation += 1
+      return {
+        authenticated: true,
+        me: sessionAuthority.me,
+        sessionGeneration: sessionAuthority.generation,
+      }
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-team-switch-pending-copy\.txt/ })
+    const originalTabId = activeWorkspaceTab(controller.current!.workspaceTabs)?.id
+    const originalNavigationIntent = controller.current!.navigationIntentSequence
+    const originalSessionGeneration = controller.current!.sessionGeneration
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(file.resourceId, 'main'))
+
+    await act(async () => {
+      await controller.current!.handleEnsureTeamContext({ teamId: 'team-b' })
+      await controller.current!.handleEnsureTeamContext({ teamId: 'team-a' })
+    })
+    expect(controller.current?.me?.teamId).toBe('team-a')
+    expect(controller.current?.sessionGeneration).not.toBe(originalSessionGeneration)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.id).toBe(originalTabId)
+    expect(controller.current?.navigationIntentSequence).toBe(originalNavigationIntent)
+
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+    )
+    expect(
+      controller.current?.toasts.some(
+        toast => toast.tone === 'error' && toast.text.includes(file.name)
+      )
+    ).toBe(false)
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({
+        text: 'This resource is no longer available from its parent folder.',
+        tone: 'error',
+      })
+    )
+    expect(controller.current?.me?.teamId).toBe('team-a')
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.id).toBe(originalTabId)
+    expect(controller.current?.navigationIntentSequence).toBe(originalNavigationIntent)
+  })
+
   it('A01 cancels a pending copy when a new tab intent commits', async () => {
     const file = await resolveResource(
       resolvedFile('16161616161616161616161616161616', 'a01-navigation-pending.txt')
