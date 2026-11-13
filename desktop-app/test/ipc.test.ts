@@ -32,9 +32,14 @@ vi.mock('electron', () => ({
 
 function makeTrustedEvent(senderId = 77) {
   const destroyedCallbacks: Array<() => void> = []
+  const frame = {
+    url: 'file:///index.html',
+    isDestroyed: vi.fn(() => false),
+  }
   const sender = {
     id: senderId,
     isDestroyed: vi.fn(() => false),
+    mainFrame: frame,
     send: vi.fn(),
     once: vi.fn((eventName: string, callback: () => void) => {
       if (eventName === 'destroyed') destroyedCallbacks.push(callback)
@@ -42,7 +47,7 @@ function makeTrustedEvent(senderId = 77) {
   }
   return {
     event: {
-      senderFrame: { url: 'file:///index.html' },
+      senderFrame: frame,
       sender,
     },
     sender,
@@ -725,11 +730,44 @@ describe('ipc host status stream handlers', () => {
       })
     )
 
-    expect(service.openProfileSettings).toHaveBeenCalledWith('user@example.com', {
-      section: 'social',
-      network: 'telegram',
-      action: undefined,
+    expect(service.openProfileSettings).toHaveBeenCalledWith(
+      'user@example.com',
+      {
+        section: 'social',
+        network: 'telegram',
+        action: undefined,
+      },
+      expect.any(Function)
+    )
+  })
+
+  it('reports a late Profile dispatch failure only to its originating live document', async () => {
+    let reportLateFailure: ((correlationId: string) => void) | undefined
+    service.openProfileSettings.mockImplementation(async (_email, _options, reportFailure) => {
+      reportLateFailure = reportFailure as (correlationId: string) => void
+      return {
+        profileUiUrl: 'https://profile.example.test/settings/profile',
+        dispatchAccepted: true,
+        correlationId: 'correlation-1',
+      }
     })
+    const { event, sender } = makeTrustedEvent()
+    const handler = testState.handlers.get('auth:openProfileSettings')
+
+    await expect(
+      Promise.resolve(handler?.(event, { email: 'user@example.test' }))
+    ).resolves.toMatchObject({ dispatchAccepted: true, correlationId: 'correlation-1' })
+    expect(reportLateFailure).toBeTypeOf('function')
+
+    reportLateFailure?.('correlation-1')
+    expect(sender.send).toHaveBeenCalledOnce()
+    expect(sender.send).toHaveBeenCalledWith('auth:profileUiDispatchFailed', {
+      correlationId: 'correlation-1',
+    })
+
+    sender.mainFrame = { url: 'file:///replacement.html', isDestroyed: () => false }
+    reportLateFailure?.('correlation-1')
+    expect(sender.send).toHaveBeenCalledOnce()
   })
 
   it('loads the external channel summary through trusted IPC', async () => {

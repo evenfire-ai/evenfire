@@ -78,6 +78,24 @@ function parseDeepLinkAcknowledgmentAuthority(input: unknown): DeepLinkAcknowled
   }
 }
 
+function profileUiDispatchFailureReporter(
+  event: IpcMainInvokeEvent
+): (correlationId: string) => void {
+  const sender = event.sender
+  const originatingFrame = event.senderFrame
+  return correlationId => {
+    if (
+      sender.isDestroyed() ||
+      !originatingFrame ||
+      originatingFrame.isDestroyed() ||
+      sender.mainFrame !== originatingFrame
+    ) {
+      return
+    }
+    sender.send('auth:profileUiDispatchFailed', { correlationId })
+  }
+}
+
 export function registerDeepLinkAcknowledgmentHandlers(
   service: AppService,
   getMainWindow: () => BrowserWindow | null,
@@ -602,11 +620,17 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   })
   ipcMain.handle('auth:startDesktopSetup', async (event, payload: { email: string }) => {
     assertTrustedSender(event)
-    return service.startDesktopSetup(sanitizeString(payload?.email).toLowerCase())
+    return service.startDesktopSetup(
+      sanitizeString(payload?.email).toLowerCase(),
+      profileUiDispatchFailureReporter(event)
+    )
   })
   ipcMain.handle('auth:openForgotPassword', async (event, payload: { email?: string }) => {
     assertTrustedSender(event)
-    return service.openForgotPassword(sanitizeString(payload?.email || '').toLowerCase())
+    return service.openForgotPassword(
+      sanitizeString(payload?.email || '').toLowerCase(),
+      profileUiDispatchFailureReporter(event)
+    )
   })
   ipcMain.handle(
     'auth:openProfileSettings',
@@ -617,11 +641,15 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       assertTrustedSender(event)
       const action = payload?.action === 'password' ? 'password' : undefined
       const section = payload?.section === 'social' ? 'social' : 'profile'
-      return service.openProfileSettings(sanitizeString(payload?.email || '').toLowerCase(), {
-        section,
-        network: sanitizeString(payload?.network || '').toLowerCase(),
-        action,
-      })
+      return service.openProfileSettings(
+        sanitizeString(payload?.email || '').toLowerCase(),
+        {
+          section,
+          network: sanitizeString(payload?.network || '').toLowerCase(),
+          action,
+        },
+        profileUiDispatchFailureReporter(event)
+      )
     }
   )
   ipcMain.handle(
@@ -729,9 +757,9 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   })
   ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
-    const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
-    await clipboard.writeText(result.url)
-    return result
+    return service.createGfsResourceDeepLink(sanitizeString(payload?.uri), url =>
+      Promise.resolve().then(() => clipboard.writeText(url))
+    )
   })
   ipcMain.handle(
     'gfs:download',
@@ -2454,9 +2482,9 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {
     assertTrustedSender(event)
     const teamId = sanitizeString(payload?.teamId)
-    const result = await service.createSandboxUiDeepLink(teamId || undefined)
-    await clipboard.writeText(result.url)
-    return result
+    return service.createSandboxUiDeepLink(teamId || undefined, url =>
+      Promise.resolve().then(() => clipboard.writeText(url))
+    )
   })
 
   ipcMain.handle('sandboxUi:setBounds', async (event, payload: { bounds: unknown }) => {

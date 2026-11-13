@@ -14,6 +14,17 @@ function boundedIntegerEnv(name: string, fallback: number, min: number, max: num
   return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
 }
 
+export function resolveDesktopProfileUiBaseUrl(): string {
+  const publicSetting = process.env.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL?.trim() || ''
+  const legacySetting = process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL?.trim() || ''
+  if (publicSetting && legacySetting && publicSetting !== legacySetting) {
+    throw new Error(
+      'DESKTOP_PROFILE_UI_PUBLIC_BASE_URL conflicts with CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL'
+    )
+  }
+  return publicSetting || legacySetting || 'http://127.0.0.1:3001'
+}
+
 type Config = {
   port: number
   jsonBodyLimit: string
@@ -843,8 +854,7 @@ export const config: Config = {
     process.env.CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091',
   desktopRpcProxyBaseUrl:
     process.env.CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094',
-  desktopProfileUiBaseUrl:
-    process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL || 'http://127.0.0.1:3001',
+  desktopProfileUiBaseUrl: resolveDesktopProfileUiBaseUrl(),
   desktopAppName: process.env.CONTROL_API_DESKTOP_APP_NAME || 'Evenfire',
   // Narrow, explicit elevation switch. Missing/false is intentionally OFF;
   // this must not inherit registry, password-seeding, or generic deploy mode.

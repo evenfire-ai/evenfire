@@ -23,6 +23,7 @@ type Config = {
   profileSessionCookieTtlSeconds: number
   publicBaseUrl: string
   desktopRpcProxyBaseUrl: string
+  desktopProfileUiBaseUrl: string
   desktopAppName: string
   desktopReleaseBaseUrl: string
   gfsUploadRequestPerMinute: number
@@ -45,6 +46,86 @@ function requiredOrDevDefault(name: string, devDefault: string): string {
   if (value) return value
   if (process.env.NODE_ENV !== 'production') return devDefault
   return required(name)
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.')
+}
+
+function isPrivateIpv4(hostname: string): boolean {
+  if (isIP(hostname) !== 4) return false
+  const octets = hostname.split('.').map(Number)
+  return (
+    octets[0] === 0 ||
+    octets[0] === 10 ||
+    octets[0] === 127 ||
+    (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
+    (octets[0] === 169 && octets[1] === 254) ||
+    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+    (octets[0] === 192 && octets[1] === 168) ||
+    (octets[0] === 198 && (octets[1] === 18 || octets[1] === 19)) ||
+    octets[0] >= 224
+  )
+}
+
+export function validateDesktopProfileUiBaseUrl(raw: string, publicRestBaseUrl: string): string {
+  const value = raw.trim()
+  const rawOrigin = /^(https?):\/\/([^/?#]+)([^?#]*)(?:\?[^#]*)?(?:#.*)?$/i.exec(value)
+  if (
+    !value ||
+    value !== raw ||
+    /[\u0000-\u0020\u007f]/.test(value) ||
+    !rawOrigin ||
+    (rawOrigin[3] !== '' && rawOrigin[3] !== '/') ||
+    value.includes('?') ||
+    value.includes('#')
+  ) {
+    throw new Error('DESKTOP_PROFILE_UI_PUBLIC_BASE_URL must be an absolute HTTP(S) origin')
+  }
+
+  let profileUrl: URL
+  let restUrl: URL
+  try {
+    profileUrl = new URL(value)
+    restUrl = new URL(publicRestBaseUrl)
+  } catch {
+    throw new Error('DESKTOP_PROFILE_UI_PUBLIC_BASE_URL must be an absolute HTTP(S) origin')
+  }
+  if (
+    !['http:', 'https:'].includes(profileUrl.protocol) ||
+    profileUrl.username ||
+    profileUrl.password ||
+    !['http:', 'https:'].includes(restUrl.protocol)
+  ) {
+    throw new Error('DESKTOP_PROFILE_UI_PUBLIC_BASE_URL must be an absolute HTTP(S) origin')
+  }
+
+  const profileHost = profileUrl.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const restLoopback = isLoopbackHostname(restUrl.hostname)
+  const profileLoopback = isLoopbackHostname(profileHost)
+  if (profileLoopback && !restLoopback) {
+    throw new Error('Loopback Profile UI origin requires a loopback External REST origin')
+  }
+  if (!profileLoopback && profileUrl.protocol !== 'https:') {
+    throw new Error('Non-loopback Profile UI origins must use HTTPS')
+  }
+  const mappedIpv4 = profileHost.match(/^::ffff:(.+)$/i)?.[1]
+  let mappedPrivateIpv4 = false
+  if (mappedIpv4 && isIP(mappedIpv4) === 4) {
+    mappedPrivateIpv4 = isPrivateIpv4(mappedIpv4)
+  } else if (mappedIpv4 && /^[0-9a-f:]+$/i.test(mappedIpv4)) {
+    const groups = mappedIpv4.split(':').filter(Boolean)
+    const low = Number.parseInt(groups.at(-1) || '0', 16)
+    const high = Number.parseInt(groups.at(-2) || '0', 16)
+    mappedPrivateIpv4 = isPrivateIpv4(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`)
+  }
+  const privateIpv6 =
+    isIP(profileHost) === 6 && (profileHost === '::' || /^(fc|fd|fe[89a-f])/i.test(profileHost))
+  if (!profileLoopback && (isPrivateIpv4(profileHost) || mappedPrivateIpv4 || privateIpv6)) {
+    throw new Error('Private IP Profile UI origins are not permitted')
+  }
+  return profileUrl.origin
 }
 
 function positiveIntegerFromEnv(name: string, defaultValue: number): number {
@@ -201,6 +282,10 @@ export const config: Config = {
     'EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL',
     'http://127.0.0.1:8094'
   ).replace(/\/+$/, ''),
+  desktopProfileUiBaseUrl: validateDesktopProfileUiBaseUrl(
+    requiredOrDevDefault('DESKTOP_PROFILE_UI_PUBLIC_BASE_URL', 'http://127.0.0.1:3001'),
+    requiredOrDevDefault('EXTERNAL_REST_API_PUBLIC_BASE_URL', 'http://127.0.0.1:8091')
+  ),
   desktopAppName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME || 'Evenfire',
   desktopReleaseBaseUrl: (
     process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL ||

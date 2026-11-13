@@ -399,6 +399,14 @@ export function useAuthController({
       ) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus('The desktop session changed while processing this link. Open it again.', 'info')
+      } else if (expectedSessionGeneration !== undefined) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          message.includes('Profile UI resolution is unavailable')
+            ? 'Desktop environment setup could not verify the confirmed REST and RPC endpoints.'
+            : `Environment setup failed: ${message}`,
+          'error'
+        )
       } else {
         setStatus(`Environment setup failed: ${message}`, 'error')
       }

@@ -63,14 +63,20 @@ describe('AppService invitation configuration lookup', () => {
 
     const [
       { AppService },
-      { config, getActiveLegacyRestOnlyEnvKey, isDesktopRuntimeConfigured, resolveEnvKey },
+      {
+        config,
+        getActiveDeploymentProfileUiBaseUrl,
+        getActiveLegacyRestOnlyEnvKey,
+        isDesktopRuntimeConfigured,
+        resolveEnvKey,
+      },
     ] = await Promise.all([import('../appService.js'), import('../config.js')])
     const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
 
     const service = new AppService() as unknown as {
       authClient: {
         passwordLogin: ReturnType<typeof vi.fn>
-        getDesktopEnvironment: ReturnType<typeof vi.fn>
+        getDesktopEnvironmentForEndpoint: ReturnType<typeof vi.fn>
       }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
       tokenStore: { setSessionToken: ReturnType<typeof vi.fn> }
@@ -89,10 +95,12 @@ describe('AppService invitation configuration lookup', () => {
       }),
     } as never
     service.authClient = {
-      getDesktopEnvironment: vi.fn().mockResolvedValue({
+      getDesktopEnvironmentForEndpoint: vi.fn().mockResolvedValue({
         externalRestApiBaseUrl: 'https://api.example.com.',
         rpcProxyBaseUrl: 'https://rpc.example.com',
         appName: 'Evenfire',
+        profileUiBaseUrl: 'https://profile.example.com',
+        responseUrl: 'https://api.example.com/api/v1/desktop/environment',
       }),
       passwordLogin: vi.fn().mockResolvedValue({
         token: 'session-token',
@@ -123,7 +131,7 @@ describe('AppService invitation configuration lookup', () => {
       'user@example.com',
       'setup-token'
     )
-    expect(service.authClient.getDesktopEnvironment).toHaveBeenCalled()
+    expect(service.authClient.getDesktopEnvironmentForEndpoint).toHaveBeenCalled()
     expect(isDesktopRuntimeConfigured()).toBe(true)
 
     const result = await service.passwordLogin('user@example.com', 'password123')
@@ -139,17 +147,19 @@ describe('AppService invitation configuration lookup', () => {
     )
     expect(config.externalRestApiBaseUrl).toBe('https://api.example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://rpc.example.com')
-    expect(config.desktopProfileUiBaseUrl).toBe('https://profile.example.com')
+    expect(getActiveDeploymentProfileUiBaseUrl()).toBe('https://profile.example.com')
 
     const persisted = JSON.parse(await fs.readFile(configPath, 'utf8')) as {
       externalRestApiBaseUrl: string
       rpcProxyBaseUrl: string
       appName: string
+      profileUiBaseUrl?: string
     }
     expect(persisted).toEqual({
       externalRestApiBaseUrl: 'https://api.example.com',
       rpcProxyBaseUrl: 'https://rpc.example.com',
       appName: 'Evenfire',
+      profileUiBaseUrl: 'https://profile.example.com',
     })
   })
 
@@ -166,7 +176,7 @@ describe('AppService invitation configuration lookup', () => {
       import('../config.js'),
     ])
     const service = new AppService() as unknown as {
-      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
+      authClient: { getDesktopEnvironmentForEndpoint: ReturnType<typeof vi.fn> }
       memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
       completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>
     }
@@ -181,16 +191,18 @@ describe('AppService invitation configuration lookup', () => {
       }),
     } as never
     service.authClient = {
-      getDesktopEnvironment: vi.fn().mockResolvedValue({
+      getDesktopEnvironmentForEndpoint: vi.fn().mockResolvedValue({
         externalRestApiBaseUrl: 'https://api.example.com./different',
         rpcProxyBaseUrl: 'https://rpc.example.com',
         appName: 'Discovered',
+        profileUiBaseUrl: 'https://profile.example.com',
+        responseUrl: 'https://api.example.com./different/api/v1/desktop/environment',
       }),
     } as never
 
     await service.completeDesktopSetup('user@example.com', 'setup-token')
 
-    expect(service.authClient.getDesktopEnvironment).toHaveBeenCalledOnce()
+    expect(service.authClient.getDesktopEnvironmentForEndpoint).toHaveBeenCalledOnce()
     expect(config.externalRestApiBaseUrl).toBe('https://api.example.com/confirmed')
     expect(config.rpcProxyBaseUrl).toBe('')
 
@@ -734,20 +746,21 @@ describe('AppService invitation configuration lookup', () => {
       deleteRuntimeConfig: (optionId: string) => Promise<unknown>
     }
 
-    const state = await service.saveRuntimeConfig({
-      externalRestApiBaseUrl: 'https://example.com',
-      rpcProxyBaseUrl: 'https://example.com',
-      appName: 'Production',
-    })
+    await expect(
+      service.saveRuntimeConfig({
+        externalRestApiBaseUrl: 'https://example.com',
+        rpcProxyBaseUrl: 'https://example.com',
+        appName: 'Production',
+      })
+    ).rejects.toThrow('Environment saved; Profile UI resolution is unavailable')
+
+    const state = isDesktopRuntimeConfigured()
 
     expect(isDesktopRuntimeConfigured()).toBe(true)
-    expect(state).toMatchObject({
-      configured: true,
-      activeOptionId: 'custom-file',
-    })
+    expect(state).toBe(true)
     expect(config.externalRestApiBaseUrl).toBe('https://example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://example.com')
-    expect(config.desktopProfileUiBaseUrl).toBe('https://example.com')
+    expect(config.desktopProfileUiBaseUrl).toBe('')
     expect(config.appName).toBe('Production')
 
     const persisted = JSON.parse(await fs.readFile(configPath, 'utf8')) as {
@@ -764,9 +777,13 @@ describe('AppService invitation configuration lookup', () => {
     const deletedState = await service.deleteRuntimeConfig('custom-file')
 
     expect(deletedState).toMatchObject({
-      configured: false,
       activeOptionId: null,
     })
+    expect(
+      deletedState.options.some((option: { source: string }) => option.source === 'user')
+    ).toBe(false)
+    // The static built-in localhost preset remains in the option list.
+    expect(deletedState.configured).toBe(true)
     await expect(fs.access(configPath)).rejects.toThrow()
   })
 })

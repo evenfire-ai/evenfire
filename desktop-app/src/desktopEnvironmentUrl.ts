@@ -21,6 +21,12 @@ export function desktopRestEndpointOrigin(rawValue: string): string {
   return new URL(canonicalizeDesktopRestEndpoint(rawValue)).origin
 }
 
+export function desktopEnvironmentDiscoveryUrl(rawValue: string): string {
+  const endpoint = new URL(canonicalizeDesktopRestEndpoint(rawValue))
+  endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, '')}/api/v1/desktop/environment`
+  return endpoint.href
+}
+
 export function sameDesktopRestEndpoint(left: string, right: string): boolean {
   try {
     return canonicalizeDesktopRestEndpoint(left) === canonicalizeDesktopRestEndpoint(right)

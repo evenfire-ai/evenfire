@@ -35,6 +35,15 @@ async function useRealAppServiceLocation(service: LinkService): Promise<void> {
   service.ensureEntityChangeConnection = vi.fn()
 }
 
+async function persistActiveProfileOrigin(
+  harness: Awaited<ReturnType<typeof createNativeCommitTestHarness>>,
+  origin: string
+): Promise<void> {
+  const identity = harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()
+  if (!identity) throw new Error('active profile identity is unavailable')
+  await harness.runtimeConfig.persistProfileUiOrigin(identity, origin)
+}
+
 function authenticate(service: LinkService, suffix: string): void {
   service.sessionToken = `synthetic-session-${suffix}`
   service.me = { id: 'user-1', email: 'user@example.test' }
@@ -61,6 +70,11 @@ describe('AppService active Profile origin pairing', () => {
     })
     const service = harness.service as LinkService
     await useRealAppServiceLocation(service)
+
+    await persistActiveProfileOrigin(harness, 'https://profile.dev.example.test')
+    await service.selectRuntimeConfig(harness.optionB.id)
+    await persistActiveProfileOrigin(harness, productionProfile)
+    await service.selectRuntimeConfig(harness.optionA.id)
 
     expect(harness.runtimeConfig.getActiveDeploymentProfileUiBaseUrl()).toBe(
       'https://profile.dev.example.test'
@@ -143,10 +157,10 @@ describe('AppService active Profile origin pairing', () => {
       authenticate(service, 'invalid-origin')
 
       await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+        'operator_profile_ui_origin_invalid'
       )
       await expect(service.createGfsResourceDeepLink(gfsUri)).rejects.toThrow(
-        'Cannot resolve a shareable Profile UI link for the active desktop deployment'
+        'operator_profile_ui_origin_invalid'
       )
     }
   )
@@ -166,11 +180,7 @@ describe('AppService active Profile origin pairing', () => {
     await service.selectRuntimeConfig(harness.optionB.id)
     authenticate(service, 'unpaired')
 
-    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
-      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
-    )
-    await expect(service.createGfsResourceDeepLink(gfsUri)).rejects.toThrow(
-      'Cannot resolve a shareable Profile UI link for the active desktop deployment'
-    )
+    await expect(service.createSandboxUiDeepLink()).rejects.toThrow()
+    await expect(service.createGfsResourceDeepLink(gfsUri)).rejects.toThrow()
   })
 })

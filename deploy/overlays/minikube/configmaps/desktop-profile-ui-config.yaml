@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: desktop-profile-ui-config
+  namespace: profiles
+data:
+  DESKTOP_PROFILE_UI_PUBLIC_BASE_URL: 'http://127.0.0.1:3001'
