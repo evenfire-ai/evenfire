@@ -57,8 +57,12 @@ type ConnModel = {
   openRequestId: string
   maxSeq: number
   lastSeqSeen: number
-  /** Decision frames with their event number. */
-  decisions: { frame: Record<string, unknown>; ev: number }[]
+  /**
+   * Decision frames with their event number and the instant their op started:
+   * a delta queued behind an op in flight, or an open still authenticating,
+   * starts later than the test asked for it.
+   */
+  decisions: { frame: Record<string, unknown>; ev: number; opStartVt: number | null }[]
 }
 
 type Real = {
@@ -168,7 +172,16 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
 
   function track(real: Real, m: ConnModel): void {
     m.socket.onFrame = (frame, ev) => {
-      if (frame.type === 'ready' || frame.type === 'subscriptions') m.decisions.push({ frame, ev })
+      if (frame.type !== 'ready' && frame.type !== 'subscriptions') return
+      // The decision is written before its op ends, so the op is still the connection's.
+      const op = m.socket.conn?.op
+      const opStartVt =
+        frame.type === 'ready'
+          ? m.socket.admittedVt
+          : op?.kind === 'delta'
+            ? op.srvDeadline - h.modules.registry.GFS_WATCH_DELTA_SERVER_DEADLINE_MS
+            : null
+      m.decisions.push({ frame, ev, opStartVt })
     }
   }
 
@@ -441,19 +454,47 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
         }
         const seq = d.frame.type === 'ready' ? 0 : (d.frame.seq as number)
         const opRequestId = seq === 0 ? m.openRequestId : m.puts.get(seq)?.r
-        const vt = seq === 0 ? m.openVt : m.puts.get(seq)?.vt
         const reads = h.reads.filter(
           r => r.rid32 === r32 && r.requestId === opRequestId && r.seq < d.ev
         )
         const last = reads.at(-1)
         if (!last || last.status !== 200 || last.decision !== 'allow')
           v.push(`I6: ${k} accepted after read ${JSON.stringify(last)}`)
-        const chain = new Set([r32, ...(rec.chain ?? [])])
-        for (const mv of real.moves) {
-          if (chain.has(mv.rid32) && mv.ev < d.ev && vt !== undefined && mv.vt > vt - 6_000) {
-            v.push(`I6/S4: ${k} accepted despite move ev ${mv.ev} before frame ev ${d.ev}`)
+      }
+    }
+    v.push(...suspicionViolations(real))
+    return v
+  }
+
+  /**
+   * S4 over every decision of every connection, closed ones included: a
+   * stream that closes afterwards (a listener loss, a reauthorize) does not
+   * make a decision it streamed any less wrong. Each key a frame accepts that
+   * the previous frame did not was decided by that frame's op. Only P moves,
+   * so a key's chain holds P exactly when its resource is P or under it; the
+   * indexed chain is gone once the connection closes.
+   */
+  function suspicionViolations(real: Real): string[] {
+    const fx = real.fixture
+    const underP = new Set([fx.p, fx.f1, fx.f2, fx.denied].map(x => h.toRid(x)))
+    const v: string[] = []
+    for (const m of real.conns) {
+      let previous = new Set<string>()
+      for (const d of m.decisions) {
+        const accepted = d.frame.accepted as string[]
+        const seq = d.frame.type === 'ready' ? 0 : (d.frame.seq as number)
+        // Anchored where the op takes its snapshot of recent ancestry changes:
+        // when it starts, not when the test sent its command.
+        const vt = d.opStartVt ?? (seq === 0 ? m.openVt : m.puts.get(seq)?.vt)
+        for (const k of accepted) {
+          if (previous.has(k) || !underP.has(k.slice(k.lastIndexOf('/') + 1))) continue
+          for (const mv of real.moves) {
+            if (mv.ev < d.ev && vt !== undefined && mv.vt > vt - 6_000) {
+              v.push(`I6/S4: ${k} accepted despite move ev ${mv.ev} before frame ev ${d.ev}`)
+            }
           }
         }
+        previous = new Set(accepted)
       }
     }
     return v
