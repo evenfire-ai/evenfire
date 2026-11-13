@@ -275,8 +275,8 @@ export async function pruneStaleCatalogModels(
 
     const unused: PruneCandidate[] = []
     if (candidates.length > 0) {
-      const memo = memoizeConsumerSources(deps.consumerSources(txPool))
       try {
+        const memo = memoizeConsumerSources(deps.consumerSources(txPool))
         for (const candidate of candidates) {
           const consumers = await computeModelConsumers(candidate.provider, candidate.model, memo)
           if (modelHasConsumers(consumers)) result.prefiltered += 1

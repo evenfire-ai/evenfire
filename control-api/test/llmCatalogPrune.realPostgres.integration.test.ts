@@ -1120,6 +1120,32 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       }
     )
 
+    it('a consumer-source factory that throws aborts the run as a pre-filter failure', async () => {
+      const m = pick(0)
+      await makeStale(m)
+      const res = await sync(gone(m), {
+        wrapPrune: () => run =>
+          mod.pruneStaleCatalogModels(run, {
+            consumerSources: () => {
+              throw new Error('no gateway client')
+            },
+            graceMs: 0,
+            txPool: corePool,
+          }),
+      })
+      expect(res).toMatchObject({ pruned: 0, pruneAborted: true })
+      expect((await row(m)).enabled).toBe(true)
+      expect(await pruneRuns()).toMatchObject([
+        {
+          candidates: 1,
+          examined_locked: 0,
+          pruned: 0,
+          aborted: true,
+          abort_reason: 'prefilter_failed',
+        },
+      ])
+    })
+
     it('S-17: the whole run, prune included, works with the control_api_runtime role', async () => {
       const m = pick(0)
       await sync(FULL, { noPrune: true, connector: runtimePool })
