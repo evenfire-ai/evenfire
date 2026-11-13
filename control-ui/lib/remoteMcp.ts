@@ -3,7 +3,7 @@
 import { apiSend } from './api'
 import type { RegistryEntry } from './api'
 import { isValidK8sName } from './k8sValidation'
-import { getRemoteOAuthCatalogBlock } from './oauthInstall'
+import { describeRemoteOAuthNotInstallable, getRemoteOAuthCatalogBlock } from './oauthInstall'
 import type {
   DiscoverCatalogRemoteRequest,
   DiscoverRemoteResponse,
@@ -406,7 +406,7 @@ export function resolveRemoteCatalogTarget(
   if (view.valid === false) {
     return {
       ok: false,
-      message: `${entry.name} v${entry.version} cannot be installed (${view.reason}). Report it to the Marketplace curator.`,
+      message: describeRemoteOAuthNotInstallable(`${entry.name} v${entry.version}`, view.reason),
     }
   }
   if (!view.block.allowedGrantScopes.includes(grantScope)) {
@@ -460,10 +460,11 @@ function describeCatalogRequestError(
   switch (code) {
     case 'catalog_entry_not_remote_oauth':
       return 'This Marketplace entry is not a remote OAuth connector, so it cannot be installed from here.'
-    case 'catalog_entry_invalid': {
-      const reason = typeof body?.reason === 'string' && body.reason ? ` (${body.reason})` : ''
-      return `This Marketplace entry cannot be installed${reason}. Report it to the Marketplace curator.`
-    }
+    case 'catalog_entry_invalid':
+      return describeRemoteOAuthNotInstallable(
+        'This Marketplace entry',
+        typeof body?.reason === 'string' ? body.reason : undefined
+      )
     case 'catalog_entry_name_mismatch':
       return 'The Marketplace entry resolved to a different name or version. Return to the Marketplace and open it again.'
     case 'catalog_grant_scope_not_allowed':

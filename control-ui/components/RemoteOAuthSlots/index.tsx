@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { remoteOAuthNotInstallableHint } from '@lib/oauthInstall'
 import {
   remoteOAuthManualNotice,
   remoteOAuthSlotNotice,
@@ -88,7 +89,10 @@ export function RemoteOAuthEntryBadges({ view }: RemoteOAuthEntryBadgesProps) {
 /** A remote-OAuth entry control-api refused: shown, never offered for install. */
 export function RemoteOAuthNotInstallable({ reason }: RemoteOAuthNotInstallableProps) {
   return (
-    <span className="cu-registry-chip cu-registry-chip--quality-unverified" title={reason}>
+    <span
+      className="cu-registry-chip cu-registry-chip--quality-unverified"
+      title={`${remoteOAuthNotInstallableHint(reason)} (${reason})`}
+    >
       Not installable
     </span>
   )

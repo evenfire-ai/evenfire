@@ -153,4 +153,20 @@ describe('RegistryInstallPage — remote-OAuth entries', () => {
     expect(mockReplace).not.toHaveBeenCalled()
     expectNoInstallForm()
   })
+
+  it('explains each refusal reason in words, and sends an outdated control-api to an update, not the curator', async () => {
+    renderFor(CURATOR_INVALID_ENTRY)
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '@evenfire/broken-remote v1.0.0 cannot be installed (setup_guide_required). Report it to the Marketplace curator. The entry asks you to register your own OAuth app but ships no setup guide.'
+    )
+    cleanup()
+
+    const { remoteOAuth: _verdict, ...unresolved } = CURATOR_CIMD_USER_ONLY_ENTRY
+    renderFor(unresolved as RegistryEntry)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'control-api did not say whether this entry can be installed. Update control-api'
+    )
+    expect(alert).not.toHaveTextContent('Marketplace curator')
+  })
 })

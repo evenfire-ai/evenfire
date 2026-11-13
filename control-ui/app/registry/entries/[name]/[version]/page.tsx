@@ -28,7 +28,7 @@ import {
   installRecipeFromRegistry,
 } from '@lib/api'
 import { useRegistryCapability } from '@lib/hooks/useRegistryCapability'
-import { getRemoteOAuthCatalogBlock } from '@lib/oauthInstall'
+import { describeRemoteOAuthNotInstallable, getRemoteOAuthCatalogBlock } from '@lib/oauthInstall'
 import { canInstallRemoteOAuthSlot, remoteOAuthSlotRows } from '@lib/remoteOAuthSlots'
 import type { RemoteOAuthSlotRow } from '@lib/remoteOAuthSlots.types'
 import { trustBgColor, trustColor } from '@lib/trustLevel'
@@ -502,8 +502,8 @@ function RegistryEntryDetailContent() {
                     </>
                   ) : (
                     <p className="cu-marketplace-detail__hint">
-                      <RemoteOAuthNotInstallable reason={remoteOAuth.reason} /> This entry cannot be
-                      installed ({remoteOAuth.reason}).
+                      <RemoteOAuthNotInstallable reason={remoteOAuth.reason} />{' '}
+                      {describeRemoteOAuthNotInstallable('This entry', remoteOAuth.reason)}
                     </p>
                   )}
                 </section>

@@ -24,7 +24,11 @@ import type { LlmAllowedModel, RegistryEntry } from '@lib/api'
 import { analyzeWorkflowRecipeEgress } from '@lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '@lib/egressModel'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
-import { getCatalogOAuthBlock, getRemoteOAuthCatalogBlock } from '@lib/oauthInstall'
+import {
+  describeRemoteOAuthNotInstallable,
+  getCatalogOAuthBlock,
+  getRemoteOAuthCatalogBlock,
+} from '@lib/oauthInstall'
 import type { RemoteOAuthCatalogView } from '@lib/oauthInstall.types'
 import { validateRecipe } from '@lib/recipeValidator'
 
@@ -612,8 +616,7 @@ function RemoteOAuthInstallRedirect({
     return (
       <>
         <div className="cu-banner cu-banner--error" role="alert">
-          {entry.name} v{entry.version} cannot be installed ({view.reason}). Report it to the
-          Marketplace curator.
+          {describeRemoteOAuthNotInstallable(`${entry.name} v${entry.version}`, view.reason)}
         </div>
         <div className="cu-create-actions">
           <Button onClick={onCancel} size="sm" variant="ghost">

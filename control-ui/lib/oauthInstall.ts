@@ -177,6 +177,60 @@ export function isRemoteOAuthCatalogEntry(entry: RegistryEntry | null | undefine
   return plainRecord(entry?.mcp_server_meta?.oauth)?.source === 'remote'
 }
 
+const REPORT_TO_CURATOR = 'Report it to the Marketplace curator.'
+
+/**
+ * What a not-installable verdict means to the admin, per reason. The control-api
+ * reasons describe a defect in the entry, so they point at the curator; the
+ * console-side ones (`unresolved`, `malformed_response`) describe a version
+ * mismatch between control-api and this console, which the curator cannot fix.
+ */
+const REMOTE_OAUTH_NOT_INSTALLABLE_HINTS: Readonly<Record<string, string>> = {
+  unresolved:
+    'control-api did not say whether this entry can be installed. Update control-api to a version that supports Marketplace remote OAuth connectors, then try again.',
+  malformed_response:
+    'control-api returned this entry in a shape this console cannot read. Check that control-api and Control UI are on matching versions.',
+  not_mcp_server: `${REPORT_TO_CURATOR} The entry is not an MCP server.`,
+  not_remote_server: `${REPORT_TO_CURATOR} The entry is not a remote MCP server.`,
+  oauth_block_missing: `${REPORT_TO_CURATOR} The entry has no OAuth configuration.`,
+  oauth_source_not_remote: `${REPORT_TO_CURATOR} The entry's OAuth configuration is not for a remote server.`,
+  oauth_provider_not_allowed: `${REPORT_TO_CURATOR} The entry names a built-in OAuth provider, which a remote connector cannot use.`,
+  remote_endpoint_missing: `${REPORT_TO_CURATOR} The entry lists no server URL.`,
+  remote_endpoint_not_https: `${REPORT_TO_CURATOR} The entry's server URL does not use HTTPS.`,
+  allowed_grant_scopes_invalid: `${REPORT_TO_CURATOR} The entry's install slots (per user, per context) are missing or invalid.`,
+  scopes_invalid: `${REPORT_TO_CURATOR} The entry's OAuth scopes are invalid.`,
+  authorization_server_hint_invalid: `${REPORT_TO_CURATOR} The entry's authorization server hint is invalid.`,
+  expected_registration_invalid: `${REPORT_TO_CURATOR} The entry does not say how its OAuth client is registered.`,
+  verification_invalid: `${REPORT_TO_CURATOR} The entry's verification badge is invalid.`,
+  verification_note_required: `${REPORT_TO_CURATOR} The entry is marked as having a known issue but does not describe it.`,
+  setup_guide_invalid: `${REPORT_TO_CURATOR} The entry's setup guide is empty or invalid.`,
+  setup_guide_too_long: `${REPORT_TO_CURATOR} The entry's setup guide is too long.`,
+  provider_console_url_not_https: `${REPORT_TO_CURATOR} The entry's provider console link does not use HTTPS.`,
+  provider_console_url_invalid: `${REPORT_TO_CURATOR} The entry's provider console link is invalid.`,
+  setup_guide_required: `${REPORT_TO_CURATOR} The entry asks you to register your own OAuth app but ships no setup guide.`,
+  provider_console_url_required: `${REPORT_TO_CURATOR} The entry asks you to register your own OAuth app but does not link to the provider's console.`,
+}
+
+const REMOTE_OAUTH_NOT_INSTALLABLE_FALLBACK = `control-api refused this entry. ${REPORT_TO_CURATOR}`
+
+/** The admin-facing explanation of a not-installable reason; unknown reasons get a generic one. */
+export function remoteOAuthNotInstallableHint(reason: string | undefined): string {
+  const hint =
+    reason && Object.prototype.hasOwnProperty.call(REMOTE_OAUTH_NOT_INSTALLABLE_HINTS, reason)
+      ? REMOTE_OAUTH_NOT_INSTALLABLE_HINTS[reason]
+      : undefined
+  return hint ?? REMOTE_OAUTH_NOT_INSTALLABLE_FALLBACK
+}
+
+/** "<subject> cannot be installed (<reason>). <hint>": the code stays as secondary detail. */
+export function describeRemoteOAuthNotInstallable(
+  subject: string,
+  reason: string | undefined
+): string {
+  const code = reason ? ` (${reason})` : ''
+  return `${subject} cannot be installed${code}. ${remoteOAuthNotInstallableHint(reason)}`
+}
+
 /**
  * The remote-OAuth view of a catalog entry, or null when it is not one. Installable
  * only when control-api resolved it as `remoteOAuth.valid === true`; a missing verdict

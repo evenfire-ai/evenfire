@@ -134,7 +134,7 @@ describe('Marketplace remote-OAuth slots', () => {
     const broken = await rowFor('@evenfire/broken-remote')
     expect(within(broken).getByText('Not installable')).toHaveAttribute(
       'title',
-      'setup_guide_required'
+      'Report it to the Marketplace curator. The entry asks you to register your own OAuth app but ships no setup guide. (setup_guide_required)'
     )
     expect(await openMenu('@evenfire/broken-remote')).toEqual(['View details'])
   })
