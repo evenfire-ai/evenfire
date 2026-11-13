@@ -11,7 +11,6 @@ import { createAuthRouter } from './routes/auth.js'
 import { createContextSharedFilesystemsRouter } from './routes/contextSharedFilesystems.js'
 import { createDesktopRouter } from './routes/desktop.js'
 import { createDirectoryRouter } from './routes/directory.js'
-import { createEntityChangesRouter } from './routes/entityChanges.js'
 import { createGfsRouter } from './routes/gfs.js'
 import { createGfsWatchRouter } from './routes/gfsWatch.js'
 import { createHealthRouter } from './routes/health.js'
@@ -128,7 +127,6 @@ export function createApp() {
   api.use(createDirectoryRouter())
   api.use(createRpcRouter())
   api.use(createNotificationsRouter())
-  api.use(createEntityChangesRouter())
   api.use(createUserApprovalDecisionsRouter())
   api.use(createOauthGrantsRouter())
   // PUBLIC (no auth) — provider redirect target; passthrough to control-api.

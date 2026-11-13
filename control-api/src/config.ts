@@ -306,7 +306,6 @@ type Config = {
   entityChangeDispatchBatchSize: number
   entityChangeMaxRecoveryEvents: number
   entityChangeStreamPollMs: number
-  entityChangeUserVisibilityRefreshMs: number
   entityChangeStreamHeartbeatMs: number
   entityChangeStreamMaxLifetimeMs: number
   entityChangeStreamMaxConnections: number
@@ -1336,12 +1335,6 @@ export const config: Config = {
     100000
   ),
   entityChangeStreamPollMs: boundedIntegerEnv('ENTITY_CHANGE_STREAM_POLL_MS', 1000, 250, 5000),
-  entityChangeUserVisibilityRefreshMs: boundedIntegerEnv(
-    'ENTITY_CHANGE_USER_VISIBILITY_REFRESH_MS',
-    4000,
-    1000,
-    5000
-  ),
   entityChangeStreamHeartbeatMs: boundedIntegerEnv(
     'ENTITY_CHANGE_STREAM_HEARTBEAT_MS',
     20 * 1000,

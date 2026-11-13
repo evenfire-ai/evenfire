@@ -1,11 +1,8 @@
-import type { Request } from 'express'
 import { config } from '../config.js'
-import type { ExternalAuthedRequest } from './externalSessionAuth.js'
 import {
   type RateLimitCheck,
   type RateLimitCheckOptions,
   createRateLimitCheck,
-  rateLimitMiddleware,
 } from './rateLimitMiddleware.js'
 
 /** Writes to the watch set are cheap and bursty (one per navigation), opens are not. */
@@ -26,27 +23,12 @@ export function externalUserStreamOpenRateLimitOptions(): RateLimitCheckOptions 
   }
 }
 
-export function externalEntityChangesStreamBucketKey(userId: string): string {
-  return `user:${userId}:entity-changes`
-}
-
 export function gfsWatchOpenBucketKey(userId: string): string {
   return `user:${userId}:gfs-watch-open`
 }
 
 export function gfsWatchPutBucketKey(userId: string): string {
   return `user:${userId}:gfs-watch-put`
-}
-
-/** The entity-changes stream limiter, mounted after the session middleware. */
-export function externalEntityChangesStreamRateLimit() {
-  return rateLimitMiddleware({
-    ...externalUserStreamOpenRateLimitOptions(),
-    getBucketKey: (req: Request) => {
-      const claims = (req as ExternalAuthedRequest).externalAuth
-      return claims ? externalEntityChangesStreamBucketKey(claims.userId) : null
-    },
-  })
 }
 
 /** Create once per route set: the check owns its throttled warn line. */

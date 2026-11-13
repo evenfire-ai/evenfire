@@ -1,8 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { once } from 'node:events'
+import type { AddressInfo } from 'node:net'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
+import { type OpenedWatch, openWatch } from './helpers/watchHttp.js'
 
 // The external GFS limiter's Postgres backend, against real PostgreSQL at the
 // production pool bounds: the CORE_POOL_* and RATE_LIMIT_POOL_* variables are
@@ -78,6 +81,7 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     config: typeof import('../src/config.js').config
     requestsTotal: typeof import('../src/observability/metrics.js').externalGfsRateLimitRequestsTotal
     MockGateway: typeof import('./mockGateway.js').MockGateway
+    watchProcess: typeof import('../src/services/gfsWatch/process.js')
   }
 
   beforeAll(async () => {
@@ -106,11 +110,13 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     const configMod = await import('../src/config.js')
     const metricsMod = await import('../src/observability/metrics.js')
     const { MockGateway } = await import('./mockGateway.js')
+    const watchProcess = await import('../src/services/gfsWatch/process.js')
     mod = {
       createApp: appMod.createApp as never,
       config: configMod.config,
       requestsTotal: metricsMod.externalGfsRateLimitRequestsTotal,
       MockGateway,
+      watchProcess,
     }
   }, 60_000)
 
@@ -267,56 +273,91 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     await corePool.query('DROP FUNCTION IF EXISTS t3b_limiter_fault()')
   }
 
-  it('T3b: the external grants limiter fails closed on a backend error while a process-memory route still passes', async () => {
+  it('T3b: the external grants and watch-open limiters fail closed on a backend error while a process-memory route still passes', async () => {
     const app = mod.createApp(new mod.MockGateway())
-    const userId = await seedUser()
-    const internalToken = mod.config.internalServiceTokens['external-rest-api']
-    if (!internalToken) throw new Error('config has no external-rest-api internal service token')
-    const external = (req: request.Test) =>
-      req
-        .set('Authorization', `Bearer ${internalToken}`)
-        .set('x-service-token', 'external-rest-api')
-        .set('x-user-session-token', JSON.stringify({ userId }))
-        .set('x-forwarded-for', '203.0.113.7')
-    await corePool.query('DELETE FROM rate_limit_buckets')
-
-    let grants: request.Response
-    let entityChanges: request.Response
-    let ack: request.Response
-    await injectLimiterFault()
-    try {
-      grants = await external(
-        request(app).get(`/api/v1/external/gfs/grants?drive=main&resourceId=${randomUUID()}`)
-      )
-      entityChanges = await external(request(app).get('/api/v1/external/entity-changes/stream'))
-      ack = await external(request(app).post(`/api/v1/external/notifications/${randomUUID()}/ack`))
-    } finally {
-      await removeLimiterFault()
+    // The watch answers 503 watch_listener_unavailable ahead of its open
+    // limiter until the process LISTEN client is up, as in production.
+    const { registry } = mod.watchProcess.gfsWatchProcess()
+    mod.watchProcess.startGfsWatchProcess()
+    for (let i = 0; i < 500 && !registry.listenerReady(); i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10))
     }
+    try {
+      expect(registry.listenerReady()).toBe(true)
+      const userId = await seedUser()
+      const internalToken = mod.config.internalServiceTokens['external-rest-api']
+      if (!internalToken) throw new Error('config has no external-rest-api internal service token')
+      const external = (req: request.Test) =>
+        req
+          .set('Authorization', `Bearer ${internalToken}`)
+          .set('x-service-token', 'external-rest-api')
+          .set('x-user-session-token', JSON.stringify({ userId }))
+          .set('x-forwarded-for', '203.0.113.7')
+      await corePool.query('DELETE FROM rate_limit_buckets')
 
-    // The 503 comes from rateLimitMiddleware, not from the external GFS
-    // Postgres buckets (whose body is gfs_rate_limit_unavailable).
-    expect(grants.status).toBe(503)
-    expect(grants.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
-    expect(grants.headers['retry-after']).toBe('2')
-    expect(grants.headers['cache-control']).toBe('no-store')
-    // The entity-change stream uses the same shared rate-limit middleware but
-    // chooses fail-closed because its principal budget must remain distributed.
-    expect(entityChanges.status).toBe(503)
-    expect(entityChanges.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
-    expect(entityChanges.headers['retry-after']).toBe('2')
-    expect(entityChanges.headers['cache-control']).toBe('no-store')
-    // Witness for the process-memory policy under the same fault: the ack
-    // route's Postgres limiter could not count either, its in-memory counter
-    // admitted the first request, and its handler answered.
-    expect(ack.status).toBe(404)
-    expect(ack.body).toEqual({ error: 'notification_not_found' })
+      let grants: request.Response
+      let watchOpen: OpenedWatch | undefined
+      let ack: request.Response
+      await injectLimiterFault()
+      try {
+        grants = await external(
+          request(app).get(`/api/v1/external/gfs/grants?drive=main&resourceId=${randomUUID()}`)
+        )
+        // Raw HTTP: a regression that admits the stream answers 200 and stays
+        // open, which supertest would wait on until the test timeout.
+        const server = app.listen(0, '127.0.0.1')
+        try {
+          await once(server, 'listening')
+          watchOpen = await openWatch(
+            `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/v1/external/gfs/watch`,
+            {
+              authorization: `Bearer ${internalToken}`,
+              'x-service-token': 'external-rest-api',
+              'x-user-session-token': JSON.stringify({ userId }),
+              'x-forwarded-for': '203.0.113.7',
+            }
+          )
+        } finally {
+          watchOpen?.close()
+          server.closeAllConnections()
+          await new Promise<void>(resolve => server.close(() => resolve()))
+        }
+        ack = await external(
+          request(app).post(`/api/v1/external/notifications/${randomUUID()}/ack`)
+        )
+      } finally {
+        await removeLimiterFault()
+      }
 
-    // Witness that the fault is scoped as intended: the external GFS Postgres
-    // buckets counted, and nothing else reached the ledger.
-    const keys = await ledgerKeys()
-    expect(keys.length).toBeGreaterThan(0)
-    expect(keys.every(key => key.startsWith('gfs-ext:'))).toBe(true)
+      // The 503 comes from rateLimitMiddleware, not from the external GFS
+      // Postgres buckets (whose body is gfs_rate_limit_unavailable).
+      expect(grants.status).toBe(503)
+      expect(grants.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
+      expect(grants.headers['retry-after']).toBe('2')
+      expect(grants.headers['cache-control']).toBe('no-store')
+      // The watch open shares the stream-open policy: an uncounted long-lived
+      // stream is refused, because its per-user budget must stay distributed.
+      expect(watchOpen!.status).toBe(503)
+      expect(watchOpen!.headers['x-watch-error']).toBe('rate_limit_unavailable')
+      expect(watchOpen!.body).toEqual({ error: 'rate_limit_unavailable' })
+      expect(watchOpen!.headers['retry-after']).toBe('2')
+      expect(watchOpen!.headers['cache-control']).toBe('no-store')
+      expect(registry.state.byConnId.size).toBe(0)
+      // Witness for the process-memory policy under the same fault: the ack
+      // route's Postgres limiter could not count either, its in-memory counter
+      // admitted the first request, and its handler answered.
+      expect(ack.status).toBe(404)
+      expect(ack.body).toEqual({ error: 'notification_not_found' })
+
+      // Witness that the fault is scoped as intended: the external GFS Postgres
+      // buckets counted, and nothing else reached the ledger.
+      const keys = await ledgerKeys()
+      expect(keys.length).toBeGreaterThan(0)
+      expect(keys.every(key => key.startsWith('gfs-ext:'))).toBe(true)
+    } finally {
+      mod.watchProcess.stopGfsWatchRegistry()
+      await mod.watchProcess.closeGfsWatchPool()
+    }
   }, 30_000)
 
   it('T4: with every core connection held, session validation answers 503 while an invalid token still answers 401', async () => {

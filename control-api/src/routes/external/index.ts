@@ -3,7 +3,6 @@ import type { K8sGateway } from '../../k8s.js'
 import { createExternalAuthRouter } from './auth.js'
 import { createExternalUserApprovalDecisionsRouter } from './decisions.routes.js'
 import { createExternalDirectoryRouter } from './directory.js'
-import { createExternalEntityChangesRouter } from './entityChanges.routes.js'
 import { createExternalGfsRouter } from './gfs.js'
 import { createExternalGfsWatchRouter } from './gfsWatch.routes.js'
 import { createExternalInvitationsRouter } from './invitations.js'
@@ -29,7 +28,6 @@ export function createExternalRouter(gateway: K8sGateway): Router {
   // matrix with 404 after running its session and authority chain.
   router.use(createExternalGfsWatchRouter())
   router.use(createExternalGfsRouter())
-  router.use(createExternalEntityChangesRouter())
   router.use(createExternalNotificationsRouter())
   router.use(createExternalUserApprovalDecisionsRouter())
   router.use(createExternalWorkflowApprovalMediumsRouter(gateway))
