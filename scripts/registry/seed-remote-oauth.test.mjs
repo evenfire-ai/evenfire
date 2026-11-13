@@ -619,6 +619,95 @@ describe('unparseable answers', () => {
   })
 })
 
+describe('credentials in request headers', () => {
+  // fetch refuses a header value with CR, LF or NUL and its error quotes the whole
+  // value, so a malformed credential would reach the output once per entry.
+  test('a CONTROL_API_TOKEN a cookie cannot carry stops the run before any request, unprinted', async () => {
+    for (const token of [
+      `${ADMIN_TOKEN}\nLEAKED-TAIL`,
+      `${ADMIN_TOKEN}\r`,
+      `${ADMIN_TOKEN}\u0000LEAKED-TAIL`,
+      `${ADMIN_TOKEN}; injected=1`,
+      `${ADMIN_TOKEN}€`,
+    ]) {
+      const items = [byName('clickup-remote'), byName('vercel-remote')]
+      const run = await seedAgainst({
+        items,
+        discover: matching(items),
+        extraEnv: { CONTROL_API_TOKEN: token },
+      })
+      const output = run.lines.join('\n')
+      assert.equal(run.exitCode, 2, JSON.stringify(token))
+      assert.ok(!output.includes(ADMIN_TOKEN), `output leaks the token: ${output}`)
+      assert.ok(!output.includes('LEAKED-TAIL'), `output leaks the token: ${output}`)
+      assert.ok(
+        run.lines.some(l => /\[FAIL\] CONTROL_API_TOKEN /.test(l)),
+        output
+      )
+      assert.equal(run.registry.calls.length, 0)
+    }
+  })
+
+  test('a JWT-shaped or percent-encoded session token is still sent as the cookie', async () => {
+    const cookies = []
+    const sink = createServer((req, res) => {
+      cookies.push(req.headers.cookie)
+      res.writeHead(401, { 'content-type': 'application/json' })
+      res.end('{"error":"Unauthorized"}')
+    })
+    await new Promise(resolve => sink.listen(0, '127.0.0.1', resolve))
+    try {
+      for (const token of [
+        'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.Ab-_cD',
+        'session%3Dvalue%2Bwith-encoding',
+      ]) {
+        cookies.length = 0
+        const exitCode = await runSeed({
+          catalog: [byName('clickup-remote')],
+          flags: { dryRun: true },
+          env: {
+            CONTROL_API_URL: `http://127.0.0.1:${sink.address().port}`,
+            CONTROL_API_TOKEN: token,
+          },
+          rules,
+          log: () => {},
+        })
+        assert.equal(exitCode, 1)
+        assert.deepEqual(cookies, [`control_ui_admin_session=${token}`])
+      }
+    } finally {
+      await new Promise(resolve => sink.close(resolve))
+    }
+  })
+
+  test('a curator token no header can carry stops the run unprinted, before publishing', async () => {
+    const minted = `${CURATOR_TOKEN}\nLEAKED-TAIL`
+    const items = [byName('clickup-remote'), byName('vercel-remote')]
+    const run = await seedAgainst({
+      items,
+      discover: matching(items),
+      fetchImpl: (url, init) =>
+        new URL(url).pathname === '/oauth/token'
+          ? Promise.resolve(
+              new Response(JSON.stringify({ access_token: minted, token_type: 'Bearer' }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+              })
+            )
+          : fetch(url, init),
+    })
+    const output = run.lines.join('\n')
+    assert.equal(run.exitCode, 1)
+    assert.ok(!output.includes(CURATOR_TOKEN), `output leaks the curator token: ${output}`)
+    assert.ok(!output.includes('LEAKED-TAIL'), `output leaks the curator token: ${output}`)
+    assert.equal(run.registry.publishes(), 0)
+    assert.ok(
+      run.lines.some(l => /0 succeeded, 1 failed, 1 not attempted/.test(l)),
+      output
+    )
+  })
+})
+
 describe('service URLs', () => {
   test('https anywhere, http only on loopback, never credentials', () => {
     assert.equal(parseServiceUrl('X', 'https://registry.example/'), 'https://registry.example')

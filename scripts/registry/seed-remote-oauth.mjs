@@ -36,6 +36,12 @@ export const CATALOG_PATH = fileURLToPath(new URL('./remote-oauth-catalog.json',
 const USER_AGENT = 'evenfire-seed-remote-oauth/1'
 const ADMIN_SESSION_COOKIE = 'control_ui_admin_session'
 const REQUEST_TIMEOUT_MS = 30_000
+// fetch rejects a header value carrying CR, LF or NUL with an error that quotes the
+// whole value, so every credential is checked before it goes into a header.
+// RFC 6265 cookie-octet: a `;` would also append cookies of its own. A session token
+// minted by control-api is a JWT, which always fits.
+const COOKIE_VALUE_RE = /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/
+const BEARER_TOKEN_RE = /^[\x21-\x7e]+$/
 
 const ITEM_KEYS = new Set([
   'name',
@@ -299,7 +305,8 @@ async function requestJson(fetchImpl, url, init) {
 
 /**
  * A thrown network error as one line. fetch puts the real reason (timeout,
- * ECONNRESET, redirect refused) in `cause`; neither carries request headers.
+ * ECONNRESET, redirect refused) in `cause`. Its message only quotes a header
+ * value fetch refused, and every credential is validated before reaching one.
  */
 function errorMessage(err) {
   if (!(err instanceof Error)) return String(err)
@@ -399,6 +406,12 @@ export async function runSeed({
     log(`[FAIL] missing environment: ${missing.join(', ')}`)
     return 2
   }
+  if (!COOKIE_VALUE_RE.test(env.CONTROL_API_TOKEN)) {
+    log(
+      '[FAIL] CONTROL_API_TOKEN holds characters a session cookie cannot carry (whitespace, control characters, non-ASCII or one of " , ; \\); check how it was copied'
+    )
+    return 2
+  }
 
   let controlApi
   let registry = ''
@@ -430,6 +443,11 @@ export async function runSeed({
       const unparseable = res.unparseable ? ', unparseable response body' : ''
       throw new StopRunError(
         `could not mint the curator token at ${new URL(registry).origin}/oauth/token (HTTP ${res.status}${unparseable}); nothing else can be published`
+      )
+    }
+    if (!BEARER_TOKEN_RE.test(token)) {
+      throw new StopRunError(
+        `the curator token minted at ${new URL(registry).origin}/oauth/token holds characters a bearer token cannot carry; nothing else can be published`
       )
     }
     return token
