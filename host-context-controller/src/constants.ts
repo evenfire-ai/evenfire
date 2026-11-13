@@ -32,3 +32,10 @@ export function isHeartbeatManagedLifecycleReason(reason: string | undefined): r
     (reason !== undefined && reason.startsWith(SUSPEND_BLOCKED_REASON_PREFIX))
   )
 }
+
+/**
+ * A NetworkPolicy pass that runs longer than this is logged as an overrun
+ * (and again at every further multiple) before the hard limit acts. Normal
+ * passes take 45 s to about 2 min.
+ */
+export const NETPOL_PASS_OVERRUN_WARN_MS = 5 * 60_000

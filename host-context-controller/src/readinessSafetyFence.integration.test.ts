@@ -55,6 +55,8 @@ vi.mock('./config', () => ({
     port: 0,
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
     hostK8sRequestTimeoutMs: 30_000,
+    k8sRequestTimeoutMs: 30_000,
+    netPolPassHardLimitMs: 1_800_000,
     hostResyncIntervalSec: 0,
     externalEgressResyncIntervalSec: 0,
     controlApiBaseUrl: 'http://control-api.test:8090',

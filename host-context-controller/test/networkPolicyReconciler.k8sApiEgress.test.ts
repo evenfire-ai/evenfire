@@ -6,6 +6,7 @@ import { applyNetworkPolicy } from '../src/utils'
 vi.mock('../src/config', () => ({
   config: {
     namespace: 'mcp-server',
+    k8sRequestTimeoutMs: 30_000,
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',

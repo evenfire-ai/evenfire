@@ -185,6 +185,42 @@ when 'host-secret-authenticated-group-grant'
     },
     'subjects' => [{ 'kind' => 'Group', 'name' => 'system:authenticated' }],
   }
+when 'authority-staleness-60s', 'poll-interval-60s'
+  host_config = documents.find do |document|
+    document['kind'] == 'ConfigMap' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host-config'
+  end
+  abort('fixture source is missing mcp-host/mcp-host-config') unless host_config
+  key = if mutation == 'authority-staleness-60s'
+    'HCC_AUTHORITY_MAX_STALENESS_MS'
+  else
+    'CLERUM_CONTEXT_MAPPER_POLL_INTERVAL'
+  end
+  data = host_config.fetch('data')
+  abort("fixture source mcp-host-config has no #{key}") unless data.key?(key)
+  data[key] = '60000'
+when 'poll-interval-not-digits'
+  host_config = documents.find do |document|
+    document['kind'] == 'ConfigMap' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host-config'
+  end
+  abort('fixture source is missing mcp-host/mcp-host-config') unless host_config
+  data = host_config.fetch('data')
+  abort('fixture source mcp-host-config has no CLERUM_CONTEXT_MAPPER_POLL_INTERVAL') unless data.key?('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL')
+  data['CLERUM_CONTEXT_MAPPER_POLL_INTERVAL'] = '30s'
+when 'authority-staleness-below-rule'
+  host_config = documents.find do |document|
+    document['kind'] == 'ConfigMap' &&
+      document.dig('metadata', 'namespace') == 'mcp-host' &&
+      document.dig('metadata', 'name') == 'mcp-host-config'
+  end
+  abort('fixture source is missing mcp-host/mcp-host-config') unless host_config
+  data = host_config.fetch('data')
+  abort('fixture source mcp-host-config has no HCC_AUTHORITY_MAX_STALENESS_MS') unless data.key?('HCC_AUTHORITY_MAX_STALENESS_MS')
+  # One millisecond below the two-missed-poll floor at the 30000ms interval.
+  data['HCC_AUTHORITY_MAX_STALENESS_MS'] = '100999'
 else
   abort("unknown fixture mutation: #{mutation}")
 end
@@ -282,3 +318,104 @@ assert_rejected \
   "${host_secret_authenticated_group}" \
   'mcp-host identities must not receive MCP Secret read grants' \
   'mcp-host MCP Secret system:authenticated grant'
+
+# Issue #1350: 60000 tolerates no missed HCC poll at a 30000ms interval.
+authority_staleness_60s="${tmpdir}/authority-staleness-60s.yaml"
+mutate_render authority-staleness-60s "${authority_staleness_60s}"
+assert_rejected \
+  "${authority_staleness_60s}" \
+  'NP-08 render contract: HCC_AUTHORITY_MAX_STALENESS_MS must be "180000"' \
+  'mcp-host authority staleness of 60000ms'
+
+poll_interval_60s="${tmpdir}/poll-interval-60s.yaml"
+mutate_render poll-interval-60s "${poll_interval_60s}"
+assert_rejected \
+  "${poll_interval_60s}" \
+  'NP-08 render contract: CLERUM_CONTEXT_MAPPER_POLL_INTERVAL must be "30000"' \
+  'mcp-host context mapper poll interval of 60000ms'
+
+# #1350: the rule itself, computed from mcp-host/src/config.ts. 101000 below
+# is produced by the contract's computation, not typed into it.
+authority_staleness_below_rule="${tmpdir}/authority-staleness-below-rule.yaml"
+mutate_render authority-staleness-below-rule "${authority_staleness_below_rule}"
+assert_rejected \
+  "${authority_staleness_below_rule}" \
+  '+ 10000 + 1000 = 101000ms; got HCC_AUTHORITY_MAX_STALENESS_MS=100999 and CLERUM_CONTEXT_MAPPER_POLL_INTERVAL=30000' \
+  'mcp-host authority staleness one millisecond below the rule'
+
+# A source whose request timeout grows to 60000ms makes the shipped
+# 180000/30000 pair break the rule; the contract must follow the source.
+slow_request_source="${tmpdir}/config-request-timeout-60s.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  pattern = /^export const CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = [0-9_]+$/
+  abort("fixture: expected exactly one CONTEXT_MAPPER_REQUEST_TIMEOUT_MS in #{source}") unless text.scan(pattern).length == 1
+  File.write(destination, text.sub(pattern, "export const CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = 60_000"))
+' "${ROOT}/mcp-host/src/config.ts" "${slow_request_source}"
+NP08_MCP_HOST_CONFIG_SOURCE="${slow_request_source}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  '+ 60000 + 1000 = 211000ms; got HCC_AUTHORITY_MAX_STALENESS_MS=180000 and CLERUM_CONTEXT_MAPPER_POLL_INTERVAL=30000' \
+  'the shipped authority pair under a 60000ms request timeout'
+
+poll_interval_not_digits="${tmpdir}/poll-interval-not-digits.yaml"
+mutate_render poll-interval-not-digits "${poll_interval_not_digits}"
+assert_rejected \
+  "${poll_interval_not_digits}" \
+  'must be positive safe integers' \
+  'a mcp-host context mapper poll interval that is not plain digits'
+
+# A source the extractor cannot read must stop the contract, not pass it.
+source_without_timeout="${tmpdir}/config-without-request-timeout.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  pattern = /^export const CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = [0-9_]+$/
+  abort("fixture: expected exactly one CONTEXT_MAPPER_REQUEST_TIMEOUT_MS in #{source}") unless text.scan(pattern).length == 1
+  File.write(destination, text.sub(pattern, "const contextMapperRequestTimeoutRenamed = 10_000"))
+' "${ROOT}/mcp-host/src/config.ts" "${source_without_timeout}"
+NP08_MCP_HOST_CONFIG_SOURCE="${source_without_timeout}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  'expected exactly one CONTEXT_MAPPER_REQUEST_TIMEOUT_MS' \
+  'an mcp-host source without the request timeout constant'
+
+# The overlay pin must follow the source default.
+source_default_45s="${tmpdir}/config-default-interval-45s.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  literal = "getEnv(\x27CLERUM_CONTEXT_MAPPER_POLL_INTERVAL\x27, \x2730000\x27)"
+  abort("fixture: expected exactly one poll interval default in #{source}") unless text.scan(literal).length == 1
+  File.write(destination, text.sub(literal, "getEnv(\x27CLERUM_CONTEXT_MAPPER_POLL_INTERVAL\x27, \x2745000\x27)"))
+' "${ROOT}/mcp-host/src/config.ts" "${source_default_45s}"
+NP08_MCP_HOST_CONFIG_SOURCE="${source_default_45s}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  'must equal the mcp-host source defaults' \
+  'an overlay pin that differs from the source default'
+
+# The same for the staleness bound, whose default is a named constant.
+source_default_staleness_200s="${tmpdir}/config-default-staleness-200s.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  pattern = /^export const HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS = [0-9_]+$/
+  abort("fixture: expected exactly one HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS in #{source}") unless text.scan(pattern).length == 1
+  File.write(destination, text.sub(pattern, "export const HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS = 200_000"))
+' "${ROOT}/mcp-host/src/config.ts" "${source_default_staleness_200s}"
+NP08_MCP_HOST_CONFIG_SOURCE="${source_default_staleness_200s}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  'must equal the mcp-host source defaults' \
+  'an overlay staleness pin that differs from the source default'
+
+source_without_staleness_default="${tmpdir}/config-without-staleness-default.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  pattern = /^export const HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS = [0-9_]+$/
+  abort("fixture: expected exactly one HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS in #{source}") unless text.scan(pattern).length == 1
+  File.write(destination, text.sub(pattern, "const hccAuthorityStalenessDefaultRenamed = 180_000"))
+' "${ROOT}/mcp-host/src/config.ts" "${source_without_staleness_default}"
+NP08_MCP_HOST_CONFIG_SOURCE="${source_without_staleness_default}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  'expected exactly one HCC_AUTHORITY_MAX_STALENESS_MS default' \
+  'an mcp-host source without the staleness default constant'

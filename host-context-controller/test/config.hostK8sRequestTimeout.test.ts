@@ -19,13 +19,28 @@ describe('config.hostK8sRequestTimeoutMs', () => {
     expect(config.hostK8sRequestTimeoutMs).toBe(1_250)
   })
 
-  it.each(['', '0', '-1', 'not-a-number', 'Infinity', '1.5'])(
-    'fails boot for invalid value %j',
-    async value => {
-      process.env[ENV_NAME] = value
-      await expect(import('../src/config')).rejects.toThrow(
-        /HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer/
-      )
-    }
-  )
+  it('defaults to 30 seconds when the env is an empty string', async () => {
+    process.env[ENV_NAME] = ''
+    const { config } = await import('../src/config')
+    expect(config.hostK8sRequestTimeoutMs).toBe(30_000)
+  })
+
+  it.each([
+    '0',
+    '-1',
+    'not-a-number',
+    'Infinity',
+    '1.5',
+    ' ',
+    '+1250',
+    ' 1250',
+    '01250',
+    '125e1',
+    '0x4E2',
+  ])('fails boot for invalid value %j', async value => {
+    process.env[ENV_NAME] = value
+    await expect(import('../src/config')).rejects.toThrow(
+      /HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer/
+    )
+  })
 })
