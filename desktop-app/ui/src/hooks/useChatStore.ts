@@ -115,6 +115,11 @@ export function useChatStore() {
       window.clerum.chat.upsertMessages(agentRef, chatId, messages),
     []
   )
+  const removeMessages = useCallback(
+    (agentRef: string, chatId: string, messageIds: string[]) =>
+      window.clerum.chat.removeMessages(agentRef, chatId, messageIds),
+    []
+  )
   const backfillCounters = useCallback(
     (agentRef: string, chatId: string, messages: ChatMessage[]) => {
       const backfill = window.clerum.chat.backfillCounters
@@ -300,6 +305,7 @@ export function useChatStore() {
     loadMessages,
     appendMessages,
     upsertMessages,
+    removeMessages,
     replaceMessages,
     backfillCounters,
     markUnreadTerminal,
