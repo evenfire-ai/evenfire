@@ -63,6 +63,7 @@ import {
   type NetworkPolicyPassOverrunPhase,
   type NetworkPolicyPassOverrunSeverity,
   contextMetadataOnlyEventsTotal,
+  countNetworkPolicyPassOverrun,
   hostDeleteCleanupTotal,
   hostFleetLifecycleCatchTotal,
   hostFleetRequestsTotal,
@@ -76,7 +77,6 @@ import {
   netPolDefaultsOnlyTickDurationSeconds,
   netPolDefaultsOnlyTicksTotal,
   netPolResyncTicksSkippedTotal,
-  networkPolicyPassOverrunsTotal,
 } from './metrics'
 import {
   DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
@@ -3599,7 +3599,7 @@ export class McpServerWatcher implements McpServerProvider {
               seconds: Math.round((now - effect.sinceMs) / 1000),
             },
     }
-    networkPolicyPassOverrunsTotal.inc({ severity, phase: progress.phase })
+    countNetworkPolicyPassOverrun(severity, progress.phase)
     if (severity === 'warn') {
       hccLogger.warn('[K8s] NetworkPolicy pass overrun', fields)
       return

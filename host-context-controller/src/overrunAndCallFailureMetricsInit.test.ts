@@ -5,7 +5,7 @@ import {
   NETWORKPOLICY_PASS_OVERRUN_PHASES,
   NETWORKPOLICY_PASS_OVERRUN_SEVERITIES,
   countMcpServerVerdictCallFailure,
-  networkPolicyPassOverrunsTotal,
+  countNetworkPolicyPassOverrun,
   registry,
 } from './metrics'
 
@@ -60,7 +60,7 @@ describe('labelled counters exposed at zero from start (#1338)', () => {
     expect(overruns.size).toBe(16)
     expect(callFailures.size).toBe(8)
 
-    networkPolicyPassOverrunsTotal.inc({ severity: 'warn', phase: 'additive' })
+    countNetworkPolicyPassOverrun('warn', 'additive')
     countMcpServerVerdictCallFailure('rollout_read', 'verdict_kept')
 
     const overrunsAfter = await series(OVERRUNS)

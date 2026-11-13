@@ -147,7 +147,7 @@ export const NETWORKPOLICY_PASS_OVERRUN_SEVERITIES = ['warn', 'fatal'] as const
 export type NetworkPolicyPassOverrunSeverity =
   (typeof NETWORKPOLICY_PASS_OVERRUN_SEVERITIES)[number]
 
-export const networkPolicyPassOverrunsTotal = counter({
+const networkPolicyPassOverrunsTotal = counter({
   name: 'clerum_hcc_networkpolicy_pass_overruns_total',
   help: 'NetworkPolicy passes still running at an overrun mark (warn) or at the hard limit (fatal), by the stage they were in.',
   labelNames: ['severity', 'phase'] as const,
@@ -158,6 +158,14 @@ for (const severity of NETWORKPOLICY_PASS_OVERRUN_SEVERITIES) {
   for (const phase of NETWORKPOLICY_PASS_OVERRUN_PHASES) {
     networkPolicyPassOverrunsTotal.inc({ severity, phase }, 0)
   }
+}
+
+/** Counts one overrun mark; the counter is reachable only through this typed helper. */
+export function countNetworkPolicyPassOverrun(
+  severity: NetworkPolicyPassOverrunSeverity,
+  phase: NetworkPolicyPassOverrunPhase
+): void {
+  networkPolicyPassOverrunsTotal.inc({ severity, phase })
 }
 
 export const networkPolicySafetyPassDurationSeconds = histogram({
@@ -257,7 +265,7 @@ export type VerdictCallSite = (typeof MCPSERVER_VERDICT_CALL_SITES)[number]
 export const MCPSERVER_VERDICT_CALL_OUTCOMES = ['verdict_kept', 'not_ready_published'] as const
 export type VerdictCallOutcome = (typeof MCPSERVER_VERDICT_CALL_OUTCOMES)[number]
 
-export const mcpserverReconcileCallFailuresTotal = counter({
+const mcpserverReconcileCallFailuresTotal = counter({
   name: 'clerum_hcc_mcpserver_reconcile_call_failures_total',
   help:
     'Failed Kubernetes calls in an McpServer reconcile that decide its published readiness, ' +
@@ -271,7 +279,10 @@ for (const site of MCPSERVER_VERDICT_CALL_SITES) {
   }
 }
 
-/** Counts one failed verdict-deciding call; typed so a new label value cannot bypass the init. */
+/**
+ * Counts one failed verdict-deciding call. The counter is reachable only through
+ * this typed helper, so every label set it can emit is one the init above exposes.
+ */
 export function countMcpServerVerdictCallFailure(
   site: VerdictCallSite,
   outcome: VerdictCallOutcome
