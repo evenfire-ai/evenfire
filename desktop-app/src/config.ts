@@ -478,19 +478,6 @@ export function closeDesktopRuntimeConfigMutationAdmission(): void {
   runtimeConfigMutationAdmissionOpen = false
 }
 
-function installFileTransactionSync(transaction: RuntimeConfigFileTransaction): void {
-  assertRuntimeConfigAvailable()
-  const journalPath = path.join(runtimeConfigDirectoryPath(), RUNTIME_CONFIG_TRANSACTION_FILE)
-  writeFileAtomicSync(journalPath, JSON.stringify(transaction))
-  try {
-    applyFileTransactionSync(transaction)
-    fs.rmSync(journalPath)
-  } catch {
-    configMutationRecoveryRequired = true
-    throw new Error('runtime_config_commit_pending_recovery')
-  }
-}
-
 function withRuntimeConfigCommit<T>(operation: () => T): Promise<T> {
   const result = configMutationQueue.then(operation, operation)
   configMutationQueue = result.then(
