@@ -1,7 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { StatusBanner } from '@components/Common'
+import { GFS_PREVIEW_UPDATE_FAILED_MESSAGE } from '@constants/gfsPreview'
 import { GFS_VIDEO_PREVIEW_MAX_BYTES } from '@constants/gfsVideoPreview'
-import { describeGfsReadError } from '@lib/gfsGrantErrors'
+import { useInPlaceObjectUrl } from '@hooks/useInPlaceObjectUrl'
+import { describeGfsReadError, isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 import { assertGfsVideoPreviewSize } from '@lib/gfsVideoPreview'
 import type { GfsVideoPreviewBodyProps } from './types'
 
@@ -13,6 +15,7 @@ import type { GfsVideoPreviewBodyProps } from './types'
  */
 export function GfsVideoPreviewBody({
   byteLength,
+  contentVersion,
   fileName,
   gfsUri,
   mimeType,
@@ -24,8 +27,9 @@ export function GfsVideoPreviewBody({
 }: GfsVideoPreviewBodyProps) {
   const generatedTitleId = useId()
   const headingId = titleId ?? generatedTitleId
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [updateError, setUpdateError] = useState<string | null>(null)
+  const { url: previewUrl, publish, discard, hasContentFor } = useInPlaceObjectUrl(gfsUri)
   const onDownloadErrorRef = useRef(onDownloadError)
   const HeadingTag = `h${headingLevel}` as const
 
@@ -35,7 +39,6 @@ export function GfsVideoPreviewBody({
 
   useEffect(() => {
     let active = true
-    let objectUrl: string | null = null
 
     const loadPreview = async () => {
       try {
@@ -49,8 +52,9 @@ export function GfsVideoPreviewBody({
         )
         assertGfsVideoPreviewSize(bytes.byteLength)
         if (!active) return
-        objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }))
-        setPreviewUrl(objectUrl)
+        publish(gfsUri, new Blob([bytes], { type: mimeType }))
+        setPreviewError(null)
+        setUpdateError(null)
       } catch (error) {
         if (!active) return
         onDownloadErrorRef.current?.(error)
@@ -59,20 +63,29 @@ export function GfsVideoPreviewBody({
         // reaches the banner as "Error invoking remote method
         // 'gfs:downloadPreview': Error: 429 …"; every other verdict, including
         // the size guard and the download ceiling, passes through untouched.
-        setPreviewError(
+        const message =
           error instanceof Error
             ? describeGfsReadError(error).message
             : 'Could not load the video preview'
-        )
+        const rawMessage = error instanceof Error ? error.message : String(error)
+        // A rejected session fails closed even mid-reload: bytes fetched under it
+        // must not stay on screen. A per-resource 403/404 instead keeps the
+        // version already shown — losing access to this one file is decided by
+        // the authoritative resolve, which remounts this body.
+        if (isGfsSessionAuthorityFailure(rawMessage, 'operation')) {
+          discard()
+          setUpdateError(null)
+          setPreviewError(message)
+        } else if (hasContentFor(gfsUri)) setUpdateError(message)
+        else setPreviewError(message)
       }
     }
 
     void loadPreview()
     return () => {
       active = false
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, gfsUri, mimeType])
+  }, [byteLength, contentVersion, gfsUri, mimeType, discard, hasContentFor, publish])
 
   return (
     <>
@@ -87,6 +100,14 @@ export function GfsVideoPreviewBody({
       </header>
       <div className="da-gfs-video-preview-dialog__body">
         {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
+        {updateError && previewUrl && !previewError ? (
+          <div role="status">
+            <StatusBanner
+              tone="warn"
+              text={`${GFS_PREVIEW_UPDATE_FAILED_MESSAGE} ${updateError}`}
+            />
+          </div>
+        ) : null}
         {!previewError && !previewUrl ? (
           <div className="da-gfs-video-preview-dialog__loading" role="status">
             Loading video preview…

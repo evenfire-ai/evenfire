@@ -4821,11 +4821,12 @@ export function App() {
                             ) : null}
                             {pluginGfsPreview ? (
                               <GfsImagePreview
-                                key={`${pluginGfsPreview.gfsUri}:${pluginGfsPreview.reloadVersion}`}
+                                key={pluginGfsPreview.gfsUri}
                                 byteLength={pluginGfsPreview.bytes}
                                 fileName={pluginGfsPreview.name}
                                 gfsUri={pluginGfsPreview.gfsUri}
                                 mimeType={pluginGfsPreview.mimeType}
+                                reloadVersion={pluginGfsPreview.reloadVersion}
                                 unavailable={pluginGfsPreview.unavailable}
                                 onClose={closePluginGfsPreview}
                               />

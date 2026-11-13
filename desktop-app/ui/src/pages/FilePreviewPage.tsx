@@ -39,8 +39,9 @@ function isPerResourceAccessDenial(message: string): boolean {
  * design: it mounts the `Gfs*PreviewBody` matching the tab's `fileKind` (each
  * body owns its own fetch + size-guard) and wires the fail-closed behavior.
  *
- * Reload hookpoint (§3.B.3): `reloadToken` is the single lever that re-fetches
- * the body (via a `key` bump → remount). The change watcher (spec 02) is
+ * Reload hookpoint (§3.B.3): `reloadToken` re-fetches the body from scratch (via
+ * a `key` bump → remount); a newer server version (`reloadVersion`) is instead
+ * re-downloaded in place by the body. The change watcher (spec 02) is
  * deferred, so it stays INERT with respect to file changes — but it is already
  * CONNECTED to the authority signal for the R-4 security requirement (§3.B.5):
  * this tab does NOT close when access is revoked; instead the authority
@@ -347,9 +348,10 @@ export function FilePreviewPage({
     return () => window.removeEventListener('focus', onFocus)
   }, [revalidateAccess])
 
-  // Remounting the body on a reload bump discards any stale bytes and re-runs the
-  // fetch from scratch — the simplest correct "re-dispatch the fetch" (§3.B.3).
-  const bodyKey = `${gfsUri}:${reloadToken}:${reloadVersion ?? 0}`
+  // A manual refresh, a revoke, or an unavailable verdict remounts the body so no
+  // stale bytes survive (fail-closed). A newer server version only changes
+  // `contentVersion`, which the body re-downloads in place without remounting.
+  const bodyKey = `${gfsUri}:${reloadToken}:${unavailable}`
 
   return (
     <section className="page">
@@ -394,6 +396,7 @@ export function FilePreviewPage({
                 <GfsImagePreviewBody
                   key={bodyKey}
                   byteLength={byteLength}
+                  contentVersion={reloadVersion}
                   fileName={fileName}
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
@@ -407,6 +410,7 @@ export function FilePreviewPage({
                 <GfsMarkdownPreviewBody
                   key={bodyKey}
                   byteLength={byteLength}
+                  contentVersion={reloadVersion}
                   fileName={fileName}
                   gfsUri={gfsUri}
                   onDownloadError={handleDownloadError}
@@ -419,6 +423,7 @@ export function FilePreviewPage({
                 <GfsVideoPreviewBody
                   key={bodyKey}
                   byteLength={byteLength}
+                  contentVersion={reloadVersion}
                   fileName={fileName}
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}

@@ -7,6 +7,11 @@ import type { ReactNode } from 'react'
  */
 export type GfsMarkdownPreviewBodyProps = {
   byteLength: number
+  /**
+   * Bumped when the server publishes a newer version of the same file. The body
+   * re-downloads in place, keeping the current content until the new one lands.
+   */
+  contentVersion?: number
   fileName: string
   gfsUri: string
   onDownloadError?: (error: unknown) => void
