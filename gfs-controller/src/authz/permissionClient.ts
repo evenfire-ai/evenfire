@@ -8,6 +8,7 @@ import { DecisionCache, type PermissionEpoch } from "./cache";
 import { withDeadlineTransaction, type DeadlineBudget, type DeadlinePool } from "../db/deadlineQuery";
 import {
   Decision,
+  DENIED,
   GfsPermission,
   GrantRow,
   resolveDecision,
@@ -62,6 +63,11 @@ export interface AuthorizationRequest {
 
 export type AuthzQueryBudget = DeadlineBudget;
 
+/** A refused in-transaction decision, reported for durable audit after its transaction rolled back. */
+export type RefusedWithin =
+  | { denied: readonly AuthorizationRequest[] }
+  | { failed: readonly AuthorizationRequest[]; error: unknown };
+
 type PermissionDb = Queryable & DeadlinePool;
 
 function errMsg(err: unknown): string {
@@ -78,6 +84,20 @@ function subjectsKeyOf(subjects: string[]): string {
   return [...subjects].sort().join(",");
 }
 
+/**
+ * Intrinsic operator authority: every request is allowed with no store read.
+ * Still audited by the caller. Not cached: it is already O(1) from
+ * ctx.isOperator with no store round-trip to save.
+ */
+function operatorDecisions(ctx: AuthzContext, requests: readonly AuthorizationRequest[]): Decision[] {
+  return requests.map((): Decision => ({
+    allowed: true,
+    via: "operator",
+    matchedSubject: ctx.subjects.includes("operator:") ? "operator:" : null,
+    authorizationSource: "operator",
+  }));
+}
+
 /** PostgreSQL renders uuid values with hyphens while the HTTP surface uses RID. */
 function resourceLookupKey(resourceId: string): string {
   return resourceId.replaceAll("-", "").toLowerCase();
@@ -86,13 +106,17 @@ function resourceLookupKey(resourceId: string): string {
 /**
  * Permission-store authorization client (read path).
  *
- * FAIL CLOSED: any store error throws GfsError('not_mounted', 503) and is
- * audited as an error — gfsc NEVER falls back to the token's pathBindings (the
- * store is the source of truth). DENY BY DEFAULT: the absence of a matching
+ * FAIL CLOSED: in `authorize` / `authorizeMany` a store error throws
+ * GfsError('not_mounted', 503), or `precondition_failed` for a budgeted
+ * deadline or abort, and is audited as an error — gfsc NEVER falls back to the
+ * token's pathBindings (the store is the source of truth). `authorizeWithin`
+ * propagates a store error unchanged. DENY BY DEFAULT: the absence of a matching
  * grant or share denies. The cluster operator is the root of trust and is
  * allowed intrinsically (no stored grant). Every decision — allow, deny, or
  * error — emits an audit row; an audit-write failure propagates (no un-audited
- * op is served).
+ * op is served). `authorizeWithin` emits its rows in the caller's transaction;
+ * they persist only if it commits. A refused in-transaction decision (a deny or
+ * a store error) is recorded durably by `auditRefusedWithin` after the rollback.
  */
 export class PermissionClient {
   constructor(
@@ -111,11 +135,12 @@ export class PermissionClient {
   }
 
   /**
-   * Snapshot the invalidation state so a long-running mutation (copy) can prove,
-   * inside its writer transaction, that no revocation NOTIFY landed after it
-   * authorized. A client with no decision cache cannot hear invalidations at all,
-   * so it reports `bypassed: true` — the mutation then fails closed rather than
-   * publishing against an authorization it cannot re-confirm.
+   * Snapshot the invalidation state so a mutation can tell, inside its writer
+   * transaction, whether a revocation NOTIFY landed after it authorized. A client
+   * with no decision cache cannot hear invalidations at all, so it reports
+   * `bypassed: true`. Rather than publishing against an authorization it cannot
+   * re-confirm, copy then fails closed, and upload finalization re-decides on its
+   * transaction client (`authorizeWithin`).
    */
   permissionEpoch(): PermissionEpoch {
     if (!this.cache) return { generation: 0, bypassed: true };
@@ -139,12 +164,7 @@ export class PermissionClient {
     // is still audited (and a failing audit still propagates below). Not cached —
     // it is already O(1) from ctx.isOperator with no store round-trip to save.
     if (ctx.isOperator) {
-      const decisions = requests.map((): Decision => ({
-        allowed: true,
-        via: "operator",
-        matchedSubject: ctx.subjects.includes("operator:") ? "operator:" : null,
-        authorizationSource: "operator",
-      }));
+      const decisions = operatorDecisions(ctx, requests);
       await this.auditBatch(ctx, requests, decisions, budget);
       return decisions;
     }
@@ -165,29 +185,13 @@ export class PermissionClient {
 
     try {
       if (misses.length > 0) {
-        const snapshot = async (db: Queryable) => {
-          const ancestorMap = await this.ancestorsMany(db, ctx.drive, misses.map(({ request }) => request.resourceId));
-          const allAncestors = [...new Set([...ancestorMap.values()].flat())];
-          const grants = await this.grantsFor(db, ctx.drive, allAncestors, ctx.subjects);
-          const shares = await this.sharesFor(db, ctx.drive, allAncestors, ctx.subjects);
-          return { ancestorMap, grants, shares };
-        };
-        const { ancestorMap, grants, shares } = budget
-          ? await withDeadlineTransaction(this.db, budget, true, snapshot)
-          : await snapshot(this.db);
-        misses.forEach(({ index, request }) => {
-          const ancestors = ancestorMap.get(resourceLookupKey(request.resourceId)) ?? [];
-          const decision = ancestors.length === 0
-            ? { allowed: false, via: null, matchedSubject: null, authorizationSource: null } as Decision
-            : resolveDecision({
-                resourceId: ancestors[0],
-                ancestors,
-                subjects: new Set(ctx.subjects),
-                isOperator: false,
-                op: request.op,
-                grants,
-                shares,
-              });
+        const missRequests = misses.map(({ request }) => request);
+        const decide = (db: Queryable) => this.decideFromStore(db, ctx, missRequests);
+        const missDecisions = budget
+          ? await withDeadlineTransaction(this.db, budget, true, decide)
+          : await decide(this.db);
+        misses.forEach(({ index, request }, missIndex) => {
+          const decision = missDecisions[missIndex];
           decisions[index] = decision;
           this.cache?.set({ subjectsKey: subjectKey, ...request }, decision);
         });
@@ -195,32 +199,7 @@ export class PermissionClient {
     } catch (err) {
       // Fail closed. Try to audit the error, but the store failure is what we
       // surface — never a pathBindings fallback, never a silent allow.
-      try {
-        const append = async (queryable?: Queryable) => {
-          for (const request of requests) await this.audit.record({
-            subject: ctx.primarySubject,
-            ...auditAttribution(ctx),
-            op: request.op,
-            resourceId: request.resourceId,
-            drive: ctx.drive,
-            outcome: "error",
-            reason: errMsg(err),
-            requestId: ctx.requestId,
-            recordType: "authorization_decision",
-            matchedSubject: null,
-            authorizationSource: null,
-            cachedAuthorizationSource: null,
-            mutationOutcome: null,
-          }, queryable);
-        };
-        if (budget) await withDeadlineTransaction(this.db, budget, false, append);
-        else await append();
-      } catch (auditErr) {
-        console.error(
-          `[gfsc] failed to audit a store-error denial (subject=${ctx.primarySubject}, ` +
-            `request=${ctx.requestId ?? "unknown"}): ${errMsg(auditErr)}`
-        );
-      }
+      await this.auditStoreError(ctx, requests, err, budget);
       if ((err instanceof GfsError && err.code === "precondition_failed")
         || (budget && ((err as { code?: string }).code === "57014"
           || budget.signal?.aborted
@@ -234,6 +213,112 @@ export class PermissionClient {
     budget?.signal?.throwIfAborted();
     await this.auditBatch(ctx, requests, complete, budget);
     return complete;
+  }
+
+  /**
+   * Re-decide `requests` for `ctx` from the permission store on `db`, a writer
+   * transaction's client. It reads ancestors, grants and shares on `db`, never on
+   * the client's own pool, and neither reads nor fills the decision cache: `db`
+   * may see the transaction's own uncommitted rows, so its decisions must not
+   * outlive it. Each decision is audited on `db`, so its row commits or rolls back
+   * with the publication it authorized. A store error propagates unchanged; the
+   * transactor maps deadlines.
+   */
+  async authorizeWithin(
+    db: Queryable,
+    ctx: AuthzContext,
+    requests: readonly AuthorizationRequest[]
+  ): Promise<Decision[]> {
+    if (requests.length === 0) {
+      throw new GfsError("internal", "authorizeWithin requires at least one request");
+    }
+    const decisions = ctx.isOperator
+      ? operatorDecisions(ctx, requests)
+      : await this.decideFromStore(db, ctx, requests);
+    for (let index = 0; index < requests.length; index += 1) {
+      const request = requests[index];
+      await this.auditDecision(ctx, request.resourceId, request.op, decisions[index], db);
+    }
+    return decisions;
+  }
+
+  /**
+   * Record durably a decision `authorizeWithin` refused inside a transaction that
+   * then rolled back, taking its in-transaction row with it. Call it after the
+   * transaction has ended, with no client held: it appends on the pool the rows
+   * `authorizeMany` would have written — one deny row per denied request, or one
+   * error row per request whose decision failed. A failed deny insert propagates;
+   * a failed error insert is logged, as in `authorizeMany`.
+   */
+  async auditRefusedWithin(ctx: AuthzContext, refusal: RefusedWithin): Promise<void> {
+    if ("error" in refusal) {
+      await this.auditStoreError(ctx, refusal.failed, refusal.error);
+      return;
+    }
+    for (const request of refusal.denied) {
+      await this.auditDecision(ctx, request.resourceId, request.op, DENIED);
+    }
+  }
+
+  /** Audit a store failure as one error row per request; an audit failure is logged. */
+  private async auditStoreError(
+    ctx: AuthzContext,
+    requests: readonly AuthorizationRequest[],
+    err: unknown,
+    budget?: AuthzQueryBudget
+  ): Promise<void> {
+    try {
+      const append = async (queryable?: Queryable) => {
+        for (const request of requests) await this.audit.record({
+          subject: ctx.primarySubject,
+          ...auditAttribution(ctx),
+          op: request.op,
+          resourceId: request.resourceId,
+          drive: ctx.drive,
+          outcome: "error",
+          reason: errMsg(err),
+          requestId: ctx.requestId,
+          recordType: "authorization_decision",
+          matchedSubject: null,
+          authorizationSource: null,
+          cachedAuthorizationSource: null,
+          mutationOutcome: null,
+        }, queryable);
+      };
+      if (budget) await withDeadlineTransaction(this.db, budget, false, append);
+      else await append();
+    } catch (auditErr) {
+      console.error(
+        `[gfsc] failed to audit a store-error denial (subject=${ctx.primarySubject}, ` +
+          `request=${ctx.requestId ?? "unknown"}): ${errMsg(auditErr)}`
+      );
+    }
+  }
+
+  /** Decide `requests` from the permission store read on `db`, in request order. */
+  private async decideFromStore(
+    db: Queryable,
+    ctx: AuthzContext,
+    requests: readonly AuthorizationRequest[]
+  ): Promise<Decision[]> {
+    const ancestorMap = await this.ancestorsMany(db, ctx.drive, requests.map(request => request.resourceId));
+    const allAncestors = [...new Set([...ancestorMap.values()].flat())];
+    const grants = await this.grantsFor(db, ctx.drive, allAncestors, ctx.subjects);
+    const shares = await this.sharesFor(db, ctx.drive, allAncestors, ctx.subjects);
+    return requests.map(request => {
+      const ancestors = ancestorMap.get(resourceLookupKey(request.resourceId)) ?? [];
+      return ancestors.length === 0
+        ? DENIED
+        : resolveDecision({
+            resourceId: ancestors[0],
+            ancestors,
+            subjects: new Set(ctx.subjects),
+            isOperator: false,
+            op: request.op,
+            grants,
+            shares,
+          });
+    });
   }
 
   private async auditBatch(

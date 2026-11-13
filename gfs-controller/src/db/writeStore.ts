@@ -198,6 +198,8 @@ function toDbResourceId(resourceId: string): string {
   return `${rid.slice(0, 8)}-${rid.slice(8, 12)}-${rid.slice(12, 16)}-${rid.slice(16, 20)}-${rid.slice(20)}`;
 }
 
+export type BeforePublicationHook = (signal?: AbortSignal) => Promise<void>;
+
 export interface CreateInput {
   drive: string;
   parentId: string;
@@ -207,7 +209,16 @@ export interface CreateInput {
   resourceId?: string;
   content?: GfsContent;
   mutation?: ManagedMutationContext;
-  /** Optional hook executed in the same transaction as resource publication. */
+  /**
+   * Optional hook that runs after the content is staged and before the
+   * publication transaction opens. It holds no client, so it may use the pool.
+   */
+  beforePublication?: BeforePublicationHook;
+  /**
+   * Optional hook executed in the same transaction as resource publication. It
+   * must run its statements on `client` and must not check out another pool
+   * client: the transaction holds the structure or row lock while it runs.
+   */
   onPublished?: (client: TxClient, resource: GfsResource, signal?: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
   deadlineAtMs?: number;
@@ -218,7 +229,16 @@ export interface ReplaceInput {
   ifMatch?: number;
   content: GfsContent;
   mutation?: ManagedMutationContext;
-  /** Optional hook executed in the same transaction as resource publication. */
+  /**
+   * Optional hook that runs after the content is staged and before the
+   * publication transaction opens. It holds no client, so it may use the pool.
+   */
+  beforePublication?: BeforePublicationHook;
+  /**
+   * Optional hook executed in the same transaction as resource publication. It
+   * must run its statements on `client` and must not check out another pool
+   * client: the transaction holds the structure or row lock while it runs.
+   */
   onPublished?: (client: TxClient, resource: GfsResource, signal?: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
   deadlineAtMs?: number;
@@ -296,6 +316,7 @@ export class GfsWriteService {
           } } : {}),
         })
         : null;
+      await input.beforePublication?.(input.signal);
       const created = await this.tx.transaction(async client => {
         input.signal?.throwIfAborted();
         await this.lockStructure(client, input.drive);
@@ -384,6 +405,7 @@ export class GfsWriteService {
         } } : {}),
       });
       staged = candidate;
+      await input.beforePublication?.(input.signal);
       const updated = await this.tx.transaction(async client => {
         input.signal?.throwIfAborted();
         const current = await this.lockResource(client, input.drive, resourceId);
