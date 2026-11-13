@@ -2396,8 +2396,9 @@ describe('FileExplorerTree — resource action menus', () => {
       expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
       const shareMenu = await screen.findByRole('menu', { name: `Share options for ${root.name}` })
-      expect(shareMenu).toBe(menu)
-      expect(screen.getAllByRole('menu')).toHaveLength(1)
+      expect(shareMenu).not.toBe(menu)
+      expect(screen.getByRole('menu', { name: `Actions for ${root.name}` })).toBe(menu)
+      expect(screen.getAllByRole('menu')).toHaveLength(2)
       fireEvent.click(
         within(shareMenu).getByRole('menuitem', {
           name: root.kind === 'directory' ? 'Copy folder ID' : 'Copy file ID',
@@ -2557,8 +2558,9 @@ describe('FileExplorerTree — resource action menus', () => {
     const menu = await screen.findByRole('menu', { name: `Actions for ${second.name}` })
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
     const shareMenu = await screen.findByRole('menu', { name: `Share options for ${second.name}` })
-    expect(shareMenu).toBe(menu)
-    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    expect(shareMenu).not.toBe(menu)
+    expect(screen.getByRole('menu', { name: `Actions for ${second.name}` })).toBe(menu)
+    expect(screen.getAllByRole('menu')).toHaveLength(2)
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
@@ -2857,7 +2859,9 @@ describe('FileExplorerTree — resource action menus', () => {
     const shareMenu = await screen.findByRole('menu', {
       name: 'Share options for pointer-target.md',
     })
-    expect(shareMenu).toBe(menu)
+    expect(shareMenu).not.toBe(menu)
+    expect(screen.getByRole('menu', { name: 'Actions for pointer-target.md' })).toBe(menu)
+    expect(screen.getAllByRole('menu')).toHaveLength(2)
     await user.click(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
@@ -3062,8 +3066,9 @@ describe('FileExplorerTree — resource action menus', () => {
     const menu = await screen.findByRole('menu', { name: 'Actions for Nested folder' })
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
     const shareMenu = await screen.findByRole('menu', { name: 'Share options for Nested folder' })
-    expect(shareMenu).toBe(menu)
-    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    expect(shareMenu).not.toBe(menu)
+    expect(screen.getByRole('menu', { name: 'Actions for Nested folder' })).toBe(menu)
+    expect(screen.getAllByRole('menu')).toHaveLength(2)
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy folder ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
@@ -3105,10 +3110,11 @@ describe('FileExplorerTree — resource action menus', () => {
     const fileMenu = await screen.findByRole('menu', { name: 'Actions for report.pdf' })
     fireEvent.click(within(fileMenu).getByRole('menuitem', { name: 'Share' }))
     const shareMenu = await screen.findByRole('menu', { name: 'Share options for report.pdf' })
-    expect(shareMenu).toBe(fileMenu)
-    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    expect(shareMenu).not.toBe(fileMenu)
+    expect(screen.getByRole('menu', { name: 'Actions for report.pdf' })).toBe(fileMenu)
+    expect(screen.getAllByRole('menu')).toHaveLength(2)
     expect(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
-    expect(within(fileMenu).queryByRole('menuitem', { name: 'Download' })).toBeNull()
+    expect(within(fileMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
     expect(within(shareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'Delete' })).toBeNull()

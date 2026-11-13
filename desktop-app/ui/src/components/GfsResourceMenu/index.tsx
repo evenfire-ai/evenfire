@@ -3,7 +3,6 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { IconButton, MenuItem } from '@components/Common'
 import {
-  IconChevronLeft,
   IconChevronRight,
   IconContexts,
   IconCopy,
@@ -100,6 +99,7 @@ export function GfsResourceMenu({
   onReplaceSelectionEnd,
   contextTargetRef,
   contextOpenRequest,
+  onSidebarMenuStateChange,
   actions,
   onManage,
   onCopyLink,
@@ -132,13 +132,49 @@ export function GfsResourceMenu({
     width: number
     maxHeight: number
   } | null>(null)
+  const [sidebarShareSize, setSidebarShareSize] = useState<{
+    width: number
+    maxHeight: number
+  } | null>(null)
   const returnFocusToShareRef = useRef(false)
+  const focusShareOnOpenRef = useRef(false)
+  const shareFocusWithinRef = useRef(false)
+  const pointerExitTimerRef = useRef<number | null>(null)
+  const menuStateRef = useRef({ open, shareOpen })
   const closeMenu = useCallback(() => {
+    if (pointerExitTimerRef.current !== null) {
+      window.clearTimeout(pointerExitTimerRef.current)
+      pointerExitTimerRef.current = null
+    }
     setOpen(false)
     setShareOpen(false)
     contextPointOffsetRef.current = null
     returnFocusToShareRef.current = false
+    focusShareOnOpenRef.current = false
   }, [])
+  useEffect(
+    () => () => {
+      if (pointerExitTimerRef.current !== null) {
+        window.clearTimeout(pointerExitTimerRef.current)
+        pointerExitTimerRef.current = null
+      }
+    },
+    []
+  )
+  const focusFirstShareChild = useCallback(() => {
+    const item = submenuRef.current?.querySelector<HTMLButtonElement>(
+      '[data-share-child="true"]:not(:disabled)'
+    )
+    if (item) {
+      item.focus()
+      shareFocusWithinRef.current = true
+    }
+  }, [])
+  const openShareForKeyboard = useCallback(() => {
+    focusShareOnOpenRef.current = true
+    if (shareOpen) focusFirstShareChild()
+    setShareOpen(true)
+  }, [focusFirstShareChild, shareOpen])
   const focusReturnTarget = useCallback(() => {
     if (triggerMode === 'context') {
       if (contextTargetRef?.current?.isConnected) {
@@ -221,7 +257,7 @@ export function GfsResourceMenu({
     const edgeInset = 8
     const gap = 6
     if (presentation === 'sidebar-context') {
-      const bounds = visibleSidebarBounds(trigger)
+      const bounds = visibleSidebarBounds(contextTargetRef?.current ?? trigger)
       if (!contextVisible || !bounds) {
         setPanelPosition(null)
         setOpen(false)
@@ -285,12 +321,16 @@ export function GfsResourceMenu({
     window.addEventListener('scroll', positionPanel, true)
     const resizeObserver =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(positionPanel)
-    const trigger = triggerMode === 'context' ? contextTargetRef?.current : triggerRef.current
+    const trigger =
+      presentation === 'sidebar-context' && triggerMode === 'context'
+        ? contextTargetRef?.current
+        : triggerRef.current
     const drive = trigger?.closest<HTMLElement>('.da-gfs-drive')
     if (trigger) resizeObserver?.observe(trigger)
     if (drive) resizeObserver?.observe(drive)
     if (presentation === 'sidebar-context') {
-      const sidebar = trigger?.closest<HTMLElement>('.left-nav')
+      const sidebarAnchor = contextTargetRef?.current ?? trigger
+      const sidebar = sidebarAnchor?.closest<HTMLElement>('.left-nav')
       if (sidebar) resizeObserver?.observe(sidebar)
     }
     if (panelRef.current) resizeObserver?.observe(panelRef.current)
@@ -318,6 +358,37 @@ export function GfsResourceMenu({
     const submenuRect = submenu.getBoundingClientRect()
     const edgeInset = 8
     const gap = 6
+    if (presentation === 'sidebar-context') {
+      // Context menus are portaled to document.body, so the Share button has
+      // no sidebar ancestor. Measure the real owning row instead.
+      const bounds = visibleSidebarBounds(contextTargetRef?.current ?? trigger)
+      const mainRect = panelRef.current?.getBoundingClientRect()
+      if (!bounds || !mainRect || !contextVisible) {
+        setShareOpen(false)
+        onContextUnavailable?.()
+        return
+      }
+      const left = mainRect.left + 48
+      const width = Math.min(232, bounds.right - edgeInset - left)
+      const maxHeight = Math.max(0, bounds.bottom - bounds.top - edgeInset * 2)
+      if (width <= 0 || maxHeight <= 0) {
+        closeMenu()
+        onContextUnavailable?.()
+        return
+      }
+      const maxTop = Math.max(
+        bounds.top + edgeInset,
+        bounds.bottom - edgeInset - Math.min(submenuRect.height, maxHeight)
+      )
+      const top = Math.min(Math.max(bounds.top + edgeInset, mainRect.top), maxTop)
+      setSidebarShareSize(current =>
+        current?.width === width && current.maxHeight === maxHeight ? current : { width, maxHeight }
+      )
+      setSubmenuPosition(current =>
+        current?.left === left && current.top === top ? current : { left, top }
+      )
+      return
+    }
     const viewportHeight = window.innerHeight
     const bounds = horizontalBounds(triggerRef.current ?? trigger, edgeInset)
     const opensLeft = triggerRect.right + gap + submenuRect.width > bounds.right
@@ -330,7 +401,7 @@ export function GfsResourceMenu({
     const top = Math.min(Math.max(edgeInset, triggerRect.top), maxTop)
 
     setSubmenuPosition({ left, top })
-  }, [])
+  }, [closeMenu, contextVisible, onContextUnavailable, presentation])
 
   useLayoutEffect(() => {
     if (!shareOpen) {
@@ -343,10 +414,17 @@ export function GfsResourceMenu({
     window.addEventListener('scroll', positionSubmenu, true)
     const resizeObserver =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(positionSubmenu)
-    const trigger = triggerRef.current
+    const trigger =
+      presentation === 'sidebar-context' && triggerMode === 'context'
+        ? contextTargetRef?.current
+        : triggerRef.current
     const drive = trigger?.closest<HTMLElement>('.da-gfs-drive')
     if (trigger) resizeObserver?.observe(trigger)
     if (drive) resizeObserver?.observe(drive)
+    if (presentation === 'sidebar-context') {
+      const sidebar = trigger?.closest<HTMLElement>('.left-nav')
+      if (sidebar) resizeObserver?.observe(sidebar)
+    }
     if (panelRef.current) resizeObserver?.observe(panelRef.current)
     if (shareTriggerRef.current) resizeObserver?.observe(shareTriggerRef.current)
     if (submenuRef.current) resizeObserver?.observe(submenuRef.current)
@@ -355,27 +433,112 @@ export function GfsResourceMenu({
       window.removeEventListener('scroll', positionSubmenu, true)
       resizeObserver?.disconnect()
     }
-  }, [panelPosition, positionSubmenu, shareOpen])
+  }, [contextTargetRef, panelPosition, positionSubmenu, presentation, shareOpen, triggerMode])
+
+  useLayoutEffect(() => {
+    menuStateRef.current = { open, shareOpen }
+  }, [open, shareOpen])
+
+  useLayoutEffect(() => {
+    if (presentation !== 'sidebar-context' || triggerMode !== 'context' || !contextOpenRequest) {
+      return
+    }
+    onSidebarMenuStateChange?.(contextOpenRequest.id, open, shareOpen)
+  }, [contextOpenRequest, onSidebarMenuStateChange, open, presentation, shareOpen, triggerMode])
+
+  const closeSidebarShareForPointerTarget = (target: EventTarget | null) => {
+    const next = target instanceof Node ? target : null
+    if (pointerExitTimerRef.current !== null) {
+      window.clearTimeout(pointerExitTimerRef.current)
+      pointerExitTimerRef.current = null
+    }
+    if (next && (shareTriggerRef.current?.contains(next) || submenuRef.current?.contains(next))) {
+      return
+    }
+    if (!next && presentation === 'sidebar-context') {
+      // Portal pointer transitions can report a null relatedTarget between the
+      // trigger and flyout. Let the paired enter event cancel this close first.
+      pointerExitTimerRef.current = window.setTimeout(() => {
+        pointerExitTimerRef.current = null
+        const focusWasInShare = Boolean(submenuRef.current?.contains(document.activeElement))
+        returnFocusToShareRef.current = false
+        if (focusWasInShare) shareTriggerRef.current?.focus()
+        setShareOpen(false)
+      }, 0)
+      return
+    }
+
+    const actionTarget =
+      next instanceof Element ? next.closest<HTMLButtonElement>('[data-gfs-action]') : null
+    const enteringMainAction = Boolean(
+      actionTarget &&
+      panelRef.current?.contains(actionTarget) &&
+      actionTarget !== shareTriggerRef.current
+    )
+    const focusWasInShare = Boolean(submenuRef.current?.contains(document.activeElement))
+    if (enteringMainAction || !next) shareFocusWithinRef.current = false
+    if (enteringMainAction && focusWasInShare) {
+      returnFocusToShareRef.current = false
+      if (actionTarget?.disabled) shareTriggerRef.current?.focus()
+      else actionTarget?.focus()
+    } else {
+      returnFocusToShareRef.current = false
+      if (focusWasInShare) shareTriggerRef.current?.focus()
+    }
+    setShareOpen(false)
+  }
 
   useEffect(() => {
     if (!open) return
     panelRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()
+    const trackFocusOwner = (event: FocusEvent) => {
+      if (presentation !== 'sidebar-context') return
+      shareFocusWithinRef.current = Boolean(
+        event.target instanceof Node && submenuRef.current?.contains(event.target)
+      )
+    }
+    document.addEventListener('focusin', trackFocusOwner)
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        if (shareOpen) {
+        const current = menuStateRef.current
+        if (current.shareOpen) {
           event.preventDefault()
-          returnFocusToShareRef.current = presentation === 'sidebar-context'
+          const focusWasInShare = Boolean(
+            presentation === 'sidebar-context' &&
+            submenuRef.current?.contains(document.activeElement)
+          )
+          returnFocusToShareRef.current = false
+          if (presentation !== 'sidebar-context' || focusWasInShare)
+            shareTriggerRef.current?.focus()
           setShareOpen(false)
-          if (presentation !== 'sidebar-context') shareTriggerRef.current?.focus()
         } else {
           closeMenu()
-          focusReturnTarget()
+          if (
+            presentation !== 'sidebar-context' ||
+            panelRef.current?.contains(document.activeElement)
+          )
+            focusReturnTarget()
         }
+        return
+      }
+      if (
+        event.key === 'ArrowLeft' &&
+        presentation === 'sidebar-context' &&
+        menuStateRef.current.shareOpen &&
+        contextVisible &&
+        (!isContextOwnerCurrent || isContextOwnerCurrent('open')) &&
+        !panelRef.current?.contains(event.target as Node) &&
+        !submenuRef.current?.contains(event.target as Node)
+      ) {
+        setShareOpen(false)
       }
     }
     window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeMenu, focusReturnTarget, open, presentation, shareOpen])
+    return () => {
+      document.removeEventListener('focusin', trackFocusOwner)
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [closeMenu, contextVisible, focusReturnTarget, isContextOwnerCurrent, open, presentation])
 
   useEffect(() => {
     if (open || !restoreTriggerAfterActionRef.current) return
@@ -406,14 +569,17 @@ export function GfsResourceMenu({
       }
       return
     }
-    ;(presentation === 'sidebar-context' ? panelRef.current : submenuRef.current)
-      ?.querySelector<HTMLButtonElement>(
-        presentation === 'sidebar-context'
-          ? '[data-share-child="true"]:not(:disabled)'
-          : '[role="menuitem"]:not(:disabled)'
-      )
+    if (presentation === 'sidebar-context') {
+      if (focusShareOnOpenRef.current) {
+        focusShareOnOpenRef.current = false
+        focusFirstShareChild()
+      }
+      return
+    }
+    submenuRef.current
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
       ?.focus()
-  }, [open, presentation, shareOpen])
+  }, [focusFirstShareChild, open, presentation, shareOpen])
 
   useEffect(() => {
     if (presentation !== 'sidebar-context') return
@@ -424,28 +590,27 @@ export function GfsResourceMenu({
     return () => input.removeEventListener('cancel', handleCancel)
   }, [onReplaceSelectionEnd, presentation])
 
-  const returnToMain = () => {
-    returnFocusToShareRef.current = presentation === 'sidebar-context'
-    setShareOpen(false)
-    if (presentation !== 'sidebar-context') shareTriggerRef.current?.focus()
-  }
-
   const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (!open) return
     if (event.key === 'ArrowRight' && event.target === shareTriggerRef.current) {
       event.preventDefault()
-      setShareOpen(true)
+      if (presentation === 'sidebar-context') openShareForKeyboard()
+      else setShareOpen(true)
       return
     }
     if (
       event.key === 'ArrowLeft' &&
       shareOpen &&
       (presentation === 'sidebar-context'
-        ? panelRef.current?.contains(document.activeElement)
+        ? panelRef.current?.contains(document.activeElement) ||
+          submenuRef.current?.contains(document.activeElement)
         : submenuRef.current?.contains(document.activeElement))
     ) {
       event.preventDefault()
-      returnToMain()
+      const focusWasInShare = Boolean(submenuRef.current?.contains(document.activeElement))
+      returnFocusToShareRef.current = presentation !== 'sidebar-context' && focusWasInShare
+      if (presentation === 'sidebar-context' && focusWasInShare) shareTriggerRef.current?.focus()
+      setShareOpen(false)
       return
     }
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
@@ -565,6 +730,21 @@ export function GfsResourceMenu({
             : []),
         ].filter(group => group.length > 0)
       : fallbackActionGroups
+  const shareProjectionKey = shareMenuChildren
+    .map(action => `${action.key}:${action.disabled ? 'disabled' : 'enabled'}`)
+    .join('|')
+  useLayoutEffect(() => {
+    if (
+      presentation !== 'sidebar-context' ||
+      !open ||
+      !shareOpen ||
+      !shareFocusWithinRef.current ||
+      submenuRef.current?.contains(document.activeElement)
+    ) {
+      return
+    }
+    focusFirstShareChild()
+  }, [focusFirstShareChild, open, presentation, shareOpen, shareProjectionKey])
   const sidebarPresentation = presentation === 'sidebar-context'
   const contextPanelAllowed =
     triggerMode !== 'context' ||
@@ -608,11 +788,7 @@ export function GfsResourceMenu({
                 className="da-gfs-resource-menu__panel"
                 ref={panelRef}
                 role="menu"
-                aria-label={
-                  sidebarPresentation && shareOpen
-                    ? `Share options for ${resourceName}`
-                    : `Actions for ${resourceName}`
-                }
+                aria-label={`Actions for ${resourceName}`}
                 data-presentation={sidebarPresentation ? 'sidebar-context' : undefined}
                 style={
                   panelPosition
@@ -627,120 +803,138 @@ export function GfsResourceMenu({
                 }
                 onKeyDown={handleMenuKeyDown}
               >
-                {sidebarPresentation && shareOpen ? (
-                  <>
-                    <MenuItem
-                      data-gfs-action="share-back"
-                      leadingIcon={<IconChevronLeft />}
-                      role="menuitem"
-                      onClick={returnToMain}
-                    >
-                      Back
-                    </MenuItem>
-                    <div className="da-gfs-resource-menu__share-heading" role="presentation">
-                      Share
-                    </div>
-                    {shareMenuChildren.map(action => (
+                {actionGroups.map((group, groupIndex) => (
+                  <Fragment key={`group-${groupIndex}`}>
+                    {groupIndex > 0 ? (
+                      <div className="da-gfs-resource-menu__separator" role="separator" />
+                    ) : null}
+                    {group.map(action => (
                       <MenuItem
-                        aria-expanded={undefined}
+                        aria-expanded={action.submenu ? shareOpen : undefined}
+                        aria-haspopup={action.submenu ? 'menu' : undefined}
+                        color={action.color}
                         data-gfs-action={action.key}
-                        data-share-child="true"
                         disabled={action.disabled}
                         key={action.key}
                         leadingIcon={action.icon}
                         role="menuitem"
+                        ref={action.submenu ? shareTriggerRef : undefined}
+                        trailingIcon={action.submenu ? <IconChevronRight /> : undefined}
+                        onMouseEnter={
+                          action.submenu
+                            ? () => {
+                                if (!sidebarPresentation) setShareOpen(true)
+                                else if (
+                                  contextVisible &&
+                                  (!isContextOwnerCurrent || isContextOwnerCurrent('open'))
+                                ) {
+                                  if (pointerExitTimerRef.current !== null) {
+                                    window.clearTimeout(pointerExitTimerRef.current)
+                                    pointerExitTimerRef.current = null
+                                  }
+                                  focusShareOnOpenRef.current = false
+                                  setShareOpen(true)
+                                }
+                              }
+                            : sidebarPresentation && shareOpen
+                              ? event => closeSidebarShareForPointerTarget(event.currentTarget)
+                              : undefined
+                        }
+                        onMouseLeave={
+                          sidebarPresentation && action.submenu && shareOpen
+                            ? event => closeSidebarShareForPointerTarget(event.relatedTarget)
+                            : undefined
+                        }
                         onClick={event => {
                           if (action.disabled) return
-                          runAction(action.onClick, event.detail === 0, action.key)
+                          if (action.submenu) {
+                            if (sidebarPresentation) {
+                              if (
+                                !contextVisible ||
+                                (isContextOwnerCurrent && !isContextOwnerCurrent('open'))
+                              ) {
+                                closeMenu()
+                                onContextUnavailable?.()
+                              } else if (event.detail === 0) openShareForKeyboard()
+                              else {
+                                focusShareOnOpenRef.current = true
+                                setShareOpen(true)
+                              }
+                            } else action.onClick()
+                          } else {
+                            if (sidebarPresentation && action.key === 'replace') {
+                              if (
+                                !contextVisible ||
+                                (isContextOwnerCurrent && !isContextOwnerCurrent('open'))
+                              ) {
+                                closeMenu()
+                                onContextUnavailable?.()
+                                return
+                              }
+                              onReplaceSelectionStart?.()
+                              runAction(action.onClick, event.detail === 0, action.key, 'replace')
+                            } else {
+                              runAction(action.onClick, event.detail === 0, action.key)
+                            }
+                          }
                         }}
                       >
                         {action.label}
                       </MenuItem>
                     ))}
-                  </>
-                ) : (
-                  actionGroups.map((group, groupIndex) => (
-                    <Fragment key={`group-${groupIndex}`}>
-                      {groupIndex > 0 ? (
-                        <div className="da-gfs-resource-menu__separator" role="separator" />
-                      ) : null}
-                      {group.map(action => (
-                        <MenuItem
-                          aria-expanded={action.submenu ? shareOpen : undefined}
-                          aria-haspopup={
-                            action.submenu && !sidebarPresentation ? 'menu' : undefined
-                          }
-                          color={action.color}
-                          data-gfs-action={action.key}
-                          disabled={action.disabled}
-                          key={action.key}
-                          leadingIcon={action.icon}
-                          role="menuitem"
-                          ref={action.submenu ? shareTriggerRef : undefined}
-                          trailingIcon={action.submenu ? <IconChevronRight /> : undefined}
-                          onMouseEnter={
-                            action.submenu && !sidebarPresentation
-                              ? () => setShareOpen(true)
-                              : undefined
-                          }
-                          onClick={event => {
-                            if (action.disabled) return
-                            if (action.submenu) {
-                              if (sidebarPresentation) {
-                                if (
-                                  !contextVisible ||
-                                  (isContextOwnerCurrent && !isContextOwnerCurrent('open'))
-                                ) {
-                                  closeMenu()
-                                  onContextUnavailable?.()
-                                } else setShareOpen(true)
-                              } else action.onClick()
-                            } else {
-                              if (sidebarPresentation && action.key === 'replace') {
-                                if (
-                                  !contextVisible ||
-                                  (isContextOwnerCurrent && !isContextOwnerCurrent('open'))
-                                ) {
-                                  closeMenu()
-                                  onContextUnavailable?.()
-                                  return
-                                }
-                                onReplaceSelectionStart?.()
-                                runAction(action.onClick, event.detail === 0, action.key, 'replace')
-                              } else {
-                                runAction(action.onClick, event.detail === 0, action.key)
-                              }
-                            }
-                          }}
-                        >
-                          {action.label}
-                        </MenuItem>
-                      ))}
-                    </Fragment>
-                  ))
-                )}
+                  </Fragment>
+                ))}
               </div>
-              {shareOpen && hasShareSubmenu && !sidebarPresentation ? (
+              {shareOpen && hasShareSubmenu ? (
                 <div
                   aria-label={`Share options for ${resourceName}`}
-                  className="da-gfs-resource-menu__submenu"
+                  className={`da-gfs-resource-menu__submenu${sidebarPresentation ? ' da-gfs-resource-menu__submenu--sidebar-context' : ''}`}
                   ref={submenuRef}
                   role="menu"
+                  data-presentation={sidebarPresentation ? 'sidebar-context' : undefined}
                   style={
                     submenuPosition
-                      ? { left: submenuPosition.left, top: submenuPosition.top }
+                      ? {
+                          left: submenuPosition.left,
+                          top: submenuPosition.top,
+                          ...(sidebarPresentation && sidebarShareSize
+                            ? {
+                                width: sidebarShareSize.width,
+                                maxHeight: sidebarShareSize.maxHeight,
+                              }
+                            : {}),
+                        }
                       : { left: 0, top: 0, visibility: 'hidden' }
                   }
                   onKeyDown={handleMenuKeyDown}
+                  onMouseLeave={
+                    sidebarPresentation
+                      ? event => closeSidebarShareForPointerTarget(event.relatedTarget)
+                      : undefined
+                  }
+                  onMouseEnter={
+                    sidebarPresentation
+                      ? () => {
+                          if (pointerExitTimerRef.current !== null) {
+                            window.clearTimeout(pointerExitTimerRef.current)
+                            pointerExitTimerRef.current = null
+                          }
+                        }
+                      : undefined
+                  }
                 >
                   {shareMenuChildren.map(action => (
                     <MenuItem
                       data-gfs-action={action.key}
+                      data-share-child={sidebarPresentation ? 'true' : undefined}
                       disabled={action.disabled}
                       key={action.key}
                       leadingIcon={action.icon}
                       role="menuitem"
-                      onClick={event => runAction(action.onClick, event.detail === 0, action.key)}
+                      onClick={event => {
+                        if (action.disabled) return
+                        runAction(action.onClick, event.detail === 0, action.key)
+                      }}
                     >
                       {action.label}
                     </MenuItem>

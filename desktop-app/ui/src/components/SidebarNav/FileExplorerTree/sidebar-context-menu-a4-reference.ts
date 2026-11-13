@@ -1,4 +1,4 @@
-// Contract oracle for r10 A4. Deliberately stores user-visible facts, not React state setters.
+// Contract oracle for r28 A4. Deliberately stores user-visible facts, not React state setters.
 export const initial = (): any => ({
   resource: null,
   rowMounted: false,
@@ -6,6 +6,7 @@ export const initial = (): any => ({
   view: 'main',
   panels: [],
   rect: null,
+  rects: [],
   sidebar: { left: 0, top: 0, right: 0, bottom: 0 },
   focus: null,
   activeItem: 0,
@@ -25,7 +26,7 @@ export const initial = (): any => ({
 })
 
 const mainItems = ['Share', 'Rename', 'Move to', 'Download', 'Replace file']
-const shareItems = ['Back', 'Share', 'Copy link', 'Copy ID']
+const shareItems = ['Share', 'Copy link', 'Copy ID']
 
 export function transition(s: any, e: any): any {
   const n = structuredClone(s)
@@ -40,19 +41,26 @@ export function transition(s: any, e: any): any {
     } else {
       n.menu = 'open'
       n.view = 'main'
-      n.panels = [`panel:${e.request}`]
+      n.panels = [`main:${e.request}`]
     }
     n.focus = `${e.resource}:first-enabled`
   } else if (e.type === 'share' && s.menu === 'open' && e.resource === s.resource) {
     n.view = 'share'
-    n.focus = `${s.resource}:share-first-enabled`
-    n.activeItem = 0
+    n.panels = s.panels.includes(`share:${s.request}`)
+      ? s.panels
+      : [...s.panels, `share:${s.request}`]
+    if (e.modality === 'keyboard' || e.modality === 'touch') {
+      n.focus = `${s.resource}:share-first-enabled`
+      n.activeItem = 0
+    }
   } else if (e.type === 'back' && s.menu === 'open' && s.view === 'share') {
     n.view = 'main'
+    n.panels = s.panels.filter((panel: string) => !panel.startsWith('share:'))
     n.focus = `${s.resource}:share-trigger`
   } else if (e.type === 'escape' && s.menu === 'open') {
     if (s.view === 'share') {
       n.view = 'main'
+      n.panels = s.panels.filter((panel: string) => !panel.startsWith('share:'))
       n.focus = `${s.resource}:share-trigger`
     } else {
       n.menu = 'closed'
@@ -141,6 +149,7 @@ export function transition(s: any, e: any): any {
   } else if (e.type === 'geometry') {
     n.sidebar = e.sidebar
     n.rect = e.rect
+    n.rects = e.rects ?? (e.rect ? [e.rect] : [])
     n.pending.delete(`observer:${e.id}`)
   } else if (e.type === 'schedule') {
     ;(e.kind === 'timer' ? n.timers : n.observers).add(e.id)
@@ -160,15 +169,23 @@ export function a4(s: any) {
   const rect = s.rect,
     box = s.sidebar
   return {
-    onePanel: open ? s.panels.length === 1 : s.panels.length === 0,
+    onePanel: open
+      ? s.panels.length === (s.view === 'share' ? 2 : 1) &&
+        s.panels.filter((panel: string) => panel.startsWith('main:')).length === 1 &&
+        s.panels.filter((panel: string) => panel.startsWith('share:')).length ===
+          (s.view === 'share' ? 1 : 0)
+      : s.panels.length === 0,
     correctView: open ? ['main', 'share'].includes(s.view) : true,
-    geometryContained:
-      open && rect
-        ? rect.left >= box.left &&
-          rect.right <= box.right &&
-          rect.top >= box.top &&
-          rect.bottom <= box.bottom
-        : !open,
+    geometryContained: open
+      ? s.rects.length > 0 &&
+        s.rects.every(
+          (panel: any) =>
+            panel.left >= box.left &&
+            panel.right <= box.right &&
+            panel.top >= box.top &&
+            panel.bottom <= box.bottom
+        )
+      : s.rects.length === 0,
     focusOwned: open
       ? typeof s.focus === 'string' && s.focus.startsWith(`${s.resource}:`)
       : s.focus === null || s.focus === 'row',

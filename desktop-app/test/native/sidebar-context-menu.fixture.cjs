@@ -52,8 +52,16 @@ app.whenReady().then(async () => {
         const value = element.getBoundingClientRect()
         return { left: value.left, top: value.top, right: value.right, bottom: value.bottom, width: value.width, height: value.height }
       }
-      const panel = document.querySelector('[role="menu"]')
-      return { sidebar: rect('.left-nav'), slot: rect('.sandbox-ui-embed-slot'), panel: panel ? { ...rect('[role="menu"]'), identity: window.__panelIdentity === panel || window.__keyboardPanelIdentity === panel } : null }
+      const main = document.querySelector('[aria-label="Actions for native-menu-file.md"]')
+      const share = document.querySelector('[aria-label="Share options for native-menu-file.md"]')
+      return {
+        sidebar: rect('.left-nav'),
+        slot: rect('.sandbox-ui-embed-slot'),
+        main: main ? { ...rect('[aria-label="Actions for native-menu-file.md"]'), identity: window.__mainPanelIdentity === main || window.__keyboardMainPanelIdentity === main } : null,
+        share: share ? { ...rect('[aria-label="Share options for native-menu-file.md"]'), identity: window.__sharePanelIdentity === share } : null,
+        separatePanels: Boolean(main && share && main !== share),
+        visibleMenus: document.querySelectorAll('[role="menu"]').length
+      }
     })()`)
     const assertNativeUnchanged = () => {
       assert.equal(
@@ -72,6 +80,10 @@ app.whenReady().then(async () => {
         'menu operations preserve native view visibility'
       )
       assert.equal(nativeVisible, true, 'the embedded WebContentsView is visible during the test')
+    }
+    const sendKey = keyCode => {
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode })
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode })
     }
     const openPointer = async () => {
       await window.webContents.executeJavaScript(`(() => {
@@ -101,53 +113,69 @@ app.whenReady().then(async () => {
 
     await openPointer()
     const main = await measure()
-    assert.equal(main.panel.left, main.sidebar.left + 8, 'main menu anchors to the sidebar edge')
+    assert.equal(main.main.left, main.sidebar.left + 8, 'main menu anchors to the sidebar edge')
     assert.ok(
-      main.panel.left >= main.sidebar.left && main.panel.right <= main.sidebar.right,
+      main.main.left >= main.sidebar.left && main.main.right <= main.sidebar.right,
       'main menu is fully inside the sidebar'
     )
     assert.ok(
-      main.panel.right <= nativeBounds.x,
+      main.main.right <= nativeBounds.x,
       'main menu does not intersect the native app surface'
     )
     await window.webContents.executeJavaScript(`(() => {
-      const panel = document.querySelector('[role="menu"]')
-      window.__panelIdentity = panel
-      panel.querySelector('[data-gfs-action="share"]').click()
+      window.__mainPanelIdentity = document.querySelector('[aria-label="Actions for native-menu-file.md"]')
+      const share = document.querySelector('[data-gfs-action="share"]')
+      const rect = share.getBoundingClientRect()
+      window.__shareTriggerPoint = { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }
     })()`)
+    const triggerPoint = await window.webContents.executeJavaScript('window.__shareTriggerPoint')
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: triggerPoint.x, y: triggerPoint.y })
     await waitFor(
       () =>
         window.webContents.executeJavaScript(
-          "document.querySelector('[role=menu]')?.getAttribute('aria-label') === 'Share options for native-menu-file.md'"
+          'Boolean(document.querySelector(\'[aria-label="Share options for native-menu-file.md"]\'))'
         ),
-      'in-place Share view'
+      'hovered Share flyout'
     )
     const share = await measure()
-    assert.equal(share.panel.identity, true, 'Share reuses the exact same popup DOM panel')
-    assert.deepEqual(
-      { left: share.panel.left, top: share.panel.top, width: share.panel.width },
-      { left: main.panel.left, top: main.panel.top, width: main.panel.width },
-      'Share retains the same menu anchor and width'
-    )
+    assert.equal(share.visibleMenus, 2, 'Main and Share are simultaneously mounted')
+    assert.equal(share.main.identity, true, 'Main retains its exact DOM panel')
+    assert.equal(share.separatePanels, true, 'Share is a separate panel identity')
+    assert.ok(share.share.left - share.main.left >= 44 && share.share.left - share.main.left <= 56)
+    assert.ok(share.share.left < share.main.right, 'Share overlaps the Main panel')
+    assert.ok(share.share.left > share.main.left, 'the leading Main icon strip stays visible')
+    assert.ok(share.share.right <= share.sidebar.right, 'Share remains in the sidebar')
     assert.ok(
-      share.panel.right <= nativeBounds.x,
+      share.share.right <= nativeBounds.x,
       'Share panel remains outside the native app surface'
     )
+    assert.equal(share.visibleMenus, 2)
     assertNativeUnchanged()
-
-    await window.webContents.executeJavaScript(
-      "document.querySelector('[data-gfs-action=share-back]').click()"
-    )
+    const flyoutPoint = await window.webContents.executeJavaScript(`(() => {
+      window.__sharePanelIdentity = document.querySelector('[aria-label="Share options for native-menu-file.md"]')
+      const rect = window.__sharePanelIdentity.getBoundingClientRect()
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }
+    })()`)
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: flyoutPoint.x, y: flyoutPoint.y })
     await waitFor(
       () =>
         window.webContents.executeJavaScript(
-          "document.querySelector('[role=menu]')?.getAttribute('aria-label') === 'Actions for native-menu-file.md'"
+          'Boolean(document.querySelector(\'[aria-label="Share options for native-menu-file.md"]\'))'
         ),
-      'Share Back'
+      'Share remains open while pointer enters its overlapping panel'
     )
-    await window.webContents.executeJavaScript(
-      "window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))"
+    assert.equal((await measure()).visibleMenus, 2, 'pointer transit does not flicker-close Share')
+    sendKey('ESC')
+    await waitFor(
+      () =>
+        window.webContents.executeJavaScript(
+          '!document.querySelector(\'[aria-label="Share options for native-menu-file.md"]\')'
+        ),
+      'Share overlay dismissal'
     )
+    assert.equal((await measure()).visibleMenus, 1, 'Escape leaves the Main menu open')
+    assertNativeUnchanged()
+    sendKey('ESC')
     await waitFor(
       () => window.webContents.executeJavaScript("!document.querySelector('[role=menu]')"),
       'main menu dismissal'
@@ -163,38 +191,41 @@ app.whenReady().then(async () => {
       'keyboard context menu'
     )
     await window.webContents.executeJavaScript(`(() => {
-      const panel = document.querySelector('[role="menu"]')
-      window.__keyboardPanelIdentity = panel
+      const panel = document.querySelector('[aria-label="Actions for native-menu-file.md"]')
+      window.__keyboardMainPanelIdentity = panel
       panel.querySelector('[data-gfs-action="share"]').focus()
-      panel.querySelector('[data-gfs-action="share"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
     })()`)
+    sendKey('RIGHT')
     await waitFor(
       () =>
         window.webContents.executeJavaScript(
-          "document.querySelector('[role=menu]')?.getAttribute('aria-label') === 'Share options for native-menu-file.md'"
+          'Boolean(document.querySelector(\'[aria-label="Share options for native-menu-file.md"]\'))'
         ),
       'keyboard Share navigation'
     )
     const keyboardShare = await measure()
-    assert.equal(keyboardShare.panel.identity, true, 'keyboard Share keeps the same panel')
+    assert.equal(keyboardShare.visibleMenus, 2, 'keyboard Share adds one flyout beside Main')
+    assert.equal(keyboardShare.main.identity, true, 'keyboard Share keeps the Main node mounted')
+    assert.equal(keyboardShare.separatePanels, true)
     assert.ok(
-      keyboardShare.panel.right <= nativeBounds.x,
+      keyboardShare.share.left - keyboardShare.main.left >= 44 &&
+        keyboardShare.share.left - keyboardShare.main.left <= 56
+    )
+    assert.ok(
+      keyboardShare.share.right <= nativeBounds.x,
       'keyboard Share stays outside the native app surface'
     )
     assertNativeUnchanged()
-    await window.webContents.executeJavaScript(
-      "window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))"
-    )
+    sendKey('ESC')
     await waitFor(
       () =>
         window.webContents.executeJavaScript(
-          "document.querySelector('[role=menu]')?.getAttribute('aria-label') === 'Actions for native-menu-file.md'"
+          '!document.querySelector(\'[aria-label="Share options for native-menu-file.md"]\')'
         ),
-      'Share Escape returns to main actions'
+      'Share Escape leaves Main mounted'
     )
-    await window.webContents.executeJavaScript(
-      "window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))"
-    )
+    assert.equal((await measure()).visibleMenus, 1)
+    sendKey('ESC')
     await waitFor(
       () => window.webContents.executeJavaScript("!document.querySelector('[role=menu]')"),
       'keyboard main menu dismissal'
@@ -206,9 +237,9 @@ app.whenReady().then(async () => {
         acceptance: 'sidebar context menu with live native WebContentsView',
         sidebar: snapshot.sidebar,
         nativeView: { id: nativeId, bounds: nativeBounds, visible: nativeVisible },
-        mainMenu: main.panel,
-        shareMenu: share.panel,
-        keyboardShare: keyboardShare.panel,
+        mainMenu: share.main,
+        shareMenu: share.share,
+        keyboardShare: keyboardShare.share,
         result: 'PASS',
       })
     )

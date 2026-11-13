@@ -125,6 +125,7 @@ function FileExplorerNode({
   onActivateFile,
   onResourceAction,
   onContextMenuRequest,
+  onContextMenuEscapeStateChange,
   isContextOwnerCurrent,
   clearContextOwner,
   clearContextOwnerForUnmount,
@@ -143,8 +144,20 @@ function FileExplorerNode({
   const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
   const owner = contextMenuOwner?.resourceId === node.resourceId ? contextMenuOwner : null
-  const ownerRequest = owner?.phase === 'open' ? owner.request : null
   const [resourceMenuOpen, setResourceMenuOpen] = useState(false)
+  const reportSidebarMenuState = useCallback(
+    (requestId: number, open: boolean, shareOpen: boolean) => {
+      if (owner?.request.id !== requestId) return
+      onContextMenuEscapeStateChange?.(requestId, {
+        phase: owner.phase,
+        menuOpen: open,
+        shareOpen,
+        admissionPending: owner.phase === 'open' && !open && !resourceMenuOpen,
+      })
+    },
+    [onContextMenuEscapeStateChange, owner, resourceMenuOpen]
+  )
+  const ownerRequest = owner?.phase === 'open' ? owner.request : null
   const rowLabelRef = useRef<HTMLButtonElement | null>(null)
   const touchStartRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
   const touchMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -691,6 +704,7 @@ function FileExplorerNode({
           isContextOwnerCurrent={isCurrentMenuOwner}
           onContextUnavailable={clearCurrentMenuOwner}
           onOpenChange={handleMenuOpenChange}
+          onSidebarMenuStateChange={reportSidebarMenuState}
           onReplaceSelectionStart={startCurrentReplace}
           onReplaceSelectionEnd={finishCurrentReplace}
           presentation="sidebar-context"
@@ -733,6 +747,7 @@ function FileExplorerNode({
               sessionGeneration={sessionGeneration}
               sidebarVisible={sidebarVisible}
               contextMenuOwner={contextMenuOwner}
+              onContextMenuEscapeStateChange={onContextMenuEscapeStateChange}
               onContextMenuRequest={onContextMenuRequest}
               isContextOwnerCurrent={isContextOwnerCurrent}
               clearContextOwner={clearContextOwner}
@@ -784,6 +799,7 @@ export function FileExplorerTree({
   onResourceAction,
   pushToast,
   sidebarVisible = true,
+  onContextMenuEscapeStateChange,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
   const queryClient = useQueryClient()
@@ -837,18 +853,33 @@ export function FileExplorerTree({
     sessionGeneration: ctrl.sessionGeneration,
   })
 
-  const setContextOwner = useCallback((owner: FileExplorerMenuOwner | null) => {
-    contextMenuOwnerRef.current = owner
-    setContextMenuOwner(owner)
-  }, [])
+  const setContextOwner = useCallback(
+    (owner: FileExplorerMenuOwner | null) => {
+      contextMenuOwnerRef.current = owner
+      setContextMenuOwner(owner)
+      if (owner) {
+        onContextMenuEscapeStateChange?.(owner.request.id, {
+          phase: owner.phase,
+          menuOpen: false,
+          shareOpen: false,
+          admissionPending: owner.phase === 'open',
+        })
+      }
+    },
+    [onContextMenuEscapeStateChange]
+  )
 
-  const clearContextOwner = useCallback((resourceId: string, requestId: number, force = false) => {
-    const current = contextMenuOwnerRef.current
-    if (!current || current.resourceId !== resourceId || current.request.id !== requestId) return
-    if (current.phase === 'replace' && !force) return
-    contextMenuOwnerRef.current = null
-    setContextMenuOwner(null)
-  }, [])
+  const clearContextOwner = useCallback(
+    (resourceId: string, requestId: number, force = false) => {
+      const current = contextMenuOwnerRef.current
+      if (!current || current.resourceId !== resourceId || current.request.id !== requestId) return
+      if (current.phase === 'replace' && !force) return
+      contextMenuOwnerRef.current = null
+      setContextMenuOwner(null)
+      onContextMenuEscapeStateChange?.(requestId, null)
+    },
+    [onContextMenuEscapeStateChange]
+  )
 
   const clearContextOwnerForUnmount = useCallback(
     (resourceId: string) => {
@@ -935,9 +966,11 @@ export function FileExplorerTree({
 
   useLayoutEffect(
     () => () => {
+      const current = contextMenuOwnerRef.current
       contextMenuOwnerRef.current = null
+      if (current) onContextMenuEscapeStateChange?.(current.request.id, null)
     },
-    []
+    [onContextMenuEscapeStateChange]
   )
 
   useEffect(() => {
@@ -1532,6 +1565,7 @@ export function FileExplorerTree({
               sessionGeneration={ctrl.sessionGeneration}
               sidebarVisible={sidebarVisible}
               contextMenuOwner={contextMenuOwner}
+              onContextMenuEscapeStateChange={onContextMenuEscapeStateChange}
               onContextMenuRequest={requestContextMenu}
               isContextOwnerCurrent={isContextOwnerCurrent}
               clearContextOwner={clearContextOwner}

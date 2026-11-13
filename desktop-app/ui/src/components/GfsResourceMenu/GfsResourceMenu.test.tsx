@@ -54,6 +54,7 @@ describe('GfsResourceMenu', () => {
     const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
     expect(menu.tagName).toBe('DIV')
     expect(menu.classList.contains('da-gfs-resource-menu__panel')).toBe(true)
+    expect(menu.getAttribute('data-presentation')).toBeNull()
     expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(2)
     expect(menu.querySelectorAll('.ui-menu-item__icon')).toHaveLength(4)
     const shareItem = within(menu).getByRole('menuitem', { name: 'Share' })
@@ -68,6 +69,7 @@ describe('GfsResourceMenu', () => {
 
     fireEvent.click(shareItem)
     const shareMenu = screen.getByRole('menu', { name: 'Share options for report.txt' })
+    expect(shareMenu.getAttribute('data-presentation')).toBeNull()
     expect(shareItem.getAttribute('aria-expanded')).toBe('true')
     expect(within(shareMenu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
     expect(within(shareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
