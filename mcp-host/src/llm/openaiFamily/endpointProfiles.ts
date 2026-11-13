@@ -43,6 +43,7 @@ export function officialOpenAIProfile(): EndpointProfile {
     createClient: officialClient,
     options: null,
     reasoningContent: false,
+    toolNameEnvelope: 'W',
     classify: null,
     visualLimits: (baseURL, operation) =>
       resolveOfficialVisualDeliveryLimits('openai', baseURL, operation),
@@ -104,6 +105,7 @@ export function azureProfile(env: ProviderEnvLookup = processEnvLookup): Endpoin
       ),
     options: null,
     reasoningContent: false,
+    toolNameEnvelope: 'W',
     classify: null,
     visualLimits: (baseURL, operation) =>
       resolveOfficialVisualDeliveryLimits('openai', baseURL, operation),
@@ -173,6 +175,9 @@ export function compatibleProfile(cfg: { id: string; baseURL: string }): Endpoin
     },
     // ZAI requires its reasoning to stay on assistant tool-call messages across a tool turn.
     reasoningContent: cfg.id === 'zai',
+    // No published limit for either: gemini fronts Gemini's backend and
+    // openrouter may route to Google, so both also need a letter or `_` first.
+    toolNameEnvelope: cfg.id === 'gemini' || cfg.id === 'openrouter' ? 'W_g' : 'W',
     classify: classifyNativeProviderCode,
     visualLimits: () => null,
     params: compatibleParamPolicy,
