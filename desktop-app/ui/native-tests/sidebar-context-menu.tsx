@@ -6,34 +6,18 @@ import { FileExplorerTree } from '@components/SidebarNav/FileExplorerTree'
 import '@styles/tokens.css'
 import '../src/styles.css'
 
-const resource = {
-  resourceId: 'native-sidebar-file',
-  rid: 'native-sidebar-file',
-  gfsUri: 'gfs://main/native-sidebar-file',
-  drive: 'main',
-  parentResourceId: null,
-  name: 'native-menu-file.md',
-  kind: 'file' as const,
-  path: '/native-menu-file.md',
-  version: 1,
-  bytes: 32,
-  readable: true,
-  sources: ['direct'],
-  permissions: ['read'],
-  coversDescendants: false,
-}
+const fixture = JSON.parse(new URL(window.location.href).searchParams.get('fixture') ?? 'null') as {
+  accessiblePage: Awaited<ReturnType<typeof window.clerum.gfs.listAccessible>>
+  affordances: Awaited<ReturnType<typeof window.clerum.gfs.affordances>>
+} | null
+if (!fixture) throw new Error('Native sidebar test requires producer-backed GFS data')
 
 const bridge = {
   auth: { getSessionGeneration: async () => 7 },
   gfs: {
-    listAccessible: async () => ({ items: [resource], nextCursor: null }),
+    listAccessible: async () => fixture.accessiblePage,
     listChildren: async () => ({ items: [], nextCursor: null }),
-    affordances: async () => ({
-      held: ['read', 'manage_acl', 'write'],
-      canDelegate: true,
-      grantableBits: ['read', 'write'],
-      canCreateShare: true,
-    }),
+    affordances: async () => fixture.affordances,
   },
 }
 ;(window as unknown as { clerum: unknown }).clerum = bridge

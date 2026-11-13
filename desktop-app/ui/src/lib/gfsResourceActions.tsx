@@ -34,8 +34,14 @@ export type GfsResourceActionId =
   | 'open-folder'
   | 'delete'
 
+export type CopyIdFocusRecovery = {
+  focusMismatchFallback: () => void
+  close: () => void
+}
+
 export type GfsResourceActionContext = {
   requestFileSelection?: () => void
+  copyIdFocusRecovery?: CopyIdFocusRecovery
 }
 
 export type GfsResourceActionHandler = (file?: File, context?: GfsResourceActionContext) => void

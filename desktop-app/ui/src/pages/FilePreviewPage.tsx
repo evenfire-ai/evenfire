@@ -13,6 +13,7 @@ import {
 } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import { copyGfsResourceId } from '@lib/gfsResourceClipboard'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
 import { useFilePreviewResourceActions } from './useFilePreviewResourceActions'
 
@@ -232,14 +233,11 @@ export function FilePreviewPage({
     }
   }, [gfsUri, pushToast])
 
-  const handleCopyRoute = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(gfsUri)
-      pushToast?.('File ID copied', 'success')
-    } catch (error) {
-      pushToast?.(`Could not copy the file ID: ${toMessage(error)}`, 'error')
-    }
-  }, [gfsUri, pushToast])
+  const handleCopyRoute = useCallback(
+    () =>
+      copyGfsResourceId(gfsUri, 'file', (message, tone) => pushToast?.(message, tone), toMessage),
+    [gfsUri, pushToast]
+  )
 
   const handleCopyContent = useCallback(async () => {
     const copy = copyContentRef.current

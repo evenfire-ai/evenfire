@@ -1,5 +1,5 @@
 import type { RefObject } from 'react'
-import type { GfsResourceAction } from '@lib/gfsResourceActions'
+import type { GfsResourceAction, GfsResourceActionContext } from '@lib/gfsResourceActions'
 
 export type GfsResourceMenuOpenRequest = {
   id: number
@@ -21,6 +21,11 @@ export type GfsResourceMenuProps = {
   onReplaceSelectionEnd?: () => void
   contextTargetRef?: RefObject<HTMLElement | null>
   contextOpenRequest?: GfsResourceMenuOpenRequest | null
+  onActionStart?: (
+    actionId: string,
+    keyboardActivated: boolean,
+    opener: HTMLElement | null
+  ) => GfsResourceActionContext | undefined
   actions?: GfsResourceAction[]
   onManage?: () => void
   onCopyLink?: () => void

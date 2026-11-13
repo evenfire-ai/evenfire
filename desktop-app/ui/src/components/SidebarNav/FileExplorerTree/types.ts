@@ -2,9 +2,13 @@ import type { DragEvent as ReactDragEvent } from 'react'
 import type { GfsResourceMenuOpenRequest } from '@components/GfsResourceMenu/types'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
-import type { GfsResourceActionId } from '@lib/gfsResourceActions'
+import type { CopyIdFocusRecovery, GfsResourceActionId } from '@lib/gfsResourceActions'
 import type { GfsDropVerdict } from '@/gfs/dragSession'
 import type { Tone } from '@/uiTypes'
+
+export type GfsResourceQuerySource =
+  | { kind: 'accessible' }
+  | { kind: 'children'; parentResourceId: string }
 
 export type FileExplorerMenuOwner = {
   resourceId: string
@@ -25,7 +29,19 @@ export interface FileExplorerTreeProps {
   /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void
   /** Run an action for the exact tree row, independent of the main-pane selection. */
-  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
+  onResourceAction: (
+    resource: GfsBrowserChild,
+    actionId: GfsResourceActionId,
+    file?: File,
+    renderedSessionGeneration?: number | null,
+    copyIdFocusRecovery?: CopyIdFocusRecovery,
+    querySource?: GfsResourceQuerySource
+  ) => void
+  onCopyIdFocusStart?: (
+    resource: GfsBrowserChild,
+    opener: HTMLButtonElement,
+    sessionGeneration: number | null
+  ) => CopyIdFocusRecovery | undefined
   /** Transient success/error feedback for the download fallback. */
   pushToast: (message: string, tone: Tone) => void
   /** False while the compact sidebar is hidden/inert. */
@@ -38,6 +54,8 @@ export interface FileExplorerNodeProps {
   level: number
   /** Cache-scope key shared with the Files page's TanStack queries. */
   scope: string
+  /** Exact query which produced this row, independent of its parent metadata. */
+  querySource: GfsResourceQuerySource
   /** Published main-process generation that owns this authority query. */
   sessionGeneration: number | null
   sidebarVisible: boolean
@@ -66,7 +84,19 @@ export interface FileExplorerNodeProps {
   onToggle: (resourceId: string) => void
   onActivateFolder: (node: GfsBrowserChild) => void
   onActivateFile: (node: GfsBrowserChild) => void
-  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
+  onResourceAction: (
+    resource: GfsBrowserChild,
+    actionId: GfsResourceActionId,
+    file?: File,
+    renderedSessionGeneration?: number | null,
+    copyIdFocusRecovery?: CopyIdFocusRecovery,
+    querySource?: GfsResourceQuerySource
+  ) => void
+  onCopyIdFocusStart?: (
+    resource: GfsBrowserChild,
+    opener: HTMLButtonElement,
+    sessionGeneration: number | null
+  ) => CopyIdFocusRecovery | undefined
   onContextMenuRequest: (
     node: GfsBrowserChild,
     clientX: number | null,

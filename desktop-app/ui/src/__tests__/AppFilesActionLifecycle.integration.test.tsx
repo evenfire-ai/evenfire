@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClientProvider } from '@tanstack/react-query'
 import {
   act,
@@ -12,9 +13,12 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
 import { DESKTOP_ROUTES } from '@constants/navigation'
+import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { installMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useNavigationController } from '@hooks/domain/useNavigationController'
 import { useNotificationsController } from '@hooks/domain/useNotificationsController'
 import { useAppController } from '@hooks/useAppController'
@@ -25,6 +29,7 @@ import {
   closeWorkspaceTab,
   createWorkspaceTabsState,
   newChatTab,
+  openAppTab,
   openChatTab,
   openFilesTab,
   openPreviewTab,
@@ -36,6 +41,7 @@ import { App } from '@/App'
 import {
   accessibleResource,
   childView,
+  downloadResult,
   listAccessiblePage,
   listChildrenPage,
   previewDownloadResult,
@@ -44,6 +50,8 @@ import {
   resolvedFile,
   resourceAffordances,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { listChildrenPaged } from '../../../../control-api/src/gfs/tree.js'
+import { type A01A4Input, evaluateA01A4 } from '../test-utils/a01CopyIdR17A4Oracle'
 
 type AppController = ReturnType<typeof useAppController>
 type WorkspaceState = AppController['workspaceTabs']
@@ -233,6 +241,9 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
   const isNavigationIntentCurrent = vi.fn(
     (sequence: number) => sequence === navigationIntentSequence
   )
+  const isSessionGenerationCurrent = vi.fn(
+    (generation: number | null) => generation === controller.sessionGeneration
+  )
   const selectWorkspaceTabById = vi.fn((id: string) => {
     if (!controller.workspaceTabs.tabs.some(tab => tab.id === id)) return false
     beginUserNavigationIntent()
@@ -301,6 +312,7 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
     navigationIntentSequence,
     beginUserNavigationIntent,
     isNavigationIntentCurrent,
+    isSessionGenerationCurrent,
     selectWorkspaceTabById,
     activateWorkspaceChatTab: noop,
     activeChatId: null,
@@ -402,14 +414,20 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
   return controller
 }
 
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
+type Deferred<T> = {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (reason?: unknown) => void
+}
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>(done => {
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((done, fail) => {
     resolve = done
+    reject = fail
   })
-  return { promise, resolve }
+  return { promise, resolve, reject }
 }
 
 type HarnessResource = Awaited<ReturnType<typeof resolvedFile>>
@@ -544,6 +562,132 @@ function renderApp() {
   )
 }
 
+async function renderActualA01App(
+  resources: Array<Awaited<ReturnType<typeof resolveResource>>>,
+  writeText: (text: string) => Promise<void>,
+  options: {
+    readable?: boolean
+    accessibleRows?: ReturnType<typeof accessibleResource>[]
+    operatorRootResourceId?: string
+    childRowsByParent?: Map<string, ReturnType<typeof childView>[]>
+  } = {}
+) {
+  const byUri = new Map(resources.map(resource => [resource.gfsUri, resource]))
+  const accessiblePage = await listAccessiblePage(
+    options.accessibleRows ??
+      resources.map(resource =>
+        Object.assign(
+          accessibleResource(
+            resource.resourceId,
+            resource.name,
+            resource.kind as 'file' | 'directory',
+            {
+              gfsUri: resource.gfsUri,
+              parentResourceId: resource.parentResourceId,
+              version: resource.version,
+            }
+          ),
+          { readable: options.readable ?? true }
+        )
+      )
+  )
+  const accessPage = options.operatorRootResourceId
+    ? {
+        ...accessiblePage,
+        rootResourceId: options.operatorRootResourceId,
+        view: 'operator' as const,
+      }
+    : accessiblePage
+  const sessionAuthority = {
+    authenticated: true,
+    generation: 1,
+    me: {
+      id: 'a01-user',
+      email: 'a01@example.test',
+      name: 'A01 User',
+      teamId: 'team-a',
+      teamName: 'Team A',
+    },
+  }
+  const { clerum } = installAppControllerClerum({
+    me: { teamId: 'team-a', teamName: 'Team A' },
+    teamDirectory: { items: [], currentTeamId: 'team-a' },
+    desktopEnvironmentHandoffProducer: {
+      getSessionState: async () => ({
+        authenticated: sessionAuthority.authenticated,
+        me: sessionAuthority.authenticated ? sessionAuthority.me : null,
+        sessionGeneration: sessionAuthority.generation,
+      }),
+      getSessionGeneration: () => sessionAuthority.generation,
+      getRuntimeConfigState: () => ({
+        configured: true,
+        isLocalhost: false,
+        selectorVisible: true,
+        activeOptionId: null,
+        currentConfig: undefined,
+        envKey: 'a01-environment',
+        storagePath: '/a01/runtime-configs',
+        options: [],
+      }),
+      selectRuntimeConfigForHandoff: async () => {
+        throw new Error('unused A01 probe boundary')
+      },
+      logout: async () => {
+        sessionAuthority.authenticated = false
+        sessionAuthority.generation += 1
+        return sessionAuthority.generation
+      },
+    },
+  })
+  const gfs = {
+    listAccessible: vi.fn(async () => accessPage),
+    listChildren: vi.fn(
+      async (resourceId: string) =>
+        await listChildrenPage(options.childRowsByParent?.get(resourceId) ?? [])
+    ),
+    affordances: vi.fn(async () => await resourceAffordances(['read', 'write'])),
+    download: vi.fn(async () => await downloadResult(resources[0]!)),
+    resolve: vi.fn(async (uri: string) => {
+      const resource = byUri.get(uri)
+      if (!resource) throw new Error(`unexpected GFS resolve: ${uri}`)
+      return resource
+    }),
+  }
+  Object.assign(clerum, {
+    gfs,
+    app: { rendererReady: vi.fn(async () => undefined) },
+    shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+    sandboxUi: {
+      onReleased: vi.fn(() => vi.fn()),
+      onSessionInvalidated: vi.fn(() => vi.fn()),
+      onDeepLink: vi.fn(() => vi.fn()),
+      listApps: vi.fn(async () => ({ apps: [] })),
+      listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
+      clearPendingDeepLinks: vi.fn(async () => 0),
+      acknowledgeDeepLink: vi.fn(async () => undefined),
+      setVisible: vi.fn(async () => undefined),
+      focusActive: vi.fn(async () => undefined),
+    },
+  })
+  const actual =
+    await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+  const realController: { current: AppController | null } = { current: null }
+  vi.mocked(useAppController).mockImplementation(() => {
+    realController.current = actual.useAppController()
+    return realController.current
+  })
+  render(
+    <QueryClientProvider client={desktopQueryClient}>
+      <AgentTaskTrackerProvider>
+        <App />
+      </AgentTaskTrackerProvider>
+    </QueryClientProvider>
+  )
+  await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+  await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+  return { controller: realController, gfs, clerum, writeText, sessionAuthority }
+}
+
 async function produceLatestSidebarSession() {
   const clerum = installMockClerum()
   await clerum.chat.create('agent-a', 'drawer-sidebar-session')
@@ -635,6 +779,37 @@ async function chooseRowAction(resourceName: string, actionName: string) {
     await screen.findByRole('menu', { name: `Share options for ${resourceName}` })
   }
   fireEvent.click(await screen.findByRole('menuitem', { name: actionName }))
+}
+
+async function chooseRowActionByKeyboard(resourceName: string, actionName: string) {
+  const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  const clipboardWriteText = clipboardDescriptor?.value?.writeText as
+    | Clipboard['writeText']
+    | undefined
+  const user = userEvent.setup()
+  if (clipboardDescriptor) {
+    Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
+  } else {
+    Reflect.deleteProperty(navigator, 'clipboard')
+  }
+  if (clipboardWriteText) expect(navigator.clipboard.writeText).toBe(clipboardWriteText)
+  const menu = await openRowActions(resourceName)
+  const shareTrigger = within(menu).getByRole('menuitem', { name: 'Share' })
+  shareTrigger.focus()
+  await user.keyboard('{ArrowRight}')
+  const submenu = await screen.findByRole('menu', { name: `Share options for ${resourceName}` })
+  const submenuItems = within(submenu).getAllByRole('menuitem')
+  const targetIndex = submenuItems.findIndex(item => item.textContent?.trim() === actionName)
+  if (targetIndex < 0) throw new Error(`Keyboard submenu action is unavailable: ${actionName}`)
+  for (let index = 0; index <= submenuItems.length; index += 1) {
+    if (document.activeElement === submenuItems[targetIndex]) break
+    await user.keyboard('{ArrowDown}')
+  }
+  await waitFor(() => expect(document.activeElement).toBe(submenuItems[targetIndex]))
+  await user.keyboard('{Enter}')
+  await waitFor(() =>
+    expect(screen.queryByRole('menu', { name: `Actions for ${resourceName}` })).toBeNull()
+  )
 }
 
 async function chooseFilesAction(resourceName: string, actionName: string) {
@@ -819,6 +994,1979 @@ afterEach(() => {
 })
 
 describe('App → Files action lifecycle integration', () => {
+  it('A01 model: Copy ID preserves Chat with the real controller', async () => {
+    const file = await resolveResource(
+      resolvedFile('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'a01-real-controller.txt')
+    )
+    const writeCalls: string[] = []
+    let scheduler!: Scheduler
+    const writeText = vi.fn(async (text: string) => {
+      writeCalls.push(text)
+      return scheduler
+        .schedule(Promise.resolve(text), 'clipboard write settlement')
+        .then(() => undefined)
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller: realController, gfs } = await renderActualA01App([file], writeText)
+    act(() => realController.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('chat')
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-real-controller\.txt/ })
+    type Model = {
+      invoked: boolean
+      expectedClipboard: string | null
+      expectedActiveKind: 'chat'
+    }
+    type Real = {
+      scheduler: Scheduler
+      invokeClickedCopy: () => Promise<void>
+    }
+    class InvokeCapturedCopy implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return !model.invoked
+      }
+
+      async run(model: Model, real: Real) {
+        await real.invokeClickedCopy()
+        model.invoked = true
+        model.expectedClipboard = file.gfsUri
+      }
+
+      toString() {
+        return 'invoke Copy ID for the captured resource'
+      }
+    }
+    const command = new InvokeCapturedCopy()
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands([fc.constant(command)], { maxCommands: 1, size: '+1' }),
+        async (activeScheduler, commands) => {
+          scheduler = activeScheduler
+          const model: Model = {
+            invoked: false,
+            expectedClipboard: null,
+            expectedActiveKind: 'chat',
+          }
+          const real: Real = {
+            scheduler: activeScheduler,
+            invokeClickedCopy: async () => {
+              await chooseRowAction(file.name, 'Copy file ID')
+              await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+              await activeScheduler.waitAll()
+            },
+          }
+          const generatedCommands = [...commands]
+          if (generatedCommands.length === 0) generatedCommands.push(command)
+          await fc.asyncModelRun(() => ({ model, real }), generatedCommands)
+
+          // Independent A4 oracle: the click target and owner contract define
+          // the expected bytes and active surface, not App's dispatch code.
+          expect(model.invoked).toBe(true)
+          expect(model.expectedClipboard).toBe(file.gfsUri)
+          expect(writeCalls).toEqual([file.gfsUri])
+          expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe(
+            model.expectedActiveKind
+          )
+          expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+          expect(gfs.download).not.toHaveBeenCalled()
+        }
+      ),
+      { numRuns: 1, seed: 281110 }
+    )
+  })
+
+  it('A01 copies from the sidebar while an embedded app remains active', async () => {
+    const file = await resolveResource(
+      resolvedFile('17171717171717171717171717171717', 'a01-while-app-active.md')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    act(() => {
+      controller.current?.setWorkspaceTabs(state =>
+        openAppTab(state, { id: 'a01-app-tab', appRef: 'a01-test-app', title: 'A01 test app' })
+      )
+    })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+        kind: 'app',
+        id: 'a01-app-tab',
+      })
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-while-app-active\.md/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+      kind: 'app',
+      id: 'a01-app-tab',
+    })
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it.each([
+    { kind: 'file', action: 'Copy file ID', name: 'a01-shared-root-file.md' },
+    { kind: 'folder', action: 'Copy folder ID', name: 'a01-shared-root-folder' },
+  ])(
+    'A01 copies an accessible root $kind with parent metadata while an embedded app remains active',
+    async ({ kind, action, name }) => {
+      const parentResourceId = 'abababababababababababababababab'
+      const resource = await resolveResource(
+        kind === 'file'
+          ? resolvedFile('18181818181818181818181818181818', name, { parentResourceId })
+          : resolvedDirectory('18181818181818181818181818181818', name, { parentResourceId })
+      )
+      const writeText = vi.fn(async (_text: string) => undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      const { controller, gfs } = await renderActualA01App([resource], writeText)
+      const scope = 'a01-environment:a01-user:team-a'
+      const accessibleKey = desktopQueryKeys.gfsAccessible(scope, 'main', 1)
+      const parentChildrenKey = desktopQueryKeys.gfsChildren(scope, parentResourceId, 'main', 1)
+
+      act(() => {
+        controller.current?.setWorkspaceTabs(state =>
+          openAppTab(state, {
+            id: 'a01-shared-app-tab',
+            appRef: 'a01-test-app',
+            title: 'A01 test app',
+          })
+        )
+      })
+      await waitFor(() =>
+        expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+          kind: 'app',
+          id: 'a01-shared-app-tab',
+        })
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      await screen.findByRole('treeitem', { name: new RegExp(name) })
+      await waitFor(() => {
+        expect(gfs.listAccessible).toHaveBeenCalled()
+        expect(
+          desktopQueryClient.getQueryCache().find({ queryKey: accessibleKey })?.state.data
+        ).toBeDefined()
+      })
+      expect(
+        desktopQueryClient.getQueryCache().find({ queryKey: parentChildrenKey })
+      ).toBeUndefined()
+      await chooseRowAction(resource.name, action)
+
+      expect(gfs.affordances).toHaveBeenCalledWith(resource.resourceId, 'main')
+      expect.soft(writeText).toHaveBeenCalledWith(resource.gfsUri)
+      expect.soft(writeText).toHaveBeenCalledTimes(1)
+      expect.soft(controller.current?.toasts).not.toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+        kind: 'app',
+        id: 'a01-shared-app-tab',
+      })
+      expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+      expect(gfs.download).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['settings', 'files'] as const)(
+    'A01 copies the same accessible root file with parent metadata while %s is active',
+    async surface => {
+      const resource = await resolveResource(
+        resolvedFile('19191919191919191919191919191919', `a01-root-${surface}.md`, {
+          parentResourceId: 'abababababababababababababababab',
+        })
+      )
+      const writeText = vi.fn(async (_text: string) => undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      const { controller } = await renderActualA01App([resource], writeText)
+
+      if (surface === 'settings') {
+        fireEvent.click(screen.getByTestId('nav-settings-menu'))
+        fireEvent.click(screen.getByTestId('nav-settings'))
+      } else {
+        fireEvent.click(screen.getByTestId('nav-files'))
+      }
+      await waitFor(() =>
+        expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe(surface)
+      )
+      const ownerTabId = activeWorkspaceTab(controller.current!.workspaceTabs)!.id
+      const explorerToggle = screen.getByTestId('nav-files-explorer-toggle')
+      if (explorerToggle.getAttribute('aria-expanded') !== 'true') {
+        fireEvent.click(explorerToggle)
+      }
+      await screen.findByRole('treeitem', { name: /a01-root-/ })
+
+      await chooseRowAction(resource.name, 'Copy file ID')
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(resource.gfsUri))
+      expect(writeText).toHaveBeenCalledTimes(1)
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+        kind: surface,
+        id: ownerTabId,
+      })
+      expect(
+        controller.current?.toasts.some(
+          toast => toast.text === 'This resource is no longer available from its parent folder.'
+        )
+      ).toBe(false)
+      expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+    }
+  )
+
+  it('A01 copies from the sidebar while Preview remains active', async () => {
+    const file = await resolveResource(
+      resolvedFile('20202020202020202020202020202020', 'a01-while-preview-active.md')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    act(() => {
+      controller.current?.setWorkspaceTabs(state =>
+        openPreviewTab(state, {
+          id: 'a01-preview-tab',
+          title: file.name,
+          gfsUri: file.gfsUri,
+          fileKind: 'markdown',
+          mimeType: 'text/markdown',
+          byteLength: 24,
+          resourceVersion: file.version,
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+        kind: 'preview',
+        id: 'a01-preview-tab',
+      })
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-while-preview-active\.md/ })
+    const downloadsBeforeCopy = gfs.download.mock.calls.length
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+      kind: 'preview',
+      id: 'a01-preview-tab',
+    })
+    expect(gfs.download).toHaveBeenCalledTimes(downloadsBeforeCopy)
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it('A01 copies the exact clicked folder ID from the sidebar', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('21212121212121212121212121212121', 'a01-folder-target')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([folder], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-folder-target/ })
+
+    await chooseRowAction(folder.name, 'Copy folder ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(folder.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(controller.current?.toasts).toContainEqual(
+      expect.objectContaining({ text: 'Folder ID copied', tone: 'success' })
+    )
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it('A01 model: A stays the clipboard target after selecting B', async () => {
+    const resourceA = await resolveResource(
+      resolvedFile('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'a01-a.txt')
+    )
+    const resourceB = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'a01-b.txt')
+    )
+    let scheduler!: Scheduler
+    const writeCalls: string[] = []
+    const settledValues: string[] = []
+    const writeText = vi.fn(async (text: string) => {
+      writeCalls.push(text)
+      const settlement = scheduler.schedule(Promise.resolve(text), 'clipboard settlement')
+      void settlement.then(value => settledValues.push(value))
+      return settlement.then(() => undefined)
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([resourceA, resourceB], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-a\.txt/ })
+    await screen.findByRole('treeitem', { name: /a01-b\.txt/ })
+
+    type Model = {
+      copiedUri: string | null
+      selectedUri: string | null
+      invoked: boolean
+    }
+    type Real = {
+      scheduler: Scheduler
+      copyA: () => Promise<void>
+      selectB: () => Promise<void>
+    }
+    class CopyClickedA implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return model.copiedUri === null
+      }
+
+      async run(model: Model, real: Real) {
+        await real.copyA()
+        model.copiedUri = resourceA.gfsUri
+        model.invoked = true
+      }
+
+      toString() {
+        return 'click Copy ID on row A'
+      }
+    }
+    class SelectB implements AsyncCommand<Model, Real> {
+      check(model: Readonly<Model>) {
+        return model.selectedUri === null
+      }
+
+      async run(model: Model, real: Real) {
+        await real.selectB()
+        model.selectedUri = resourceB.gfsUri
+      }
+
+      toString() {
+        return 'select row B'
+      }
+    }
+    const copyA = new CopyClickedA()
+    const selectB = new SelectB()
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands([fc.constantFrom(copyA, selectB)], { maxCommands: 2, size: '+1' }),
+        async (activeScheduler, generated) => {
+          scheduler = activeScheduler
+          const model: Model = { copiedUri: null, selectedUri: null, invoked: false }
+          const real: Real = {
+            scheduler: activeScheduler,
+            copyA: async () => {
+              await chooseRowAction(resourceA.name, 'Copy file ID')
+              await waitFor(() => expect(writeCalls).toHaveLength(1))
+            },
+            selectB: async () => {
+              fireEvent.click(await screen.findByRole('button', { name: resourceB.name }))
+              await waitFor(() =>
+                expect(activeWorkspaceTab(controller.current!.workspaceTabs)).toMatchObject({
+                  kind: 'preview',
+                  preview: { gfsUri: resourceB.gfsUri },
+                })
+              )
+            },
+          }
+          const commands = [...generated]
+          if (!commands.some(command => command instanceof CopyClickedA)) commands.push(copyA)
+          if (!commands.some(command => command instanceof SelectB)) commands.push(selectB)
+          await fc.asyncModelRun(() => ({ model, real }), commands)
+          await activeScheduler.waitAll()
+
+          // Independent event model: selected-row state and click-bound target
+          // are distinct. The user event itself supplies the URI expectation.
+          expect(model.copiedUri).toBe(resourceA.gfsUri)
+          expect(model.selectedUri).toBe(resourceB.gfsUri)
+          expect(model.invoked).toBe(true)
+          expect(writeCalls).toEqual([resourceA.gfsUri])
+          expect(settledValues).toEqual([resourceA.gfsUri])
+          expect(gfs.download).not.toHaveBeenCalled()
+          expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+        }
+      ),
+      { numRuns: 1, seed: 281111 }
+    )
+  })
+
+  it.each([
+    {
+      outcome: 'fulfillment',
+      write: async (_text: string) => undefined,
+      toast: { text: 'File ID copied', tone: 'success' },
+    },
+    {
+      outcome: 'rejection',
+      write: async (_text: string) => {
+        throw new Error('clipboard unavailable')
+      },
+      toast: { text: 'Could not copy the file ID: clipboard unavailable', tone: 'error' },
+    },
+  ])('A01 preserves Files feedback on clipboard $outcome', async ({ write, toast }) => {
+    const file = await resolveResource(
+      resolvedFile('cccccccccccccccccccccccccccccccc', 'a01-feedback.txt')
+    )
+    const writeText = vi.fn(write)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-feedback\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(expect.objectContaining(toast))
+    )
+    expect(writeText).toHaveBeenCalledWith(file.gfsUri)
+  })
+
+  it('A01 cancels a queued copy before invocation after session revocation', async () => {
+    const file = await resolveResource(
+      resolvedFile('dddddddddddddddddddddddddddddddd', 'a01-before-logout.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs, sessionAuthority } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-before-logout\.txt/ })
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    gfs.affordances.mockImplementation(async () => {
+      return pendingPermission.promise
+    })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(file.resourceId, 'main'))
+    await act(async () => controller.current?.handleLogout())
+    expect(sessionAuthority).toMatchObject({ authenticated: false, generation: 2 })
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+    )
+  })
+
+  it('A01 leaves an invoked clipboard write to settle naturally after logout', async () => {
+    const file = await resolveResource(
+      resolvedFile('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'a01-after-logout.txt')
+    )
+    const pendingClipboard = deferred<void>()
+    const calls: string[] = []
+    let settledText: string | null = null
+    const writeText = vi.fn(async (text: string) => {
+      calls.push(text)
+      await pendingClipboard.promise
+      settledText = text
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, sessionAuthority } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-after-logout\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(calls).toEqual([file.gfsUri]))
+    await act(async () => controller.current?.handleLogout())
+    expect(sessionAuthority).toMatchObject({ authenticated: false, generation: 2 })
+    expect(settledText).toBeNull()
+    await act(async () => {
+      pendingClipboard.resolve()
+      await pendingClipboard.promise
+    })
+    await waitFor(() => expect(settledText).toBe(file.gfsUri))
+    expect(calls).toEqual([file.gfsUri])
+  })
+
+  it('A01 preserves rejection feedback when an invoked write rejects after logout', async () => {
+    const file = await resolveResource(
+      resolvedFile('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'a01-after-logout-reject.txt')
+    )
+    const pendingClipboard = deferred<void>()
+    const writeText = vi.fn(async (_text: string) => pendingClipboard.promise)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-after-logout-reject\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    await act(async () => controller.current?.handleLogout())
+    await act(async () => {
+      pendingClipboard.reject(new Error('clipboard interrupted'))
+      await pendingClipboard.promise.catch(() => undefined)
+    })
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'Could not copy the file ID: clipboard interrupted',
+          tone: 'error',
+        })
+      )
+    )
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+    )
+    expect(writeText).toHaveBeenCalledTimes(1)
+  })
+
+  it('A01 cancels a batched route request before its React commit', async () => {
+    const file = await resolveResource(
+      resolvedFile('ffffffffffffffffffffffffffffffff', 'a01-batched.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    act(() => controller.current?.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    const chatTabId = controller.current!.workspaceTabs.activeTabId
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-batched\.txt/ })
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+
+    // A no-route copy request and a subsequent navigation intent share one
+    // React batch. The intent change must cancel the pending pre-invocation copy.
+    act(() => {
+      fireEvent.click(copyAction)
+      expect(controller.current?.selectWorkspaceTabById(chatTabId!)).toBe(true)
+    })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+    )
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    expect(writeText).not.toHaveBeenCalled()
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it('A01 keeps Copy ID eligible for an unreadable resource', async () => {
+    const file = await resolveResource(
+      resolvedFile('11111111111111111111111111111111', 'a01-unreadable.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText, { readable: false })
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-unreadable\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(gfs.download).not.toHaveBeenCalled()
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 rejects a clicked row removed from the live parent cache', async () => {
+    const file = await resolveResource(
+      resolvedFile('13131313131313131313131313131313', 'a01-removed-row.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-removed-row\.txt/ })
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+    const emptyPage = await listAccessiblePage([])
+
+    act(() => {
+      desktopQueryClient.setQueryData(
+        desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1),
+        { pages: [emptyPage], pageParams: [undefined] }
+      )
+      fireEvent.click(copyAction)
+    })
+
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 model probe: same URI identity with refreshed version remains copyable', async () => {
+    const file = await resolveResource(
+      resolvedFile('abababababababababababababababab', 'a01-version-v0.txt')
+    )
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-version-v0\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+
+    const refreshedPage = await listAccessiblePage([
+      accessibleResource(file.resourceId, 'a01-version-v1.txt', 'file', {
+        gfsUri: file.gfsUri,
+        parentResourceId: file.parentResourceId,
+        version: file.version + 1,
+      }),
+    ])
+    act(() => {
+      desktopQueryClient.setQueryData(
+        desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1),
+        { pages: [refreshedPage], pageParams: [undefined] }
+      )
+    })
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({
+        text: 'This resource is no longer available from its parent folder.',
+      })
+    )
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 model probe: changed URI is rejected and refreshes its exact parent query once', async () => {
+    const file = await resolveResource(
+      resolvedFile('acacacacacacacacacacacacacacacac', 'a01-uri-v0.txt', {
+        parentResourceId: 'abababababababababababababababab',
+      })
+    )
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-uri-v0\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+
+    const changedUri = `gfs://main/${'cd'.repeat(16)}`
+    const changedPage = await listAccessiblePage([
+      accessibleResource(file.resourceId, file.name, 'file', {
+        gfsUri: changedUri,
+        parentResourceId: file.parentResourceId,
+        version: file.version + 1,
+      }),
+    ])
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, { pages: [changedPage], pageParams: [undefined] })
+    )
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    {
+      field: 'resource ID',
+      row: (file: Awaited<ReturnType<typeof resolveResource>>) =>
+        accessibleResource('ea'.repeat(16), file.name, 'file', {
+          gfsUri: file.gfsUri,
+          parentResourceId: file.parentResourceId,
+          version: file.version,
+        }),
+    },
+    {
+      field: 'kind',
+      row: (file: Awaited<ReturnType<typeof resolveResource>>) =>
+        accessibleResource(file.resourceId, file.name, 'directory', {
+          gfsUri: file.gfsUri,
+          parentResourceId: file.parentResourceId,
+          version: file.version,
+        }),
+    },
+    {
+      field: 'parent binding',
+      row: (file: Awaited<ReturnType<typeof resolveResource>>, otherParentId: string) =>
+        accessibleResource(file.resourceId, file.name, 'file', {
+          gfsUri: file.gfsUri,
+          parentResourceId: otherParentId,
+          version: file.version,
+        }),
+    },
+  ])('A01 r17 rejects a changed $field without substituting the clicked URI', async testCase => {
+    const file = await resolveResource(
+      resolvedFile('ec'.repeat(16), `a01-binding-${testCase.field.replaceAll(' ', '-')}.txt`)
+    )
+    const otherParent = await resolveResource(resolvedDirectory('ed'.repeat(16), 'other-parent'))
+    const replacement = testCase.row(file, otherParent.resourceId)
+    const mismatchedPage = await listAccessiblePage([replacement])
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, {
+        pages: [mismatchedPage],
+        pageParams: [undefined],
+      })
+    )
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0))
+  })
+
+  it('A01 H1: linked-admin operator root Copy ID accepts omitted parent metadata', async () => {
+    const id = 'c4'.repeat(16)
+    const file = await resolveResource(resolvedFile(id, 'a01-operator-root.txt'))
+    const operatorPage = await listChildrenPaged(
+      {
+        listChildren: async () => [
+          {
+            resourceId: id,
+            name: file.name,
+            kind: 'file',
+            pathCache: `/${file.name}`,
+            bytes: 4,
+            version: 1,
+            updatedAt: '2026-11-13T00:00:00.000Z',
+          },
+        ],
+      },
+      'main',
+      'operator-root',
+      { limit: 20 }
+    )
+    const rawOperatorRoot = operatorPage.items[0]
+    expect(rawOperatorRoot).toBeDefined()
+    expect(rawOperatorRoot).not.toHaveProperty('parentResourceId')
+    const writeText = vi.fn(async (_uri: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    const { controller } = await renderActualA01App([file], writeText, {
+      accessibleRows: [rawOperatorRoot as unknown as ReturnType<typeof accessibleResource>],
+      operatorRootResourceId: 'c5'.repeat(16),
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    const toggle = screen.getByRole('button', { name: 'Collapse file explorer' })
+    const focusToggle = vi.spyOn(toggle, 'focus')
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await act(async () => Promise.resolve())
+
+    expect(writeText).toHaveBeenCalledOnce()
+    expect(writeText).toHaveBeenCalledWith(file.gfsUri)
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({
+        text: 'This resource is no longer available from its parent folder.',
+        tone: 'error',
+      })
+    )
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(focusToggle).not.toHaveBeenCalled()
+  })
+
+  it('A01 model probe: changed child URI refreshes only its exact parent query once', async () => {
+    const parent = await resolveResource(resolvedDirectory('ce'.repeat(16), 'a01-child-parent'))
+    const file = await resolveResource(
+      resolvedFile('cf'.repeat(16), 'a01-child-v0.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const clickedRow = childView(file.resourceId, file.name, 'file', {
+      gfsUri: file.gfsUri,
+      parentResourceId: parent.resourceId,
+      version: file.version,
+    })
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([parent, file], writeText, {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+          parentResourceId: null,
+          version: parent.version,
+        }),
+      ],
+      childRowsByParent: new Map([[parent.resourceId, [clickedRow]]]),
+    })
+    const queryKey = desktopQueryKeys.gfsChildren(
+      'a01-environment:a01-user:team-a',
+      parent.resourceId,
+      'main',
+      1
+    )
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const parentRow = await screen.findByRole('treeitem', { name: /a01-child-parent/ })
+    fireEvent.click(within(parentRow).getByRole('button', { name: /Expand a01-child-parent/ }))
+    await waitFor(() => expect(gfs.listChildren).toHaveBeenCalled())
+    await findResourceTreeRow(file.name)
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+
+    const changedRow = childView(file.resourceId, file.name, 'file', {
+      gfsUri: `gfs://main/${'d0'.repeat(16)}`,
+      parentResourceId: parent.resourceId,
+      version: file.version + 1,
+    })
+    const changedPage = await listChildrenPage([changedRow])
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, { pages: [changedPage], pageParams: [undefined] })
+    )
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(gfs.listChildren).toHaveBeenCalledTimes(2))
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 D4: focuses the explorer toggle before a mismatch refetch removes the row', async () => {
+    const parent = await resolveResource(resolvedDirectory('d1'.repeat(16), 'a01-focus-parent'))
+    const file = await resolveResource(
+      resolvedFile('d2'.repeat(16), 'a01-focus-child.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const clickedRow = childView(file.resourceId, file.name, 'file', {
+      gfsUri: file.gfsUri,
+      parentResourceId: parent.resourceId,
+      version: file.version,
+    })
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([parent, file], writeText, {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+          parentResourceId: null,
+          version: parent.version,
+        }),
+      ],
+      childRowsByParent: new Map([[parent.resourceId, [clickedRow]]]),
+    })
+    const queryKey = desktopQueryKeys.gfsChildren(
+      'a01-environment:a01-user:team-a',
+      parent.resourceId,
+      'main',
+      1
+    )
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const parentRow = await screen.findByRole('treeitem', { name: /a01-focus-parent/ })
+    const parentLabel = parentRow.querySelector<HTMLButtonElement>('.da-file-explorer__label')
+    expect(parentLabel).toBeTruthy()
+    fireEvent.click(within(parentRow).getByRole('button', { name: /Expand a01-focus-parent/ }))
+    const clickedLabel = (await findResourceTreeRow(file.name)).querySelector<HTMLButtonElement>(
+      '.da-file-explorer__label'
+    )
+    expect(clickedLabel).toBeTruthy()
+    const callsBeforeRefetch = gfs.listChildren.mock.calls.length
+    const pendingRefetch = deferred<Awaited<ReturnType<typeof listChildrenPage>>>()
+    gfs.listChildren.mockImplementation(async () =>
+      gfs.listChildren.mock.calls.length > callsBeforeRefetch
+        ? pendingRefetch.promise
+        : await listChildrenPage([clickedRow])
+    )
+    await chooseRowActionByKeyboard(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(document.activeElement).toBe(clickedLabel))
+
+    const changedRow = childView(file.resourceId, file.name, 'file', {
+      gfsUri: `gfs://main/${'d3'.repeat(16)}`,
+      parentResourceId: parent.resourceId,
+      version: file.version + 1,
+    })
+    const changedPage = await listChildrenPage([changedRow])
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, { pages: [changedPage], pageParams: [undefined] })
+    )
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    const toggle = screen.getByTestId('nav-files-explorer-toggle')
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(1))
+    expect(getResourceTreeRow(file.name)).not.toBeNull()
+    await waitFor(() => expect(document.activeElement).toBe(toggle))
+    await act(async () => pendingRefetch.resolve(await listChildrenPage([])))
+    await waitFor(() => expect(gfs.listChildren).toHaveBeenCalledTimes(callsBeforeRefetch + 1))
+    await waitFor(() => expect(getResourceTreeRow(file.name)).toBeNull())
+    await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0))
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(toggle)
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(controller.current?.toasts).toContainEqual(
+      expect.objectContaining({
+        text: 'This resource is no longer available from its parent folder.',
+        tone: 'error',
+      })
+    )
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 D3: restores focus when a root refresh removes the keyboard action opener', async () => {
+    const file = await resolveResource(resolvedFile('d4'.repeat(16), 'a01-root-removal-focus.txt'))
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const emptyPage = await listAccessiblePage([])
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const toggle = screen.getByTestId('nav-files-explorer-toggle')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-root-removal-focus\.txt/ })
+    await chooseRowActionByKeyboard(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    const opener = getResourceTreeRow(file.name)?.querySelector<HTMLButtonElement>(
+      '.da-file-explorer__label'
+    )
+    if (!opener) throw new Error('The keyboard Copy ID opener did not remain mounted')
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    const pendingRootRefresh = deferred<Awaited<ReturnType<typeof listAccessiblePage>>>()
+    gfs.listAccessible.mockImplementation(async () => pendingRootRefresh.promise)
+    let rootRefresh!: Promise<void>
+    act(() => {
+      rootRefresh = desktopQueryClient.invalidateQueries({
+        queryKey,
+        exact: true,
+        refetchType: 'active',
+      })
+    })
+    await waitFor(() => expect(gfs.listAccessible).toHaveBeenCalledTimes(2))
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, { pages: [emptyPage], pageParams: [undefined] })
+    )
+    await waitFor(() => expect(getResourceTreeRow(file.name)).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(toggle))
+    expect(toggle.isConnected).toBe(true)
+    expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(1)
+    expect(gfs.affordances).toHaveBeenCalledTimes(1)
+    expect(writeText).not.toHaveBeenCalled()
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+
+    await act(async () => {
+      pendingRootRefresh.resolve(emptyPage)
+      await pendingRootRefresh.promise
+      await rootRefresh
+    })
+    await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0))
+
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0))
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it.each(['timer-before-commit', 'commit-before-timer'] as const)(
+    'A01 r17 S14/S28: %s preserves connected focus across the real menu timer and row commit',
+    async order => {
+      const file = await resolveResource(
+        resolvedFile('d7'.repeat(16), `a01-menu-timer-${order}.txt`)
+      )
+      const emptyPage = await listAccessiblePage([])
+      const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+      const pendingRootRefresh = deferred<Awaited<ReturnType<typeof listAccessiblePage>>>()
+      const writeText = vi.fn(async (_text: string) => undefined)
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+      const { controller, gfs } = await renderActualA01App([file], writeText)
+      const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+      const toggle = screen.getByTestId('nav-files-explorer-toggle')
+      const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+      gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+      fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+      const row = await findResourceTreeRow(file.name)
+      const opener = row.querySelector<HTMLButtonElement>('.da-file-explorer__label')
+      if (!opener) throw new Error('The keyboard Copy ID opener did not mount')
+      opener.focus()
+
+      const user = userEvent.setup()
+      await user.keyboard('{Shift>}{F10}{/Shift}')
+      const menu = await screen.findByRole('menu', { name: `Actions for ${file.name}` })
+      const shareTrigger = within(menu).getByRole('menuitem', { name: 'Share' })
+      shareTrigger.focus()
+      await user.keyboard('{ArrowRight}')
+      const submenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+      const action = within(submenu).getByRole('menuitem', { name: 'Copy file ID' })
+      action.focus()
+      expect(document.activeElement).toBe(action)
+
+      const originalSetTimeout = window.setTimeout.bind(window)
+      const originalClearTimeout = window.clearTimeout.bind(window)
+      const focusTimerId = originalSetTimeout(() => undefined, 0)
+      let runMenuFocusReturn: (() => void) | null = null
+      const setTimeoutSpy = vi.spyOn(window, 'setTimeout').mockImplementation(((
+        handler: TimerHandler,
+        timeout?: number,
+        ...args: unknown[]
+      ) => {
+        if (
+          timeout === 0 &&
+          typeof handler === 'function' &&
+          handler.toString().includes('restoreTriggerAfterActionRef.current = false')
+        ) {
+          runMenuFocusReturn = () => handler(...args)
+          return focusTimerId
+        }
+        return originalSetTimeout(handler as (...callbackArgs: never[]) => void, timeout, ...args)
+      }) as typeof window.setTimeout)
+      const clearedTimers: unknown[] = []
+      const clearTimeoutSpy = vi.spyOn(window, 'clearTimeout').mockImplementation(handle => {
+        clearedTimers.push(handle)
+        originalClearTimeout(handle as NodeJS.Timeout | undefined)
+      })
+
+      // detail=0 is the browser click synthesized by keyboard activation; this invokes the
+      // production menu handler that arms its actual zero-delay focus-return effect.
+      fireEvent.click(action, { detail: 0 })
+      await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+      await waitFor(() =>
+        expect(screen.queryByRole('menu', { name: `Actions for ${file.name}` })).toBeNull()
+      )
+      expect(runMenuFocusReturn).toBeTypeOf('function')
+
+      const callsBeforeRootRefresh = gfs.listAccessible.mock.calls.length
+      gfs.listAccessible.mockImplementation(async () => pendingRootRefresh.promise)
+      let rootRefresh!: Promise<void>
+      act(() => {
+        rootRefresh = desktopQueryClient.invalidateQueries({
+          queryKey,
+          exact: true,
+          refetchType: 'active',
+        })
+      })
+      await waitFor(() =>
+        expect(gfs.listAccessible).toHaveBeenCalledTimes(callsBeforeRootRefresh + 1)
+      )
+
+      if (order === 'timer-before-commit') {
+        act(() => runMenuFocusReturn?.())
+        expect(document.activeElement).toBe(opener)
+      }
+
+      await act(async () => {
+        pendingRootRefresh.resolve(emptyPage)
+        await pendingRootRefresh.promise
+        await rootRefresh
+      })
+      await waitFor(() => expect(getResourceTreeRow(file.name)).toBeNull())
+      await waitFor(() => expect(document.activeElement).toBe(toggle))
+      expect(toggle.isConnected).toBe(true)
+
+      if (order === 'commit-before-timer') {
+        expect(clearedTimers).toContain(focusTimerId)
+        // A callback already dequeued when unmount cleanup runs cannot reclaim focus.
+        act(() => runMenuFocusReturn?.())
+        expect(document.activeElement).toBe(toggle)
+      }
+
+      gfs.listAccessible.mockImplementation(async () => emptyPage)
+      await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+      await waitFor(() =>
+        expect(controller.current?.toasts).toContainEqual(
+          expect.objectContaining({
+            text: 'This resource is no longer available from its parent folder.',
+            tone: 'error',
+          })
+        )
+      )
+      await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0))
+
+      expect(writeText).not.toHaveBeenCalled()
+      expect(invalidate).toHaveBeenCalledTimes(2)
+      expect(
+        invalidate.mock.calls.every(
+          ([filters]) =>
+            JSON.stringify(filters?.queryKey) === JSON.stringify(queryKey) &&
+            filters?.exact === true
+        )
+      ).toBe(true)
+      expect(document.activeElement).toBe(toggle)
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+      expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+      originalClearTimeout(focusTimerId)
+      setTimeoutSpy.mockRestore()
+      clearTimeoutSpy.mockRestore()
+    }
+  )
+
+  it('A01 D3 G2: ancestor removal restores focus while the clicked parent query remains valid', async () => {
+    const parent = await resolveResource(resolvedDirectory('d5'.repeat(16), 'a01-surviving-parent'))
+    const file = await resolveResource(
+      resolvedFile('d6'.repeat(16), 'a01-ancestor-focus-child.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const clickedRow = childView(file.resourceId, file.name, 'file', {
+      gfsUri: file.gfsUri,
+      parentResourceId: parent.resourceId,
+      version: file.version,
+    })
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([parent, file], writeText, {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+          parentResourceId: null,
+          version: parent.version,
+        }),
+      ],
+      childRowsByParent: new Map([[parent.resourceId, [clickedRow]]]),
+    })
+    const parentQueryKey = desktopQueryKeys.gfsAccessible(
+      'a01-environment:a01-user:team-a',
+      'main',
+      1
+    )
+    const toggle = screen.getByTestId('nav-files-explorer-toggle')
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const parentTreeRow = await screen.findByRole('treeitem', { name: /a01-surviving-parent/ })
+    fireEvent.click(
+      within(parentTreeRow).getByRole('button', { name: /Expand a01-surviving-parent/ })
+    )
+    await findResourceTreeRow(file.name)
+    await chooseRowActionByKeyboard(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    const opener = getResourceTreeRow(file.name)?.querySelector<HTMLButtonElement>(
+      '.da-file-explorer__label'
+    )
+    if (!opener) throw new Error('The keyboard Copy ID opener did not remain mounted')
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+
+    gfs.listAccessible.mockImplementation(async () => await listAccessiblePage([]))
+    await act(async () =>
+      desktopQueryClient.invalidateQueries({ queryKey: parentQueryKey, exact: true })
+    )
+    await waitFor(() => expect(getResourceTreeRow(parent.name)).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(toggle))
+    expect(toggle.isConnected).toBe(true)
+    expect(gfs.affordances).toHaveBeenCalledTimes(1)
+    expect(writeText).not.toHaveBeenCalled()
+
+    const laterFocus = screen.getByTestId('nav-chat')
+    laterFocus.focus()
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'File ID copied',
+          tone: 'success',
+        })
+      )
+    )
+    await waitFor(() =>
+      expect(desktopQueryClient.isFetching({ queryKey: parentQueryKey, exact: true })).toBe(0)
+    )
+    expect(document.activeElement).toBe(laterFocus)
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 r17 S35: an older D2 result cannot steal a newer keyboard Copy ID focus', async () => {
+    const first = await resolveResource(resolvedFile('d7'.repeat(16), 'a01-older-copy.txt'))
+    const second = await resolveResource(resolvedFile('d8'.repeat(16), 'a01-newer-copy.txt'))
+    const pendingFirstPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const pendingSecondPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const pendingFirstRefetch = deferred<Awaited<ReturnType<typeof listAccessiblePage>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([first, second], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(() =>
+      gfs.affordances.mock.calls.length === 1
+        ? pendingFirstPermission.promise
+        : pendingSecondPermission.promise
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-older-copy\.txt/ })
+    await screen.findByRole('treeitem', { name: /a01-newer-copy\.txt/ })
+    const callsBeforeRefetch = gfs.listAccessible.mock.calls.length
+    gfs.listAccessible.mockImplementation(async () =>
+      gfs.listAccessible.mock.calls.length > callsBeforeRefetch
+        ? pendingFirstRefetch.promise
+        : await listAccessiblePage([
+            accessibleResource(first.resourceId, first.name, 'file', {
+              gfsUri: first.gfsUri,
+              parentResourceId: first.parentResourceId,
+              version: first.version,
+            }),
+            accessibleResource(second.resourceId, second.name, 'file', {
+              gfsUri: second.gfsUri,
+              parentResourceId: second.parentResourceId,
+              version: second.version,
+            }),
+          ])
+    )
+
+    await chooseRowActionByKeyboard(first.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(first.resourceId, 'main'))
+    const mismatchedPage = await listAccessiblePage([
+      accessibleResource(first.resourceId, first.name, 'file', {
+        gfsUri: `gfs://main/${'d9'.repeat(16)}`,
+        parentResourceId: first.parentResourceId,
+        version: first.version + 1,
+      }),
+      accessibleResource(second.resourceId, second.name, 'file', {
+        gfsUri: second.gfsUri,
+        parentResourceId: second.parentResourceId,
+        version: second.version,
+      }),
+    ])
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, {
+        pages: [mismatchedPage],
+        pageParams: [undefined],
+      })
+    )
+    await act(async () => pendingFirstPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(gfs.listAccessible).toHaveBeenCalledTimes(callsBeforeRefetch + 1))
+
+    const newerOpener = getResourceTreeRow(second.name)?.querySelector<HTMLButtonElement>(
+      '.da-file-explorer__label'
+    )
+    expect(newerOpener).toBeTruthy()
+    await chooseRowActionByKeyboard(second.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(second.resourceId, 'main'))
+    await waitFor(() => expect(document.activeElement).toBe(newerOpener))
+
+    const currentPage = await listAccessiblePage([
+      accessibleResource(second.resourceId, second.name, 'file', {
+        gfsUri: second.gfsUri,
+        parentResourceId: second.parentResourceId,
+        version: second.version,
+      }),
+    ])
+    await act(async () => {
+      pendingFirstRefetch.resolve(currentPage)
+      await pendingFirstRefetch.promise
+    })
+    await waitFor(() => expect(getResourceTreeRow(first.name)).toBeNull())
+    await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0))
+    expect(document.activeElement).toBe(newerOpener)
+
+    await act(async () => pendingSecondPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(second.gfsUri))
+    expect(writeText.mock.calls.map(([uri]) => uri)).toEqual([second.gfsUri])
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(controller.current?.toasts).toContainEqual(
+      expect.objectContaining({
+        text: 'This resource is no longer available from its parent folder.',
+        tone: 'error',
+      })
+    )
+    expect(controller.current?.toasts).toContainEqual(
+      expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+    )
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it('A01 model probe: name-only refresh preserves canonical target identity', async () => {
+    const file = await resolveResource(
+      resolvedFile('adadadadadadadadadadadadadadadad', 'a01-name-before.txt')
+    )
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-name-before\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    const renamedPage = await listAccessiblePage([
+      accessibleResource(file.resourceId, 'a01-name-after.txt', 'file', {
+        gfsUri: file.gfsUri,
+        parentResourceId: file.parentResourceId,
+        version: file.version,
+      }),
+    ])
+    act(() =>
+      desktopQueryClient.setQueryData(
+        desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1),
+        { pages: [renamedPage], pageParams: [undefined] }
+      )
+    )
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({
+        text: 'This resource is no longer available from its parent folder.',
+      })
+    )
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 model probe: replacement resource ID is never substituted', async () => {
+    const file = await resolveResource(resolvedFile('b0'.repeat(16), 'a01-id-before.txt'))
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-id-before\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    const replacementId = 'b1'.repeat(16)
+    const page = await listAccessiblePage([
+      accessibleResource(replacementId, file.name, 'file', {
+        gfsUri: file.gfsUri,
+        parentResourceId: file.parentResourceId,
+        version: file.version,
+      }),
+    ])
+    act(() => desktopQueryClient.setQueryData(queryKey, { pages: [page], pageParams: [undefined] }))
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it('A01 model probe: changed kind is rejected and refreshes exact parent once', async () => {
+    const file = await resolveResource(resolvedFile('b2'.repeat(16), 'a01-kind-before.txt'))
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-kind-before\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    const page = await listAccessiblePage([
+      accessibleResource(file.resourceId, file.name, 'directory', {
+        gfsUri: file.gfsUri,
+        parentResourceId: file.parentResourceId,
+        version: file.version,
+      }),
+    ])
+    act(() => desktopQueryClient.setQueryData(queryKey, { pages: [page], pageParams: [undefined] }))
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it('A01 model probe: reparented target is rejected and refreshes clicked parent once', async () => {
+    const file = await resolveResource(resolvedFile('b3'.repeat(16), 'a01-parent-before.txt'))
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-parent-before\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    const page = await listAccessiblePage([
+      accessibleResource(file.resourceId, file.name, 'file', {
+        gfsUri: file.gfsUri,
+        parentResourceId: 'moved-parent',
+        version: file.version,
+      }),
+    ])
+    act(() => desktopQueryClient.setQueryData(queryKey, { pages: [page], pageParams: [undefined] }))
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it('A01 waits for the existing permission producer before writing', async () => {
+    const file = await resolveResource(
+      resolvedFile('14141414141414141414141414141414', 'a01-permission-pending.txt')
+    )
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-permission-pending\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    expect(writeText).not.toHaveBeenCalled()
+
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(file.gfsUri))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('A01 closes keyboard focus recovery after stable-identity clipboard success', async () => {
+    const file = await resolveResource(
+      resolvedFile('27272727272727272727272727272727', 'a01-focus-terminal-success.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const emptyPage = await listAccessiblePage([])
+    const changedPage = await listAccessiblePage([
+      accessibleResource(file.resourceId, `${file.name}.renamed`, 'file', {
+        gfsUri: file.gfsUri,
+        parentResourceId: file.parentResourceId,
+        version: file.version + 1,
+      }),
+    ])
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-focus-terminal-success\.txt/ })
+    await chooseRowActionByKeyboard(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    const opener = getResourceTreeRow(file.name)?.querySelector<HTMLButtonElement>(
+      '.da-file-explorer__label'
+    )
+    if (!opener) throw new Error('The keyboard Copy ID opener did not remain mounted')
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, { pages: [changedPage], pageParams: [undefined] })
+    )
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+      )
+    )
+    expect(writeText).toHaveBeenCalledWith(file.gfsUri)
+    expect(writeText).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({
+        text: 'This resource is no longer available from its parent folder.',
+        tone: 'error',
+      })
+    )
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, { pages: [emptyPage], pageParams: [undefined] })
+    )
+    await waitFor(() => expect(opener.isConnected).toBe(false))
+    await waitFor(() => expect(getResourceTreeRow(file.name)).toBeNull())
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('A01 closes keyboard focus recovery after permission failure', async () => {
+    const file = await resolveResource(
+      resolvedFile('28282828282828282828282828282828', 'a01-focus-terminal-permission.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const emptyPage = await listAccessiblePage([])
+    gfs.affordances.mockRejectedValue(new Error('permission unavailable'))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-focus-terminal-permission\.txt/ })
+    await chooseRowActionByKeyboard(file.name, 'Copy file ID')
+    const opener = getResourceTreeRow(file.name)?.querySelector<HTMLButtonElement>(
+      '.da-file-explorer__label'
+    )
+    if (!opener) throw new Error('The keyboard Copy ID opener did not remain mounted')
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({ tone: 'error', text: expect.stringContaining('permission') })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, { pages: [emptyPage], pageParams: [undefined] })
+    )
+    await waitFor(() => expect(opener.isConnected).toBe(false))
+    await waitFor(() => expect(getResourceTreeRow(file.name)).toBeNull())
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('A01 reports an existing authority error without invoking the clipboard', async () => {
+    const file = await resolveResource(
+      resolvedFile('22222222222222222222222222222222', 'a01-authority-error.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    gfs.affordances.mockRejectedValue(
+      new Error(
+        "Error invoking remote method 'gfs:affordances': Error: gfs download failed: 429: " +
+          'Too Many Requests retryAfterSeconds=7'
+      )
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-authority-error\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text:
+            'Could not verify permissions for a01-authority-error.txt: ' +
+            'Too many file requests — try again in 7s.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it('A01 rejects an old menu callback after synchronous session revocation', async () => {
+    const file = await resolveResource(
+      resolvedFile('15151515151515151515151515151515', 'a01-old-session.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, clerum } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+    const authBridge = clerum as unknown as {
+      auth: { onExternalLogout: ReturnType<typeof vi.fn> }
+    }
+    const onExternalLogout = authBridge.auth.onExternalLogout.mock.calls.at(-1)?.[0] as
+      | (() => void)
+      | undefined
+
+    expect(onExternalLogout).toBeTypeOf('function')
+    act(() => {
+      onExternalLogout?.()
+      fireEvent.click(copyAction)
+    })
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.isAuthenticated).toBe(false)
+  })
+
+  it('A01 rejects a stale generation before React publishes the replacement session', async () => {
+    const file = await resolveResource(
+      resolvedFile('18181818181818181818181818181818', 'a01-generation-replaced.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, sessionAuthority } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+    await waitFor(() =>
+      expect(
+        desktopQueryClient.getQueryData(
+          desktopQueryKeys.gfsAffordances(
+            'a01-environment:a01-user:team-a',
+            file.resourceId,
+            'main',
+            1
+          )
+        )
+      ).toBeTruthy()
+    )
+    sessionAuthority.generation = 2
+
+    await act(async () => {
+      const loading = controller.current!.loadSession({ preserveNav: true })
+      for (
+        let turn = 0;
+        turn < 10 && controller.current!.isSessionGenerationCurrent(1);
+        turn += 1
+      ) {
+        await Promise.resolve()
+      }
+      expect(controller.current!.isSessionGenerationCurrent(1)).toBe(false)
+      expect(controller.current?.isAuthenticated).toBe(true)
+      expect(
+        desktopQueryClient.getQueryData(
+          desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+        )
+      ).toBeTruthy()
+      expect(
+        desktopQueryClient.getQueryState(
+          desktopQueryKeys.gfsAffordances(
+            'a01-environment:a01-user:team-a',
+            file.resourceId,
+            'main',
+            1
+          )
+        )?.status
+      ).toBe('success')
+      expect(
+        controller.current!.isNavigationIntentCurrent(controller.current!.navigationIntentSequence)
+      ).toBe(true)
+      fireEvent.click(copyAction)
+      await loading
+    })
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.sessionGeneration).toBe(2)
+  })
+
+  it('A01 rejects a stale row callback during the real team-switch generation gap', async () => {
+    const file = await resolveResource(
+      resolvedFile('19191919191919191919191919191919', 'a01-team-switch-gap.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, clerum } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const menu = await openRowActions(file.name)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
+    const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
+    await waitFor(() =>
+      expect(
+        desktopQueryClient.getQueryData(
+          desktopQueryKeys.gfsAffordances(
+            'a01-environment:a01-user:team-a',
+            file.resourceId,
+            'main',
+            1
+          )
+        )
+      ).toBeTruthy()
+    )
+    const teamBridge = clerum as unknown as {
+      team: { switch: ReturnType<typeof vi.fn> }
+    }
+    const teamSwitch = deferred<{
+      authenticated: true
+      me: NonNullable<AppController['me']>
+      sessionGeneration: number
+    }>()
+    teamBridge.team.switch.mockReturnValue(teamSwitch.promise)
+
+    await act(async () => {
+      const switching = controller.current!.handleEnsureTeamContext({ teamId: 'team-b' })
+      teamSwitch.resolve({
+        authenticated: true,
+        me: { ...controller.current!.me!, teamId: 'team-b', teamName: 'team-b' },
+        sessionGeneration: 2,
+      })
+      for (
+        let turn = 0;
+        turn < 20 && controller.current!.isSessionGenerationCurrent(1);
+        turn += 1
+      ) {
+        await Promise.resolve()
+      }
+      expect(controller.current!.isSessionGenerationCurrent(1)).toBe(false)
+      expect(controller.current?.isAuthenticated).toBe(true)
+      expect(controller.current?.me?.teamId).toBe('team-a')
+      expect(copyAction.isConnected).toBe(true)
+      fireEvent.click(copyAction)
+      await switching
+    })
+
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it('A01 M1: retires pending Copy ID permission across completed team switches without changing tabs', async () => {
+    const file = await resolveResource(
+      resolvedFile('20202020202020202020202020202020', 'a01-team-switch-pending-copy.txt')
+    )
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs, clerum, sessionAuthority } = await renderActualA01App(
+      [file],
+      writeText
+    )
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    const teamBridge = clerum as unknown as {
+      team: { switch: ReturnType<typeof vi.fn> }
+    }
+    teamBridge.team.switch.mockImplementation(async (teamId: string) => {
+      sessionAuthority.me.teamId = teamId
+      sessionAuthority.generation += 1
+      return {
+        authenticated: true,
+        me: sessionAuthority.me,
+        sessionGeneration: sessionAuthority.generation,
+      }
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-team-switch-pending-copy\.txt/ })
+    const originalTabId = activeWorkspaceTab(controller.current!.workspaceTabs)?.id
+    const originalNavigationIntent = controller.current!.navigationIntentSequence
+    const originalSessionGeneration = controller.current!.sessionGeneration
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(file.resourceId, 'main'))
+
+    await act(async () => {
+      await controller.current!.handleEnsureTeamContext({ teamId: 'team-b' })
+      await controller.current!.handleEnsureTeamContext({ teamId: 'team-a' })
+    })
+    expect(controller.current?.me?.teamId).toBe('team-a')
+    expect(controller.current?.sessionGeneration).not.toBe(originalSessionGeneration)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.id).toBe(originalTabId)
+    expect(controller.current?.navigationIntentSequence).toBe(originalNavigationIntent)
+
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+    )
+    expect(
+      controller.current?.toasts.some(
+        toast => toast.tone === 'error' && toast.text.includes(file.name)
+      )
+    ).toBe(false)
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({
+        text: 'This resource is no longer available from its parent folder.',
+        tone: 'error',
+      })
+    )
+    expect(controller.current?.me?.teamId).toBe('team-a')
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.id).toBe(originalTabId)
+    expect(controller.current?.navigationIntentSequence).toBe(originalNavigationIntent)
+  })
+
+  it('A01 cancels a pending copy when a new tab intent commits', async () => {
+    const file = await resolveResource(
+      resolvedFile('16161616161616161616161616161616', 'a01-navigation-pending.txt')
+    )
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-navigation-pending\.txt/ })
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByTestId('nav-files'))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('files')
+    )
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({ text: 'File ID copied', tone: 'success' })
+    )
+  })
+
+  it('A01 limits clipboard effects to one per accepted click', async () => {
+    const file = await resolveResource(
+      resolvedFile('12121212121212121212121212121212', 'a01-repeat.txt')
+    )
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const { gfs } = await renderActualA01App([file], writeText)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-repeat\.txt/ })
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    await chooseRowAction(file.name, 'Copy file ID')
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2))
+    expect(writeText.mock.calls.map(([uri]) => uri)).toEqual([file.gfsUri, file.gfsUri])
+    expect(gfs.download).not.toHaveBeenCalled()
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
   it('keeps sidebar folder and file menus aligned with the shared action producer', async () => {
     const folder = await resolveResource(
       resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Parity folder')
@@ -2078,9 +4226,22 @@ describe('App → Files action lifecycle integration', () => {
       await waitFor(() => expect(clipboardWrite).toHaveBeenCalledTimes(clipboardCount))
       await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(linkCopyCount))
 
-      const filesOwnerId = activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id
+      let activeTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+      if (actionName === 'Copy file ID') {
+        expect(activeTab?.kind).toBe('chat')
+        expect(appHarness.controller.workspaceTabs.tabs.some(tab => tab.kind === 'files')).toBe(
+          false
+        )
+        act(() => appHarness.controller.openFilesSectionWithReceipt())
+        await waitFor(() =>
+          expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
+        )
+        activeTab = activeWorkspaceTab(appHarness.controller.workspaceTabs)
+      }
+
+      const filesOwnerId = activeTab?.id
       expect(filesOwnerId).toBeTruthy()
-      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
+      expect(activeTab?.kind).toBe('files')
       const counts = [download.mock.calls.length]
 
       for (const expectedCount of expectedDownloads.slice(1)) {
@@ -2592,7 +4753,7 @@ describe('App → Files action lifecycle integration', () => {
     }
     class ExplicitDeepLink implements AsyncCommand<Model, Real> {
       check(model: Model) {
-        return model.consumedSeed !== null && !model.explicit && !model.closed
+        return !model.explicit && !model.closed
       }
       async run(model: Model, real: Real) {
         act(() => appHarness.controller.openFilesSectionWithReceipt(real.archiveUri))
@@ -2629,7 +4790,6 @@ describe('App → Files action lifecycle integration', () => {
         )
         model.closed = true
         model.path = real.archiveUri
-        expect(model.requestId).toBeGreaterThan(0)
         expect(model.session).toBe(1)
         expect(model.intent).toBeGreaterThan(0)
       }
@@ -2655,6 +4815,13 @@ describe('App → Files action lifecycle integration', () => {
     })
     appHarness.useRealNavigationController = true
     renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt())
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: null },
+      })
+    )
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await findResourceTreeRow(archive.name)
     await chooseRowAction(archive.name, 'Copy file ID')
@@ -2663,11 +4830,11 @@ describe('App → Files action lifecycle integration', () => {
     const owner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
     expect(owner?.kind).toBe('files')
     const ownerTabId = owner!.id
-    const requestId = (appHarness.filesPagePendingActions.at(-1) as { id: number }).id
+    expect(appHarness.filesPagePendingActions).toHaveLength(0)
     const model: Model = {
       activeTabId: ownerTabId,
-      requestId,
-      consumedSeed: { requestId, path: archive.gfsUri },
+      requestId: 0,
+      consumedSeed: null,
       session: 1,
       intent: 1,
       path: null,
@@ -3227,6 +5394,13 @@ describe('App → Files action lifecycle integration', () => {
     })
     appHarness.useRealNavigationController = true
     renderApp()
+    act(() => appHarness.controller.openFilesSectionWithReceipt())
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: null },
+      })
+    )
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await findResourceTreeRow(markdown.name)
     await chooseRowAction(markdown.name, 'Copy file ID')
@@ -3610,4 +5784,856 @@ describe('App → Files action lifecycle integration', () => {
     await screen.findByRole('heading', { name: 'Preview body' })
     expect(writeText).not.toHaveBeenCalled()
   })
+
+  it('A01 r17 D4: rejected D2 refetch preserves fallback focus', async () => {
+    const file = await resolveResource(resolvedFile('db'.repeat(16), 'a01-r16-refetch-error.txt'))
+    const changedPage = await listAccessiblePage([
+      accessibleResource(file.resourceId, file.name, 'file', {
+        gfsUri: `gfs://main/${'dc'.repeat(16)}`,
+        parentResourceId: file.parentResourceId,
+        version: file.version + 1,
+      }),
+    ])
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const pendingRefetch = deferred<Awaited<ReturnType<typeof listAccessiblePage>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const invalidationFocus: Element[] = []
+    const originalInvalidate = desktopQueryClient.invalidateQueries.bind(desktopQueryClient)
+    const invalidate = vi
+      .spyOn(desktopQueryClient, 'invalidateQueries')
+      .mockImplementation((filters, options) => {
+        if (
+          JSON.stringify(filters?.queryKey) === JSON.stringify(queryKey) &&
+          filters?.exact === true
+        ) {
+          invalidationFocus.push(document.activeElement as Element)
+        }
+        return originalInvalidate(filters, options)
+      })
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-r16-refetch-error\.txt/ })
+    await chooseRowActionByKeyboard(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    const opener = getResourceTreeRow(file.name)?.querySelector<HTMLButtonElement>(
+      '.da-file-explorer__label'
+    )
+    expect(opener).toBeTruthy()
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, { pages: [changedPage], pageParams: [undefined] })
+    )
+    gfs.listAccessible.mockImplementation(async () => pendingRefetch.promise)
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(gfs.listAccessible).toHaveBeenCalledTimes(2))
+    const toggle = screen.getByTestId('nav-files-explorer-toggle')
+    expect(invalidationFocus).toEqual([toggle])
+    pendingRefetch.reject(new Error('controlled accessible-row refetch failure'))
+    await expect(pendingRefetch.promise).rejects.toThrow(
+      'controlled accessible-row refetch failure'
+    )
+    await waitFor(() => expect(getResourceTreeRow(file.name)).toBeTruthy())
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey, exact: true, refetchType: 'active' }),
+      expect.anything()
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(toggle)
+    await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0))
+    expect(document.activeElement).toBe(toggle)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  it('A01 r17 D4 G2: mismatch focuses the connected toggle before parent refetch', async () => {
+    const file = await resolveResource(resolvedFile('e1'.repeat(16), 'a01-d4-focus-boundary.txt'))
+    const mismatchedPage = await listAccessiblePage([
+      accessibleResource(file.resourceId, file.name, 'file', {
+        gfsUri: `gfs://main/${'e2'.repeat(16)}`,
+        parentResourceId: file.parentResourceId,
+        version: file.version + 1,
+      }),
+    ])
+    const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const writeText = vi.fn(async (_text: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const { controller, gfs } = await renderActualA01App([file], writeText)
+    const queryKey = desktopQueryKeys.gfsAccessible('a01-environment:a01-user:team-a', 'main', 1)
+    const toggle = screen.getByTestId('nav-files-explorer-toggle')
+    const invalidationFocus: Element[] = []
+    const originalInvalidate = desktopQueryClient.invalidateQueries.bind(desktopQueryClient)
+    const invalidate = vi
+      .spyOn(desktopQueryClient, 'invalidateQueries')
+      .mockImplementation((filters, options) => {
+        if (
+          JSON.stringify(filters?.queryKey) === JSON.stringify(queryKey) &&
+          filters?.exact === true
+        ) {
+          invalidationFocus.push(document.activeElement as Element)
+        }
+        return originalInvalidate(filters, options)
+      })
+    gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await screen.findByRole('treeitem', { name: /a01-d4-focus-boundary\.txt/ })
+    await chooseRowActionByKeyboard(file.name, 'Copy file ID')
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+    const opener = getResourceTreeRow(file.name)?.querySelector<HTMLButtonElement>(
+      '.da-file-explorer__label'
+    )
+    if (!opener) throw new Error('The D4 keyboard Copy ID opener was not mounted')
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+
+    gfs.listAccessible.mockImplementation(async () => mismatchedPage)
+    act(() =>
+      desktopQueryClient.setQueryData(queryKey, {
+        pages: [mismatchedPage],
+        pageParams: [undefined],
+      })
+    )
+    await act(async () => pendingPermission.resolve(await resourceAffordances(['read'])))
+    await waitFor(() =>
+      expect(controller.current?.toasts).toContainEqual(
+        expect.objectContaining({
+          text: 'This resource is no longer available from its parent folder.',
+          tone: 'error',
+        })
+      )
+    )
+    expect(document.activeElement).toBe(toggle)
+    expect(toggle.isConnected).toBe(true)
+    expect(invalidationFocus).toEqual([toggle])
+    expect(writeText).not.toHaveBeenCalled()
+    await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0))
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe('chat')
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+  })
+
+  type DifferentialFocusModel = {
+    contract: A01A4Input
+    opened: boolean
+    mode: 'identity-update' | 'root-removal' | 'terminal-mismatch' | null
+    started: boolean
+    drained: boolean
+    audited: boolean
+    userIntent: boolean
+    ownerSuperseded: boolean
+    focusTarget: 'chat' | 'files' | 'sibling' | 'session' | null
+    eventOrder: string[]
+  }
+
+  function resolveA01FocusTarget(
+    target: 'body' | 'opener' | 'toggle' | 'chat' | 'files' | 'sibling',
+    controls: {
+      body: HTMLElement
+      opener: HTMLElement
+      toggle: HTMLElement
+      chat: HTMLElement
+      files: HTMLElement
+      sibling: HTMLElement
+    }
+  ) {
+    return controls[target]
+  }
+
+  type DifferentialFocusReal = {
+    scheduler: Scheduler
+    opener: HTMLButtonElement
+    toggle: HTMLButtonElement
+    filesRoute: HTMLButtonElement
+    userControl: HTMLButtonElement
+    transientControl: HTMLButtonElement
+    open: () => Promise<void>
+    start: (mode: 'identity-update' | 'root-removal' | 'terminal-mismatch') => Promise<void>
+    supersedeFocus: () => void
+    supersedeTransientFocus: () => void
+    supersedeOwner: () => void
+    supersedeSession: () => Promise<void>
+    drain: (model: DifferentialFocusModel) => Promise<string[]>
+    audit: (model: DifferentialFocusModel) => Promise<void>
+  }
+  class DifferentialOpenCopy implements AsyncCommand<
+    DifferentialFocusModel,
+    DifferentialFocusReal
+  > {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return !model.opened
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      await real.open()
+      model.opened = true
+    }
+    toString() {
+      return 'open Copy ID while permission is pending'
+    }
+  }
+  class DifferentialIdentityRace implements AsyncCommand<
+    DifferentialFocusModel,
+    DifferentialFocusReal
+  > {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return model.opened && !model.started
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      model.mode = 'identity-update'
+      model.contract.binding = 'metadata-only'
+      await real.start('identity-update')
+      model.started = true
+    }
+    toString() {
+      return 'race a current-row identity update against permission settlement'
+    }
+  }
+  class DifferentialRootRace implements AsyncCommand<
+    DifferentialFocusModel,
+    DifferentialFocusReal
+  > {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return model.opened && !model.started
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      model.mode = 'root-removal'
+      model.contract.binding = 'different-uri'
+      await real.start('root-removal')
+      model.started = true
+    }
+    toString() {
+      return 'race a root-query row removal against permission settlement'
+    }
+  }
+  class DifferentialTerminalMismatch implements AsyncCommand<
+    DifferentialFocusModel,
+    DifferentialFocusReal
+  > {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return model.opened && !model.started
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      model.mode = 'terminal-mismatch'
+      model.contract.binding = 'missing'
+      await real.start('terminal-mismatch')
+      model.contract.permissionGranted = true
+      model.contract.d2Observed = true
+      model.started = true
+    }
+    toString() {
+      return 'introduce a real URI mismatch while the keyboard opener stays mounted'
+    }
+  }
+  class DifferentialConcurrentDrain implements AsyncCommand<
+    DifferentialFocusModel,
+    DifferentialFocusReal
+  > {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return model.started && !model.drained
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      model.eventOrder = await real.drain(model)
+      model.drained = true
+    }
+    toString() {
+      return 'settle concurrently pending producers in scheduler-selected order'
+    }
+  }
+  class DifferentialUserFocus implements AsyncCommand<
+    DifferentialFocusModel,
+    DifferentialFocusReal
+  > {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return model.started && !model.userIntent && !model.drained
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      real.supersedeFocus()
+      model.userIntent = true
+      model.focusTarget = 'chat'
+      model.contract.newerFocus = 'chat'
+      model.contract.newerFocusConnected = true
+    }
+    toString() {
+      return 'user focuses Go to Chat while the real parent refetch is pending'
+    }
+  }
+  class DifferentialOwnerSupersession implements AsyncCommand<
+    DifferentialFocusModel,
+    DifferentialFocusReal
+  > {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return model.started && !model.ownerSuperseded && !model.drained
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      real.supersedeOwner()
+      model.ownerSuperseded = true
+      model.focusTarget = 'files'
+      model.contract.navigationCurrent = false
+      model.contract.ownerCurrent = false
+      model.contract.newerFocus = 'files'
+      model.contract.newerFocusConnected = true
+      model.contract.surface = 'files'
+    }
+    toString() {
+      return 'navigate to Files while the real parent refetch is pending'
+    }
+  }
+  class DifferentialSessionSupersession implements AsyncCommand<
+    DifferentialFocusModel,
+    DifferentialFocusReal
+  > {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return (
+        model.started &&
+        model.mode === 'terminal-mismatch' &&
+        !model.ownerSuperseded &&
+        !model.drained
+      )
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      await real.supersedeSession()
+      model.ownerSuperseded = true
+      model.userIntent = true
+      model.focusTarget = 'session'
+      model.contract.sessionCurrent = false
+    }
+    toString() {
+      return 'logout while the real parent refetch is pending'
+    }
+  }
+  class DifferentialTransientFocus implements AsyncCommand<
+    DifferentialFocusModel,
+    DifferentialFocusReal
+  > {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return model.started && !model.userIntent && !model.ownerSuperseded && !model.drained
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      real.supersedeTransientFocus()
+      model.userIntent = true
+      model.focusTarget = 'sibling'
+      model.contract.newerFocus = 'sibling'
+      model.contract.newerFocusConnected = true
+    }
+    toString() {
+      return 'focus a sibling row before D2 removes both rows'
+    }
+  }
+  class DifferentialAudit implements AsyncCommand<DifferentialFocusModel, DifferentialFocusReal> {
+    check(model: Readonly<DifferentialFocusModel>) {
+      return model.drained && !model.audited
+    }
+    async run(model: DifferentialFocusModel, real: DifferentialFocusReal) {
+      await real.audit(model)
+      model.audited = true
+    }
+    toString() {
+      return 'compare quiescent App observations with the independent A4 model'
+    }
+  }
+
+  it('A01 r17 A6: generated real-App differential event and promise schedules', async () => {
+    const file = await resolveResource(resolvedFile('e5'.repeat(16), 'a01-r17-generated.txt'))
+    const sibling = await resolveResource(resolvedFile('e6'.repeat(16), 'a01-r17-sibling.txt'))
+    const clickedUri = file.gfsUri
+    const changedPage = await listAccessiblePage([
+      accessibleResource(file.resourceId, file.name, 'file', {
+        gfsUri: file.gfsUri,
+        parentResourceId: file.parentResourceId,
+        version: file.version + 1,
+        name: `${file.name}.renamed`,
+      }),
+      accessibleResource(sibling.resourceId, sibling.name, 'file', {
+        gfsUri: sibling.gfsUri,
+        parentResourceId: sibling.parentResourceId,
+        version: sibling.version,
+      }),
+    ])
+    const mismatchedPage = await listAccessiblePage([
+      accessibleResource(file.resourceId, file.name, 'file', {
+        gfsUri: `gfs://main/${'a7'.repeat(16)}`,
+        parentResourceId: file.parentResourceId,
+        version: file.version + 1,
+      }),
+      accessibleResource(sibling.resourceId, sibling.name, 'file', {
+        gfsUri: sibling.gfsUri,
+        parentResourceId: sibling.parentResourceId,
+        version: sibling.version,
+      }),
+    ])
+    const observedCases = new Set<string>()
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands(
+          [
+            fc.constant(new DifferentialOpenCopy()),
+            fc.constant(new DifferentialIdentityRace()),
+            fc.constant(new DifferentialRootRace()),
+            fc.constant(new DifferentialTerminalMismatch()),
+            fc.constant(new DifferentialUserFocus()),
+            fc.constant(new DifferentialOwnerSupersession()),
+            fc.constant(new DifferentialSessionSupersession()),
+            fc.constant(new DifferentialTransientFocus()),
+            fc.constant(new DifferentialConcurrentDrain()),
+            fc.constant(new DifferentialAudit()),
+          ],
+          { maxCommands: 18, size: 'max' }
+        ),
+        async (scheduler, generatedCommands) => {
+          vi.restoreAllMocks()
+          cleanup()
+          mockSidebarBounds()
+          desktopQueryClient.clear()
+          const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+          const pendingD2Refetch = deferred<Awaited<ReturnType<typeof listAccessiblePage>>>()
+          const emptyPage = await listAccessiblePage([])
+          const writeText = vi.fn(async (_text: string) => undefined)
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: { writeText },
+          })
+          const { controller, gfs } = await renderActualA01App([file, sibling], writeText)
+          const queryKey = desktopQueryKeys.gfsAccessible(
+            'a01-environment:a01-user:team-a',
+            'main',
+            1
+          )
+          let opener: HTMLButtonElement | null = null
+          expect(navigator.clipboard.writeText).toBe(writeText)
+          expect(window.navigator.clipboard.writeText).toBe(writeText)
+          const exactInvalidationFocus: Element[] = []
+          const exactInvalidationOpenerConnected: boolean[] = []
+          const originalInvalidate = desktopQueryClient.invalidateQueries.bind(desktopQueryClient)
+          const d2Invalidation = vi
+            .spyOn(desktopQueryClient, 'invalidateQueries')
+            .mockImplementation((filters, options) => {
+              if (
+                JSON.stringify(filters?.queryKey) === JSON.stringify(queryKey) &&
+                filters?.exact === true
+              ) {
+                exactInvalidationFocus.push(document.activeElement as Element)
+                exactInvalidationOpenerConnected.push(opener?.isConnected ?? false)
+              }
+              return originalInvalidate(filters, options)
+            })
+          const parentInvalidationCount = () =>
+            d2Invalidation.mock.calls.filter(
+              ([filters]) =>
+                JSON.stringify(filters?.queryKey) === JSON.stringify(queryKey) &&
+                filters?.exact === true
+            ).length
+          gfs.affordances.mockImplementation(async () => pendingPermission.promise)
+          fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+          await screen.findByRole('treeitem', { name: /a01-r17-generated\.txt/ })
+          opener =
+            getResourceTreeRow(file.name)?.querySelector<HTMLButtonElement>(
+              '.da-file-explorer__label'
+            ) ?? null
+          const toggle = screen.getByTestId('nav-files-explorer-toggle') as HTMLButtonElement
+          const filesRoute = screen.getByRole('button', { name: 'Files' }) as HTMLButtonElement
+          const userControl = screen.getByRole('button', {
+            name: 'Go to Chat',
+          }) as HTMLButtonElement
+          const transientControl =
+            getResourceTreeRow(sibling.name)?.querySelector<HTMLButtonElement>(
+              '.da-file-explorer__label'
+            ) ?? null
+          if (!transientControl) throw new Error('The sibling focus target is unavailable')
+          expect(opener).toBeTruthy()
+          let mode: 'identity-update' | 'root-removal' | 'terminal-mismatch' | null = null
+          let rootInvalidation: Promise<void> | undefined
+          let userFocusSuperseded = false
+          let ownerSuperseded = false
+          let transientFocusSuperseded = false
+          let sessionSuperseded = false
+          const eventOrder: string[] = []
+          const keyboardFocusScenario = true
+          const real: DifferentialFocusReal = {
+            scheduler,
+            opener: opener!,
+            toggle,
+            filesRoute,
+            userControl,
+            transientControl: transientControl!,
+            open: async () => {
+              if (keyboardFocusScenario) {
+                await chooseRowActionByKeyboard(file.name, 'Copy file ID')
+              } else {
+                await chooseRowAction(file.name, 'Copy file ID')
+              }
+              await waitFor(() => expect(gfs.affordances).toHaveBeenCalledTimes(1))
+              if (keyboardFocusScenario) {
+                await waitFor(() => expect(document.activeElement).toBe(opener))
+              }
+            },
+            start: async nextMode => {
+              mode = nextMode
+              d2Invalidation.mockClear()
+              if (nextMode === 'root-removal') {
+                gfs.listAccessible.mockImplementation(async () => pendingD2Refetch.promise)
+                rootInvalidation = desktopQueryClient.invalidateQueries({
+                  queryKey,
+                  exact: true,
+                  refetchType: 'active',
+                })
+                await waitFor(() => expect(gfs.listAccessible).toHaveBeenCalledTimes(2))
+              } else if (nextMode === 'terminal-mismatch') {
+                gfs.listAccessible.mockImplementation(async () => pendingD2Refetch.promise)
+                act(() => {
+                  desktopQueryClient.setQueryData(queryKey, {
+                    pages: [mismatchedPage],
+                    pageParams: [undefined],
+                  })
+                })
+                await scheduler.waitFor(
+                  scheduler
+                    .schedule(Promise.resolve(), 'permission result starts real D2 refetch')
+                    .then(async () => {
+                      eventOrder.push('permission-result')
+                      await act(async () => {
+                        pendingPermission.resolve(await resourceAffordances(['read']))
+                      })
+                    })
+                )
+                await waitFor(() => expect(getResourceTreeRow(file.name)).toBeTruthy())
+                await waitFor(() => expect(d2Invalidation).toHaveBeenCalledTimes(1))
+                await waitFor(() => expect(gfs.listAccessible).toHaveBeenCalledTimes(2))
+                expect(exactInvalidationOpenerConnected).toEqual([true])
+                expect(exactInvalidationFocus[0]).toBe(toggle)
+              }
+            },
+            supersedeFocus: () => {
+              userControl.focus()
+              userFocusSuperseded = true
+              eventOrder.push('user-focus')
+              expect(document.activeElement).toBe(userControl)
+            },
+            supersedeTransientFocus: () => {
+              transientControl!.focus()
+              userFocusSuperseded = true
+              transientFocusSuperseded = true
+              eventOrder.push('transient-user-focus')
+              expect(document.activeElement).toBe(transientControl)
+            },
+            supersedeOwner: () => {
+              filesRoute.focus()
+              fireEvent.click(filesRoute)
+              userFocusSuperseded = true
+              ownerSuperseded = true
+              eventOrder.push('owner-navigation')
+              expect(document.activeElement).toBe(filesRoute)
+            },
+            supersedeSession: async () => {
+              await act(async () => controller.current?.handleLogout())
+              sessionSuperseded = true
+              eventOrder.push('session-logout')
+              expect(controller.current?.isAuthenticated).toBe(false)
+            },
+            drain: async model => {
+              if (mode === 'root-removal') {
+                // S24: the real root producer removes the opener while the actual
+                // affordance producer remains unresolved. Keep this ordering explicit.
+                const rootResult = scheduler
+                  .schedule(Promise.resolve(), 'real root producer result before permission')
+                  .then(async () => {
+                    eventOrder.push('root-result')
+                    await act(async () => pendingD2Refetch.resolve(emptyPage))
+                  })
+                await scheduler.waitFor(rootResult)
+                await act(async () => rootInvalidation)
+                await waitFor(() => expect(getResourceTreeRow(file.name)).toBeNull())
+                model.contract.openerConnected = false
+                model.contract.newerFocusConnected =
+                  model.focusTarget === 'files'
+                    ? filesRoute.isConnected
+                    : model.focusTarget === 'chat'
+                      ? userControl.isConnected
+                      : model.focusTarget === 'sibling' && transientControl!.isConnected
+                const beforePermission = evaluateA01A4(model.contract)
+                expect(document.activeElement).toBe(
+                  resolveA01FocusTarget(beforePermission.focus, {
+                    body: document.body,
+                    opener: opener!,
+                    toggle,
+                    chat: userControl,
+                    files: filesRoute,
+                    sibling: transientControl!,
+                  })
+                )
+                const expectedFocus =
+                  model.focusTarget === 'session' || model.focusTarget === 'sibling'
+                    ? document.body
+                    : model.focusTarget === 'files'
+                      ? filesRoute
+                      : model.focusTarget === 'chat'
+                        ? userControl
+                        : toggle
+                expect(document.activeElement).toBe(expectedFocus)
+                d2Invalidation.mockClear()
+                await scheduler.waitFor(
+                  scheduler
+                    .schedule(Promise.resolve(), 'permission result after root removal')
+                    .then(async () => {
+                      await act(async () => {
+                        eventOrder.push('permission-result')
+                        pendingPermission.resolve(await resourceAffordances(['read']))
+                      })
+                    })
+                )
+                if (!ownerSuperseded) {
+                  model.contract.permissionGranted = true
+                  model.contract.d2Observed = true
+                }
+                await scheduler.waitAll()
+                if (ownerSuperseded) {
+                  expect(controller.current?.toasts).not.toContainEqual(
+                    expect.objectContaining({
+                      text: 'This resource is no longer available from its parent folder.',
+                      tone: 'error',
+                    })
+                  )
+                  expect(parentInvalidationCount()).toBe(0)
+                  expect(gfs.listAccessible).toHaveBeenCalledTimes(2)
+                } else {
+                  await waitFor(() =>
+                    expect(controller.current?.toasts).toContainEqual(
+                      expect.objectContaining({
+                        text: 'This resource is no longer available from its parent folder.',
+                        tone: 'error',
+                      })
+                    )
+                  )
+                  await waitFor(() => expect(gfs.listAccessible).toHaveBeenCalledTimes(3))
+                  expect(parentInvalidationCount()).toBe(1)
+                }
+                await waitFor(() =>
+                  expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0)
+                )
+                return [...eventOrder]
+              }
+              if (mode === 'terminal-mismatch') {
+                await waitFor(() => expect(d2Invalidation).toHaveBeenCalledTimes(1))
+                await waitFor(() => expect(gfs.listAccessible).toHaveBeenCalledTimes(2))
+                const d2Result = scheduler
+                  .schedule(Promise.resolve(), 'real D2 parent-query result')
+                  .then(async () => {
+                    await act(async () => pendingD2Refetch.resolve(emptyPage))
+                  })
+                await scheduler.waitFor(d2Result)
+                await act(async () => d2Invalidation.mock.results[0]?.value)
+                await waitFor(() =>
+                  expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0)
+                )
+                await waitFor(() => expect(getResourceTreeRow(file.name)).toBeNull())
+                await waitFor(() => expect(getResourceTreeRow(sibling.name)).toBeNull())
+                model.contract.openerConnected = false
+                model.contract.newerFocusConnected =
+                  model.focusTarget === 'files'
+                    ? filesRoute.isConnected
+                    : model.focusTarget === 'chat'
+                      ? userControl.isConnected
+                      : model.focusTarget === 'sibling' && transientControl!.isConnected
+                if (sessionSuperseded) {
+                  expect(toggle.isConnected).toBe(false)
+                  expect(document.activeElement).toBe(document.body)
+                  expect(writeText).not.toHaveBeenCalled()
+                  expect(parentInvalidationCount()).toBe(1)
+                  observedCases.add('terminal-mismatch:session-logout')
+                  return [...eventOrder]
+                }
+                await waitFor(() =>
+                  expect(controller.current?.toasts).toContainEqual(
+                    expect.objectContaining({
+                      text: 'This resource is no longer available from its parent folder.',
+                      tone: 'error',
+                    })
+                  )
+                )
+                return [...eventOrder]
+              }
+              const runQuery = scheduler
+                .schedule(Promise.resolve(), 'current row identity query result')
+                .then(() => {
+                  act(() => {
+                    eventOrder.push('identity-update')
+                    desktopQueryClient.setQueryData(queryKey, {
+                      pages: [changedPage],
+                      pageParams: [undefined],
+                    })
+                  })
+                })
+              const runPermission = scheduler
+                .schedule(Promise.resolve(), 'real permission producer result')
+                .then(async () => {
+                  await act(async () => {
+                    eventOrder.push('permission-result')
+                    pendingPermission.resolve(await resourceAffordances(['read']))
+                  })
+                })
+              await scheduler.waitFor(Promise.all([runQuery, runPermission]))
+              model.contract.permissionGranted = true
+              await act(async () => scheduler.waitIdle())
+              if (ownerSuperseded) {
+                expect(writeText).not.toHaveBeenCalled()
+              } else {
+                await waitFor(() => expect(writeText).toHaveBeenCalledWith(clickedUri))
+              }
+              expect(runQuery).toBeDefined()
+              expect(runPermission).toBeDefined()
+              return [...eventOrder]
+            },
+            audit: async model => {
+              if (model.mode === 'root-removal') {
+                const expected = evaluateA01A4(model.contract)
+                expect(writeText.mock.calls.map(([value]) => value)).toEqual(expected.writes)
+                expect(parentInvalidationCount()).toBe(expected.exactParentInvalidations)
+                expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe(
+                  expected.surface
+                )
+                expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+                expect(document.activeElement).toBe(
+                  resolveA01FocusTarget(expected.focus, {
+                    body: document.body,
+                    opener: opener!,
+                    toggle,
+                    chat: userControl,
+                    files: filesRoute,
+                    sibling: transientControl!,
+                  })
+                )
+                observedCases.add('root-removal:root-first')
+                return
+              }
+              if (model.mode === 'terminal-mismatch') {
+                const expected = evaluateA01A4(model.contract)
+                expect(writeText.mock.calls.map(([value]) => value)).toEqual(expected.writes)
+                const hasStaleError =
+                  controller.current?.toasts.some(
+                    toast =>
+                      toast.text === 'This resource is no longer available from its parent folder.'
+                  ) ?? false
+                expect(hasStaleError).toBe(expected.staleError)
+                expect(parentInvalidationCount()).toBe(expected.exactParentInvalidations)
+                expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe(
+                  expected.surface
+                )
+                expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+                expect(document.activeElement).toBe(
+                  resolveA01FocusTarget(expected.focus, {
+                    body: document.body,
+                    opener: opener!,
+                    toggle,
+                    chat: userControl,
+                    files: filesRoute,
+                    sibling: transientControl!,
+                  })
+                )
+                observedCases.add(
+                  `terminal-mismatch:${ownerSuperseded ? 'owner-navigation' : transientFocusSuperseded ? 'transient-user-focus' : 'user-focus'}`
+                )
+                return
+              }
+              const expected = evaluateA01A4(model.contract)
+              expect(writeText.mock.calls.map(([value]) => value)).toEqual(expected.writes)
+              const hasStaleError =
+                controller.current?.toasts.some(
+                  toast =>
+                    toast.text === 'This resource is no longer available from its parent folder.'
+                ) ?? false
+              expect(hasStaleError).toBe(expected.staleError)
+              expect(parentInvalidationCount()).toBe(expected.exactParentInvalidations)
+              expect(activeWorkspaceTab(controller.current!.workspaceTabs)?.kind).toBe(
+                expected.surface
+              )
+              expect(screen.queryAllByRole('dialog')).toHaveLength(0)
+              const focusMatches =
+                document.activeElement ===
+                resolveA01FocusTarget(expected.focus, {
+                  body: document.body,
+                  opener: opener!,
+                  toggle,
+                  chat: userControl,
+                  files: filesRoute,
+                  sibling: transientControl!,
+                })
+              const queryWins =
+                model.eventOrder.indexOf('identity-update') <
+                model.eventOrder.indexOf('permission-result')
+              const caseKey = `${mode}:${queryWins ? 'query-first' : 'permission-first'}`
+              observedCases.add(caseKey)
+              expect(focusMatches).toBe(true)
+              expect(opener!.isConnected).toBe(true)
+            },
+          }
+          const model: DifferentialFocusModel = {
+            contract: {
+              clickedUri,
+              requestCurrent: true,
+              permissionGranted: false,
+              binding: 'same',
+              d2Observed: false,
+              sessionCurrent: true,
+              navigationCurrent: true,
+              ownerCurrent: true,
+              newerFocus: null,
+              newerFocusConnected: false,
+              openerConnected: true,
+              toggleConnected: true,
+              surface: 'chat',
+            },
+            opened: false,
+            mode: null,
+            started: false,
+            drained: false,
+            audited: false,
+            userIntent: false,
+            ownerSuperseded: false,
+            focusTarget: null,
+            eventOrder: [],
+          }
+          try {
+            await fc.asyncModelRun(() => ({ model, real }), generatedCommands)
+            fc.pre(model.opened && model.started && model.drained && model.audited)
+            expect(model.opened && model.started && model.drained && model.audited).toBe(true)
+            expect(model.mode).not.toBeNull()
+          } finally {
+            await act(async () => {
+              if (!eventOrder.includes('permission-result')) {
+                pendingPermission.resolve(await resourceAffordances(['read']))
+              }
+              pendingD2Refetch.resolve(changedPage)
+              await pendingD2Refetch.promise
+              await scheduler.waitAll()
+            })
+            cleanup()
+            desktopQueryClient.clear()
+          }
+        }
+      ),
+      { numRuns: 60, maxSkipsPerRun: 100, seed: 1606 }
+    )
+    expect([...observedCases].some(value => value.startsWith('identity-update:query-first'))).toBe(
+      true
+    )
+    expect(
+      [...observedCases].some(value => value.startsWith('identity-update:permission-first'))
+    ).toBe(true)
+    expect(observedCases.has('root-removal:root-first')).toBe(true)
+    expect(observedCases.has('terminal-mismatch:user-focus')).toBe(true)
+    expect(observedCases.has('terminal-mismatch:owner-navigation')).toBe(true)
+    expect(observedCases.has('terminal-mismatch:transient-user-focus')).toBe(true)
+    expect(observedCases.has('terminal-mismatch:session-logout')).toBe(true)
+  }, 180_000)
 })

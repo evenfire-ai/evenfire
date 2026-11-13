@@ -2409,7 +2409,11 @@ describe('FileExplorerTree — resource action menus', () => {
           gfsUri: root.gfsUri,
           parentResourceId: null,
         }),
-        'copy-route'
+        'copy-route',
+        undefined,
+        7,
+        undefined,
+        { kind: 'accessible' }
       )
     }
 
@@ -2563,7 +2567,11 @@ describe('FileExplorerTree — resource action menus', () => {
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'second', gfsUri: second.gfsUri }),
-      'copy-route'
+      'copy-route',
+      undefined,
+      7,
+      undefined,
+      { kind: 'accessible' }
     )
     expect(firstRow.getAttribute('aria-selected')).toBe('true')
     expect(secondRow.getAttribute('aria-selected')).toBe('false')
@@ -2761,10 +2769,21 @@ describe('FileExplorerTree — resource action menus', () => {
 
       await waitFor(() => expect(document.activeElement).toBe(trigger))
       expect(trigger.isConnected).toBe(true)
-      expect(onResourceAction).toHaveBeenCalledWith(
-        expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-        actionName === 'Copy file ID' ? 'copy-route' : 'copy-link'
-      )
+      if (actionName === 'Copy file ID') {
+        expect(onResourceAction).toHaveBeenCalledWith(
+          expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
+          'copy-route',
+          undefined,
+          7,
+          undefined,
+          { kind: 'accessible' }
+        )
+      } else {
+        expect(onResourceAction).toHaveBeenCalledWith(
+          expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
+          'copy-link'
+        )
+      }
     }
   )
 
@@ -2828,7 +2847,11 @@ describe('FileExplorerTree — resource action menus', () => {
     expect(focusTrigger).not.toHaveBeenCalled()
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-      'copy-route'
+      'copy-route',
+      undefined,
+      7,
+      undefined,
+      { kind: 'accessible' }
     )
   })
 
@@ -2862,7 +2885,11 @@ describe('FileExplorerTree — resource action menus', () => {
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-      'copy-route'
+      'copy-route',
+      undefined,
+      7,
+      undefined,
+      { kind: 'accessible' }
     )
     expect(document.activeElement).not.toBe(trigger)
   })
@@ -3068,7 +3095,11 @@ describe('FileExplorerTree — resource action menus', () => {
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'nested', gfsUri: nested.gfsUri }),
-      'copy-route'
+      'copy-route',
+      undefined,
+      7,
+      undefined,
+      { kind: 'children', parentResourceId: 'root' }
     )
     expect(nestedRow.getAttribute('aria-expanded')).toBe('false')
     expect(onOpenFolder).not.toHaveBeenCalled()

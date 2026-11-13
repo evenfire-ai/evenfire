@@ -22,7 +22,7 @@ import {
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
-import type { GfsResourceActionId } from '@lib/gfsResourceActions'
+import type { CopyIdFocusRecovery, GfsResourceActionId } from '@lib/gfsResourceActions'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
@@ -108,6 +108,7 @@ function FileExplorerNode({
   node,
   level,
   scope,
+  querySource,
   sessionGeneration,
   sidebarVisible,
   contextMenuOwner,
@@ -124,6 +125,7 @@ function FileExplorerNode({
   onActivateFolder,
   onActivateFile,
   onResourceAction,
+  onCopyIdFocusStart,
   onContextMenuRequest,
   isContextOwnerCurrent,
   clearContextOwner,
@@ -194,14 +196,30 @@ function FileExplorerNode({
     canPreview && (preview?.kind === 'image' || preview?.kind === 'markdown')
   )
   const dispatchOwnedAction = useCallback(
-    (actionId: GfsResourceActionId, file?: File) => {
+    (actionId: GfsResourceActionId, file?: File, copyIdFocusRecovery?: CopyIdFocusRecovery) => {
       const ownerId = owner?.request.id
       const phase = actionId === 'replace' && file ? 'replace' : 'open'
       if (!ownerId || !isContextOwnerCurrent(node.resourceId, ownerId, phase)) return
-      if (file) onResourceAction(node, actionId, file)
+      if (actionId === 'copy-route') {
+        onResourceAction(
+          node,
+          actionId,
+          undefined,
+          sessionGeneration,
+          copyIdFocusRecovery,
+          querySource
+        )
+      } else if (file) onResourceAction(node, actionId, file)
       else onResourceAction(node, actionId)
     },
-    [isContextOwnerCurrent, node, onResourceAction, owner?.request.id]
+    [
+      isContextOwnerCurrent,
+      node,
+      onResourceAction,
+      owner?.request.id,
+      querySource,
+      sessionGeneration,
+    ]
   )
 
   const resourceActions = useMemo(
@@ -214,7 +232,8 @@ function FileExplorerNode({
             refresh:
               accessActive && !isUnreadable ? () => dispatchOwnedAction('refresh') : undefined,
             'copy-link': () => dispatchOwnedAction('copy-link'),
-            'copy-route': () => dispatchOwnedAction('copy-route'),
+            'copy-route': (_file, context) =>
+              dispatchOwnedAction('copy-route', undefined, context?.copyIdFocusRecovery),
             'open-route': () => dispatchOwnedAction('open-route'),
             rename: () => dispatchOwnedAction('rename'),
             move: () => dispatchOwnedAction('move'),
@@ -687,6 +706,15 @@ function FileExplorerNode({
           actions={resourceActions}
           contextOpenRequest={ownerRequest}
           contextTargetRef={rowLabelRef}
+          onActionStart={(actionId, keyboardActivated, opener) => {
+            if (actionId !== 'copy-route' || !keyboardActivated || !opener) return undefined
+            const recovery = onCopyIdFocusStart?.(
+              node,
+              opener as HTMLButtonElement,
+              sessionGeneration
+            )
+            return recovery ? { copyIdFocusRecovery: recovery } : undefined
+          }}
           contextVisible={sidebarVisible}
           isContextOwnerCurrent={isCurrentMenuOwner}
           onContextUnavailable={clearCurrentMenuOwner}
@@ -722,6 +750,7 @@ function FileExplorerNode({
               onActivateFile={onActivateFile}
               onActivateFolder={onActivateFolder}
               onResourceAction={onResourceAction}
+              onCopyIdFocusStart={onCopyIdFocusStart}
               onAuthorityFailure={onAuthorityFailure}
               onNodeDragEnd={onNodeDragEnd}
               onNodeDragLeave={onNodeDragLeave}
@@ -730,6 +759,7 @@ function FileExplorerNode({
               onNodeDrop={onNodeDrop}
               onToggle={onToggle}
               scope={scope}
+              querySource={{ kind: 'children', parentResourceId: node.resourceId }}
               sessionGeneration={sessionGeneration}
               sidebarVisible={sidebarVisible}
               contextMenuOwner={contextMenuOwner}
@@ -782,6 +812,7 @@ export function FileExplorerTree({
   onOpenFolder,
   onOpenPreview,
   onResourceAction,
+  onCopyIdFocusStart,
   pushToast,
   sidebarVisible = true,
 }: FileExplorerTreeProps) {
@@ -1521,6 +1552,7 @@ export function FileExplorerTree({
               onActivateFile={handleActivateFile}
               onActivateFolder={handleActivateFolder}
               onResourceAction={onResourceAction}
+              onCopyIdFocusStart={onCopyIdFocusStart}
               onAuthorityFailure={handleAuthorityFailure}
               onNodeDragEnd={clearDragState}
               onNodeDragLeave={handleNodeDragLeave}
@@ -1529,6 +1561,7 @@ export function FileExplorerTree({
               onNodeDrop={handleNodeDrop}
               onToggle={handleToggle}
               scope={ctrl.sessionScope ?? 'anonymous'}
+              querySource={{ kind: 'accessible' }}
               sessionGeneration={ctrl.sessionGeneration}
               sidebarVisible={sidebarVisible}
               contextMenuOwner={contextMenuOwner}

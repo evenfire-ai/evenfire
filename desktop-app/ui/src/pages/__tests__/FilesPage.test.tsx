@@ -8,6 +8,7 @@ import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { GfsResourceActionRequest, GfsResourceKind } from '@lib/gfsResourceActions'
+import * as gfsResourceClipboard from '@lib/gfsResourceClipboard'
 import {
   accessibleResource,
   affordancesResult,
@@ -1367,6 +1368,62 @@ describe('FilesPage', () => {
     expect(renameResource).toHaveBeenCalledWith('folder-1', 'renamed', 7)
     expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
   })
+
+  it.each([
+    { entry: 'folder header', kind: 'directory' as const, action: 'Copy folder ID' },
+    { entry: 'file header', kind: 'file' as const, action: 'Copy file ID' },
+    { entry: 'resource row', kind: 'file' as const, action: 'Copy file ID' },
+  ])(
+    'delegates Files $entry Copy ID to the shared clipboard owner',
+    async ({ entry, kind, action }) => {
+      const identity = kind === 'directory' ? 'f1'.repeat(16) : 'f2'.repeat(16)
+      const parent = await resolveResource(resolvedDirectory('f3'.repeat(16), 'Copy ID parent'))
+      const isRow = entry === 'resource row'
+      const resource = await resolveResource(
+        kind === 'directory'
+          ? resolvedDirectory(identity, `Copy ID ${entry}`)
+          : resolvedFile(identity, `Copy ID ${entry}.txt`, {
+              parentResourceId: isRow ? parent.resourceId : null,
+            })
+      )
+      const childPage = await listChildrenPage([
+        childView(resource.resourceId, resource.name, 'file', {
+          gfsUri: resource.gfsUri,
+          parentResourceId: parent.resourceId,
+          version: resource.version,
+        }),
+      ])
+      const current = isRow ? parent : resource
+      const items = isRow ? childPage.items : []
+      const writeText = vi.fn(async (_uri: string) => undefined)
+      const pushToast = vi.fn()
+      const copyOperation = vi.spyOn(gfsResourceClipboard, 'copyGfsResourceId')
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      })
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        current,
+        items,
+        affordances: delegationAffordances(new Set(['read', 'write', 'delete']), false),
+      })
+
+      renderFilesPage(pushToast)
+      await chooseResourceAction(resource.name, action)
+
+      await waitFor(() => expect(copyOperation).toHaveBeenCalledOnce())
+      expect(copyOperation).toHaveBeenCalledWith(resource.gfsUri, kind, expect.any(Function))
+      await waitFor(() => expect(writeText).toHaveBeenCalledOnce())
+      expect(writeText).toHaveBeenCalledWith(resource.gfsUri)
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          kind === 'directory' ? 'Folder ID copied' : 'File ID copied',
+          'success'
+        )
+      )
+    }
+  )
 
   it('keeps resource sharing in the breadcrumb menu and link controls in the navbar', async () => {
     const gfsUri = 'gfs://main/0123456789abcdef0123456789abcdef'

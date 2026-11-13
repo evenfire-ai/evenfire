@@ -178,6 +178,11 @@ export function useAppController() {
   const activeAuthenticatedSessionIdentityRef = useRef<string | null>(null)
   const authenticatedSessionIdentityRef = useRef<string | null>(null)
   const sessionGenerationRef = useRef<number | null>(null)
+  const isSessionGenerationCurrent = useCallback(
+    (generation: number | null) =>
+      generation !== null && sessionGenerationRef.current === generation,
+    []
+  )
   const [publishedSessionGeneration, setPublishedSessionGeneration] = useState<number | null>(null)
   const catalogRefreshPromiseRef = useRef<Promise<AccessCatalog> | null>(null)
   const onExternalSessionEnded = useCallback(() => {
@@ -1643,6 +1648,7 @@ export function useAppController() {
     // Auth
     booting: auth.booting,
     sessionGeneration: publishedSessionGeneration,
+    isSessionGenerationCurrent,
     initialExperienceLoading:
       auth.isAuthenticated &&
       !auth.hasDependencyOutage &&

@@ -11,8 +11,10 @@ import { Button, IconButton, MenuItem, NavItem as NavItemControl } from '@compon
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/navigation'
+import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
+import type { CopyIdFocusRecovery } from '@lib/gfsResourceActions'
 import type { NavItem } from '@/uiTypes'
 import { FileExplorerTree } from './FileExplorerTree'
 import {
@@ -49,6 +51,7 @@ export function SidebarNav({
   onOpenFilesSection,
   onOpenPreviewSection,
   onGfsResourceAction = () => {},
+  getCopyIdFocusOwner,
   pushToast,
   toggleRequestId = 0,
 }: SidebarNavProps) {
@@ -81,10 +84,95 @@ export function SidebarNav({
   const desktopAppInfo = useDesktopAppInfo()
   const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
   const sidebarRef = useRef<HTMLElement | null>(null)
+  const filesExplorerToggleRef = useRef<HTMLButtonElement | null>(null)
+  const filesExplorerOpenRef = useRef(filesExplorerOpen)
+  const isCollapsedRef = useRef(isCollapsed)
+  filesExplorerOpenRef.current = filesExplorerOpen
+  isCollapsedRef.current = isCollapsed
+  const copyIdFocusEpochRef = useRef(0)
+  const copyIdFocusTokenRef = useRef<{
+    id: symbol
+    opener: HTMLButtonElement
+    toggle: HTMLButtonElement
+    close: () => void
+  } | null>(null)
   const settingsMenuRef = useRef<HTMLDivElement | null>(null)
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const sessionsRef = useRef<HTMLDivElement | null>(null)
   const renameInputRef = useRef<HTMLInputElement | null>(null)
+  const startCopyIdFocusRecovery = React.useCallback(
+    (
+      resource: GfsBrowserChild,
+      opener: HTMLButtonElement,
+      sessionGeneration: number | null
+    ): CopyIdFocusRecovery | undefined => {
+      copyIdFocusTokenRef.current?.close()
+      const owner = getCopyIdFocusOwner?.(resource, sessionGeneration)
+      const sidebar = sidebarRef.current
+      const toggle = filesExplorerToggleRef.current
+      if (!owner || !sidebar || !toggle || !sidebar.contains(opener)) return undefined
+
+      const startedAtEpoch = copyIdFocusEpochRef.current
+      let closed = false
+      const token = { id: Symbol('sidebar-copy-id-focus'), opener, toggle, close: () => {} }
+      const close = () => {
+        if (closed) return
+        closed = true
+        observer.disconnect()
+        if (copyIdFocusTokenRef.current === token) copyIdFocusTokenRef.current = null
+      }
+      const fallback = (allowConnectedOpener: boolean) => {
+        if (
+          closed ||
+          copyIdFocusTokenRef.current !== token ||
+          copyIdFocusEpochRef.current !== startedAtEpoch ||
+          !owner.isCurrent() ||
+          !filesExplorerOpenRef.current ||
+          isCollapsedRef.current
+        ) {
+          close()
+          return
+        }
+        if (allowConnectedOpener ? !opener.isConnected : opener.isConnected) return
+        const active = document.activeElement
+        if (active && active !== document.body && active !== toggle && active !== opener) {
+          close()
+          return
+        }
+        if (toggle.isConnected && sidebar.contains(toggle)) toggle.focus()
+        close()
+      }
+      const observer = new MutationObserver(() => fallback(false))
+      token.close = close
+      copyIdFocusTokenRef.current = token
+      observer.observe(sidebar, { childList: true, subtree: true })
+      return {
+        close,
+        focusMismatchFallback: () => fallback(true),
+      }
+    },
+    [getCopyIdFocusOwner]
+  )
+  useEffect(() => {
+    const cancelForInput = (event: Event) => {
+      if (event.isTrusted) copyIdFocusEpochRef.current += 1
+      copyIdFocusTokenRef.current?.close()
+    }
+    const cancelForFocus = (event: FocusEvent) => {
+      const token = copyIdFocusTokenRef.current
+      if (!token || event.target === token.opener || event.target === token.toggle) return
+      token.close()
+    }
+    document.addEventListener('pointerdown', cancelForInput, true)
+    document.addEventListener('keydown', cancelForInput, true)
+    document.addEventListener('focusin', cancelForFocus, true)
+    return () => {
+      document.removeEventListener('pointerdown', cancelForInput, true)
+      document.removeEventListener('keydown', cancelForInput, true)
+      document.removeEventListener('focusin', cancelForFocus, true)
+      copyIdFocusTokenRef.current?.close()
+    }
+  }, [])
   const updateSettingsMenuOpen = React.useCallback(
     (open: boolean) => {
       setSettingsMenuOpen(open)
@@ -674,6 +762,7 @@ export function SidebarNav({
                 label={filesExplorerOpen ? 'Collapse file explorer' : 'Expand file explorer'}
                 aria-expanded={filesExplorerOpen}
                 data-testid="nav-files-explorer-toggle"
+                ref={filesExplorerToggleRef}
                 onClick={event => {
                   event.stopPropagation()
                   setFilesExplorerOpen(open => !open)
@@ -696,6 +785,7 @@ export function SidebarNav({
                     closeCompactMenu()
                   }}
                   onResourceAction={onGfsResourceAction}
+                  onCopyIdFocusStart={startCopyIdFocusRecovery}
                   pushToast={pushToast}
                   sidebarVisible={!compactMode || compactMenuOpen}
                 />
