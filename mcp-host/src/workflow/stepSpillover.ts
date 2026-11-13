@@ -2,45 +2,40 @@
  * Tool-result spillover for agentic workflow steps.
  *
  * `WorkflowService.executeStep` pastes every tool result into the prompt and
- * resends it on each iteration. This module wires the shared spillover store
- * (`core/spillover`) into that loop: a result at or above the threshold is
- * written under `<outputDir>/.spill/<executionId>/spillover/<stepId>/<callId>.json`
- * and the model receives the store's summary plus a `spillover_ref` it can
- * read back by byte range with `clerum__spillover_read`. `executionId` is
- * random per step execution, so refs stay `spillover://<stepId>/<callId>.json`
- * while one execution can never read or delete another's files.
+ * resends it on each iteration. This module keeps a result at or above the
+ * threshold in this process's memory for the length of the step execution,
+ * and the model receives the summary the first-party store gives (head, tail,
+ * size, structure hint) plus a `spillover_ref` it can read back by byte range
+ * with `clerum__spillover_read`. Refs are `spillover://<stepId>/<callId>.json`.
  *
  * Invariants:
- *   - A step execution writes nothing until its first result is persisted, so
- *     a step whose results all stay under the threshold is unchanged. The
- *     first step of a process removes spill files a dead process left
- *     (`removeLeftoverStepSpillover`).
- *   - `.spill` is used only when it is a real directory. When it is a symbolic
- *     link or a file, nothing is listed, written or removed through it:
- *     results stay inline and a warning is logged.
- *   - The read tool only accepts refs of the same step, finds only blobs of
+ *   - Nothing is written to disk. The results of an execution are held by that
+ *     execution only (`createStepSpillover` returns one store per execution),
+ *     and `release` drops them when the execution ends, however it ends. A
+ *     process that dies loses them with the process.
+ *   - A step whose results all stay under the threshold is unchanged.
+ *   - The read tool only accepts refs of the same step, finds only results of
  *     the same execution, and reads at most the threshold.
- *   - The budget caps the result bytes persisted by one execution; a result
- *     that does not fit stays inline and later results that fit still spill.
- *   - Files under `.spill` are not artifacts: the run's artifact quota
- *     (`enforceQuota`) does not count them. The budget and the size of the
- *     run's output volume are their only bounds.
+ *   - The budget caps the result bytes the store holds for one execution; a
+ *     result that does not fit stays inline, as without spillover, and later
+ *     results that fit are still stored.
  *   - Logs carry tool names, sizes and refs only, never result content or
  *     arguments.
  *
  * Configuration is deliberately separate from the first-party agent's
  * `CLERUM_TOOL_SPILLOVER_*` settings: threshold and retention differ.
  */
-import { randomBytes } from 'crypto'
-import type { Stats } from 'fs'
-import * as fs from 'fs/promises'
-import * as path from 'path'
+import { createHash } from 'crypto'
 import { Counter } from 'prom-client'
-import { SpilloverStorage, parseSpilloverRef } from '../core/spillover'
-import type { SpilloverInstruments } from '../core/spillover/types'
+import {
+  buildSpilloverRef,
+  generateStructureHint,
+  inferContentType,
+  parseSpilloverRef,
+} from '../core/spillover'
+import type { SpilloverBlob, SpilloverSummary } from '../core/spillover/types'
 import { SpilloverReadTool } from '../core/tools/spilloverRead'
 import { logger } from '../logger'
-import { STEP_SPILL_DIR } from './artifactOutput'
 import type { InternalToolDefinition, InternalToolResult } from './types'
 
 export const STEP_SPILLOVER_READ_TOOL_NAME = 'clerum__spillover_read'
@@ -57,11 +52,7 @@ export const DEFAULT_STEP_SPILLOVER_BUDGET_BYTES = 16777216
 const MIN_BUDGET_BYTES = 1048576
 const MAX_BUDGET_BYTES = 268435456
 
-// The artifact quota skips this directory by the same name.
-const SPILL_DIR = STEP_SPILL_DIR
-const STORE_ROOT = 'spillover'
 const SEGMENT_RE = /^[A-Za-z0-9_-]+$/
-const EXECUTION_DIR_RE = /^[0-9a-f]{16}$/
 
 // Workflow steps report to their own counters, so the first-party agent's
 // spillover metrics keep describing the agent only. Guarded like the
@@ -90,13 +81,6 @@ export const clerumWorkflowStepSpilloverReadsTotal = (() => {
     return undefined
   }
 })()
-
-// No output-size histogram: the step store only sees results at or above the
-// threshold, so it could not describe the size distribution.
-const STEP_SPILLOVER_INSTRUMENTS: SpilloverInstruments = {
-  persisted: clerumWorkflowStepSpilloverPersistedTotal,
-  reads: clerumWorkflowStepSpilloverReadsTotal,
-}
 
 export interface StepSpilloverConfig {
   enabled: boolean
@@ -166,38 +150,30 @@ export interface StepSpilloverResult {
 }
 
 export interface StepSpillover {
-  /** Internal tool that reads a spilled blob of this step. */
+  /** Internal tool that reads a spilled result of this step. */
   readTool: InternalToolDefinition
-  /** Never throws. When nothing is persisted, `text` is `content` unchanged. */
+  /** Never throws. When nothing is stored, `text` is `content` unchanged. */
   persist(args: {
     callId: string
     toolName: string
     content: string
     isError: boolean
   }): Promise<StepSpilloverResult>
-  /**
-   * Removes this execution's blobs. Never throws; no-op when nothing was
-   * written. Removes nothing when `.spill` is no longer a directory.
-   */
-  cleanup(): Promise<void>
+  /** Drops every stored result. After it the read tool finds nothing. */
+  release(): void
 }
 
-/**
- * True when `spillRootAbs` is a directory, false when it does not exist.
- * Rejects with `ENOTDIR` when it is anything else (a symbolic link, a file),
- * and with the `lstat` error when it cannot be examined. `lstat` does not
- * follow a link in the last path component.
- */
-async function spillRootIsDirectory(spillRootAbs: string): Promise<boolean> {
-  let stat: Stats
-  try {
-    stat = await fs.lstat(spillRootAbs)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return false
-    throw err
+// Same summary shape as the first-party store (core/spillover/storage.ts).
+const HEAD_TAIL_CHARS = 400
+
+function countLines(content: string): number {
+  if (content.length === 0) return 0
+  let count = 1
+  for (let i = 0; i < content.length; i++) {
+    if (content.charCodeAt(i) === 10) count += 1
   }
-  if (stat.isDirectory()) return true
-  throw Object.assign(new Error('step spillover root is not a directory'), { code: 'ENOTDIR' })
+  if (content.charCodeAt(content.length - 1) === 10) count -= 1
+  return Math.max(count, 1)
 }
 
 function readError(error: string): InternalToolResult {
@@ -208,14 +184,13 @@ function tooLargeReadError(size: number, thresholdBytes: number): string {
   return `blob is ${size} bytes; pass range {start,end} with end-start <= ${thresholdBytes}`
 }
 
-/** Synchronous and disk-free. Returns null when `stepId` is not a valid store segment. */
+/** Synchronous. Returns null when `stepId` is not a valid ref segment. */
 export function createStepSpillover(opts: {
-  outputDir: string
   stepId: string
   thresholdBytes: number
   budgetBytes: number
 }): StepSpillover | null {
-  const { outputDir, stepId, thresholdBytes, budgetBytes } = opts
+  const { stepId, thresholdBytes, budgetBytes } = opts
   if (typeof stepId !== 'string' || !SEGMENT_RE.test(stepId)) {
     logger.warn(
       { component: LOG_COMPONENT, stepIdLength: typeof stepId === 'string' ? stepId.length : 0 },
@@ -224,22 +199,15 @@ export function createStepSpillover(opts: {
     return null
   }
 
-  const spillRoot = path.join(outputDir, SPILL_DIR)
-  const spillRootAbs = path.resolve(spillRoot)
-  const executionId = randomBytes(8).toString('hex')
-  const executionRoot = path.join(spillRoot, executionId)
-  const storage = new SpilloverStorage({
-    workspacePath: executionRoot,
-    thresholdBytes,
-    ttlMs: 0,
-    gcIntervalMs: 0,
-    instruments: STEP_SPILLOVER_INSTRUMENTS,
-  })
-  const reader = new SpilloverReadTool(storage)
+  // The spilled results of this execution, by ref. `release` empties the map,
+  // after which the read tool finds nothing.
+  const blobs = new Map<string, SpilloverBlob>()
+  const reader = new SpilloverReadTool(
+    { load: (ref: string) => Promise.resolve(blobs.get(ref) ?? null) },
+    { reads: clerumWorkflowStepSpilloverReadsTotal }
+  )
 
   let persistedBytes = 0
-  let attemptedWrite = false
-  let writeFailed = false
   let budgetWarned = false
 
   const readTool: InternalToolDefinition = {
@@ -251,7 +219,7 @@ export function createStepSpillover(opts: {
       if (!parsed || parsed.taskId !== stepId) {
         return readError('spillover ref is not available to this step')
       }
-      const blob = await storage.load(args.ref as string)
+      const blob = blobs.get(args.ref as string)
       if (!blob) return readError('spillover blob not found')
 
       const range =
@@ -276,17 +244,19 @@ export function createStepSpillover(opts: {
     },
   }
 
-  async function persist(args: {
+  function persist(args: {
     callId: string
     toolName: string
     content: string
     isError: boolean
   }): Promise<StepSpilloverResult> {
     const inline: StepSpilloverResult = { text: args.content, spilled: false }
-    if (args.isError || args.toolName === STEP_SPILLOVER_READ_TOOL_NAME) return inline
-    if (writeFailed || typeof args.content !== 'string') return inline
+    if (args.isError || args.toolName === STEP_SPILLOVER_READ_TOOL_NAME) {
+      return Promise.resolve(inline)
+    }
+    if (typeof args.content !== 'string') return Promise.resolve(inline)
     const size = Buffer.byteLength(args.content, 'utf8')
-    if (size < thresholdBytes) return inline
+    if (size < thresholdBytes) return Promise.resolve(inline)
     if (persistedBytes + size > budgetBytes) {
       if (!budgetWarned) {
         budgetWarned = true
@@ -295,143 +265,68 @@ export function createStepSpillover(opts: {
           'Tool result does not fit in the step spillover budget; it stays inline (logged once per step)'
         )
       }
-      return inline
+      return Promise.resolve(inline)
     }
-    try {
-      attemptedWrite = true
-      // Rejects for a `.spill` that is a link or a file, so nothing is written
-      // through it; a missing `.spill` is created by the store.
-      await spillRootIsDirectory(spillRootAbs)
-      const summary = await storage.maybePersist({
-        taskId: stepId,
-        toolCallId: args.callId,
-        toolName: args.toolName,
-        content: args.content,
-        isError: false,
-      })
-      if (!summary) return inline
-      persistedBytes += size
-      logger.info(
-        {
-          component: LOG_COMPONENT,
-          stepId,
-          toolName: args.toolName,
-          byteSize: size,
-          spilloverRef: summary.spillover_ref,
-        },
-        'Tool result stored outside the prompt'
-      )
-      return {
-        text:
-          `[Result stored outside the prompt (${summary.byte_size} bytes). Read more with ` +
-          `${STEP_SPILLOVER_READ_TOOL_NAME}: pass this spillover_ref and a byte range of at most ` +
-          `${thresholdBytes} bytes.]\n${JSON.stringify(summary)}`,
-        spilled: true,
-      }
-    } catch (err) {
-      writeFailed = true
+    if (!SEGMENT_RE.test(args.callId)) {
       logger.warn(
-        {
-          component: LOG_COMPONENT,
-          stepId,
-          toolName: args.toolName,
-          byteSize: size,
-          errorCode: (err as NodeJS.ErrnoException | undefined)?.code,
-        },
-        'Could not persist tool result; results stay inline for the rest of this step'
+        { component: LOG_COMPONENT, stepId, toolName: args.toolName, byteSize: size },
+        'Call id is not a valid spillover segment; the tool result stays inline'
       )
-      return inline
+      return Promise.resolve(inline)
     }
-  }
 
-  async function cleanup(): Promise<void> {
-    if (!attemptedWrite) return
-    // The recursive delete must stay inside `.spill`: the execution id is
-    // generated here as hex, and this re-checks the resolved path. That check
-    // is lexical; the `lstat` check below keeps a `.spill` that was replaced by
-    // a symbolic link from being followed.
-    const executionDir = path.resolve(spillRootAbs, executionId)
-    if (!executionDir.startsWith(spillRootAbs + path.sep)) return
-    try {
-      if (!(await spillRootIsDirectory(spillRootAbs))) return
-      await fs.rm(executionDir, { recursive: true, force: true })
-    } catch (err) {
-      logger.warn(
-        {
-          component: LOG_COMPONENT,
-          stepId,
-          errorCode: (err as NodeJS.ErrnoException | undefined)?.code,
-        },
-        'Could not remove step spillover directory'
-      )
-      return
+    const contentType = inferContentType(args.toolName, args.content)
+    const summary: SpilloverSummary = {
+      spillover_ref: buildSpilloverRef(stepId, args.callId),
+      byte_size: size,
+      line_count: countLines(args.content),
+      content_type: contentType,
+      fingerprint_sha256: createHash('sha256').update(args.content, 'utf8').digest('hex'),
+      head:
+        args.content.length > HEAD_TAIL_CHARS
+          ? args.content.slice(0, HEAD_TAIL_CHARS)
+          : args.content,
+      tail: args.content.length > HEAD_TAIL_CHARS ? args.content.slice(-HEAD_TAIL_CHARS) : '',
+      structure_hint: generateStructureHint(args.toolName, args.content, contentType),
     }
-    // Remove `.spill` only when empty; another execution may still use it.
-    try {
-      await fs.rmdir(spillRoot)
-    } catch {
-      // Not empty, or already gone.
-    }
-  }
-
-  return { readTool, persist, cleanup }
-}
-
-/**
- * Removes the spill files a process that died mid-step left in `outputDir`:
- * `.spill/<executionId>` directories and the older `.spill/spillover` layout.
- * Other entries under `.spill` are kept. A `.spill` that is not a real
- * directory (a symbolic link, a file) is left alone, with a warning. Creates
- * nothing and never throws.
- *
- * Call it once per process, before the first step creates its store: no
- * execution of this process can own a spill directory yet.
- */
-export async function removeLeftoverStepSpillover(outputDir: string): Promise<void> {
-  const spillRootAbs = path.resolve(outputDir, SPILL_DIR)
-  let entries: string[]
-  try {
-    if (!(await spillRootIsDirectory(spillRootAbs))) return
-    entries = await fs.readdir(spillRootAbs)
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException | undefined)?.code
-    if (code === 'ENOENT') return
-    logger.warn(
-      { component: LOG_COMPONENT, errorCode: code },
-      'Could not list leftover step spillover files'
-    )
-    return
-  }
-
-  let removed = 0
-  for (const entry of entries) {
-    if (entry !== STORE_ROOT && !EXECUTION_DIR_RE.test(entry)) continue
-    const target = path.resolve(spillRootAbs, entry)
-    if (!target.startsWith(spillRootAbs + path.sep)) continue
-    try {
-      await fs.rm(target, { recursive: true, force: true })
-      removed += 1
-    } catch (err) {
-      logger.warn(
-        {
-          component: LOG_COMPONENT,
-          errorCode: (err as NodeJS.ErrnoException | undefined)?.code,
-        },
-        'Could not remove leftover step spillover files'
-      )
-    }
-  }
-  if (removed > 0) {
+    blobs.set(summary.spillover_ref, {
+      version: 1,
+      tool_call_id: args.callId,
+      tool_name: args.toolName,
+      task_id: stepId,
+      created_at_ms: Date.now(),
+      byte_size: size,
+      line_count: summary.line_count,
+      content_type: contentType,
+      fingerprint_sha256: summary.fingerprint_sha256,
+      content: args.content,
+    })
+    persistedBytes += size
+    clerumWorkflowStepSpilloverPersistedTotal?.inc({ tool: args.toolName })
     logger.info(
-      { component: LOG_COMPONENT, removedEntries: removed },
-      'Removed step spillover files left by an earlier process'
+      {
+        component: LOG_COMPONENT,
+        stepId,
+        toolName: args.toolName,
+        byteSize: size,
+        spilloverRef: summary.spillover_ref,
+      },
+      'Tool result stored outside the prompt'
     )
+    return Promise.resolve({
+      text:
+        `[Result stored outside the prompt (${summary.byte_size} bytes). Read more with ` +
+        `${STEP_SPILLOVER_READ_TOOL_NAME}: pass this spillover_ref and a byte range of at most ` +
+        `${thresholdBytes} bytes.]\n${JSON.stringify(summary)}`,
+      spilled: true,
+    })
   }
-  try {
-    await fs.rmdir(spillRootAbs)
-  } catch {
-    // Not empty: other entries under `.spill` are not this feature's.
+
+  function release(): void {
+    blobs.clear()
   }
+
+  return { readTool, persist, release }
 }
 
 /** What `toolsCalled` records for a read call: never the blob content. */

@@ -27,7 +27,6 @@ import { generateStructureHint, inferContentType } from './structureHints'
 import type {
   MaybePersistArgs,
   SpilloverBlob,
-  SpilloverInstruments,
   SpilloverStorageOptions,
   SpilloverSummary,
   SweepResult,
@@ -145,8 +144,6 @@ export class SpilloverStorage {
   private gcTimer: NodeJS.Timeout | null = null
   /** Resolved absolute root for safety prefix checks. Trailing separator stripped. */
   private readonly rootAbs: string
-  /** Metrics this store and its read tool report to. */
-  readonly instruments: SpilloverInstruments
 
   constructor(opts: SpilloverStorageOptions) {
     if (!opts.workspacePath) throw new Error('SpilloverStorage: workspacePath is required')
@@ -155,11 +152,6 @@ export class SpilloverStorage {
     if (opts.gcIntervalMs < 0) throw new Error('SpilloverStorage: gcIntervalMs must be >= 0')
     this.opts = opts
     this.rootAbs = path.resolve(opts.workspacePath, SPILLOVER_ROOT)
-    this.instruments = opts.instruments ?? {
-      outputBytes: clerumToolOutputBytes,
-      persisted: clerumSpilloverPersistedTotal,
-      reads: clerumSpilloverReadsTotal,
-    }
   }
 
   // ── Public API ─────────────────────────────────────────────────────────
@@ -179,7 +171,7 @@ export class SpilloverStorage {
    */
   async maybePersist(args: MaybePersistArgs): Promise<SpilloverSummary | null> {
     const byteSize = Buffer.byteLength(args.content, 'utf8')
-    this.instruments.outputBytes?.observe({ tool: args.toolName }, byteSize)
+    clerumToolOutputBytes?.observe({ tool: args.toolName }, byteSize)
 
     if (args.isError) return null
     if (args.toolName === 'clerum__spillover_read') return null
@@ -205,7 +197,7 @@ export class SpilloverStorage {
     }
 
     await this.atomicWrite(resolved, JSON.stringify(blob))
-    this.instruments.persisted?.inc({ tool: args.toolName })
+    clerumSpilloverPersistedTotal?.inc({ tool: args.toolName })
 
     const head =
       args.content.length > HEAD_TAIL_CHARS ? args.content.slice(0, HEAD_TAIL_CHARS) : args.content

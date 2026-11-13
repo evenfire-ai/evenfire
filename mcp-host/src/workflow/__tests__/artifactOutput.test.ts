@@ -3,10 +3,8 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { logger } from '../../logger'
-import { CALLER_OUTPUTS_DIR } from '../../workspace/callerOutputs'
 import {
   PARTIAL_PREFIX,
-  STEP_SPILL_DIR,
   artifactResult,
   capNotes,
   claimOutputFile,
@@ -258,73 +256,6 @@ describe('enforceQuota', () => {
       }
     }
   )
-
-  describe('the step spill directory', () => {
-    const KB = 1024
-
-    beforeEach(() => {
-      vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_QUOTA_MB', '1')
-    })
-
-    afterEach(() => {
-      vi.unstubAllEnvs()
-    })
-
-    /** A 2000 KiB file at `dir/...segments`, twice the 1 MB quota. */
-    function plant(dir: string, ...segments: string[]): void {
-      const file = path.join(dir, ...segments)
-      fs.mkdirSync(path.dirname(file), { recursive: true })
-      fs.writeFileSync(file, Buffer.alloc(2000 * KB))
-    }
-
-    it.each([
-      ['on', undefined],
-      ['off', 'false'],
-    ])(
-      'is not counted in a run output, and artifacts still are (spillover %s)',
-      (_label, enabled) => {
-        if (enabled !== undefined) vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED', enabled)
-        plant(outputDir, STEP_SPILL_DIR, '0123456789abcdef', 'spillover', 'step', 'i1c0.json')
-        fs.writeFileSync(path.join(outputDir, 'a.md'), Buffer.alloc(100 * KB))
-        // Witness: the spill file is there and a plain sum counts it.
-        expect(getDirectorySize(outputDir)).toBe(2100 * KB)
-        expect(() => enforceQuota(outputDir, 500 * KB)).not.toThrow()
-        // Witness: the artifact still counts (100 KiB held, 1000 KiB more is over 1 MB).
-        expect(() => enforceQuota(outputDir, 1000 * KB)).toThrow(
-          /Output quota exceeded: the output folder holds 0\.1 MB/
-        )
-      }
-    )
-
-    it.each([
-      ['a directory of that name below the top level', ['sub', '.spill', 'x']],
-      ['a directory named .spill2', ['.spill2', 'x']],
-      ['a directory named spill', ['spill', 'x']],
-      ['a directory named .spillover', ['.spillover', 'x']],
-      ['a directory named x.spill', ['x.spill', 'x']],
-      ['a regular file named .spill', ['.spill']],
-    ])('still counts %s', (_what, segments) => {
-      plant(outputDir, ...segments)
-      expect(() => enforceQuota(outputDir, 1)).toThrow(
-        /Output quota exceeded: the output folder holds 2\.0 MB/
-      )
-    })
-
-    it('still counts a .spill directory in a chat caller folder', () => {
-      const callerFolder = path.join(outputDir, CALLER_OUTPUTS_DIR)
-      plant(callerFolder, STEP_SPILL_DIR, 'x')
-      expect(() => enforceQuota(callerFolder, 1)).toThrow(
-        /Output quota exceeded: the output folder holds 2\.0 MB/
-      )
-    })
-
-    it('keeps getDirectorySize a full sum unless a directory is named to skip', () => {
-      plant(outputDir, STEP_SPILL_DIR, 'x')
-      plant(outputDir, 'sub', STEP_SPILL_DIR, 'x')
-      expect(getDirectorySize(outputDir)).toBe(4000 * KB)
-      expect(getDirectorySize(outputDir, STEP_SPILL_DIR)).toBe(2000 * KB)
-    })
-  })
 })
 
 describe('generators through the shared output path', () => {

@@ -6,15 +6,12 @@ import { register } from 'prom-client'
 import { config } from '../../config'
 import { LlmErrorCode } from '../../core/errors'
 import {
-  SpilloverStorage,
   clerumSpilloverPersistedTotal,
   clerumSpilloverReadsTotal,
   clerumToolOutputBytes,
 } from '../../core/spillover'
-import { SpilloverReadTool } from '../../core/tools/spilloverRead'
 import { FinishReason } from '../../core/types'
 import type { SingleTurnProvider } from '../../llm'
-import { logger } from '../../logger'
 import type { McpClientConnection, McpClientFactory } from '../stepRouter'
 import {
   clerumWorkflowStepSpilloverPersistedTotal,
@@ -119,15 +116,6 @@ function toolResultMessages(llm: SingleTurnProvider): string[] {
   return last.filter(m => m.content.startsWith('<tool-result ')).map(m => m.content)
 }
 
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fs.stat(p)
-    return true
-  } catch {
-    return false
-  }
-}
-
 const big = (size: number): string => 'L'.repeat(size)
 
 let outputDir: string
@@ -143,7 +131,7 @@ afterEach(async () => {
 })
 
 describe('WorkflowService step spillover — default (enabled)', () => {
-  it('spills a 100 KiB MCP result, then offers the read tool, and cleans up', async () => {
+  it('spills a 100 KiB MCP result, then offers the read tool', async () => {
     const payload = big(100 * 1024)
     const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
     const llm = mockLlmProvider([
@@ -166,7 +154,6 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     expect(res.toolsCalled?.[0]?.result).toBe(payload)
     expect(offeredTools(llm)[0]).not.toContain(READ_TOOL)
     expect(offeredTools(llm)[1]).toContain(READ_TOOL)
-    expect(await exists(path.join(outputDir, '.spill'))).toBe(false)
   })
 
   it('leaves a step with small results unchanged', async () => {
@@ -362,65 +349,6 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     expect(res.output).toContain('report.pdf')
     expect(res.toolsCalled?.[0]?.result).toEqual(artifact)
   })
-
-  it('removes the spill directory when the step fails after spilling', async () => {
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(100 * 1024) } })
-    const llm = mockLlmProvider([
-      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
-    ])
-    let calls = 0
-    vi.mocked(llm.completeSingleTurnWithTools).mockImplementation(() => {
-      calls += 1
-      if (calls === 1) {
-        return Promise.resolve({
-          content: null,
-          tool_calls: [{ id: 'call-1', name: 'srv__read', arguments: {} }],
-          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-          finish_reason: FinishReason.ToolUse,
-        })
-      }
-      return Promise.reject(new Error('provider exploded'))
-    })
-
-    const res = await service(llm, client).executeStep({
-      stepId: STEP_ID,
-      instruction: 'review',
-      mcpServers: SERVERS,
-    })
-
-    expect(res.status).toBe('failed')
-    expect(await exists(path.join(outputDir, '.spill'))).toBe(false)
-  })
-
-  it('removes the spill directory when the step is aborted after spilling', async () => {
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(100 * 1024) } })
-    const llm = mockLlmProvider([])
-    const controller = new AbortController()
-    let calls = 0
-    vi.mocked(llm.completeSingleTurnWithTools).mockImplementation(() => {
-      calls += 1
-      if (calls === 1) {
-        return Promise.resolve({
-          content: null,
-          tool_calls: [{ id: 'call-1', name: 'srv__read', arguments: {} }],
-          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-          finish_reason: FinishReason.ToolUse,
-        })
-      }
-      // The spill already happened; abort while the next call is pending.
-      setTimeout(() => controller.abort('step-timeout'), 0)
-      return new Promise(() => undefined)
-    })
-
-    const res = await service(llm, client).executeStep(
-      { stepId: STEP_ID, instruction: 'review', mcpServers: SERVERS },
-      undefined,
-      { signal: controller.signal }
-    )
-
-    expect(res.status).toBe('failed')
-    expect(await exists(path.join(outputDir, '.spill'))).toBe(false)
-  })
 })
 
 describe('WorkflowService step spillover — kill switch', () => {
@@ -524,160 +452,7 @@ describe('WorkflowService step spillover — first-party flag', () => {
   })
 })
 
-function blobFile(content: string): string {
-  return JSON.stringify({
-    version: 1,
-    tool_call_id: 'i9c9',
-    tool_name: 'srv__read',
-    task_id: STEP_ID,
-    created_at_ms: Date.now(),
-    byte_size: Buffer.byteLength(content, 'utf8'),
-    line_count: 1,
-    content_type: 'text',
-    fingerprint_sha256: 'x',
-    content,
-  })
-}
-
-async function seedSpill(rel: string, body: string): Promise<string> {
-  const file = path.join(outputDir, '.spill', rel)
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  await fs.writeFile(file, body)
-  return file
-}
-
-describe('WorkflowService step spillover — files of other executions', () => {
-  it.each([
-    ['enabled', undefined],
-    ['disabled', 'false'],
-  ])(
-    'removes spill files left by an earlier process before the first step (%s)',
-    async (_label, enabled) => {
-      if (enabled !== undefined) vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED', enabled)
-      const leftovers = [
-        await seedSpill('spillover/review/i1c0.json', blobFile('OLD-LAYOUT-MARKER')),
-        await seedSpill('deadbeefdeadbeef/spillover/review/i1c0.json', blobFile('DEAD-MARKER')),
-      ]
-      const unrelated = await seedSpill('keep.txt', 'not written by spillover')
-      for (const f of [...leftovers, unrelated]) expect(await exists(f)).toBe(true)
-
-      const payload = big(1024)
-      const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
-      const llm = mockLlmProvider([
-        { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
-        { content: 'done', tool_calls: null },
-      ])
-      const res = await service(llm, client).executeStep({
-        stepId: STEP_ID,
-        instruction: 'review',
-        mcpServers: SERVERS,
-      })
-
-      expect(res.status).toBe('completed')
-      expect(llm.completeSingleTurnWithTools).toHaveBeenCalledTimes(2)
-      expect(toolResultMessages(llm)).toEqual([
-        `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`,
-      ])
-      expect(await fs.readdir(path.join(outputDir, '.spill'))).toEqual(['keep.txt'])
-    }
-  )
-
-  it.each([
-    ['enabled', undefined],
-    ['disabled', 'false'],
-  ])('leaves a symlinked .spill and its target alone (%s)', async (_label, enabled) => {
-    if (enabled !== undefined) vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED', enabled)
-    const warn = vi.spyOn(logger, 'warn')
-    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-spillover-outside-'))
-    try {
-      for (const rel of ['spillover/review/i1c0.json', 'deadbeefdeadbeef/x.json', 'keep.txt']) {
-        await fs.mkdir(path.dirname(path.join(outside, rel)), { recursive: true })
-        await fs.writeFile(path.join(outside, rel), 'not ours')
-      }
-      await fs.symlink(outside, path.join(outputDir, '.spill'), 'dir')
-
-      const payload = big(100 * 1024)
-      const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
-      const llm = mockLlmProvider([
-        { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
-        { content: 'done', tool_calls: null },
-      ])
-      const res = await service(llm, client).executeStep({
-        stepId: STEP_ID,
-        instruction: 'review',
-        mcpServers: SERVERS,
-      })
-
-      expect(res.status).toBe('completed')
-      // Nothing is written through the link: the result stays inline.
-      expect(toolResultMessages(llm)).toEqual([
-        `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`,
-      ])
-      for (const names of offeredTools(llm)) expect(names).not.toContain(READ_TOOL)
-      expect((await fs.readdir(outside)).sort()).toEqual([
-        'deadbeefdeadbeef',
-        'keep.txt',
-        'spillover',
-      ])
-      expect((await fs.lstat(path.join(outputDir, '.spill'))).isSymbolicLink()).toBe(true)
-      // Witness: the removal ran on this step and refused the link.
-      expect(
-        warn.mock.calls.filter(([, msg]) => String(msg).includes('Could not list leftover'))
-      ).toHaveLength(1)
-    } finally {
-      // This file's afterEach does not restore spies.
-      warn.mockRestore()
-      await fs.rm(outside, { recursive: true, force: true })
-    }
-  })
-
-  it('does not let a step read a blob left under the same ref by another execution', async () => {
-    const llm = mockLlmProvider([
-      // Step 1 (text only) runs the once-per-process removal first.
-      { content: 'warm-up done' },
-      // Step 2: spill, read a foreign ref, read its own ref.
-      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
-      {
-        content: null,
-        tool_calls: [{ name: READ_TOOL, arguments: { ref: `spillover://${STEP_ID}/i9c9.json` } }],
-      },
-      {
-        content: null,
-        tool_calls: [
-          { name: READ_TOOL, arguments: { ref: FIRST_REF, range: { start: 0, end: 50 } } },
-        ],
-      },
-      { content: 'done', tool_calls: null },
-    ])
-    const payload = big(100 * 1024)
-    const svc = service(llm, mockMcpClient([{ name: 'read' }], { read: { content: payload } }))
-    const warmUp = await svc.executeStep({ stepId: 'warm-up', instruction: 'warm up' })
-    expect(warmUp.status).toBe('completed')
-
-    await seedSpill('spillover/review/i9c9.json', blobFile('FOREIGN-OLD-LAYOUT'))
-    await seedSpill('0123456789abcdef/spillover/review/i9c9.json', blobFile('FOREIGN-EXECUTION'))
-
-    const res = await svc.executeStep({
-      stepId: STEP_ID,
-      instruction: 'review',
-      mcpServers: SERVERS,
-    })
-
-    expect(res.status).toBe('completed')
-    const records = res.toolsCalled ?? []
-    expect(records[1]?.result).toEqual({
-      success: false,
-      ref: `spillover://${STEP_ID}/i9c9.json`,
-      error: 'spillover blob not found',
-    })
-    expect(records[2]?.result).toEqual({ success: true, ref: FIRST_REF, bytes: 50 })
-    const prompt = providerCalls(llm).flatMap(([messages]) => messages.map(m => m.content))
-    for (const text of prompt) {
-      expect(text).not.toContain('FOREIGN-OLD-LAYOUT')
-      expect(text).not.toContain('FOREIGN-EXECUTION')
-    }
-  })
-
+describe('WorkflowService step spillover — other executions', () => {
   it('keeps the blobs of an execution when another execution of the same step ends', async () => {
     const payloadA = 'A'.repeat(100 * 1024)
     const payloadB = 'B'.repeat(100 * 1024)
@@ -757,7 +532,6 @@ describe('WorkflowService step spillover — files of other executions', () => {
       .find(m => m.content.startsWith(`<tool-result server="${READ_TOOL}"`))
     expect(readMessage?.content).toContain('AAAAAAAAAA')
     expect(readMessage?.content).not.toContain('BBBBBBBBBB')
-    expect(await exists(path.join(outputDir, '.spill'))).toBe(false)
   })
 })
 
@@ -830,148 +604,5 @@ describe('WorkflowService step spillover — metrics', () => {
     expect(await metricTotal('clerum_spillover_persisted_total')).toBe(before.persisted)
     expect(await metricTotal('clerum_spillover_reads_total')).toBe(before.reads)
     expect(await metricTotal('clerum_tool_output_bytes')).toBe(before.outputBytes)
-  })
-
-  it('keeps the first-party instruments for a store built without instruments', async () => {
-    const storage = new SpilloverStorage({
-      workspacePath: outputDir,
-      thresholdBytes: 10,
-      ttlMs: 0,
-      gcIntervalMs: 0,
-    })
-    const persisted = await metricTotal('clerum_spillover_persisted_total', { tool: 'probe' })
-    const observed = await metricTotal('clerum_tool_output_bytes', { tool: 'probe' })
-    const summary = await storage.maybePersist({
-      taskId: 'task',
-      toolCallId: 'call',
-      toolName: 'probe',
-      content: 'x'.repeat(100),
-      isError: false,
-    })
-    expect(summary?.spillover_ref).toBe('spillover://task/call.json')
-    expect(await metricTotal('clerum_spillover_persisted_total', { tool: 'probe' })).toBe(
-      persisted + 1
-    )
-    expect(await metricTotal('clerum_tool_output_bytes', { tool: 'probe' })).toBe(observed + 1)
-  })
-
-  it('counts reads of a store built without instruments under the first-party counter', async () => {
-    expect(register.getSingleMetric('clerum_spillover_reads_total')).toBe(clerumSpilloverReadsTotal)
-    const storage = new SpilloverStorage({
-      workspacePath: outputDir,
-      thresholdBytes: 10,
-      ttlMs: 0,
-      gcIntervalMs: 0,
-    })
-    const summary = await storage.maybePersist({
-      taskId: 'task',
-      toolCallId: 'call',
-      toolName: 'probe',
-      content: 'x'.repeat(100),
-      isError: false,
-    })
-    const reader = new SpilloverReadTool(storage)
-    const before = {
-      whole: await metricTotal('clerum_spillover_reads_total', { with_range: 'false' }),
-      ranged: await metricTotal('clerum_spillover_reads_total', { with_range: 'true' }),
-      step: await metricTotal('clerum_workflow_step_spillover_reads_total'),
-    }
-
-    const whole = await reader.execute({ ref: summary!.spillover_ref })
-    const ranged = await reader.execute({
-      ref: summary!.spillover_ref,
-      range: { start: 0, end: 10 },
-    })
-
-    expect(whole).toMatchObject({ is_error: false, content: 'x'.repeat(100) })
-    expect(ranged).toMatchObject({ is_error: false, content: 'x'.repeat(10) })
-    expect(await metricTotal('clerum_spillover_reads_total', { with_range: 'false' })).toBe(
-      before.whole + 1
-    )
-    expect(await metricTotal('clerum_spillover_reads_total', { with_range: 'true' })).toBe(
-      before.ranged + 1
-    )
-    expect(await metricTotal('clerum_workflow_step_spillover_reads_total')).toBe(before.step)
-  })
-})
-
-/** Bytes of the regular files under `dir`, by a walk that is not the quota's. */
-async function treeBytes(dir: string): Promise<number> {
-  let total = 0
-  let entries
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true })
-  } catch {
-    return 0
-  }
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name)
-    if (entry.isDirectory()) total += await treeBytes(full)
-    else if (entry.isFile()) total += (await fs.stat(full)).size
-  }
-  return total
-}
-
-describe('WorkflowService step spillover — artifact quota', () => {
-  it('does not count spilled results against the artifact quota, and still counts artifacts', async () => {
-    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_QUOTA_MB', '1')
-    const MIB = 1024 * 1024
-    const llm = mockLlmProvider([
-      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
-      {
-        content: null,
-        tool_calls: [
-          {
-            name: 'clerum__generate_markdown',
-            arguments: { filename: 'report.md', content: big(200 * 1024) },
-          },
-        ],
-      },
-      {
-        content: null,
-        tool_calls: [
-          {
-            name: 'clerum__generate_markdown',
-            arguments: { filename: 'second.md', content: big(900 * 1024) },
-          },
-        ],
-      },
-      { content: 'done', tool_calls: null },
-    ])
-    // Bytes under `.spill` at each model call: the second and third calls are
-    // made right before each generator runs.
-    const spillBytesAtCall: number[] = []
-    const answer = llm.completeSingleTurnWithTools
-    llm.completeSingleTurnWithTools = vi.fn().mockImplementation(async (...args: unknown[]) => {
-      spillBytesAtCall.push(await treeBytes(path.join(outputDir, '.spill')))
-      return (answer as (...a: unknown[]) => unknown)(...args)
-    })
-    const client = mockMcpClient([{ name: 'read' }], {
-      read: { content: big(Math.floor(1.2 * MIB)) },
-    })
-
-    const res = await service(llm, client).executeStep({
-      stepId: STEP_ID,
-      instruction: 'review',
-      mcpServers: SERVERS,
-    })
-
-    expect(res.status).toBe('completed')
-    // Witness: when each generator ran, the spilled result was on disk and
-    // alone larger than the 1 MB quota.
-    expect(spillBytesAtCall[0]).toBe(0)
-    expect(spillBytesAtCall[1]).toBeGreaterThan(MIB)
-    expect(spillBytesAtCall[2]).toBeGreaterThan(MIB)
-    const records = res.toolsCalled ?? []
-    // The spilled bytes do not make the artifact write fail.
-    expect(records[1]?.result).toMatchObject({ artifact: { name: 'report.md' } })
-    expect((await fs.stat(path.join(outputDir, 'report.md'))).size).toBe(200 * 1024)
-    // Witness: the quota still counts artifacts, and only them (0.2 MB held).
-    expect(JSON.stringify(records[2]?.result)).toMatch(
-      /Output quota exceeded: the output folder holds 0\.2 MB and this file needs 0\.9 MB/
-    )
-    await expect(fs.stat(path.join(outputDir, 'second.md'))).rejects.toMatchObject({
-      code: 'ENOENT',
-    })
   })
 })

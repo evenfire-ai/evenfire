@@ -40,7 +40,6 @@ import {
   STEP_SPILLOVER_READ_TOOL_NAME,
   type StepSpillover,
   createStepSpillover,
-  removeLeftoverStepSpillover,
   resolveStepSpilloverConfig,
   summarizeSpilloverReadForRecord,
 } from './stepSpillover'
@@ -337,8 +336,6 @@ export class WorkflowService {
   // `lazyBudgetClient` caches the one built from runtimeAuth.
   private readonly injectedBudgetClient: BudgetClient | null | undefined
   private lazyBudgetClient: BudgetClient | null = null
-  // Removal of step spill files left by an earlier process; runs once.
-  private leftoverSpillRemoval: Promise<void> | null = null
 
   constructor(
     recipeName: string,
@@ -885,13 +882,6 @@ export class WorkflowService {
       }
     }
 
-    // Spill files a dead process left in the output folder are removed once per
-    // process. The memo makes every step share one removal; a step waits for it
-    // before it can write a spill file (see the wait before
-    // `createStepSpillover`).
-    const leftoverSpillRemoval = (this.leftoverSpillRemoval ??=
-      removeLeftoverStepSpillover(getOutputDir()))
-
     // Capture provider into local const — eliminates non-null assertions inside async loop
     // and prevents concurrent configure() from nullifying mid-execution.
     const provider = this.currentProvider!
@@ -1184,23 +1174,13 @@ export class WorkflowService {
         }
       }
 
-      // Oversized tool results are stored outside the prompt. The store does
-      // not write to the disk and the read tool is not offered until a result
-      // is actually spilled, so steps without large results keep today's
-      // prompts and toolset. Leftovers of a dead process are removed first,
-      // also when spillover is disabled. The removal is shared by every step
-      // of the process, so a step waits for it only while the step itself may
-      // run: an abort or timeout during the wait fails the step with its abort
-      // reason. A step that is already aborted does not wait; it never writes
-      // to the store, because results are persisted only inside the loop
-      // below, after the loop's abort check.
-      if (!abortController.signal.aborted) {
-        await withTimeout(leftoverSpillRemoval, timeoutMs, abortController.signal)
-      }
+      // Oversized tool results are stored outside the prompt, in this
+      // process's memory, for the length of this step execution. The read
+      // tool is not offered until a result is actually stored, so steps
+      // without large results keep today's prompts and toolset.
       const spilloverConfig = resolveStepSpilloverConfig()
       if (spilloverConfig.enabled && toolDefs.length > 0) {
         stepSpillover = createStepSpillover({
-          outputDir: getOutputDir(),
           stepId: req.stepId,
           thresholdBytes: spilloverConfig.thresholdBytes,
           budgetBytes: spilloverConfig.budgetBytes,
@@ -1659,7 +1639,7 @@ export class WorkflowService {
     } finally {
       clearTimeout(timeout)
       options.signal?.removeEventListener('abort', abortFromCaller)
-      await stepSpillover?.cleanup()
+      stepSpillover?.release()
       await router.disconnect()
       this.revertSoulToGlobal()
       // P2b token budgets (§5.4) — workflow steps never traverse the agent
