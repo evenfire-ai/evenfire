@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import net from 'node:net'
 import { Pool } from 'pg'
-import type { DbRunProcessor } from '../../../src/reconciler/dbRunProcessor'
+import { type DbRunProcessor, createDbRunProcessor } from '../../../src/reconciler/dbRunProcessor'
 import {
   type AuthenticatedRequest,
   createWorkflowEndpointHandlers,
@@ -723,5 +723,90 @@ describe('step running report: pause projection clear (§10)', () => {
     const executionOps = ops.filter(op => op.path === '/status/workflowExecution')
     expect(executionOps).toHaveLength(1)
     expect(executionOps[0]).toMatchObject({ op: 'replace', value: { phase: 'failed' } })
+  })
+})
+
+// ─── A13 A-1: the real run processor behind the step running report ────────
+
+describe('step running report through the real run processor (A13 A-1)', () => {
+  const RUN_READ_SQL = /FROM workflow_runs run[\s\S]*WHERE run\.run_id = \$1/i
+
+  function processorOver(row: Record<string, unknown> | null) {
+    const calls: string[] = []
+    const client = {
+      query: vi.fn(async (sql: unknown) => {
+        const text = String(sql)
+        calls.push(text)
+        if (RUN_READ_SQL.test(text)) {
+          return row ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 }
+        }
+        return { rows: [], rowCount: 0 }
+      }),
+      release: vi.fn(),
+      on: vi.fn(),
+    }
+    const checkpointAuthority = vi.fn()
+    const processor = createDbRunProcessor({
+      instanceId: 'wrc-test',
+      pool: { connect: vi.fn(async () => client) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe: vi.fn(),
+      logger: { ...logSpies, withStep: () => logSpies } as never,
+    })
+    return { processor, calls, checkpointAuthority }
+  }
+
+  function runRow(phase: string, bound: boolean): Record<string, unknown> {
+    return {
+      run_id: RUN_ID,
+      phase,
+      failure_reason: null,
+      authority_binding: bound ? { operationId: 'workflow.run.trigger' } : null,
+      authority_binding_id: bound ? 'binding-1' : null,
+    }
+  }
+
+  async function stepRunning(processor: DbRunProcessor) {
+    const api = makeApi(childRecipe(execution('running')))
+    const result = await createWorkflowEndpointHandlers(
+      api as unknown as k8s.CustomObjectsApi,
+      'sandbox-recipes',
+      undefined,
+      { dbRunProcessor: processor }
+    ).postStepStatus('my-recipe', claims(), { stepId: 's2', phase: 'running' })
+    return { api, result }
+  }
+
+  it('accepts a step report for a legacy Failed run with no authority binding, as at dev', async () => {
+    const { processor, calls, checkpointAuthority } = processorOver(runRow('Failed', false))
+
+    const { api, result } = await stepRunning(processor)
+
+    expect(result).toEqual({ status: 200, body: { accepted: true } })
+    // Liveness witness: the route reached the real boundary, which read the run once.
+    expect(calls.filter(sql => RUN_READ_SQL.test(sql))).toHaveLength(1)
+    expect(checkpointAuthority).not.toHaveBeenCalled()
+    expect(api.patchNamespacedCustomObjectStatus).toHaveBeenCalledOnce()
+  })
+
+  it('still answers 409 for a bound Failed run', async () => {
+    const { processor, calls } = processorOver(runRow('Failed', true))
+
+    const { api, result } = await stepRunning(processor)
+
+    expect(result).toEqual({ status: 409, body: { code: 'workflow_run_not_running' } })
+    expect(calls.filter(sql => RUN_READ_SQL.test(sql))).toHaveLength(1)
+    expect(api.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+  })
+
+  it('still answers 409 for a run with no row', async () => {
+    const { processor, calls } = processorOver(null)
+
+    const { api, result } = await stepRunning(processor)
+
+    expect(result).toEqual({ status: 409, body: { code: 'workflow_run_not_running' } })
+    expect(calls.filter(sql => RUN_READ_SQL.test(sql))).toHaveLength(1)
+    expect(api.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
 })

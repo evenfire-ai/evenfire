@@ -113,7 +113,8 @@ export interface DbRunRow {
  *  - `allowed`: the run is Running (and, for a V2 run, its checkpoint passed);
  *  - `paused`: the run is AuthorizationPaused, with the reason stored on the
  *    row (or just written by this boundary);
- *  - `not_running`: the run is missing, Pending or terminal;
+ *  - `not_running`: the run is missing, or it has an authority binding and
+ *    is Pending or terminal (a run with no binding is not decided by phase);
  *  - `run_state_unavailable`: the run store could not be reached, so the
  *    boundary has no durable answer. A pause written in the same call may or
  *    may not have committed (a failed `COMMIT`); the caller's retry reads it.
@@ -844,9 +845,11 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
 
   // The authority checkpoint (an HTTP call) runs outside any transaction and
   // while no pooled client is held:
-  //   1. read the run without a transaction (client released after the read)
-  //      and answer from its phase: `not_running` for a missing, Pending or
-  //      terminal run, `paused` with the row's reason for a paused run;
+  //   1. read the run without a transaction (client released after the read):
+  //      `not_running` for a missing run, `paused` with the row's reason for a
+  //      paused run, `allowed` for a run with no authority binding (V1, any
+  //      other phase; the recipe status decides as at dev), and for a bound
+  //      run answer from its phase: `not_running` when Pending or terminal;
   //   2. checkpoint its binding;
   //   3. acquire a client and re-read the run under the row lock. A phase
   //      change answers from the new phase; a binding change (only resume
@@ -866,11 +869,20 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       return runStoreUnavailableOrThrow(runId, 'read', error)
     }
     if (!observed) return { outcome: 'not_running' }
+    // A paused row keeps its answer first. Both pause statements need an
+    // authority rejection, which needs a binding, so a run with no binding
+    // never reaches this branch.
+    if (observed.phase === 'AuthorizationPaused') {
+      return { outcome: 'paused', failureReason: observed.failure_reason ?? null }
+    }
+    // A run with no authority binding (no continuation and no initiating
+    // binding: `COALESCE(continuation, initiating)` is null) is a legacy V1
+    // run. It keeps dev's lifecycle without the V2 continuation checkpoint:
+    // its phase does not decide here, the recipe status does, so a latched
+    // `Failed` run can still recover and finish as at dev.
+    if (!observed.authority_binding) return { outcome: 'allowed' }
     const observedPhaseOutcome = boundaryPhaseOutcome(observed)
     if (observedPhaseOutcome) return observedPhaseOutcome
-    // Legacy V1 runs have no initiating authority binding and retain their
-    // existing lifecycle without the V2 continuation checkpoint.
-    if (!observed.authority_binding) return { outcome: 'allowed' }
 
     let failureReason: string | null = null
     try {

@@ -1617,6 +1617,105 @@ describe('createDbRunProcessor', () => {
     )
   })
 
+  // A13 A-1 (owner decision A16 X1): a run with no authority binding is a
+  // legacy V1 run; its row phase does not decide the running boundary, as at
+  // dev, so a latched or force-failed run can still recover and finish.
+  it.each(['Failed', 'Succeeded', 'Canceled', 'Pending'] as const)(
+    'lets a legacy %s run with no authority binding pass the running boundary',
+    async phase => {
+      const run = baseRun({ phase })
+      const client = makeClient(async sql =>
+        RUN_READ_SQL.test(sql) ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
+      )
+      const checkpointAuthority = vi.fn()
+      const proc = spawn({
+        instanceId: 'wrc-1',
+        pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+        runPollMs: 30_000,
+        checkpointAuthority,
+        createChildRecipe: vi.fn(),
+        logger: silentLogger(),
+      })
+
+      await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toEqual({
+        outcome: 'allowed',
+      })
+      // Liveness witness: the boundary made its one read of the run.
+      expect(client.calls.filter(call => RUN_READ_SQL.test(call.sql))).toHaveLength(1)
+      expect(client.calls.some(call => /^\s*BEGIN/i.test(call.sql))).toBe(false)
+      expect(checkpointAuthority).not.toHaveBeenCalled()
+      expect(client.calls.some(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))).toBe(
+        false
+      )
+    }
+  )
+
+  it('still answers not_running for a bound Failed run without a checkpoint', async () => {
+    const run = runWithBinding('binding-1', { phase: 'Failed' })
+    const client = makeClient(async sql =>
+      RUN_READ_SQL.test(sql) ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
+    )
+    const checkpointAuthority = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe: vi.fn(),
+      logger: silentLogger(),
+    })
+
+    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toEqual({
+      outcome: 'not_running',
+    })
+    expect(client.calls.filter(call => RUN_READ_SQL.test(call.sql))).toHaveLength(1)
+    expect(checkpointAuthority).not.toHaveBeenCalled()
+  })
+
+  it('still answers not_running for a run with no row', async () => {
+    const client = makeClient(async sql =>
+      RUN_READ_SQL.test(sql) ? { rows: [], rowCount: 0 } : { rows: [], rowCount: 0 }
+    )
+    const checkpointAuthority = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe: vi.fn(),
+      logger: silentLogger(),
+    })
+
+    await expect(proc.checkpointRunningBoundary('missing-run')).resolves.toEqual({
+      outcome: 'not_running',
+    })
+    expect(client.calls.filter(call => RUN_READ_SQL.test(call.sql))).toHaveLength(1)
+    expect(checkpointAuthority).not.toHaveBeenCalled()
+  })
+
+  it('keeps the AuthorizationPaused answer ahead of the V1 exit (row unreachable for bindingless runs)', async () => {
+    const run = baseRun({ phase: 'AuthorizationPaused', failure_reason: 'authority_revoked' })
+    const client = makeClient(async sql =>
+      RUN_READ_SQL.test(sql) ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
+    )
+    const checkpointAuthority = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe: vi.fn(),
+      logger: silentLogger(),
+    })
+
+    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toEqual({
+      outcome: 'paused',
+      failureReason: 'authority_revoked',
+    })
+    expect(client.calls.filter(call => RUN_READ_SQL.test(call.sql))).toHaveLength(1)
+    expect(checkpointAuthority).not.toHaveBeenCalled()
+  })
+
   // ─── Authority checkpoint outside the run transaction (plan r6 §3.2, §5.3)
 
   it('T-R1: checkpoints a bound Pending run outside any transaction, then claims it', async () => {
