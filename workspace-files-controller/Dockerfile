@@ -1,7 +1,8 @@
 # workspace-files-controller — per-SharedFileSystem HTTP IO service.
-# Built from the repository root: @clerum/action-context-contracts resolves
-# through file:../packages/action-context-contracts, so the package must be in
-# the build context before npm ci.
+# Built from the repository root: src/auth/actionAuthority.ts imports
+# ../../../packages/action-context-contracts by relative path. That path resolves
+# to /app/packages/action-context-contracts from src/auth (build stage) and from
+# dist/auth (runtime stage), so both stages copy the package.
 FROM node:24.22.1-alpine AS builder
 WORKDIR /app
 COPY packages/action-context-contracts ./packages/action-context-contracts

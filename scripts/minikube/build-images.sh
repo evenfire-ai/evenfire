@@ -1240,8 +1240,8 @@ build_image "nginx-egress-proxy" \
   "${PROJECT_DIR}/nginx-egress-proxy" \
   "clerum/nginx-egress-proxy:test"
 
-# gfsc (Global File System controller) — root build context: it depends on
-# @clerum/action-context-contracts through file:../packages. HCC's
+# gfsc (Global File System controller) — root build context: it imports
+# packages/action-context-contracts by relative path. HCC's
 # gfsReconciler spawns it from this image.
 build_image "gfs-controller" \
   "${PROJECT_DIR}" \

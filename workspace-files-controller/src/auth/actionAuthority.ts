@@ -1,4 +1,4 @@
-import { validateActionAuthorityCheckpointResponse } from '@clerum/action-context-contracts'
+import { validateActionAuthorityCheckpointResponse } from '../../../packages/action-context-contracts'
 import { HttpError, err } from '../errors'
 
 export type WfcOperation = 'shared_filesystem.read' | 'shared_filesystem.write'

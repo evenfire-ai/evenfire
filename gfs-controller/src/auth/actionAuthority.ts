@@ -1,4 +1,4 @@
-import { validateActionAuthorityCheckpointResponse } from '@clerum/action-context-contracts'
+import { validateActionAuthorityCheckpointResponse } from '../../../packages/action-context-contracts'
 import { GfsError } from '../api/errors'
 
 export type CanonicalTarget = Readonly<Record<string, string>>

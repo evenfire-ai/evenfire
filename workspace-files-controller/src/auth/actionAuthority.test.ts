@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
-import { hashActionTarget } from '@clerum/action-context-contracts'
+import { hashActionTarget } from '../../../packages/action-context-contracts'
 import { createWfcAuthorityCheckpointer, parseWfcActionAuthority } from './actionAuthority'
 
 const USER = '11111111-1111-4111-8111-111111111111'

@@ -747,8 +747,8 @@ assert_root_build_context rpc-proxy
 assert_publish_root_build_context rpc-proxy
 
 # gfs-controller and workspace-files-controller import the action-authority
-# checkpoint parser from @clerum/action-context-contracts, so both build from
-# the repository root and copy the package before each npm ci.
+# checkpoint parser from packages/action-context-contracts by relative path, so
+# both build from the repository root and copy the package into each stage.
 for service in gfs-controller workspace-files-controller; do
   assert_copy_before_every_ci "$service/Dockerfile" action-context-contracts
   assert_root_build_context "$service"
