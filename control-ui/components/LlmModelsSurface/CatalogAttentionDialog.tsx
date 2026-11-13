@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useRef } from 'react'
+import React, { useEffect, useRef } from 'react'
 import Link from 'next/link'
 import { DataTable, DialogShell } from '@clerum/frontend-components'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
@@ -190,10 +190,16 @@ function ReviewedAttentionSection({
   busyKeys,
   itemErrors,
   onUndoReviewed,
+  expanded,
 }: ReviewedAttentionSectionProps) {
   if (items.length === 0) return null
   return (
-    <details className="cu-advanced-details cu-model-attention__group cu-model-attention__reviewed">
+    // Expanded when nothing is pending: the list is then the dialog's only
+    // content, and a lone collapsed summary would read as an empty dialog.
+    <details
+      className="cu-advanced-details cu-model-attention__group cu-model-attention__reviewed"
+      open={expanded}
+    >
       <summary>Reviewed ({items.length})</summary>
       <p className="cu-model-attention__lede">
         Models you already reviewed. They come back to review when they change or gain a new
@@ -277,6 +283,16 @@ export function CatalogAttentionDialog({
   // would navigate away.
   const doneRef = useRef<HTMLButtonElement>(null)
   const { staleReferenced, deprecated, staleDiscovery } = groups
+  const pendingCount = staleReferenced.length + deprecated.length + staleDiscovery.length
+
+  // Acting on a row can remove it together with the button that had focus (the
+  // last pending item moving to Reviewed, an Undo emptying Reviewed). Focus would
+  // fall to <body> behind the modal, so it goes back to Done.
+  useEffect(() => {
+    if (!open) return
+    const active = document.activeElement
+    if (!active || active === document.body) doneRef.current?.focus()
+  }, [open, pendingCount, reviewed.length])
 
   function renderActions(item: AdminAttentionItem) {
     const key = attentionItemKey(item)
@@ -296,7 +312,7 @@ export function CatalogAttentionDialog({
     <DialogShell
       open={open}
       onDismiss={() => onDismiss()}
-      title="Models that need review"
+      title={pendingCount > 0 ? 'Models that need review' : 'Reviewed models'}
       size="large"
       initialFocusRef={doneRef}
       footer={
@@ -380,6 +396,7 @@ export function CatalogAttentionDialog({
         busyKeys={busyKeys}
         itemErrors={itemErrors}
         onUndoReviewed={onUndoReviewed}
+        expanded={pendingCount === 0}
       />
     </DialogShell>
   )

@@ -64,6 +64,8 @@ export type ReviewedAttentionSectionProps = {
   busyKeys: ReadonlySet<string>
   itemErrors: ReadonlyMap<string, string>
   onUndoReviewed: (item: AdminModelAttentionItem) => void
+  /** Rendered expanded; set when nothing is left to review. */
+  expanded: boolean
 }
 
 export type AttentionReviewLinkProps = {

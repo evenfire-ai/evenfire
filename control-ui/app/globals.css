@@ -11819,6 +11819,11 @@ td.cu-registry-description {
   flex: 0 0 auto;
 }
 
+/* Only reviewed attention items left: informational, not a warning. */
+.cu-llm-models-banner--quiet {
+  color: var(--cu-text-soft);
+}
+
 .cu-agent-create-panel__header > .cu-tabs {
   margin: 0;
   padding: 0 var(--cu-space-4) var(--cu-space-3);

@@ -70,7 +70,15 @@ export function CatalogAttentionBanner({
         includeAcknowledged: true,
         signal: controller.signal,
       })
-      if (currentLoad.current === controller) setItems(report.items)
+      if (currentLoad.current !== controller) return
+      setItems(report.items)
+      // An error belongs to an item; once the item leaves the feed it points at nothing.
+      const present = new Set(report.items.map(attentionItemKey))
+      setItemErrors(current =>
+        [...current.keys()].every(key => present.has(key))
+          ? current
+          : new Map([...current].filter(([key]) => present.has(key)))
+      )
     } catch (err) {
       if (currentLoad.current !== controller || isSilentApiError(err)) return
       // Advisory banner: a failure must never break the models surface.
@@ -184,11 +192,12 @@ export function CatalogAttentionBanner({
   // Unknown kinds never reach here: the fetch layer drops them while parsing.
   const groups = groupAttentionItems(pending)
   const { staleReferenced, deprecated, staleDiscovery } = groups
-  const empty = staleReferenced.length + deprecated.length + staleDiscovery.length === 0
+  const nothingPending = staleReferenced.length + deprecated.length + staleDiscovery.length === 0
+  const empty = nothingPending && reviewed.length === 0
   // `return null` does not unmount this component, so without this reset a
   // dialog left open when the feed empties (an empty or a failed refetch) would
-  // reappear on its own the next time the feed has items. Reviewed items do not
-  // keep it open: they need nothing from the operator.
+  // reappear on its own the next time the feed has items. Reviewed items keep it
+  // open: they are where the operator undoes a review.
   if (empty && reviewOpen) setReviewOpen(false)
   if (empty) return null
 
@@ -200,11 +209,26 @@ export function CatalogAttentionBanner({
     staleDiscovery.length > 0 ? `${staleDiscovery.length} no longer listed` : null,
   ].filter((segment): segment is string => segment !== null)
 
+  // One element for both lines, so the dialog stays mounted (and open) when the
+  // last pending item moves to Reviewed.
   return (
-    <div className="cu-banner cu-banner--warning cu-llm-models-banner" role="status">
-      <span>Models need review: {segments.join(' · ')}</span>{' '}
+    <div
+      className={
+        nothingPending
+          ? 'cu-banner cu-llm-models-banner cu-llm-models-banner--quiet'
+          : 'cu-banner cu-banner--warning cu-llm-models-banner'
+      }
+      role="status"
+    >
+      {nothingPending ? (
+        <span>
+          {reviewed.length} model{reviewed.length === 1 ? '' : 's'} reviewed
+        </span>
+      ) : (
+        <span>Models need review: {segments.join(' · ')}</span>
+      )}{' '}
       <Button type="button" variant="ghost" size="sm" onClick={() => setReviewOpen(true)}>
-        Review models
+        {nothingPending ? 'Show reviewed' : 'Review models'}
       </Button>
       <CatalogAttentionDialog
         open={reviewOpen}

@@ -345,28 +345,50 @@ describe('catalog attention dialog actions', () => {
     expect(banner).not.toHaveTextContent('deprecated')
   })
 
-  it('shows no banner when every item is reviewed', async () => {
+  it('shows a neutral line, not the review warning, when every item is reviewed; Undo stays reachable', async () => {
     for (const item of items) acked.add(keyOf(item))
     renderSurface()
 
-    expect(await screen.findByText('Model catalog')).toBeInTheDocument()
-    await waitFor(() => expect(vi.mocked(getAdminAttention)).toHaveBeenCalled())
-    await act(async () => {
-      await vi.mocked(getAdminAttention).mock.results[0].value
-    })
+    const line = await screen.findByText(`${items.length} models reviewed`)
     expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
+    expect(line.closest('.cu-banner')).not.toHaveClass('cu-banner--warning')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show reviewed' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(reviewedSection(dialog)).toHaveAttribute('open')
+
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: `Undo review: ${itemName(deprecated)}` })
+    )
+
+    // The undone item needs review again, so the warning line comes back.
+    expect(
+      await within(dialog).findByRole('button', { name: `Mark reviewed: ${itemName(deprecated)}` })
+    ).toBeInTheDocument()
+    expect(vi.mocked(unackAdminAttention)).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(BANNER_TEXT)).toHaveTextContent('1 deprecated')
   })
 
-  it('closes the dialog when the last pending item is reviewed', async () => {
+  it('keeps the dialog open with focus inside when the last pending item is reviewed', async () => {
     for (const item of items) if (item !== deprecated) acked.add(keyOf(item))
     renderSurface()
     const dialog = await openReview()
+    const reviewedButton = within(dialog).getByRole('button', {
+      name: `Mark reviewed: ${itemName(deprecated)}`,
+    })
+    reviewedButton.focus()
 
-    fireEvent.click(
-      within(dialog).getByRole('button', { name: `Mark reviewed: ${itemName(deprecated)}` })
-    )
+    fireEvent.click(reviewedButton)
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    // The acted-on row moves to Reviewed, which opens since nothing else is left.
+    const undo = await within(dialog).findByRole('button', {
+      name: `Undo review: ${itemName(deprecated)}`,
+    })
+    expect(screen.getByRole('dialog')).toBe(dialog)
+    expect(reviewedSection(dialog)).toContainElement(undo)
+    expect(reviewedSection(dialog)).toHaveAttribute('open')
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Done' })).toHaveFocus())
+    expect(screen.getByText(`${items.length} models reviewed`)).toBeInTheDocument()
     expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
   })
 })
