@@ -54,12 +54,22 @@ export function acknowledgedWireItem(item: AttentionWireItem): AttentionWireItem
 /**
  * A generated item for a model a WorkflowRecipe also names: the producer adds
  * `recipesAffected` (an array of `{ namespace, name }`) only when the list is
- * non-empty (llmAttention.ts `itemFor`). The generator has no recipe consumer
- * yet, so this is the one field derived here; extend the generator to replace it.
+ * non-empty (llmAttention.ts `itemFor`), and a recipe is an explicit consumer,
+ * so its `recipe:<namespace>/<name>` key also joins the sorted, deduplicated
+ * `consumerKeys` (llmModelConsumers.ts `explicitConsumerKeys`). The generator has
+ * no recipe consumer yet, so both fields are derived here; extend the generator
+ * to replace it.
  */
 export function withRecipesWireItem(
   item: AttentionWireItem,
   recipes: Array<{ namespace: string; name: string }>
 ): AttentionWireItem {
-  return { ...structuredClone(item), recipesAffected: recipes }
+  const clone = structuredClone(item)
+  const consumerKeys = [
+    ...new Set([
+      ...(clone.consumerKeys as string[]),
+      ...recipes.map(recipe => `recipe:${recipe.namespace}/${recipe.name}`),
+    ]),
+  ].sort()
+  return { ...clone, recipesAffected: recipes, consumerKeys }
 }
