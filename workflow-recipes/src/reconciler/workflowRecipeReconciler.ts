@@ -8078,34 +8078,36 @@ export class WorkflowRecipeReconciler {
           : undefined)
 
     if (isWorkflow && workflowPhase) {
-      try {
-        const liveRecipe = (await this.customApi.getNamespacedCustomObject({
-          group: CRD_GROUP,
-          version: CRD_VERSION,
-          namespace: recipe.metadata.namespace,
-          plural: WORKFLOWRECIPE_PLURAL,
-          name: recipe.metadata.name,
-        })) as WorkflowRecipeCRD
-        const liveExecution = liveRecipe.status?.workflowExecution
-        if (
-          liveExecution?.phase &&
-          workflowPhase === 'initializing' &&
-          liveExecution.phase !== 'initializing'
-        ) {
-          existingWorkflowExecution = liveExecution
-          workflowPhase = undefined
-        } else if (
-          isTerminalWorkflowStatusPhase(liveExecution?.phase) &&
-          (!explicitWorkflowPhase || liveExecution?.phase !== workflowPhase)
-        ) {
-          existingWorkflowExecution = liveExecution
-          workflowPhase = undefined
-        } else if (liveExecution) {
-          existingWorkflowExecution = liveExecution
-        }
-      } catch {
-        // Best-effort race guard only; keep the original status patch path if
-        // the live read fails.
+      // `recipe` is the object this pass started from. Since then the workflow
+      // reconciler may have patched workflowExecution in this same pass (it
+      // writes `attempt + 1` before it replaces a pod), and the coordinator
+      // reports phases through the status endpoint. The patch below is built
+      // on this read, so a failed read fails the pass: the watcher drops a
+      // recipe that is gone (404) and retries after any other error. Patching
+      // from `recipe` instead would write the older `attempt` and phase back.
+      const liveRecipe = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+      })) as WorkflowRecipeCRD
+      const liveExecution = liveRecipe.status?.workflowExecution
+      if (
+        liveExecution?.phase &&
+        workflowPhase === 'initializing' &&
+        liveExecution.phase !== 'initializing'
+      ) {
+        existingWorkflowExecution = liveExecution
+        workflowPhase = undefined
+      } else if (
+        isTerminalWorkflowStatusPhase(liveExecution?.phase) &&
+        (!explicitWorkflowPhase || liveExecution?.phase !== workflowPhase)
+      ) {
+        existingWorkflowExecution = liveExecution
+        workflowPhase = undefined
+      } else if (liveExecution) {
+        existingWorkflowExecution = liveExecution
       }
     }
 

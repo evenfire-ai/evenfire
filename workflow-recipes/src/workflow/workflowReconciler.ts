@@ -1396,6 +1396,12 @@ function workflowPhaseForMcpHostReadinessWait(
  *   its creation is not counted. The window starts at the later of the run
  *   start and its deletionTimestamp (the deletion request plus its grace
  *   period), so a predecessor that never goes away still ends the wait.
+ *
+ * Crash recovery writes `attempt + 1` to the recipe status before it replaces
+ * the pod and fails the run instead of replacing once the `attempt` it reads
+ * is 3, and each replacement gets a new window. The bound is on the stored
+ * `attempt`, not on the number of windows: a pod deleted by anything else is
+ * recreated without counting an attempt and gets a new window.
  */
 function hasMcpHostReadinessWaitExpired(
   execution: WorkflowExecutionStatus | undefined,
