@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { LlmAllowedModel } from '@lib/api'
 import {
   formatApiError,
@@ -133,5 +133,39 @@ describe('Keep disabled on a row the catalog sync turned off', () => {
       { enabled: false, pinEnabled: true },
       { force: true },
     ])
+  })
+
+  it('reloads the list when the operator cancels after the sync turned the row back on', async () => {
+    // The catalog sync's re-enable sets `enabled` and clears the prune marker
+    // (llmCatalogSync.ts), so the next read shows the row on, without the marker.
+    let current = pruned
+    vi.mocked(getLlmModels).mockImplementation(async () => ({ rows: [current] }))
+    vi.mocked(updateLlmModel).mockImplementationOnce(async () => {
+      current = { ...pruned, enabled: true, stale: false, auto_disabled_at: null }
+      throw structuredApiError(409, {
+        error: 'model_in_use',
+        message: 'still referenced',
+        impact: {
+          provider: 'claude',
+          model: 'claude-old',
+          hostsAffected: [{ namespace: 'mcp-host', name: 'agent-a', roles: ['primary'] }],
+          grantsAffected: [],
+        },
+      })
+    })
+
+    renderSurface()
+    await keepDisabled()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() =>
+      expect(screen.queryByText('Turned off by catalog sync')).not.toBeInTheDocument()
+    )
+    const row = screen
+      .getByRole('button', { name: 'Actions for model claude/claude-old' })
+      .closest('tr')!
+    expect(within(row).getByText('Enabled')).toBeInTheDocument()
+    expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(1)
   })
 })

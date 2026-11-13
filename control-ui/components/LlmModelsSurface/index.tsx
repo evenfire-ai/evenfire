@@ -189,7 +189,13 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
       confirmLabel: 'Disable anyway',
       tone: 'danger',
     })
-    if (forced) await keepDisabledWithImpactGate(model, true)
+    if (forced) {
+      await keepDisabledWithImpactGate(model, true)
+      return
+    }
+    // The 409 proved the sync turned the row back on, so the loaded row (off,
+    // "Turned off by catalog sync") is stale even though nothing was written.
+    await loadAll()
   }
 
   useEffect(() => {
