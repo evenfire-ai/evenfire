@@ -1764,6 +1764,27 @@ describe('grok-llm-proxy attempt telemetry', () => {
     expect(failureCount(metricsText, 'other')).toBe(0)
   })
 
+  // #1433: an upstream 400 is a request rejection, reported like any other
+  // upstream 4xx. `invalid_request` stays reserved for this proxy's own refusals.
+  it('(g1-3a) answers 422 upstream_rejected for an upstream 400', async () => {
+    const { res, lines, metricsText } = await run({
+      providerAttemptId: 'att-rejected-400',
+      fetchFn: (async () => new Response('bad request', { status: 400 })) as typeof fetch,
+    })
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({ error: 'upstream_rejected', upstreamStatus: 400 })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-rejected-400',
+      outcome: 'failed',
+      code: 'upstream_rejected',
+      details: { upstreamStatus: 400 },
+      httpStatus: 422,
+    })
+    expect(failureCount(metricsText, 'upstream_rejected')).toBe(1)
+    expect(failureCount(metricsText, 'invalid_request')).toBe(0)
+  })
+
   it('(g1-3c) carries the upstream status on the SSE error frame after a keepalive', async () => {
     const { res, lines } = await run({
       providerAttemptId: 'att-rejected-sse',

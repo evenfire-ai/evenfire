@@ -9,10 +9,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, waitFor as rtlWaitFor } from '@testing-library/react'
+import { getComposerDraft } from '@lib/composerDraftStore'
 import { readHostModelSelection, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { RetainedSendSnapshot } from '@lib/retainedSendStore'
 import type { ComposerImageAttachment } from '../../../uiTypes'
 import { renderController } from './__fixtures__/controllerHarness'
+import { ipcHttpError } from './__fixtures__/ipcErrors'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 type RetainedSendStore = ReturnType<
@@ -216,6 +218,29 @@ describe('retained send release on terminal outcomes (#654 M6)', () => {
     )
     expect(heldSnapshot()).toMatchObject({ taskId: 'task-keep' })
   })
+
+  it('releases the retained send when a rejected send returns its input to the composer', async () => {
+    const { result } = renderController()
+    await settleMount()
+    clerum.rpc.invokeHostMessage.mockRejectedValueOnce(
+      await ipcHttpError('rpc:invokeHostMessage', 401, 'Unauthorized', { error: 'expired' })
+    )
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('keep this payload')
+    })
+
+    // Witness: the send retained its payload, and the put-back ran.
+    expect(captured.retained).toHaveLength(1)
+    expect(captured.retained[0]).toMatchObject({
+      content: 'keep this payload',
+      reason: 'awaiting_terminal',
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(getComposerDraft(result.current.activeChatId, 'agent-x')).toBe('keep this payload')
+    expect(result.current.failedAgentSend).toBeNull()
+    expect(heldSnapshot()).toBeUndefined()
+  })
 })
 
 /** Sends one message whose POST throws, leaving a retained failure. */
@@ -315,9 +340,11 @@ describe('older failures of a chat (#654 M2)', () => {
     await settleMount()
     await sendFailing(result, 'first try')
 
-    // With no fresh error, the banner falls back to the retained failure.
+    // With no fresh error, the banner shows the sentence for the retained failure.
     act(() => result.current.clearComposerSendError())
-    expect(result.current.agentError).toBe('network down')
+    expect(result.current.agentError).toBe(
+      'Temporary connection issue while sending to the agent. Temporary connectivity issue. Retry in a few seconds or check backend health.'
+    )
 
     // An image send is blocked before any POST: the model selection for this
     // chat was never loaded, so the send-time guard reports a fresh error.

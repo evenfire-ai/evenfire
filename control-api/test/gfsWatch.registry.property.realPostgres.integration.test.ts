@@ -37,10 +37,11 @@ let flushMicrotasks!: Loaded['flushMicrotasks'],
 // listener losses with them.
 //
 // Reference model, deliberately trivial: a key may be `accepted` only if the
-// last read of its resource by the op that accepted it was a 2xx of the right
-// kind under an `allow` decision, and no ancestry change of its chain landed
-// within the six seconds before that op started or while it ran. Everything
-// else is checked as an invariant at rest.
+// op that accepted it read its resource as a 2xx under an `allow` decision,
+// the key is of its resource's kind, and no ancestry change of its chain
+// landed within the six seconds before that op started or while it ran. It is
+// checked on every decision a stream wrote, closed streams included.
+// Everything else is checked as an invariant at rest.
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -410,20 +411,8 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
     fc.constant(new ListenerLostCmd()),
   ]
 
-  function deciderOf(m: ConnModel, k: GfsKey) {
-    // The decision frame from which k is accepted without interruption.
-    let start: { frame: Record<string, unknown>; ev: number } | null = null
-    for (const d of m.decisions) {
-      const acc = (d.frame.accepted as string[]).includes(k)
-      if (!acc) start = null
-      else if (start === null) start = d
-    }
-    return start
-  }
-
   function checkModel(real: Real): string[] {
     const v: string[] = []
-    const fx = real.fixture
     for (const m of real.conns) {
       const conn = m.conn
       if (m.outcome === null) v.push('I30: open did not resolve')
@@ -441,60 +430,74 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       if (!base) v.push(`I19: lastSeq ${conn.lastSeq} never sent legitimately`)
       for (const k of conn.keys.keys())
         if (base && !base.includes(k)) v.push(`I21: ${k} not in set ${conn.lastSeq}`)
+      // Accepted at rest without being in the last decision frame: accepted
+      // by no decision the client saw. What each frame decided is checked
+      // over every connection in decisionViolations.
+      const last = m.decisions.at(-1)?.frame.accepted as string[] | undefined
       for (const [k, rec] of conn.keys) {
-        if (rec.state !== 'accepted') continue
-        const r32 = k.slice(k.lastIndexOf('/') + 1)
-        const expectedKind = fx.kindOf.get(r32)
-        if (expectedKind === undefined || !k.startsWith(`${expectedKind}:`))
-          v.push(`I6/I11: ${k} accepted with wrong kind or missing`)
-        const d = deciderOf(m, k)
-        if (!d) {
+        if (rec.state === 'accepted' && !last?.includes(k))
           v.push(`I6: ${k} accepted without a decision frame`)
-          continue
-        }
-        const seq = d.frame.type === 'ready' ? 0 : (d.frame.seq as number)
-        const opRequestId = seq === 0 ? m.openRequestId : m.puts.get(seq)?.r
-        const reads = h.reads.filter(
-          r => r.rid32 === r32 && r.requestId === opRequestId && r.seq < d.ev
-        )
-        const last = reads.at(-1)
-        if (!last || last.status !== 200 || last.decision !== 'allow')
-          v.push(`I6: ${k} accepted after read ${JSON.stringify(last)}`)
       }
     }
-    v.push(...suspicionViolations(real))
+    v.push(...decisionViolations(real))
     return v
   }
 
   /**
-   * S4 over every decision of every connection, closed ones included: a
-   * stream that closes afterwards (a listener loss, a reauthorize) does not
-   * make a decision it streamed any less wrong. Each key a frame accepts that
-   * the previous frame did not was decided by that frame's op. Only P moves,
-   * so a key's chain holds P exactly when its resource is P or under it; the
-   * indexed chain is gone once the connection closes.
+   * Each key a frame accepts that the previous frame of its connection did
+   * not, with the op that decided it: keys are only accepted by the op that
+   * added them, and every op that ends on an open stream writes a frame (a
+   * retained user's delta writes none, but in this model retention only
+   * ends by closing the stream, so no later frame can surface its keys).
+   * Every connection counts, closed ones included: a stream that closes
+   * afterwards (a listener loss, a reauthorize, the client leaving) does not
+   * make a decision it streamed any less wrong.
    */
-  function suspicionViolations(real: Real): string[] {
-    const fx = real.fixture
-    const underP = new Set([fx.p, fx.f1, fx.f2, fx.denied].map(x => h.toRid(x)))
-    const v: string[] = []
+  function* newlyAccepted(real: Real) {
     for (const m of real.conns) {
       let previous = new Set<string>()
       for (const d of m.decisions) {
         const accepted = d.frame.accepted as string[]
         const seq = d.frame.type === 'ready' ? 0 : (d.frame.seq as number)
-        // Anchored where the op takes its snapshot of recent ancestry changes:
-        // when it starts, not when the test sent its command.
-        const vt = d.opStartVt ?? (seq === 0 ? m.openVt : m.puts.get(seq)?.vt)
-        for (const k of accepted) {
-          if (previous.has(k) || !underP.has(k.slice(k.lastIndexOf('/') + 1))) continue
-          for (const mv of real.moves) {
-            if (mv.ev < d.ev && vt !== undefined && mv.vt > vt - 6_000) {
-              v.push(`I6/S4: ${k} accepted despite move ev ${mv.ev} before frame ev ${d.ev}`)
-            }
-          }
-        }
+        for (const k of accepted) if (!previous.has(k)) yield { m, d, seq, k }
         previous = new Set(accepted)
+      }
+    }
+  }
+
+  /**
+   * I6, I11 and S4 over every decision of every connection. Only P moves, so
+   * a key's chain holds P exactly when its resource is P or under it; the
+   * indexed chain is gone once the connection closes.
+   */
+  function decisionViolations(real: Real): string[] {
+    const fx = real.fixture
+    const underP = new Set<string>([fx.p, fx.f1, fx.f2, fx.denied].map(x => h.toRid(x)))
+    const v: string[] = []
+    for (const { m, d, seq, k } of newlyAccepted(real)) {
+      const r32 = k.slice(k.lastIndexOf('/') + 1)
+      const expectedKind = fx.kindOf.get(r32)
+      if (expectedKind === undefined || !k.startsWith(`${expectedKind}:`))
+        v.push(`I6/I11: ${k} accepted with wrong kind or missing`)
+      // gfsc sees the resource, not the key, so an op holding both kinds of
+      // a key (dir:P and file:P) reads it twice, and a decision change
+      // between the two reads is legitimate: one read of each kind decides
+      // its own key. Which one decided k is not observable, so one of them
+      // must be a 2xx under `allow`; with a single read, that read.
+      const opRequestId = seq === 0 ? m.openRequestId : m.puts.get(seq)?.r
+      const reads = h.reads.filter(
+        r => r.rid32 === r32 && r.requestId === opRequestId && r.seq < d.ev
+      )
+      if (!reads.some(r => r.status === 200 && r.decision === 'allow'))
+        v.push(`I6: ${k} accepted at frame ev ${d.ev} after reads ${JSON.stringify(reads)}`)
+      if (!underP.has(r32)) continue
+      // Anchored where the op takes its snapshot of recent ancestry changes:
+      // when it starts, not when the test sent its command.
+      const vt = d.opStartVt ?? (seq === 0 ? m.openVt : m.puts.get(seq)?.vt)
+      for (const mv of real.moves) {
+        if (mv.ev < d.ev && vt !== undefined && mv.vt > vt - 6_000) {
+          v.push(`I6/S4: ${k} accepted despite move ev ${mv.ev} before frame ev ${d.ev}`)
+        }
       }
     }
     return v
@@ -577,7 +580,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       {
         // fast-check counts the examples inside numRuns; add them back so the
         // number of random runs is the one requested.
-        numRuns: Number(process.env.GFS_WATCH_MODEL_RUNS ?? 25) + 2,
+        numRuns: Number(process.env.GFS_WATCH_MODEL_RUNS ?? 25) + 3,
         endOnFailure: true,
         verbose: 1,
         // A fixed sequence that reaches every decision path, so the coverage
@@ -607,6 +610,22 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
               new AdvanceCmd(6_000),
               new ListenerLostCmd(),
               new OpenCmd(1, [3]),
+              new SettleCmd(),
+            ] as unknown as Iterable<fc.AsyncCommand<object, Real>>,
+          ],
+          // One delta reads P twice, for dir:P and for file:P, and P's
+          // decision turns to deny between the two reads: dir:P is rightly
+          // accepted although the op's last read of P was a deny.
+          [
+            fc.sample(fc.scheduler(), { seed: 11, numRuns: 1 })[0]!,
+            [
+              new OpenCmd(0, [1]),
+              new SettleCmd(),
+              new PutCmd(0, [0, 6], 'next'),
+              new StepCmd(1),
+              new StepCmd(1),
+              new StepCmd(1),
+              new DecisionCmd(2, 'deny'),
               new SettleCmd(),
             ] as unknown as Iterable<fc.AsyncCommand<object, Real>>,
           ],
