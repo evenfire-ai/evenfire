@@ -1283,6 +1283,148 @@ describe('TaskExecutor', () => {
     expect(executor.executorState).toBe('completed')
   }, 30_000)
 
+  it.each([
+    ['without', false, []],
+    [
+      'with',
+      true,
+      [
+        expect.objectContaining({
+          source: { kind: 'tool', attachmentId: 'frame-again', toolCallId: 'call-repeat' },
+          sourceIdentityOnly: true,
+        }),
+      ],
+    ],
+  ] as const)(
+    'N4: a frame the turn already collected is not sent again in full on a resume %s source identity',
+    async (_label, identity, expected) => {
+      const frame = (id: string, toolCallId: string) => ({
+        attachment: createImageAttachment({
+          id,
+          mimeType: 'image/png',
+          dataBase64: PNG_2X2_BASE64,
+          filename: 'frame.png',
+          width: 2,
+          height: 2,
+        }),
+        part: {
+          type: 'image' as const,
+          mimeType: 'image/png' as const,
+          data: PNG_2X2_BASE64,
+          width: 2,
+          height: 2,
+          source: { kind: 'tool' as const, attachmentId: id, toolCallId },
+        },
+      })
+      const first = frame('frame-first', 'call-first')
+      const calls = [
+        { id: 'call-repeat', name: 'capture', arguments: {} },
+        { id: 'call-approved', name: 'shell_exec', arguments: { command: 'ls' } },
+      ]
+      // An earlier iteration collected the frame and sent it; the suspended
+      // batch's first call returned the same frame again.
+      vi.mocked(runToolUseLoop)
+        .mockResolvedValueOnce({
+          type: 'need_approval',
+          approval: {
+            request_id: 'req-repeat',
+            tool_name: 'shell_exec',
+            parameters: { command: 'ls' },
+            description: 'Shell command',
+            tool_call_id: 'call-approved',
+            context_snapshot: [
+              { role: 'user', content: 'Capture twice' },
+              {
+                role: 'assistant',
+                content: '',
+                tool_calls: [{ id: 'call-first', name: 'capture', arguments: {} }],
+              },
+              { role: 'tool', name: 'capture', tool_call_id: 'call-first', content: 'Captured' },
+              {
+                role: 'user',
+                content: 'Tool result image',
+                imageOrigin: 'tool_result',
+                contentParts: [{ type: 'text', text: 'Tool result image' }, first.part],
+              },
+              { role: 'assistant', content: '', tool_calls: calls },
+            ],
+            completed_results: [
+              {
+                tool_call_id: 'call-repeat',
+                name: 'capture',
+                content: 'Captured',
+                is_error: false,
+                attachments: [frame('frame-again', 'call-repeat').attachment],
+              },
+            ],
+            attachments: [first.attachment],
+          },
+        } as any)
+        .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+      vi.mocked(executeSingleTool).mockResolvedValueOnce({
+        tool_call_id: 'call-approved',
+        name: 'shell_exec',
+        content: 'ok',
+        is_error: false,
+      })
+      const base = createDeps()
+      const deps = createDeps({
+        llmProvider: { ...base.llmProvider, requiresImageSourceIdentity: identity },
+      })
+      const executor = new TaskExecutor(createTask('Capture twice'), deps)
+      await executor.run()
+      await executor.resumeAfterApproval(false)
+
+      expect(vi.mocked(runToolUseLoop).mock.calls[1]![0].imageSourceIdentity).toBe(identity)
+      // The loop's own rule, from the turn's collection before this batch:
+      // a repeated frame is dropped, or named by reference when the provider
+      // binds image sources (review round 2, N4).
+      expect(resumedToolImages('call-repeat')).toEqual(expected)
+      expect(resumedToolImages('call-first')).toHaveLength(1)
+      expect(executor.executorState).toBe('completed')
+    }
+  )
+
+  it('N4: the tool messages a resume rebuilds carry no spillover ref', async () => {
+    const call = { id: 'call-spilled', name: 'shell_exec', arguments: { command: 'cat big' } }
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-spilled',
+          tool_name: 'shell_exec',
+          parameters: call.arguments,
+          description: 'Shell command',
+          tool_call_id: call.id,
+          context_snapshot: [
+            { role: 'user', content: 'Print the big file' },
+            { role: 'assistant', content: '', tool_calls: [call] },
+          ],
+          completed_results: [],
+        },
+      } as any)
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    vi.mocked(executeSingleTool).mockResolvedValueOnce({
+      tool_call_id: call.id,
+      name: 'shell_exec',
+      content: 'Summary of a large output',
+      is_error: false,
+      spillover_ref: 'spillover://fixture/call-spilled',
+    })
+    const executor = new TaskExecutor(createTask('Print the big file'), createDeps())
+    await executor.run()
+    await executor.resumeAfterApproval(false)
+
+    // The rebuilt messages become the snapshot of any later suspension, and a
+    // cold start expires an approval whose snapshot names a missing blob
+    // (sqliteColdStartLoader B7). The model already holds this content, so
+    // the rebuilt message must not tie the turn to the blob's lifetime.
+    const messages = vi.mocked(runToolUseLoop).mock.calls[1]![1] as ChatMessage[]
+    const rebuilt = messages.find(message => message.tool_call_id === call.id)
+    expect(rebuilt).toMatchObject({ role: 'tool', content: 'Summary of a large output' })
+    expect(rebuilt!.spillover_ref).toBeUndefined()
+  })
+
   it('U5: a 401 on resume re-suspends as connect_required, then re-executes on connect (no double approval)', async () => {
     vi.mocked(runToolUseLoop)
       // Round A — the LLM calls an oauth MCP tool → approval_required.
