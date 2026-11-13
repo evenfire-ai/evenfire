@@ -94,10 +94,11 @@ start otherwise.
 host-context-controller bounds every NetworkPolicy pass with two settings that
 `deploy/base` does not set, so their code defaults apply:
 
-| Variable                        | Default            | Effect                                                                                                                                       |
-| ------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HCC_K8S_REQUEST_TIMEOUT_MS`    | `30000`            | Deadline for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding work; a timed-out request fails the pass, which retries |
-| `HCC_NETPOL_PASS_HARD_LIMIT_MS` | `1800000` (30 min) | A pass still running at this limit makes HCC exit, so its container restarts and the startup pass converges again                           |
+| Variable                          | Default            | Effect                                                                                                                                                                                                       |
+| --------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `HCC_K8S_REQUEST_TIMEOUT_MS`      | `30000`            | Deadline for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding work; a timed-out request fails the pass, which retries. Plain digits, below `HCC_NETPOL_PASS_HARD_LIMIT_MS` |
+| `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` | `30000`            | Deadline for each finite Kubernetes request on the Host convergence path. Plain digits, below `HCC_NETPOL_PASS_HARD_LIMIT_MS`                                                                                |
+| `HCC_NETPOL_PASS_HARD_LIMIT_MS`   | `1800000` (30 min) | A pass still running at this limit makes HCC exit, so its container restarts and the startup pass converges again                                                                                            |
 
 See the [upgrade note](../deploy/releases-and-upgrades.md#hcc-networkpolicy-pass-bounds)
 and the [HCC README](../../host-context-controller/README.md#networkpolicy).

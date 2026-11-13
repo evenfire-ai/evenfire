@@ -428,6 +428,25 @@ export function parseNetPolPassHardLimitMs(raw: string | undefined): number {
 }
 
 /**
+ * A request that runs to its deadline must fail the NetworkPolicy pass, so the
+ * pass can retry, before the pass hard limit exits the process. Both deadlines
+ * can hold the pass: Host convergence queued on a Context identity uses the
+ * Host deadline.
+ */
+export function assertRequestTimeoutsBelowPassHardLimit(
+  timeouts: { name: string; valueMs: number }[],
+  netPolPassHardLimitMs: number
+): void {
+  for (const { name, valueMs } of timeouts) {
+    if (valueMs >= netPolPassHardLimitMs) {
+      throw new Error(
+        `${name} (${valueMs}ms) must be below HCC_NETPOL_PASS_HARD_LIMIT_MS (${netPolPassHardLimitMs}ms): a request that runs to its deadline would otherwise hold the pass to the hard limit and exit the process instead of failing the pass`
+      )
+    }
+  }
+}
+
+/**
  * HCC_HOST_FULL_RECONCILE_CONCURRENCY — bounded cross-Host concurrency for a
  * full/lifecycle Host fleet pass. Urgent per-Host events are admitted OUTSIDE
  * this budget, so a low default optimizes for Kubernetes API stability rather
@@ -631,6 +650,19 @@ export function validateExternalEgressResyncInvariant(cfg: {
     }
   }
 }
+
+const hostK8sRequestTimeoutMs = parseHostK8sRequestTimeoutMs(
+  getEnv('HCC_HOST_K8S_REQUEST_TIMEOUT_MS')
+)
+const k8sRequestTimeoutMs = parseK8sRequestTimeoutMs(getEnv('HCC_K8S_REQUEST_TIMEOUT_MS'))
+const netPolPassHardLimitMs = parseNetPolPassHardLimitMs(getEnv('HCC_NETPOL_PASS_HARD_LIMIT_MS'))
+assertRequestTimeoutsBelowPassHardLimit(
+  [
+    { name: 'HCC_K8S_REQUEST_TIMEOUT_MS', valueMs: k8sRequestTimeoutMs },
+    { name: 'HCC_HOST_K8S_REQUEST_TIMEOUT_MS', valueMs: hostK8sRequestTimeoutMs },
+  ],
+  netPolPassHardLimitMs
+)
 
 export const config: Config = {
   devMode,
@@ -889,9 +921,9 @@ export const config: Config = {
 
   // Every finite Kubernetes request that can hold Host convergence gets its
   // own deadline. Watch streams are intentionally excluded.
-  hostK8sRequestTimeoutMs: parseHostK8sRequestTimeoutMs(getEnv('HCC_HOST_K8S_REQUEST_TIMEOUT_MS')),
-  k8sRequestTimeoutMs: parseK8sRequestTimeoutMs(getEnv('HCC_K8S_REQUEST_TIMEOUT_MS')),
-  netPolPassHardLimitMs: parseNetPolPassHardLimitMs(getEnv('HCC_NETPOL_PASS_HARD_LIMIT_MS')),
+  hostK8sRequestTimeoutMs,
+  k8sRequestTimeoutMs,
+  netPolPassHardLimitMs,
   hostFullReconcileConcurrency: parseHostFullReconcileConcurrency(
     getEnv('HCC_HOST_FULL_RECONCILE_CONCURRENCY')
   ),

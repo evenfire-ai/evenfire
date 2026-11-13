@@ -52,7 +52,8 @@ vi.mock('./config', () => ({
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
     hostK8sRequestTimeoutMs: 30_000,
     // Longer than the hard limit, so a held request in the fake-clock tests
-    // below stays pending instead of ending at its own deadline.
+    // below stays pending instead of ending at its own deadline. Config load
+    // refuses this pair; the mocked config bypasses it on purpose.
     k8sRequestTimeoutMs: 2 * 60 * 60_000,
     netPolPassHardLimitMs: 30 * 60_000,
     hostResyncIntervalSec: 0,

@@ -452,17 +452,24 @@ default and the cap check apply when the new pods start.
 
 This release bounds every host-context-controller (HCC) NetworkPolicy pass
 (#1338). A pass is single-flight, so one pass that never finished used to block
-every later pass. Two settings are new. `deploy/base` sets neither, so both
-take their code defaults:
+every later pass. Two settings are new, `HCC_K8S_REQUEST_TIMEOUT_MS` and
+`HCC_NETPOL_PASS_HARD_LIMIT_MS`; `deploy/base` sets neither, so both take their
+code defaults. The table also lists the existing
+`HCC_HOST_K8S_REQUEST_TIMEOUT_MS` (`deploy/base` sets `30000`), because the hard
+limit now bounds it too:
 
-| Variable                        | Default            | Meaning                                                                                                                                                                                                                                                                                     |
-| ------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HCC_K8S_REQUEST_TIMEOUT_MS`    | `30000`            | Deadline in milliseconds for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding reconcilers and of the watcher's McpServer/Context and Secret clients. A timed-out request fails with error code `HCC_K8S_REQUEST_TIMEOUT`, and the pass fails and retries. |
-| `HCC_NETPOL_PASS_HARD_LIMIT_MS` | `1800000` (30 min) | Longest a NetworkPolicy pass may run. It must be above `300000`, the 5-minute overrun mark.                                                                                                                                                                                                 |
+| Variable                          | Default            | Meaning                                                                                                                                                                                                                                                                                                                                       |
+| --------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HCC_K8S_REQUEST_TIMEOUT_MS`      | `30000`            | Deadline in milliseconds for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding reconcilers and of the watcher's McpServer/Context and Secret clients. A timed-out request fails with error code `HCC_K8S_REQUEST_TIMEOUT`, and the pass fails and retries. It must be below `HCC_NETPOL_PASS_HARD_LIMIT_MS`. |
+| `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` | `30000`            | Deadline in milliseconds for each finite Kubernetes request on the Host convergence path, including Host work queued behind a Context. It must be below `HCC_NETPOL_PASS_HARD_LIMIT_MS`.                                                                                                                                                      |
+| `HCC_NETPOL_PASS_HARD_LIMIT_MS`   | `1800000` (30 min) | Longest a NetworkPolicy pass may run. It must be above `300000`, the 5-minute overrun mark.                                                                                                                                                                                                                                                   |
 
-Both accept plain decimal digits only. Unset or `""` means the default; any
-other spelling (`3e4`, `+30000`, `030000`, `30000.0`, surrounding white space)
-or a value out of range fails startup; the
+All three accept plain decimal digits only. Unset or `""` means the default;
+any other spelling (`3e4`, `+30000`, `030000`, `30000.0`, surrounding white
+space) or a value out of range fails startup. HCC also refuses to start when
+either request timeout is not below the hard limit: a request that runs to its
+deadline would hold the pass to the hard limit and exit the process instead of
+failing the pass. The
 [HCC README](../../host-context-controller/README.md#networkpolicy) has the full
 rules.
 
