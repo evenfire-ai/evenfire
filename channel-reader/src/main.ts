@@ -91,8 +91,6 @@ interface ProcessedProviderEvent {
   seenAt: number
 }
 
-/** Stale approval entries are cleaned up after this interval. */
-const PENDING_APPROVAL_TTL_MS = 10 * 60 * 1000 // 10 minutes
 const RESULT_POLL_FALLBACK_INTERVAL_MS = 2 * 1000
 const RESULT_POLL_FALLBACK_TIMEOUT_MS = 30 * 60 * 1000
 /** Telegram and Slack can redeliver the same provider event while poll offsets settle. */
@@ -325,6 +323,8 @@ export interface ChannelReaderOptions {
   channels?: CommunicationChannelCRD[]
   sleep?: (ms: number) => Promise<void>
   credentialsResolver?: { resolve(cc: CommunicationChannelCRD): Promise<ResolvedCredentials> }
+  /** Pending tool approval lifetime in ms; defaults to config.approvalTimeoutMs. 0 = never expire. */
+  approvalTimeoutMs?: number
 }
 
 export class ChannelReader {
@@ -341,6 +341,13 @@ export class ChannelReader {
   } | null
   /** Pending approvals keyed by provider conversation/thread and sender. */
   private pendingApprovals: Map<string, PendingApprovalState> = new Map()
+  /**
+   * How long a pending approval stays answerable (CLERUM_APPROVAL_TIMEOUT).
+   * It must match mcp-host's auto-deny: dropping the entry earlier leaves the
+   * mcp-host session suspended with no way to approve or deny it from the
+   * channel, and every later message in that conversation queues behind it.
+   */
+  private readonly approvalTimeoutMs: number
   /** Recently processed provider events keyed by stable provider or channel message identity. */
   private processedProviderEvents: Map<string, ProcessedProviderEvent> = new Map()
   /** Unresolved-sender notices already sent, keyed by workspace + user + channel. */
@@ -379,6 +386,7 @@ export class ChannelReader {
     this.channels = options.channels ?? []
     this.sleepImpl = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
     this.credentialsResolver = options.credentialsResolver ?? null
+    this.approvalTimeoutMs = options.approvalTimeoutMs ?? config.approvalTimeoutMs
     this.workflowApprovalCoordinator = new WorkflowApprovalCoordinator({
       rpcClient: this.rpcClient,
       notificationDeliveryClient: this.notificationDeliveryClient,
@@ -2345,7 +2353,7 @@ export class ChannelReader {
   private cleanupStaleApprovals(): void {
     const now = Date.now()
     for (const [key, state] of this.pendingApprovals) {
-      if (now - state.createdAt.getTime() > PENDING_APPROVAL_TTL_MS) {
+      if (this.approvalTimeoutMs > 0 && now - state.createdAt.getTime() > this.approvalTimeoutMs) {
         console.log(`[Main] Cleaning up stale approval: ${key}`)
         this.pendingApprovals.delete(key)
       }

@@ -26,6 +26,34 @@ beforeEach(() => {
   delete process.env.CLERUM_ENABLE_RESPONSE_ATTACHMENTS
   delete process.env.CLERUM_ATTACHMENT_MAX_COUNT
   delete process.env.CLERUM_ATTACHMENT_MAX_BYTES
+  delete process.env.CLERUM_APPROVAL_TIMEOUT
+})
+
+describe('channel-reader config — CLERUM_APPROVAL_TIMEOUT', () => {
+  it('defaults to 7 days when unset', async () => {
+    const { config } = await import('../src/config.js')
+    expect(config.approvalTimeoutMs).toBe(7 * 24 * 60 * 60 * 1000)
+  })
+
+  it.each([
+    ['0', 0],
+    ['600000', 600_000],
+    ['2147483647', 2_147_483_647],
+  ])('accepts %s', async (raw, expected) => {
+    process.env.CLERUM_APPROVAL_TIMEOUT = raw
+    const { config } = await import('../src/config.js')
+    expect(config.approvalTimeoutMs).toBe(expected)
+  })
+
+  it.each(['', 'abc', '-1', '1.5', '10m', '2147483648'])(
+    'stops startup on %j, as mcp-host does',
+    async raw => {
+      process.env.CLERUM_APPROVAL_TIMEOUT = raw
+      await expect(import('../src/config.js')).rejects.toThrow(
+        'CLERUM_APPROVAL_TIMEOUT must be a valid bounded integer from 0 to 2147483647 (inclusive)'
+      )
+    }
+  )
 })
 
 afterEach(() => {

@@ -2,6 +2,7 @@
  * Configuration settings loaded from environment variables.
  */
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
+import { DEFAULT_APPROVAL_TIMEOUT_MS } from './agent/types'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
@@ -371,6 +372,16 @@ function getExecutionLimit(
     )
   }
   return value
+}
+
+/**
+ * CLERUM_APPROVAL_TIMEOUT in ms. Unset keeps DEFAULT_APPROVAL_TIMEOUT_MS (7d);
+ * 0 disables the auto-deny. Anything that is not a whole decimal integer up to
+ * the Node.js timer range stops the Host at startup: NaN would silently
+ * disable the timeout and a larger delay would fire after 1 ms.
+ */
+export function parseApprovalTimeoutMs(): number {
+  return getExecutionLimit('CLERUM_APPROVAL_TIMEOUT', DEFAULT_APPROVAL_TIMEOUT_MS, true)
 }
 
 /** Progress snapshots are never scheduled more than once per second. */
@@ -931,12 +942,14 @@ export const config: Config = {
   agentMaxTaskDuration: getExecutionLimit('CLERUM_AGENT_MAX_TASK_DURATION', 86400000),
   agentMaxToolCallsPerTask: getExecutionLimit('CLERUM_AGENT_MAX_TOOL_CALLS', 1000),
   agentMaxQueueSize: parseInt(getEnv('CLERUM_AGENT_MAX_QUEUE_SIZE', '100')!, 10),
-  // 0 = disabled (default): an unresolved approval never auto-denies in memory,
-  // so the request stays available no matter how long the human takes. A
-  // suspended session only blocks its OWN session's next tasks (it frees the
-  // global concurrency slot in SessionProcessor), and the durable pending row is
-  // still bounded by `pendingApprovalTtlMs` (7d) + the boot-time reaper.
-  agentApprovalTimeout: parseInt(getEnv('CLERUM_APPROVAL_TIMEOUT', '0')!, 10),
+  // Default 7d. An unanswered approval is auto-denied after this many ms and
+  // its session is released. Until then the suspended session blocks only its
+  // OWN session's next tasks (it frees the global concurrency slot in
+  // SessionProcessor). channel-reader reads the same variable with the same
+  // default, so a provider approval stays answerable exactly as long as
+  // mcp-host keeps it. 0 disables the auto-deny; the durable pending row is
+  // then bounded only by `pendingApprovalTtlMs` (7d) + the boot-time reaper.
+  agentApprovalTimeout: parseApprovalTimeoutMs(),
   pendingApprovalTtlMs:
     parseInt(getEnv('CLERUM_PENDING_APPROVAL_TTL_HOURS', '168')!, 10) * 3600 * 1000, // 7d default
 

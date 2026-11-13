@@ -99,8 +99,8 @@ for the other routes.
 - **Approvals.** The approval gate is on by default. Set the policy with
   `CLERUM_APPROVAL_CONFIG` (the JSON form of `Host.spec.approval`). Without
   it, the approval resolver allows no approver, and `CLERUM_APPROVAL_TIMEOUT`
-  defaults to `0` (never time out), so a tool that needs approval waits
-  forever. For local iteration, either set `CLERUM_APPROVAL_CONFIG` or turn
+  defaults to 7 days, so a tool that needs approval waits that long before
+  it is auto-denied. For local iteration, either set `CLERUM_APPROVAL_CONFIG` or turn
   the gate off with `CLERUM_ENABLE_APPROVAL=false`. With the gate off, shell
   commands run without review; never do this on a reachable port. Decisions go to
   `POST /v1/runtime/approvals/approve` and `POST /v1/runtime/approvals/deny`,
