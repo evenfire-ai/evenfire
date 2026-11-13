@@ -556,11 +556,9 @@ assert_network_policy_core_change_rebuilds_all_consumers() {
 # package-only change selects no image at all. This case fails until the
 # package appears in the control-api and control-ui filters AND source_paths.
 #
-# Scoped to display-field on purpose. packages/llm-providers has FIVE consumers
-# (control-api, control-ui, mcp-host, host-context-controller, workflow-recipes)
-# and none of them track it yet -- a broader, pre-existing change-detection gap
-# tracked in work-tracker/issues, not asserted here so this test never bakes a
-# partial (2-of-5) consumer set as golden.
+# Scoped to display-field on purpose. packages/llm-providers has a far wider
+# consumer set (eleven published images behind five filters) and is pinned by
+# its own case, assert_llm_providers_change_rebuilds_consumers, below.
 assert_display_field_change_rebuilds_both_consumers() {
   local output rc
   output="$(node -e '
@@ -778,6 +776,143 @@ assert_llm_provider_attempt_contract_change_rebuilds_consumers() {
     pass "a provider-attempt-contract change rebuilds Control API, mcp-host variants, the proxy, and the workflow-recipes family"
   else
     fail "llm-provider-attempt-contract changed-path contract failed: $output"
+  fi
+}
+
+# packages/llm-providers is COPYed from the repo root by ELEVEN published
+# images: control-api, control-ui, host-context-controller, the four mcp-host
+# variants, and the four workflow-recipes-family images (workflow-recipes and
+# workflow-snippet-runner from workflow-recipes/Dockerfile, workflow-coordinator
+# from Dockerfile.coordinator, clerum-workflow-base from
+# packages/workflow-sdk/Dockerfile.base, whose builder stage compiles
+# workflow-runtime-core against it). A package.json audit finds only five
+# declaring services; the Dockerfiles are the real consumer list. The three
+# Dockerfile.dockerignore files of HCC and WRC never name the package (#745),
+# but their `!packages/` line re-includes the whole packages/ tree under
+# BuildKit, so the COPY still receives it.
+#
+# Like the cases above, this pins the consumer set itself rather than relying
+# on assert_source_paths_match_filters, which stayed green for months with the
+# package absent from BOTH hand-maintained copies (#550). It checks three
+# views against one expected set: the filters that list the path, the manifest
+# rows that carry it, and the build-matrix images whose Dockerfile COPYs it --
+# so a new COPY consumer, a dropped filter line, or a non-consumer row all fail.
+assert_llm_providers_change_rebuilds_consumers() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const wf = fs.readFileSync(wfPath, "utf8")
+      const sourcePath = "packages/llm-providers/**"
+      const expectedFilters = ["control-api", "control-ui", "host-context-controller", "mcp-host", "workflow-recipes"]
+      const expectedImages = [
+        "clerum-workflow-base",
+        "control-api",
+        "control-ui",
+        "host-context-controller",
+        "mcp-host",
+        "mcp-host-desktop",
+        "mcp-host-full",
+        "mcp-host-slim",
+        "workflow-coordinator",
+        "workflow-recipes",
+        "workflow-snippet-runner",
+      ]
+
+      const filtersMatch = wf.match(/filters: \|\n([\s\S]*?)\n\n {2}build-push:/)
+      if (!filtersMatch) {
+        console.log(`PARSE_ERROR: could not find the paths-filter filters block in ${wfPath}`)
+        process.exit(1)
+      }
+      const filters = {}
+      let currentKey = null
+      for (const line of filtersMatch[1].split("\n")) {
+        if (!line.trim()) continue
+        const keyMatch = line.match(/^\s*([\w.-]+):\s*$/)
+        const pathMatch = line.match(/^\s*-\s*\x27([^\x27]+)\x27\s*$/)
+        if (keyMatch) {
+          currentKey = keyMatch[1]
+          filters[currentKey] = []
+        } else if (pathMatch && currentKey) {
+          filters[currentKey].push(pathMatch[1])
+        } else {
+          console.log(`PARSE_ERROR: unrecognized line in the filters block: ${JSON.stringify(line)}`)
+          process.exit(1)
+        }
+      }
+
+      const sectionMatch = wf.match(/include:\n([\s\S]*?)\n {4}steps:/)
+      if (!sectionMatch) {
+        console.log(`PARSE_ERROR: could not find the build-push matrix section in ${wfPath}`)
+        process.exit(1)
+      }
+      const imageFilterKeys = {}
+      for (const block of sectionMatch[1].split(/\n(?=\s*- image:)/)) {
+        const image = block.match(/- image:\s*(\S+)/)?.[1]
+        if (!image) continue
+        const changedKey = block.match(/\n\s*changed:\s*\$\{\{\s*needs\.detect\.outputs\.([\w.-]+)\s*\}\}/)?.[1]
+        if (!changedKey) {
+          console.log(`PARSE_ERROR: matrix entry ${image} has no detect output mapping`)
+          process.exit(1)
+        }
+        imageFilterKeys[image] = changedKey
+      }
+
+      const problems = []
+      const filterKeys = Object.entries(filters)
+        .filter(([, paths]) => paths.includes(sourcePath))
+        .map(([key]) => key)
+        .sort()
+      if (filterKeys.join(",") !== expectedFilters.join(",")) {
+        problems.push(`filters are ${filterKeys.join(",") || "<none>"}, expected ${expectedFilters.join(",")}`)
+      }
+      const selectedImages = Object.entries(imageFilterKeys)
+        .filter(([, filterKey]) => filterKeys.includes(filterKey))
+        .map(([image]) => image)
+        .sort()
+      if (selectedImages.join(",") !== expectedImages.join(",")) {
+        problems.push(`selected images are ${selectedImages.join(",") || "<none>"}, expected ${expectedImages.join(",")}`)
+      }
+      const manifestImages = m.IMAGES
+        .filter(image => image.source_paths?.includes(sourcePath))
+        .map(image => image.name)
+        .sort()
+      if (manifestImages.join(",") !== expectedImages.join(",")) {
+        problems.push(`manifest rows carrying ${sourcePath} are ${manifestImages.join(",") || "<none>"}, expected ${expectedImages.join(",")}`)
+      }
+
+      const copiesPackage = /^\s*COPY\s+(?:--(?!from=)\S+\s+)*packages\/llm-providers[\s/]/m
+      const copyingImages = []
+      for (const name of Object.keys(imageFilterKeys)) {
+        const image = m.IMAGES.find(item => item.name === name)
+        if (!image) {
+          problems.push(`${name} has no manifest row`)
+          continue
+        }
+        const dockerfile = `'"$REPO_ROOT"'/${image.path}/${image.dockerfile || "Dockerfile"}`
+        if (!fs.existsSync(dockerfile)) {
+          problems.push(`${name} Dockerfile ${image.path}/${image.dockerfile || "Dockerfile"} is missing`)
+          continue
+        }
+        if (copiesPackage.test(fs.readFileSync(dockerfile, "utf8"))) copyingImages.push(name)
+      }
+      copyingImages.sort()
+      if (copyingImages.join(",") !== expectedImages.join(",")) {
+        problems.push(`Dockerfiles that COPY packages/llm-providers are ${copyingImages.join(",") || "<none>"}, expected ${expectedImages.join(",")}`)
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "llm-providers changed-path contract parse failed: $output"
+  elif [ -z "$output" ]; then
+    pass "an llm-providers-only change rebuilds every image whose Dockerfile COPYs it"
+  else
+    fail "llm-providers changed-path contract failed: $output"
   fi
 }
 
@@ -1510,6 +1645,7 @@ assert_network_policy_core_change_rebuilds_all_consumers
 assert_display_field_change_rebuilds_both_consumers
 assert_control_ui_qa_recorder_change_rebuilds_control_ui
 assert_llm_provider_attempt_contract_change_rebuilds_consumers
+assert_llm_providers_change_rebuilds_consumers
 assert_codex_catalog_projection_change_rebuilds_consumers
 assert_gfs_interaction_policy_change_rebuilds_consumers
 assert_jwt_key_policy_change_rebuilds_all_consumers
