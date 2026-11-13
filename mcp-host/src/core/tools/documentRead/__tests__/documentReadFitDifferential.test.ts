@@ -32,6 +32,8 @@ describe('document read results are unchanged by the M2 measure cuts', () => {
       ['xlsx nearly full page (fresh)', 'bb1edc5fbaea20ef', 5],
       ['xlsx mixed widths (turn)', '7d60396cfeb08778', 3],
       ['xlsx mixed widths (fresh)', '51aa021abb7eac69', 7],
+      ['xlsx long sheet list, all rows too wide (turn)', '1236cd9c4f3281c9', 2],
+      ['xlsx long sheet list, all rows too wide (fresh)', 'af048a98ea5bc314', 2],
       ['pdf one long page (turn)', '05adf470191929db', 3],
       ['pdf one long page (fresh)', 'c6229cbd7864c70a', 16],
       ['pdf pages with a secret (turn)', '6e8d6a5b977e9a0a', 3],
@@ -39,5 +41,14 @@ describe('document read results are unchanged by the M2 measure cuts', () => {
       ['pdf surrogate pairs (turn)', 'c47e2d0ce4829179', 3],
       ['pdf surrogate pairs (fresh)', 'b0cbbbcbc2567dd9', 4],
     ])
+  }, 60_000)
+
+  it('decides rows that are all too wide with about one measure each', async () => {
+    // 600 rows, each emitted as []: every one needs its own exact probe, and
+    // halving alone spent about two (1,340 measures; review round 2, P2).
+    const runs = await runFitScenarios(DocumentReadTool)
+    const measures = Object.fromEntries(runs.map(run => [run.name, run.measures]))
+    expect(measures['xlsx long sheet list, all rows too wide (turn)']).toBeLessThanOrEqual(750)
+    expect(measures['xlsx long sheet list, all rows too wide (fresh)']).toBeLessThanOrEqual(750)
   }, 60_000)
 })

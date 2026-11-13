@@ -193,6 +193,12 @@ function scenarios(): Scenario[] {
     sheetNames: ['Wide'],
     sheets: [{ rows: Array.from({ length: 12 }, (_, row) => cells(row + 1, 5, 2_000)) }],
   }
+  // A long sheet list and rows that each exceed the page left beside it, so
+  // every row is emitted as [] (independent review round 2, P2).
+  const longListAllWide: WorkbookModel = {
+    sheetNames: Array.from({ length: 300 }, (_, index) => sheetName(index)),
+    sheets: [{ rows: Array.from({ length: 600 }, (_, row) => cells(row + 1, 1, 3_000)) }],
+  }
   // A sheet list that leaves about 40 tokens of a 2,000-token page.
   const nearlyFull: WorkbookModel = {
     sheetNames: Array.from({ length: 40 }, (_, index) => sheetName(index)),
@@ -238,6 +244,7 @@ function scenarios(): Scenario[] {
     ['all rows too wide', allWide, 12, 20_000],
     ['nearly full page', nearlyFull, 300, 20_000],
     ['mixed widths', mixed, 80, 20_000],
+    ['long sheet list, all rows too wide', longListAllWide, 600, 0],
   ]
   const out: Scenario[] = []
   for (const [name, model, window, tokens] of xlsxCases) {

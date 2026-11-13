@@ -135,6 +135,9 @@ const IMAGE_EXHAUSTED_MESSAGE =
  */
 const VISUAL_REQUEST_TEXT_RESERVE_BYTES = 4_000_000
 
+/** Blanked XLSX rows in a row after which row probes skip group probes. */
+const DENSE_BLANKED_ROWS = 4
+
 const LIMIT_BY_STOP: Record<
   'max_pages' | 'max_extracted_chars' | 'max_rows' | 'max_cells',
   DocumentReadLimit
@@ -976,9 +979,9 @@ export class DocumentReadTool implements Tool {
         rowIndex + 1 < sheet.rows.length || sheet.truncated
       // Rows before `to` are decided. `estimate` follows the smallest result
       // holding them, from what each fitting row or group adds to an empty
-      // probe; only when it passes the allowance is that result measured, so
-      // a call measures it about once. A blanked row adds about one token and
-      // is left out of the estimate, which can then only stop later.
+      // probe and about one token for each blanked row; only when it passes
+      // the allowance is that result measured, so a call measures it about
+      // once. The measure, not the estimate, decides the stop.
       let stopped = false
       let estimate = 0
       let probeBase = 0
@@ -988,19 +991,34 @@ export class DocumentReadTool implements Tool {
         estimate = smallest(sheet.rows.slice(0, to))
         if (estimate > allowance) stopped = true
       }
+      // Rows blanked in a row. Every row a call emits as [] costs one exact
+      // probe, and halving spends about one more per row on groups that fail
+      // (independent review round 2, P2: a long sheet list beside rows that
+      // are all too wide). After `DENSE_BLANKED_ROWS` blanked rows in a row,
+      // groups are split without a probe until a row fits again. Each row
+      // is still decided by its own exact probe, so no result changes.
+      let blankedRun = 0
       const check = (from: number, to: number): void => {
         if (stopped) return
         if (to - from === 1) {
           if (parserSkipped.has(sheet.startRow + from)) return
           const cost = probe(from, to, continuationAfter(from), truncatedAfter(from))
-          if (cost > pageTokens) skip(from)
-          else decided(to, cost)
+          if (cost > pageTokens) {
+            skip(from)
+            blankedRun += 1
+            decided(to, probeBase + 1)
+          } else {
+            blankedRun = 0
+            decided(to, cost)
+          }
           return
         }
-        const cost = probe(from, to, continuationAfter(to - 1), truncatedAfter(to - 1))
-        if (cost <= pageTokens - margin) {
-          decided(to, cost)
-          return
+        if (blankedRun < DENSE_BLANKED_ROWS) {
+          const cost = probe(from, to, continuationAfter(to - 1), truncatedAfter(to - 1))
+          if (cost <= pageTokens - margin) {
+            decided(to, cost)
+            return
+          }
         }
         const middle = from + Math.floor((to - from) / 2)
         check(from, middle)
