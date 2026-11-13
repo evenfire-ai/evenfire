@@ -51,6 +51,38 @@ export {
   PROVIDERS,
 } from './registryCore'
 
+// Subscription provider switch, read when the provider is built (not at boot,
+// so one bad value in the shared Host ConfigMap does not stop every Host).
+// Unset, empty and `true` mean on; `false` means off; any other value refuses
+// to build the provider.
+export type SubscriptionSwitchName =
+  | 'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED'
+  | 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED'
+export type SubscriptionSwitchRefusal = 'subscription_switch_invalid' | 'subscription_switch_off'
+
+/** A subscription switch refused construction. `reason` and `envVar` are fixed strings, safe to log. */
+export class SubscriptionSwitchError extends Error {
+  constructor(
+    message: string,
+    readonly reason: SubscriptionSwitchRefusal,
+    readonly envVar: SubscriptionSwitchName
+  ) {
+    super(message)
+    this.name = 'SubscriptionSwitchError'
+  }
+}
+
+function subscriptionSwitchOn(name: SubscriptionSwitchName): boolean {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '' || raw === 'true') return true
+  if (raw === 'false') return false
+  throw new SubscriptionSwitchError(
+    `[LLM] makeProvider: ${name} must be 'true' or 'false'`,
+    'subscription_switch_invalid',
+    name
+  )
+}
+
 /**
  * Construct the concrete provider for `provider` from its credential bag (+
  * optional model). Direct-SDK providers (openai, claude), the own-SDK newcomers
@@ -99,8 +131,12 @@ function constructProvider(
         azureProfile(env)
       )
     case 'codex-subscription':
-      if (process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true') {
-        throw new Error('[LLM] makeProvider: codex-subscription is disabled')
+      if (!subscriptionSwitchOn('MCP_HOST_CODEX_SUBSCRIPTION_ENABLED')) {
+        throw new SubscriptionSwitchError(
+          '[LLM] makeProvider: codex-subscription is disabled',
+          'subscription_switch_off',
+          'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED'
+        )
       }
       if (!model?.trim() || !options?.codex) {
         throw new Error(
@@ -109,8 +145,12 @@ function constructProvider(
       }
       return new CodexSubscriptionProvider(model, options.codex)
     case 'grok-subscription':
-      if (process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED !== 'true') {
-        throw new Error('[LLM] makeProvider: grok-subscription is disabled')
+      if (!subscriptionSwitchOn('MCP_HOST_GROK_SUBSCRIPTION_ENABLED')) {
+        throw new SubscriptionSwitchError(
+          '[LLM] makeProvider: grok-subscription is disabled',
+          'subscription_switch_off',
+          'MCP_HOST_GROK_SUBSCRIPTION_ENABLED'
+        )
       }
       if (!model?.trim() || !options?.grok) {
         throw new Error(

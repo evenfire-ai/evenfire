@@ -5,11 +5,12 @@
  * the dev auto-detection priority order (§5.4/§5.9), the prototype-pollution
  * guard in `isLlmProvider` (§1), and the factory fail-safe (§5.7).
  */
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { LIMITS as GROK_LIMITS } from '@clerum/grok-provider-attempt-contract'
 import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
-import { logger } from '../../logger'
+import { logger, redactUnknown } from '../../logger'
 import { apiKeysFromEnv, createLLMProvider } from '../index'
+import { azureProfile } from '../openaiFamily/endpointProfiles'
 import { makeProvider } from '../registry'
 import {
   ALL_PROVIDERS,
@@ -220,6 +221,79 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
     }
     expect(internals.defaultModel).toBe(desc.defaultModel)
     expect(internals.client.baseURL).toBe(desc.baseURL)
+  })
+
+  // A construction failure logs the registry id and, for a subscription switch,
+  // the fixed reason code and the switch name. The error text is never logged:
+  // it can carry operator config (the Azure endpoint) or third-party SDK text.
+  // Each case asserts what reaches the sink after the logger's redaction; the
+  // exact-equality assertion on that single line is the liveness witness for the
+  // negative assertions that follow it.
+  const CONSTRUCT_FAILED = 'Failed to construct LLM provider'
+
+  function captureErrorLog() {
+    const spy = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    return () =>
+      spy.mock.calls.map(([fields, msg]) => [
+        JSON.parse(JSON.stringify(redactUnknown(fields))),
+        msg,
+      ])
+  }
+
+  for (const [provider, envVar] of [
+    ['codex-subscription', 'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED'],
+    ['grok-subscription', 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED'],
+  ] as const) {
+    describe(`${provider} switch refusal`, () => {
+      afterEach(() => {
+        delete process.env[envVar]
+        vi.restoreAllMocks()
+      })
+
+      it('T-C1 logs subscription_switch_invalid and the switch name, never the value', () => {
+        process.env[envVar] = 'sk-not-a-boolean'
+        const calls = captureErrorLog()
+        const result = createLLMProvider({}, { provider, name: 'model-x' })
+        expect(result).toBeNull()
+        expect(calls()).toEqual([
+          [{ provider, reason: 'subscription_switch_invalid', envVar }, CONSTRUCT_FAILED],
+        ])
+        expect(JSON.stringify(calls())).not.toContain('sk-not-a-boolean')
+      })
+
+      it('T-C2 logs subscription_switch_off and the switch name', () => {
+        process.env[envVar] = 'false'
+        const calls = captureErrorLog()
+        const result = createLLMProvider({}, { provider, name: 'model-x' })
+        expect(result).toBeNull()
+        expect(calls()).toEqual([
+          [{ provider, reason: 'subscription_switch_off', envVar }, CONSTRUCT_FAILED],
+        ])
+      })
+    })
+  }
+
+  describe('azure construction failure', () => {
+    afterEach(() => vi.restoreAllMocks())
+
+    it('T-C3 logs the provider id and not the error text that carries the endpoint', () => {
+      const env = (name: string) =>
+        name === 'AZURE_OPENAI_ENDPOINT' ? 'not a url SENTINEL-HOST.example' : undefined
+      // The error text does carry the endpoint, so logging it would leak it.
+      expect(() => azureProfile(env)).toThrow(/SENTINEL-HOST\.example/)
+      const calls = captureErrorLog()
+      const slot = primarySlot(descriptorFor('azure')).dataKey
+      const result = createLLMProvider(
+        { azure: { [slot]: 'sk-azure-SENTINEL-KEY' } },
+        { provider: 'azure', name: 'deployment-x' },
+        { env }
+      )
+      expect(result).toBeNull()
+      expect(calls()).toEqual([[{ provider: 'azure' }, CONSTRUCT_FAILED]])
+      const logged = JSON.stringify(calls())
+      expect(logged).not.toContain('SENTINEL-HOST')
+      expect(logged).not.toContain('SENTINEL-KEY')
+    })
   })
 })
 

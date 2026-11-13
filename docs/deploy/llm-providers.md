@@ -8,7 +8,7 @@ the per-session model selector behaves in the desktop app.
 The canonical provider set — **24 providers**, from `openai`, `claude`
 (Anthropic), `zai` and `bailian` through the own-SDK `vertex` / `bedrock` to the
 OpenAI-compatible additions, `azure`, and the two sign-in subscription providers
-(`codex-subscription`, `grok-subscription`, off by default in `deploy/base`) — and their credential slots live in the
+(`codex-subscription`, `grok-subscription`, on by default) — and their credential slots live in the
 shared `@clerum/llm-providers` package, which the Control UI, control-api,
 mcp-host, and the workflow runtime all consume. See the
 [providers overview](../llm-providers/README.md) for the full list and the

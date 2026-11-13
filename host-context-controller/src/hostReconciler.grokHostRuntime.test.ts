@@ -227,12 +227,16 @@ function grokPolicyCalls(networkingApi: ReturnType<typeof createMockNetworkingAp
   ].filter(named)
 }
 
+// These cases prove whether HCC adds the mcp-host Grok env entry and mints
+// `llm:grok:execute`. A missing entry does not make mcp-host refuse the provider
+// (the switch is on when unset); the withheld scope and egress policy are what
+// stop a call.
 describe('HostReconciler Grok Host runtime gating', () => {
   beforeEach(() => {
     vi.mocked(issueMcpHostRuntimeTokens).mockClear()
   })
 
-  it('sets the mcp-host Grok factory flag when the Host projection derives llm:grok:execute', async () => {
+  it('sets the mcp-host Grok env entry and mints llm:grok:execute when the Host projection derives it', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     wireAllowlist(
       coreApi,
@@ -251,7 +255,7 @@ describe('HostReconciler Grok Host runtime gating', () => {
     expect(flag).toEqual([{ name: GROK_FLAG_ENV, value: 'true' }])
   })
 
-  it('omits the Grok factory flag when clerum.io/grok-enabled is false', async () => {
+  it('withholds llm:grok:execute and the mcp-host Grok env entry when clerum.io/grok-enabled is false', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     wireAllowlist(
       coreApi,
@@ -266,7 +270,7 @@ describe('HostReconciler Grok Host runtime gating', () => {
     )
   })
 
-  it('omits the Grok factory flag when the assigned Grok connection is not connected', async () => {
+  it('withholds llm:grok:execute and the mcp-host Grok env entry when the assigned Grok connection is not connected', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     wireAllowlist(
       coreApi,
@@ -341,6 +345,52 @@ describe('HostReconciler Grok Host runtime gating', () => {
         'CLERUM_SESSION_STORE',
         'CLERUM_SESSION_DB_DIR',
       ])
+    }
+  )
+
+  // Subscriptions are on by default, so an install that never connected an
+  // account sees clerum.io/{codex,grok}-enabled flip from "false" to "true" at
+  // the first publish after the upgrade. With no grant nothing is eligible, so
+  // no Host may restart because of that flip.
+  function freshInstallAllowlist(enabled: boolean): ReturnType<typeof allowlistConfigMap> {
+    return {
+      metadata: {
+        resourceVersion: '1',
+        annotations: {
+          'clerum.io/content-hash': 'aa',
+          'clerum.io/codex-enabled': String(enabled),
+          'clerum.io/grok-enabled': String(enabled),
+          'clerum.io/codex-connection-status': 'disconnected',
+        },
+      },
+      data: { 'codex-subscription': JSON.stringify([]) },
+    }
+  }
+
+  it.each([
+    ['static-provider', staticHost],
+    ['Codex', codexHost],
+    ['Grok', grokHost],
+  ] as const)(
+    'keeps the %s Host pod template unchanged when the subscription switches turn on with no grant',
+    async (_label, hostFactory) => {
+      const off = createReconciler()
+      wireAllowlist(off.coreApi, freshInstallAllowlist(false))
+      await off.reconciler.reconcile(hostFactory())
+      const before = lastDeployment(off.appsApi, hostFactory().name)
+      const scopesOff = issuedScopes()
+
+      const on = createReconciler()
+      wireAllowlist(on.coreApi, freshInstallAllowlist(true))
+      await on.reconciler.reconcile(hostFactory())
+      const after = lastDeployment(on.appsApi, hostFactory().name)
+
+      // Witness: both reconciles reached the token issuer with the runtime
+      // scopes only, so the projection ran and derived nothing.
+      expect(scopesOff).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES])
+      expect(issuedScopes()).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES])
+      expect(JSON.stringify(after.spec?.template)).toBe(JSON.stringify(before.spec?.template))
+      expect(mcpHostEnv(after).map(env => env.name)).not.toContain(GROK_FLAG_ENV)
     }
   )
 

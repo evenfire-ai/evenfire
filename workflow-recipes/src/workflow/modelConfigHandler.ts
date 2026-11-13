@@ -162,9 +162,11 @@ type BrokerConnectionKeys = Pick<HandleOptions, 'codexConnectionKey' | 'grokConn
 /** WRC process switches the broker needs to agree with the recipe verdict. */
 export interface ModelConfigHandlerOptions {
   /**
-   * WRC_GROK_SUBSCRIPTION_ENABLED. Off (the default) means no Grok grant is
-   * redeemable here, matching `projectCodexRecipeVerdict`, which already
-   * withholds the Grok scope, egress, binding and pod env.
+   * WRC_GROK_SUBSCRIPTION_ENABLED, as loaded by the WRC config. When the
+   * option is omitted or false, no Grok grant is redeemable here, matching
+   * `projectCodexRecipeVerdict`, which already withholds the Grok scope,
+   * egress and binding. `buildMcpHostPod` leaves the Grok pod env out on the
+   * same flag; that env is not a gate.
    */
   grokSubscriptionEnabled?: boolean
 }

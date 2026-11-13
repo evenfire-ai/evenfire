@@ -55,4 +55,38 @@ describe('WRC code defaults against deploy/base', () => {
       baseValue('WRC_EXTERNAL_EGRESS_MAX_ENTRIES')
     )
   })
+
+  it('the Grok subscription switch default equals the deploy/base value (on)', () => {
+    delete process.env.WRC_GROK_SUBSCRIPTION_ENABLED
+    expect(loadConfig().grokSubscriptionEnabled).toBe(true)
+    expect(String(loadConfig().grokSubscriptionEnabled)).toBe(
+      baseValue('WRC_GROK_SUBSCRIPTION_ENABLED')
+    )
+  })
+})
+
+describe('WRC Grok subscription switch parsing', () => {
+  const originalEnv = process.env
+
+  afterEach(() => {
+    process.env = originalEnv
+  })
+
+  it('is on when unset, empty, true in any case or 1, and off for false, 0 or other values', () => {
+    for (const [raw, expected] of [
+      [undefined, true],
+      ['', true],
+      ['true', true],
+      ['TRUE', true],
+      ['1', true],
+      ['false', false],
+      ['0', false],
+      ['off', false],
+    ] as const) {
+      process.env = { ...originalEnv }
+      if (raw === undefined) delete process.env.WRC_GROK_SUBSCRIPTION_ENABLED
+      else process.env.WRC_GROK_SUBSCRIPTION_ENABLED = raw
+      expect(loadConfig().grokSubscriptionEnabled, String(raw)).toBe(expected)
+    }
+  })
 })

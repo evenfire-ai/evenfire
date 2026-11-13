@@ -6,6 +6,7 @@ import {
   isLlmProviderId,
 } from '@clerum/llm-providers'
 import type { DbClient } from '../../db.js'
+import { defaultOnBooleanFromEnv } from '../../defaultOnBoolean.js'
 import { rootLogger } from '../../observability/logger.js'
 import { isCodexAssignmentAllowed } from '../../services/codexSubscriptionCatalog.js'
 import {
@@ -64,12 +65,14 @@ function providerSupportsFallbackCredentialSlot(provider: LlmProviderId): boolea
   return slots.length === 1 && !slots[0].multiline
 }
 
+// Read per call (not from `config`) so the gate follows the process env. Same
+// default-on contract as `config.codexSubscriptionEnabled`.
 function isCodexSubscriptionEnabled(): boolean {
-  return process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true'
+  return defaultOnBooleanFromEnv('CONTROL_API_CODEX_SUBSCRIPTION_ENABLED')
 }
 
 function isGrokSubscriptionEnabled(): boolean {
-  return process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED === 'true'
+  return defaultOnBooleanFromEnv('CONTROL_API_GROK_SUBSCRIPTION_ENABLED')
 }
 
 function oauthBrokerFlagEnabled(provider: string): boolean {
@@ -197,7 +200,7 @@ function validateCodexBrokerAdmission(
         errors: [
           {
             field: target.field,
-            message: `provider "${target.provider}" is disabled (set ${flag}=true)`,
+            message: `provider "${target.provider}" is disabled (${flag}=false; remove it or set it to true)`,
           },
         ],
       }

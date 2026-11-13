@@ -97,8 +97,8 @@ Other services and directories this document does not detail (full list in
 | [webhook-gateway](../../webhook-gateway/README.md)       | `sandbox-recipes` | Per-recipe webhook signature verifier; WRC creates one per recipe, no static manifest                    |
 | [nginx-egress-proxy](../../nginx-egress-proxy/README.md) | `mcp-server`      | Image only: the `egress-proxy` container HCC adds to remote (`spec.remote`) McpServer pods               |
 | [profile-ui](../../profile-ui/README.md)                 | `profiles`        | End-user profile, invitations, Desktop App setup and app-link handoff                                    |
-| [codex-llm-proxy](../../codex-llm-proxy/README.md)       | `control-plane`   | Broker for `codex-subscription` model calls; off by default (`CODEX_LLM_PROXY_EXECUTION_ENABLED`)        |
-| [grok-llm-proxy](../../grok-llm-proxy/README.md)         | `control-plane`   | Broker for `grok-subscription` model calls; off by default (`GROK_LLM_PROXY_EXECUTION_ENABLED`)          |
+| [codex-llm-proxy](../../codex-llm-proxy/README.md)       | `control-plane`   | Broker for `codex-subscription` model calls; on by default (`CODEX_LLM_PROXY_EXECUTION_ENABLED=false` stops it) |
+| [grok-llm-proxy](../../grok-llm-proxy/README.md)         | `control-plane`   | Broker for `grok-subscription` model calls; on by default (`GROK_LLM_PROXY_EXECUTION_ENABLED=false` stops it)   |
 | [monitoring](../../monitoring/README.md)                 | `monitoring`      | Not a service: optional Helm values and dashboards for Grafana and Loki, installed with its own Makefile |
 
 ### Human surfaces

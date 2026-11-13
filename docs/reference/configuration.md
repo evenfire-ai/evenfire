@@ -27,12 +27,6 @@ Set boolean switches to the lowercase string `true`. Some services also accept
 | -------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
 | `MCP_OAUTH_BROKER_ENABLED`                         | control-api (`control-api-config`)         | OAuth sign-in for MCP connectors; without it OAuth connectors never receive a token        | [Connect an OAuth connector](../how-to/connect-oauth-connector.md)      |
 | `CONTROL_API_OAUTH_CALLBACK_BASE_URL`              | control-api (`control-api-config`)         | Browser-reachable origin for OAuth callbacks (a URL, not a boolean)                        | [Connect an OAuth connector](../how-to/connect-oauth-connector.md)      |
-| `CONTROL_API_CODEX_SUBSCRIPTION_ENABLED`           | control-api (`control-api-config`)         | ChatGPT (Codex) subscription connections                                                   | [Use a subscription](../how-to/connect-llm-subscription.md)             |
-| `CODEX_LLM_PROXY_EXECUTION_ENABLED`                | codex-llm-proxy (`codex-llm-proxy-config`) | Model calls through the Codex proxy                                                        | [Use a subscription](../how-to/connect-llm-subscription.md)             |
-| `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED`              | mcp-host (`mcp-host-config`)               | The `codex-subscription` provider in agents                                                | [Use a subscription](../how-to/connect-llm-subscription.md)             |
-| `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`            | control-api (`control-api-config`)         | Grok subscription connections (mcp-host's Grok flag is injected per Host)                  | [Use a subscription](../how-to/connect-llm-subscription.md)             |
-| `GROK_LLM_PROXY_EXECUTION_ENABLED`                 | grok-llm-proxy (`grok-llm-proxy-config`)   | Model calls through the Grok proxy                                                         | [Use a subscription](../how-to/connect-llm-subscription.md)             |
-| `WRC_GROK_SUBSCRIPTION_ENABLED`                    | workflow-recipes (Deployment env)          | Grok in WorkflowRecipe steps                                                               | [Use a subscription](../how-to/connect-llm-subscription.md)             |
 | `CLERUM_BUDGETS_ENABLED`                           | mcp-host (`mcp-host-config`)               | Token budget checks before tasks                                                           | [Track usage & set budgets](../how-to/token-budgets-and-usage.md)       |
 | `CLERUM_MEMORY_ENABLED`                            | mcp-host (`mcp-host-config`)               | Agent workspace memory                                                                     | [mcp-host README](../../mcp-host/README.md)                             |
 | `CLERUM_SESSION_SEARCH_ENABLED`                    | mcp-host (`mcp-host-config`)               | Session search for agents                                                                  | [mcp-host README](../../mcp-host/README.md)                             |
@@ -66,6 +60,19 @@ Set boolean switches to the lowercase string `true`. Some services also accept
 | `CLERUM_ENABLE_RESPONSE_ATTACHMENTS`              | channel-reader, mcp-host | Send generated files back to channels                                         |
 | `WRC_ENABLE_DETERMINISTIC`                        | workflow-recipes         | Deterministic workflow steps                                                  |
 | `WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED` | control-api              | Deliver workflow approval notifications                                       |
+| `CONTROL_API_CODEX_SUBSCRIPTION_ENABLED`          | control-api              | ChatGPT (Codex) subscription connections; `false` turns them off              |
+| `CODEX_LLM_PROXY_EXECUTION_ENABLED`               | codex-llm-proxy          | Model calls through the Codex proxy; `false` is the kill switch               |
+| `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED`             | mcp-host                 | The `codex-subscription` provider in agents; `false` turns it off             |
+| `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`           | control-api              | Grok subscription connections; `false` turns them off                         |
+| `GROK_LLM_PROXY_EXECUTION_ENABLED`                | grok-llm-proxy           | Model calls through the Grok proxy; `false` is the kill switch                |
+| `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`              | mcp-host                 | The `grok-subscription` provider in agents; HCC also injects it per Host      |
+| `WRC_GROK_SUBSCRIPTION_ENABLED`                   | workflow-recipes         | Grok in WorkflowRecipe steps; `false` turns it off                            |
+
+The control-api, proxy and mcp-host subscription switches accept only `true`,
+`false`, unset or empty; control-api and the proxies refuse to start on any
+other value, and mcp-host refuses to build that provider. To turn a
+subscription off, set its control-api and proxy switches to `false`. See
+[Use a subscription](../how-to/connect-llm-subscription.md).
 
 The catalog sync enables a new model only when its provider's catalog policy is
 ON and the model is eligible. One run enables at most

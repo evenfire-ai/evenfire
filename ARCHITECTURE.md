@@ -40,8 +40,8 @@ NetworkPolicy owned by whichever component is responsible for that selector.
 | [workflow-recipes](workflow-recipes/)               | The WorkflowRecipe controller (WRC) — a separate Deployment and image                                                                                  |
 | [control-api](control-api/)                         | CRD lifecycle, resource CRUD, profile mapping                                                                                                          |
 | [control-ui](control-ui/)                           | Platform management UI                                                                                                                                 |
-| [codex-llm-proxy](codex-llm-proxy/)                 | Streams `codex-subscription` model calls to ChatGPT; redeems single-use tickets from control-api. Off by default (`CODEX_LLM_PROXY_EXECUTION_ENABLED`) |
-| [grok-llm-proxy](grok-llm-proxy/)                   | Streams `grok-subscription` model calls to Grok; redeems single-use tickets from control-api. Off by default (`GROK_LLM_PROXY_EXECUTION_ENABLED`)      |
+| [codex-llm-proxy](codex-llm-proxy/)                 | Streams `codex-subscription` model calls to ChatGPT; redeems single-use tickets from control-api. On by default; `CODEX_LLM_PROXY_EXECUTION_ENABLED=false` is the kill switch |
+| [grok-llm-proxy](grok-llm-proxy/)                   | Streams `grok-subscription` model calls to Grok; redeems single-use tickets from control-api. On by default; `GROK_LLM_PROXY_EXECUTION_ENABLED=false` is the kill switch   |
 
 ### Identity & profiles — `profiles`
 

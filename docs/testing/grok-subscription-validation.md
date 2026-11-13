@@ -26,9 +26,10 @@ unmeasured for images.
 - A branch-owned local profile, bootstrapped by the canonical Minikube entry
   points, with the images built from the commit under test. Do not touch
   another branch's profile or port-forwards.
-- `GROK_LLM_PROXY_EXECUTION_ENABLED` on, a connected Grok grant, and a Host
-  whose Grok projection mints `llm:grok:execute` (HCC then injects
-  `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`). There is no image-specific flag.
+- `GROK_LLM_PROXY_EXECUTION_ENABLED` on (unset or `true`), a connected Grok
+  grant, and a Host whose Grok projection mints `llm:grok:execute` (HCC then
+  injects `MCP_HOST_GROK_SUBSCRIPTION_ENABLED=true`; the switch is also on when
+  unset). There is no image-specific flag.
 - A catalog model that the xAI documentation lists with image input
   (grok-4.5, grok-4.6 or grok-4.7). Record the canonical model id the runtime
   returns, not an alias.

@@ -144,14 +144,16 @@ if "location = /api/v1/internal/llm/grok/provider-attempts/finalize" not in cm:
     errors.append("rpc gateway missing exact Grok finalize location")
 if re.search(r"location\s+/api/v1/internal/llm/grok", cm):
     errors.append("Grok redeem/finalize paths must stay exact-match, not a prefix wildcard")
-# The public base ships every Grok switch off and each environment's overlay
-# turns it on; keyper-labs/evenfire-infra CI asserts the base half on every
-# dev commit. The minikube overlay turns them on (#739). The Host switch
-# (MCP_HOST_GROK_SUBSCRIPTION_ENABLED) is not here: HCC injects it per Host.
-if "CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'false'" not in cm:
-    errors.append("base control-api config must keep Grok subscription disabled")
-if 'GROK_LLM_PROXY_EXECUTION_ENABLED: "false"' not in text:
-    errors.append("base grok-llm-proxy config must keep execution disabled")
+# The public base ships every Grok switch on, matching the code default. The
+# deployment repository's CI reads these base values and has its own assertion
+# on them, so a change here needs the matching change there. The minikube
+# overlay also states them (#739). The Host switch (MCP_HOST_GROK_SUBSCRIPTION_ENABLED) is
+# not here: mcp-host treats it as on unless it is "false", and HCC also sets
+# it on eligible Hosts.
+if "CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'true'" not in cm:
+    errors.append("base control-api config must ship Grok subscription enabled")
+if 'GROK_LLM_PROXY_EXECUTION_ENABLED: "true"' not in text:
+    errors.append("base grok-llm-proxy config must ship execution enabled")
 # The proxy derives its body limit from the contract plus the envelope
 # allowance; a literal in base would freeze it at a stale value.
 if "GROK_LLM_PROXY_MAX_BODY_BYTES" in text:
@@ -185,10 +187,9 @@ elif not re.search(
     re.M,
 ):
     errors.append("workflow-approval gateway authorize route must allow the 35 MiB Grok visual envelope")
-wrc_disabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "false"\n')
-if not wrc_disabled.search(active(manifest.parent / "workflow-recipes.yaml")):
-    errors.append("base workflow-recipes must keep Grok subscriptions disabled")
 wrc_enabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "true"\n')
+if not wrc_enabled.search(active(manifest.parent / "workflow-recipes.yaml")):
+    errors.append("base workflow-recipes must ship Grok subscriptions enabled")
 overlay = minikube.parent
 if "CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'true'" not in active(
     overlay / "configmaps/control-api-config.yaml"

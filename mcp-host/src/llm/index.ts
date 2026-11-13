@@ -15,7 +15,7 @@ import type { GrokAttemptContext } from './grokSubscription'
 import { OpenAIProvider } from './openai'
 import { ProviderAttemptAuthorizer, resolveCodexAuthorizeUrl } from './providerAttemptAuthorizer'
 import type { ProviderEnvLookup } from './providerEnv'
-import { makeProvider } from './registry'
+import { SubscriptionSwitchError, makeProvider } from './registry'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from './registryCore'
 // Re-export the transport interfaces (moved to ./types to break the registry
 // import cycle) so existing `import { SingleTurnProvider, ClassifiedError }
@@ -123,7 +123,8 @@ export function createLLMProvider(
   // 401 later. Multi-slot (R4): every required slot must be present, so Bedrock
   // never constructs half-credentialed. The provider id IS the ApiKeys key.
   const credentials = keys[provider] ?? {}
-  for (const slot of descriptorFor(provider).credentialSlots) {
+  const descriptor = descriptorFor(provider)
+  for (const slot of descriptor.credentialSlots) {
     if (slot.required && !credentials[slot.dataKey]) {
       logger.error({}, 'Required LLM credential is missing')
       return null
@@ -132,7 +133,10 @@ export function createLLMProvider(
 
   // The own-SDK arms (vertex/bedrock) can still throw at construction if their
   // non-secret pod env (Vertex project id, AWS region) is absent or the Vertex
-  // service-account JSON is malformed. Treat that as the same fail-safe: log +
+  // service-account JSON is malformed. Azure throws when AZURE_OPENAI_ENDPOINT
+  // is missing or invalid, and the subscription arms throw when their switch is
+  // `false` or invalid, when the model is blank, or when their runtime
+  // dependencies cannot be built. Treat all of these as the same fail-safe: log +
   // return null (→ degraded), never crash the process. The four original arms
   // never throw here (their empty-key case is already handled above), so their
   // behaviour is byte-identical.
@@ -146,7 +150,12 @@ export function createLLMProvider(
           : {}),
     })
   } catch (err) {
-    logger.error({}, 'Failed to construct LLM provider')
+    // Error text is not logged: it can carry operator config (the Azure endpoint)
+    // or third-party SDK text. The registry id is, and for a subscription switch
+    // the fixed reason and the variable name.
+    const refusal =
+      err instanceof SubscriptionSwitchError ? { reason: err.reason, envVar: err.envVar } : {}
+    logger.error({ provider: descriptor.id, ...refusal }, 'Failed to construct LLM provider')
     return null
   }
 }

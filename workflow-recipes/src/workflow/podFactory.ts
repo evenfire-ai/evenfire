@@ -760,13 +760,18 @@ export function buildMcpHostPod(
               value: 'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092',
             },
             // Recipe pods do not mount the Host mcp-host-config ConfigMap.
-            // WRC keyless-configures oauth-broker against this process, so the
-            // Codex factory kill-switch and proxy URL must be on the pod.
+            // WRC keyless-configures oauth-broker against this process. The
+            // Codex switch is on when unset; the explicit value states it on
+            // the pod next to the proxy URL.
             { name: 'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED', value: 'true' },
             {
               name: 'CODEX_LLM_PROXY_RUNTIME_URL',
               value: 'http://codex-llm-proxy.control-plane.svc.cluster.local:8080',
             },
+            // The Grok entries follow the WRC switch and the recipe's
+            // declaration. Leaving them out does not make mcp-host refuse the
+            // Grok provider (its switch is on when unset); the recipe verdict
+            // withholds the scope, the proxy egress and the binding.
             ...(options.grokSubscriptionEnabled &&
             (options.recipeDeclaresGrok === true ||
               options.recipeAgentProvider === 'grok-subscription')

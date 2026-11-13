@@ -101,7 +101,7 @@ patchesStrategicMerge:
   # degradation E2E can prove recovery inside its bounded wait.
   - patches/wrc-external-egress-overlap.yaml
   # Grok subscriptions for workflow recipes, set explicitly like every other
-  # subscription switch in this overlay (base ships it off).
+  # subscription switch in this overlay (base ships it on).
   - patches/workflow-recipes-grok.yaml
   # Multi-document YAML must use patchesStrategicMerge — kubectl's embedded
   # kustomize (e.g. v4.5.x) rejects the same files under `patches:` with:

@@ -114,17 +114,20 @@ describe('grok-llm-proxy base manifest', () => {
     expect(limit).toBeGreaterThanOrEqual(Math.ceil(CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
   })
 
-  it('T-DEP-3 keeps the Grok subscription off in base, as keyper-labs/evenfire-infra CI requires', () => {
-    expect(scalar(MANIFEST, 'GROK_LLM_PROXY_EXECUTION_ENABLED')).toBe('false')
-    expect(scalar(CONTROL_PLANE_CONFIG, 'CONTROL_API_GROK_SUBSCRIPTION_ENABLED')).toBe('false')
+  it('T-DEP-3 ships the Grok subscription on in base', () => {
+    // The deployment repository's CI reads these base values and has its own
+    // assertion on them, so a change here needs the matching change there.
+    expect(scalar(MANIFEST, 'GROK_LLM_PROXY_EXECUTION_ENABLED')).toBe('true')
+    expect(scalar(CONTROL_PLANE_CONFIG, 'CONTROL_API_GROK_SUBSCRIPTION_ENABLED')).toBe('true')
     // Witness for the absence below: the file is the control-plane config that
     // carries the MCP Host settings.
     expect(scalar(CONTROL_PLANE_CONFIG, 'MCP_HOST_JWT_CONTROL_TTL_SEC')).toBe('600')
     expect(activeLines(CONTROL_PLANE_CONFIG).some((line) => /MCP_HOST_GROK_SUBSCRIPTION_ENABLED/.test(line))).toBe(false)
-    // HCC injects the MCP Host switch per Host from its Grok projection.
+    // mcp-host builds the Grok provider unless its switch is "false"; HCC also
+    // sets it on eligible Hosts. Base carries no shared MCP Host switch.
     const recipes = activeLines(WORKFLOW_RECIPES)
     const wrc = recipes.findIndex((line) => /name:\s*WRC_GROK_SUBSCRIPTION_ENABLED\s*$/.test(line))
     expect(wrc, 'workflow-recipes must declare WRC_GROK_SUBSCRIPTION_ENABLED').toBeGreaterThanOrEqual(0)
-    expect(recipes[wrc + 1]?.trim()).toBe('value: "false"')
+    expect(recipes[wrc + 1]?.trim()).toBe('value: "true"')
   })
 })

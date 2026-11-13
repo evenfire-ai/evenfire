@@ -69,6 +69,14 @@ function requiredNonEmpty(name: string, raw: string | undefined): string {
   return value
 }
 
+// Default-on switch: unset, empty and `true` mean on; `false` means off. Any
+// other value stops startup instead of silently picking a state.
+function defaultOnBoolean(name: string, raw: string | undefined): boolean {
+  if (raw === undefined || raw === '' || raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`${name} must be 'true' or 'false' (got '${raw}')`)
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyConfig {
   const maxBodyBytes = requiredPositiveInt(
     'GROK_LLM_PROXY_MAX_BODY_BYTES',
@@ -155,7 +163,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
     ),
     jwtIssuer: env.GROK_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('GROK_LLM_PROXY_JWT_PUBLIC_KEY', env.GROK_LLM_PROXY_JWT_PUBLIC_KEY),
-    executionEnabled: env.GROK_LLM_PROXY_EXECUTION_ENABLED === 'true',
+    executionEnabled: defaultOnBoolean('GROK_LLM_PROXY_EXECUTION_ENABLED', env.GROK_LLM_PROXY_EXECUTION_ENABLED),
     controlApiBaseUrl: requiredHttpUrl(
       'GROK_LLM_PROXY_CONTROL_API_URL',
       env.GROK_LLM_PROXY_CONTROL_API_URL

@@ -184,6 +184,7 @@ describe('WRC MCP server ModelConfigHandler Grok flag wiring', () => {
   it('reads WRC_GROK_SUBSCRIPTION_ENABLED into the configure-model broker', () => {
     expect(handlerFlag('true')).toBe(true)
     expect(handlerFlag('false')).toBe(false)
-    expect(handlerFlag(undefined)).toBe(false)
+    // On by default when unset.
+    expect(handlerFlag(undefined)).toBe(true)
   })
 })

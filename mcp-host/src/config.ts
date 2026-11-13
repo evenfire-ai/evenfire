@@ -71,12 +71,8 @@ export interface Config {
   // Dev mode: Model configuration from env vars
   devModelProvider?: LlmProvider
   devModelName?: string
-  // Default OFF. Codex provider construction stays dark until the operator
-  // sets MCP_HOST_CODEX_SUBSCRIPTION_ENABLED=true.
-  codexSubscriptionEnabled: boolean
   // Server-owned Codex proxy URL. Callers cannot override this per request.
   codexProxyRuntimeBaseUrl: string
-  grokSubscriptionEnabled: boolean
   grokProxyRuntimeBaseUrl: string
   grokPolicyRevision: number
   grokPolicyHash: string
@@ -866,7 +862,6 @@ export const config: Config = {
   // resolveDevModelProvider fail-closes on a set-but-invalid value.
   devModelProvider: devMode ? resolveDevModelProvider(rawDevModelProvider) : undefined,
   devModelName,
-  codexSubscriptionEnabled: process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED === 'true',
   codexProxyRuntimeBaseUrl: getEnv(
     'CODEX_LLM_PROXY_RUNTIME_URL',
     'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
@@ -876,7 +871,6 @@ export const config: Config = {
   // ConfigMap. Set both env vars together only as a test/dev override.
   codexPolicyRevision: parseInt(getEnv('CODEX_POLICY_REVISION', '1')!, 10),
   codexPolicyHash: getEnv('CODEX_POLICY_HASH', '')!,
-  grokSubscriptionEnabled: process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED === 'true',
   grokProxyRuntimeBaseUrl: getEnv(
     'GROK_LLM_PROXY_RUNTIME_URL',
     'http://grok-llm-proxy.control-plane.svc.cluster.local:8080'

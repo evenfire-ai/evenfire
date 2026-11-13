@@ -72,7 +72,7 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 | ------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
 | [LLM providers overview](llm-providers/README.md)                        | The 24 providers, mental model, support matrix, request flow, fallback |
 | [Configure LLM providers](deploy/llm-providers.md)                       | Operator guide: credentials, Vertex/Bedrock/Azure, allowlist, selector |
-| [Use a ChatGPT or Grok subscription](how-to/connect-llm-subscription.md) | Sign in with a subscription instead of an API key (off by default)     |
+| [Use a ChatGPT or Grok subscription](how-to/connect-llm-subscription.md) | Sign in with a subscription instead of an API key                      |
 | [Add an LLM provider](llm-providers/adding-a-provider.md)                | Data-only vs driver-based integration paths                            |
 
 ## Deploy & operate

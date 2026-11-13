@@ -6,15 +6,43 @@ afterEach(() => {
 })
 
 describe('grok-subscription Host admission', () => {
-  it('rejects a Grok target when the Grok management flag is absent or false', async () => {
+  it('accepts a Grok-only Host when the Grok management flag is unset (on by default)', async () => {
+    delete process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED
     const isModelAllowed = vi.fn().mockResolvedValue(true)
     const res = await validateHostSpec(
-      { model: { provider: 'grok-subscription', name: 'grok-4.6' } },
+      { model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'team-grok' } },
       { isModelAllowed }
     )
+    expect(res).toBeNull()
+    expect(isModelAllowed).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a Grok target when the Grok management flag is false', async () => {
+    const spec = {
+      model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'team-grok' },
+    }
+    process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED = 'false'
+    const isModelAllowed = vi.fn().mockResolvedValue(true)
+    const res = await validateHostSpec(spec, { isModelAllowed })
     expect(res).not.toBeNull()
-    expect(res!.errors[0].message).toMatch(/CONTROL_API_GROK_SUBSCRIPTION_ENABLED/)
+    expect(res!.errors[0].message).toMatch(/CONTROL_API_GROK_SUBSCRIPTION_ENABLED=false/)
     expect(isModelAllowed).not.toHaveBeenCalled()
+
+    // Witness: the same spec reaches the model check once the flag is on.
+    process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED = 'true'
+    expect(await validateHostSpec(spec, { isModelAllowed })).toBeNull()
+    expect(isModelAllowed).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a Grok management flag that is neither true nor false', async () => {
+    process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED = '1'
+    const isModelAllowed = vi.fn().mockResolvedValue(true)
+    await expect(
+      validateHostSpec(
+        { model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'team-grok' } },
+        { isModelAllowed }
+      )
+    ).rejects.toThrow(/CONTROL_API_GROK_SUBSCRIPTION_ENABLED must be 'true' or 'false'/)
   })
 
   it('does not tolerate switching a Grok Host onto a revoked connectionRef with the same model', async () => {

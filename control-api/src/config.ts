@@ -4,6 +4,7 @@ import {
   parseSigningMaterial,
   parseVerifierMaterial,
 } from '@clerum/jwt-key-policy'
+import { defaultOnBooleanFromEnv } from './defaultOnBoolean.js'
 import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
 import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
 import { rootLogger } from './observability/logger.js'
@@ -144,14 +145,14 @@ type Config = {
   // (the code default) a later run is only a manual sync or a boot sync.
   llmCatalogAutoEnableMaxPerProviderPerRun: number
   llmCatalogAutoEnableMaxPerRun: number
-  // Default OFF. Codex subscription management/admission stays dark until
-  // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
+  // Default ON. CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=false turns Codex
+  // subscription management and admission off.
   codexSubscriptionEnabled: boolean
   // Public Codex CLI OAuth client id. Not a secret; PKCE/device flow protect the
   // grant. Override only to pin a documented registration.
   codexOAuthClientId: string
-  // Default OFF. Grok SuperGrok/coding-plan management stays dark until
-  // CONTROL_API_GROK_SUBSCRIPTION_ENABLED=true.
+  // Default ON. CONTROL_API_GROK_SUBSCRIPTION_ENABLED=false turns Grok
+  // SuperGrok/coding-plan management off.
   grokSubscriptionEnabled: boolean
   // Public Grok CLI OAuth client id. Not a secret; device-code flow protects
   // the grant. Override only to pin a documented registration.
@@ -623,13 +624,6 @@ const externalRateLimitConfig = (() => {
 // from retrying forever against a URL the loader will never fetch.
 assertSafeCatalogUrl(resolveModelsDevApiUrl())
 
-function defaultOnBooleanFromEnv(name: string): boolean {
-  const raw = process.env[name]
-  if (raw === undefined || raw === '' || raw === 'true') return true
-  if (raw === 'false') return false
-  throw new Error(`${name} must be 'true' or 'false' (got '${raw}')`)
-}
-
 function failClosedBooleanFromEnv(name: string): boolean {
   const raw = process.env[name]
   if (raw === undefined || raw === '' || raw === 'false') return false
@@ -935,15 +929,16 @@ export const config: Config = {
   // it on deliberately.
   llmCatalogSyncCronEnabled: process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
   llmCatalogBootSyncEnabled: defaultOnBooleanFromEnv('LLM_CATALOG_BOOT_SYNC_ENABLED'),
-  // Default OFF. Absent or any value other than the exact token `true` keeps
-  // Codex subscription management and admission dark.
-  codexSubscriptionEnabled: process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true',
+  // Default ON. `false` disables Codex subscription management and admission;
+  // any value other than unset, empty, `true` or `false` stops startup.
+  codexSubscriptionEnabled: defaultOnBooleanFromEnv('CONTROL_API_CODEX_SUBSCRIPTION_ENABLED'),
   // Public native client used by the Codex CLI ChatGPT login. This is not a
   // confidential client secret. Browser OAuth requires a deployment-registered
   // client id; the default CLI client supports device-code connect only.
   codexOAuthClientId:
     process.env.CONTROL_API_CODEX_OAUTH_CLIENT_ID || 'app_EMoamEEZ73f0CkXaXp7hrann',
-  grokSubscriptionEnabled: process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED === 'true',
+  // Default ON, same contract as codexSubscriptionEnabled.
+  grokSubscriptionEnabled: defaultOnBooleanFromEnv('CONTROL_API_GROK_SUBSCRIPTION_ENABLED'),
   // Default OFF, same exact-token idiom as the discovery cron above: the
   // reconciliation stays dark until an operator turns it on deliberately.
   subscriptionCatalogSyncCronEnabled: process.env.SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED === 'true',

@@ -9,7 +9,7 @@
  * we mock `descriptorFor` to return a baseURL-less descriptor and confirm the
  * throw fires (rather than silently constructing a broken client).
  */
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { makeProvider } from '../registry'
 import type { LlmProvider } from '../registryCore'
 
@@ -37,32 +37,41 @@ describe('makeProvider — divergent provider without a factory', () => {
   })
 })
 
-describe('makeProvider — Grok broker', () => {
-  it('fails closed when the execution flag is off', () => {
-    delete process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED
-    expect(() => makeProvider('grok-subscription', {})).toThrow(/is disabled/)
-  })
+// The switch is on by default: unset, empty and `true` pass the gate, `false`
+// closes it and any other value refuses to build the provider. "Passes the
+// gate" is observed through the next check, the missing model/authorizer
+// error, which only code past the gate can raise.
+for (const [provider, flag] of [
+  ['grok-subscription', 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED'],
+  ['codex-subscription', 'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED'],
+] as const) {
+  describe(`makeProvider — ${provider} switch`, () => {
+    afterEach(() => {
+      delete process.env[flag]
+    })
 
-  it('fails closed without runtime authorizer/proxy dependencies when the flag is on', () => {
-    process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED = 'true'
-    expect(() => makeProvider('grok-subscription', {})).toThrow(
-      /requires an explicit model and runtime authorizer/
-    )
-    delete process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED
-  })
-})
+    it('passes the gate when the switch is unset, empty or true', () => {
+      for (const value of [undefined, '', 'true']) {
+        if (value === undefined) delete process.env[flag]
+        else process.env[flag] = value
+        expect(() => makeProvider(provider, {}), String(value)).toThrow(
+          /requires an explicit model and runtime authorizer/
+        )
+      }
+    })
 
-describe('makeProvider — Codex broker', () => {
-  it('fails closed when the execution flag is off', () => {
-    delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
-    expect(() => makeProvider('codex-subscription', {})).toThrow(/is disabled/)
-  })
+    it('fails closed when the switch is false', () => {
+      process.env[flag] = 'false'
+      expect(() => makeProvider(provider, {})).toThrow(/is disabled/)
+    })
 
-  it('fails closed without runtime authorizer/proxy dependencies when the flag is on', () => {
-    process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
-    expect(() => makeProvider('codex-subscription', {})).toThrow(
-      /requires an explicit model and runtime authorizer/
-    )
-    delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
+    it('refuses a switch value that is neither true nor false', () => {
+      for (const value of ['TRUE', '0', 'off', 'true\n']) {
+        process.env[flag] = value
+        expect(() => makeProvider(provider, {}), value).toThrow(
+          new RegExp(`${flag} must be 'true' or 'false'`)
+        )
+      }
+    })
   })
-})
+}
