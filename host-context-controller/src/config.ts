@@ -385,38 +385,43 @@ export function parseHeartbeatPollMs(raw: string | undefined): number {
 // or a hard limit immediately instead of never.
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 
+// Unset or "" means "not configured". Anything else must be plain decimal
+// digits: Number() also reads '3e4', '0x7530', '+30000', '30000.0' and a value
+// with surrounding white space, which the range checks cannot see.
+function plainPositiveIntegerOrDefault(raw: string | undefined, defaultValue: number): number {
+  if (raw === undefined || raw === '') return defaultValue
+  return /^[1-9]\d*$/.test(raw) ? Number(raw) : Number.NaN
+}
+
 export function parseHostK8sRequestTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined) return 30_000
-  const parsed = Number(raw)
+  const parsed = plainPositiveIntegerOrDefault(raw, 30_000)
   if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
     throw new Error(
-      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds, got '${raw}'`
+      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds in plain digits, got '${raw}'`
     )
   }
   return parsed
 }
 
 export function parseK8sRequestTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined) return 30_000
-  const parsed = Number(raw)
+  const parsed = plainPositiveIntegerOrDefault(raw, 30_000)
   if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
     throw new Error(
-      `HCC_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds, got '${raw}'`
+      `HCC_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds in plain digits, got '${raw}'`
     )
   }
   return parsed
 }
 
 export function parseNetPolPassHardLimitMs(raw: string | undefined): number {
-  if (raw === undefined) return 30 * 60_000
-  const parsed = Number(raw)
+  const parsed = plainPositiveIntegerOrDefault(raw, 30 * 60_000)
   if (
     !Number.isSafeInteger(parsed) ||
     parsed <= NETPOL_PASS_OVERRUN_WARN_MS ||
     parsed > MAX_TIMER_DELAY_MS
   ) {
     throw new Error(
-      `HCC_NETPOL_PASS_HARD_LIMIT_MS must be an integer number of milliseconds above the ${NETPOL_PASS_OVERRUN_WARN_MS}ms overrun warning and at most ${MAX_TIMER_DELAY_MS}, got '${raw}'`
+      `HCC_NETPOL_PASS_HARD_LIMIT_MS must be an integer number of milliseconds above the ${NETPOL_PASS_OVERRUN_WARN_MS}ms overrun warning and at most ${MAX_TIMER_DELAY_MS}, in plain digits, got '${raw}'`
     )
   }
   return parsed

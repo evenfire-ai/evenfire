@@ -29,9 +29,28 @@ describe('HCC_HOST_K8S_REQUEST_TIMEOUT_MS', () => {
     expect(config.hostK8sRequestTimeoutMs).toBe(2_147_483_647)
   })
 
+  it('defaults to 30000 when set to an empty string', async () => {
+    const { config } = await loadConfig('HCC_HOST_K8S_REQUEST_TIMEOUT_MS', '')
+    expect(config.hostK8sRequestTimeoutMs).toBe(30_000)
+  })
+
   // Node clamps a larger timer delay to 1 ms, so every Host request would
-  // time out at once.
-  it.each(['2147483648', '0', ''])("fails configuration validation for '%s'", async raw => {
+  // time out at once. Number() would read every other spelling below.
+  it.each([
+    '2147483648',
+    '0',
+    ' ',
+    '+30000',
+    ' 30000',
+    '30000 ',
+    '30000\n',
+    '030000',
+    '3e4',
+    '0x7530',
+    '0b111010100110000',
+    '0o72460',
+    '30000.0',
+  ])("fails configuration validation for '%s'", async raw => {
     await expect(loadConfig('HCC_HOST_K8S_REQUEST_TIMEOUT_MS', raw)).rejects.toThrow(
       'HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer'
     )
@@ -53,14 +72,34 @@ describe('HCC_K8S_REQUEST_TIMEOUT_MS', () => {
     expect(config.k8sRequestTimeoutMs).toBe(expected)
   })
 
-  it.each(['', '0', '-1', '1.5', '30s', 'NaN', '2147483648'])(
-    "fails configuration validation for '%s'",
-    async raw => {
-      await expect(loadConfig('HCC_K8S_REQUEST_TIMEOUT_MS', raw)).rejects.toThrow(
-        'HCC_K8S_REQUEST_TIMEOUT_MS must be a positive integer'
-      )
-    }
-  )
+  it('defaults to 30000 when set to an empty string', async () => {
+    const { config } = await loadConfig('HCC_K8S_REQUEST_TIMEOUT_MS', '')
+    expect(config.k8sRequestTimeoutMs).toBe(30_000)
+  })
+
+  it.each([
+    '0',
+    '-1',
+    '1.5',
+    '30s',
+    'NaN',
+    '2147483648',
+    ' ',
+    '+30000',
+    ' 30000',
+    '30000 ',
+    '30000\n',
+    '030000',
+    '3e4',
+    '0x7530',
+    '0b111010100110000',
+    '0o72460',
+    '30000.0',
+  ])("fails configuration validation for '%s'", async raw => {
+    await expect(loadConfig('HCC_K8S_REQUEST_TIMEOUT_MS', raw)).rejects.toThrow(
+      'HCC_K8S_REQUEST_TIMEOUT_MS must be a positive integer'
+    )
+  })
 })
 
 describe('HCC_NETPOL_PASS_HARD_LIMIT_MS', () => {
@@ -78,12 +117,31 @@ describe('HCC_NETPOL_PASS_HARD_LIMIT_MS', () => {
     expect(config.netPolPassHardLimitMs).toBe(expected)
   })
 
-  it.each(['', '0', '-1', '300000', '1.5', '30m', 'NaN', '2147483648'])(
-    "fails configuration validation for '%s'",
-    async raw => {
-      await expect(loadConfig('HCC_NETPOL_PASS_HARD_LIMIT_MS', raw)).rejects.toThrow(
-        'HCC_NETPOL_PASS_HARD_LIMIT_MS must be an integer number of milliseconds above the 300000ms overrun warning'
-      )
-    }
-  )
+  it('defaults to 30 minutes when set to an empty string', async () => {
+    const { config } = await loadConfig('HCC_NETPOL_PASS_HARD_LIMIT_MS', '')
+    expect(config.netPolPassHardLimitMs).toBe(1_800_000)
+  })
+
+  it.each([
+    '0',
+    '-1',
+    '300000',
+    '1.5',
+    '30m',
+    'NaN',
+    '2147483648',
+    ' ',
+    '+1800000',
+    ' 1800000',
+    '1800000 ',
+    '1800000\n',
+    '01800000',
+    '18e5',
+    '0x1B7740',
+    '1800000.0',
+  ])("fails configuration validation for '%s'", async raw => {
+    await expect(loadConfig('HCC_NETPOL_PASS_HARD_LIMIT_MS', raw)).rejects.toThrow(
+      'HCC_NETPOL_PASS_HARD_LIMIT_MS must be an integer number of milliseconds above the 300000ms overrun warning'
+    )
+  })
 })
