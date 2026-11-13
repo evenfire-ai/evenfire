@@ -13,6 +13,7 @@ import {
 } from '../../core/spillover'
 import { FinishReason } from '../../core/types'
 import type { SingleTurnProvider } from '../../llm'
+import { logger } from '../../logger'
 import type { McpClientConnection, McpClientFactory } from '../stepRouter'
 import {
   clerumWorkflowStepSpilloverPersistedTotal,
@@ -579,6 +580,55 @@ describe('WorkflowService step spillover — files of other executions', () => {
       expect(await fs.readdir(path.join(outputDir, '.spill'))).toEqual(['keep.txt'])
     }
   )
+
+  it.each([
+    ['enabled', undefined],
+    ['disabled', 'false'],
+  ])('leaves a symlinked .spill and its target alone (%s)', async (_label, enabled) => {
+    if (enabled !== undefined) vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED', enabled)
+    const warn = vi.spyOn(logger, 'warn')
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-spillover-outside-'))
+    try {
+      for (const rel of ['spillover/review/i1c0.json', 'deadbeefdeadbeef/x.json', 'keep.txt']) {
+        await fs.mkdir(path.dirname(path.join(outside, rel)), { recursive: true })
+        await fs.writeFile(path.join(outside, rel), 'not ours')
+      }
+      await fs.symlink(outside, path.join(outputDir, '.spill'), 'dir')
+
+      const payload = big(100 * 1024)
+      const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
+      const llm = mockLlmProvider([
+        { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+        { content: 'done', tool_calls: null },
+      ])
+      const res = await service(llm, client).executeStep({
+        stepId: STEP_ID,
+        instruction: 'review',
+        mcpServers: SERVERS,
+      })
+
+      expect(res.status).toBe('completed')
+      // Nothing is written through the link: the result stays inline.
+      expect(toolResultMessages(llm)).toEqual([
+        `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`,
+      ])
+      for (const names of offeredTools(llm)) expect(names).not.toContain(READ_TOOL)
+      expect((await fs.readdir(outside)).sort()).toEqual([
+        'deadbeefdeadbeef',
+        'keep.txt',
+        'spillover',
+      ])
+      expect((await fs.lstat(path.join(outputDir, '.spill'))).isSymbolicLink()).toBe(true)
+      // Witness: the removal ran on this step and refused the link.
+      expect(
+        warn.mock.calls.filter(([, msg]) => String(msg).includes('Could not list leftover'))
+      ).toHaveLength(1)
+    } finally {
+      // This file's afterEach does not restore spies.
+      warn.mockRestore()
+      await fs.rm(outside, { recursive: true, force: true })
+    }
+  })
 
   it('does not let a step read a blob left under the same ref by another execution', async () => {
     const llm = mockLlmProvider([

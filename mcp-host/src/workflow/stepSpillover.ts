@@ -15,6 +15,9 @@
  *     a step whose results all stay under the threshold is unchanged. The
  *     first step of a process removes spill files a dead process left
  *     (`removeLeftoverStepSpillover`).
+ *   - `.spill` is used only when it is a real directory. When it is a symbolic
+ *     link or a file, nothing is listed, written or removed through it:
+ *     results stay inline and a warning is logged.
  *   - The read tool only accepts refs of the same step, finds only blobs of
  *     the same execution, and reads at most the threshold.
  *   - The budget caps the result bytes persisted by one execution; a result
@@ -26,6 +29,7 @@
  * `CLERUM_TOOL_SPILLOVER_*` settings: threshold and retention differ.
  */
 import { randomBytes } from 'crypto'
+import type { Stats } from 'fs'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { Counter } from 'prom-client'
@@ -166,8 +170,29 @@ export interface StepSpillover {
     content: string
     isError: boolean
   }): Promise<StepSpilloverResult>
-  /** Removes this execution's blobs. Never throws; no-op when nothing was written. */
+  /**
+   * Removes this execution's blobs. Never throws; no-op when nothing was
+   * written. Removes nothing when `.spill` is no longer a directory.
+   */
   cleanup(): Promise<void>
+}
+
+/**
+ * True when `spillRootAbs` is a directory, false when it does not exist.
+ * Rejects with `ENOTDIR` when it is anything else (a symbolic link, a file),
+ * and with the `lstat` error when it cannot be examined. `lstat` does not
+ * follow a link in the last path component.
+ */
+async function spillRootIsDirectory(spillRootAbs: string): Promise<boolean> {
+  let stat: Stats
+  try {
+    stat = await fs.lstat(spillRootAbs)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return false
+    throw err
+  }
+  if (stat.isDirectory()) return true
+  throw Object.assign(new Error('step spillover root is not a directory'), { code: 'ENOTDIR' })
 }
 
 function readError(error: string): InternalToolResult {
@@ -269,6 +294,9 @@ export function createStepSpillover(opts: {
     }
     try {
       attemptedWrite = true
+      // Rejects for a `.spill` that is a link or a file, so nothing is written
+      // through it; a missing `.spill` is created by the store.
+      await spillRootIsDirectory(spillRootAbs)
       const summary = await storage.maybePersist({
         taskId: stepId,
         toolCallId: args.callId,
@@ -314,10 +342,13 @@ export function createStepSpillover(opts: {
   async function cleanup(): Promise<void> {
     if (!attemptedWrite) return
     // The recursive delete must stay inside `.spill`: the execution id is
-    // generated here as hex, and this re-checks the resolved path.
+    // generated here as hex, and this re-checks the resolved path. That check
+    // is lexical; the `lstat` check below keeps a `.spill` that was replaced by
+    // a symbolic link from being followed.
     const executionDir = path.resolve(spillRootAbs, executionId)
     if (!executionDir.startsWith(spillRootAbs + path.sep)) return
     try {
+      if (!(await spillRootIsDirectory(spillRootAbs))) return
       await fs.rm(executionDir, { recursive: true, force: true })
     } catch (err) {
       logger.warn(
@@ -344,7 +375,9 @@ export function createStepSpillover(opts: {
 /**
  * Removes the spill files a process that died mid-step left in `outputDir`:
  * `.spill/<executionId>` directories and the older `.spill/spillover` layout.
- * Other entries under `.spill` are kept. Creates nothing and never throws.
+ * Other entries under `.spill` are kept. A `.spill` that is not a real
+ * directory (a symbolic link, a file) is left alone, with a warning. Creates
+ * nothing and never throws.
  *
  * Call it once per process, before the first step creates its store: no
  * execution of this process can own a spill directory yet.
@@ -353,6 +386,7 @@ export async function removeLeftoverStepSpillover(outputDir: string): Promise<vo
   const spillRootAbs = path.resolve(outputDir, SPILL_DIR)
   let entries: string[]
   try {
+    if (!(await spillRootIsDirectory(spillRootAbs))) return
     entries = await fs.readdir(spillRootAbs)
   } catch (err) {
     const code = (err as NodeJS.ErrnoException | undefined)?.code

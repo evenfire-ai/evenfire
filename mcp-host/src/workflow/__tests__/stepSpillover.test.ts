@@ -295,6 +295,44 @@ describe('createStepSpillover', () => {
       expect(res).toEqual({ text: content, spilled: false })
       await expect(spillover.cleanup()).resolves.toBeUndefined()
     })
+
+    it('keeps results inline and writes nothing through a symlinked .spill', async () => {
+      const warn = vi.spyOn(logger, 'warn')
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'step-spillover-outside-'))
+      try {
+        await fs.writeFile(path.join(outside, 'keepme'), 'not ours')
+        await fs.symlink(outside, path.join(outputDir, '.spill'), 'dir')
+        const spillover = make()
+        const content = 'w'.repeat(THRESHOLD * 2)
+        const first = await spillover.persist({
+          callId: 'c1',
+          toolName: 't',
+          content,
+          isError: false,
+        })
+        const second = await spillover.persist({
+          callId: 'c2',
+          toolName: 't',
+          content,
+          isError: false,
+        })
+        expect(first).toEqual({ text: content, spilled: false })
+        expect(second).toEqual({ text: content, spilled: false })
+        expect(await fs.readdir(outside)).toEqual(['keepme'])
+        // Witness: the store refused the write once and latched.
+        const writeWarnings = warn.mock.calls.filter(([, msg]) =>
+          String(msg).includes('Could not persist tool result')
+        )
+        expect(writeWarnings).toHaveLength(1)
+        expect(writeWarnings[0]![0]).toMatchObject({ errorCode: 'ENOTDIR' })
+
+        await expect(spillover.cleanup()).resolves.toBeUndefined()
+        expect(await fs.readdir(outside)).toEqual(['keepme'])
+        expect((await fs.lstat(path.join(outputDir, '.spill'))).isSymbolicLink()).toBe(true)
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true })
+      }
+    })
   })
 
   describe('readTool', () => {
@@ -437,6 +475,39 @@ describe('createStepSpillover', () => {
       await a.cleanup()
       expect(await fs.readdir(await stepDir('other-step'))).toEqual(['c1.json'])
     })
+
+    it('does not remove through a .spill that was replaced by a symlink', async () => {
+      const warn = vi.spyOn(logger, 'warn')
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'step-spillover-outside-'))
+      try {
+        const spillover = make()
+        const res = await spillover.persist({
+          callId: 'c1',
+          toolName: 't',
+          content: 'z'.repeat(THRESHOLD),
+          isError: false,
+        })
+        expect(res.spilled).toBe(true)
+        const [executionId] = await executionRoots()
+        // Another writer moves `.spill` away and links it to a directory that
+        // holds an entry with this execution's name.
+        await fs.rename(path.join(outputDir, '.spill'), path.join(outputDir, 'moved'))
+        await fs.mkdir(path.join(outside, executionId!))
+        await fs.writeFile(path.join(outside, executionId!, 'victim'), 'not ours')
+        await fs.symlink(outside, path.join(outputDir, '.spill'), 'dir')
+
+        await expect(spillover.cleanup()).resolves.toBeUndefined()
+        expect(await fs.readdir(path.join(outside, executionId!))).toEqual(['victim'])
+        // Witness: cleanup reached the removal and refused it.
+        const removeWarnings = warn.mock.calls.filter(([, msg]) =>
+          String(msg).includes('Could not remove step spillover directory')
+        )
+        expect(removeWarnings).toHaveLength(1)
+        expect(removeWarnings[0]![0]).toMatchObject({ errorCode: 'ENOTDIR' })
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true })
+      }
+    })
   })
 })
 
@@ -495,6 +566,45 @@ describe('removeLeftoverStepSpillover', () => {
     await fs.writeFile(path.join(outputDir, '.spill'), 'not a directory')
     await expect(removeLeftoverStepSpillover(outputDir)).resolves.toBeUndefined()
     expect(await exists(path.join(outputDir, '.spill'))).toBe(true)
+    expect(
+      warn.mock.calls.filter(([, msg]) => String(msg).includes('Could not list leftover'))
+    ).toHaveLength(1)
+  })
+
+  it('does not follow a symlinked .spill', async () => {
+    const warn = vi.spyOn(logger, 'warn')
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'step-spillover-outside-'))
+    try {
+      for (const rel of ['0123456789abcdef/x.json', 'spillover/review/i1c0.json', 'keepme']) {
+        await fs.mkdir(path.dirname(path.join(outside, rel)), { recursive: true })
+        await fs.writeFile(path.join(outside, rel), 'not ours')
+      }
+      await fs.symlink(outside, path.join(outputDir, '.spill'), 'dir')
+
+      await expect(removeLeftoverStepSpillover(outputDir)).resolves.toBeUndefined()
+
+      expect((await fs.readdir(outside)).sort()).toEqual([
+        '0123456789abcdef',
+        'keepme',
+        'spillover',
+      ])
+      expect((await fs.lstat(path.join(outputDir, '.spill'))).isSymbolicLink()).toBe(true)
+      // Witness: the removal ran and refused the link.
+      const listWarnings = warn.mock.calls.filter(([, msg]) =>
+        String(msg).includes('Could not list leftover')
+      )
+      expect(listWarnings).toHaveLength(1)
+      expect(listWarnings[0]![0]).toMatchObject({ errorCode: 'ENOTDIR' })
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('warns about a .spill that is a dangling symlink and leaves it', async () => {
+    const warn = vi.spyOn(logger, 'warn')
+    await fs.symlink(path.join(outputDir, 'nowhere'), path.join(outputDir, '.spill'))
+    await expect(removeLeftoverStepSpillover(outputDir)).resolves.toBeUndefined()
+    expect((await fs.lstat(path.join(outputDir, '.spill'))).isSymbolicLink()).toBe(true)
     expect(
       warn.mock.calls.filter(([, msg]) => String(msg).includes('Could not list leftover'))
     ).toHaveLength(1)
