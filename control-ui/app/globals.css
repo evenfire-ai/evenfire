@@ -2888,11 +2888,8 @@ textarea.cu-input {
   color: var(--cu-text);
 }
 
-/* Name is 24% and Verification, Status and Actions are fixed (9 + 16 + 3.5rem, set
-   on the header cells), so Description gets 0.76 x min-width - 28.5rem. 76rem keeps it
-   near 29rem at the narrowest; below that the viewport scrolls instead of squeezing it. */
 .cu-marketplace-table {
-  min-width: 76rem;
+  min-width: 54rem;
   table-layout: fixed;
 }
 
