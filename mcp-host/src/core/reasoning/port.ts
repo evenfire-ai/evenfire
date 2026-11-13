@@ -1,4 +1,5 @@
 import { logger } from '../../logger'
+import { RuntimeActionAuthorityError } from '../../runtime/actionAuthority'
 import { LlmError, LlmErrorCode } from '../errors'
 import { LlmPort, PromptBuilder, ReasoningPort } from '../interfaces'
 import type { TokenCounter } from '../tokenizer/tokenCounter'
@@ -82,6 +83,9 @@ export class DefaultReasoningPort implements ReasoningPort {
 
       return this.classifyResponse(response)
     } catch (err) {
+      if (err instanceof RuntimeActionAuthorityError) {
+        return { type: 'error', error: err }
+      }
       if (err instanceof LlmError) {
         return { type: 'error', error: err }
       }
@@ -124,6 +128,9 @@ export class DefaultReasoningPort implements ReasoningPort {
 
       return this.classifyResponse(response)
     } catch (err) {
+      if (err instanceof RuntimeActionAuthorityError) {
+        return { type: 'error', error: err }
+      }
       if (err instanceof LlmError) {
         return { type: 'error', error: err }
       }

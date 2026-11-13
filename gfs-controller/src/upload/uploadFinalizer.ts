@@ -124,6 +124,9 @@ export function createGfsUploadFinalizer(
         ownerSubject: session.ownerSubject,
         primarySubject: session.primarySubject,
       }
+      // GFS-09: the V2 live checkpoint for finalization is the one the finalize
+      // request already passed (serve.ts checkpointRouteAuthority), outside this
+      // publication transaction. Here only the local permission check repeats.
       const targetContext = await resolveAuthzContext(deps.pool, {
         sub: reauthorizationPrincipal.ownerSubject,
         drive: reauthorizationPrincipal.drive,

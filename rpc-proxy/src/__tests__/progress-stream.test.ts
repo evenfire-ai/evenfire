@@ -24,7 +24,6 @@ const serviceMock = vi.hoisted(() => ({
     }
   },
 }))
-
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
 

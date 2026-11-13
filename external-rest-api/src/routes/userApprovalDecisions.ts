@@ -5,6 +5,18 @@ import {
   decideUserApprovalDecision,
   listPendingUserApprovalDecisions,
 } from '../services/userApprovalDecisionsService.js'
+import {
+  WorkflowActionDelegationTransportError,
+  workflowActionDelegationForRequest,
+} from '../workflowActionDelegation.js'
+
+function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
+  if (error instanceof WorkflowActionDelegationTransportError) {
+    res.status(400).json({ error: 'invalid_action_delegation' })
+    return
+  }
+  next(error)
+}
 
 export function createUserApprovalDecisionsRouter(): Router {
   const router = Router()
@@ -20,7 +32,7 @@ export function createUserApprovalDecisionsRouter(): Router {
       }
       res.status(200).json(await listPendingUserApprovalDecisions(sessionToken, parsedLimit))
     } catch (error) {
-      next(error)
+      forwardControlApiError(error, res, next)
     }
   })
 
@@ -46,11 +58,19 @@ export function createUserApprovalDecisionsRouter(): Router {
         }
 
         const sessionToken = extractAuthToken(req)
-        res
-          .status(200)
-          .json(await decideUserApprovalDecision(sessionToken, approvalId, decision, note))
+        const actionDelegation = workflowActionDelegationForRequest(req)
+        const result = actionDelegation
+          ? await decideUserApprovalDecision(
+              sessionToken,
+              approvalId,
+              decision,
+              note,
+              actionDelegation
+            )
+          : await decideUserApprovalDecision(sessionToken, approvalId, decision, note)
+        res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )

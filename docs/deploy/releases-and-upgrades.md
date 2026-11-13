@@ -309,6 +309,10 @@ Read the notes for every release you skip over, not only the target release.
    replaces this step. The [user access foundation
    upgrade](user-access-foundation-upgrade.md) is one: it runs the migration
    Job, then External REST and Profile UI, and only then control-api.
+   gfs-controller images from the first release after v0.12.0 write
+   `gfs_upload_sessions.action_authority`, so control-api migration
+   `0140_gfs_upload_authority_bindings` must be applied first; do not bump
+   `CONTEXT_MAPPER_GFSC_IMAGE` on its own ahead of control-api.
 4. **Follow any feature-specific runbook** below.
 
 ### Feature-specific notes

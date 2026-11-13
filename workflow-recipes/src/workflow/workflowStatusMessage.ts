@@ -11,6 +11,8 @@ export function workflowStatusMessage(phase: WorkflowPhase, failureReason?: stri
       return 'Workflow running'
     case 'recovering':
       return 'Workflow recovering'
+    case 'authorization_paused':
+      return 'Workflow paused until initiating authority is restored'
     case 'completed':
       return 'Workflow completed'
     case 'failed':

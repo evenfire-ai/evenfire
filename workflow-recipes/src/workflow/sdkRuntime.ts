@@ -11,10 +11,13 @@ import {
   type StepExecutor,
   type StepMcpServerRef,
   type StepSpec,
+  WorkflowAuthorizationPausedError,
   type WorkflowConfig,
   type WorkflowPhase,
   type WorkflowRecipeSpec,
+  WorkflowRunStateUnavailableError,
   computeBackoff,
+  emitLog,
   renderPrompt,
   requestModelInjection,
   withRetry,
@@ -32,7 +35,6 @@ import type { SnippetExecuteResponse } from './snippetTypes'
 // key pair (mirror of the enum comment in charts/.../workflowrecipe.yaml).
 type AgentProvider = LlmProviderId
 
-const DEFAULT_STEP_TIMEOUT_SECONDS = 300
 const PROVIDER_OUTPUT_LENGTH_EXCEEDED = 'provider_output_length_exceeded'
 const MCP_HOST_NOT_READY = 'mcp_host not ready'
 
@@ -89,6 +91,8 @@ export interface RuntimeDependencies {
   waitForMcpHost?: boolean
   mcpHostReadyAttempts?: number
   mcpHostReadyDelayMs?: number
+  /** Longest consecutive run-store unavailability a running boundary waits out. */
+  runStateWaitMs?: number
 }
 
 export interface RuntimeResult {
@@ -109,6 +113,12 @@ class StepRuntimeError extends Error {
 class McpHostReadinessTimeoutError extends Error {
   constructor() {
     super(MCP_HOST_NOT_READY)
+  }
+}
+
+class WorkflowRunTerminatedError extends Error {
+  constructor(readonly phase: 'completed' | 'failed' | 'cancelled') {
+    super(`workflow_run_${phase}`)
   }
 }
 
@@ -207,7 +217,8 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
       return { exitCode: 0, workflowPhase: 'completed' }
     }
 
-    await status.reportWorkflowStatus('running')
+    const runStateWaitMs = deps.runStateWaitMs ?? RUN_STATE_WAIT_MS
+    await reportRunningBoundary(status, signals, config.signalPollIntervalMs, runStateWaitMs)
 
     let currentAgent = resolveLastCompletedAgent(orderedSteps, currentStatus, spec.agent)
     let needsInitialModelInjection = true
@@ -229,17 +240,24 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
       const startedMs = Date.now()
       const executorKind = resolveExecutorKind(runtimeStep)
       const approvalBindingProof = runtimeStep.requiresApproval ? randomUUID() : undefined
-      await status.reportStepStatus(runtimeStep.id, 'running', {
-        executor: executorKind,
-        startedAt,
-        ...(approvalBindingProof
-          ? {
-              approvalBindingSha256: createHash('sha256')
-                .update(approvalBindingProof)
-                .digest('hex'),
-            }
-          : {}),
-      })
+      await reportStepRunningBoundary(
+        status,
+        signals,
+        config.signalPollIntervalMs,
+        runStateWaitMs,
+        runtimeStep.id,
+        {
+          executor: executorKind,
+          startedAt,
+          ...(approvalBindingProof
+            ? {
+                approvalBindingSha256: createHash('sha256')
+                  .update(approvalBindingProof)
+                  .digest('hex'),
+              }
+            : {}),
+        }
+      )
 
       try {
         if (isSnippetRuntimeStep(runtimeStep)) {
@@ -330,6 +348,12 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
     await status.reportWorkflowStatus('completed', { completedAt: new Date().toISOString() })
     return { exitCode: 0, workflowPhase: 'completed' }
   } catch (err) {
+    if (err instanceof WorkflowRunTerminatedError) {
+      return {
+        exitCode: err.phase === 'completed' ? 0 : 1,
+        workflowPhase: err.phase,
+      }
+    }
     if (err instanceof GfsPublishCancelledError) {
       await status.reportWorkflowStatus('cancelled')
       return { exitCode: 1, workflowPhase: 'cancelled' }
@@ -351,6 +375,156 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
     return { exitCode: 1, workflowPhase: 'failed', failureReason }
   } finally {
     stopPolling()
+  }
+}
+
+/**
+ * Default bound on consecutive run-store unavailability at one running
+ * boundary (owner decision, 2026-11-10): about 6x the one measured Postgres
+ * restart (24 s, prod 2026-11-09). Past it the runtime fails the run as it
+ * did before the wait existed.
+ */
+const RUN_STATE_WAIT_MS = 150_000
+
+/** Consecutive run-store unavailability seen by one running boundary loop. */
+interface RunStateWait {
+  unavailableSince: number | undefined
+  attempts: number
+}
+
+async function reportRunningBoundary(
+  status: RuntimeDependencies['status'],
+  signals: RuntimeDependencies['signals'],
+  pollIntervalMs: number,
+  runStateWaitMs: number
+): Promise<void> {
+  const storeWait: RunStateWait = { unavailableSince: undefined, attempts: 0 }
+  while (true) {
+    try {
+      await status.reportWorkflowStatus('running')
+      return
+    } catch (error) {
+      if (error instanceof WorkflowRunStateUnavailableError) {
+        await waitBeforeRunStateRetry(
+          status,
+          signals,
+          pollIntervalMs,
+          'workflow',
+          error,
+          storeWait,
+          runStateWaitMs
+        )
+        continue
+      }
+      if (!(error instanceof WorkflowAuthorizationPausedError)) throw error
+      storeWait.unavailableSince = undefined
+      await waitForAuthorizationResume(status, signals, pollIntervalMs)
+    }
+  }
+}
+
+async function reportStepRunningBoundary(
+  status: RuntimeDependencies['status'],
+  signals: RuntimeDependencies['signals'],
+  pollIntervalMs: number,
+  runStateWaitMs: number,
+  stepId: string,
+  details: Parameters<RuntimeDependencies['status']['reportStepStatus']>[2]
+): Promise<void> {
+  const storeWait: RunStateWait = { unavailableSince: undefined, attempts: 0 }
+  while (true) {
+    try {
+      await status.reportStepStatus(stepId, 'running', details)
+      return
+    } catch (error) {
+      if (error instanceof WorkflowRunStateUnavailableError) {
+        await waitBeforeRunStateRetry(
+          status,
+          signals,
+          pollIntervalMs,
+          stepId,
+          error,
+          storeWait,
+          runStateWaitMs
+        )
+        continue
+      }
+      if (!(error instanceof WorkflowAuthorizationPausedError)) throw error
+      storeWait.unavailableSince = undefined
+      await waitForAuthorizationResume(status, signals, pollIntervalMs)
+    }
+  }
+}
+
+/**
+ * WRC could not reach its run store at this running boundary, so the report
+ * got neither an allowed nor a paused answer. Wait, run no step, and let the caller send
+ * the same report again. Unlike the pause wait this never reads the status
+ * GET: during an outage it serves the recipe phase, which says `running` for
+ * a run already past its first report and never says `running` for a V1 run
+ * still `initializing`. Cancel is honoured; consecutive unavailability past
+ * `runStateWaitMs` rethrows, so the run fails as it did before this wait.
+ */
+async function waitBeforeRunStateRetry(
+  status: RuntimeDependencies['status'],
+  signals: RuntimeDependencies['signals'],
+  pollIntervalMs: number,
+  boundary: string,
+  error: WorkflowRunStateUnavailableError,
+  storeWait: RunStateWait,
+  runStateWaitMs: number
+): Promise<void> {
+  if (signals.hasSignal('cancel')) {
+    await status.reportWorkflowStatus('cancelled')
+    throw new WorkflowRunTerminatedError('cancelled')
+  }
+  const now = Date.now()
+  if (storeWait.unavailableSince === undefined) storeWait.unavailableSince = now
+  const waitedMs = now - storeWait.unavailableSince
+  if (waitedMs >= runStateWaitMs) {
+    emitLog('error', 'Workflow run state unavailable beyond the wait bound', {
+      boundary,
+      waitedMs,
+    })
+    throw error
+  }
+  const delayMs = Math.max(250, pollIntervalMs)
+  storeWait.attempts += 1
+  emitLog('warn', 'Workflow run state unavailable at a running boundary; waiting before retry', {
+    boundary,
+    attempt: storeWait.attempts,
+    delayMs,
+  })
+  await new Promise(resolve => setTimeout(resolve, delayMs))
+}
+
+async function waitForAuthorizationResume(
+  status: RuntimeDependencies['status'],
+  signals: RuntimeDependencies['signals'],
+  pollIntervalMs: number
+): Promise<void> {
+  const delayMs = Math.max(250, pollIntervalMs)
+  while (true) {
+    if (signals.hasSignal('cancel')) {
+      await status.reportWorkflowStatus('cancelled')
+      throw new WorkflowRunTerminatedError('cancelled')
+    }
+    try {
+      const current = await status.getWorkflowStatus()
+      if (current.workflowPhase === 'running') return
+      if (
+        current.workflowPhase === 'completed' ||
+        current.workflowPhase === 'failed' ||
+        current.workflowPhase === 'cancelled'
+      ) {
+        throw new WorkflowRunTerminatedError(current.workflowPhase)
+      }
+    } catch (error) {
+      if (error instanceof WorkflowRunTerminatedError) throw error
+      // A temporary status read failure cannot authorize progress or turn a
+      // durable authorization pause into a terminal workflow failure.
+    }
+    await new Promise(resolve => setTimeout(resolve, delayMs))
   }
 }
 
@@ -420,11 +594,6 @@ function mergeSnippetArtifactsIntoOutput(response: SnippetExecuteResponse): unkn
     return { ...output, artifacts: [...existing, ...artifacts] }
   }
   return { value: response.output, artifacts }
-}
-
-function resolveStepTimeoutSeconds(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_STEP_TIMEOUT_SECONDS
-  return Math.max(1, Math.floor(value))
 }
 
 function resolveStepAgent(

@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import {
+  PR1_MIGRATION_VERSIONS,
+  PR2_MIGRATION_VERSIONS,
+} from '../src/migrations/migrationRunner.js'
 
 // Mock pg exactly like the other db.*.test.ts specs so importing ../src/db.js
 // does not spin up a real Pool as a module side effect.
@@ -67,7 +71,12 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     const incomingDev = '0129_workflow_schedules_concurrency_policy'
     const passwordAdmission = '0130_password_login_success_admission'
     const lastDev = '0136_llm_catalog_dismissed_backfill'
-    const task106 = ['0137_user_access_foundation', '0138_legacy_password_security_epoch_backfill']
+    // PR1's two versions, then PR2's in consecutive slots after dev's last.
+    const task106 = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]
+    expect(task106.slice(0, 2)).toEqual([
+      '0137_user_access_foundation',
+      '0138_legacy_password_security_epoch_backfill',
+    ])
 
     expect(
       versions.slice(versions.indexOf(parentDev[0]!), versions.indexOf(parentDev[0]!) + 3)
@@ -76,7 +85,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(versions[versions.indexOf(incomingDev) + 1]).toBe(passwordAdmission)
     expect(versions[versions.indexOf(lastDev) + 1]).toBe(task106[0])
     expect(
-      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 2)
+      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + task106.length)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
     expect(versions.at(-1)).toBe(task106.at(-1))

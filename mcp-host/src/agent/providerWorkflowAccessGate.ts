@@ -43,7 +43,7 @@ export function looksLikeWorkflowTriggerRequest(content: string): boolean {
     /\b(run|trigger|start|execute)\s+(?:the\s+)?(?:workflow\s+)?(?:recipe\s+)?named\s+[a-z0-9][a-z0-9._-]*\b/.test(
       normalized
     ) ||
-    /\b(run|trigger|start|execute)\s+(?:the\s+)?(?:workflow\s+)?(?:recipe\s+)?[a-z0-9][a-z0-9._-]*-[a-z0-9._-]*\b/.test(
+    /\b(run|trigger|start|execute)\s+(?:the\s+)?(?:workflow\s+)?(?:recipe\s+)?[a-z0-9][a-z0-9._]*-[a-z0-9._-]*\b/.test(
       normalized
     )
 

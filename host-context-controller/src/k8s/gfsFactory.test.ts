@@ -149,6 +149,12 @@ describe('gfsFactory writer Deployment', () => {
       'gfs-controller-db'
     )
     expect(byName('GFS_JWT_PUBLIC_KEY')?.valueFrom?.configMapKeyRef?.name).toBe('gfs-config')
+    // The controller has no call to control-api, so it gets no control-api
+    // credential: the permission-store DSN is its only Secret reference.
+    expect(env.filter(e => e.valueFrom?.secretKeyRef).map(e => e.name)).toEqual([
+      'GFS_PG_CONNECTION_STRING',
+    ])
+    expect(env.filter(e => e.name.startsWith('GFS_CONTROL_API_'))).toEqual([])
     expect(byName('GFS_SYNC_COPY_MAX_OBJECTS')).toBeUndefined()
     expect(byName('GFS_SYNC_COPY_MAX_BYTES')).toBeUndefined()
     expect(byName('GFS_SYNC_COPY_TIMEOUT_MS')).toBeUndefined()
@@ -373,6 +379,9 @@ describe('gfsFactory NetworkPolicies', () => {
     expect(pg).toBeDefined()
     const pgTo = pg?.to?.[0] as { podSelector?: { matchLabels?: Record<string, string> } }
     expect(pgTo.podSelector?.matchLabels?.app).toBe('control-postgres')
+    // DNS and Postgres are the whole egress: no path to control-api.
+    expect(egress).toHaveLength(2)
+    expect(egress.filter(r => r.ports?.some(p => p.port === 8090))).toEqual([])
   })
 
   it('adds kube-dns service-ip egress only when GKE NodeLocal DNS CIDR is configured', () => {

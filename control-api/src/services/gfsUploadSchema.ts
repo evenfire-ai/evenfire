@@ -95,3 +95,34 @@ export async function applyGfsUploadFinalizingSchema(db: DbClient): Promise<void
     `ALTER TABLE IF EXISTS gfs_upload_sessions ADD COLUMN IF NOT EXISTS finalizing_started_at TIMESTAMPTZ NULL`
   )
 }
+
+/**
+ * Persist immutable, non-bearer v2 provenance for resumable upload sessions.
+ * Existing rows remain explicit legacy rows (NULL); controller code refuses to
+ * cross between legacy and v2 session modes. The CHECK is added NOT VALID, so
+ * it takes no scan under ACCESS EXCLUSIVE; the migration runner validates it
+ * after this transaction commits.
+ */
+export async function applyGfsUploadAuthorityBindingSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE IF EXISTS gfs_upload_sessions
+      ADD COLUMN IF NOT EXISTS action_authority JSONB NULL;
+
+    DO $$
+    BEGIN
+      IF to_regclass('public.gfs_upload_sessions') IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM pg_constraint
+            WHERE conname = 'gfs_upload_sessions_action_authority_object'
+              AND conrelid = 'gfs_upload_sessions'::regclass
+         ) THEN
+        ALTER TABLE gfs_upload_sessions
+          ADD CONSTRAINT gfs_upload_sessions_action_authority_object
+          CHECK (action_authority IS NULL OR jsonb_typeof(action_authority) = 'object')
+          NOT VALID;
+      END IF;
+    END
+    $$;
+  `)
+}

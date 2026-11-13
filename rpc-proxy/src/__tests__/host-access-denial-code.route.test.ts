@@ -169,7 +169,7 @@ const DENYING_ROUTES: RouteCase[] = [
     label: 'session rename',
     method: 'patch',
     path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/name',
-    body: { name: 'renamed' },
+    body: { title: 'renamed' },
   },
   { label: 'models', method: 'get', path: '/rpc/hosts/chatllm/models' },
   {

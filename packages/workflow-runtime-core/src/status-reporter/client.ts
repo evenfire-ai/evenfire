@@ -1,4 +1,5 @@
 import type { StepPhase, WorkflowPhase } from '../config-loader/types'
+import { WorkflowAuthorizationPausedError, WorkflowRunStateUnavailableError } from '../errors'
 import type { RuntimeTokenProvider } from '../runtime-token-provider/provider'
 import { requireRuntimeToken } from '../runtime-token-provider/provider'
 import { sendWithAuthRetryOn401 } from './authRetry'
@@ -28,8 +29,12 @@ export class StatusReporter {
 
   private async report(path: string, body: Record<string, unknown>, label: string): Promise<void> {
     let lastErr: Error | undefined
+    // True only when the latest attempt was answered 503 with the run-store code;
+    // the last attempt decides which error the caller receives.
+    let lastAttemptRunStateUnavailable = false
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      lastAttemptRunStateUnavailable = false
       try {
         const resp = await sendWithAuthRetryOn401(
           async () =>
@@ -54,6 +59,10 @@ export class StatusReporter {
           return
         }
 
+        if (resp.status === 423 && (await responseHasAuthorizationPauseCode(resp))) {
+          throw new WorkflowAuthorizationPausedError()
+        }
+
         // 4xx = permanent client error, don't retry. This must be fatal because
         // otherwise the coordinator can mark a workflow completed while step status
         // patches were rejected.
@@ -66,9 +75,16 @@ export class StatusReporter {
           })
           throw new Error(`WRC rejected ${label} with HTTP ${resp.status}`)
         }
+        // WRC could not reach its run store to checkpoint a running boundary.
+        // Retried like any 5xx; recorded so the final error can say so.
+        if (resp.status === 503 && (await responseHasRunStateUnavailableCode(resp))) {
+          lastAttemptRunStateUnavailable = true
+        }
         lastErr = new Error(`HTTP ${resp.status}`)
       } catch (err) {
+        lastAttemptRunStateUnavailable = false
         lastErr = err instanceof Error ? err : new Error(String(err))
+        if (lastErr instanceof WorkflowAuthorizationPausedError) throw lastErr
         if (lastErr.message.startsWith('WRC rejected')) throw lastErr
       }
       if (attempt < MAX_RETRIES - 1) {
@@ -79,6 +95,7 @@ export class StatusReporter {
     // Log only structural fields because status payloads can include step output.
     const message = `Failed to report ${label} after ${MAX_RETRIES} attempts: ${lastErr?.message}`
     emitLog('warn', message, { label })
+    if (lastAttemptRunStateUnavailable) throw new WorkflowRunStateUnavailableError(message)
     throw new Error(message)
   }
 
@@ -137,6 +154,24 @@ async function responseHasAlreadyTerminalPhase(resp: Response): Promise<boolean>
   try {
     const text = await resp.text()
     return text.toLowerCase().includes('already in terminal phase')
+  } catch {
+    return false
+  }
+}
+
+async function responseHasAuthorizationPauseCode(resp: Response): Promise<boolean> {
+  try {
+    const body = (await resp.json()) as { code?: unknown }
+    return body?.code === 'workflow_authorization_paused'
+  } catch {
+    return false
+  }
+}
+
+async function responseHasRunStateUnavailableCode(resp: Response): Promise<boolean> {
+  try {
+    const body = (await resp.json()) as { code?: unknown }
+    return body?.code === 'workflow_run_state_unavailable'
   } catch {
     return false
   }

@@ -139,6 +139,15 @@ connectors, also set `MCP_OAUTH_BROKER_ENABLED: "true"` in `control-api-config`.
 Base leaves it off, and without it the agent asks for consent forever even after
 the user authorizes. See [OAuth connectors](../how-to/connect-oauth-connector.md).
 
+`RPC_PROXY_MCP_SERVER_NAMESPACE` (base Deployment `env`, default `mcp-server`
+when unset) names the namespace of the MCP servers for rpc-proxy. If you move the
+MCP servers, set it to the same value as control-api's
+`CONTROL_API_MCP_SERVERS_NAMESPACE`.
+
+`MCP_HOST_ACTIVITY_MAX_EVENT_BYTES` (default `2048`) caps one Host activity
+event. rpc-proxy reads the same variable to size the activity frames it relays,
+so if you change it, set the same value on the Host and on rpc-proxy.
+
 ## Outbound destinations
 
 The NetworkPolicies are port and CIDR rules, not hostname rules. Agent pods
@@ -212,6 +221,18 @@ enforcement, see [`deploy/scripts/np-enforce-preflight.sh`](../../deploy/scripts
 It was written for GKE; read it before you run it elsewhere.
 
 ## Install order
+
+For the authenticated RPC Proxy → MCP Host protocol, production must upgrade
+compatible RPC Proxy replicas before strict HCC/Host behavior and roll HCC/Hosts
+back before rolling Proxy back. The in-repository executable barrier currently
+covers the supported Minikube path. Production GCP rollout/rollback orchestration
+is owned by `keyper-labs/evenfire-infra`; this OSS repository does not publish its
+exact workflow path. Do not enable the strict production Host protocol until that
+orchestrator enforces both directions of the barrier.
+The strict protocol also needs the dedicated edge credential
+(`RPC_PROXY_MCP_HOST_EDGE_TOKEN` in `rpc-proxy-secrets` and in the `mcp-host`
+Secret `rpc-proxy-edge-credentials`). No script in this repository creates it,
+and the default `legacy-headers` protocol does not use it.
 
 [minikube.md](minikube.md) and `scripts/minikube/full-setup.sh` show the full
 dependency graph. The minikube scripts are bound to a minikube profile; the

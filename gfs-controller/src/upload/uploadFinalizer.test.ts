@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { FilesystemActionAuthorityV2 } from '../auth/actionAuthority'
 import type { DbAuditSink, PermissionClient } from '../authz/permissionClient'
 import { createGfsUploadFinalizer } from './uploadFinalizer'
 import type { UploadPartRow, UploadSessionRow } from './uploadSession'
@@ -40,7 +41,38 @@ function session(): UploadSessionRow {
     resultVersion: null,
     resultSha256: null,
     failureCode: null,
+    actionAuthority: null,
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }
+}
+
+function actionAuthority(): FilesystemActionAuthorityV2 {
+  const now = Math.floor(Date.now() / 1000)
+  return {
+    binding: {
+      version: 2,
+      userId: '11111111-1111-4111-8111-111111111111',
+      sid: '22222222-2222-4222-8222-222222222222',
+      sessionVersion: 1,
+      delegationJti: '33333333-3333-4333-8333-333333333333',
+      operationId: 'gfs.write',
+      resource: {
+        environmentId: 'development:local-cluster',
+        type: 'gfs_resource',
+        canonicalId: `gfs_resource:${PARENT_ID}`,
+        logicalId: PARENT_ID,
+        displayName: PARENT_ID,
+      },
+      target: { drive: 'main', resourceId: PARENT_ID, action: 'finalize', uploadId: UPLOAD_ID },
+      targetHash: 'ath1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      pathKind: 'direct',
+      effectiveTeamId: null,
+      behaviorBindingHash: 'abh1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    },
+    sourceIssuedAt: now - 1,
+    sourceExpiresAt: now + 300,
   }
 }
 
@@ -165,6 +197,41 @@ describe('production GFS upload finalizer seam', () => {
         code: 'forbidden',
       })
       expect(harness.client.query).not.toHaveBeenCalled()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('publishes a v2 upload with only the local permission recheck inside the transaction', async () => {
+    // GFS-09: the finalize request's route checkpoint is the live V2 check
+    // (serve.test.ts); the publication transaction repeats only the local
+    // permission decision for the v2 principal.
+    const root = await mkdtemp(join(tmpdir(), 'gfs-upload-finalizer-authority-'))
+    try {
+      const partPath = join(root, '.uploads', UPLOAD_ID, 'parts', '0.part')
+      await mkdir(join(root, '.uploads', UPLOAD_ID, 'parts'), { recursive: true })
+      await writeFile(partPath, BODY)
+      const harness = finalizerHarness(root, () => ({ generation: 1, bypassed: false }))
+      const current = actionAuthority()
+
+      await expect(
+        harness.finalizer(session(), [part(root)], undefined, undefined, {
+          drive: 'main',
+          ownerSubject: FINALIZER_SUBJECT,
+          primarySubject: FINALIZER_SUBJECT,
+          actionAuthority: current,
+        })
+      ).resolves.toEqual({ resourceId: UPLOAD_ID, version: 0, sha256: SHA256 })
+      expect(harness.permissions.authorize).toHaveBeenCalledTimes(1)
+      expect(harness.permissions.authorize).toHaveBeenCalledWith(
+        expect.anything(),
+        PARENT_ID,
+        'write'
+      )
+      expect(harness.client.query).toHaveBeenCalledWith(
+        expect.stringContaining("SET state = 'completed'"),
+        expect.arrayContaining([UPLOAD_ID])
+      )
     } finally {
       await rm(root, { recursive: true, force: true })
     }

@@ -6,9 +6,23 @@ import {
   controlApiRequestWithStatus,
 } from '../controlApiClient.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
+import {
+  sendWorkflowActionDelegationTransportError,
+  workflowActionDelegationHeaders,
+} from '../workflowActionDelegation.js'
+
+function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
+  if (sendWorkflowActionDelegationTransportError(error, res)) return
+  next(error)
+}
 
 export function createExternalWorkflowsRouter(): Router {
   const router = Router()
+
+  const delegationOptions = (req: AuthedRequest) => {
+    const extraHeaders = workflowActionDelegationHeaders(req)
+    return Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}
+  }
 
   router.get(
     '/workflows',
@@ -21,7 +35,7 @@ export function createExternalWorkflowsRouter(): Router {
         })
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -43,11 +57,12 @@ export function createExternalWorkflowsRouter(): Router {
           `/external/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
           {
             userSessionToken: sessionToken,
+            ...delegationOptions(req),
           }
         )
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -69,11 +84,12 @@ export function createExternalWorkflowsRouter(): Router {
           `/external/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/health`,
           {
             userSessionToken: sessionToken,
+            ...delegationOptions(req),
           }
         )
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -101,12 +117,15 @@ export function createExternalWorkflowsRouter(): Router {
           {
             userSessionToken: sessionToken,
             body: req.body,
-            extraHeaders: { 'idempotency-key': idempotencyKey },
+            extraHeaders: {
+              'idempotency-key': idempotencyKey,
+              ...workflowActionDelegationHeaders(req),
+            },
           }
         )
         res.status(status).json(data)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -131,11 +150,12 @@ export function createExternalWorkflowsRouter(): Router {
           {
             userSessionToken: sessionToken,
             query: { limit: String(limit) },
+            ...delegationOptions(req),
           }
         )
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -158,11 +178,12 @@ export function createExternalWorkflowsRouter(): Router {
           `/external/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/artifacts`,
           {
             userSessionToken: sessionToken,
+            ...delegationOptions(req),
           }
         )
         res.status(200).json(result)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )
@@ -186,6 +207,7 @@ export function createExternalWorkflowsRouter(): Router {
           `/external/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactName)}/download`,
           {
             userSessionToken: sessionToken,
+            ...delegationOptions(req),
           }
         )
         res.status(result.status)
@@ -194,7 +216,7 @@ export function createExternalWorkflowsRouter(): Router {
         }
         res.end(result.body)
       } catch (error) {
-        next(error)
+        forwardControlApiError(error, res, next)
       }
     }
   )

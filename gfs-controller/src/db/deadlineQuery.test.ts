@@ -12,6 +12,9 @@ class Pool {
         if (sql === this.fail) throw Object.assign(new Error(`failed ${sql}`), sql.includes("pg_sleep") ? { code: "57014" } : {});
         return { rows: [{ ok: true }] };
       },
+      // The checkout error-event surface; this fake never emits.
+      on: () => undefined,
+      removeListener: () => undefined,
       release: (error?: Error | boolean) => { this.releaseError = error; },
     };
   }

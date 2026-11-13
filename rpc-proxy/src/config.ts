@@ -1,4 +1,5 @@
 import { dirname, join } from 'node:path'
+import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT } from '@clerum/action-context-contracts'
 import { parseVerifierMaterial } from '@clerum/jwt-key-policy'
 import { readDevVerifierMaterial, resolveDevKeyStoreDir } from '@clerum/jwt-key-policy/dev-store'
 
@@ -21,6 +22,7 @@ type Config = {
   controlApiBaseUrl: string
   controlApiServiceToken: string
   controlApiServiceName: string
+  mcpHostEdgeToken: string
   controlApiCacheTtlMs: number
   artifactDownloadMaxBytes: number
   artifactDownloadTimeoutMs: number
@@ -50,6 +52,7 @@ type Config = {
   wakeRetriggerMs: number
   hccBaseUrl: string
   hostNamespace: string
+  mcpServerNamespace: string
   desktopCookieName: string
   desktopCookieMaxAgeMs: number
   desktopCookieSecret: string
@@ -110,6 +113,21 @@ function assertNotPlaceholder(label: string, value: string): void {
   }
 }
 
+export function parseRpcProxyMcpHostEdgeToken(
+  raw: string | undefined,
+  production: boolean
+): string {
+  const supplied = raw?.trim() ?? ''
+  const value = supplied || (production ? '' : RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT)
+  // The dedicated credential is required only for authenticated V2 traffic.
+  // PR1/PR2 can serve the pre-PR3 legacy path without this dormant secret.
+  if (!value) return ''
+  assertNotPlaceholder('RPC_PROXY_MCP_HOST_EDGE_TOKEN', value)
+  if (value.length < 16 || value.length > 4096) {
+    throw new Error('RPC_PROXY_MCP_HOST_EDGE_TOKEN must contain 16 to 4096 characters')
+  }
+  return value
+}
 export function parseSandboxUiAllowedPorts(raw: string): ReadonlySet<number> {
   const ports = new Set<number>()
   for (const token of raw.split(',')) {
@@ -241,6 +259,10 @@ export const config: Config = {
     return v
   })(),
   controlApiServiceName: process.env.RPC_PROXY_CONTROL_API_SERVICE_NAME || 'rpc-proxy',
+  mcpHostEdgeToken: parseRpcProxyMcpHostEdgeToken(
+    process.env.RPC_PROXY_MCP_HOST_EDGE_TOKEN,
+    process.env.NODE_ENV === 'production'
+  ),
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   // The Host refuses artifact files above 50 MiB (MAX_ARTIFACT_BYTES in
   // mcp-host/src/workflow/artifactPaths.ts) and checks that size before it redacts
@@ -319,6 +341,10 @@ export const config: Config = {
     'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
   ),
   hostNamespace: requiredOrDevDefault('RPC_PROXY_HOST_NAMESPACE', 'mcp-host'),
+  // Read only on the V2 MCP path. Defaulted (not required) so an image of this
+  // release can boot under an older base manifest that lacks the variable; it
+  // must equal control-api's CONTROL_API_MCP_SERVERS_NAMESPACE (same default).
+  mcpServerNamespace: process.env.RPC_PROXY_MCP_SERVER_NAMESPACE || 'mcp-server',
   desktopCookieName: process.env.RPC_PROXY_DESKTOP_COOKIE_NAME || 'clerum_desktop_session',
   desktopCookieMaxAgeMs: Number(process.env.RPC_PROXY_DESKTOP_COOKIE_MAX_AGE_MS || 3_600_000),
   desktopCookieSecret: requiredOrDevDefault(

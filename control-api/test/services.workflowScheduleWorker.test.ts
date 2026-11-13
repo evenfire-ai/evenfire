@@ -58,7 +58,7 @@ let selectQueryError: Error | null = null
 /** Non-terminal workflow_runs keyed by `${recipe_namespace}/${recipe_name}`. */
 type FakeRun = {
   run_id: string
-  phase: 'Pending' | 'Running'
+  phase: 'Pending' | 'Running' | 'AuthorizationPaused'
   created_at: Date
   started_at: Date | null
   max_duration_seconds: number | null
@@ -136,7 +136,10 @@ const clientQuery = vi.fn(
 
     if (/FROM workflow_runs/i.test(text)) {
       if (activeRunQueryError) throw activeRunQueryError
-      if (!/phase = 'Pending'/.test(text) || !/phase = 'Running'/.test(text)) {
+      if (
+        !/phase = 'Pending'/.test(text) ||
+        !/phase IN \('Running', 'AuthorizationPaused'\)/.test(text)
+      ) {
         throw new Error('active-run lookup must filter on non-terminal phases')
       }
       const run = activeRuns.get(`${String(params?.[0])}/${String(params?.[1])}`)
@@ -597,6 +600,20 @@ describe('processMaturedSchedules', () => {
     it('blocks on a Running run still inside max_duration_seconds + grace', async () => {
       // 600 s deadline passed 2 min ago, but the 5 min reaper grace has not.
       setActiveRun({ max_duration_seconds: 600, started_at: minutesAgo(12) })
+      maturedRows.push(scheduleRow())
+
+      const result = await processMaturedSchedules()
+
+      expect(result.concurrencyForbidden).toBe(1)
+      expect(createRunMock).not.toHaveBeenCalled()
+    })
+
+    it('keeps an authorization-paused run active for Forbid within the run bound', async () => {
+      setActiveRun({
+        phase: 'AuthorizationPaused',
+        max_duration_seconds: 600,
+        started_at: minutesAgo(12),
+      })
       maturedRows.push(scheduleRow())
 
       const result = await processMaturedSchedules()

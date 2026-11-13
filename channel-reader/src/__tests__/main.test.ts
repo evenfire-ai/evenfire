@@ -82,6 +82,58 @@ describe('ChannelReader provider event idempotency', () => {
     expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
 
+  it('does not retry Telegram on an authorization error without canonical admission proof', async () => {
+    const rpc = rpcClient()
+    rpc.authorizeProviderMessage = vi
+      .fn()
+      .mockResolvedValueOnce({ authorized: false, reason: 'error', retryAfterSeconds: 2 })
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map(),
+    })
+    const message = telegramMessage()
+
+    await reader.handleMessages([message, message])
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
+    await reader.handleMessages([message])
+
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
+    expect(rpc.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('keeps non-Telegram provider events retryable after direct admission rejects them', async () => {
+    vi.useFakeTimers()
+    const rpc = rpcClient()
+    rpc.sendMessage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        success: false,
+        error: {
+          code: 'RUNTIME_SERVICE_ADMISSION_LIMITED',
+          message: 'temporarily limited',
+          retryable: true,
+          provider: 'mcp-host',
+          retryAfterSeconds: 5,
+        },
+      })
+      .mockResolvedValueOnce(completedResponse)
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map(),
+    })
+    const message = telegramMessage({ channelType: 'slack', providerIdentity: undefined })
+
+    await reader.handleMessages([message, message])
+    expect(rpc.sendMessage).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await reader.handleMessages([message])
+
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+  })
+
   it('records denied provider events so duplicate redelivery does not reauthorize', async () => {
     const rpc = rpcClient()
     rpc.authorizeProviderMessage = vi
@@ -1370,5 +1422,83 @@ describe('profileSocialChannelUrl', () => {
     expect(profileSocialChannelUrl('https://p.example.com/base', 'teams')).toBe(
       'https://p.example.com/base/settings/social/teams'
     )
+  })
+})
+
+// A13 B-9 (owner decision A16 X3): after the Host accepted the async POST, a
+// failed status message must not lead to a second submission on Telegram;
+// Slack and Teams keep their synchronous fallback.
+describe('ChannelReader progress-flow failure after an accepted POST', () => {
+  function rejectingAdapter(channelType: 'telegram' | 'slack'): {
+    adapter: ChannelAdapter
+    statusSend: ReturnType<typeof vi.fn>
+  } {
+    const statusSend = vi.fn(async () => {
+      throw new Error('status message failed')
+    })
+    const adapter: ChannelAdapter = {
+      channelType,
+      connect: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: statusSend,
+      editMessage: vi.fn(async () => undefined),
+    }
+    return { adapter, statusSend }
+  }
+
+  function acceptingRpc() {
+    const rpc = rpcClient()
+    rpc.authorizeProviderMessage = vi.fn(async () => ({ authorized: true }))
+    rpc.sendMessage = vi.fn(async () => ({
+      success: true,
+      status: 'pending' as const,
+      taskId: 'accepted-task-1',
+    }))
+    return rpc
+  }
+
+  it('does not re-submit a Telegram message when the status message fails', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const rpc = acceptingRpc()
+    const { adapter, statusSend } = rejectingAdapter('telegram')
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([['telegram', adapter]]),
+    })
+
+    await reader.handleMessages([telegramMessage()])
+
+    // Liveness witness: the progress flow ran and its status send was rejected.
+    expect(statusSend).toHaveBeenCalledOnce()
+    await expect(statusSend.mock.results[0]?.value).rejects.toThrow('status message failed')
+    expect(rpc.sendMessage).toHaveBeenCalledOnce()
+    expect(vi.mocked(rpc.sendMessage).mock.calls[0]?.[1]).toMatchObject({ async: true })
+    expect(
+      errorLog.mock.calls.some(([line]) => String(line).includes('Telegram does not re-submit'))
+    ).toBe(true)
+    errorLog.mockRestore()
+  })
+
+  it('still falls back to one synchronous re-submit for Slack', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const rpc = acceptingRpc()
+    const { adapter, statusSend } = rejectingAdapter('slack')
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([['slack', adapter]]),
+    })
+
+    await reader.handleMessages([
+      telegramMessage({ channelType: 'slack', providerIdentity: undefined }),
+    ])
+
+    expect(statusSend).toHaveBeenCalled()
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(rpc.sendMessage).mock.calls[0]?.[1]).toMatchObject({ async: true })
+    expect(vi.mocked(rpc.sendMessage).mock.calls[1]?.[1]).not.toMatchObject({ async: true })
+    errorLog.mockRestore()
   })
 })

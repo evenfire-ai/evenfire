@@ -427,6 +427,10 @@ describe('sharedFileSystemFactory — buildDeployment (controller + root initCon
     expect(byName.WSF_MAX_UPLOAD_BYTES?.value).toBe(String(100 * 1024 * 1024))
     expect(byName.WSF_MAX_LIST_ENTRIES?.value).toBe('5000')
     expect(byName.WSF_MAX_PATH_DEPTH?.value).toBe('32')
+    // The controller has no call to control-api, so no Secret is projected:
+    // the public key above is its only credential input.
+    expect(env.filter(e => e.valueFrom?.secretKeyRef)).toEqual([])
+    expect(env.filter(e => e.name.startsWith('WSF_CONTROL_API_'))).toEqual([])
   })
 
   it('uses Recreate strategy so RWO upgrades do not deadlock on volume re-attach', () => {
@@ -503,5 +507,6 @@ describe('sharedFileSystemFactory — NetworkPolicies', () => {
       { port: 53, protocol: 'UDP' },
       { port: 53, protocol: 'TCP' },
     ])
+    expect(np.spec?.egress).toHaveLength(1)
   })
 })

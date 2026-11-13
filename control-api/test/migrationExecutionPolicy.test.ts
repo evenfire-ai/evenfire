@@ -4,11 +4,15 @@ import { readFile } from 'node:fs/promises'
 import { MIGRATION_EXECUTION_POLICY } from '../src/migrations/migrationExecutionPolicy.js'
 import {
   PR1_MIGRATION_VERSIONS,
+  PR2_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
 import {
   PR1_ONLINE_INDEX_PLAN,
+  PR2_ONLINE_INDEX_PLAN,
+  PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   expectedIndexDefinition,
+  hasPostSchemaWork,
   onlineIndex,
   preparePr1Migration,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
@@ -24,6 +28,9 @@ type IndexStateRow = {
   indisvalid: boolean
   definition: string
 }
+
+const PLANNED_INDEXES = [...PR1_ONLINE_INDEX_PLAN, ...PR2_ONLINE_INDEX_PLAN]
+const VALIDATE_CONSTRAINT = /^ALTER TABLE (\w+) VALIDATE CONSTRAINT (\w+)$/
 
 function plannedIndexState(entry: (typeof PR1_ONLINE_INDEX_PLAN)[number]): IndexStateRow {
   return {
@@ -50,8 +57,21 @@ describe('D34 migration execution policy', () => {
       '0137_user_access_foundation',
       '0138_legacy_password_security_epoch_backfill',
     ])
+    // PR2 follows dev's last migration (0138) in consecutive slots. No read
+    // binding entity migration remains (WF-14, A6 E1).
+    expect(PR2_MIGRATION_VERSIONS).toEqual([
+      '0139_workflow_authority_bindings',
+      '0140_gfs_upload_authority_bindings',
+      '0141_pr2_readiness_evidence',
+      '0142_pr2_runtime_privileges',
+      '0143_workflow_run_failure_reason',
+      '0144_workflow_authorization_pause',
+    ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
+    expect(PR1_MIGRATION_VERSIONS).not.toContain('0119_dynamic_clients_table')
+    expect(PR1_MIGRATION_VERSIONS).not.toContain('0120_dynamic_clients_runtime_access')
+    expect(PR1_MIGRATION_VERSIONS).not.toContain('0121_oauth_install_identity')
   })
 
   it('freezes the owner-approved timeout and Job values', () => {
@@ -96,6 +116,71 @@ describe('D34 migration execution policy', () => {
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('invitation_delivery_commands_'))
     ).toBe(false)
+  })
+
+  it('classifies the PR2 online indexes and the eight post-schema constraint validations', () => {
+    expect(
+      PR2_ONLINE_INDEX_PLAN.map(index => [
+        index.migrationVersion,
+        index.name,
+        index.phase,
+        index.replaces,
+      ])
+    ).toEqual([
+      [
+        '0139_workflow_authority_bindings',
+        'workflow_runs_initiating_authority_binding',
+        'after-schema',
+        undefined,
+      ],
+      ['0144_workflow_authorization_pause', 'idx_wr_phase_v2', 'after-schema', 'idx_wr_phase'],
+      ['0144_workflow_authorization_pause', 'idx_wr_owner_v2', 'after-schema', 'idx_wr_owner'],
+    ])
+    expect(
+      PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => [
+        entry.migrationVersion,
+        entry.table,
+        entry.constraint,
+      ])
+    ).toEqual([
+      [
+        '0139_workflow_authority_bindings',
+        'workflow_runs',
+        'workflow_runs_initiating_authority_binding_id_fkey',
+      ],
+      [
+        '0139_workflow_authority_bindings',
+        'workflow_approval_requests',
+        'workflow_approval_requests_trigger_authority_binding_id_fkey',
+      ],
+      [
+        '0139_workflow_authority_bindings',
+        'workflow_approval_requests',
+        'workflow_approval_requests_decision_authority_binding_id_fkey',
+      ],
+      [
+        '0139_workflow_authority_bindings',
+        'workflow_approval_requests',
+        'workflow_approval_requests_consume_authority_binding_id_fkey',
+      ],
+      [
+        '0140_gfs_upload_authority_bindings',
+        'gfs_upload_sessions',
+        'gfs_upload_sessions_action_authority_object',
+      ],
+      ['0143_workflow_run_failure_reason', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+      ['0144_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_phase_check'],
+      ['0144_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+    ])
+    // A version with only constraint validations (0140, 0143) still has
+    // post-schema work; the versions without either have none.
+    expect(PR2_MIGRATION_VERSIONS.filter(version => hasPostSchemaWork(version))).toEqual([
+      '0139_workflow_authority_bindings',
+      '0140_gfs_upload_authority_bindings',
+      '0143_workflow_run_failure_reason',
+      '0144_workflow_authorization_pause',
+    ])
+    expect(PR1_MIGRATION_VERSIONS.filter(version => hasPostSchemaWork(version))).toEqual([])
   })
 
   it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
@@ -229,13 +314,17 @@ describe('D34 PR1 migration runner', () => {
     let transaction = 0
     const aliasedVersion: string = PR1_MIGRATION_VERSIONS[1]
     const alias = 'synthetic_pr1_alias'
-    const migrations = PR1_MIGRATION_VERSIONS.map(version => ({
-      version,
-      ...(version === aliasedVersion ? { legacyVersions: [alias] } : {}),
-      apply: vi.fn(async () => undefined),
-    }))
+    const migrations = [
+      ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        ...(version === aliasedVersion ? { legacyVersions: [alias] } : {}),
+        apply: vi.fn(async () => undefined),
+      })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn(async () => undefined) })),
+    ]
     const appliedVersions = new Set<string>([
       ...PR1_MIGRATION_VERSIONS.filter(version => version !== aliasedVersion),
+      ...PR2_MIGRATION_VERSIONS,
       alias,
     ])
     const recorded: string[] = []
@@ -266,7 +355,7 @@ describe('D34 PR1 migration runner', () => {
     expect(appliedVersions).toContain(aliasedVersion)
   })
 
-  it('commits and records each PR1 version independently in order', async () => {
+  it('commits and records each runner version independently in order', async () => {
     const queries: Array<{ sql: string; values?: unknown[] }> = []
     const indexStates = new Map<string, IndexStateRow>()
     const db = {
@@ -278,17 +367,23 @@ describe('D34 PR1 migration runner', () => {
           return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
         }
         if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
-          const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
+          const entry = PLANNED_INDEXES.find(index => sql === index.createSql)
           if (entry) indexStates.set(entry.name, plannedIndexState(entry))
         }
         return { rows: [], rowCount: 0 }
       }),
     }
     const applied: string[] = []
-    const migrations = PR1_MIGRATION_VERSIONS.map(version => ({
-      version,
-      apply: vi.fn(async () => undefined),
-    }))
+    const migrations = [
+      ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
+    ]
 
     await applyPendingPr1Migrations({
       db,
@@ -299,12 +394,234 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applied).toEqual([...PR1_MIGRATION_VERSIONS])
-    // One transaction per version.
-    const transactions = PR1_MIGRATION_VERSIONS.length
+    expect(applied).toEqual([...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS])
+    // One transaction per version without post-schema work (0137, 0138,
+    // 0141-0142); a version with it commits its schema, each validation and
+    // its receipt separately: 0139 1 + 4 + 1, 0140 1 + 1 + 1, 0143 1 + 1 + 1,
+    // 0144 1 + 2 + 1.
+    const transactions = 4 + 6 + 3 + 3 + 4
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
+    expect(queries.filter(({ sql }) => VALIDATE_CONSTRAINT.test(sql))).toHaveLength(8)
+  })
+
+  it('runs after-schema online indexes, then each constraint validation, before recording', async () => {
+    const events: string[] = []
+    const indexStates = new Map<string, IndexStateRow>()
+    let inTransaction = false
+    const db = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        if (sql === 'BEGIN') inTransaction = true
+        if (sql === 'COMMIT' || sql === 'ROLLBACK') inTransaction = false
+        if (sql.includes('FROM pg_class index_rel')) {
+          const state = indexStates.get(String(values?.[0]))
+          return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
+        }
+        if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
+          const entry = PLANNED_INDEXES.find(index => sql === index.createSql)
+          if (entry) {
+            events.push(`create:${entry.name}:${inTransaction}`)
+            indexStates.set(entry.name, plannedIndexState(entry))
+          }
+        }
+        // The online bound (120 s), not the ordinary 15 s bound every
+        // bounded transaction sets first.
+        if (sql === "SET LOCAL statement_timeout = '120000ms'") {
+          events.push(`bound:120000ms:${inTransaction}`)
+        }
+        const validation = VALIDATE_CONSTRAINT.exec(sql)
+        if (validation) events.push(`validate:${validation[2]}:${inTransaction}`)
+        return { rows: [], rowCount: 0 }
+      }),
+    }
+    const pendingVersion = '0139_workflow_authority_bindings'
+    const appliedVersions = new Set<string>([
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
+    ])
+    const migrations = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS].map(version => ({
+      version,
+      apply: vi.fn(async () => {
+        if (version === pendingVersion) events.push(`apply:${inTransaction}`)
+      }),
+    }))
+
+    await applyPendingPr1Migrations({
+      db,
+      migrations,
+      appliedVersions,
+      recordMigration: async (_db, version) => {
+        if (version === pendingVersion) events.push(`record:${inTransaction}`)
+      },
+    })
+
+    const validate = (constraint: string) => [`bound:120000ms:true`, `validate:${constraint}:true`]
+    expect(events).toEqual([
+      'apply:true',
+      'create:workflow_runs_initiating_authority_binding:false',
+      ...validate('workflow_runs_initiating_authority_binding_id_fkey'),
+      ...validate('workflow_approval_requests_trigger_authority_binding_id_fkey'),
+      ...validate('workflow_approval_requests_decision_authority_binding_id_fkey'),
+      ...validate('workflow_approval_requests_consume_authority_binding_id_fkey'),
+      'record:true',
+    ])
+  })
+
+  it.each([
+    ['0140_gfs_upload_authority_bindings', ['gfs_upload_sessions_action_authority_object']],
+    ['0143_workflow_run_failure_reason', ['workflow_runs_failure_reason_check']],
+  ])(
+    'validates the constraints of %s, which has no online index, after its schema commits',
+    async (pendingVersion, constraints) => {
+      const events: string[] = []
+      let inTransaction = false
+      let transaction = 0
+      const db = {
+        query: vi.fn(async (sql: string) => {
+          if (sql === 'BEGIN') {
+            inTransaction = true
+            transaction += 1
+          }
+          if (sql === 'COMMIT' || sql === 'ROLLBACK') inTransaction = false
+          const validation = VALIDATE_CONSTRAINT.exec(sql)
+          if (validation) events.push(`validate:${validation[2]}:${transaction}:${inTransaction}`)
+          return { rows: [], rowCount: 0 }
+        }),
+      }
+      const appliedVersions = new Set<string>([
+        ...PR1_MIGRATION_VERSIONS,
+        ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
+      ])
+      const migrations = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS].map(version => ({
+        version,
+        apply: vi.fn(async () => {
+          if (version === pendingVersion) events.push(`apply:${transaction}:${inTransaction}`)
+        }),
+      }))
+
+      await applyPendingPr1Migrations({
+        db,
+        migrations,
+        appliedVersions,
+        recordMigration: async (_db, version) => {
+          if (version === pendingVersion) events.push(`record:${transaction}:${inTransaction}`)
+        },
+      })
+
+      expect(events).toEqual([
+        'apply:1:true',
+        ...constraints.map((constraint, index) => `validate:${constraint}:${index + 2}:true`),
+        `record:${constraints.length + 2}:true`,
+      ])
+    }
+  )
+
+  it('surfaces a failed validation error itself, records nothing, and rolls that validation back', async () => {
+    // A fake session that behaves as PostgreSQL does after a failed statement
+    // inside a transaction: every statement but ROLLBACK is rejected with
+    // 25P02 until the transaction ends. A cleanup statement issued inside the
+    // aborted transaction would therefore replace the VALIDATE error.
+    const queries: string[] = []
+    const rejectedWhileAborted: string[] = []
+    let inTransaction = false
+    let aborted = false
+    const validationError = Object.assign(
+      new Error('canceling statement due to statement timeout'),
+      { code: '57014' }
+    )
+    const query = vi.fn(async (sql: string) => {
+      queries.push(sql)
+      if (sql === 'ROLLBACK') {
+        inTransaction = false
+        aborted = false
+        return { rows: [], rowCount: 0 }
+      }
+      if (aborted) {
+        rejectedWhileAborted.push(sql)
+        throw Object.assign(
+          new Error(
+            'current transaction is aborted, commands ignored until end of transaction block'
+          ),
+          { code: '25P02' }
+        )
+      }
+      if (sql === 'BEGIN') inTransaction = true
+      if (sql === 'COMMIT') inTransaction = false
+      if (VALIDATE_CONSTRAINT.test(sql)) {
+        if (inTransaction) aborted = true
+        throw validationError
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const pendingVersion = '0143_workflow_run_failure_reason'
+    const appliedVersions = new Set<string>([
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
+    ])
+    const migrations = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS].map(version => ({
+      version,
+      apply: vi.fn(async () => undefined),
+    }))
+    const recordMigration = vi.fn(async () => undefined)
+
+    await expect(
+      applyPendingPr1Migrations({
+        db: { query },
+        migrations,
+        appliedVersions,
+        recordMigration,
+      })
+    ).rejects.toBe(validationError)
+
+    // Witness: the schema transaction committed and the validation was issued
+    // once, inside its own transaction.
+    expect(
+      migrations.find(migration => migration.version === pendingVersion)!.apply
+    ).toHaveBeenCalledTimes(1)
+    expect(
+      queries.filter(
+        sql =>
+          sql === 'ALTER TABLE workflow_runs VALIDATE CONSTRAINT workflow_runs_failure_reason_check'
+      )
+    ).toHaveLength(1)
+    expect(queries.slice(-2)).toEqual([
+      'ALTER TABLE workflow_runs VALIDATE CONSTRAINT workflow_runs_failure_reason_check',
+      'ROLLBACK',
+    ])
+    expect(rejectedWhileAborted).toEqual([])
+    expect(recordMigration).not.toHaveBeenCalled()
+    expect(appliedVersions).not.toContain(pendingVersion)
+  })
+
+  it('does not record an after-schema migration when its online index fails', async () => {
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('FROM pg_class index_rel')) return { rows: [], rowCount: 0 }
+      if (sql.startsWith('CREATE INDEX CONCURRENTLY')) throw new Error('online index failed')
+      return { rows: [], rowCount: 0 }
+    })
+    const pendingVersion = '0139_workflow_authority_bindings'
+    const appliedVersions = new Set<string>([
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
+    ])
+    const migrations = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS].map(version => ({
+      version,
+      apply: vi.fn(async () => undefined),
+    }))
+    const recordMigration = vi.fn(async () => undefined)
+
+    await expect(
+      applyPendingPr1Migrations({
+        db: { query },
+        migrations,
+        appliedVersions,
+        recordMigration,
+      })
+    ).rejects.toThrow('online index failed')
+
+    expect(recordMigration).not.toHaveBeenCalled()
+    expect(appliedVersions).not.toContain(pendingVersion)
   })
 
   it('stops after a failed version and rolls back only that version', async () => {
@@ -340,6 +657,7 @@ describe('D34 PR1 migration runner', () => {
         db: { query: vi.fn() },
         migrations: [
           ...PR1_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
+          ...PR2_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           { version: '0199_unclassified', apply: vi.fn() },
         ],
         appliedVersions: new Set(),
@@ -381,7 +699,7 @@ describe('D34 PR1 migration runner', () => {
           return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
         }
         if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
-          const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
+          const entry = PLANNED_INDEXES.find(index => sql === index.createSql)
           if (entry) indexStates.set(entry.name, plannedIndexState(entry))
         }
         return { rows: [], rowCount: 0 }
@@ -403,6 +721,12 @@ describe('D34 PR1 migration runner', () => {
             applyOrder.push(version)
           }),
         })),
+        ...PR2_MIGRATION_VERSIONS.map(version => ({
+          version,
+          apply: vi.fn(async () => {
+            applyOrder.push(version)
+          }),
+        })),
       ],
       appliedVersions: new Set(),
       recordMigration: async (_db, version) => {
@@ -410,7 +734,7 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    const expectedOrder = [...PR1_MIGRATION_VERSIONS]
+    const expectedOrder = [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]
     expect(applyOrder).toEqual(expectedOrder)
     expect(recorded).toEqual(expectedOrder)
     for (const migration of devMigrations) {
@@ -433,7 +757,7 @@ describe('PR1 earlier-head guard', () => {
   }
 
   function pr1Migrations(legacyVersionsFor: Record<string, readonly string[]> = {}) {
-    return PR1_MIGRATION_VERSIONS.map(version => ({
+    return [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS].map(version => ({
       version,
       ...(legacyVersionsFor[version] ? { legacyVersions: legacyVersionsFor[version] } : {}),
       apply: vi.fn(async () => undefined),
@@ -522,6 +846,7 @@ describe('PR1 earlier-head guard', () => {
       appliedVersions: new Set([
         '0137_user_access_foundation',
         '0134_legacy_password_security_epoch_backfill',
+        ...PR2_MIGRATION_VERSIONS,
       ]),
       recordMigration: async (_db, version) => {
         recorded.push(version)

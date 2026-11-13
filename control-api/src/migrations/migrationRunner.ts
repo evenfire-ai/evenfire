@@ -1,6 +1,6 @@
 import type { DbClient } from '../db.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
-import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
+import { hasPostSchemaWork, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0137_user_access_foundation',
@@ -9,7 +9,7 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
 
 // The one bound between initDb's single dev batch and this runner: every migration
 // up to and including this version runs in the dev batch (db.ts imports it), and
-// this runner owns only the PR1 versions that follow it. Until this change merges,
+// this runner owns only the PR1 and PR2 versions that follow it. Until this change merges,
 // a dev merge that brings new migrations moves this bound to dev's last version and
 // renumbers PR1_MIGRATION_VERSIONS above it, and every dev merge moves the latestDev
 // producer in tests/contracts/certification-inputs.json to dev's tip. After it merges
@@ -52,6 +52,20 @@ const EARLIER_PR1_TABLES = Object.freeze([
 const EARLIER_PR1_HEAD_CLEANUP_REFERENCE =
   'see docs/deploy/user-access-foundation-upgrade.md#databases-that-ran-an-earlier-head-of-this-change'
 
+export const PR2_MIGRATION_VERSIONS = Object.freeze([
+  '0139_workflow_authority_bindings',
+  '0140_gfs_upload_authority_bindings',
+  '0141_pr2_readiness_evidence',
+  '0142_pr2_runtime_privileges',
+  '0143_workflow_run_failure_reason',
+  '0144_workflow_authorization_pause',
+])
+
+export const RUNNER_MIGRATION_VERSIONS = Object.freeze([
+  ...PR1_MIGRATION_VERSIONS,
+  ...PR2_MIGRATION_VERSIONS,
+] as const)
+
 export type MigrationDescriptor = {
   version: string
   legacyVersions?: readonly string[]
@@ -65,7 +79,10 @@ type ApplyPendingPr1MigrationsInput = {
   recordMigration: (db: DbClient, version: string) => Promise<void>
 }
 
-async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): Promise<void> {
+export async function runBoundedTransaction(
+  db: DbClient,
+  work: () => Promise<void>
+): Promise<void> {
   let started = false
   try {
     await db.query('BEGIN')
@@ -176,7 +193,7 @@ export async function applyPendingPr1Migrations({
       aliasOwners.set(alias, migration.version)
     }
   }
-  const expected = new Set<string>(PR1_MIGRATION_VERSIONS)
+  const expected = new Set<string>(RUNNER_MIGRATION_VERSIONS)
   const unclassified = migrations.filter(
     migration => migration.version > LAST_DEV_MIGRATION_VERSION && !expected.has(migration.version)
   )
@@ -191,7 +208,7 @@ export async function applyPendingPr1Migrations({
     new Set([...PR1_MIGRATION_VERSIONS, ...canonicalVersions, ...aliasOwners.keys()])
   )
 
-  for (const version of PR1_MIGRATION_VERSIONS) {
+  for (const version of RUNNER_MIGRATION_VERSIONS) {
     const migration = byVersion.get(version)
     if (!migration) throw new Error(`Missing registered PR1 migration: ${version}`)
     if (appliedVersions.has(version)) continue
@@ -200,6 +217,16 @@ export async function applyPendingPr1Migrations({
     )
     if (acceptedLegacyVersion) {
       await runBoundedTransaction(db, () => recordMigration(db, version))
+      appliedVersions.add(version)
+      continue
+    }
+
+    if (hasPostSchemaWork(version)) {
+      await runBoundedTransaction(db, async () => migration.apply(db))
+      await preparePr1Migration(db, version, 'after-schema')
+      await runBoundedTransaction(db, async () => {
+        await recordMigration(db, version)
+      })
       appliedVersions.add(version)
       continue
     }

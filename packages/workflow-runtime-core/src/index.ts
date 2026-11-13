@@ -19,7 +19,13 @@ export {
   sendWithAuthRetryOn401,
 } from './status-reporter/authRetry'
 export { createServer, start, stop, safeEqual } from './rest-server/server'
-export { CycleDetectedError, WorkflowSDKInitError, McpHostNotConfiguredError } from './errors'
+export {
+  CycleDetectedError,
+  WorkflowSDKInitError,
+  McpHostNotConfiguredError,
+  WorkflowAuthorizationPausedError,
+  WorkflowRunStateUnavailableError,
+} from './errors'
 export {
   OWNER_RECIPE_LABEL_KEY,
   SHARED_LABEL_KEY,

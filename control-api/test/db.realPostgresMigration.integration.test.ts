@@ -1729,6 +1729,21 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(secondVersions.rows.map(row => row.version)).toEqual(
       firstVersions.rows.map(row => row.version)
     )
+    await dbPool.query(`
+      REVOKE ALL ON TABLE workflow_authority_bindings FROM control_api_runtime;
+      REVOKE ALL ON TABLE pr2_readiness_activations FROM control_api_runtime;
+      REVOKE ALL ON TABLE pr2_readiness_evidence FROM control_api_runtime;
+      DELETE FROM schema_migrations
+       WHERE version = '0142_pr2_runtime_privileges';
+    `)
+    await initDb(connector)
+    const upgradedPr2Corrections = await dbPool.query<{ version: string }>(
+      `SELECT version FROM schema_migrations
+        WHERE version = '0142_pr2_runtime_privileges'`
+    )
+    expect(upgradedPr2Corrections.rows.map(row => row.version)).toEqual([
+      '0142_pr2_runtime_privileges',
+    ])
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0063_workflow_approval_trace_binding'
     )
@@ -2019,6 +2034,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'gfs_desktop_operator_links',
       'desktop_user_retirement_operations',
       'dynamic_clients',
+      'workflow_authority_bindings',
+      'pr2_readiness_activations',
+      'pr2_readiness_evidence',
     ] as const
     const controlApiRelations = await relationPrivileges(dbPool, 'control_api_runtime')
     const expectedControlApiRelations: Record<string, string[]> = {
@@ -2044,6 +2062,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       // dynamicClientStore does INSERT ... ON CONFLICT DO UPDATE, SELECT and
       // DELETE, so the runtime role needs the full legacy_dml envelope.
       dynamic_clients: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      workflow_authority_bindings: ['INSERT', 'SELECT'],
+      pr2_readiness_activations: ['INSERT', 'SELECT', 'UPDATE'],
+      pr2_readiness_evidence: ['INSERT', 'SELECT', 'UPDATE'],
     }
     for (const relation of exactControlApiRelations) {
       expectPrivileges(
@@ -2062,6 +2083,91 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       [...(controlApiSequences.dynamic_clients_id_seq ?? new Set())],
       ['SELECT', 'UPDATE', 'USAGE']
     )
+    const pr2RuntimeClient = await dbPool.connect()
+    try {
+      const bindingId = randomUUID()
+      const environmentId = `runtime-role-${randomUUID()}`
+      const revision = 'd'.repeat(40)
+      await pr2RuntimeClient.query('BEGIN')
+      await pr2RuntimeClient.query('SET LOCAL ROLE control_api_runtime')
+      const insertBinding = (id: string, bindingKind: string, entityType: string) =>
+        pr2RuntimeClient.query(
+          `INSERT INTO workflow_authority_bindings (
+             id, binding_kind, entity_type, entity_id, binding_version, binding_hash,
+             user_id, session_id, session_version, delegation_jti, operation_id,
+             resource, target, target_hash, access_path_id, authorization_revision,
+             path_kind, effective_team_id, behavior_binding_hash,
+             source_issued_at, source_expires_at
+           ) VALUES (
+             $1, $12, $13, 'sandbox-recipes/runtime-role', 2, $2,
+             $3, $4, 1, $5, 'workflow.trigger',
+             $6::jsonb, $7::jsonb, $8, $9, $10,
+             'direct', NULL, $11, NOW(), NOW() + interval '1 minute'
+           )`,
+          [
+            id,
+            'a'.repeat(64),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            JSON.stringify({ type: 'workflow_recipe', logicalId: 'sandbox-recipes/runtime-role' }),
+            JSON.stringify({ recipeNamespace: 'sandbox-recipes', recipeName: 'runtime-role' }),
+            `ath2_${'b'.repeat(43)}`,
+            `ap1_${'c'.repeat(43)}`,
+            `ar1_${'d'.repeat(43)}`,
+            `bh2_${'e'.repeat(43)}`,
+            bindingKind,
+            entityType,
+          ]
+        )
+      await insertBinding(bindingId, 'trigger', 'workflow_trigger')
+      // WF-14 (A6 E1): reads persist no binding, so the read kinds and the
+      // workflow_recipe entity are outside the closed vocabulary.
+      for (const [bindingKind, entityType] of [
+        ['workflow_read', 'workflow_trigger'],
+        ['artifact_list', 'workflow_run'],
+        ['artifact_read', 'workflow_artifact'],
+        ['trigger', 'workflow_recipe'],
+      ] as const) {
+        await pr2RuntimeClient.query('SAVEPOINT removed_read_vocabulary')
+        await expect(insertBinding(randomUUID(), bindingKind, entityType)).rejects.toMatchObject({
+          code: '23514',
+        })
+        await pr2RuntimeClient.query('ROLLBACK TO SAVEPOINT removed_read_vocabulary')
+      }
+      await pr2RuntimeClient.query(
+        `INSERT INTO pr2_readiness_activations (
+           environment_id, source_revision, accepted_by, accepted_at,
+           max_runtime_evidence_age_seconds
+         ) VALUES ($1, $2, 'test:runtime-role', NOW(), 60)`,
+        [environmentId, revision]
+      )
+      await pr2RuntimeClient.query(
+        `INSERT INTO pr2_readiness_evidence (
+           environment_id, source_revision, hop, evidence_class, evidence_kind,
+           writer_principal, evidence_reference, outcome, service_version,
+           contract_version, deployment_revision, image_revision, observed_at
+         ) VALUES (
+           $1, $2, 'action_contracts', 'build', 'exact_head_ci',
+           'operator-build-importer', 'ci:runtime-role', 'passed', '1.0.0',
+           'pr2-readiness-v1', NULL, $2, NOW()
+         )`,
+        [environmentId, revision]
+      )
+      await expect(
+        pr2RuntimeClient.query('SELECT id FROM workflow_authority_bindings WHERE id = $1', [
+          bindingId,
+        ])
+      ).resolves.toMatchObject({ rowCount: 1 })
+      await pr2RuntimeClient.query('SAVEPOINT prohibited_delete')
+      await expect(
+        pr2RuntimeClient.query('DELETE FROM workflow_authority_bindings WHERE id = $1', [bindingId])
+      ).rejects.toMatchObject({ code: '42501' })
+      await pr2RuntimeClient.query('ROLLBACK TO SAVEPOINT prohibited_delete')
+    } finally {
+      await pr2RuntimeClient.query('ROLLBACK').catch(() => undefined)
+      pr2RuntimeClient.release()
+    }
 
     const linkUserId = randomUUID()
     const linkAdminId = randomUUID()
@@ -2173,7 +2279,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       await linkRuntimeClient.query('SAVEPOINT deny_link_truncate')
       await expect(
         linkRuntimeClient.query('TRUNCATE TABLE gfs_desktop_operator_links')
-      ).rejects.toThrow(/permission denied/)
+      ).rejects.toMatchObject({ code: '42501' })
       await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_truncate')
 
       await linkRuntimeClient.query('SAVEPOINT deny_link_delete')
@@ -2181,7 +2287,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         linkRuntimeClient.query(`DELETE FROM gfs_desktop_operator_links WHERE user_id = $1`, [
           linkUserId,
         ])
-      ).rejects.toThrow(/permission denied/)
+      ).rejects.toMatchObject({ code: '42501' })
       await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_delete')
     } finally {
       await linkRuntimeClient.query('ROLLBACK')
@@ -2327,7 +2433,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       await promptPrivilegeClient.query('SET LOCAL ROLE trace_maintenance_runtime')
       await expect(
         promptPrivilegeClient.query('SELECT * FROM governed_approval_prompt_history')
-      ).rejects.toThrow(/permission denied/)
+      ).rejects.toMatchObject({ code: '42501' })
     } finally {
       await promptPrivilegeClient.query('ROLLBACK')
       promptPrivilegeClient.release()
@@ -2784,6 +2890,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const expectedWrcRelations: Record<string, string[]> = {
       team_workflow_triggers: ['DELETE'],
       user_workflow_triggers: ['DELETE'],
+      workflow_authority_bindings: ['SELECT'],
       workflow_approval_requests: ['SELECT', 'UPDATE'],
       workflow_recipe_allowed_teams: ['DELETE'],
       workflow_run_steps: ['INSERT', 'SELECT', 'UPDATE'],

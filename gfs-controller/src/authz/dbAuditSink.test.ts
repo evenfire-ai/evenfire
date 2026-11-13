@@ -25,6 +25,9 @@ class AuditPool extends AuditDb {
         this.queries.push(text);
         return this.query(text, values);
       },
+      // The checkout error-event surface; this fake never emits.
+      on: () => undefined,
+      removeListener: () => undefined,
       release: () => { this.releases += 1; },
     };
   }

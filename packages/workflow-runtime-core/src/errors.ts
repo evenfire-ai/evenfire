@@ -27,3 +27,23 @@ export class McpHostNotConfiguredError extends Error {
     this.name = 'McpHostNotConfiguredError'
   }
 }
+
+/** A protected workflow boundary is waiting for an explicit authority resume. */
+export class WorkflowAuthorizationPausedError extends Error {
+  constructor() {
+    super('workflow_authorization_paused')
+    this.name = 'WorkflowAuthorizationPausedError'
+  }
+}
+
+/**
+ * WRC answered the last attempt of a status report with 503
+ * `workflow_run_state_unavailable`: it could not reach its workflow run store
+ * to checkpoint a running boundary, so it answered neither allowed nor paused.
+ */
+export class WorkflowRunStateUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'WorkflowRunStateUnavailableError'
+  }
+}

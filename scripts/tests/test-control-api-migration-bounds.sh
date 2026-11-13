@@ -45,7 +45,8 @@ grep -q 'INDEX CONCURRENTLY' "$INDEX_PLAN_FILE" || \
   fail "existing-table indexes are not prepared concurrently"
 
 index_count="$(awk "/^    migrationVersion: '/ { count++ } END { print count + 0 }" "$INDEX_PLAN_FILE")"
-[ "$index_count" = "5" ] || fail "expected 5 online indexes, found $index_count"
+[ "$index_count" = "8" ] || \
+  fail "expected 8 online indexes (PR1 5, PR2 3; per-version set pinned in control-api/test/migrationExecutionPolicy.test.ts), found $index_count"
 
 grep -q 'activeDeadlineSeconds' "$DEPLOY_FILE" || \
   fail "migration Job has no active deadline"

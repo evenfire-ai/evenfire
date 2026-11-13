@@ -5,6 +5,10 @@ import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootRec
 import { rootLogger } from './observability/logger.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
+import {
+  bootstrapConfiguredPr2Readiness,
+  startControlApiPr2RuntimeEvidence,
+} from './services/access/pr2ReadinessEvidence.js'
 import { resolveEffectiveUserAccessPolicy } from './services/access/userAccessRuntimePolicy.js'
 import {
   startAdminRevokedTokenCleanup,
@@ -84,6 +88,7 @@ const logger = rootLogger.child({ module: 'control-api-shutdown' })
 let activeServer: ControlApiServer | null = null
 let requestedExitCode = 0
 let shutdownRequested = false
+let stopPr2RuntimeEvidence: (() => void) | null = null
 
 const shutdown = createShutdownHandler(async () => {
   const result = await runShutdownSteps(
@@ -107,6 +112,7 @@ const shutdown = createShutdownHandler(async () => {
       'oauth-shared-grant-sweep': stopOauthSharedGrantSweepCron,
       'workflow-approval-trace-projector': stopWorkflowApprovalTraceProjector,
       'entity-change-dispatcher': stopEntityChangeDispatcher,
+      'pr2-runtime-evidence': () => stopPr2RuntimeEvidence?.(),
       'core-database-pool': () => pool.end(),
       'rate-limit-database-pool': () => rateLimitPool.end(),
       'trace-database-pools': closeTracingPools,
@@ -150,6 +156,8 @@ async function main(): Promise<void> {
   await assertDbReady()
   ensureStartupActive()
   logger.info({ event: 'control_api_database_ready' }, 'Database schema ready')
+  await bootstrapConfiguredPr2Readiness()
+  ensureStartupActive()
   const userAccessPolicy = await resolveEffectiveUserAccessPolicy()
   logger.info(
     { event: 'user_access_policy_ready', policyRevision: userAccessPolicy.policyRevision },
@@ -378,6 +386,7 @@ async function main(): Promise<void> {
 
   await server.start()
   ensureStartupActive()
+  stopPr2RuntimeEvidence = startControlApiPr2RuntimeEvidence()
   logger.info({ event: 'control_api_running' }, 'Control API running')
 
   // Hosted member-registration self-enrollment (spec §8.4): degrade, never

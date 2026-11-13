@@ -447,6 +447,103 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     })
   })
 
+  /**
+   * A pg pool whose transaction client classifies every statement of the
+   * trigger-policy cleanup and throws on any other, so the cases below can
+   * assert the exact statement order of that transaction.
+   */
+  function recordingPolicyCleanupPool(options: { failOn?: string } = {}) {
+    const statements: string[] = []
+    const dmlValues: Array<{ kind: string; values: unknown[] | undefined }> = []
+    const counters = { releases: 0, schedulingDeletes: 0 }
+    const classify = (sql: string): string => {
+      const text = sql.trim()
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return text
+      if (text.startsWith('UPDATE workflow_approval_requests')) return 'cancel-approvals'
+      if (text.startsWith('DELETE FROM user_workflow_triggers')) return 'delete-uwt'
+      if (text.startsWith('DELETE FROM team_workflow_triggers')) return 'delete-twt'
+      if (text.startsWith('DELETE FROM workflow_recipe_allowed_teams')) return 'delete-wat'
+      if (text.includes("to_regclass('public.workflow_recipe_allowed_users')")) {
+        return 'probe-legacy'
+      }
+      throw new Error(`Unexpected trigger-policy cleanup statement: ${sql}`)
+    }
+    const pgPool = {
+      query: async (sql: string) => {
+        if (!sql.includes('DELETE FROM workflow_schedules')) {
+          throw new Error(`Unexpected pool statement: ${sql}`)
+        }
+        counters.schedulingDeletes += 1
+        return { rows: [], rowCount: 0 }
+      },
+      connect: async () => ({
+        query: async (sql: string, values?: unknown[]) => {
+          const kind = classify(sql)
+          statements.push(kind)
+          if (values) dmlValues.push({ kind, values })
+          if (kind === options.failOn) throw new Error(`${kind} failed`)
+          if (kind === 'probe-legacy') return { rows: [{ regclass: null }], rowCount: 1 }
+          return { rows: [], rowCount: 0 }
+        },
+        release: () => {
+          counters.releases += 1
+        },
+      }),
+    }
+    return { pgPool, statements, dmlValues, counters }
+  }
+
+  it("cancels the recipe's approvals before deleting its grant rows", async () => {
+    const recipeName = 'deleted-recipe'
+    const cleanup = recordingPolicyCleanupPool()
+    const reconciler = new WorkflowReconciler({
+      ...deps,
+      pgPool: cleanup.pgPool,
+    } as unknown as WorkflowReconcilerDeps)
+
+    await reconciler.reconcileDelete(recipeName, sandboxNamespace)
+
+    expect(cleanup.statements).toEqual([
+      'BEGIN',
+      'cancel-approvals',
+      'delete-uwt',
+      'delete-twt',
+      'delete-wat',
+      'probe-legacy',
+      'COMMIT',
+    ])
+    expect(cleanup.dmlValues.filter(entry => entry.kind !== 'probe-legacy')).toEqual(
+      ['cancel-approvals', 'delete-uwt', 'delete-twt', 'delete-wat'].map(kind => ({
+        kind,
+        values: [sandboxNamespace, recipeName],
+      }))
+    )
+    // Witness: the transaction committed and released its one client.
+    expect(cleanup.statements).toContain('COMMIT')
+    expect(cleanup.counters.releases).toBe(1)
+    expect(cleanup.counters.schedulingDeletes).toBe(1)
+    expect(cleanup.statements.indexOf('cancel-approvals')).toBeLessThan(
+      cleanup.statements.indexOf('delete-uwt')
+    )
+  })
+
+  // The failure is logged and swallowed (`reconcileDelete`'s cleanup block);
+  // the test logger is silent, so the resolved promise is the observable part.
+  it('rolls back and resolves when the approval cancel fails', async () => {
+    const recipeName = 'deleted-recipe-cancel-fails'
+    const cleanup = recordingPolicyCleanupPool({ failOn: 'cancel-approvals' })
+    const reconciler = new WorkflowReconciler({
+      ...deps,
+      pgPool: cleanup.pgPool,
+    } as unknown as WorkflowReconcilerDeps)
+
+    await expect(reconciler.reconcileDelete(recipeName, sandboxNamespace)).resolves.toBeUndefined()
+
+    expect(cleanup.statements).toEqual(['BEGIN', 'cancel-approvals', 'ROLLBACK'])
+    expect(cleanup.statements.filter(kind => kind.startsWith('delete-'))).toEqual([])
+    expect(cleanup.counters.releases).toBe(1)
+  })
+
   it('still deletes per-mcp-server NetworkPolicies by label selector without deletecollection', async () => {
     const reconciler = new WorkflowReconciler(deps)
     const recipeName = 'my-agentic-recipe'

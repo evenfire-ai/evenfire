@@ -123,7 +123,7 @@ describe('0056_llm_allowed_models migration', () => {
     )
   })
 
-  it('0115 adds the nullable image_input capability column idempotently (#654)', async () => {
+  it('011b adds the nullable image_input capability column idempotently (#654)', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
@@ -151,7 +151,7 @@ describe('0056_llm_allowed_models migration', () => {
     expect(alter!).not.toMatch(/DROP COLUMN/)
   })
 
-  it('0115 is purely additive: it adds the column and writes no image_input data', async () => {
+  it('011b is purely additive: it adds the column and writes no image_input data', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const calls = clientQuery.mock.calls.map(([sql, params]) => ({

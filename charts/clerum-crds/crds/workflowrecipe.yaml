@@ -86,80 +86,80 @@ spec:
               x-kubernetes-validations:
                 # R1: agent{} binds either an executable workflow or the eager
                 # Plugin Workload SDK promptBridge host. Empty steps[] is not a workflow.
-                - rule: "!has(self.agent) || (has(self.steps) && size(self.steps) > 0) || (has(self.pluginWorkloadSdk) && has(self.pluginWorkloadSdk.promptBridge))"
-                  message: "agent requires non-empty workflow steps or spec.pluginWorkloadSdk.promptBridge"
+                - rule: '!has(self.agent) || (has(self.steps) && size(self.steps) > 0) || (has(self.pluginWorkloadSdk) && has(self.pluginWorkloadSdk.promptBridge))'
+                  message: 'agent requires non-empty workflow steps or spec.pluginWorkloadSdk.promptBridge'
                 # SDK-only recipes are a capability runtime, not a dormant workflow.
                 # Keep resolved workflow-only fields fail-closed in this mode.
-                - rule: "!has(self.pluginWorkloadSdk) || (has(self.steps) && size(self.steps) > 0) || (!has(self.triggers) && !has(self.scheduling) && !has(self.coordinatorImage))"
-                  message: "spec.pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage"
+                - rule: '!has(self.pluginWorkloadSdk) || (has(self.steps) && size(self.steps) > 0) || (!has(self.triggers) && !has(self.scheduling) && !has(self.coordinatorImage))'
+                  message: 'spec.pluginWorkloadSdk without workflow steps cannot define triggers, scheduling, or coordinatorImage'
                 # R2: recipe must have workloads or steps (not empty)
-                - rule: "(has(self.workloads) && size(self.workloads) > 0) || has(self.steps)"
-                  message: "recipe must define at least workloads or steps"
+                - rule: '(has(self.workloads) && size(self.workloads) > 0) || has(self.steps)'
+                  message: 'recipe must define at least workloads or steps'
                 # R3: step IDs must be unique — no toSet() in K8s CEL, use all/exists_one.
                 # Cross-step dependsOn validation is enforced by control-api/WRC; with
                 # 100 steps, the equivalent CEL rule exceeds Kubernetes' cost budget.
-                - rule: "!has(self.steps) || self.steps.all(s, self.steps.exists_one(t, t.id == s.id))"
-                  message: "duplicate step IDs are not allowed"
+                - rule: '!has(self.steps) || self.steps.all(s, self.steps.exists_one(t, t.id == s.id))'
+                  message: 'duplicate step IDs are not allowed'
                 # R4: scheduling requires steps[] (no scheduling without workflow)
-                - rule: "!has(self.scheduling) || (has(self.steps) && size(self.steps) > 0)"
-                  message: "spec.scheduling requires spec.steps to be non-empty"
+                - rule: '!has(self.scheduling) || (has(self.steps) && size(self.steps) > 0)'
+                  message: 'spec.scheduling requires spec.steps to be non-empty'
                 # R5: scheduling.cron must be a valid five-field cron expression
                 - rule: "!has(self.scheduling) || self.scheduling.cron.matches('^(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)$')"
-                  message: "spec.scheduling.cron must be a valid five-field cron expression"
+                  message: 'spec.scheduling.cron must be a valid five-field cron expression'
                 # R6: triggers must declare at least one of onDemand or schedule
-                - rule: "!has(self.triggers) || (has(self.triggers.onDemand) || has(self.triggers.schedule))"
-                  message: "spec.triggers must declare at least one of onDemand or schedule"
+                - rule: '!has(self.triggers) || (has(self.triggers.onDemand) || has(self.triggers.schedule))'
+                  message: 'spec.triggers must declare at least one of onDemand or schedule'
                 # R7: triggers.schedule.cron must be a valid five-field cron expression
                 - rule: "!has(self.triggers) || !has(self.triggers.schedule) || self.triggers.schedule.cron.matches('^(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)$')"
-                  message: "spec.triggers.schedule.cron must be a valid five-field cron expression"
+                  message: 'spec.triggers.schedule.cron must be a valid five-field cron expression'
                 # W1: webhooks[].id must be unique within webhooks[].
                 # W2 (workloadRef references an existing deployment workload
                 # with no transport) is enforced in the WRC reconciler and
                 # surfaced via a status condition — the nested webhooks x
                 # workloads lookup remains too costly at the workload ceiling.
-                - rule: "!has(self.webhooks) || self.webhooks.all(w, self.webhooks.exists_one(t, t.id == w.id))"
-                  message: "spec.webhooks[].id must be unique within webhooks[]"
+                - rule: '!has(self.webhooks) || self.webhooks.all(w, self.webhooks.exists_one(t, t.id == w.id))'
+                  message: 'spec.webhooks[].id must be unique within webhooks[]'
                 # R8: run and instruction are mutually exclusive on every step
-                - rule: "!has(self.steps) || self.steps.all(s, !(has(s.run) && has(s.instruction)))"
-                  message: "step cannot define both run and instruction"
+                - rule: '!has(self.steps) || self.steps.all(s, !(has(s.run) && has(s.instruction)))'
+                  message: 'step cannot define both run and instruction'
                 # R9: built-in workflows require exactly one executable step shape
-                - rule: "!has(self.steps) || has(self.coordinatorImage) || self.steps.all(s, has(s.run) != has(s.instruction))"
-                  message: "step must have exactly one of: run, instruction unless spec.coordinatorImage is set"
+                - rule: '!has(self.steps) || has(self.coordinatorImage) || self.steps.all(s, has(s.run) != has(s.instruction))'
+                  message: 'step must have exactly one of: run, instruction unless spec.coordinatorImage is set'
                 # R10: run steps cannot also declare a step agent
-                - rule: "!has(self.steps) || self.steps.all(s, !(has(s.run) && has(s.agent)))"
-                  message: "step cannot define both run and agent"
+                - rule: '!has(self.steps) || self.steps.all(s, !(has(s.run) && has(s.agent)))'
+                  message: 'step cannot define both run and agent'
                 # D13: at most one oauth-broker id across agent and steps[].agent.
                 # kubectl apply bypasses control-api; this is the cluster gate.
                 - rule: "!(((has(self.agent) && has(self.agent.provider) && self.agent.provider == 'codex-subscription') || (has(self.steps) && self.steps.exists(s, has(s.agent) && has(s.agent.provider) && s.agent.provider == 'codex-subscription'))) && ((has(self.agent) && has(self.agent.provider) && self.agent.provider == 'grok-subscription') || (has(self.steps) && self.steps.exists(s, has(s.agent) && has(s.agent.provider) && s.agent.provider == 'grok-subscription'))))"
-                  message: "a WorkflowRecipe may declare at most one oauth-broker provider"
+                  message: 'a WorkflowRecipe may declare at most one oauth-broker provider'
                 # R11: snippet MCP tool allowlists must be explicit; no wildcard in v1
                 - rule: "!has(self.steps) || self.steps.all(s, !has(s.run) || !has(s.run.capabilities) || !has(s.run.capabilities.mcp) || !has(s.run.capabilities.mcp.allowedTools) || !has(s.run.capabilities.mcp.allowedTools.include) || s.run.capabilities.mcp.allowedTools.include.all(t, !t.contains('*')))"
-                  message: "snippet mcp allowedTools.include must not contain wildcards"
+                  message: 'snippet mcp allowedTools.include must not contain wildcards'
                 # R12: public runtime egress intent only accepts public DNS hostnames unless explicit public-web is selected
                 - rule: "!has(self.runtimeEgress) || !has(self.runtimeEgress.http) || ((has(self.runtimeEgress.http.egressClass) && self.runtimeEgress.http.egressClass == 'public-web') ? (!has(self.runtimeEgress.http.allowedHosts) || size(self.runtimeEgress.http.allowedHosts) == 0) : (!has(self.runtimeEgress.http.allowedHosts) || self.runtimeEgress.http.allowedHosts.all(h, h.contains('.') && !h.matches('^([0-9]{1,3}[.]){3}[0-9]{1,3}$') && h != 'localhost' && !h.endsWith('.localhost') && !h.endsWith('.local') && !h.endsWith('.internal') && !h.endsWith('.svc') && !h.endsWith('.cluster.local') && h != 'kubernetes.default' && h != 'metadata.goog')))"
-                  message: "runtimeEgress.http.allowedHosts must contain public DNS hostnames for exact-host and must be omitted for public-web"
+                  message: 'runtimeEgress.http.allowedHosts must contain public DNS hostnames for exact-host and must be omitted for public-web'
                 # R13: snippet HTTP capabilities must be backed by shared runtime egress intent
                 - rule: "!has(self.steps) || self.steps.all(s, !has(s.run) || !has(s.run.capabilities) || !has(s.run.capabilities.http) || ((has(s.run.capabilities.http.egressClass) && s.run.capabilities.http.egressClass == 'public-web') ? (has(self.runtimeEgress) && has(self.runtimeEgress.http) && has(self.runtimeEgress.http.egressClass) && self.runtimeEgress.http.egressClass == 'public-web' && (!has(s.run.capabilities.http.allowedHosts) || size(s.run.capabilities.http.allowedHosts) == 0)) : (!has(s.run.capabilities.http.allowedHosts) || (has(self.runtimeEgress) && has(self.runtimeEgress.http) && has(self.runtimeEgress.http.allowedHosts) && s.run.capabilities.http.allowedHosts.all(h, h in self.runtimeEgress.http.allowedHosts)))))"
-                  message: "snippet HTTP exact-host allowedHosts must be declared in spec.runtimeEgress.http.allowedHosts; public-web requires spec.runtimeEgress.http.egressClass public-web and no allowedHosts"
+                  message: 'snippet HTTP exact-host allowedHosts must be declared in spec.runtimeEgress.http.allowedHosts; public-web requires spec.runtimeEgress.http.egressClass public-web and no allowedHosts'
                 # R14: snippet MCP is never wildcard/implicit; tools must be stated with intent
-                - rule: "!has(self.steps) || self.steps.all(s, !has(s.run) || !has(s.run.capabilities) || !has(s.run.capabilities.mcp) || !has(s.run.capabilities.mcp.servers) || size(s.run.capabilities.mcp.servers) == 0 || (has(s.run.capabilities.mcp.allowedTools) && has(s.run.capabilities.mcp.allowedTools.include) && size(s.run.capabilities.mcp.allowedTools.include) > 0))"
-                  message: "snippet mcp servers require explicit allowedTools.include"
+                - rule: '!has(self.steps) || self.steps.all(s, !has(s.run) || !has(s.run.capabilities) || !has(s.run.capabilities.mcp) || !has(s.run.capabilities.mcp.servers) || size(s.run.capabilities.mcp.servers) == 0 || (has(s.run.capabilities.mcp.allowedTools) && has(s.run.capabilities.mcp.allowedTools.include) && size(s.run.capabilities.mcp.allowedTools.include) > 0))'
+                  message: 'snippet mcp servers require explicit allowedTools.include'
                 # R15: ui.workloadRef must reference an existing workloads[].id
-                - rule: "!has(self.ui) || (has(self.workloads) && self.workloads.exists(w, w.id == self.ui.workloadRef))"
-                  message: "spec.ui.workloadRef must reference an existing workloads[].id"
+                - rule: '!has(self.ui) || (has(self.workloads) && self.workloads.exists(w, w.id == self.ui.workloadRef))'
+                  message: 'spec.ui.workloadRef must reference an existing workloads[].id'
                 # R16: the UI workload must be type=deployment, replicas=1, no transport
                 - rule: "!has(self.ui) || self.workloads.exists(w, w.id == self.ui.workloadRef && w.type == 'deployment' && !has(w.transport) && (!has(w.replicas) || w.replicas == 1))"
-                  message: "the workload referenced by spec.ui.workloadRef must be type=deployment with replicas=1 and no transport"
+                  message: 'the workload referenced by spec.ui.workloadRef must be type=deployment with replicas=1 and no transport'
                 # R17: ui.egress.internal[].workloadRef must reference an existing
                 # workloads[].id that is itself NOT an MCP server (no transport).
-                - rule: "!has(self.ui) || !has(self.ui.egress) || !has(self.ui.egress.internal) || self.ui.egress.internal.all(e, self.workloads.exists(w, w.id == e.workloadRef && !has(w.transport)))"
-                  message: "spec.ui.egress.internal[].workloadRef must reference a non-MCP-server workload"
+                - rule: '!has(self.ui) || !has(self.ui.egress) || !has(self.ui.egress.internal) || self.ui.egress.internal.all(e, self.workloads.exists(w, w.id == e.workloadRef && !has(w.transport)))'
+                  message: 'spec.ui.egress.internal[].workloadRef must reference a non-MCP-server workload'
                 # R18: ui.defaultPath must not begin with a scheme prefix that
                 # the field-level regex doesn't catch when the URL also starts
                 # with '/'. The regex enforces the leading '/'; this rule blocks
                 # values whose first segment matches /<scheme>: forms.
                 - rule: "!has(self.ui) || !has(self.ui.defaultPath) || !self.ui.defaultPath.matches('^/[a-zA-Z][a-zA-Z0-9+.\\\\-]*:.*')"
-                  message: "spec.ui.defaultPath must not include a scheme prefix"
+                  message: 'spec.ui.defaultPath must not include a scheme prefix'
                 # O1: oauthClients have TWO consumers — the sandbox UI embed
                 # (foreground end-user OAuth via the callback IPC) AND
                 # background workloads (Path B: backgroundAccess: true clients
@@ -179,10 +179,10 @@ spec:
                         w.oauthClientRefs.exists(r, r == c.id)
                       )
                     )
-                  message: "spec.oauthClients requires either spec.ui or a workloads[].oauthClientRefs consumer for every client"
+                  message: 'spec.oauthClients requires either spec.ui or a workloads[].oauthClientRefs consumer for every client'
                 # O3: oauthClients[].id must be unique within oauthClients[].
-                - rule: "!has(self.oauthClients) || self.oauthClients.all(c, self.oauthClients.exists_one(t, t.id == c.id))"
-                  message: "spec.oauthClients[].id must be unique within oauthClients[]"
+                - rule: '!has(self.oauthClients) || self.oauthClients.all(c, self.oauthClients.exists_one(t, t.id == c.id))'
+                  message: 'spec.oauthClients[].id must be unique within oauthClients[]'
                 # O4: workloads[].oauthClientRefs is for background OAuth
                 # (Path B) — MCP transport workloads reach providers via the
                 # MCP proxy and must not also receive a broker-token mount.
@@ -195,17 +195,17 @@ spec:
                       !has(w.oauthClientRefs) ||
                       size(w.oauthClientRefs) == 0
                     )
-                  message: "workloads[].oauthClientRefs is not allowed on MCP transport workloads"
+                  message: 'workloads[].oauthClientRefs is not allowed on MCP transport workloads'
                 # PS1: pluginWorkloadSdk must declare at least one capability family.
-                - rule: "!has(self.pluginWorkloadSdk) || (has(self.pluginWorkloadSdk.promptBridge) || has(self.pluginWorkloadSdk.clientNotifications))"
-                  message: "spec.pluginWorkloadSdk must declare at least one capability family (promptBridge or clientNotifications)"
+                - rule: '!has(self.pluginWorkloadSdk) || (has(self.pluginWorkloadSdk.promptBridge) || has(self.pluginWorkloadSdk.clientNotifications))'
+                  message: 'spec.pluginWorkloadSdk must declare at least one capability family (promptBridge or clientNotifications)'
                 # PS2: no wildcard event types at the CRD level — only explicit
                 # admin grants (control-api) may use wildcards.
                 - rule: "!has(self.pluginWorkloadSdk) || !has(self.pluginWorkloadSdk.clientNotifications) || self.pluginWorkloadSdk.clientNotifications.allowedEventTypes.all(t, !t.contains('*'))"
-                  message: "spec.pluginWorkloadSdk.clientNotifications.allowedEventTypes must not contain wildcards"
+                  message: 'spec.pluginWorkloadSdk.clientNotifications.allowedEventTypes must not contain wildcards'
                 # PS3: no wildcard models at the CRD level.
                 - rule: "!has(self.pluginWorkloadSdk) || !has(self.pluginWorkloadSdk.promptBridge) || !has(self.pluginWorkloadSdk.promptBridge.allowedModels) || self.pluginWorkloadSdk.promptBridge.allowedModels.all(m, !m.contains('*'))"
-                  message: "spec.pluginWorkloadSdk.promptBridge.allowedModels must not contain wildcards"
+                  message: 'spec.pluginWorkloadSdk.promptBridge.allowedModels must not contain wildcards'
                 # PS4 (allowedCallers reference existing workloads[].id) is
                 # enforced in the WRC reconciler — like W2, the nested lookup
                 # is too costly at the workload ceiling.
@@ -269,7 +269,7 @@ spec:
                   type: string
                   minLength: 1
                   maxLength: 512
-                  pattern: "^[A-Za-z0-9][A-Za-z0-9._/:@-]*$"
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._/:@-]*$'
                   description: >-
                     Operator-approved custom coordinator image. When set, WRC may
                     start the workflow coordinator Pod with this image after
@@ -309,7 +309,7 @@ spec:
                           items:
                             type: string
                             maxLength: 253
-                            pattern: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+                            pattern: '^[a-z0-9][a-z0-9.-]*[a-z0-9]$'
                 agent:
                   type: object
                   description: >-
@@ -323,7 +323,7 @@ spec:
                     model:
                       type: string
                       maxLength: 128
-                      pattern: "^[A-Za-z0-9._:/-]{1,128}$"
+                      pattern: '^[A-Za-z0-9._:/-]{1,128}$'
                       description: LLM model name (e.g., glm-4.7, gpt-4o, claude-3-opus).
                     provider:
                       type: string
@@ -331,7 +331,31 @@ spec:
                       # transport is mono-credential and cannot deliver Bedrock's key
                       # pair nor azure's required non-secret AZURE_OPENAI_ENDPOINT —
                       # fail at admission, not mid-workflow (see workflowService).
-                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription, grok-subscription]
+                      enum:
+                        [
+                          openai,
+                          claude,
+                          zai,
+                          bailian,
+                          vertex,
+                          openrouter,
+                          gemini,
+                          deepseek,
+                          groq,
+                          together,
+                          fireworks,
+                          mistral,
+                          xai,
+                          cerebras,
+                          deepinfra,
+                          perplexity,
+                          moonshot,
+                          nebius,
+                          novita,
+                          minimax,
+                          codex-subscription,
+                          grok-subscription,
+                        ]
                       description: LLM provider.
                     secretRef:
                       type: object
@@ -368,17 +392,17 @@ spec:
                   items:
                     type: object
                     x-kubernetes-validations:
-                      - rule: "!(has(self.run) && has(self.instruction))"
-                        message: "step cannot define both run and instruction"
-                      - rule: "!(has(self.run) && has(self.agent))"
-                        message: "step cannot define both run and agent"
+                      - rule: '!(has(self.run) && has(self.instruction))'
+                        message: 'step cannot define both run and instruction'
+                      - rule: '!(has(self.run) && has(self.agent))'
+                        message: 'step cannot define both run and agent'
                     required:
                       - id
                     properties:
                       id:
                         type: string
                         maxLength: 63
-                        pattern: "^[a-z][a-z0-9-]*$"
+                        pattern: '^[a-z][a-z0-9-]*$'
                         description: Unique step identifier.
                       instruction:
                         type: string
@@ -389,7 +413,7 @@ spec:
                         description: TypeScript snippet invocation for steps that do not require an agent.
                         x-kubernetes-validations:
                           - rule: "has(self.type) && self.type == 'snippet' && has(self.language) && has(self.code)"
-                            message: "run must define type=snippet with language and code"
+                            message: 'run must define type=snippet with language and code'
                         properties:
                           type:
                             type: string
@@ -426,7 +450,7 @@ spec:
                                     items:
                                       type: string
                                       maxLength: 253
-                                      pattern: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+                                      pattern: '^[a-z0-9][a-z0-9.-]*[a-z0-9]$'
                               secrets:
                                 type: array
                                 maxItems: 20
@@ -439,7 +463,7 @@ spec:
                                     alias:
                                       type: string
                                       maxLength: 63
-                                      pattern: "^[A-Za-z][A-Za-z0-9_]*$"
+                                      pattern: '^[A-Za-z][A-Za-z0-9_]*$'
                                     secretRef:
                                       type: object
                                       required: [name, key]
@@ -520,7 +544,7 @@ spec:
                                         items:
                                           type: string
                                           maxLength: 128
-                                          pattern: "^[A-Za-z0-9._:/-]{1,128}$"
+                                          pattern: '^[A-Za-z0-9._:/-]{1,128}$'
                                       maxOutputTokens:
                                         type: integer
                                         minimum: 1
@@ -612,13 +636,37 @@ spec:
                           model:
                             type: string
                             maxLength: 128
-                            pattern: "^[A-Za-z0-9._:/-]{1,128}$"
+                            pattern: '^[A-Za-z0-9._:/-]{1,128}$'
                           provider:
                             type: string
                             # bedrock AND azure intentionally absent (mono-credential
                             # WRC transport; see the comment on the first llm provider
                             # enum above).
-                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription, grok-subscription]
+                            enum:
+                              [
+                                openai,
+                                claude,
+                                zai,
+                                bailian,
+                                vertex,
+                                openrouter,
+                                gemini,
+                                deepseek,
+                                groq,
+                                together,
+                                fireworks,
+                                mistral,
+                                xai,
+                                cerebras,
+                                deepinfra,
+                                perplexity,
+                                moonshot,
+                                nebius,
+                                novita,
+                                minimax,
+                                codex-subscription,
+                                grok-subscription,
+                              ]
                           soul:
                             type: string
                             description: Per-step SOUL content override.
@@ -703,10 +751,10 @@ spec:
                     storageSize:
                       type: string
                       description: PVC storage size (e.g. "256Mi", "1Gi"). Default 256Mi.
-                      pattern: "^[0-9]+(Mi|Gi)$"
+                      pattern: '^[0-9]+(Mi|Gi)$'
                   x-kubernetes-validations:
                     - rule: "!has(self.claimName) || (has(self.destination) && self.destination == 'pvc')"
-                      message: "output.claimName requires output.destination=pvc"
+                      message: 'output.claimName requires output.destination=pvc'
                 scheduling:
                   type: object
                   description: >-
@@ -722,7 +770,7 @@ spec:
                       type: string
                       maxLength: 63
                       description: IANA timezone name. Defaults to UTC if omitted.
-                      default: "UTC"
+                      default: 'UTC'
                     concurrencyPolicy:
                       type: string
                       enum: [Forbid, Replace, Allow]
@@ -795,7 +843,7 @@ spec:
                           description: Five-field cron expression (min hour dom mon dow).
                         timezone:
                           type: string
-                          default: "UTC"
+                          default: 'UTC'
                           description: IANA timezone name.
                         concurrencyPolicy:
                           type: string
@@ -867,7 +915,7 @@ spec:
                   properties:
                     workloadRef:
                       type: string
-                      pattern: "^[a-z][a-z0-9-]*$"
+                      pattern: '^[a-z][a-z0-9-]*$'
                       maxLength: 63
                       description: >-
                         ID of the workloads[] entry that serves the UI HTTP
@@ -906,7 +954,7 @@ spec:
                       # defence-in-depth check for the protocol-relative
                       # case using CEL.
                       pattern: "^/([^/\\s][^\\s]*)?$"
-                      default: "/"
+                      default: '/'
                       description: >-
                         Path the embed loads on first open. Must start with
                         a single '/' (no protocol-relative URLs). Whitespace
@@ -938,7 +986,7 @@ spec:
                             properties:
                               workloadRef:
                                 type: string
-                                pattern: "^[a-z][a-z0-9-]*$"
+                                pattern: '^[a-z][a-z0-9-]*$'
                                 maxLength: 63
                               port:
                                 type: integer
@@ -983,7 +1031,7 @@ spec:
                     # CEL `!= null` is rejected by the schema validator; use
                     # `has()` instead, which is the idiomatic null-check.
                     - rule: "!has(self.defaultPath) || !self.defaultPath.startsWith('//')"
-                      message: "ui.defaultPath must not be a protocol-relative URL"
+                      message: 'ui.defaultPath must not be a protocol-relative URL'
                 workloads:
                   type: array
                   minItems: 0
@@ -1005,12 +1053,12 @@ spec:
                       - image
                     x-kubernetes-validations:
                       - rule: "self.type != 'cronjob' || has(self.schedule)"
-                        message: "CronJob workloads must specify a schedule"
+                        message: 'CronJob workloads must specify a schedule'
                     properties:
                       id:
                         type: string
                         description: Unique identifier within this recipe.
-                        pattern: "^[a-z][a-z0-9-]*$"
+                        pattern: '^[a-z][a-z0-9-]*$'
                         # DNS-1123 label limit; bounds CEL string-compare cost.
                         maxLength: 63
                       type:
@@ -1187,7 +1235,7 @@ spec:
                         items:
                           type: string
                           maxLength: 63
-                          pattern: "^[a-z0-9-]{1,63}$"
+                          pattern: '^[a-z0-9-]{1,63}$'
                       egressBindings:
                         type: array
                         maxItems: 20
@@ -1359,38 +1407,38 @@ spec:
                     x-kubernetes-validations:
                       # W4: methods must include POST when specified
                       - rule: "!has(self.methods) || ('POST' in self.methods)"
-                        message: "spec.webhooks[].methods must include POST when specified"
+                        message: 'spec.webhooks[].methods must include POST when specified'
                       # W7: secretRef required for all schemes EXCEPT jwt-bearer-jwks
                       - rule: "self.verification.scheme == 'jwt-bearer-jwks' || has(self.verification.secretRef)"
-                        message: "spec.webhooks[].verification.secretRef is required for all schemes except jwt-bearer-jwks"
+                        message: 'spec.webhooks[].verification.secretRef is required for all schemes except jwt-bearer-jwks'
                       # W8: replay required iff scheme == hmac-sha256-timestamp-body
                       - rule: "self.verification.scheme != 'hmac-sha256-timestamp-body' || has(self.replay)"
-                        message: "spec.webhooks[].replay is required when verification.scheme is hmac-sha256-timestamp-body"
+                        message: 'spec.webhooks[].replay is required when verification.scheme is hmac-sha256-timestamp-body'
                       # W9: jwksUrl/issuer/audience required iff scheme == jwt-bearer-jwks
                       - rule: "self.verification.scheme != 'jwt-bearer-jwks' || (has(self.verification.jwksUrl) && has(self.verification.issuer) && has(self.verification.audience))"
-                        message: "spec.webhooks[].verification must set jwksUrl, issuer, and audience when scheme is jwt-bearer-jwks"
+                        message: 'spec.webhooks[].verification must set jwksUrl, issuer, and audience when scheme is jwt-bearer-jwks'
                       # W12: jwksUrl https:// only with a DNS host that has at
                       # least one dot (rejects IP literals via the [a-zA-Z] start
                       # and rejects localhost via the required dot). Reconciler
                       # does deeper rejection (RFC1918 host resolution etc.).
                       - rule: "self.verification.scheme != 'jwt-bearer-jwks' || self.verification.jwksUrl.matches('^https://[a-zA-Z][a-zA-Z0-9-]*(\\\\.[a-zA-Z][a-zA-Z0-9-]*)+(:[0-9]+)?(/.*)?$')"
-                        message: "spec.webhooks[].verification.jwksUrl must be https:// with a multi-label DNS host (no IP literals, no localhost)"
+                        message: 'spec.webhooks[].verification.jwksUrl must be https:// with a multi-label DNS host (no IP literals, no localhost)'
                       # W13: methods may include GET only when verification.setupHandshake
                       # is set. The handshake is the only mechanism that admits unsigned
                       # GETs — without it, the gateway has no rule for them.
                       - rule: "!('GET' in self.methods) || has(self.verification.setupHandshake)"
-                        message: "spec.webhooks[].methods may include GET only when verification.setupHandshake is set"
+                        message: 'spec.webhooks[].methods may include GET only when verification.setupHandshake is set'
                       # W14: meta-hub-challenge requires setupHandshake.secretRef (carries
                       # the provider-side verify token) AND methods to include GET (the
                       # strategy's request shape is a GET).
                       - rule: "!has(self.verification.setupHandshake) || self.verification.setupHandshake.strategy != 'meta-hub-challenge' || (has(self.verification.setupHandshake.secretRef) && 'GET' in self.methods)"
-                        message: "spec.webhooks[].verification.setupHandshake.strategy=meta-hub-challenge requires setupHandshake.secretRef and methods to include GET"
+                        message: 'spec.webhooks[].verification.setupHandshake.strategy=meta-hub-challenge requires setupHandshake.secretRef and methods to include GET'
                     properties:
                       id:
                         type: string
                         # W1 uniqueness enforced at spec level
                         maxLength: 63
-                        pattern: "^[a-z0-9-]{1,63}$"
+                        pattern: '^[a-z0-9-]{1,63}$'
                         description: >-
                           Stable identifier within this recipe's webhooks[].
                           Appears in the public URL.
@@ -1398,7 +1446,7 @@ spec:
                         type: string
                         # W2 cross-reference enforced in WRC reconciler.
                         maxLength: 63
-                        pattern: "^[a-z][a-z0-9-]*$"
+                        pattern: '^[a-z][a-z0-9-]*$'
                         description: >-
                           References workloads[].id. Must point to a workload
                           of type=deployment with no transport (MCP-server
@@ -1481,7 +1529,7 @@ spec:
                               type: string
                               maxLength: 253
                               # http(s)://host[:port], no path, no trailing slash, no wildcards
-                              pattern: "^https?://[a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]+)?$"
+                              pattern: '^https?://[a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]+)?$'
                       verification:
                         type: object
                         required: [scheme]
@@ -1516,7 +1564,7 @@ spec:
                             type: string
                             # W10
                             maxLength: 64
-                            pattern: "^[a-zA-Z][a-zA-Z0-9-]{0,63}$"
+                            pattern: '^[a-zA-Z][a-zA-Z0-9-]{0,63}$'
                             description: >-
                               HTTP header that carries the signature.
                               Required for hmac-* schemes (validated at
@@ -1538,7 +1586,7 @@ spec:
                             type: string
                             # Reuses W10 header-name shape.
                             maxLength: 64
-                            pattern: "^[a-zA-Z][a-zA-Z0-9-]{0,63}$"
+                            pattern: '^[a-zA-Z][a-zA-Z0-9-]{0,63}$'
                             description: >-
                               static-bearer only. Optional HTTP header to
                               read the token from. Defaults to
@@ -1623,7 +1671,7 @@ spec:
                             type: string
                             # W10 also applies here
                             maxLength: 64
-                            pattern: "^[a-zA-Z][a-zA-Z0-9-]{0,63}$"
+                            pattern: '^[a-zA-Z][a-zA-Z0-9-]{0,63}$'
                           toleranceSec:
                             type: integer
                             # W11
@@ -1661,7 +1709,7 @@ spec:
                         type: string
                         # O3 uniqueness enforced at spec level
                         maxLength: 63
-                        pattern: "^[a-z0-9-]{1,63}$"
+                        pattern: '^[a-z0-9-]{1,63}$'
                         description: >-
                           Stable identifier within this recipe's
                           oauthClients[]. Embed surfaces it as the
@@ -1764,7 +1812,7 @@ spec:
                           items:
                             type: string
                             maxLength: 128
-                            pattern: "^[A-Za-z0-9._:/-]{1,128}$"
+                            pattern: '^[A-Za-z0-9._:/-]{1,128}$'
                         maxOutputTokens:
                           type: integer
                           minimum: 1
@@ -1886,7 +1934,7 @@ spec:
                     properties:
                       id:
                         type: string
-                        pattern: "^[a-z][a-z0-9-]*$"
+                        pattern: '^[a-z][a-z0-9-]*$'
                       type:
                         type: string
                         enum:
@@ -2098,7 +2146,17 @@ spec:
                   properties:
                     phase:
                       type: string
-                      enum: [pending, initializing, running, recovering, completed, failed, cancelled]
+                      enum:
+                        [
+                          pending,
+                          initializing,
+                          running,
+                          recovering,
+                          authorization_paused,
+                          completed,
+                          failed,
+                          cancelled,
+                        ]
                       description: Current workflow execution phase.
                     message:
                       type: string
@@ -2271,9 +2329,9 @@ spec:
                       status:
                         type: string
                         enum:
-                          - "True"
-                          - "False"
-                          - "Unknown"
+                          - 'True'
+                          - 'False'
+                          - 'Unknown'
                       lastTransitionTime:
                         type: string
                         format: date-time

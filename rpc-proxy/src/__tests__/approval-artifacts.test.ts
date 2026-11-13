@@ -38,6 +38,15 @@ const serviceMock = vi.hoisted(() => ({
 }))
 
 const controlApiMock = vi.hoisted(() => ({
+  ControlApiHostAccessRejectedError: class extends Error {
+    constructor(
+      readonly status: number,
+      readonly denialCode: string | null = null
+    ) {
+      super(`Control API rejected host access (${status})`)
+      this.name = 'ControlApiHostAccessRejectedError'
+    }
+  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
   // Stage 5 wake-and-hold consults the control-api wake endpoint whenever an
@@ -665,6 +674,11 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
       .post('/rpc/hosts/chatllm/tasks/abc/cancel')
       .set('authorization', 'Bearer token')
       .expect(404)
+    // P-1 parity (merge-plan Addendum M-1): both task routes answer dev's 404
+    // on a Host denial instead of the coded 403, so the live witness is that
+    // resolution ran and no upstream call happened.
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledOnce()
+    expect(serviceMock.forwardCancelToHost).not.toHaveBeenCalled()
   })
 
   it('returns 502 when upstream fetch rejects and the host is not stateless', async () => {

@@ -37,7 +37,7 @@
  *   • Forbid: a matured tick is skipped while a LIVE non-terminal run of the
  *     same recipe exists, whatever its trigger source. Live means
  *       - `Pending` created less than FORBID_PENDING_ACTIVE_BOUND_SECONDS ago, or
- *       - `Running` started less than
+ *       - `Running` or `AuthorizationPaused` started less than
  *         min(max_duration_seconds ?? cap, cap) + FORBID_RUNNING_GRACE_SECONDS
  *         ago, with cap = FORBID_RUNNING_MAX_DURATION_CAP_SECONDS.
  *     Nothing terminalises a `Pending` row whose child CR never got created,
@@ -125,7 +125,7 @@ export const FORBID_SKIP_STREAK_CAPACITY = 1000
 /** A live non-terminal run (see the CHECK on `workflow_runs.phase`). */
 interface ActiveRecipeRun {
   run_id: string
-  phase: 'Pending' | 'Running'
+  phase: 'Pending' | 'Running' | 'AuthorizationPaused'
   created_at: Date
   started_at: Date | null
 }
@@ -543,7 +543,7 @@ export async function findActiveRunForRecipe(
         AND (
               (phase = 'Pending'
                 AND created_at > now() - make_interval(secs => $3))
-           OR (phase = 'Running'
+           OR (phase IN ('Running', 'AuthorizationPaused')
                 AND COALESCE(started_at, created_at) > now() - make_interval(secs => LEAST(COALESCE(max_duration_seconds, $4), $4) + $5))
             )
       ORDER BY created_at ASC

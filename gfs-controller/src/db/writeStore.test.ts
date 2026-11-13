@@ -332,6 +332,9 @@ describe("PgTransactor legacy contract", () => {
     async connect() {
       return {
         query: async (text: string) => { this.queries.push(text); if (this.failAt && text.includes(this.failAt)) throw new Error(`fail at ${text}`); return { rows: [] }; },
+        // The checkout error-event surface; this fake never emits.
+        on: () => undefined,
+        removeListener: () => undefined,
         release: (error?: Error | boolean) => { this.released = true; this.releaseError = error; },
       };
     }

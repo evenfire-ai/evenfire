@@ -38,7 +38,7 @@ describe('workflowConversationRunReadService', () => {
     expect(result.lastRun).toMatchObject({ phase: 'Succeeded' })
     const [sql, params] = query.mock.calls[0]
     expect(String(sql)).toContain('COUNT(*) FILTER')
-    expect(String(sql)).toContain("phase IN ('Pending', 'Running')")
+    expect(String(sql)).toContain("phase IN ('Pending', 'Running', 'AuthorizationPaused')")
     expect(String(sql)).toContain('trigger_caller_key = $5')
     expect(String(sql)).toContain("'conversationId' = $6")
     expect(params).toEqual([

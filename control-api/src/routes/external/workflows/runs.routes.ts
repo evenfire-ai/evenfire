@@ -3,6 +3,10 @@ import { asyncHandler } from '../../../http/asyncHandler.js'
 import type { K8sGateway } from '../../../k8s.js'
 import { K8sNotFoundError } from '../../../services/resourceService.js'
 import {
+  WorkflowAuthorityError,
+  requireWorkflowActionAuthority,
+} from '../../../services/workflows/workflowAuthorityBindingService.js'
+import {
   ensureRecipeAuthorized,
   isRecipeNamespaceAllowed,
 } from '../../../services/workflows/workflowRecipeAccessService.js'
@@ -15,10 +19,15 @@ import { listCanonicalRuns } from '../../../services/workflows/workflowRunReadSe
 import { requireBoundExternalWorkflowCaller } from '../../workflows/shared/auth.js'
 import { parseLimit } from '../../workflows/shared/validation.js'
 import { externalWorkflowReadAdmission } from './admission.js'
+import { auditAuthorizedWorkflowRead } from './readAudit.js'
 
 const BASE = '/external/workflows'
 
 function sendArtifactError(res: Response, err: unknown): void {
+  if (err instanceof WorkflowAuthorityError) {
+    res.status(err.status).json({ error: err.code })
+    return
+  }
   if (err instanceof WorkflowArtifactHttpError) {
     res.status(err.status).json({ error: err.message })
     return
@@ -63,8 +72,30 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
         return
       }
 
+      let authority: Awaited<ReturnType<typeof requireWorkflowActionAuthority>>
+      try {
+        authority = await requireWorkflowActionAuthority({
+          req,
+          caller,
+          operationId: 'workflow.read',
+          resourceType: 'workflow_recipe',
+          resourceLogicalId: `${ns}/${name}`,
+          target: Object.freeze({ recipeNamespace: ns, recipeName: name }),
+          gateway,
+        })
+      } catch (err) {
+        sendArtifactError(res, err)
+        return
+      }
+
       const limit = parseLimit(req.query?.limit)
       const items = await listCanonicalRuns(ns, name, limit, caller)
+      if (authority) {
+        auditAuthorizedWorkflowRead(authority, {
+          entityType: 'workflow_recipe',
+          entityId: `${ns}/${name}`,
+        })
+      }
       res.json({ items, count: items.length })
     })
   )
@@ -77,6 +108,17 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
       if (!caller) return
 
       try {
+        const authority = await requireWorkflowActionAuthority({
+          req,
+          caller,
+          operationId: 'workflow.artifact.list',
+          resourceType: 'workflow_run',
+          resourceLogicalId: req.params.runId,
+          target: Object.freeze({
+            runId: req.params.runId,
+          }),
+          gateway,
+        })
         const artifacts = await listWorkflowRunArtifacts({
           gateway,
           caller,
@@ -84,6 +126,12 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
           recipeName: req.params.name,
           runId: req.params.runId,
         })
+        if (authority) {
+          auditAuthorizedWorkflowRead(authority, {
+            entityType: 'workflow_run',
+            entityId: req.params.runId,
+          })
+        }
         res.json({ artifacts })
       } catch (err) {
         sendArtifactError(res, err)
@@ -99,6 +147,18 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
       if (!caller) return
 
       try {
+        const authority = await requireWorkflowActionAuthority({
+          req,
+          caller,
+          operationId: 'workflow.artifact.read',
+          resourceType: 'workflow_artifact',
+          resourceLogicalId: `${req.params.runId}/${req.params.artifactName}`,
+          target: Object.freeze({
+            runId: req.params.runId,
+            artifactName: req.params.artifactName,
+          }),
+          gateway,
+        })
         const result = await downloadWorkflowRunArtifact({
           gateway,
           caller,
@@ -107,6 +167,12 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
           runId: req.params.runId,
           artifactName: req.params.artifactName,
         })
+        if (authority) {
+          auditAuthorizedWorkflowRead(authority, {
+            entityType: 'workflow_artifact',
+            entityId: `${req.params.runId}/${req.params.artifactName}`,
+          })
+        }
         sendDownloadResult(res, result)
       } catch (err) {
         sendArtifactError(res, err)

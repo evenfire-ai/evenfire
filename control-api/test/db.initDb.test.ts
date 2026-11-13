@@ -27,7 +27,7 @@ describe('db.initDb', () => {
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('holds one advisory lock while partitioning legacy and PR1 migration transactions', async () => {
+  it('holds one advisory lock while partitioning legacy and composed migration transactions', async () => {
     const { initDb } = await import('../src/db.js')
 
     await initDb()
@@ -68,9 +68,16 @@ describe('db.initDb', () => {
     expect(sqls.some(sql => sql.includes('DROP TABLE IF EXISTS workflow_run_outputs'))).toBe(false)
     expect(sqls).not.toContain('ROLLBACK')
     // The committed password-admission rollout fence, one dev batch through
-    // 0136_llm_catalog_dismissed_backfill (as in dev), then two PR1 versions.
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(4)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(4)
+    // 0136_llm_catalog_dismissed_backfill (as in dev), then two PR1 versions,
+    // then the six PR2 versions: 18 transactions, because a version with
+    // post-schema work commits its schema, then each constraint validation, then
+    // its receipt (0139: 1 + 4 + 1, 0140: 1 + 1 + 1, 0141-0142: 1 each,
+    // 0143: 1 + 1 + 1, 0144: 1 + 2 + 1).
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(22)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(22)
+    expect(sqls.filter(sql => /^ALTER TABLE \w+ VALIDATE CONSTRAINT \w+$/.test(sql))).toHaveLength(
+      8
+    )
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)

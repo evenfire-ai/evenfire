@@ -16,7 +16,7 @@ const OTHER_NS = 'p3-forbid-other'
 type Fixture = {
   recipe: string
   namespace?: string
-  phase: 'Pending' | 'Running' | 'Succeeded'
+  phase: 'Pending' | 'Running' | 'AuthorizationPaused' | 'Succeeded'
   /** Recipe whose run this row is (defaults to `recipe`). */
   runOf?: string
   /** Run-scoped child CR name; never the identity the lookup matches on. */
@@ -107,6 +107,17 @@ const cases: Array<{ name: string; blocks: boolean; fixture: Fixture }> = [
     fixture: {
       recipe: 'running-within-grace',
       phase: 'Running',
+      createdMinutesAgo: 13,
+      startedMinutesAgo: 12,
+      maxDurationSeconds: 600,
+    },
+  },
+  {
+    name: 'an authorization-paused run inside max_duration_seconds + grace blocks',
+    blocks: true,
+    fixture: {
+      recipe: 'authorization-paused-within-grace',
+      phase: 'AuthorizationPaused',
       createdMinutesAgo: 13,
       startedMinutesAgo: 12,
       maxDurationSeconds: 600,

@@ -230,14 +230,15 @@ jobs:
               - 'workflow-approval-request-reader/**'
             control-api:
               - 'control-api/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
               - 'packages/jwt-key-policy/**'
               - 'packages/display-field/**'
               - 'packages/llm-provider-attempt-contract/**'
-              - 'packages/grok-provider-attempt-contract/**'
               - 'packages/llm-providers/**'
+              - 'packages/grok-provider-attempt-contract/**'
             control-ui:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'
@@ -258,15 +259,17 @@ jobs:
               - 'packages/llm-providers/**'
             mcp-host:
               - 'mcp-host/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
               - 'packages/gfs-interaction-policy/**'
-              - 'packages/llm-providers/**'
             mcp-proxy:
               - 'mcp-proxy/**'
             gfs-controller:
               - 'gfs-controller/**'
+              - 'packages/action-context-contracts/**'
             nginx-egress-proxy:
               - 'nginx-egress-proxy/**'
             profile-ui:
@@ -275,9 +278,11 @@ jobs:
               - 'packages/frontend-components/**'
             rpc-proxy:
               - 'rpc-proxy/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/jwt-key-policy/**'
             workflow-recipes:
               - 'workflow-recipes/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-sdk/**'
               - 'packages/workflow-recipe-capability-policy/**'
@@ -285,14 +290,15 @@ jobs:
               - 'packages/network-policy-core/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
-              - 'packages/grok-provider-attempt-contract/**'
               - 'packages/llm-providers/**'
+              - 'packages/grok-provider-attempt-contract/**'
               - 'scripts/e2e/**'
               - 'tests/e2e/fixtures/**'
             stdio-bridge:
               - 'stdio-bridge/**'
             workspace-files-controller:
               - 'workspace-files-controller/**'
+              - 'packages/action-context-contracts/**'
             airtable-mcp-server:
               - 'mcp-servers/airtable/**'
             playwright-server:
@@ -417,6 +423,7 @@ jobs:
             changed: ${{ needs.detect.outputs.mcp-proxy }}
           - image: gfs-controller
             path: gfs-controller
+            rooted: true
             changed: ${{ needs.detect.outputs.gfs-controller }}
           - image: nginx-egress-proxy
             path: nginx-egress-proxy
@@ -452,6 +459,7 @@ jobs:
             changed: ${{ needs.detect.outputs.stdio-bridge }}
           - image: workspace-files-controller
             path: workspace-files-controller
+            rooted: true
             changed: ${{ needs.detect.outputs.workspace-files-controller }}
           - image: airtable-mcp-server
             path: mcp-servers/airtable
@@ -539,6 +547,11 @@ jobs:
           MATRIX_IMAGE: ${{ matrix.image }}
           PROFILE_DESKTOP_HANDOFF_ENABLED: ${{ vars.PROFILE_DESKTOP_HANDOFF_ENABLED }}
         run: |
+          set -euo pipefail
+          service_version=unknown
+          if [ -f "$MATRIX_PATH/package.json" ]; then
+            service_version="$(node scripts/ci/resolve-package-version.cjs "$MATRIX_PATH/package.json")"
+          fi
           # Rooted services COPY from sibling directories (packages/*) so their
           # Docker build context must be the repo root and the Dockerfile path
           # is fully qualified.
@@ -549,6 +562,7 @@ jobs:
             echo "context=$MATRIX_PATH" >> "$GITHUB_OUTPUT"
             echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
           fi
+          echo "service-version=$service_version" >> "$GITHUB_OUTPUT"
 
           if [ "$MATRIX_IMAGE" = "profile-ui" ]; then
             handoff_enabled="${PROFILE_DESKTOP_HANDOFF_ENABLED:-false}"
@@ -566,7 +580,12 @@ jobs:
         with:
           context: ${{ steps.buildargs.outputs.context }}
           file: ${{ steps.buildargs.outputs.file }}
-          build-args: ${{ steps.buildargs.outputs.build_args }}
+          # One build-args key: YAML/Actions reject a duplicated key, and the
+          # profile-ui handoff argument is empty for every other image.
+          build-args: |
+            EVENFIRE_SOURCE_REVISION=${{ github.sha }}
+            EVENFIRE_SERVICE_VERSION=${{ steps.buildargs.outputs.service-version }}
+            ${{ steps.buildargs.outputs.build_args }}
           platforms: linux/${{ matrix.arch }}
           # Attestations are disabled per-leg. Provenance attestations don't
           # push cleanly in push-by-digest mode (they need a repo:tag target,

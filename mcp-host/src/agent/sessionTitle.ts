@@ -17,12 +17,8 @@
  * (→ 404). No secret handling here; the title is user content, logged only by
  * length (§5).
  */
+import { validateSessionRenameTitle } from '@clerum/action-context-contracts'
 import type { ConversationManager } from '../core/conversation/conversation'
-import {
-  MAX_TITLE_BYTES,
-  MAX_TITLE_CODE_POINTS,
-  normalizeTitleText,
-} from '../core/conversation/sessionTitle'
 import type { SetTitleResult } from '../server/types'
 import { serializeSessionKey } from '../session'
 
@@ -43,14 +39,11 @@ export async function applySessionTitle(
   // rename policy: non-empty after sanitize, capped at 120 code points / 512
   // bytes. Reject over-cap (400) rather than silently truncating so the user's
   // stored name is never a surprise.
-  const title = normalizeTitleText(rawTitle)
-  if (
-    title.length === 0 ||
-    Array.from(title).length > MAX_TITLE_CODE_POINTS ||
-    Buffer.byteLength(title, 'utf8') > MAX_TITLE_BYTES
-  ) {
+  const validation = validateSessionRenameTitle(rawTitle)
+  if (!validation.ok) {
     return { ok: false as const, reason: 'invalid_title' as const }
   }
+  const title = validation.title
 
   const key = serializeSessionKey({
     userId: userSub,

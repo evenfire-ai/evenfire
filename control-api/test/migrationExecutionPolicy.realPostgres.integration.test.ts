@@ -9,10 +9,13 @@ import { CONTROL_API_MIGRATIONS, type DbClient, assertDbReady, initDb } from '..
 import { migrationSessionBoundsSql } from '../src/migrations/migrationExecutionPolicy.js'
 import {
   PR1_MIGRATION_VERSIONS,
+  RUNNER_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
 import {
   PR1_ONLINE_INDEX_PLAN,
+  PR2_ONLINE_INDEX_PLAN,
+  PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   ensureOnlineIndex,
   expectedIndexDefinition,
   onlineIndex,
@@ -45,7 +48,7 @@ if (
   (!OBSERVED_DEV_SOURCE_DIR || !LATEST_DEV_SOURCE_DIR)
 ) {
   throw new Error(
-    'R61-B1 real PostgreSQL lane requires both pinned DEV producer source directories'
+    'R61-B1 real PostgreSQL lane requires all pinned historical/current producer source directories'
   )
 }
 
@@ -248,20 +251,50 @@ async function versions(pool: Pool): Promise<string[]> {
 
 // The upgrade delta is derived from head, so a dev merge that brings migrations needs
 // no edit here: the pinned producer describes the start, and head describes the rest.
+type ConstraintValidationObservation = { constraint: string; convalidatedBefore: boolean | null }
+
+const VALIDATE_CONSTRAINT = /^ALTER TABLE (\w+) VALIDATE CONSTRAINT (\w+)$/
+
 async function upgradeFromProducerReceipts(
   pool: Pool,
   producerReceipts: readonly string[]
-): Promise<{ pending: string[] }> {
+): Promise<{ pending: string[]; validations: ConstraintValidationObservation[] }> {
   const headVersions = CONTROL_API_MIGRATIONS.map(migration => migration.version)
   const pending = headVersions.filter(version => !producerReceipts.includes(version))
-  // Witness: the derived delta ends in the versions this change owns.
-  expect(pending.slice(-PR1_MIGRATION_VERSIONS.length)).toEqual([...PR1_MIGRATION_VERSIONS])
+  // Witness: the derived delta ends in the versions this change owns (PR1 and PR2).
+  expect(pending.slice(-RUNNER_MIGRATION_VERSIONS.length)).toEqual([...RUNNER_MIGRATION_VERSIONS])
+  // Each VALIDATE CONSTRAINT the runner issues is preceded by a read, from
+  // another session, of whether the constraint is already validated.
+  const validations: ConstraintValidationObservation[] = []
+  const connect = async () => {
+    const client = await pool.connect()
+    return {
+      release: (destroy?: boolean) => client.release(destroy),
+      query: async (text: string, values?: unknown[]) => {
+        const validation = VALIDATE_CONSTRAINT.exec(text.trim())
+        if (validation) {
+          const state = await pool.query<{ convalidated: boolean }>(
+            `SELECT con.convalidated
+               FROM pg_constraint con
+               JOIN pg_class rel ON rel.oid = con.conrelid
+              WHERE rel.relname = $1 AND con.conname = $2`,
+            [validation[1], validation[2]]
+          )
+          validations.push({
+            constraint: validation[2]!,
+            convalidatedBefore: state.rows[0]?.convalidated ?? null,
+          })
+        }
+        return client.query(text, values)
+      },
+    } as unknown as PoolClient
+  }
   const upgrade = await withMigrationApplyObserver(new Set(headVersions), async () =>
-    initDb({ connect: () => pool.connect() })
+    initDb({ connect })
   )
   expect(upgrade.applyOrder).toEqual(pending)
   expect(new Set(await versions(pool))).toEqual(new Set(headVersions))
-  return { pending }
+  return { pending, validations }
 }
 
 async function removeMigrationReceiptForReplay(pool: Pool, version: string): Promise<void> {
@@ -383,6 +416,54 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
     expect(await oids()).toEqual(before)
     expect(await versions(databasePool)).toContain('0137_user_access_foundation')
+  })
+
+  it('reruns 0144 after a crash between its online builds, the replaced-index drops and its receipt', async () => {
+    const version = '0144_workflow_authorization_pause'
+    const replacing = PR2_ONLINE_INDEX_PLAN.filter(entry => entry.replaces !== undefined)
+    expect(replacing.map(entry => [entry.migrationVersion, entry.name, entry.replaces])).toEqual([
+      [version, 'idx_wr_phase_v2', 'idx_wr_phase'],
+      [version, 'idx_wr_owner_v2', 'idx_wr_owner'],
+    ])
+    const indexOids = async (names: readonly string[]) =>
+      (
+        await databasePool.query<{ index_name: string; oid: string | null }>(
+          `SELECT index_name, to_regclass(index_name)::oid::text AS oid
+             FROM unnest($1::text[]) AS index_name
+            ORDER BY index_name`,
+          [[...names]]
+        )
+      ).rows
+    const replacementNames = replacing.map(entry => entry.name)
+    const replacedNames = replacing.map(entry => entry.replaces!)
+    const absent = replacedNames
+      .map(index_name => ({ index_name, oid: null }))
+      .sort((left, right) => (left.index_name < right.index_name ? -1 : 1))
+    const replacements = await indexOids(replacementNames)
+    expect(replacements.every(row => row.oid !== null)).toBe(true)
+    expect(await indexOids(replacedNames)).toEqual(absent)
+
+    // Crash after the drops, before the receipt: the replaced indexes are gone,
+    // so the rerun's drops find nothing and must still pass.
+    await removeMigrationReceiptForReplay(databasePool, version)
+    await initDb({ connect: () => databasePool.connect() })
+    expect(await versions(databasePool)).toContain(version)
+    expect(await indexOids(replacementNames)).toEqual(replacements)
+    expect(await indexOids(replacedNames)).toEqual(absent)
+
+    // Crash after the builds, before the drops: dev's replaced indexes still exist.
+    await databasePool.query(
+      "CREATE INDEX idx_wr_phase ON workflow_runs(phase) WHERE phase IN ('Pending','Running')"
+    )
+    await databasePool.query(
+      "CREATE INDEX idx_wr_owner ON workflow_runs(owner_instance_id) WHERE phase = 'Running'"
+    )
+    expect((await indexOids(replacedNames)).every(row => row.oid !== null)).toBe(true)
+    await removeMigrationReceiptForReplay(databasePool, version)
+    await initDb({ connect: () => databasePool.connect() })
+    expect(await versions(databasePool)).toContain(version)
+    expect(await indexOids(replacementNames)).toEqual(replacements)
+    expect(await indexOids(replacedNames)).toEqual(absent)
   })
 
   it('rejects same-name indexes with changed order, predicate, expression, uniqueness or table', async () => {
@@ -938,19 +1019,55 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
           version => !latestDevReceipts.includes(version)
         ),
         'latestDev is stale: move it in tests/contracts/certification-inputs.json to the merge base with dev'
-      ).toEqual([...PR1_MIGRATION_VERSIONS])
+      ).toEqual([...RUNNER_MIGRATION_VERSIONS])
       expect(latestDevReceipts).toContain(DEV_PASSWORD_SUCCESS_ADMISSION_VERSION)
 
-      const { pending } = await upgradeFromProducerReceipts(isolatedPool, latestDevReceipts)
-      expect(pending).toEqual([...PR1_MIGRATION_VERSIONS])
-      // Each PR1 migration commits in its own bounded transaction.
+      const { pending, validations } = await upgradeFromProducerReceipts(
+        isolatedPool,
+        latestDevReceipts
+      )
+      expect(pending).toEqual([...RUNNER_MIGRATION_VERSIONS])
+      // On this upgrade every PR2 constraint lands on a table readers already
+      // use: each is added NOT VALID (no scan under ACCESS EXCLUSIVE), is still
+      // unvalidated after its schema commit, and is validated afterwards.
+      expect(validations).toEqual(
+        PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => ({
+          constraint: entry.constraint,
+          convalidatedBefore: false,
+        }))
+      )
+      const validated = await isolatedPool.query<{ name: string; valid: boolean }>(
+        `SELECT rel.relname || '.' || con.conname AS name, con.convalidated AS valid
+           FROM pg_constraint con
+           JOIN pg_class rel ON rel.oid = con.conrelid
+          WHERE (rel.relname::text, con.conname::text) IN (
+            SELECT * FROM unnest($1::text[], $2::text[])
+          )
+          ORDER BY 1`,
+        [
+          PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => entry.table),
+          PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => entry.constraint),
+        ]
+      )
+      expect(validated.rows).toEqual(
+        [
+          ...new Set(
+            PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(
+              entry => `${entry.table}.${entry.constraint}`
+            )
+          ),
+        ]
+          .sort()
+          .map(name => ({ name, valid: true }))
+      )
+      // Each PR1 and PR2 receipt commits in its own bounded transaction.
       const receiptTransactions = await isolatedPool.query<{ version: string; xmin: string }>(
         'SELECT version, xmin::text AS xmin FROM schema_migrations WHERE version = ANY($1::text[])',
-        [[...PR1_MIGRATION_VERSIONS]]
+        [[...RUNNER_MIGRATION_VERSIONS]]
       )
-      expect(receiptTransactions.rows).toHaveLength(PR1_MIGRATION_VERSIONS.length)
+      expect(receiptTransactions.rows).toHaveLength(RUNNER_MIGRATION_VERSIONS.length)
       expect(new Set(receiptTransactions.rows.map(row => row.xmin)).size).toBe(
-        PR1_MIGRATION_VERSIONS.length
+        RUNNER_MIGRATION_VERSIONS.length
       )
       expect(
         (
@@ -1017,7 +1134,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
       const afterUpgrade = await versions(isolatedPool)
       const secondRun = await withMigrationApplyObserver(
-        new Set<string>(PR1_MIGRATION_VERSIONS),
+        new Set<string>(RUNNER_MIGRATION_VERSIONS),
         async () => initDb({ connect: () => isolatedPool.connect() })
       )
       expect(await versions(isolatedPool)).toEqual(afterUpgrade)

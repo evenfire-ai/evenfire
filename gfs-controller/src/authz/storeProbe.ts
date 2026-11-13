@@ -1,4 +1,5 @@
 import { Client } from "pg";
+import { holdClientErrorListener, type ErrorEventSource } from "../db/pool";
 
 /**
  * Readiness probe for the permission store (issue #775).
@@ -27,14 +28,14 @@ import { Client } from "pg";
 
 /** Minimal pool surface (structurally satisfied by pg.Pool; injectable in tests). */
 export interface PingPool {
-  connect(): Promise<{
+  connect(): Promise<ErrorEventSource & {
     query(sql: string): Promise<unknown>;
     /** Passing an error DESTROYS the client instead of returning it to the pool. */
     release(err?: Error): void;
   }>;
 }
 /** Minimal ephemeral-client surface (structurally satisfied by pg.Client). */
-export interface ProbeClient {
+export interface ProbeClient extends ErrorEventSource {
   connect(): Promise<void>;
   query(sql: string): Promise<{ rows: Array<Record<string, unknown>> }>;
   end(): Promise<void>;
@@ -215,6 +216,8 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
         },
         query: (sql: string) => client.query(sql),
         end: () => client.end(),
+        on: (event, listener) => client.on(event, listener),
+        removeListener: (event, listener) => client.removeListener(event, listener),
       };
     });
   let lastFreshOkAt: number | null = null;
@@ -243,6 +246,9 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       acquireTimedOut = true;
       throw err;
     }
+    // A connection error during the ping rejects the ping query (pg) and
+    // destroys the client on release instead of crashing the process.
+    const checkoutError = holdClientErrorListener(pooled);
     let pingFailure: Error | undefined;
     try {
       await withTimeout(pooled.query("SELECT 1"), connectTimeoutMs, "permission store pool ping");
@@ -253,8 +259,10 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       pingFailure = err instanceof Error ? err : new Error(String(err));
       throw err;
     } finally {
-      if (pingFailure) {
-        pooled.release(pingFailure);
+      checkoutError.detach();
+      const releaseError = pingFailure ?? checkoutError.error;
+      if (releaseError) {
+        pooled.release(releaseError);
       } else {
         pooled.release();
       }
@@ -265,6 +273,10 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       return;
     }
     const client = clientFactory(opts.connectionString);
+    // Held for the client's whole life and never removed: the client is
+    // discarded after end(), and pg can still emit while it tears down.
+    const clientError = holdClientErrorListener(client);
+    let passed = false;
     try {
       // A rotated credential fails HERE with the real auth error — the pool
       // would have masked it by reusing a pre-rotation connection. Both steps
@@ -276,6 +288,9 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
         connectTimeoutMs,
         "permission store coherence query"
       );
+      // pg rejects a pending connect or query itself. An error emitted outside
+      // those calls only reached the listener, so it fails the probe here.
+      if (clientError.error) throw clientError.error;
       const row = result.rows[0];
       if (row?.can_read !== true) {
         throw new Error(
@@ -362,6 +377,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
             "or 0074_gfs_runtime_role_exact_contract grants drifted?)"
         );
       }
+      passed = true;
       lastFreshOkAt = now(); // cache SUCCESS only — failures always retry
     } finally {
       // Best-effort close of the ephemeral client; a close error must not mask
@@ -369,6 +385,11 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       await client.end().catch((err) => {
         console.error(`[gfsc] store-probe client close error: ${errMsg(err)}`);
       });
+      // A connection error emitted after the verdict (while closing) is a close
+      // error too: logged, not turned into a failure of a passed probe.
+      if (passed && clientError.error) {
+        console.error(`[gfsc] store-probe client error while closing: ${errMsg(clientError.error)}`);
+      }
     }
   };
 }

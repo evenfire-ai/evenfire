@@ -527,6 +527,9 @@ incremental_build_images_ghcr() {
 incremental_restart_targets() {
   local target selector remainder namespace deployment deployment_key deployment_probe
   local restarted="|"
+  local restart_rpc_proxy=false restart_hcc=false
+  local -a restart_hosts=()
+  local restart_hosts_count=0
 
   for target in "${INCREMENTAL_TARGETS[@]}"; do
     selector="${target%%|*}"
@@ -534,6 +537,19 @@ incremental_restart_targets() {
     namespace="${remainder%%|*}"
     deployment="${remainder#*|}"
     deployment_key="|${namespace}/${deployment}|"
+
+    # These three workloads form one protocol transition. Defer them until
+    # after independent service restarts so the RPC Proxy / HCC / Host order is
+    # selected by the explicit cohort barrier below.
+    case "${namespace}/${deployment}" in
+      rpc-proxy/rpc-proxy) restart_rpc_proxy=true; continue ;;
+      control-plane/host-context-controller) restart_hcc=true; continue ;;
+      mcp-host/*)
+        restart_hosts+=("${deployment}")
+        restart_hosts_count=$((restart_hosts_count + 1))
+        continue
+        ;;
+    esac
 
     [[ "${restarted}" == *"${deployment_key}"* ]] && continue
     restarted+="${namespace}/${deployment}|"
@@ -559,6 +575,19 @@ incremental_restart_targets() {
       rollout_if_present "${namespace}" "${deployment}"
     fi
   done
+
+  if [[ "${restart_rpc_proxy}" == true || "${restart_hcc}" == true ||
+        "${restart_hosts_count}" -gt 0 ]]; then
+    local -a edge_args=(restart-targets --context "${PROFILE}")
+    [[ "${restart_rpc_proxy}" != true ]] || edge_args+=(--restart-proxy)
+    [[ "${restart_hcc}" != true ]] || edge_args+=(--restart-hcc)
+    local host_target
+    for host_target in ${restart_hosts[@]+"${restart_hosts[@]}"}; do
+      edge_args+=(--restart-host "${host_target}")
+    done
+    bash "${PROJECT_DIR}/scripts/minikube/rollout-rpc-proxy-edge-protocol.sh" \
+      "${edge_args[@]}"
+  fi
 }
 
 incremental_requires_database_reconcile() {
