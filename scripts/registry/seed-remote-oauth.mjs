@@ -295,10 +295,13 @@ async function requestJson(fetchImpl, url, init) {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
   // A body that does not parse is flagged rather than left as a bare null, so a
-  // 2xx answer with a broken body is not reported as a missing field.
+  // 2xx answer with a broken body is not reported as a missing field. Only a parse
+  // error means that: a timeout or reset while the body streams in is a network
+  // failure and is thrown as one.
   try {
     return { status: res.status, body: await res.json(), unparseable: false }
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err
     return { status: res.status, body: null, unparseable: true }
   }
 }

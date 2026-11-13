@@ -617,6 +617,41 @@ describe('unparseable answers', () => {
       run.lines.join('\n')
     )
   })
+
+  test('a connection cut while reading the body is reported as such, not as a broken body', async () => {
+    // Headers and the first bytes arrive, then the socket closes: the failure is the
+    // connection, and blaming the body would send the operator to the wrong layer.
+    const cut = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '200' })
+      res.write('{"transport":')
+      setImmediate(() => res.socket.destroy())
+    })
+    await new Promise(resolve => cut.listen(0, '127.0.0.1', resolve))
+    const lines = []
+    try {
+      const exitCode = await runSeed({
+        catalog: [byName('clickup-remote')],
+        flags: { dryRun: true },
+        env: {
+          CONTROL_API_URL: `http://127.0.0.1:${cut.address().port}`,
+          CONTROL_API_TOKEN: ADMIN_TOKEN,
+        },
+        rules,
+        log: line => lines.push(line),
+      })
+      const output = lines.join('\n')
+      assert.equal(exitCode, 1)
+      assert.ok(!/unparseable/.test(output), output)
+      assert.ok(
+        lines.some(l =>
+          /\[FAIL\] @evenfire\/clickup-remote 1\.0\.0: TypeError: terminated/.test(l)
+        ),
+        output
+      )
+    } finally {
+      await new Promise(resolve => cut.close(resolve))
+    }
+  })
 })
 
 describe('credentials in request headers', () => {
