@@ -995,8 +995,12 @@ export class DocumentReadTool implements Tool {
       // probe, and halving spends about one more per row on groups that fail
       // (independent review round 2, P2: a long sheet list beside rows that
       // are all too wide). After `DENSE_BLANKED_ROWS` blanked rows in a row,
-      // groups are split without a probe until a row fits again. Each row
-      // is still decided by its own exact probe, so no result changes.
+      // groups are split without a probe until a row fits again. This only
+      // skips group probes: a row is blanked by its own exact probe either
+      // way, and under a measure that grows with the result a fitting row
+      // fits whichever probe decides it, so no result changes. The byte-count
+      // differential pins this; the production token measure was not
+      // compared, because the fixture's random ids change its counts per run.
       let blankedRun = 0
       const check = (from: number, to: number): void => {
         if (stopped) return

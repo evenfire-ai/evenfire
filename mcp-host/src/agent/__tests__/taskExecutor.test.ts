@@ -1415,10 +1415,10 @@ describe('TaskExecutor', () => {
     await executor.run()
     await executor.resumeAfterApproval(false)
 
-    // The rebuilt messages become the snapshot of any later suspension, and a
-    // cold start expires an approval whose snapshot names a missing blob
-    // (sqliteColdStartLoader B7). The model already holds this content, so
-    // the rebuilt message must not tie the turn to the blob's lifetime.
+    // Pins the rebuild's existing behaviour: dev's rebuild never carried a
+    // ref, while the loop's own append does. The rebuilt messages become the
+    // snapshot of any later suspension, and a cold start expires an approval
+    // whose snapshot names a missing blob (sqliteColdStartLoader B7).
     const messages = vi.mocked(runToolUseLoop).mock.calls[1]![1] as ChatMessage[]
     const rebuilt = messages.find(message => message.tool_call_id === call.id)
     expect(rebuilt).toMatchObject({ role: 'tool', content: 'Summary of a large output' })
@@ -1503,7 +1503,7 @@ describe('TaskExecutor', () => {
     expect(executor.executorState).toBe('completed')
 
     // Every tool message answers an open call of the tool-call message before
-    // it; providers reject a tool result that answers none (review round 2, P1).
+    // it (review round 2, P1).
     const messages = vi.mocked(runToolUseLoop).mock.calls[2]![1] as ChatMessage[]
     const unanswered: string[] = []
     let open = new Set<string>()

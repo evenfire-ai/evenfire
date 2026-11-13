@@ -321,7 +321,7 @@ interface TaskToolRegistry {
  * message after it answers yet. A suspension inside a resumed turn freezes
  * messages that already hold the earlier batch, while its `completed_results`
  * keep that batch too (they carry its attachments through a cold restart).
- * Appending those again would answer no open call, which providers reject
+ * Appending those again would add tool results that answer no open call
  * (independent review round 2, P1).
  */
 function unansweredBatchResults(snapshot: ChatMessage[], results: ToolResult[]): ToolResult[] {
