@@ -708,16 +708,18 @@ code the proxy constructs, and every code it refuses a request with
   text had already been streamed. The same `error.code` in the JSON body of a
   non-success HTTP reply other than 401/403 is mapped the same way; the proxy
   reads at most `UPSTREAM_ERROR_BODY_MAX_BYTES` (16 KiB) of that body and
-  otherwise keeps the status mapping (400 `invalid_request`, 401/403
-  `connection_unavailable`, 429 `rate_limited`, any other 4xx except 408
-  `upstream_rejected`, anything else `provider_unavailable`). It is the only
+  otherwise keeps the status mapping (401/403 `connection_unavailable`, 429
+  `rate_limited`, any other 4xx except 408, 400 included, `upstream_rejected`,
+  anything else `provider_unavailable`). It is the only
   upstream code the proxy forwards: a streamed failure with any other upstream
   code, or none, stays `provider_unavailable`. The Host maps it to
   `LLM_CONTEXT_LENGTH_EXCEEDED`,
   not retryable, like `request_limit_exceeded`.
 
 - `invalid_request`: the request body failed the transport schema (HTTP 400
-  before redeem), or the upstream answered the completion with HTTP 400.
+  before redeem). An upstream HTTP 400 on the completion is
+  `upstream_rejected` with `upstreamStatus: 400` (#1433), so the Host shows it
+  as a rejected request, not as a connection error.
 - `sse_buffer_exceeded`: the upstream sent more than 1 MiB without the blank
   line that ends an SSE event.
 - `stream_duration_exceeded`: the attempt reached `maxStreamDurationMs` (the
