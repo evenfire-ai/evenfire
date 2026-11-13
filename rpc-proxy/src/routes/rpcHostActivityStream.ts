@@ -50,6 +50,10 @@ function sanitizedStreamErrorMessage(): string {
   return 'Activity temporarily unavailable'
 }
 
+// The Host caps one activity event with its own MCP_HOST_ACTIVITY_MAX_EVENT_BYTES
+// (mcp-host/src/config.ts, mcp-host/README.md). This reads the same variable from
+// rpc-proxy's environment, so a non-default value must be set on both
+// Deployments; both default to 2048.
 function maximumActivityFrameBytes(): number {
   const configured = Number(process.env.MCP_HOST_ACTIVITY_MAX_EVENT_BYTES ?? '2048')
   const eventBytes = Number.isSafeInteger(configured) && configured > 0 ? configured : 2_048

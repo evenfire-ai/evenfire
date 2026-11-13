@@ -144,6 +144,10 @@ when unset) names the namespace of the MCP servers for rpc-proxy. If you move th
 MCP servers, set it to the same value as control-api's
 `CONTROL_API_MCP_SERVERS_NAMESPACE`.
 
+`MCP_HOST_ACTIVITY_MAX_EVENT_BYTES` (default `2048`) caps one Host activity
+event. rpc-proxy reads the same variable to size the activity frames it relays,
+so if you change it, set the same value on the Host and on rpc-proxy.
+
 ## Outbound destinations
 
 The NetworkPolicies are port and CIDR rules, not hostname rules. Agent pods

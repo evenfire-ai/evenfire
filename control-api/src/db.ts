@@ -3393,12 +3393,6 @@ async function applyWorkflowRunAuthorizationPauseSchema(db: DbClient): Promise<v
   `)
 }
 
-// Exported (read-only) as the canonical migration registry. The baseline
-// runner consumes its early entries in array order; post-0106 migrations are
-// selected from this registry and executed in the classified phase order in
-// migrationRunner.ts. Every applied migration is tracked by its full version
-// string in `schema_migrations`.
-
 async function applyMcpSecretRollbackPermitSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS mcp_secret_rollback_permits (
@@ -3473,10 +3467,14 @@ async function applyControlAdminReplaceInviterAcceptGuard(db: DbClient): Promise
   `)
 }
 
-// Exported (read-only) so the migration-order invariant test can assert the
-// array is monotonic by version-string. Applied strictly in array order and
-// tracked by full version-string in `schema_migrations`, so a non-monotonic
-// array is a latent footgun — the test guards it going forward.
+// Exported (read-only) as the canonical migration registry, and so the
+// migration-order invariant test can assert the array is monotonic by
+// version-string. initDb applies every version up to and including
+// LAST_DEV_MIGRATION_VERSION (migrations/migrationRunner.ts) in array order in
+// one dev batch; migrationRunner.ts applies the PR1 and PR2 versions after it.
+// Every applied migration is tracked by its full version-string in
+// `schema_migrations`, so a non-monotonic array is a latent footgun — the test
+// guards it going forward.
 export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // Keep auto-migrations strictly additive / non-destructive. If we ever
@@ -6363,8 +6361,30 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyLlmProviderAttemptConnectionIntegritySchema,
   },
   {
+    // Renumbered from 0109 when `dev` was merged: `dev` had already shipped
+    // `0109_grok_subscription_connections`, so this one moves to the end of the
+    // list rather than claiming a version another migration already uses.
     version: '0115_llm_allowed_models_image_input',
     apply: async db => {
+      // #654 — model-level image-input capability + evidence for the allowlist.
+      //
+      // ADDITIVE and NULLABLE. Every pre-existing row reads as `unknown` (no
+      // affirmative capability): the shared contract
+      // (`@clerum/llm-providers` normalizeImageInputCapability) maps absent or
+      // malformed metadata to `{ state: 'unknown' }`, so a legacy row can never
+      // become affirmative support by accident, and this migration alone changes
+      // no runtime behavior — enforcement acts only where a capability exists.
+      //
+      // The CHECK constrains the ONE field no reader may have to guess (`state`)
+      // against a non-object/scalar payload. The nested evidence is validated
+      // strictly on write by the service (shared parser) and normalized on read,
+      // so `state` here is a backstop, not the only gate.
+      //
+      // All three conjuncts are load-bearing, because a CHECK accepts NULL:
+      // `jsonb_typeof` alone would let `{}` through (`'{}'::jsonb->>'state'` is
+      // NULL, so the IN list yields NULL, not FALSE), and `? 'state'` alone
+      // would let `{"state": null}` through (`?` is true while `->>` is NULL).
+      // COALESCE is what turns that untyped NULL into a real FALSE.
       await db.query(`
         ALTER TABLE llm_allowed_models
           ADD COLUMN IF NOT EXISTS image_input JSONB;
@@ -6385,10 +6405,30 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         EXCEPTION WHEN duplicate_object THEN NULL;
         END $$;
       `)
+
+      // This migration is PURELY ADDITIVE: it adds the column and the CHECK, and
+      // writes no data. It used to hand-curate two Z.AI ids from their public
+      // docs, which was a stand-in for not knowing any model's image capability.
+      // The catalog sync now derives that from models.dev `modalities.input` for
+      // every model, including those two (#654), so the seed would only have
+      // pinned `curated` provenance the sync is required never to overwrite —
+      // freezing exactly the rows a test harness needs to be able to refresh.
     },
   },
   {
     version: '0116_mcp_secret_rollback_permits',
+    // Renumbered twice while syncing onto dev: 0101 -> 0109 -> 0116. This branch
+    // introduced the migration as 0101; the first sync brought dev's 0101–0108
+    // (codex multi-connection through the SDK-link FK) and pushed it to 0109;
+    // this sync brought dev's 0109–0115 (grok subscriptions through the
+    // allowed-models image-input column), so 0109 is now taken by
+    // 0109_grok_subscription_connections and the migration moves to the end of
+    // the list rather than claiming a version another migration already uses.
+    // Environments where this feature branch was already deployed recorded it
+    // under one of the earlier names. legacyVersions lets the runner mark 0116
+    // applied from that prior row instead of re-running the DDL and leaving an
+    // orphan schema_migrations entry. Both prior names are unique to this
+    // migration, so there is no false-skip.
     legacyVersions: ['0101_mcp_secret_rollback_permits', '0109_mcp_secret_rollback_permits'],
     apply: applyMcpSecretRollbackPermitSchema,
   },
@@ -6426,7 +6466,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // Install-identity columns for the DCR/OAuth state (install_id + cr_uid on
     // dynamic_clients, cr_uid on oauth_grants). Renumbered 0119 -> 0121 while
-    // syncing onto dev; the pre-renumber name is unique to this migration.
+    // syncing onto dev (dev's 0117/0118 pushed the oauth-19 migrations down by
+    // two); the pre-renumber name is unique to this migration, so legacyVersions
+    // marks it applied on environments that already ran it.
     version: '0121_oauth_install_identity',
     legacyVersions: ['0119_oauth_install_identity'],
     apply: applyOAuthInstallIdentity,
