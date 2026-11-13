@@ -25,7 +25,9 @@ const crashRecoveryMocks = vi.hoisted(() => ({
     const phase = await crashRecoveryMocks.getPodPhase(api, name, namespace)
     return phase === undefined ? { kind: 'absent' as const } : { kind: 'present' as const, phase }
   }),
-  getPodReadiness: vi.fn().mockResolvedValue({ ready: true, phase: 'Running', uid: 'pod-uid-1' }),
+  getPodReadiness: vi
+    .fn()
+    .mockResolvedValue({ kind: 'present', ready: true, phase: 'Running', uid: 'pod-uid-1' }),
   isRecoverableContainerWaitingReason: vi.fn(
     (phase: string | undefined, reason: string | undefined) =>
       Boolean(
@@ -196,6 +198,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     crashRecoveryMocks.getContainerWaitingReason.mockResolvedValue(undefined)
     crashRecoveryMocks.getPodPhase.mockResolvedValue(undefined)
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -244,6 +247,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     crashRecoveryMocks.getContainerWaitingReason.mockResolvedValue(undefined)
     crashRecoveryMocks.getPodPhase.mockResolvedValue(undefined)
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -1017,6 +1021,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       return undefined
     })
     crashRecoveryMocks.getPodReadiness.mockResolvedValueOnce({
+      kind: 'present',
       ready: false,
       phase: 'Pending',
       schedulingReason: 'Unschedulable',
@@ -1127,6 +1132,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       return undefined
     })
     crashRecoveryMocks.getPodReadiness.mockResolvedValueOnce({
+      kind: 'present',
       ready: false,
       phase: 'Pending',
     })
@@ -2156,6 +2162,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     crashRecoveryMocks.getContainerWaitingReason.mockResolvedValue(undefined)
     crashRecoveryMocks.getPodPhase.mockResolvedValue(undefined)
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -3443,7 +3450,11 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
   })
 
   it('skips the provider broker while the eager mcp-host is not ready', async () => {
-    crashRecoveryMocks.getPodReadiness.mockResolvedValue({ ready: false, phase: 'Pending' })
+    crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
+      ready: false,
+      phase: 'Pending',
+    })
     const reconciler = new WorkflowReconciler(makeDeps())
 
     await reconciler.reconcile(
@@ -3468,7 +3479,11 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     // (requeueAfterMs=undefined) — the now-Ready pod is never re-reconciled and
     // stays "waiting for /configure" forever, so promptBridge / clientNotifications
     // fail with provider_unavailable. Regression guard for the readiness race.
-    crashRecoveryMocks.getPodReadiness.mockResolvedValue({ ready: false, phase: 'Pending' })
+    crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
+      ready: false,
+      phase: 'Pending',
+    })
     const reconciler = new WorkflowReconciler(makeDeps())
 
     const result = await reconciler.reconcile(
@@ -3492,6 +3507,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     // settled: phase=active (no progress requeue); the workflowNeedsInfrastructure
     // Reconcile keep-alive loop handles steady-state re-configure/self-heal.
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -3516,6 +3532,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
   it('reports awaiting_policy when identity bootstrap is ready but the operator grant is missing', async () => {
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -3556,6 +3573,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
   it('re-probes live bootstrap policy on every reconcile of the same ready pod', async () => {
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -3584,6 +3602,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
   it('stays pending (not registered) and retries when the provider broker fails', async () => {
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -3622,6 +3641,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
   it('does not publish SDK readiness when the bootstrap contract is not v2', async () => {
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -3649,6 +3669,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
   it('projects provider_unavailable after repeated configure failures instead of an indefinite starting', async () => {
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -3712,7 +3733,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     let podUid = 'pod-uid-1'
     crashRecoveryMocks.getPodReadiness.mockImplementation(async (_api, podName: string) => {
       if (podName.endsWith('-mcp-host')) {
-        return { ready: true, phase: 'Running', uid: podUid }
+        return { kind: 'present', ready: true, phase: 'Running', uid: podUid }
       }
       return { ready: true, phase: 'Running' }
     })
@@ -3751,6 +3772,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
   it('re-brokers the provider after the eager mcp-host pod restarts (new uid)', async () => {
     const reconciler = new WorkflowReconciler(makeDeps())
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -3767,6 +3789,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     )
     // Pod restarted — new UID invalidates the cache, forcing a fresh configure.
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-2',

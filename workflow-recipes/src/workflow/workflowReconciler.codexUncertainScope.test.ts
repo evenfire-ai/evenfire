@@ -20,7 +20,9 @@ const crashRecoveryMocks = vi.hoisted(() => ({
     const phase = await crashRecoveryMocks.getPodPhase(api, name, namespace)
     return phase === undefined ? { kind: 'absent' as const } : { kind: 'present' as const, phase }
   }),
-  getPodReadiness: vi.fn().mockResolvedValue({ ready: true, phase: 'Running', uid: 'pod-uid-1' }),
+  getPodReadiness: vi
+    .fn()
+    .mockResolvedValue({ kind: 'present', ready: true, phase: 'Running', uid: 'pod-uid-1' }),
   isRecoverableContainerWaitingReason: vi.fn(() => false),
 }))
 
@@ -272,6 +274,7 @@ describe('Codex scope under an undecidable catalog', () => {
     vi.clearAllMocks()
     crashRecoveryMocks.getPodPhase.mockResolvedValue(undefined)
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',
@@ -412,6 +415,7 @@ describe('Codex allowlist view across interleaved recipes', () => {
     vi.clearAllMocks()
     crashRecoveryMocks.getPodPhase.mockResolvedValue(undefined)
     crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+      kind: 'present',
       ready: true,
       phase: 'Running',
       uid: 'pod-uid-1',

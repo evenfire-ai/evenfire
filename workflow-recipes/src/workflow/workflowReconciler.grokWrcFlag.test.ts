@@ -27,7 +27,9 @@ const crashRecoveryMocks = vi.hoisted(() => ({
     const phase = await crashRecoveryMocks.getPodPhase(api, name, namespace)
     return phase === undefined ? { kind: 'absent' as const } : { kind: 'present' as const, phase }
   }),
-  getPodReadiness: vi.fn().mockResolvedValue({ ready: true, phase: 'Running', uid: 'pod-uid-1' }),
+  getPodReadiness: vi
+    .fn()
+    .mockResolvedValue({ kind: 'present', ready: true, phase: 'Running', uid: 'pod-uid-1' }),
   isRecoverableContainerWaitingReason: vi.fn(() => false),
 }))
 
@@ -166,7 +168,11 @@ async function reconcileRecipe(reconciler: WorkflowReconciler, spec: WorkflowRec
     if (name.endsWith('-workflow-output-prepare')) return 'Succeeded'
     return undefined
   })
-  crashRecoveryMocks.getPodReadiness.mockResolvedValue({ ready: false, phase: 'Pending' })
+  crashRecoveryMocks.getPodReadiness.mockResolvedValue({
+    kind: 'present',
+    ready: false,
+    phase: 'Pending',
+  })
   return reconciler.reconcile(
     RECIPE,
     `uid-${RECIPE}`,
