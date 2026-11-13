@@ -1381,14 +1381,21 @@ function workflowPhaseForMcpHostReadinessWait(
 }
 
 /**
- * The wait for an mcp-host pod starts at the later of the run start and the
- * creation of that pod. A pod created after the run started (the output
- * anchor/prepare pods ran first, or crash recovery replaced it) gets the whole
- * window; a pod that predates the run is measured from the run start. A pod
- * that is being deleted is the predecessor of the pod this run waits for: its
- * creation is not counted, and the window starts at its deletionTimestamp (the
- * deletion request plus its grace period), so a predecessor that never goes
- * away still ends the wait.
+ * Whether the pre-coordinator wait for the mcp-host pod has run out. The gate
+ * judges the pod it read against that pod's own window of
+ * MCP_HOST_READINESS_WAIT_TIMEOUT_MS. Where the window starts depends only on
+ * the state of that pod:
+ * - absent: no pod has the name, so there is nothing to wait for and no
+ *   verdict. The next pass creates the pod, and that pod gets its own window.
+ *   The run start is not used.
+ * - present: the later of the run start and the creation of the pod. A pod
+ *   created after the run started (the output anchor/prepare pods ran first,
+ *   or crash recovery replaced it) gets the whole window; a pod that predates
+ *   the run, or that reports no creation time, is measured from the run start.
+ * - terminating: the pod is the predecessor of the pod this run waits for, and
+ *   its creation is not counted. The window starts at the later of the run
+ *   start and its deletionTimestamp (the deletion request plus its grace
+ *   period), so a predecessor that never goes away still ends the wait.
  */
 function hasMcpHostReadinessWaitExpired(
   execution: WorkflowExecutionStatus | undefined,
@@ -1398,11 +1405,26 @@ function hasMcpHostReadinessWaitExpired(
   if (!execution?.startedAt) return false
 
   const startedAtMs = Date.parse(execution.startedAt)
-  const podWaitStartedAt = readiness.deletingAt ?? readiness.createdAt
-  const waitStartedAtMs =
-    podWaitStartedAt === undefined
-      ? startedAtMs
-      : Math.max(startedAtMs, Date.parse(podWaitStartedAt))
+  let waitStartedAtMs: number
+  switch (readiness.kind) {
+    case 'absent':
+      return false
+    case 'present':
+      waitStartedAtMs =
+        readiness.createdAt === undefined
+          ? startedAtMs
+          : Math.max(startedAtMs, Date.parse(readiness.createdAt))
+      break
+    case 'terminating':
+      waitStartedAtMs = Math.max(startedAtMs, Date.parse(readiness.deletingAt))
+      break
+    default: {
+      const unreachable: never = readiness
+      throw new Error(
+        `Unknown mcp-host pod readiness: ${String((unreachable as { kind: unknown }).kind)}`
+      )
+    }
+  }
   return (
     Number.isFinite(waitStartedAtMs) &&
     nowMs - waitStartedAtMs >= MCP_HOST_READINESS_WAIT_TIMEOUT_MS

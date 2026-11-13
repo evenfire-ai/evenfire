@@ -3,6 +3,7 @@ import {
   evaluateCompletedRuntimePodRecovery,
   evaluateCrashRecovery,
   getPodPresence,
+  getPodReadiness,
   inspectPodReadiness,
   waitForPodDeletion,
 } from './crashRecovery'
@@ -79,6 +80,7 @@ describe('crash recovery pod readiness classification', () => {
         },
       })
     ).toEqual({
+      kind: 'present',
       phase: 'Pending',
       ready: false,
       schedulingReason: 'Unschedulable',
@@ -94,6 +96,7 @@ describe('crash recovery pod readiness classification', () => {
         },
       })
     ).toEqual({
+      kind: 'present',
       phase: 'Running',
       ready: false,
     })
@@ -106,6 +109,7 @@ describe('crash recovery pod readiness classification', () => {
         },
       })
     ).toEqual({
+      kind: 'present',
       phase: 'Running',
       ready: true,
     })
@@ -120,6 +124,7 @@ describe('crash recovery pod readiness classification', () => {
         status,
       })
     ).toEqual({
+      kind: 'present',
       phase: 'Running',
       ready: false,
       uid: 'pod-uid-2',
@@ -136,12 +141,48 @@ describe('crash recovery pod readiness classification', () => {
         status,
       })
     ).toEqual({
+      kind: 'terminating',
       phase: 'Running',
       ready: false,
       uid: 'pod-uid-2',
       createdAt: '2026-11-13T10:00:00.000Z',
       deletingAt: '2026-11-13T10:05:30.000Z',
     })
+  })
+})
+
+describe('getPodReadiness', () => {
+  it('returns the absent state on GET 404 and the inspected pod on GET 200', async () => {
+    const readNamespacedPod = vi
+      .fn()
+      .mockRejectedValueOnce({ code: 404 })
+      .mockResolvedValueOnce({
+        metadata: { uid: 'pod-uid-3', creationTimestamp: new Date('2026-11-13T10:00:00.000Z') },
+        status: { phase: 'Pending' },
+      })
+    const coreApi = { readNamespacedPod } as unknown as Parameters<typeof getPodReadiness>[0]
+
+    await expect(getPodReadiness(coreApi, 'recipe-mcp-host', 'sandbox-recipes')).resolves.toEqual({
+      kind: 'absent',
+      ready: false,
+    })
+    await expect(getPodReadiness(coreApi, 'recipe-mcp-host', 'sandbox-recipes')).resolves.toEqual({
+      kind: 'present',
+      phase: 'Pending',
+      ready: false,
+      uid: 'pod-uid-3',
+      createdAt: '2026-11-13T10:00:00.000Z',
+    })
+    expect(readNamespacedPod).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([403, 500])('rethrows a GET %i instead of reporting the pod absent', async code => {
+    const readNamespacedPod = vi.fn().mockRejectedValueOnce({ code })
+    const coreApi = { readNamespacedPod } as unknown as Parameters<typeof getPodReadiness>[0]
+
+    await expect(
+      getPodReadiness(coreApi, 'recipe-mcp-host', 'sandbox-recipes')
+    ).rejects.toMatchObject({ code })
   })
 })
 

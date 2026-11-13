@@ -72,11 +72,13 @@ function unsignedRuntimeJwt(payload: Record<string, unknown>): string {
 }
 
 type MockPodReadiness = {
+  kind?: 'present'
   ready: boolean
   phase?: string
   uid?: string
   waitingReason?: string
   schedulingReason?: string
+  createdAt?: string
 }
 
 function mockAgenticOutputPodPhases(overrides?: {
@@ -102,9 +104,9 @@ function mockAgenticOutputPodPhases(overrides?: {
 function mockMcpHostReadiness(readiness: MockPodReadiness) {
   crashRecoveryMocks.getPodReadiness.mockImplementation(async (_api, podName: string) => {
     if (podName.endsWith('-mcp-host')) {
-      return readiness
+      return { kind: 'present', ...readiness }
     }
-    return { ready: true, phase: 'Running' }
+    return { kind: 'present', ready: true, phase: 'Running' }
   })
 }
 
@@ -114,9 +116,9 @@ function mockMcpHostReadinessSequence(...sequence: MockPodReadiness[]) {
     if (podName.endsWith('-mcp-host')) {
       const value = sequence[Math.min(mcpHostCalls, sequence.length - 1)]
       mcpHostCalls += 1
-      return value
+      return { kind: 'present', ...value }
     }
-    return { ready: true, phase: 'Running' }
+    return { kind: 'present', ready: true, phase: 'Running' }
   })
 }
 
@@ -1153,8 +1155,10 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
   it('fails stale pre-coordinator readiness wait for a Running non-ready mcp-host pod', async () => {
     mockAgenticOutputPodPhases({ mcpHost: 'Running' })
     mockMcpHostReadiness({
+      kind: 'present',
       ready: false,
       phase: 'Running',
+      createdAt: isoDateAgo(60 * 60_000),
     })
     const reconciler = new WorkflowReconciler(deps)
 
@@ -1182,7 +1186,9 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
 
   it('fails stale pre-coordinator readiness wait for a Pending non-recoverable mcp-host pod', async () => {
     mockAgenticOutputPodPhases({ mcpHost: 'Pending' })
+    // No createdAt: a pod that reports no creation time is measured from the run start.
     mockMcpHostReadiness({
+      kind: 'present',
       ready: false,
       phase: 'Pending',
     })
@@ -1213,8 +1219,10 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
   it('keeps waiting when mcp-host readiness wait is still inside the deadline', async () => {
     mockAgenticOutputPodPhases({ mcpHost: 'Running' })
     mockMcpHostReadiness({
+      kind: 'present',
       ready: false,
       phase: 'Running',
+      createdAt: isoDateAgo(60 * 60_000),
     })
     const reconciler = new WorkflowReconciler(deps)
 
@@ -1294,7 +1302,9 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     async function useFakePods(
       recipeName: string,
       initial: { coordinator?: FakePod; mcpHost?: FakePod },
-      options: { gracefulDelete?: boolean } = {}
+      // goneAtReadinessRead: that pod finishes terminating after the pass-start
+      // presence read and before the gate's readiness read.
+      options: { gracefulDelete?: boolean; goneAtReadinessRead?: string } = {}
     ) {
       const actual = await vi.importActual<typeof import('./crashRecovery')>('./crashRecovery')
       crashRecoveryMocks.evaluateCrashRecovery.mockImplementation(actual.evaluateCrashRecovery)
@@ -1305,6 +1315,8 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       if (initial.coordinator) pods.set(`${recipeName}-coordinator`, initial.coordinator)
       if (initial.mcpHost) pods.set(`${recipeName}-mcp-host`, initial.mcpHost)
       const created: string[] = []
+      // Creates the API refused with 409 because the name was still taken.
+      const conflicts: string[] = []
       const deleted: string[] = []
       const readinessReads: string[] = []
       crashRecoveryMocks.getPodPhase.mockImplementation(
@@ -1324,30 +1336,43 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       mockCoreApi.createNamespacedPod.mockImplementation(
         async (params: { body: { metadata: { name: string } } }) => {
           const name = params.body.metadata.name
-          if (pods.has(name)) throw { code: 409 }
+          if (pods.has(name)) {
+            conflicts.push(name)
+            throw { code: 409 }
+          }
           created.push(name)
           pods.set(name, { phase: 'Pending', ageMs: 0 })
           return {}
         }
       )
-      crashRecoveryMocks.getPodReadiness.mockImplementation(async (_api, name: string) => {
-        readinessReads.push(name)
-        const pod = pods.get(name)
-        if (!pod) return { ready: false }
-        return actual.inspectPodReadiness({
-          metadata: {
-            creationTimestamp: new Date(Date.now() - pod.ageMs),
-            ...(pod.deletingAgoMs === undefined
-              ? {}
-              : { deletionTimestamp: new Date(Date.now() - pod.deletingAgoMs) }),
-          },
-          status: {
-            phase: pod.phase,
-            conditions: [{ type: 'Ready', status: pod.ready ? 'True' : 'False' }],
-          },
-        })
-      })
-      return { created, deleted, readinessReads }
+      // The real getPodReadiness reads the fake pods, so a missing pod goes
+      // through the production 404 mapping.
+      const podReads = {
+        readNamespacedPod: async ({ name }: { name: string }) => {
+          const pod = pods.get(name)
+          if (!pod) throw { code: 404 }
+          return {
+            metadata: {
+              creationTimestamp: new Date(Date.now() - pod.ageMs),
+              ...(pod.deletingAgoMs === undefined
+                ? {}
+                : { deletionTimestamp: new Date(Date.now() - pod.deletingAgoMs) }),
+            },
+            status: {
+              phase: pod.phase,
+              conditions: [{ type: 'Ready', status: pod.ready ? 'True' : 'False' }],
+            },
+          }
+        },
+      }
+      crashRecoveryMocks.getPodReadiness.mockImplementation(
+        async (_api, name: string, podNamespace: string) => {
+          if (name === options.goneAtReadinessRead) pods.delete(name)
+          readinessReads.push(name)
+          return actual.getPodReadiness(podReads as never, name, podNamespace)
+        }
+      )
+      return { created, conflicts, deleted, readinessReads }
     }
 
     function reconcileRun(
@@ -1466,7 +1491,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     })
 
     it('measures a predecessor that is still terminating from its deletion, not its creation', async () => {
-      const { created, deleted } = await useFakePods(
+      const { created, conflicts, deleted } = await useFakePods(
         'hybrid-recipe',
         {
           coordinator: { phase: 'Failed', ageMs: 5 * MINUTE_MS },
@@ -1483,6 +1508,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
 
       // Witnesses: the predecessor was deleted, and its name was still taken (create got a 409).
       expect(deleted).toContain('hybrid-recipe-mcp-host')
+      expect(conflicts).toEqual(['hybrid-recipe-mcp-host'])
       expect(created).toEqual([])
       expect(result).toMatchObject({
         phase: 'deploying',
@@ -1518,6 +1544,194 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
         expect(result.message.includes(deadlineMessage)).toBe(row.phase === 'failed')
       }
     )
+
+    it.each([
+      { runAgeMs: MINUTE_MS, phase: 'deploying' },
+      { runAgeMs: 5 * MINUTE_MS, phase: 'failed' },
+    ])(
+      'measures a predecessor whose deletion predates the run from the run start (run age $runAgeMs ms)',
+      async row => {
+        const { readinessReads } = await useFakePods('hybrid-recipe', {
+          mcpHost: {
+            phase: 'Running',
+            ageMs: 60 * MINUTE_MS,
+            ready: false,
+            deletingAgoMs: 10 * MINUTE_MS,
+          },
+        })
+
+        const result = await reconcileRun('hybrid-recipe', hybridSpec, {
+          phase: 'recovering',
+          attempt: 1,
+          startedAt: isoDateAgo(row.runAgeMs),
+        })
+
+        expect(readinessReads).toContain('hybrid-recipe-mcp-host')
+        expect(result.phase).toBe(row.phase)
+        expect(result.message).toContain('Waiting for mcp-host pod to become Ready (phase=Running)')
+        expect(result.message.includes(deadlineMessage)).toBe(row.phase === 'failed')
+      }
+    )
+
+    it('gives no verdict when the predecessor is gone at the gate read', async () => {
+      const { created, conflicts, readinessReads } = await useFakePods(
+        'hybrid-recipe',
+        {
+          mcpHost: { phase: 'Running', ageMs: 60 * MINUTE_MS, ready: false, deletingAgoMs: 0 },
+        },
+        { goneAtReadinessRead: 'hybrid-recipe-mcp-host' }
+      )
+
+      const result = await reconcileRun('hybrid-recipe', hybridSpec, {
+        phase: 'recovering',
+        attempt: 1,
+        startedAt: isoDateAgo(10 * MINUTE_MS),
+      })
+
+      // Witnesses: the pod was there at the presence read (no create was
+      // attempted), and the gate read happened and found no pod.
+      expect(created).toEqual([])
+      expect(conflicts).toEqual([])
+      expect(readinessReads).toEqual(['hybrid-recipe-mcp-host'])
+      expect(result).toMatchObject({
+        phase: 'deploying',
+        workflowPhase: 'recovering',
+        message: 'Waiting for mcp-host pod to become Ready (phase=missing)',
+      })
+    })
+
+    it('reaches "Pod failed after 3 recovery attempts" after four coordinator waits when predecessors terminate gracefully', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      const SECOND_MS = 1000
+      const recipeName = 'hybrid-recipe'
+      const mcpHostName = `${recipeName}-mcp-host`
+      const coordinatorName = `${recipeName}-coordinator`
+      const actual = await vi.importActual<typeof import('./crashRecovery')>('./crashRecovery')
+      crashRecoveryMocks.evaluateCrashRecovery.mockImplementation(actual.evaluateCrashRecovery)
+
+      // Pods on an absolute clock. A deleted Running pod keeps its name for
+      // 5.5 s; its deletionTimestamp is the request plus the 30 s grace period.
+      type TimedPod = {
+        phase: string
+        createdAtMs: number
+        ready?: boolean
+        deletionTimestampMs?: number
+        goneAtMs?: number
+      }
+      const pods = new Map<string, TimedPod>([
+        [`${recipeName}-workflow-output-anchor`, { phase: 'Running', createdAtMs: Date.now() }],
+        [`${recipeName}-workflow-output-prepare`, { phase: 'Succeeded', createdAtMs: Date.now() }],
+      ])
+      const sweep = () => {
+        for (const [name, pod] of pods) {
+          if (pod.goneAtMs !== undefined && Date.now() >= pod.goneAtMs) pods.delete(name)
+        }
+      }
+      crashRecoveryMocks.getPodPhase.mockImplementation(async (_api, name: string) => {
+        sweep()
+        return pods.get(name)?.phase
+      })
+      crashRecoveryMocks.deletePodIfExists.mockImplementation(async (_api, name: string) => {
+        sweep()
+        const pod = pods.get(name)
+        if (!pod) return
+        if (pod.phase !== 'Running') {
+          pods.delete(name)
+          return
+        }
+        if (pod.deletionTimestampMs === undefined) {
+          pod.deletionTimestampMs = Date.now() + 30 * SECOND_MS
+          pod.goneAtMs = Date.now() + 5500
+          pod.ready = false
+        }
+      })
+      mockCoreApi.createNamespacedPod.mockImplementation(
+        async (params: { body: { metadata: { name: string } } }) => {
+          sweep()
+          const name = params.body.metadata.name
+          if (pods.has(name)) throw { code: 409 }
+          pods.set(name, { phase: 'Pending', createdAtMs: Date.now() })
+          return {}
+        }
+      )
+      const podReads = {
+        readNamespacedPod: async ({ name }: { name: string }) => {
+          const pod = pods.get(name)
+          if (!pod) throw { code: 404 }
+          return {
+            metadata: {
+              creationTimestamp: new Date(pod.createdAtMs),
+              ...(pod.deletionTimestampMs === undefined
+                ? {}
+                : { deletionTimestamp: new Date(pod.deletionTimestampMs) }),
+            },
+            status: {
+              phase: pod.phase,
+              conditions: [{ type: 'Ready', status: pod.ready ? 'True' : 'False' }],
+            },
+          }
+        },
+      }
+      crashRecoveryMocks.getPodReadiness.mockImplementation(
+        async (_api, name: string, podNamespace: string) => {
+          // The gate reads 300 ms after the pass-start presence read.
+          if (name === mcpHostName) vi.setSystemTime(Date.now() + 300)
+          sweep()
+          return actual.getPodReadiness(podReads as never, name, podNamespace)
+        }
+      )
+
+      // The run as the CR status holds it between passes: WRC's own attempt
+      // patches, then the phase and message of each pass, and startedAt once.
+      let execution: Record<string, unknown> = { phase: 'initializing' }
+      let coordinatorWaits = 0
+      const messages: string[] = []
+      let last: { phase: string; message: string } | undefined
+      for (let pass = 0; pass < 2000; pass++) {
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+        const result = await reconcileRun(recipeName, hybridSpec, execution)
+        for (const call of mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls) {
+          const patched = call[0]?.body?.status?.workflowExecution
+          if (patched) execution = { ...execution, ...patched }
+        }
+        execution = {
+          ...execution,
+          phase: result.workflowPhase ?? execution.phase,
+          message: result.message,
+          startedAt: execution.startedAt ?? new Date().toISOString(),
+        }
+        messages.push(result.message)
+        last = { phase: result.phase, message: result.message }
+        if (result.phase === 'failed') break
+
+        vi.setSystemTime(Date.now() + 5 * SECOND_MS)
+        // The mcp-host becomes Ready 20 s after its creation. The snippet
+        // runner never does: each coordinator waits 240 s, reports
+        // `recovering` and exits 1.
+        const mcpHost = pods.get(mcpHostName)
+        if (mcpHost?.phase === 'Pending' && Date.now() - mcpHost.createdAtMs >= 20 * SECOND_MS) {
+          mcpHost.phase = 'Running'
+          mcpHost.ready = true
+        }
+        const coordinator = pods.get(coordinatorName)
+        if (coordinator?.phase === 'Pending') coordinator.phase = 'Running'
+        if (
+          coordinator?.phase === 'Running' &&
+          Date.now() - coordinator.createdAtMs >= 240 * SECOND_MS
+        ) {
+          coordinator.phase = 'Failed'
+          coordinatorWaits += 1
+          execution = { ...execution, phase: 'recovering', message: 'snippet_runner not ready' }
+        }
+      }
+
+      expect(last).toEqual({ phase: 'failed', message: 'Pod failed after 3 recovery attempts' })
+      expect(coordinatorWaits).toBe(4)
+      expect(execution.attempt).toBe(3)
+      // Witness: at least one gate read found no pod (the predecessor was gone
+      // and its replacement not created yet).
+      expect(messages).toContain('Waiting for mcp-host pod to become Ready (phase=missing)')
+    })
 
     it('gives an mcp-host created after slow output pods a full window on the first deploy', async () => {
       const { created } = await useFakePods('agentic-recipe', {})

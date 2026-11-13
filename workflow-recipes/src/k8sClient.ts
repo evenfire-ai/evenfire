@@ -1330,10 +1330,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // NOTE: a fixed 5s interval × N concurrent deploying runs is N/5 reconciles
     // per second. We accept that load tradeoff for prompt progress; the inner
     // reconcile advances past the waiting state once the awaited Pod succeeds.
-    // The mcp-host readiness wait ends at its 240s deadline, measured from the
-    // later of the run start and that pod's creation (or, for a pod being
-    // deleted, its deletionTimestamp), and dbRunProcessor fails a run that
-    // exceeds its max_duration_seconds when one is set.
+    // The mcp-host readiness wait for a pod ends at that pod's 240s deadline,
+    // measured from the later of the run start and that pod's creation (or, for
+    // a pod being deleted, its deletionTimestamp). While no pod has the name
+    // there is no deadline, and the next pass creates the pod. dbRunProcessor
+    // fails a run that exceeds its max_duration_seconds when one is set.
     this.transientRetries.set(name, {
       timer,
       attempts: fixedInterval ? 0 : attempts + 1,
