@@ -11,6 +11,14 @@ export type GfsResourceMenuProps = {
   resourceName: string
   /** Reuse the action menu without a visible button, opened by its owning row. */
   triggerMode?: 'button' | 'context'
+  /** Sidebar-only geometry and in-place Share presentation. */
+  presentation?: 'default' | 'sidebar-context'
+  /** Current tree owner controls whether a context menu may be shown or act. */
+  contextVisible?: boolean
+  isContextOwnerCurrent?: (phase?: 'open' | 'replace') => boolean
+  onContextUnavailable?: () => void
+  onReplaceSelectionStart?: () => void
+  onReplaceSelectionEnd?: () => void
   contextTargetRef?: RefObject<HTMLElement | null>
   contextOpenRequest?: GfsResourceMenuOpenRequest | null
   actions?: GfsResourceAction[]

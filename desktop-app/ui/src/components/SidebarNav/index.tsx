@@ -188,6 +188,9 @@ export function SidebarNav({
     if (!compactMenuOpen) return undefined
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      const target = event.target
+      if (target instanceof Element && target.closest('[data-presentation="sidebar-context"]'))
+        return
       event.preventDefault()
       event.stopPropagation()
       closeCompactMenu()
@@ -694,6 +697,7 @@ export function SidebarNav({
                   }}
                   onResourceAction={onGfsResourceAction}
                   pushToast={pushToast}
+                  sidebarVisible={!compactMode || compactMenuOpen}
                 />
               </div>
             )}

@@ -631,7 +631,8 @@ async function chooseRowAction(resourceName: string, actionName: string) {
     return
   }
   if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
-    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Share' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Share' }))
+    await screen.findByRole('menu', { name: `Share options for ${resourceName}` })
   }
   fireEvent.click(await screen.findByRole('menuitem', { name: actionName }))
 }
@@ -750,6 +751,30 @@ const targetB = await resolveResource(
   resolvedFile('33333333333333333333333333333333', 'target-b.txt')
 )
 
+function mockSidebarBounds() {
+  const getBoundingClientRect = HTMLElement.prototype.getBoundingClientRect
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+    this: HTMLElement
+  ) {
+    if (this.classList.contains('left-nav')) {
+      const width = 328
+      const height = window.innerHeight || 768
+      return {
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+        width,
+        height,
+        toJSON: () => ({}),
+      } as DOMRect
+    }
+    return getBoundingClientRect.call(this)
+  })
+}
+
 beforeEach(() => {
   originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
   originalCreateObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, 'createObjectURL')
@@ -773,6 +798,7 @@ beforeEach(() => {
     configurable: true,
     value: vi.fn(() => ({ matches: false, addListener: vi.fn(), removeListener: vi.fn() })),
   })
+  mockSidebarBounds()
 })
 
 afterEach(() => {
@@ -2174,6 +2200,7 @@ describe('App → Files action lifecycle integration', () => {
           } finally {
             cleanup()
             vi.restoreAllMocks()
+            mockSidebarBounds()
           }
         }
       ),
@@ -2537,6 +2564,7 @@ describe('App → Files action lifecycle integration', () => {
           } finally {
             cleanup()
             vi.restoreAllMocks()
+            mockSidebarBounds()
           }
         }
       ),
@@ -3244,7 +3272,11 @@ describe('App → Files action lifecycle integration', () => {
         preview: { gfsUri: markdown.gfsUri },
       })
     )
-    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === markdown.gfsUri)).toHaveLength(1)
+    expect(
+      getWorkspaceTabButtons(markdown.name).find(tab => tab.getAttribute('aria-pressed') === 'true')
+    ).toBeTruthy()
+    expect(gfs.download).not.toHaveBeenCalled()
+    expect(gfs.downloadPreview).toHaveBeenCalledWith(markdown.gfsUri, expect.any(Number))
   })
 
   it('preserves explicit non-previewable deep-link download and tab-path behavior', async () => {
