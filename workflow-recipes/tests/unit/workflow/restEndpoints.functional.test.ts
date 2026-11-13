@@ -2201,3 +2201,85 @@ describe('deleteArtifactFile — per-file artifact delete', () => {
     expect(result.status).toBe(403)
   })
 })
+
+// --- R1-M1: stored tool calls are bounded in serialized bytes ---------------
+
+describe('postStepStatus with byte-heavy tool calls', () => {
+  it('stores a byte-heavy report within the serialized limit, raw or coordinator-bounded', async () => {
+    const units = ['日本語テキスト', '\u0001\u001b', '"\\']
+    const fill = (unit: string, chars: number) =>
+      unit.repeat(Math.ceil(chars / unit.length)).slice(0, chars)
+    const toolsCalled: Array<Record<string, unknown>> = Array.from({ length: 60 }, (_, i) => ({
+      serverName: 'git',
+      toolName: 'read_file',
+      // Odd calls are over the character limit; even calls fit it but, for the
+      // CJK unit, not the byte limit.
+      args: { query: fill(units[i % 3], i % 2 ? 5_000 : 900) },
+      result:
+        i % 2 ? [{ type: 'text', text: fill(units[i % 3], 5_000) }] : fill(units[i % 3], 1_024),
+      durationMs: i,
+    }))
+    toolsCalled[55] = {
+      serverName: 'clerum',
+      toolName: 'generate_docx',
+      args: { path: 'report', padding: fill(units[0], 4_096) },
+      result: {
+        success: true,
+        artifact: {
+          name: 'report.docx',
+          format: 'docx',
+          path: '/output/report.docx',
+          sizeBytes: 2048,
+          createdAt: '2026-10-16T00:00:00.000Z',
+        },
+      },
+      durationMs: 55,
+    }
+    const stored = async (calls: unknown[]) => {
+      const customApi = makeCustomApi({
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { name: 'my-recipe', resourceVersion: '1' },
+          spec: { steps: [{ id: 's1' }] },
+          status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+        }),
+      })
+      const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+      const result = await h.postStepStatus('my-recipe', makeClaims(), {
+        stepId: 's1',
+        phase: 'completed',
+        toolsCalled: calls as never,
+      })
+      expect(result.status).toBe(200)
+      const patchOps = getStatusPatchOps(customApi)
+      return {
+        toolsCalled: (
+          patchOps.find(op => op.path === '/status/steps/-')?.value as {
+            toolsCalled?: Array<{ args?: unknown; result?: unknown }>
+          }
+        ).toolsCalled,
+        artifact: patchOps.find(op => op.path === '/status/artifacts/-')?.value,
+      }
+    }
+
+    const fromRaw = await stored(toolsCalled)
+    const fromBounded = await stored(boundToolsCalledForStatus(toolsCalled))
+
+    // Liveness: 50 calls stored, the artifact past them extracted, previews carry text.
+    expect(fromRaw.toolsCalled).toHaveLength(50)
+    expect(fromRaw.artifact).toMatchObject({ name: 'report.docx' })
+    const previews = (fromRaw.toolsCalled ?? []).filter(
+      call => (call.result as { truncated?: boolean } | undefined)?.truncated === true
+    )
+    expect(previews.length).toBeGreaterThanOrEqual(25)
+    for (const call of previews) {
+      expect((call.result as { preview: string }).preview.length).toBeGreaterThan(300)
+    }
+
+    const maxValueBytes = 2 * 1024 + 31
+    for (const call of fromRaw.toolsCalled ?? []) {
+      expect(Buffer.byteLength(JSON.stringify(call.args))).toBeLessThanOrEqual(maxValueBytes)
+      expect(Buffer.byteLength(JSON.stringify(call.result))).toBeLessThanOrEqual(maxValueBytes)
+    }
+    expect(fromBounded).toEqual(fromRaw)
+  })
+})

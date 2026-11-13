@@ -354,3 +354,55 @@ describe('StatusReporter', () => {
     expect(fetchMock.mock.calls[3][1].headers.Authorization).toBe('Bearer jwt-4')
   })
 })
+
+// --- R1-M1: the request body carries a byte-bounded toolsCalled -------------
+
+describe('StatusReporter with byte-heavy tool calls', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('bounds multi-byte and control-character toolsCalled in the real request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const cjk = '日本語テキスト'.repeat(800)
+    const control = '\u0001\u001b'.repeat(2_500)
+    const toolsCalled = Array.from({ length: 100 }, (_, i) => ({
+      serverName: 'srv',
+      toolName: 'tool',
+      durationMs: 1,
+      args: i % 2 ? { query: cjk } : control,
+      result:
+        i >= 50
+          ? {
+              success: true,
+              artifact: { name: 'a/b', format: 'pdf', path: '/output/x' },
+              content: cjk,
+            }
+          : i % 2
+            ? control
+            : [{ type: 'text', text: cjk }],
+    }))
+    const output = 'r'.repeat(150_000)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('review', 'completed', { output, toolsCalled })
+
+    const rawBody: string = fetchMock.mock.calls[0][1].body
+    const body = JSON.parse(rawBody)
+    // Liveness: the report went out with the full output and every call.
+    expect(body.output).toBe(output)
+    expect(body.toolsCalled).toHaveLength(100)
+    expect(body.toolsCalled[0].result.preview.length).toBeGreaterThan(300)
+    const toolsCalledBytes = Buffer.byteLength(JSON.stringify(body.toolsCalled))
+    expect(toolsCalledBytes).toBeGreaterThan(200 * 1024)
+    // 150 values of at most 2 x 1,024 + 31 bytes, plus at most 80 bytes per call.
+    expect(toolsCalledBytes).toBeLessThanOrEqual(150 * (2 * 1024 + 31) + 100 * 80)
+    // With a 150 KB output the whole body fits WRC's 512 KiB request limit.
+    expect(Buffer.byteLength(rawBody)).toBeLessThan(512 * 1024)
+  })
+})

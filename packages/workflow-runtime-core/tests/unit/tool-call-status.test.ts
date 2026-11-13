@@ -243,3 +243,165 @@ describe('boundToolsCalledForStatus', () => {
     ])
   })
 })
+
+// --- R1-M1: the limits also count serialized UTF-8 bytes -------------------
+
+// The most one args or result value costs once serialized: a preview of
+// 2 x 1,024 bytes inside its `{"truncated":true,"preview":""}` wrapper (31 bytes).
+const MAX_VALUE_BYTES = 2 * STATUS_TOOL_RESULT_PREVIEW_LIMIT + 31
+const serializedBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value))
+const fill = (unit: string, chars: number) =>
+  unit.repeat(Math.ceil(chars / unit.length)).slice(0, chars)
+const HEAVY_UNITS = ['日本語テキスト', '\u0001\u001b', '"\\']
+const rejectedArtifact = { name: 'a/b', format: 'pdf', path: '/output/x' }
+
+/**
+ * Multi-byte text, control characters and quotes in args and results. A call
+ * past the first MAX_STATUS_TOOL_CALLS is kept only when its result parses as an
+ * artifact result, so those carry an artifact WRC rejects and stay previews.
+ */
+const heavyCall = (i: number) => {
+  const unit = HEAVY_UNITS[i % HEAVY_UNITS.length]
+  return {
+    serverName: 'srv',
+    toolName: 'tool',
+    durationMs: 1,
+    args: i % 2 ? { query: fill(unit, 5_000) } : fill(unit, 1_024),
+    result:
+      i >= MAX_STATUS_TOOL_CALLS
+        ? { success: true, artifact: rejectedArtifact, content: fill(unit, 5_000) }
+        : i % 2
+          ? fill(unit, 1_024)
+          : [{ type: 'text', text: fill(unit, 5_000) }],
+  }
+}
+
+describe('serialized size of bounded tool calls', () => {
+  it('bounds multi-byte, control-character and quoted args and results by serialized bytes', () => {
+    const calls = Array.from({ length: 2 * MAX_STATUS_TOOL_CALLS }, (_, i) => heavyCall(i))
+
+    const bounded = boundToolsCalledForStatus(calls) as Array<{
+      args?: unknown
+      result?: { truncated?: boolean; preview?: string }
+    }>
+
+    // Liveness: every call is still reported and the previews carry text.
+    expect(bounded).toHaveLength(2 * MAX_STATUS_TOOL_CALLS)
+    const overLongResults = bounded.filter((_, i) => i >= MAX_STATUS_TOOL_CALLS || i % 2 === 0)
+    expect(overLongResults).toHaveLength(75)
+    for (const call of overLongResults) {
+      expect(call.result).toEqual({ truncated: true, preview: expect.any(String) })
+      expect(call.result?.preview?.length).toBeGreaterThan(300)
+    }
+    const total = serializedBytes(bounded)
+    expect(total).toBeGreaterThan(200 * 1024)
+
+    for (const [i, call] of bounded.entries()) {
+      if (i < MAX_STATUS_TOOL_CALLS) {
+        expect(call.args).toBeDefined()
+        expect(serializedBytes(call.args)).toBeLessThanOrEqual(MAX_VALUE_BYTES)
+      }
+      expect(serializedBytes(call.result)).toBeLessThanOrEqual(MAX_VALUE_BYTES)
+    }
+    // 150 values plus at most 80 bytes of names, duration and punctuation per call.
+    expect(total).toBeLessThanOrEqual(150 * MAX_VALUE_BYTES + 100 * 80)
+  })
+
+  it.each([
+    ['a string of control characters', '\u0001'.repeat(1_024)],
+    ['a string of CJK text', '日'.repeat(1_024)],
+    ['a string of lone surrogates', '\ud83d'.repeat(1_024)],
+    ['a record of CJK text', { q: '日'.repeat(1_000) }],
+    ['an array of CJK text', ['日'.repeat(1_000)]],
+  ])('previews %s that fits the character limit but not the byte limit', (_name, value) => {
+    for (const normalize of [normalizeToolResultForStatus, normalizeToolArgsForStatus]) {
+      const out = normalize(value) as { preview: string }
+      expect(out).toEqual({ truncated: true, preview: expect.any(String) })
+      // The cut keeps as much as the byte limit allows (within one character of it).
+      expect(serializedBytes(out)).toBeLessThanOrEqual(MAX_VALUE_BYTES)
+      expect(serializedBytes(out)).toBeGreaterThan(MAX_VALUE_BYTES - 6)
+    }
+  })
+
+  it.each([
+    ['quotes', '"'.repeat(1_024)],
+    ['backslashes', '\\'.repeat(1_024)],
+    ['newlines', '\n'.repeat(1_024)],
+    ['accented Latin text', 'é'.repeat(1_024)],
+    ['emoji', '😀'.repeat(512)],
+    ['ANSI-coloured terminal output', '\u001b[31mERR\u001b[0m '.repeat(78)],
+  ])('keeps %s within the character limit whole', (_name, value) => {
+    expect(normalizeToolResultForStatus(value)).toBe(value)
+    const record = { text: value.slice(0, 400) }
+    expect(normalizeToolArgsForStatus(record)).toBe(record)
+  })
+
+  it('cuts a preview at the byte limit on a code-point boundary', () => {
+    const cjk = normalizeToolResultForStatus('日'.repeat(5_000)) as { preview: string }
+    expect(cjk.preview).toBe('日'.repeat(682))
+
+    const control = normalizeToolArgsForStatus('\u0001'.repeat(5_000)) as { preview: string }
+    expect(control.preview).toBe('\u0001'.repeat(341))
+
+    // 1,024 UTF-16 units end inside the 512th emoji; the cut drops that half.
+    const emoji = normalizeToolResultForStatus(`x${'😀'.repeat(600)}`) as { preview: string }
+    expect(emoji.preview).toBe(`x${'😀'.repeat(511)}`)
+  })
+
+  it('counts the {value} wrapper of non-record args, so a second pass reaches the same byte verdict', () => {
+    // 12 bytes of wrapper put each of these over the byte limit although the text fits it.
+    for (const args of ['日'.repeat(680), '"'.repeat(1_020), '\u0001'.repeat(340)]) {
+      const once = normalizeToolArgsForStatus(args)
+      expect(once).toEqual({ truncated: true, preview: args })
+      expect(normalizeToolArgsForStatus(once)).toBe(once)
+    }
+    // Witness: just under the limit with the wrapper, the value is still sent whole.
+    const whole = '日'.repeat(678)
+    const wrapped = normalizeToolArgsForStatus(whole)
+    expect(wrapped).toEqual({ value: whole })
+    expect(normalizeToolArgsForStatus(wrapped)).toBe(wrapped)
+  })
+
+  it('normalizing byte-heavy values twice changes nothing', () => {
+    const values: unknown[] = [
+      '日'.repeat(1_024),
+      '\u0001'.repeat(5_000),
+      { q: '日'.repeat(1_000) },
+      { q: '"'.repeat(5_000) },
+      [{ type: 'text', text: fill(HEAVY_UNITS[0], 5_000) }],
+    ]
+    for (const value of values) {
+      for (const normalize of [normalizeToolResultForStatus, normalizeToolArgsForStatus]) {
+        const once = normalize(value)
+        expect(once).toEqual({ truncated: true, preview: expect.any(String) })
+        expect(normalize(once)).toEqual(once)
+      }
+    }
+  })
+})
+
+// --- R1-L6 (only if the owner includes the guard change) --------------------
+
+describe('preview pass-through guard, serialized size', () => {
+  it('re-bounds a preview-shaped value whose text is over the byte limit', () => {
+    const crafted = { truncated: true, preview: '\u0001'.repeat(1_024) }
+    for (const normalize of [normalizeToolResultForStatus, normalizeToolArgsForStatus]) {
+      const out = normalize(crafted) as { preview: string }
+      expect(out).not.toBe(crafted)
+      expect(out).toEqual({ truncated: true, preview: expect.any(String) })
+      expect(out.preview.length).toBeGreaterThan(300)
+      expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(
+        2 * STATUS_TOOL_RESULT_PREVIEW_LIMIT + 31
+      )
+      expect(normalize(out)).toBe(out)
+    }
+  })
+
+  it('still passes a preview within both limits through', () => {
+    for (const preview of ['"'.repeat(1_024), '日'.repeat(682), 'x'.repeat(1_024)]) {
+      const value = { truncated: true, preview }
+      expect(normalizeToolResultForStatus(value)).toBe(value)
+      expect(normalizeToolArgsForStatus(value)).toBe(value)
+    }
+  })
+})
