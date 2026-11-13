@@ -136,6 +136,9 @@ export class MockGateway {
       uid: string
       resourceVersion: string
       data?: Record<string, string>
+      // Set by the apiserver on create and deserialized to a Date by the client, as
+      // the real gateway returns it; seedable so a test can model an old Secret.
+      creationTimestamp?: Date
     }
   >
 
@@ -198,10 +201,12 @@ export class MockGateway {
       resourceVersion?: string
       data?: Record<string, string>
       stringData?: Record<string, string>
+      creationTimestamp?: Date
     }
   ): void {
     const ns = namespace || this.ns
     this.secretStore.set(`${ns}/${name}`, {
+      creationTimestamp: options?.creationTimestamp ?? new Date(),
       name,
       namespace: ns,
       type: options?.type,
@@ -469,6 +474,7 @@ export class MockGateway {
         annotations: entry.annotations,
         uid: entry.uid,
         resourceVersion: entry.resourceVersion,
+        ...(entry.creationTimestamp ? { creationTimestamp: entry.creationTimestamp } : {}),
       },
       type: entry.type || 'Opaque',
       data: entry.data,
@@ -498,6 +504,7 @@ export class MockGateway {
       uid: this.allocateUid('secret', body.namespace || this.ns, body.name),
       resourceVersion: '1',
       data: materializeSecretData(body.data, body.stringData),
+      creationTimestamp: new Date(),
     }
     this.secretStore.set(key, entry)
     const snapshot = this.snapshot(entry)
@@ -553,6 +560,7 @@ export class MockGateway {
       uid: existing?.uid,
       resourceVersion: MockGateway.nextResourceVersion(existing?.resourceVersion),
       data: materializeSecretData(body.data, body.stringData),
+      creationTimestamp: existing?.creationTimestamp,
     }
     this.secretStore.set(key, updated)
     const snapshot = this.snapshot(updated)

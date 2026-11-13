@@ -1,0 +1,11 @@
+{
+  "status": 201,
+  "body": {
+    "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af",
+    "namespace": "mcp-server",
+    "clientMode": "public",
+    "registrationMode": "cimd",
+    "callbackVariant": "shared",
+    "redirectUri": "https://control.example.com/api/v1/oauth-callback/remote"
+  }
+}

@@ -9,7 +9,7 @@ import {
 } from '../src/oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
-import { signOAuthState } from '../src/oauth/state.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 
 /**
  * S3.2 / DEC-28 + DEC-17 — the GENERIC auth-code exchange goes through the
@@ -55,7 +55,7 @@ function genericCr(confidential: boolean) {
     oauth.clientSecretRef = { name: 'gen-creds', key: 'client_secret' }
   }
   return {
-    metadata: { name: 'gen-server', namespace: MCP_NS },
+    metadata: { name: 'gen-server', namespace: MCP_NS, uid: 'uid-gen-server' },
     spec: { contextRef: 'ctx-A', auth: { type: 'oauth' }, oauth },
   }
 }
@@ -92,7 +92,7 @@ function recordingTransport(responseJson: string, status = 200) {
   return { transport, calls }
 }
 
-function genericInput(): CallbackInput {
+async function genericInput(deps: CallbackDeps): Promise<CallbackInput> {
   return {
     target: {
       kind: 'client',
@@ -100,14 +100,11 @@ function genericInput(): CallbackInput {
       redirectUri: 'https://control.example.com/api/v1/oauth-callback/my-generic-client',
     },
     code: 'AUTH_CODE',
-    state: signOAuthState(STATE_SECRET, {
-      subjectKind: 'mcp',
+    state: await mintMcpState(deps, STATE_SECRET, {
       mcpServerName: 'gen-server',
       userId: 'user-9',
       oauthClientId: CLIENT_ID,
-      grantKind: 'user',
-      background: false,
-    } as Parameters<typeof signOAuthState>[1]),
+    }),
   }
 }
 
@@ -145,7 +142,7 @@ describe('handleOAuthCallback — generic exchange is IP-pinned (DEC-17)', () =>
       pinnedTransport: transport,
     })
 
-    const result = await handleOAuthCallback(genericInput(), deps)
+    const result = await handleOAuthCallback(await genericInput(deps), deps)
 
     expect(result.kind).toBe('ok')
     expect(fetchFn).not.toHaveBeenCalled()
@@ -179,7 +176,7 @@ describe('handleOAuthCallback — generic exchange is IP-pinned (DEC-17)', () =>
       pinnedTransport: transport,
     })
 
-    const result = await handleOAuthCallback(genericInput(), deps)
+    const result = await handleOAuthCallback(await genericInput(deps), deps)
 
     expect(result.kind).toBe('ok')
     expect(calls).toHaveLength(1)

@@ -35,11 +35,11 @@ import {
 } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
-import { signOAuthState } from '../src/oauth/state.js'
 import { upsertOAuthGrant } from '../src/oauth/store.js'
 import { getAccessToken } from '../src/oauth/tokenHelper.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { type McpServerResource, normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 import {
   DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
   dcrPilot,
@@ -206,7 +206,7 @@ describeRealPostgres(
       }
     }
 
-    function consent(
+    async function consent(
       gateway: MockGateway,
       name: string,
       transport: ReturnType<typeof recordingAs>['transport']
@@ -214,14 +214,11 @@ describeRealPostgres(
       const input: CallbackInput = {
         target: { kind: 'remote-shared', origin: 'https://control.example.com' },
         code: 'AUTH_CODE',
-        state: signOAuthState(STATE_SECRET, {
-          subjectKind: 'mcp',
-          mcpServerName: name,
-          userId: 'user-9',
-          oauthClientId: REG.client_id,
-          grantKind: 'user',
-          background: false,
-        } as Parameters<typeof signOAuthState>[1]),
+        state: await mintMcpState(
+          { mcpServerReader: subjectReader(gateway), secretReader: { read: async () => ({}) } },
+          STATE_SECRET,
+          { mcpServerName: name, userId: 'user-9', oauthClientId: REG.client_id }
+        ),
         iss: discovery.issuer,
       }
       const deps: CallbackDeps = {

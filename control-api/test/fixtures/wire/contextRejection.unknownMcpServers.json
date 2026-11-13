@@ -1,0 +1,8 @@
+{
+  "status": 422,
+  "body": {
+    "error": "unknown_mcp_server",
+    "mcpServers": ["mcp-gone-a", "mcp-gone-b"],
+    "message": "one or more connectors no longer exist; reload and try again"
+  }
+}

@@ -230,6 +230,12 @@ jobs:
         working-directory: rpc-proxy
         run: npm ci
 
+      # The seed loads control-api's TypeScript sources with Node itself (type
+      # stripping), so this also fails if those modules stop being erasable.
+      - name: Test remote-OAuth catalog seed (hermetic)
+        if: matrix.service == 'control-api'
+        run: node scripts/tests/run-node-test-files.mjs scripts/registry/seed-remote-oauth.test.mjs
+
       - name: Test Playwright MCP cluster probe (hermetic)
         if: matrix.service == 'host-context-controller'
         run: >-

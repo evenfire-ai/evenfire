@@ -45,7 +45,11 @@ import {
   listCodexSubscriptionConnections,
 } from '../../../lib/codexSubscription'
 import { isDisabledCapabilityError } from '../../../lib/codexSubscriptionFeature'
-import { buildContextUpdatePayload, contextMutationError } from '../../../lib/contextMutation'
+import {
+  buildContextUpdatePayload,
+  contextMutationError,
+  unknownMcpServerNames,
+} from '../../../lib/contextMutation'
 import {
   type GrokSubscriptionConnectionView,
   isAssignableGrokGrant,
@@ -790,6 +794,9 @@ export default function HostDetailsPage() {
       return true
     } catch (e) {
       setError(agentConnectorMutationError(e))
+      // The picker was filled from a list read earlier; reload it so a connector that
+      // no longer exists stops being offered.
+      if (unknownMcpServerNames(e) !== null) void loadConnectorCatalog(true)
       return false
     } finally {
       setBusy(false)

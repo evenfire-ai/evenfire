@@ -14,7 +14,8 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
  * The recipe subject wire format is FROZEN: a recipe state carries NO
  * `subjectKind` discriminator and NO mcp fields, so an existing recipe state
  * serializes / signs byte-for-byte identically to before U5. The mcp subject is
- * strictly additive — it carries `subjectKind:'mcp'` + `mcpServerName`. Anything
+ * strictly additive — it carries `subjectKind:'mcp'` + `mcpServerName` + the
+ * server CR's `crUid` (plus `contextId` for a context-scope consent). Anything
  * that is neither an unmarked recipe nor a well-formed mcp subject fails closed
  * (see {@link decodePayload}): a state marked `mcp` with a missing
  * `mcpServerName`, or an unrecognized `subjectKind`, is rejected rather than
@@ -63,6 +64,15 @@ export interface OAuthMcpStateClaims extends OAuthStateCommonClaims {
    * so a context-scope state without it is refused. Absent on per-user states.
    */
   contextId?: string
+  /**
+   * metadata.uid of the McpServer CR the consent was started on. The server name
+   * alone does not identify an installation: after an uninstall and a reinstall
+   * under the same name, a consent started on the old CR would otherwise be
+   * sealed onto the new one. The mint always signs it; it is optional here only
+   * so a state signed before it existed still decodes and the callback can answer
+   * `oauth_state_outdated` (retry the Connect) instead of a generic invalid state.
+   */
+  crUid?: string
 }
 
 export type OAuthStateClaims = OAuthRecipeStateClaims | OAuthMcpStateClaims
@@ -109,6 +119,8 @@ export type SignStateInput =
       background: boolean
       /** The validated Context of a context-scope consent; omitted otherwise. */
       contextId?: string
+      /** metadata.uid of the McpServer CR read for this mint. */
+      crUid: string
     }
 
 /**
@@ -135,6 +147,7 @@ export function signOAuthState(secret: string, input: SignStateInput): string {
       expiresAt,
       nonce,
       ...(input.contextId !== undefined ? { contextId: input.contextId } : {}),
+      crUid: input.crUid,
     }
   } else {
     // FROZEN recipe subject — this object literal (field set + order) MUST stay
@@ -274,17 +287,24 @@ function decodePayload(payload: string): OAuthStateClaims {
     if (typeof obj.mcpServerName !== 'string' || obj.mcpServerName.length === 0) {
       throw new Error('decodePayload: malformed mcp claims')
     }
-    if (obj.contextId === undefined) {
-      return { subjectKind: 'mcp', mcpServerName: obj.mcpServerName, ...common }
-    }
-    if (typeof obj.contextId !== 'string' || obj.contextId.length === 0) {
+    if (
+      obj.contextId !== undefined &&
+      (typeof obj.contextId !== 'string' || obj.contextId.length === 0)
+    ) {
       throw new Error('decodePayload: malformed mcp contextId')
+    }
+    // An absent crUid is a state signed before the field existed: it decodes, and
+    // the callback refuses it as outdated. A present but malformed one was never
+    // signed by this service.
+    if (obj.crUid !== undefined && (typeof obj.crUid !== 'string' || obj.crUid.length === 0)) {
+      throw new Error('decodePayload: malformed mcp crUid')
     }
     return {
       subjectKind: 'mcp',
       mcpServerName: obj.mcpServerName,
       ...common,
-      contextId: obj.contextId,
+      ...(obj.contextId !== undefined ? { contextId: obj.contextId } : {}),
+      ...(obj.crUid !== undefined ? { crUid: obj.crUid } : {}),
     }
   }
 

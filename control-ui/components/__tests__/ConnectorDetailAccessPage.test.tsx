@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ContextResource, HostResource } from '@lib/api'
 import * as api from '@lib/api'
+import {
+  contextRejectionError,
+  unknownMcpServerBody,
+} from '../../test/fixtures/contextMcpServerRejection'
 import { ConnectorDetailAccessProvider } from '../ConnectorDetailAccessProvider'
 import { ConnectorDetailPage } from '../ConnectorDetailPage'
 import { ConnectorDetailProvider } from '../ConnectorDetailProvider'
@@ -296,4 +300,42 @@ describe('connector detail authentication field', () => {
       }
     }
   )
+})
+
+describe('connector detail access — a write refused mid-way', () => {
+  it('reloads the bindings so the writes that landed show, and reports the refusal', async () => {
+    contexts.push({
+      metadata: { name: 'gamma-context', resourceVersion: '5' },
+      spec: { contextId: 'gamma-context', mcpServers: [], sharedFileSystems: [] },
+    })
+    hosts.push({
+      metadata: { name: 'agent-gamma' },
+      spec: { host: 'Gamma Agent', contextRef: 'gamma-context' },
+    })
+    const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    const refusal = await contextRejectionError(actualApi, unknownMcpServerBody(['search']))
+    const writeContext = vi.mocked(api.updateContext).getMockImplementation()!
+    vi.mocked(api.updateContext).mockImplementation(async (name, payload) => {
+      if (name === 'gamma-context') throw refusal
+      return writeContext(name, payload)
+    })
+
+    renderDetail()
+    expect(await screen.findByRole('link', { name: 'Alpha Agent' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Add agent' }))
+    const dialog = screen.getByRole('dialog', { name: 'Give agents access to this connector' })
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /Beta Agent/ }))
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /Gamma Agent/ }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add to agents' }))
+
+    expect(
+      (
+        await screen.findAllByText(
+          'The connector search no longer exists; reload the page and try again.'
+        )
+      ).length
+    ).toBeGreaterThan(0)
+    expect(await screen.findByRole('link', { name: 'Beta Agent' })).toBeVisible()
+    expect(screen.queryByRole('link', { name: 'Gamma Agent' })).toBeNull()
+  })
 })

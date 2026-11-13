@@ -1,0 +1,8 @@
+{
+  "status": 422,
+  "body": {
+    "error": "too_many_mcp_servers",
+    "limit": 256,
+    "message": "a single write may add at most 256 connectors to a context"
+  }
+}

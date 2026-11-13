@@ -1,0 +1,7 @@
+{
+  "status": 400,
+  "body": {
+    "error": "catalog_entry_invalid",
+    "reason": "setup_guide_required"
+  }
+}

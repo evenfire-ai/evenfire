@@ -43,7 +43,10 @@ function remoteSubject(): McpServerOAuthSubject {
     cimdClientId: CLIENT_ID,
   })
   const resolved = resolveServerOAuthSubject(
-    { spec: { contextRef: 'ctx-A', oauth: oauth as unknown as Record<string, unknown> } },
+    {
+      metadata: { name: 'linear-remote', uid: 'uid-linear-remote' },
+      spec: { contextRef: 'ctx-A', oauth: oauth as unknown as Record<string, unknown> },
+    },
     'consent'
   )
   if (!resolved) throw new Error('fixture: remote resolve returned null')

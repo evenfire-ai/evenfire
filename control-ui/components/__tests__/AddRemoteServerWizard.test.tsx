@@ -4,6 +4,7 @@ import * as api from '../../lib/api'
 import * as clipboard from '../../lib/clipboard'
 import * as remoteMcp from '../../lib/remoteMcp'
 import type { DiscoverRemoteResponse, RemoteTransportProbe } from '../../lib/remoteMcp.types'
+import { CATALOG_TRANSPORT_UNREACHABLE_FAILURE } from '../../test/fixtures/catalogRemoteOAuthWire'
 import {
   TRANSPORT_INCONCLUSIVE_TIMEOUT,
   VERCEL_TRANSPORT_DEAD,
@@ -357,6 +358,38 @@ describe('AddRemoteServerWizard', () => {
     expect(await screen.findByText(/isn't reachable at that URL/i)).toBeInTheDocument()
     expect(screen.getByText(/https:\/\/mcp\.vercel\.com\//)).toBeInTheDocument()
     expect(onInstalled).not.toHaveBeenCalled()
+  })
+
+  it('C5 install transport_unreachable without a reported status names no HTTP code', async () => {
+    // Manual and catalog installs share the producer of this 400. control-api always
+    // sends detail.httpStatus; the body without it is that golden minus the one field.
+    const { httpStatus: _status, ...detailWithoutStatus } = (
+      CATALOG_TRANSPORT_UNREACHABLE_FAILURE.body as { detail: Record<string, unknown> }
+    ).detail
+    discoverMock.mockResolvedValue(discovered(NOTION_DISCOVER))
+    installMock.mockRejectedValue(
+      apiErrorFrom({
+        ...CATALOG_TRANSPORT_UNREACHABLE_FAILURE,
+        body: {
+          ...(CATALOG_TRANSPORT_UNREACHABLE_FAILURE.body as Record<string, unknown>),
+          detail: detailWithoutStatus,
+        },
+      })
+    )
+    renderWizard()
+    await fillIdentity()
+    clickDetect()
+    await screen.findByText('https://mcp.notion.com/authorize')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+    expect(
+      await screen.findByText(
+        "This server's MCP endpoint isn't reachable at that URL. Its MCP endpoint looks like https://mcp.vercel.com/ — go back and detect that URL instead."
+      )
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/HTTP \d/)).not.toBeInTheDocument()
   })
 
   // ── Per-server callback (AS without RFC 9207) ──────────────────────────────

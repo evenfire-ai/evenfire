@@ -5,10 +5,11 @@ import { config } from '../src/config.js'
 import type { DiscoveryResult } from '../src/oauth/discovery.js'
 import { claimDeleteDynamicClientForResource } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
-import { signOAuthState } from '../src/oauth/state.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
+import { buildOAuthCallbackDeps } from '../src/routes/external/oauthCallback.js'
 import { attachServerToContext } from '../src/services/contextAllowlist.js'
 import { membershipResult } from './fixtures/contextAllowlist.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 import {
   discoverPilot,
   enableServerInContext,
@@ -174,14 +175,11 @@ async function oauthOf(name: string): Promise<Record<string, unknown>> {
 }
 
 async function stateFor(name: string): Promise<string> {
-  return signOAuthState(config.oauthStateHmacSecret, {
-    subjectKind: 'mcp',
+  return mintMcpState(buildOAuthCallbackDeps(gateway as never), config.oauthStateHmacSecret, {
     mcpServerName: name,
     userId: 'user-9',
     oauthClientId: String((await oauthOf(name)).id),
-    grantKind: 'user',
-    background: false,
-  } as Parameters<typeof signOAuthState>[1])
+  })
 }
 
 function deepLinkOf(html: string): URL {
@@ -339,6 +337,82 @@ describe('GET /api/v1/oauth-callback/remote/:serverName/:installNonce?', () => {
     expect(res.status).toBe(400)
     expect(res.body).toEqual({ error: 'issuer_mismatch' })
   })
+})
+
+/**
+ * A same-name reinstall between the mint and the callback, on the remote callback
+ * URIs. The CR is recreated from the bytes the real install wrote, so only its uid
+ * changes, which is exactly what a pre-registered reinstall with the same app keeps.
+ */
+describe('remote callbacks refuse a consent started on a previous installation (crUid)', () => {
+  async function reinstallSameName(name: string): Promise<void> {
+    const cr = (await gateway.getResource('mcpservers', name, NS)) as {
+      metadata: Record<string, unknown> & { uid?: string }
+      spec: unknown
+    }
+    const { uid: _uid, resourceVersion: _rv, creationTimestamp: _ts, ...metadata } = cr.metadata
+    await gateway.deleteResource('mcpservers', name, NS)
+    await gateway.createResource('mcpservers', { metadata, spec: cr.spec }, NS)
+    const after = (await gateway.getResource('mcpservers', name, NS)) as {
+      metadata: { uid?: string }
+    }
+    expect(after.metadata.uid).toBeTruthy()
+    expect(after.metadata.uid).not.toBe(cr.metadata.uid)
+  }
+
+  const variants = [
+    ['per-server', () => notion, (redirectUri: string) => new URL(redirectUri).pathname],
+    ['shared', () => notionWithIss, () => '/api/v1/oauth-callback/remote'],
+  ] as const
+
+  async function callback(name: string, path: string, state: string) {
+    const oauth = await oauthOf(name)
+    return request(app)
+      .get(path)
+      .query({
+        code: 'CODE',
+        state,
+        ...(oauth.issForCallback ? { iss: String(oauth.issForCallback) } : {}),
+      })
+  }
+
+  it.each(variants)(
+    '%s: the installation the consent started on → 200, one exchange',
+    async (_label, discovery, path) => {
+      const redirectUri = await install(
+        'hubspot',
+        'pre-registered',
+        discovery(),
+        PILOTS.notion.mcpUrl
+      )
+      const state = await stateFor('hubspot')
+
+      const res = await callback('hubspot', path(redirectUri), state)
+
+      expect(res.status).toBe(200)
+      expect(tokenEndpoint.posts).toHaveLength(1)
+    }
+  )
+
+  it.each(variants)(
+    '%s: a same-name reinstall between mint and callback → 400 oauth_state_outdated, no exchange',
+    async (_label, discovery, path) => {
+      const redirectUri = await install(
+        'hubspot',
+        'pre-registered',
+        discovery(),
+        PILOTS.notion.mcpUrl
+      )
+      const state = await stateFor('hubspot')
+      await reinstallSameName('hubspot')
+
+      const res = await callback('hubspot', path(redirectUri), state)
+
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'oauth_state_outdated' })
+      expect(tokenEndpoint.posts).toHaveLength(0)
+    }
+  )
 })
 
 describe('POST /api/v1/internal/mcp-oauth/authorize-url — remote redirect URI', () => {

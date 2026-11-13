@@ -9,6 +9,7 @@ import {
   ResourceListResponse,
   ResourcePreconditions,
 } from '../types.js'
+import { mergeAnnotationsForReplace } from './annotationMerge.js'
 import {
   addNonEmpty,
   extractK8sStatus,
@@ -76,8 +77,8 @@ type ResourceMutation = {
   spec: Record<string, unknown>
 } | null
 
-/** Annotation keys under this prefix are platform-owned write-only projections. */
-const PLATFORM_ANNOTATION_PREFIX = 'clerum.io/'
+// Re-exported so existing importers keep resolving it from the resource service.
+export { mergeAnnotationsForReplace }
 
 function isHostResource(plural: ClerumResourceType): boolean {
   return plural === 'hosts'
@@ -108,33 +109,6 @@ async function persistHostFailure(intent: HostAdministrativeIntent | null): Prom
     'failed',
     'kubernetes_write_failed'
   )
-}
-
-/**
- * Merge annotations for a full-replace write (updateResource/mutateResource).
- *
- * - `incoming === undefined` — the caller did not touch annotations: the
- *   server's current map survives verbatim (legacy behavior).
- * - `incoming` provided — caller-owned keys keep replace semantics (the
- *   incoming map wins per key, omission clears), but platform-owned
- *   `clerum.io/*` keys present on the server are re-added unless the caller
- *   EXPLICITLY sets that exact key. Platform annotations are write-only
- *   projections owned by control-api/HCC (e.g. `clerum.io/wake-requested`,
- *   see hostWakeService.ts) — an admin PUT that happens to carry an
- *   annotations map must never erase them (AP-6 companion fix).
- */
-export function mergeAnnotationsForReplace(
-  current: Record<string, string> | undefined,
-  incoming: Record<string, string> | undefined
-): Record<string, string> | undefined {
-  if (incoming === undefined) return current
-  const merged: Record<string, string> = { ...incoming }
-  for (const [key, value] of Object.entries(current ?? {})) {
-    if (key.startsWith(PLATFORM_ANNOTATION_PREFIX) && !(key in incoming)) {
-      merged[key] = value
-    }
-  }
-  return merged
 }
 
 /** Preserve the kubeconfig client's server, auth and TLS middleware per call. */

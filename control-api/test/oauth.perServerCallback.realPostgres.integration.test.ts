@@ -477,22 +477,20 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
   })
 
   /**
-   * A state for a server the mint refuses (no usable registration). Signed by the same
-   * signer the mint uses, with the CR's current client id — what a state minted just
-   * before the row went away would carry.
+   * A state for a server the mint route refuses (no usable registration): the state
+   * the authorize-URL mint signs over the CR as it is now, with its current client id
+   * and uid — what a state minted just before the row went away would carry.
    */
   async function signedStateFor(name: string): Promise<string> {
-    const { signOAuthState } = await import('../src/oauth/state.js')
+    const { mintMcpState } = await import('./fixtures/mcpOAuthState.js')
+    const { buildOAuthCallbackDeps } = await import('../src/routes/external/oauthCallback.js')
     const cr = (await gateway.getResource('mcpservers', name, NS)) as {
       spec: { oauth: { id: string } }
     }
-    return signOAuthState(config.oauthStateHmacSecret, {
-      subjectKind: 'mcp',
+    return mintMcpState(buildOAuthCallbackDeps(gateway as never), config.oauthStateHmacSecret, {
       mcpServerName: name,
       userId: memberId,
       oauthClientId: cr.spec.oauth.id,
-      grantKind: 'user',
-      background: false,
-    } as Parameters<typeof signOAuthState>[1])
+    })
   }
 })

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  type RemoteOAuthGrantScope,
+  deriveCatalogRemoteServerName,
+} from '../src/routes/admin/catalogRemoteOAuth.js'
 import { generateRegistryName } from '../src/routes/admin/registry.js'
 
 /**
@@ -10,10 +14,12 @@ import { generateRegistryName } from '../src/routes/admin/registry.js'
  * mcp-host cannot import control-api, so instead of retyping names there,
  * every name here is emitted by the real producer.
  *
- * `registry` holds names from `generateRegistryName` (registry installs).
- * `catalog` is empty for now: the producer of catalog-slot names does not
- * exist in this tree yet; when it lands it extends this same test and fills
- * `catalog` from it.
+ * `registry` holds names from `generateRegistryName` (registry installs). The
+ * version is part of the name and the whole name is trimmed at 63, so a long
+ * version reaches the K8s label ceiling.
+ * `catalog` holds names from `deriveCatalogRemoteServerName` (one McpServer per
+ * catalog install slot). It ignores the version and caps the slug, so its names
+ * stop at 55; both scopes are listed because the scope changes tag and hash.
  *
  * A producer change fails the equality below and forces the golden to move. To
  * regenerate after an intended change:
@@ -26,10 +32,13 @@ const GOLDEN_DIR = new URL('../../mcp-host/src/llm/__tests__/fixtures/', import.
 const GOLDEN_FILE = new URL('serverNames.json', GOLDEN_DIR)
 
 const K8S_LABEL_MAX = 63
+// `mcp-` + slug (capped at 40) + `-u-`/`-c-` + 8 hex chars.
+const CATALOG_NAME_MAX = 55
 const RFC1123_LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/
 
 type RegistryGoldenEntry = { entryName: string; version: string; name: string }
-type ServerNamesGolden = { registry: RegistryGoldenEntry[]; catalog: never[] }
+type CatalogGoldenEntry = { catalogId: string; grantScope: RemoteOAuthGrantScope; name: string }
+type ServerNamesGolden = { registry: RegistryGoldenEntry[]; catalog: CatalogGoldenEntry[] }
 
 const REGISTRY_INPUTS: ReadonlyArray<{ entryName: string; version: string }> = [
   // Sample inputs in the curated catalog's `@evenfire/<name>` format; these
@@ -42,6 +51,16 @@ const REGISTRY_INPUTS: ReadonlyArray<{ entryName: string; version: string }> = [
   { entryName: '@evenfire/google-workspace-admin-directory-remote', version: '10.20.300-beta.12' },
 ]
 
+const CATALOG_INPUTS: ReadonlyArray<{ catalogId: string; grantScope: RemoteOAuthGrantScope }> = [
+  { catalogId: '@evenfire/notion-remote', grantScope: 'user' },
+  { catalogId: '@evenfire/notion-remote', grantScope: 'context' },
+  { catalogId: '@evenfire/atlassian-remote', grantScope: 'user' },
+  { catalogId: '@evenfire/atlassian-remote', grantScope: 'context' },
+  // Slug longer than the 40-char cap: the name reaches its 55-char maximum.
+  { catalogId: '@evenfire/google-workspace-admin-directory-remote', grantScope: 'user' },
+  { catalogId: '@evenfire/google-workspace-admin-directory-remote', grantScope: 'context' },
+]
+
 function produce(): ServerNamesGolden {
   return {
     registry: REGISTRY_INPUTS.map(({ entryName, version }) => ({
@@ -49,7 +68,11 @@ function produce(): ServerNamesGolden {
       version,
       name: generateRegistryName(entryName, version),
     })),
-    catalog: [],
+    catalog: CATALOG_INPUTS.map(({ catalogId, grantScope }) => ({
+      catalogId,
+      grantScope,
+      name: deriveCatalogRemoteServerName(catalogId, grantScope),
+    })),
   }
 }
 
@@ -88,8 +111,13 @@ describe('mcp-host server-name golden', () => {
     }
   })
 
-  it('the entries reach the 63-char ceiling, so mcp-host is tested at the worst case', () => {
-    const lengths = [...actual.registry, ...actual.catalog].map(({ name }) => name.length)
+  it('the registry entries reach the 63-char ceiling, so mcp-host is tested at the worst case', () => {
+    const lengths = actual.registry.map(({ name }) => name.length)
     expect(Math.max(...lengths)).toBe(K8S_LABEL_MAX)
+  })
+
+  it('the catalog entries reach the 55-char catalog maximum', () => {
+    const lengths = actual.catalog.map(({ name }) => name.length)
+    expect(Math.max(...lengths)).toBe(CATALOG_NAME_MAX)
   })
 })

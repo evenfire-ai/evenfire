@@ -10,13 +10,13 @@ import {
 } from '../src/oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
-import { signOAuthState } from '../src/oauth/state.js'
+import { mintMcpState } from './fixtures/mcpOAuthState.js'
 
 /**
  * The mcp-subject OAuth callback, per-user flavor and dispatch. The
  * context flavor runs through the production deps in
  * src/oauth/__tests__/callbackMcpMembership.test.ts. Fixtures are derived from the REAL
- * `signOAuthState` (T1: no hand-forged state) and the observable outcome asserted
+ * authorize-URL mint (T1: no hand-forged state) and the observable outcome asserted
  * is the persisted grant + the `source:'mcp'` return (T4), not intermediate calls.
  */
 
@@ -28,23 +28,24 @@ const MCP_NS = 'mcp-server'
 const REDIRECT_URI = 'https://control.example.com/api/v1/oauth-callback/google-drive'
 const USER_ID = 'user-uuid-9'
 
-function mcpState(overrides: Partial<Parameters<typeof signOAuthState>[1]> = {}): string {
-  return signOAuthState(STATE_SECRET, {
-    subjectKind: 'mcp',
-    mcpServerName: 'gdrive',
-    userId: USER_ID,
-    oauthClientId: 'google-drive',
-    grantKind: 'user',
-    background: false,
-    ...overrides,
-  } as Parameters<typeof signOAuthState>[1])
+// Minted while the gdrive CR is installed; tests that need it gone at the callback
+// swap the callback's reader, not the mint's.
+async function mcpState(): Promise<string> {
+  return mintMcpState(
+    {
+      mcpServerReader: { read: async () => gdriveSubject() },
+      secretReader: { read: async () => ({ 'client-id': 'CID' }) },
+    },
+    STATE_SECRET,
+    { mcpServerName: 'gdrive', userId: USER_ID, oauthClientId: 'google-drive' }
+  )
 }
 
-function buildInput(overrides: Partial<CallbackInput> = {}): CallbackInput {
+async function buildInput(overrides: Partial<CallbackInput> = {}): Promise<CallbackInput> {
   return {
     target: { kind: 'client', id: 'google-drive', redirectUri: REDIRECT_URI },
     code: 'AUTH_CODE',
-    state: mcpState(),
+    state: await mcpState(),
     ...overrides,
   }
 }
@@ -54,7 +55,7 @@ function buildInput(overrides: Partial<CallbackInput> = {}): CallbackInput {
 // exactly the shape production wiring emits.
 function gdriveSubject(opts: { grantScope?: 'user' | 'context' } = {}): McpServerOAuthSubject {
   const rawServer = {
-    metadata: { name: 'gdrive', namespace: MCP_NS },
+    metadata: { name: 'gdrive', namespace: MCP_NS, uid: 'uid-gdrive' },
     spec: {
       auth: { type: 'oauth' },
       oauth: {
@@ -133,7 +134,7 @@ function buildDeps(opts: { subject?: McpServerOAuthSubject | null; subjectError?
 describe('handleOAuthCallback — mcp subject (U5)', () => {
   it('persists a per-user grant keyed by (mcpserver owner, userId) and returns source:mcp', async () => {
     const { deps, db } = buildDeps({ subject: gdriveSubject({ grantScope: 'user' }) })
-    const result = await handleOAuthCallback(buildInput(), deps)
+    const result = await handleOAuthCallback(await buildInput(), deps)
 
     expect(result).toEqual({
       kind: 'ok',
@@ -165,21 +166,21 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
 
   it('unknown server → server_not_found (reader returns null)', async () => {
     const { deps, db } = buildDeps({ subject: null })
-    const result = await handleOAuthCallback(buildInput(), deps)
+    const result = await handleOAuthCallback(await buildInput(), deps)
     expect(result.kind).toBe('server_not_found')
     expect(db.query).not.toHaveBeenCalled()
   })
 
   it('reader throwing RecipeNotFoundError → server_not_found', async () => {
     const { deps } = buildDeps({ subjectError: new RecipeNotFoundError('gone') })
-    const result = await handleOAuthCallback(buildInput(), deps)
+    const result = await handleOAuthCallback(await buildInput(), deps)
     expect(result.kind).toBe('server_not_found')
   })
 
   it('rejects when the callback-path oauthClientId disagrees with the signed state', async () => {
     const { deps } = buildDeps({ subject: gdriveSubject() })
     const result = await handleOAuthCallback(
-      buildInput({ target: { kind: 'client', id: 'other', redirectUri: REDIRECT_URI } }),
+      await buildInput({ target: { kind: 'client', id: 'other', redirectUri: REDIRECT_URI } }),
       deps
     )
     expect(result.kind).toBe('invalid_state')
@@ -187,7 +188,10 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
 
   it('fails closed when no mcpServerReader is wired', async () => {
     const { deps } = buildDeps({ subject: gdriveSubject() })
-    const result = await handleOAuthCallback(buildInput(), { ...deps, mcpServerReader: undefined })
+    const result = await handleOAuthCallback(await buildInput(), {
+      ...deps,
+      mcpServerReader: undefined,
+    })
     expect(result.kind).toBe('server_not_found')
   })
 })

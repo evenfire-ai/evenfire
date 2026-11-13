@@ -612,8 +612,11 @@ describeRealPostgres('context-scope grant purge (real Postgres)', () => {
     expect(await rows()).toEqual([])
   })
 
+  // The state names the installation it was minted on. A same-name reinstall is a
+  // different installation, so its consent is refused as outdated before any access
+  // guard, whether or not an admin enabled the new installation again.
   describe('uninstall and reinstall between the mint and the callback', () => {
-    it('not re-enabled: the callback is refused before the exchange', async () => {
+    it('not re-enabled: refused as outdated before the exchange, no grant', async () => {
       const u1 = await seedActiveMember(db, { contexts: ['c1'] })
       const state = await mintState(u1, 'c1')
       await adminUninstall()
@@ -621,24 +624,25 @@ describeRealPostgres('context-scope grant purge (real Postgres)', () => {
 
       const res = await callback(state)
 
-      expect(res.status).toBe(403)
-      expect(res.body).toEqual({ error: 'context_membership_denied' })
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'oauth_state_outdated' })
       expect(idp.calls).toBe(0)
       expect(await rows()).toEqual([])
     })
 
-    it('re-enabled by an admin: the consent completes and is sealed to the new installation', async () => {
+    it('re-enabled by an admin: the old consent is refused as outdated, never sealed to the new installation', async () => {
       const u1 = await seedActiveMember(db, { contexts: ['c1'] })
       const state = await mintState(u1, 'c1')
       await adminUninstall()
-      const newUid = await installServer()
+      await installServer()
       await adminSetAllowlist('c1', [SERVER])
 
       const res = await callback(state)
 
-      expect(res.status).toBe(200)
-      expect((await rows()).map(r => [r.context_id, r.cr_uid])).toEqual([['c1', newUid]])
-      expect(await expectServed('h1')).toBe('AT-1')
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'oauth_state_outdated' })
+      expect(idp.calls).toBe(0)
+      expect(await rows()).toEqual([])
     })
   })
 

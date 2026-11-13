@@ -1,0 +1,495 @@
+{
+  "status": 200,
+  "body": {
+    "data": [
+      {
+        "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c0000",
+        "name": "@evenfire/linear-remote",
+        "version": "1.0.0",
+        "entry_type": "mcp-server",
+        "description": "Remote MCP connector",
+        "author": "catalog",
+        "contact_email": null,
+        "origin": "human-authored",
+        "category": "productivity",
+        "tags": [],
+        "visibility": "public",
+        "content_creator_tag": "api-owner",
+        "config_creator_tag": "api-owner",
+        "trust_level": "mid",
+        "quality_tier": "unverified",
+        "status": "published",
+        "channel": "stable",
+        "deprecated_at": null,
+        "version_major": 1,
+        "version_minor": 0,
+        "version_patch": 0,
+        "version_prerelease": null,
+        "downloads": 0,
+        "installs": 0,
+        "created_at": "2026-10-28T00:00:00.000Z",
+        "updated_at": "2026-10-28T00:00:00.000Z",
+        "revision": 1,
+        "server_mode": "remote",
+        "transport": "streamableHttp",
+        "recipe_type": null,
+        "mcp_server_meta": {
+          "remoteEndpoints": [
+            {
+              "url": "https://mcp.linear.app/mcp"
+            }
+          ],
+          "oauth": {
+            "source": "remote",
+            "allowedGrantScopes": ["user", "context"],
+            "expectedRegistration": "cimd",
+            "scopes": ["read"],
+            "verification": {
+              "status": "verified",
+              "checkedAt": "2026-09-25"
+            }
+          }
+        },
+        "recipe_meta": null,
+        "hook_meta": null,
+        "artifact_refs": {},
+        "owner_type": "org",
+        "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+        "remoteOAuth": {
+          "valid": true
+        }
+      },
+      {
+        "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c0001",
+        "name": "@evenfire/linear-user",
+        "version": "1.0.0",
+        "entry_type": "mcp-server",
+        "description": "Remote MCP connector",
+        "author": "catalog",
+        "contact_email": null,
+        "origin": "human-authored",
+        "category": "productivity",
+        "tags": [],
+        "visibility": "public",
+        "content_creator_tag": "api-owner",
+        "config_creator_tag": "api-owner",
+        "trust_level": "mid",
+        "quality_tier": "unverified",
+        "status": "published",
+        "channel": "stable",
+        "deprecated_at": null,
+        "version_major": 1,
+        "version_minor": 0,
+        "version_patch": 0,
+        "version_prerelease": null,
+        "downloads": 0,
+        "installs": 0,
+        "created_at": "2026-10-28T00:00:00.000Z",
+        "updated_at": "2026-10-28T00:00:00.000Z",
+        "revision": 1,
+        "server_mode": "remote",
+        "transport": "streamableHttp",
+        "recipe_type": null,
+        "mcp_server_meta": {
+          "remoteEndpoints": [
+            {
+              "url": "https://mcp.linear.app/mcp"
+            }
+          ],
+          "oauth": {
+            "source": "remote",
+            "allowedGrantScopes": ["user"],
+            "expectedRegistration": "cimd",
+            "verification": {
+              "status": "untested"
+            }
+          }
+        },
+        "recipe_meta": null,
+        "hook_meta": null,
+        "artifact_refs": {},
+        "owner_type": "org",
+        "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+        "remoteOAuth": {
+          "valid": true
+        }
+      },
+      {
+        "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c0002",
+        "name": "@evenfire/linear-dcr",
+        "version": "1.0.0",
+        "entry_type": "mcp-server",
+        "description": "Remote MCP connector",
+        "author": "catalog",
+        "contact_email": null,
+        "origin": "human-authored",
+        "category": "productivity",
+        "tags": [],
+        "visibility": "public",
+        "content_creator_tag": "api-owner",
+        "config_creator_tag": "api-owner",
+        "trust_level": "mid",
+        "quality_tier": "unverified",
+        "status": "published",
+        "channel": "stable",
+        "deprecated_at": null,
+        "version_major": 1,
+        "version_minor": 0,
+        "version_patch": 0,
+        "version_prerelease": null,
+        "downloads": 0,
+        "installs": 0,
+        "created_at": "2026-10-28T00:00:00.000Z",
+        "updated_at": "2026-10-28T00:00:00.000Z",
+        "revision": 1,
+        "server_mode": "remote",
+        "transport": "streamableHttp",
+        "recipe_type": null,
+        "mcp_server_meta": {
+          "remoteEndpoints": [
+            {
+              "url": "https://mcp.linear.app/mcp"
+            }
+          ],
+          "oauth": {
+            "source": "remote",
+            "allowedGrantScopes": ["user"],
+            "expectedRegistration": "dcr"
+          }
+        },
+        "recipe_meta": null,
+        "hook_meta": null,
+        "artifact_refs": {},
+        "owner_type": "org",
+        "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+        "remoteOAuth": {
+          "valid": true
+        }
+      },
+      {
+        "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c0003",
+        "name": "@evenfire/workiq-remote",
+        "version": "1.0.0",
+        "entry_type": "mcp-server",
+        "description": "Remote MCP connector",
+        "author": "catalog",
+        "contact_email": null,
+        "origin": "human-authored",
+        "category": "productivity",
+        "tags": [],
+        "visibility": "public",
+        "content_creator_tag": "api-owner",
+        "config_creator_tag": "api-owner",
+        "trust_level": "mid",
+        "quality_tier": "unverified",
+        "status": "published",
+        "channel": "stable",
+        "deprecated_at": null,
+        "version_major": 1,
+        "version_minor": 0,
+        "version_patch": 0,
+        "version_prerelease": null,
+        "downloads": 0,
+        "installs": 0,
+        "created_at": "2026-10-28T00:00:00.000Z",
+        "updated_at": "2026-10-28T00:00:00.000Z",
+        "revision": 1,
+        "server_mode": "remote",
+        "transport": "streamableHttp",
+        "recipe_type": null,
+        "mcp_server_meta": {
+          "remoteEndpoints": [
+            {
+              "url": "https://workiq.svc.cloud.microsoft/mcp"
+            }
+          ],
+          "oauth": {
+            "source": "remote",
+            "allowedGrantScopes": ["user"],
+            "expectedRegistration": "pre-registered",
+            "scopes": ["fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask"],
+            "authorizationServerHint": "entra-v2",
+            "providerConsoleUrl": "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps",
+            "setupGuide": "1. Open the Microsoft Entra admin center and register a new application.\n2. Under **Authentication**, add a Web platform with the redirect URI below.\n3. Create a client secret and paste the client ID and secret here.\n\nUse a separate app registration for each slot.",
+            "verification": {
+              "status": "known-issue",
+              "note": "Consent needs a tenant admin."
+            }
+          }
+        },
+        "recipe_meta": null,
+        "hook_meta": null,
+        "artifact_refs": {},
+        "owner_type": "org",
+        "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+        "remoteOAuth": {
+          "valid": true
+        }
+      },
+      {
+        "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c0004",
+        "name": "@evenfire/broken-remote",
+        "version": "1.0.0",
+        "entry_type": "mcp-server",
+        "description": "Remote MCP connector",
+        "author": "catalog",
+        "contact_email": null,
+        "origin": "human-authored",
+        "category": "productivity",
+        "tags": [],
+        "visibility": "public",
+        "content_creator_tag": "api-owner",
+        "config_creator_tag": "api-owner",
+        "trust_level": "mid",
+        "quality_tier": "unverified",
+        "status": "published",
+        "channel": "stable",
+        "deprecated_at": null,
+        "version_major": 1,
+        "version_minor": 0,
+        "version_patch": 0,
+        "version_prerelease": null,
+        "downloads": 0,
+        "installs": 0,
+        "created_at": "2026-10-28T00:00:00.000Z",
+        "updated_at": "2026-10-28T00:00:00.000Z",
+        "revision": 1,
+        "server_mode": "remote",
+        "transport": "streamableHttp",
+        "recipe_type": null,
+        "mcp_server_meta": {
+          "remoteEndpoints": [
+            {
+              "url": "https://mcp.linear.app/mcp"
+            }
+          ],
+          "oauth": {
+            "source": "remote"
+          }
+        },
+        "recipe_meta": null,
+        "hook_meta": null,
+        "artifact_refs": {},
+        "owner_type": "org",
+        "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+        "remoteOAuth": {
+          "valid": false,
+          "reason": "setup_guide_required"
+        }
+      },
+      {
+        "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c0005",
+        "name": "@acme/notion-remote",
+        "version": "1.0.0",
+        "entry_type": "mcp-server",
+        "description": "Remote MCP connector",
+        "author": "catalog",
+        "contact_email": null,
+        "origin": "human-authored",
+        "category": "productivity",
+        "tags": [],
+        "visibility": "public",
+        "content_creator_tag": "api-owner",
+        "config_creator_tag": "api-owner",
+        "trust_level": "mid",
+        "quality_tier": "unverified",
+        "status": "published",
+        "channel": "stable",
+        "deprecated_at": null,
+        "version_major": 1,
+        "version_minor": 0,
+        "version_patch": 0,
+        "version_prerelease": null,
+        "downloads": 0,
+        "installs": 0,
+        "created_at": "2026-10-28T00:00:00.000Z",
+        "updated_at": "2026-10-28T00:00:00.000Z",
+        "revision": 1,
+        "server_mode": "remote",
+        "transport": "streamableHttp",
+        "recipe_type": null,
+        "mcp_server_meta": {
+          "remoteEndpoints": [
+            {
+              "url": "https://mcp.notion.com/mcp"
+            }
+          ],
+          "oauth": {
+            "source": "remote",
+            "allowedGrantScopes": ["user"],
+            "expectedRegistration": "dcr"
+          }
+        },
+        "recipe_meta": null,
+        "hook_meta": null,
+        "artifact_refs": {},
+        "owner_type": "org",
+        "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+        "remoteOAuth": {
+          "valid": true
+        },
+        "publisher": "@acme"
+      },
+      {
+        "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c0006",
+        "name": "@acme/linear-pre",
+        "version": "1.0.0",
+        "entry_type": "mcp-server",
+        "description": "Remote MCP connector",
+        "author": "catalog",
+        "contact_email": null,
+        "origin": "human-authored",
+        "category": "productivity",
+        "tags": [],
+        "visibility": "public",
+        "content_creator_tag": "api-owner",
+        "config_creator_tag": "api-owner",
+        "trust_level": "mid",
+        "quality_tier": "unverified",
+        "status": "published",
+        "channel": "stable",
+        "deprecated_at": null,
+        "version_major": 1,
+        "version_minor": 0,
+        "version_patch": 0,
+        "version_prerelease": null,
+        "downloads": 0,
+        "installs": 0,
+        "created_at": "2026-10-28T00:00:00.000Z",
+        "updated_at": "2026-10-28T00:00:00.000Z",
+        "revision": 1,
+        "server_mode": "remote",
+        "transport": "streamableHttp",
+        "recipe_type": null,
+        "mcp_server_meta": {
+          "remoteEndpoints": [
+            {
+              "url": "https://mcp.linear.app/mcp"
+            }
+          ],
+          "oauth": {
+            "source": "remote",
+            "allowedGrantScopes": ["user", "context"],
+            "expectedRegistration": "pre-registered"
+          }
+        },
+        "recipe_meta": null,
+        "hook_meta": null,
+        "artifact_refs": {},
+        "owner_type": "org",
+        "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31",
+        "remoteOAuth": {
+          "valid": true
+        },
+        "publisher": "@acme"
+      },
+      {
+        "id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c0007",
+        "name": "@evenfire/plain-remote",
+        "version": "1.0.0",
+        "entry_type": "mcp-server",
+        "description": "Remote MCP connector",
+        "author": "catalog",
+        "contact_email": null,
+        "origin": "human-authored",
+        "category": "productivity",
+        "tags": [],
+        "visibility": "public",
+        "content_creator_tag": "api-owner",
+        "config_creator_tag": "api-owner",
+        "trust_level": "mid",
+        "quality_tier": "unverified",
+        "status": "published",
+        "channel": "stable",
+        "deprecated_at": null,
+        "version_major": 1,
+        "version_minor": 0,
+        "version_patch": 0,
+        "version_prerelease": null,
+        "downloads": 0,
+        "installs": 0,
+        "created_at": "2026-10-28T00:00:00.000Z",
+        "updated_at": "2026-10-28T00:00:00.000Z",
+        "revision": 1,
+        "server_mode": "remote",
+        "transport": "streamableHttp",
+        "recipe_type": null,
+        "mcp_server_meta": {
+          "remoteEndpoints": [
+            {
+              "url": "https://mcp.linear.app/mcp"
+            }
+          ]
+        },
+        "recipe_meta": null,
+        "hook_meta": null,
+        "artifact_refs": {},
+        "owner_type": "org",
+        "owner_id": "5b0f3c2e-8d1a-4c6f-9e2b-7a4d1f0c9e31"
+      }
+    ],
+    "meta": {
+      "total": 8,
+      "limit": 200,
+      "offset": 0
+    },
+    "categories": [],
+    "installed": {
+      "catalogKeys": [],
+      "serverNames": [
+        "hand-named-linear",
+        "manual-notion",
+        "mcp-acme-linear-pre-c-610fdec3",
+        "mcp-acme-linear-pre-u-64164363",
+        "mcp-evenfire-linear-remote-u-4ef7a4af"
+      ],
+      "recipeKeys": [],
+      "hookKeys": [],
+      "remoteOAuthSlots": {
+        "@evenfire/linear-user": {
+          "user": {
+            "kind": "instance",
+            "serverName": "hand-named-linear",
+            "version": "1.0.0",
+            "canonical": false,
+            "terminating": false
+          }
+        },
+        "@acme/linear-pre": {
+          "user": {
+            "kind": "instance",
+            "serverName": "mcp-acme-linear-pre-u-64164363",
+            "version": "1.0.0",
+            "canonical": true,
+            "terminating": true
+          },
+          "context": {
+            "kind": "foreign",
+            "serverName": "mcp-acme-linear-pre-c-610fdec3"
+          }
+        },
+        "@evenfire/linear-remote": {
+          "user": {
+            "kind": "instance",
+            "serverName": "mcp-evenfire-linear-remote-u-4ef7a4af",
+            "version": "1.0.0",
+            "canonical": true,
+            "terminating": false
+          }
+        }
+      },
+      "manualRemoteOAuth": [
+        {
+          "serverName": "manual-notion",
+          "baseUrl": "https://mcp.notion.com/mcp",
+          "grantScope": "user"
+        },
+        {
+          "serverName": "mcp-acme-linear-pre-c-610fdec3",
+          "baseUrl": "https://mcp.notion.com/mcp",
+          "grantScope": "context"
+        }
+      ]
+    }
+  }
+}

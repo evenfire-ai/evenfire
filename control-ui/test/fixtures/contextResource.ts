@@ -1,4 +1,8 @@
-import type { ContextSharedFileSystemRef, ContextSharedFileSystemStatus } from '../../lib/api'
+import type {
+  ContextGfsMount,
+  ContextSharedFileSystemRef,
+  ContextSharedFileSystemStatus,
+} from '../../lib/api'
 
 export type ProducerContextResource = {
   metadata: {
@@ -13,6 +17,8 @@ export type ProducerContextResource = {
     description: string
     mcpServers: string[]
     sharedFileSystems: ContextSharedFileSystemRef[]
+    /** Optional gfs mount intents (spec.gfs); the producer omits it when unset. */
+    gfs?: { mounts: ContextGfsMount[] }
   }
   status: {
     sharedFileSystems: ContextSharedFileSystemStatus[]
@@ -83,6 +89,16 @@ export function buildContextResource(
       description: overrides.spec?.description ?? '',
       mcpServers: [...(overrides.spec?.mcpServers ?? [])],
       sharedFileSystems: [...(overrides.spec?.sharedFileSystems ?? [])],
+      ...(overrides.spec?.gfs !== undefined
+        ? {
+            gfs: {
+              mounts: overrides.spec.gfs.mounts.map(mount => ({
+                ...mount,
+                scopes: [...mount.scopes],
+              })),
+            },
+          }
+        : {}),
     },
     status: {
       sharedFileSystems: [...(overrides.status?.sharedFileSystems ?? [])],

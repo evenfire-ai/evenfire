@@ -35,7 +35,9 @@ export const CONTROL_ROUTES = {
   connectors: {
     root: '/connectors',
     new: '/connectors/new',
-    remoteNew: '/connectors/remote/new',
+    // `?entry=&version=&scope=` opens the wizard in Marketplace catalog mode; no query is
+    // the manual wizard. The URL is never a query value: it comes from the entry.
+    remoteNew: (query?: ControlRouteQuery) => withQuery('/connectors/remote/new', query),
     detail: (name: string) => `/connectors/${segment(name)}`,
     detailTab: (name: string, tab: string) => `/connectors/${segment(name)}/${segment(tab)}`,
     edit: (name: string) => `/connectors/${segment(name)}/edit`,

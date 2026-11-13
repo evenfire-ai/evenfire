@@ -207,10 +207,11 @@ export interface McpServerOAuthSubject {
   decl: OAuthClientDecl
   grantScope: 'user' | 'context'
   /**
-   * metadata.uid of the McpServer CR the subject was read from. The callback seals
-   * the grant it writes with it and fences the DCR credential read by it; the
-   * authorize-url mint carries it too but never persists a grant. Absent only when
-   * the CR carried no uid.
+   * metadata.uid of the McpServer CR the subject was read from. The authorize-url
+   * mint signs it into the state and refuses to mint without it; the callback
+   * requires it to equal the signed one, then seals the grant it writes with it
+   * and fences the DCR credential read by it. Absent only when the CR carried no
+   * uid.
    */
   crUid?: string
   /** The grant coordinate of the same CR (`resolveServerOAuth`); keys the grant written. */
@@ -379,10 +380,12 @@ export type CallbackResult =
     }
   | { kind: 'invalid_state'; reason: string }
   /**
-   * A validly signed mcp state for a `grantScope='context'` server that names no
-   * Context: it was minted before states carried one, so there is no Context to
-   * create the grant for. Refused before the code is exchanged; the user starts
-   * the consent again.
+   * A validly signed mcp state that no longer describes the live server: it
+   * carries no CR uid, its uid is not the live CR's (the server was reinstalled
+   * under the same name after the consent started), the live CR has no uid, or a
+   * `grantScope='context'` server's state names no Context. Refused before the
+   * code is exchanged and before any grant is written; the user starts the
+   * consent again.
    */
   | { kind: 'oauth_state_outdated' }
   /**
@@ -572,9 +575,11 @@ export async function handleOAuthCallback(
 }
 
 /**
- * mcp-subject callback (U5). The signed state binds the initiating `userId` and
- * the `mcpServerName`; the server's OAuth declaration + grant-scope routing are
- * recovered fresh from the CR (authoritative), NOT from the state or any body.
+ * mcp-subject callback (U5). The signed state binds the initiating `userId`, the
+ * `mcpServerName` and the `crUid` of the CR the consent was started on (which
+ * must still be the live CR, else `oauth_state_outdated`); the server's OAuth
+ * declaration + grant-scope routing are recovered fresh from the CR
+ * (authoritative), NOT from the state or any body.
  *
  * Access is re-checked BEFORE the code exchange, by flavor:
  *   - `grantScope='user'`    → some Context the signed user reaches (directly or
@@ -616,6 +621,15 @@ async function handleMcpOAuthCallback(
   // client id bound in the signed state. Checked against `claims.oauthClientId`
   // because on the remote callbacks the URL carries no client id at all.
   if (subject.decl.id !== claims.oauthClientId) return BINDING_MISMATCH
+
+  // The state must have been minted on this very installation. A same-name
+  // reinstall keeps the name (and, for CIMD or a shared pre-registered app, the
+  // client id and redirect URI), so only the uid tells a consent started on the
+  // old CR from one started on the live CR. A missing uid on either side is
+  // refused too: two absent values must never compare as a match.
+  if (!claims.crUid || !subject.crUid || claims.crUid !== subject.crUid) {
+    return { kind: 'oauth_state_outdated' }
+  }
 
   // A context-scope grant is created for the Context signed into the state at
   // mint time, never for anything the request carries now. A state without one

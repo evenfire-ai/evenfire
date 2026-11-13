@@ -1,0 +1,42 @@
+{
+  "status": 200,
+  "body": {
+    "transport": {
+      "status": "dead",
+      "probedUrl": "https://mcp.vercel.com/mcp",
+      "httpStatus": 404,
+      "suggestedBaseUrl": "https://mcp.vercel.com/"
+    },
+    "callback": {
+      "configured": true,
+      "variant": "per-server",
+      "redirectUriTemplate": "https://control.example.com/api/v1/oauth-callback/remote/{serverName}/{installId}"
+    },
+    "serverName": "mcp-evenfire-vercel-remote-u-8256b649",
+    "detected": {
+      "registrationMode": "dcr",
+      "dcr": {
+        "available": true,
+        "clientMode": "confidential",
+        "supportsRefresh": true
+      },
+      "endpoints": {
+        "authorization": "https://vercel.com/oauth/authorize",
+        "token": "https://api.vercel.com/login/oauth/token",
+        "registration": "https://api.vercel.com/login/oauth/register"
+      },
+      "resource": "https://mcp.vercel.com/mcp",
+      "issuer": "https://vercel.com",
+      "asEndpointHosts": {
+        "authorization": "vercel.com",
+        "token": "api.vercel.com",
+        "registration": "api.vercel.com"
+      },
+      "scopes": ["openid"],
+      "quirks": {
+        "bearerInBody": false,
+        "supportsRefresh": true
+      }
+    }
+  }
+}

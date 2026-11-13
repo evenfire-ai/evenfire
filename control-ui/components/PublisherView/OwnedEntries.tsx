@@ -13,10 +13,14 @@ import { MARKETPLACE_ENTRY_TYPE_LABELS } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type OwnedRegistryEntry,
+  type RegistryEntry,
+  type RegistryInstalledState,
   deleteRegistryEntry,
   getOwnedRegistryEntries,
   getRegistryCatalog,
 } from '../../lib/api'
+import { getRemoteOAuthCatalogBlock } from '../../lib/oauthInstall'
+import { canInstallRemoteOAuthSlot, remoteOAuthSlotRows } from '../../lib/remoteOAuthSlots'
 import { useConfirmDialog } from '../ConfirmDialog'
 import { type RowActionMenuItem, RowActionsMenu } from '../RowActionsMenu'
 import { TableHeaderRow } from '../TableHeaderRow'
@@ -113,6 +117,10 @@ export function OwnedEntries({
   const [installedServerNames, setInstalledServerNames] = useState<Set<string>>(new Set())
   const [installedRecipeKeys, setInstalledRecipeKeys] = useState<Set<string>>(new Set())
   const [installedHookKeys, setInstalledHookKeys] = useState<Set<string>>(new Set())
+  // The owned-entries payload has no OAuth block, so a remote-OAuth entry is recognised
+  // through its catalog row, and its per-slot state through `remoteOAuthSlots`.
+  const [catalogEntries, setCatalogEntries] = useState<RegistryEntry[]>([])
+  const [installedState, setInstalledState] = useState<RegistryInstalledState | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -128,6 +136,8 @@ export function OwnedEntries({
         setInstalledServerNames(new Set(catalog.installed.serverNames))
         setInstalledRecipeKeys(new Set(catalog.installed.recipeKeys))
         setInstalledHookKeys(new Set(catalog.installed.hookKeys ?? []))
+        setCatalogEntries(catalog.data)
+        setInstalledState(catalog.installed)
       }
     } catch {
       setError(true)
@@ -163,6 +173,44 @@ export function OwnedEntries({
     },
     [confirm, showToast, load]
   )
+
+  function catalogEntryFor(e: OwnedRegistryEntry): RegistryEntry | undefined {
+    return (
+      catalogEntries.find(entry => entry.name === e.name && entry.version === e.version) ??
+      catalogEntries.find(entry => entry.name === e.name)
+    )
+  }
+
+  // Install items of a remote-OAuth entry, one per free slot; null for any other entry.
+  function remoteOAuthInstallActions(e: OwnedRegistryEntry): RowActionMenuItem[] | null {
+    const catalogEntry = catalogEntryFor(e)
+    const view = getRemoteOAuthCatalogBlock(catalogEntry)
+    if (!catalogEntry || !view) return null
+    if (!view.valid) return []
+    return remoteOAuthSlotRows(view, e.name, installedState).map(row =>
+      canInstallRemoteOAuthSlot(row)
+        ? {
+            key: `install-${row.scope}`,
+            label: `Install (${row.label.toLowerCase()})`,
+            onClick: () =>
+              router.push(
+                // The catalog row may be another version than this one when this
+                // version is not listed; the wizard must load the remote-OAuth one.
+                CONTROL_ROUTES.connectors.remoteNew({
+                  entry: catalogEntry.name,
+                  version: catalogEntry.version,
+                  scope: row.scope,
+                })
+              ),
+          }
+        : {
+            key: `slot-${row.scope}`,
+            label: `${row.label}: ${row.status.kind === 'installed' ? 'installed' : 'unavailable'}`,
+            disabled: true,
+            onClick: () => undefined,
+          }
+    )
+  }
 
   function isInstalled(e: OwnedRegistryEntry): boolean {
     const kind = ownedEntryKind(e)
@@ -311,34 +359,37 @@ export function OwnedEntries({
                 sortedEntries.map(e => {
                   const isPrivate = e.visibility === 'private'
                   const detailRoute = CONTROL_ROUTES.marketplace.entry(e.name, e.version)
+                  const remoteOAuthActions = remoteOAuthInstallActions(e)
                   const rowActions: RowActionMenuItem[] = [
                     {
                       key: 'view',
                       label: 'View details',
                       onClick: () => router.push(detailRoute),
                     },
-                    ...(isInstalled(e)
-                      ? [
-                          {
-                            key: 'installed',
-                            label: 'Installed',
-                            disabled: true,
-                            onClick: () => undefined,
-                          },
-                        ]
-                      : [
-                          {
-                            key: 'install',
-                            label: 'Install',
-                            onClick: () =>
-                              router.push(
-                                CONTROL_ROUTES.marketplace.install({
-                                  entry: e.name,
-                                  version: e.version,
-                                })
-                              ),
-                          },
-                        ]),
+                    ...(remoteOAuthActions
+                      ? remoteOAuthActions
+                      : isInstalled(e)
+                        ? [
+                            {
+                              key: 'installed',
+                              label: 'Installed',
+                              disabled: true,
+                              onClick: () => undefined,
+                            },
+                          ]
+                        : [
+                            {
+                              key: 'install',
+                              label: 'Install',
+                              onClick: () =>
+                                router.push(
+                                  CONTROL_ROUTES.marketplace.install({
+                                    entry: e.name,
+                                    version: e.version,
+                                  })
+                                ),
+                            },
+                          ]),
                     ...(isPrivate && canShare
                       ? [
                           {

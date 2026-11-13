@@ -21,6 +21,7 @@ import { deleteSharedGrantsForContextExcept } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
 import { contextAllowlist } from '../../services/access/mcpInvocable.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
+import { readLiveMcpServerUid } from '../../services/liveMcpServer.js'
 import {
   K8sConflictError,
   K8sNotFoundError,
@@ -33,6 +34,13 @@ import {
   type ResourcePreconditions,
   type SecretPreconditions,
 } from '../../types.js'
+import { mapWithConcurrencyLimit } from '../../utils/mapWithConcurrencyLimit.js'
+import {
+  CATALOG_ANNOTATION_PREFIX,
+  becomesCatalogRemoteOAuthInstance,
+  catalogInstanceIdentityChanges,
+  isCatalogRemoteOAuthInstance,
+} from './catalogRemoteOAuth.js'
 import {
   registerCommunicationChannelCredentialsRoutes,
   validateCommunicationChannelCredentials,
@@ -515,6 +523,102 @@ function hostValidationDeps(db: DbClient) {
   return createHostValidationDeps(db)
 }
 
+// Bounds the per-write fan-out of McpServer reads; a Context write rarely adds
+// more than a handful of servers at once.
+const ADDED_MCP_SERVER_READ_CONCURRENCY = 4
+// Each added name costs one apiserver read, so the count per write is capped well
+// above any real allowlist edit.
+const MAX_ADDED_MCP_SERVERS_PER_WRITE = 256
+
+/**
+ * The servers a Context write adds to `spec.mcpServers`, sorted: in the incoming
+ * spec and not in the current one. With no current spec (create, or a PUT whose
+ * Context could not be read) every name counts as added.
+ */
+function addedContextMcpServers(
+  nextSpec: Record<string, unknown> | undefined,
+  currentSpec: Record<string, unknown> | null
+): string[] {
+  const current = contextAllowlist({ spec: currentSpec ?? undefined })
+  return [...contextAllowlist({ spec: nextSpec })].filter(name => !current.has(name)).sort()
+}
+
+/**
+ * The names among `added` with no live McpServer. Only added names are checked: a
+ * name an earlier writer left behind must not lock the Context's other fields.
+ * Without this check, an enable built from a list read before an uninstall lands
+ * on a Context the uninstall never touched (it only rewrites Contexts that held
+ * the name), and the next install under that name comes back already enabled. A
+ * read error other than 404 propagates, so the write fails instead of passing an
+ * unverified name.
+ */
+async function mcpServersWithoutLiveCr(
+  gateway: K8sGateway,
+  added: readonly string[]
+): Promise<string[]> {
+  // The shared helper rejects on the first error but lets its other workers keep
+  // draining the list; once the write is going to fail, the remaining reads are
+  // wasted apiserver calls.
+  let failed = false
+  const uids = await mapWithConcurrencyLimit(
+    added,
+    ADDED_MCP_SERVER_READ_CONCURRENCY,
+    async name => {
+      if (failed) return undefined
+      try {
+        return await readLiveMcpServerUid(gateway, name, config.mcpServersNamespace)
+      } catch (err) {
+        failed = true
+        throw err
+      }
+    }
+  )
+  return added.filter((_, index) => uids[index] === undefined)
+}
+
+/**
+ * Answers the request and returns true when the Context write may not proceed:
+ * too many added names to verify, or an added name with no live McpServer.
+ */
+async function refuseUnverifiedAddedMcpServers(
+  gateway: K8sGateway,
+  res: Response,
+  added: readonly string[]
+): Promise<boolean> {
+  if (added.length > MAX_ADDED_MCP_SERVERS_PER_WRITE) {
+    res.status(422).json({
+      error: 'too_many_mcp_servers',
+      limit: MAX_ADDED_MCP_SERVERS_PER_WRITE,
+      message: `a single write may add at most ${MAX_ADDED_MCP_SERVERS_PER_WRITE} connectors to a context`,
+    })
+    return true
+  }
+  const unknown = await mcpServersWithoutLiveCr(gateway, added)
+  if (unknown.length === 0) return false
+  res.status(422).json({
+    error: 'unknown_mcp_server',
+    mcpServers: unknown,
+    message: 'one or more connectors no longer exist; reload and try again',
+  })
+  return true
+}
+
+/**
+ * Whether a generic McpServer create claims a catalog remote-OAuth identity. Only
+ * the catalog install saga creates those, and it does not go through this route.
+ */
+function claimsCatalogRemoteOAuthIdentity(body: {
+  metadata?: object
+  spec?: Record<string, unknown>
+}): boolean {
+  const oauth = recordValue(body.spec?.oauth)
+  if (oauth?.source !== 'remote') return false
+  const annotations = recordValue(
+    (body.metadata as { annotations?: unknown } | undefined)?.annotations
+  )
+  return Object.keys(annotations ?? {}).some(key => key.startsWith(CATALOG_ANNOTATION_PREFIX))
+}
+
 type ContextGrantPurgeSource = 'context_create' | 'context_update' | 'context_delete'
 
 /**
@@ -643,6 +747,17 @@ export function createAdminResourcesRouter(
           res.status(422).json({ errors: fieldIssues })
           return
         }
+      }
+
+      if (
+        plural === 'contexts' &&
+        (await refuseUnverifiedAddedMcpServers(
+          gateway,
+          res,
+          addedContextMcpServers(body.spec, null)
+        ))
+      ) {
+        return
       }
 
       if (plural === 'communicationchannels' && body.spec) {
@@ -814,6 +929,14 @@ export function createAdminResourcesRouter(
       // Early validation for McpServer specs — UX safety net + defense-in-depth.
       // HCC reconciler also sanitizes as a backstop.
       if (plural === 'mcpservers' && body.spec) {
+        if (claimsCatalogRemoteOAuthIdentity(body)) {
+          res.status(400).json({
+            error: 'catalog_annotations_not_allowed',
+            message:
+              'a remote-OAuth connector with catalog annotations can only be installed from the catalog',
+          })
+          return
+        }
         body.spec = stripLegacyMcpServerSpecFields(body.spec)
         const errors = await validateMcpServerSpecPreflight(body.spec, {
           allowedImagePrefixes: config.allowedPluginImagePrefixes,
@@ -898,6 +1021,7 @@ export function createAdminResourcesRouter(
         metadata?: {
           labels?: Record<string, string>
           annotations?: Record<string, string>
+          uid?: string
           resourceVersion?: string
         }
         spec: Record<string, unknown>
@@ -951,6 +1075,20 @@ export function createAdminResourcesRouter(
         }
       }
 
+      // Reuses the ratchet read above. A Context it could not read counts every
+      // name as added: the write is about to 404 anyway, and a Context created in
+      // between must not take an unverified name.
+      if (
+        plural === 'contexts' &&
+        (await refuseUnverifiedAddedMcpServers(
+          gateway,
+          res,
+          addedContextMcpServers(body.spec, recordValue(ratchetCurrent?.spec))
+        ))
+      ) {
+        return
+      }
+
       if (plural === 'communicationchannels' && body.spec) {
         const errors = validateCommunicationChannelSpec(body.spec)
         if (errors.length > 0) {
@@ -959,10 +1097,20 @@ export function createAdminResourcesRouter(
         }
       }
 
+      // The McpServer read by the catalog-identity guard below; handed to
+      // updateResource so the PUT still reads the apiserver once.
+      let mcpServerCurrent: MutableResourceSnapshot | undefined
       // Same early validation for McpServer updates. A PUT replaces the whole spec, so
       // a client resending the spec it read would otherwise carry the legacy fields on.
-      if (plural === 'mcpservers' && body.spec) {
-        body.spec = stripLegacyMcpServerSpecFields(body.spec)
+      if (plural === 'mcpservers') {
+        // A replace without a spec object would skip every check below and still
+        // overwrite the CR.
+        const spec = recordValue(body.spec)
+        if (!spec) {
+          res.status(400).json({ error: 'invalid_request', message: 'spec must be an object' })
+          return
+        }
+        body.spec = stripLegacyMcpServerSpecFields(spec)
         const errors = await validateMcpServerSpecPreflight(body.spec, {
           allowedImagePrefixes: config.allowedPluginImagePrefixes,
           enforceImageAllowlist: config.enforcePluginImageAllowlist,
@@ -970,6 +1118,49 @@ export function createAdminResourcesRouter(
         if (errors.length > 0) {
           res.status(422).json({ errors })
           return
+        }
+
+        // A 404 propagates as the response. Falling through would let
+        // updateResource read again and replace an object created after this
+        // read, which no check here has seen.
+        mcpServerCurrent = (await gateway.getResource(
+          plural,
+          req.params.name,
+          ns
+        )) as MutableResourceSnapshot
+        // Answered here rather than left to the CRD's CEL rules: those pin only part
+        // of the identity, and an edit page saving a spec read before an uninstall
+        // and reinstall must not rewrite the new install's URL or catalog identity.
+        // A CR that is not yet an instance is checked too: the identity must not be
+        // acquired here either, or the guard would protect a forged one from then on.
+        const mcpServerNext = {
+          metadata: {
+            annotations: (recordValue(body.metadata?.annotations) ?? undefined) as
+              | Record<string, string>
+              | undefined,
+          },
+          spec: body.spec,
+        }
+        const isCatalogInstance = isCatalogRemoteOAuthInstance(mcpServerCurrent)
+        if (
+          isCatalogInstance ||
+          becomesCatalogRemoteOAuthInstance(mcpServerCurrent, mcpServerNext)
+        ) {
+          const fields = catalogInstanceIdentityChanges(mcpServerCurrent, mcpServerNext)
+          if (fields.length > 0) {
+            ;(req.log ?? log).warn(
+              { event: 'catalog_instance_identity_change_refused', name: req.params.name, fields },
+              'generic McpServer update refused: it would change a catalog instance identity'
+            )
+            res.status(409).json({
+              error: 'catalog_instance_immutable',
+              fields,
+              message: isCatalogInstance
+                ? 'the identity of a catalog connector cannot be edited; uninstall it and install again'
+                : 'a catalog connector identity can only be created by installing from the catalog',
+            })
+            return
+          }
         }
       }
 
@@ -1068,7 +1259,18 @@ export function createAdminResourcesRouter(
               previousCommunicationChannelSpec?.spec ?? null
             ),
           }
-        : body
+        : mcpServerCurrent?.metadata?.uid
+          ? {
+              ...body,
+              // The replace must land on the object the checks above read, never
+              // on one recreated under the same name in between; a uid the caller
+              // sent is kept, so its own precondition still applies.
+              metadata: {
+                ...body.metadata,
+                uid: body.metadata?.uid || mcpServerCurrent.metadata.uid,
+              },
+            }
+          : body
       // A null snapshot means the channel does not exist (loadCommunicationChannelSpecSnapshot
       // returns null only on 404). Skipping the guard here is what makes the response
       // honest: with no previous spec every provider reads as newly added, so the guard
@@ -1092,11 +1294,12 @@ export function createAdminResourcesRouter(
         }
       }
       try {
-        // Only the ratchet path (hosts/contexts) has a pre-read to hand off; the
-        // CC/mcpservers paths call with the original 4-arg arity untouched.
-        const updated = ratchetCurrent
+        // The contexts ratchet and the McpServer guard each hand off their read;
+        // the CC path calls with the original 4-arg arity untouched.
+        const preReadCurrent = ratchetCurrent ?? mcpServerCurrent
+        const updated = preReadCurrent
           ? await gateway.updateResource(plural, req.params.name, updateBody, ns, {
-              preReadCurrent: ratchetCurrent,
+              preReadCurrent,
             })
           : await gateway.updateResource(plural, req.params.name, updateBody, ns)
         // Before the displayName guard, whose 409 is answered after the spec has

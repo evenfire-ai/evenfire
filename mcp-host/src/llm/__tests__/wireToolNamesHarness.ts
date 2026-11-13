@@ -37,16 +37,30 @@ export function familyOf(id: LlmProvider): WireFamily {
 
 // ─── Real server names (produced by control-api, see the golden) ────────────
 
+export interface CatalogServerName {
+  readonly catalogId: string
+  readonly grantScope: string
+  readonly name: string
+}
+
+// Annotated rather than cast, so a golden that drops a field fails typecheck.
+const CATALOG: readonly CatalogServerName[] = serverNames.catalog
+
+function catalogSlot(catalogId: string, grantScope: string): string {
+  const entry = CATALOG.find(e => e.catalogId === catalogId && e.grantScope === grantScope)
+  if (!entry) throw new Error(`serverNames golden has no catalog slot ${catalogId} (${grantScope})`)
+  return entry.name
+}
+
 export const REGISTRY_SERVER_NAMES: readonly string[] = serverNames.registry.map(e => e.name)
-export const CATALOG_SERVER_NAMES: readonly string[] = serverNames.catalog.map(
-  (e: { name: string }) => e.name
-)
+export const CATALOG_SERVER_NAMES: readonly string[] = CATALOG.map(e => e.name)
 export const NOTION_SERVER = serverNames.registry.find(
   e => e.entryName === '@evenfire/notion-remote'
 )!.name
 export const ATLASSIAN_SERVER = serverNames.registry.find(
   e => e.entryName === '@evenfire/atlassian-remote'
 )!.name
+export const CATALOG_NOTION_SERVER = catalogSlot('@evenfire/notion-remote', 'user')
 
 // ─── Construction ───────────────────────────────────────────────────────────
 

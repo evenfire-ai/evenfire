@@ -1,0 +1,12 @@
+{
+  "status": 201,
+  "body": {
+    "serverName": "mcp-acme-linear-pre-u-64164363",
+    "namespace": "mcp-server",
+    "clientMode": "confidential",
+    "registrationMode": "pre-registered",
+    "callbackVariant": "per-server",
+    "redirectUri": "https://control.example.com/api/v1/oauth-callback/remote/mcp-acme-linear-pre-u-64164363",
+    "clientSecretName": "mcp-acme-linear-pre-u-64164363-oauth-client"
+  }
+}
