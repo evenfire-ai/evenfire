@@ -1025,6 +1025,9 @@ jobs:
       - name: Test the continuity lane's teardown, log reads, C3 and C7 contracts
         run: bash scripts/tests/test-hcc-restart-continuity-lane.sh
 
+      - name: Test the continuity lane's node kill watcher
+        run: bash scripts/tests/test-hcc-node-kill.sh
+
       - name: Test autoresearch gate wrappers
         run: bash scripts/tests/test-autoresearch-gates.sh
 

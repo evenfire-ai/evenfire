@@ -11,12 +11,16 @@
 #   idle      kill at once.
 #   mid-pass  arm a watcher on the container's own log file and kill the moment
 #             the controller logs `networkpolicy-pass-start`. The caller starts
-#             a pass only after this script prints ARMED. A pass on a small
-#             fleet takes tens of milliseconds, so the watcher runs on the node,
-#             next to the log, instead of polling through the API server.
+#             a pass only after this script prints ARMED. The byte the watcher
+#             reads from is fixed before ARMED is printed, so a line written
+#             between ARMED and the watcher opening the file is still read, and
+#             a line already in the log before the script started is not. A
+#             pass on a small fleet takes tens of milliseconds, so the watcher
+#             runs on the node, next to the log, instead of polling through the
+#             API server.
 #
 # Output lines (parsed by the caller):
-#   ARMED log=<path>          watcher running (mid-pass only)
+#   ARMED log=<path>          watcher start position fixed (mid-pass only)
 #   KILLED pid=<pid> container=<id>
 #   KILL_ERROR <reason>       exit 2: container lookup failed
 #   NO_PASS_START             exit 3: no pass started within the timeout
@@ -47,16 +51,19 @@ case "$mode" in
     ;;
   mid-pass)
     [ -r "$log" ] || { echo "KILL_ERROR unreadable log=${log}"; exit 2; }
+    start=$(($(wc -c <"$log") + 1))
     echo "ARMED log=${log}"
     # `timeout` bounds the watcher; the loop kills the controller, then the
     # tail that feeds it, so the pipeline ends instead of waiting for a line
-    # the dead container will never write.
-    if timeout "$wait_sec" tail -n0 -F "$log" 2>/dev/null | while IFS= read -r line; do
+    # the dead container will never write. pkill -f reads its pattern as an
+    # extended regular expression, where a bare `+` is a quantifier: `[+]`
+    # matches the literal `+` of the tail arguments.
+    if timeout "$wait_sec" tail -c "+${start}" -F "$log" 2>/dev/null | while IFS= read -r line; do
       case "$line" in
         *networkpolicy-pass-start*)
           kill -KILL "$pid"
           echo "KILLED pid=${pid} container=${id}"
-          pkill -f "tail -n0 -F ${log}" || true
+          pkill -f "tail -c [+]${start} -F ${log}" || true
           exit 0
           ;;
       esac

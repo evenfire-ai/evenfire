@@ -98,7 +98,8 @@
 #                                  it takes the lock; the usage check below
 #                                  (an integer >= 60) is only a syntax check
 #   E2E_CONTINUITY_VACUITY         empty | roll-host-fixture | rotate-early
-#   E2E_CONTINUITY_MID_PASS_ATTEMPTS  default 3
+#   E2E_CONTINUITY_MID_PASS_ATTEMPTS  default 3; an attempt that sees no pass
+#                                  start (NO_PASS_START) counts as one
 #   E2E_CONTINUITY_PEER_CONTEXTS   extra Contexts selecting the McpServer
 #                                  fixture (default 30 in mid-pass, 0 in idle).
 #                                  A pass on a small fleet ends in tens of
@@ -194,6 +195,9 @@ CADENCE_KEYS="CONTEXT_MAPPER_STATELESS_IDLE_MINUTES CONTEXT_MAPPER_STATELESS_IDL
 CADENCE_TEST_VALUES="1 1 20000 5000"
 # Bounds of the disruption phase; HCC recovers in seconds.
 KILL_WATCH_SEC=60
+# The mcp-host log lines that mean a Host lost MCP servers. The settle
+# precondition and C7 both judge by this one pattern.
+REVOCATION_PATTERN='MCP authority revoked|Removed server'
 RESTART_WAIT_SEC=60
 RECOVERY_BETWEEN_SEC=120
 RECOVERY_WAIT_SEC=300
@@ -1292,7 +1296,8 @@ copy_node_kill_script() {
 }
 
 # kill_hcc <idle|mid-pass>: returns 0 when the controller was killed,
-# 3 when mid-pass saw no pass start, 2 on lookup failure.
+# 3 when mid-pass saw no pass start (a failed attempt: run_mid_pass_attempts
+# runs the next one), 2 on lookup failure.
 kill_hcc() {
   local kill_mode=$1 out="${EVIDENCE_DIR}/kill-$((KILLS + 1)).log" pid rc
   : >"$out"
@@ -1313,6 +1318,44 @@ kill_hcc() {
   grep -q '^NO_PASS_START' "$out" && return 3
   echo "node kill failed (ssh rc=${rc}): $(cat "$out")" >&2
   return 2
+}
+
+# run_mid_pass_attempts: up to MID_PASS_ATTEMPTS kills, each armed on the next
+# pass start. Sets achieved=1 and `previous` when a kill landed inside a pass.
+# An attempt that saw no pass start (kill_hcc rc=3, NO_PASS_START) killed
+# nothing: it is a failed attempt and the next one runs. Any other kill_hcc
+# failure aborts the lane. With no kill at all there is nothing to verify.
+run_mid_pass_attempts() {
+  achieved=0
+  previous=""
+  for attempt in $(seq 1 "$MID_PASS_ATTEMPTS"); do
+    HCC_POD="$(hcc_pod)" || die "no running HCC pod before mid-pass attempt ${attempt}"
+    [ "$attempt" = 1 ] || copy_node_kill_script
+    [ -n "$KILL_EPOCH" ] || KILL_EPOCH="$(date +%s)"
+    rc=0
+    kill_hcc mid-pass || rc=$?
+    if [ "$rc" = 3 ]; then
+      echo "attempt ${attempt}: no pass started within ${KILL_WATCH_SEC}s (NO_PASS_START); HCC was not killed" | tee -a "${EVIDENCE_DIR}/mid-pass.log"
+      # C6 measures from the start of the first attempt that killed; an attempt
+      # that killed nothing must not move that start earlier.
+      [ "$KILLS" -ge 1 ] || KILL_EPOCH=""
+      continue
+    fi
+    [ "$rc" = 0 ] || die "mid-pass kill attempt ${attempt} failed (rc=${rc})"
+    wait_until "$RESTART_WAIT_SEC" "HCC container restart after attempt ${attempt}" \
+      hcc_restarted_past "$HCC_POD" "$((HCC_RESTARTS_BEFORE + KILLS - 1))" ||
+      die "HCC did not restart after attempt ${attempt}"
+    save_killed_hcc_log "$HCC_POD"
+    previous="$(last_pass_event "$HCC_POD" previous)"
+    echo "attempt ${attempt}: last pass event of the killed process: ${previous}" | tee -a "${EVIDENCE_DIR}/mid-pass.log"
+    if [[ "$previous" == start* ]]; then
+      achieved=1
+      break
+    fi
+    wait_until "$RECOVERY_BETWEEN_SEC" "HCC ready before the next attempt" request_lane_ready_now ||
+      die "HCC request lane did not recover between attempts"
+  done
+  [ "$KILLS" -ge 1 ] || die "no mid-pass attempt killed HCC: ${MID_PASS_ATTEMPTS} attempt(s), none saw a pass start"
 }
 
 # ─── Preconditions ────────────────────────────────────────────────────
@@ -1401,8 +1444,8 @@ for host in "$SOURCE_HOST" "$ACTIVE_HOST"; do
   settle_log="${EVIDENCE_DIR}/settle-host-${host}.log"
   read_host_log_window "$host" "$CADENCE_RESTORED_EPOCH" "$settle_log" ||
     die "precondition: could not prove a complete read of ${host} logs since the setup's HCC rollout (${since_restore})"
-  if grep -qE 'MCP authority revoked|Removed server' "$settle_log"; then
-    die "precondition: ${host} revoked or removed MCP servers after the setup's HCC rollout ($(grep -cE 'MCP authority revoked|Removed server' "$settle_log") line(s)); see ${settle_log}"
+  if grep -qE "$REVOCATION_PATTERN" "$settle_log"; then
+    die "precondition: ${host} revoked or removed MCP servers after the setup's HCC rollout ($(grep -cE "$REVOCATION_PATTERN" "$settle_log") line(s)); see ${settle_log}"
   fi
   ok "precondition: ${host} logged no fleet revocation since the setup's HCC rollout ($(wc -l <"$settle_log") lines read)"
 done
@@ -1476,27 +1519,7 @@ if [ "$MODE" = idle ]; then
   kill_hcc idle || die "idle kill failed"
   ok "HCC killed at rest"
 else
-  achieved=0
-  for attempt in $(seq 1 "$MID_PASS_ATTEMPTS"); do
-    HCC_POD="$(hcc_pod)" || die "no running HCC pod before mid-pass attempt ${attempt}"
-    [ "$attempt" = 1 ] || copy_node_kill_script
-    [ -n "$KILL_EPOCH" ] || KILL_EPOCH="$(date +%s)"
-    rc=0
-    kill_hcc mid-pass || rc=$?
-    [ "$rc" = 0 ] || die "mid-pass kill attempt ${attempt} failed (rc=${rc})"
-    wait_until "$RESTART_WAIT_SEC" "HCC container restart after attempt ${attempt}" \
-      hcc_restarted_past "$HCC_POD" "$((HCC_RESTARTS_BEFORE + KILLS - 1))" ||
-      die "HCC did not restart after attempt ${attempt}"
-    save_killed_hcc_log "$HCC_POD"
-    previous="$(last_pass_event "$HCC_POD" previous)"
-    echo "attempt ${attempt}: last pass event of the killed process: ${previous}" | tee -a "${EVIDENCE_DIR}/mid-pass.log"
-    if [[ "$previous" == start* ]]; then
-      achieved=1
-      break
-    fi
-    wait_until "$RECOVERY_BETWEEN_SEC" "HCC ready before the next attempt" request_lane_ready_now ||
-      die "HCC request lane did not recover between attempts"
-  done
+  run_mid_pass_attempts
   if [ "$achieved" = 1 ]; then
     ok "HCC killed inside a NetworkPolicy pass (${previous}) after ${KILLS} kill(s)"
   else
@@ -1587,8 +1610,8 @@ for host in "$SOURCE_HOST" "$ACTIVE_HOST"; do
   host_log="${EVIDENCE_DIR}/host-${host}.log"
   read_host_log_window "$host" "$KILL_EPOCH" "$host_log" ||
     { fail "C7 could not prove a complete read of ${host} logs since the kill (${since})"; continue; }
-  if grep -qE 'MCP authority revoked|Removed server' "$host_log"; then
-    fail "C7 ${host} revoked or removed MCP servers after the kill: $(grep -cE 'MCP authority revoked|Removed server' "$host_log") line(s)"
+  if grep -qE "$REVOCATION_PATTERN" "$host_log"; then
+    fail "C7 ${host} revoked or removed MCP servers after the kill: $(grep -cE "$REVOCATION_PATTERN" "$host_log") line(s)"
   else
     ok "C7 ${host} logged no fleet revocation and no removed server ($(wc -l <"$host_log") lines read)"
   fi

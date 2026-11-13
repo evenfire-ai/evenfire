@@ -39,7 +39,7 @@ extract_function() {
   ' "$LANE"
 }
 
-for fn in die start_sampler stop_sampler teardown host_received_fixture_fleet; do
+for fn in die start_sampler stop_sampler teardown host_received_fixture_fleet run_mid_pass_attempts; do
   extract_function "$fn" >"${WORK}/fn-${fn}.sh"
   if [ -s "${WORK}/fn-${fn}.sh" ] && [[ "$(tail -n 1 "${WORK}/fn-${fn}.sh")" == *"}" ]]; then
     pass "extracted ${fn} from the lane"
@@ -49,6 +49,15 @@ for fn in die start_sampler stop_sampler teardown host_received_fixture_fleet; d
 done
 
 # ─── teardown under signals ───────────────────────────────────────────
+# The harness installs the trap line taken from the lane. A lane without it
+# gives a harness without a trap, and every case below fails.
+LANE_TRAP="${WORK}/lane-trap.sh"
+grep -x 'trap teardown EXIT' "$LANE" >"$LANE_TRAP" || true
+if [ "$(wc -l <"$LANE_TRAP" | tr -d ' ')" = 1 ]; then
+  pass "the lane installs 'trap teardown EXIT' exactly once"
+else
+  fail "the lane must contain the line 'trap teardown EXIT' exactly once, found $(wc -l <"$LANE_TRAP" | tr -d ' ')"
+fi
 HARNESS="${WORK}/teardown-harness.sh"
 {
   cat <<'EOF'
@@ -81,8 +90,11 @@ condition_status() { echo True; }
 host_state() { echo active; }
 EOF
   cat "${WORK}/fn-die.sh" "${WORK}/fn-start_sampler.sh" "${WORK}/fn-stop_sampler.sh" "${WORK}/fn-teardown.sh"
+  cat "$LANE_TRAP"
+} >"${WORK}/teardown-prelude.sh"
+{
+  cat "${WORK}/teardown-prelude.sh"
   cat <<'EOF'
-trap teardown EXIT
 start_sampler selector
 echo "SAMPLER_STARTED" >>"$STEPS"
 : >"$READY"
@@ -90,6 +102,17 @@ echo "SAMPLER_STARTED" >>"$STEPS"
 sleep 30
 EOF
 } >"$HARNESS"
+# Normal exit with a sampler whose process ended with status $4.
+SAMPLER_HARNESS="${WORK}/sampler-harness.sh"
+{
+  cat "${WORK}/teardown-prelude.sh"
+  cat <<'EOF'
+(exit "$4") &
+SAMPLER_PID=$!
+echo "SAMPLER_STARTED" >>"$STEPS"
+exit 0
+EOF
+} >"$SAMPLER_HARNESS"
 
 # run_signal_case <mode>: group-TERM | group-HUP | group-INT | main-TERM.
 # Prints the harness exit status (negative: killed by that signal).
@@ -154,6 +177,125 @@ for mode in group-TERM group-HUP group-INT main-TERM; do
     fail "teardown after ${mode}: exit=${status} missing=[${missing[*]+"${missing[*]}"}] steps=$(tr '\n' ';' <"$steps") output=$(tr '\n' ';' <"${steps}.out")"
   fi
 done
+
+# ─── teardown on a normal exit: the sampler's status decides ──────────
+# The control (sampler status 0) shows that exit 1 below comes from the
+# sampler and from nothing else in the harness.
+for sampler_status in 0 1; do
+  rm -rf "${WORK}/case" && mkdir -p "${WORK}/case/evidence"
+  : >"${WORK}/case/steps"
+  status=0
+  "$BASH" "$SAMPLER_HARNESS" "${WORK}/case/steps" "${WORK}/case/ready" "${WORK}/case/evidence" "$sampler_status" \
+    >"${WORK}/case/steps.out" 2>&1 || status=$?
+  missing=()
+  for step in "${CLEANUP_STEPS[@]}"; do
+    grep -qxF "$step" "${WORK}/case/steps" || missing+=("$step")
+  done
+  sampler_line=0
+  grep -qxF 'teardown: the sampler exited with an error' "${WORK}/case/steps.out" && sampler_line=1
+  if grep -qxF "SAMPLER_STARTED" "${WORK}/case/steps" && [ "${#missing[@]}" = 0 ] &&
+     [ "$status" = "$sampler_status" ] && [ "$sampler_line" = "$sampler_status" ]; then
+    pass "normal exit with sampler status ${sampler_status}: every cleanup step ran, exit ${status}"
+  else
+    fail "normal exit with sampler status ${sampler_status}: exit=${status} sampler_line=${sampler_line} missing=[${missing[*]+"${missing[*]}"}] output=$(tr '\n' ';' <"${WORK}/case/steps.out")"
+  fi
+done
+
+# ─── mid-pass attempts: NO_PASS_START is a failed attempt ─────────────
+# run_mid_pass_case <kill_hcc results, one per attempt as rc:last-pass-event>
+# Prints the subshell's exit status; the calls are in ${WORK}/mid/steps.
+run_mid_pass_case() {
+  rm -rf "${WORK}/mid" && mkdir -p "${WORK}/mid/evidence"
+  : >"${WORK}/mid/steps"
+  printf '%s\n' "$@" >"${WORK}/mid/plan"
+  (
+    set -euo pipefail
+    RED='' NC=''
+    STEPS="${WORK}/mid/steps"
+    EVIDENCE_DIR="${WORK}/mid/evidence"
+    MID_PASS_ATTEMPTS=3 KILL_EPOCH="" KILL_WATCH_SEC=60 KILLS=0 HCC_RESTARTS_BEFORE=4
+    RESTART_WAIT_SEC=1 RECOVERY_BETWEEN_SEC=1 HCC_POD=""
+    hcc_pod() { echo hcc-pod; }
+    copy_node_kill_script() { echo "copy_node_kill_script" >>"$STEPS"; }
+    kill_hcc() {
+      local n line rc
+      n=$(($(grep -c '^kill_hcc' "$STEPS" || true) + 1))
+      echo "kill_hcc $1 attempt=${n}" >>"$STEPS"
+      line="$(sed -n "${n}p" "${WORK}/mid/plan")"
+      rc="${line%%:*}"
+      [ "$rc" != 0 ] || KILLS=$((KILLS + 1))
+      return "$rc"
+    }
+    wait_until() { echo "wait_until $2" >>"$STEPS"; }
+    # The stamp of attempt N is 1000 + N - 1 (taken before its kill_hcc call).
+    date() { echo "$((1000 + $(grep -c '^kill_hcc' "$STEPS" || true)))"; }
+    save_killed_hcc_log() { echo "save_killed_hcc_log kills=${KILLS}" >>"$STEPS"; }
+    last_pass_event() {
+      local line
+      line="$(sed -n "$(grep -c '^kill_hcc' "$STEPS")p" "${WORK}/mid/plan")"
+      echo "${line#*:}"
+    }
+    # shellcheck disable=SC1090
+    source "${WORK}/fn-die.sh"
+    # shellcheck disable=SC1090
+    source "${WORK}/fn-run_mid_pass_attempts.sh"
+    run_mid_pass_attempts
+    echo "RETURNED achieved=${achieved} kills=${KILLS} previous=${previous}" >>"$STEPS"
+    echo "KILL_EPOCH=${KILL_EPOCH}" >>"$STEPS"
+  ) >"${WORK}/mid/out" 2>&1
+  echo $?
+}
+mid_steps() { tr '\n' ';' <"${WORK}/mid/steps"; }
+
+status="$(run_mid_pass_case 3: 0:start)"
+if [ "$status" = 0 ] && [ "$(grep -c '^kill_hcc' "${WORK}/mid/steps")" = 2 ] &&
+   [ "$(grep -c '^wait_until HCC container restart' "${WORK}/mid/steps")" = 1 ] &&
+   grep -qxF 'wait_until HCC container restart after attempt 2' "${WORK}/mid/steps" &&
+   grep -qxF 'RETURNED achieved=1 kills=1 previous=start' "${WORK}/mid/steps" &&
+   grep -qF 'attempt 1: no pass started' "${WORK}/mid/evidence/mid-pass.log"; then
+  pass "mid-pass: NO_PASS_START on attempt 1 is a failed attempt, attempt 2 kills inside a pass"
+else
+  fail "mid-pass NO_PASS_START then kill: exit=${status} steps=$(mid_steps) output=$(tr '\n' ';' <"${WORK}/mid/out")"
+fi
+status="$(run_mid_pass_case 3: 3: 3:)"
+if [ "$status" != 0 ] && [ "$(grep -c '^kill_hcc' "${WORK}/mid/steps")" = 3 ] &&
+   ! grep -q '^RETURNED' "${WORK}/mid/steps" &&
+   grep -qF 'no mid-pass attempt killed HCC' "${WORK}/mid/out"; then
+  pass "mid-pass: three NO_PASS_START attempts end the lane, with no kill to verify (exit ${status})"
+else
+  fail "mid-pass all NO_PASS_START: exit=${status} steps=$(mid_steps) output=$(tr '\n' ';' <"${WORK}/mid/out")"
+fi
+status="$(run_mid_pass_case 2: 0:start)"
+if [ "$status" != 0 ] && [ "$(grep -c '^kill_hcc' "${WORK}/mid/steps")" = 1 ] &&
+   grep -qF 'mid-pass kill attempt 1 failed (rc=2)' "${WORK}/mid/out"; then
+  pass "mid-pass: a kill failure other than NO_PASS_START still aborts at once (exit ${status})"
+else
+  fail "mid-pass rc=2: exit=${status} steps=$(mid_steps) output=$(tr '\n' ';' <"${WORK}/mid/out")"
+fi
+status="$(run_mid_pass_case 0:result 0:start)"
+if [ "$status" = 0 ] && [ "$(grep -c '^kill_hcc' "${WORK}/mid/steps")" = 2 ] &&
+   grep -qxF 'wait_until HCC ready before the next attempt' "${WORK}/mid/steps" &&
+   grep -qxF 'RETURNED achieved=1 kills=2 previous=start' "${WORK}/mid/steps"; then
+  pass "mid-pass: a kill outside a pass is followed by the next attempt, as before"
+else
+  fail "mid-pass kill outside a pass: exit=${status} steps=$(mid_steps) output=$(tr '\n' ';' <"${WORK}/mid/out")"
+fi
+# C6 measures from KILL_EPOCH: an attempt that killed nothing must not move it
+# earlier, and an attempt after a real kill must not move it later.
+status="$(run_mid_pass_case 3: 0:start)"
+if [ "$status" = 0 ] && grep -qxF 'KILL_EPOCH=1001' "${WORK}/mid/steps"; then
+  pass "mid-pass: KILL_EPOCH is the start of the first attempt that killed, not of an earlier NO_PASS_START"
+else
+  fail "mid-pass KILL_EPOCH after NO_PASS_START: exit=${status} steps=$(mid_steps)"
+fi
+status="$(run_mid_pass_case 0:result 3: 3:)"
+if [ "$status" = 0 ] && [ "$(grep -c '^kill_hcc' "${WORK}/mid/steps")" = 3 ] &&
+   grep -qxF 'RETURNED achieved=0 kills=1 previous=result' "${WORK}/mid/steps" &&
+   grep -qxF 'KILL_EPOCH=1000' "${WORK}/mid/steps"; then
+  pass "mid-pass: kills that all landed outside a pass return to the lane's fail branch, with KILL_EPOCH kept"
+else
+  fail "mid-pass kill outside then NO_PASS_START twice: exit=${status} steps=$(mid_steps) output=$(tr '\n' ';' <"${WORK}/mid/out")"
+fi
 
 # ─── host_received_fixture_fleet under pipefail ───────────────────────
 BIG_LOG="${WORK}/big-host.log"
@@ -237,11 +379,19 @@ fi
 # C7 passes when a Host log has no 'MCP authority revoked' and no 'Removed
 # server' line. That negative check means something only while mcp-host still
 # logs those exact texts.
-C7_PATTERN_LINE="$(grep -c "grep -qE 'MCP authority revoked|Removed server'" "$LANE")"
-if [ "$C7_PATTERN_LINE" -ge 1 ]; then
-  pass "the lane's C7 pattern is 'MCP authority revoked|Removed server'"
+# The precondition and C7 must both judge by the one REVOCATION_PATTERN: two
+# -qE verdicts and the two -cE counts in their messages, and no grep in the
+# lane with its own copy of either text.
+pattern_defs="$(grep -cx "REVOCATION_PATTERN='MCP authority revoked|Removed server'" "$LANE")"
+pattern_any_defs="$(grep -c '^[[:space:]]*REVOCATION_PATTERN=' "$LANE")"
+pattern_q_uses="$(grep -cE 'grep -qE "\$REVOCATION_PATTERN" "\$(settle_log|host_log)"' "$LANE")"
+pattern_c_uses="$(grep -cE 'grep -cE "\$REVOCATION_PATTERN" "\$(settle_log|host_log)"' "$LANE")"
+pattern_literals="$(grep -cE 'grep .*(MCP authority revoked|Removed server)' "$LANE")"
+if [ "$pattern_defs" = 1 ] && [ "$pattern_any_defs" = 1 ] && [ "$pattern_q_uses" = 2 ] &&
+   [ "$pattern_c_uses" = 2 ] && [ "$pattern_literals" = 0 ]; then
+  pass "the precondition and C7 judge by one REVOCATION_PATTERN, 'MCP authority revoked|Removed server'"
 else
-  fail "the lane's C7 pattern changed; update this contract test with it"
+  fail "the lane's revocation pattern changed: definitions=${pattern_defs}/${pattern_any_defs} -qE uses=${pattern_q_uses} -cE uses=${pattern_c_uses} greps with their own text=${pattern_literals}; update this contract test with it"
 fi
 if grep -qF 'MCP authority revoked' "${ROOT}/mcp-host/src/main.ts"; then
   pass "mcp-host/src/main.ts logs 'MCP authority revoked'"
@@ -254,8 +404,8 @@ else
   fail "mcp-host/src/mcp/manager.ts no longer logs 'Removed server'; C7 would pass vacuously"
 fi
 
-if [ "$TOTAL" -lt 17 ]; then
-  echo "FAIL: expected at least 17 checks, ran ${TOTAL}"
+if [ "$TOTAL" -lt 27 ]; then
+  echo "FAIL: expected at least 27 checks, ran ${TOTAL}"
   exit 1
 fi
 if [ "$FAIL" != 0 ]; then
