@@ -36,7 +36,7 @@ function jsonResponse(body: unknown): Response {
 function stubControlApi(items: WireItem[]) {
   const acked = new Set<string>()
   const held: Array<() => void> = []
-  let holdNextGet = false
+  let getsToHold = 0
   const feedReads: string[] = []
 
   const snapshot = () => ({
@@ -50,8 +50,8 @@ function stubControlApi(items: WireItem[]) {
     if (url.pathname.endsWith('/api/v1/admin/attention') && method === 'GET') {
       feedReads.push(url.search)
       const body = snapshot()
-      if (!holdNextGet) return jsonResponse(body)
-      holdNextGet = false
+      if (getsToHold === 0) return jsonResponse(body)
+      getsToHold -= 1
       return new Promise<Response>((resolve, reject) => {
         const signal = init.signal
         const onAbort = () => reject(new DOMException('The operation was aborted.', 'AbortError'))
@@ -72,7 +72,7 @@ function stubControlApi(items: WireItem[]) {
     fetchStub,
     feedReads,
     holdNextGet: () => {
-      holdNextGet = true
+      getsToHold += 1
     },
     releaseHeld: () => {
       for (const release of held.splice(0)) release()
@@ -151,5 +151,31 @@ describe('catalog attention feed reads over the real client', () => {
     expect(screen.getByText(/Models need review/)).not.toHaveTextContent('deprecated')
     // The reload reached the server on its own instead of joining the older read.
     expect(api.feedReads).toHaveLength(3)
+  })
+
+  it('keeps the banner and the open dialog when a superseded read is aborted', async () => {
+    const { rerender } = renderBanner(0)
+    fireEvent.click(await screen.findByRole('button', { name: 'Review models' }))
+    const dialog = await screen.findByRole('dialog')
+
+    // A refresh is waiting on the server when a newer one replaces it: the
+    // first read is aborted and rejects, the second is still on its way.
+    api.holdNextGet()
+    rerenderBanner(rerender, 1)
+    await waitFor(() => expect(api.feedReads).toHaveLength(2))
+    api.holdNextGet()
+    rerenderBanner(rerender, 2)
+    await waitFor(() => expect(api.feedReads).toHaveLength(3))
+    await act(async () => new Promise(resolve => setTimeout(resolve, 0)))
+
+    expect(screen.getByRole('dialog')).toBe(dialog)
+    expect(screen.getByText(/Models need review/)).toBeInTheDocument()
+
+    await act(async () => api.releaseHeld())
+
+    expect(screen.getByRole('dialog')).toBe(dialog)
+    expect(
+      within(dialog).getByRole('button', { name: `Mark reviewed: ${itemName(deprecated)}` })
+    ).toBeInTheDocument()
   })
 })
