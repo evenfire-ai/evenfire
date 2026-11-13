@@ -793,12 +793,7 @@ async function chooseRowActionByKeyboard(resourceName: string, actionName: strin
     Reflect.deleteProperty(navigator, 'clipboard')
   }
   if (clipboardWriteText) expect(navigator.clipboard.writeText).toBe(clipboardWriteText)
-  const row = await findResourceTreeRow(resourceName)
-  const rowLabel = row.querySelector<HTMLButtonElement>('.da-file-explorer__label')
-  if (!rowLabel) throw new Error(`The sidebar row label is unavailable for ${resourceName}`)
-  rowLabel.focus()
-  await user.keyboard('{Shift>}{F10}{/Shift}')
-  const menu = await screen.findByRole('menu', { name: `Actions for ${resourceName}` })
+  const menu = await openRowActions(resourceName)
   const shareTrigger = within(menu).getByRole('menuitem', { name: 'Share' })
   shareTrigger.focus()
   await user.keyboard('{ArrowRight}')
@@ -806,7 +801,10 @@ async function chooseRowActionByKeyboard(resourceName: string, actionName: strin
   const submenuItems = within(submenu).getAllByRole('menuitem')
   const targetIndex = submenuItems.findIndex(item => item.textContent?.trim() === actionName)
   if (targetIndex < 0) throw new Error(`Keyboard submenu action is unavailable: ${actionName}`)
-  for (let index = 0; index < targetIndex; index += 1) await user.keyboard('{ArrowDown}')
+  for (let index = 0; index <= submenuItems.length; index += 1) {
+    if (document.activeElement === submenuItems[targetIndex]) break
+    await user.keyboard('{ArrowDown}')
+  }
   await waitFor(() => expect(document.activeElement).toBe(submenuItems[targetIndex]))
   await user.keyboard('{Enter}')
   await waitFor(() =>
@@ -1560,7 +1558,7 @@ describe('App → Files action lifecycle integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /a01-batched\.txt/ })
     const menu = await openRowActions(file.name)
-    fireEvent.mouseEnter(within(menu).getByRole('menuitem', { name: 'Share' }))
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
     const shareMenu = await screen.findByRole('menu', { name: `Share options for ${file.name}` })
     const copyAction = within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })
 
@@ -6196,6 +6194,7 @@ describe('App → Files action lifecycle integration', () => {
         async (scheduler, generatedCommands) => {
           vi.restoreAllMocks()
           cleanup()
+          mockSidebarBounds()
           desktopQueryClient.clear()
           const pendingPermission = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
           const pendingD2Refetch = deferred<Awaited<ReturnType<typeof listAccessiblePage>>>()
