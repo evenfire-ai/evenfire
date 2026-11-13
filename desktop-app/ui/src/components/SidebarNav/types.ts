@@ -1,5 +1,7 @@
+import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import type { SidebarResizeControls } from '@hooks/useSidebarResize'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import type { GfsResourceActionId } from '@lib/gfsResourceActions'
 import type { ActiveSandboxUiApp, NavItem, Tone } from '@/uiTypes'
 
 export type CompactMenuCloseFocus = 'preserve-destination-focus'
@@ -25,6 +27,12 @@ export type SidebarNavProps = {
   /** Open (or focus) a preview tab — the file explorer's single-click / Enter
    *  action on a previewable file. */
   onOpenPreviewSection: (preview: GfsPreviewResource) => void
+  /** Dispatch a sidebar action for its exact resource row. */
+  onGfsResourceAction?: (
+    resource: GfsBrowserChild,
+    actionId: GfsResourceActionId,
+    file?: File
+  ) => void
   /** Transient feedback for the file explorer's download fallback. */
   pushToast: (message: string, tone: Tone) => void
   toggleRequestId?: number

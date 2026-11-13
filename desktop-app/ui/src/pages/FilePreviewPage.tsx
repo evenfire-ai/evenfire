@@ -71,6 +71,8 @@ export function FilePreviewPage({
   pushToast,
   onOpenRoute,
   onRenameCommitted,
+  pendingResourceAction,
+  onPendingResourceActionHandled,
   titlebarLeadingTarget,
 }: FilePreviewPageProps) {
   const queryClient = useQueryClient()
@@ -80,6 +82,7 @@ export function FilePreviewPage({
   const [refreshing, setRefreshing] = useState(false)
   const [copyContentReady, setCopyContentReady] = useState(false)
   const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
+  const lastHandledResourceActionIdRef = useRef<number | null>(null)
   const accessRevoked = ctrl.accessState === 'revoked'
   const liveAuthorityRef = useRef({
     sessionScope: ctrl.sessionScope,
@@ -283,6 +286,38 @@ export function FilePreviewPage({
   const fileActionsMenu = (
     <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={menuResourceName} />
   )
+
+  useEffect(() => {
+    const request = pendingResourceAction
+    if (
+      !request ||
+      request.actionId !== 'copy-content' ||
+      request.targetUri !== gfsUri ||
+      lastHandledResourceActionIdRef.current === request.id
+    ) {
+      return
+    }
+    if (denied || unavailable || accessRevoked) {
+      lastHandledResourceActionIdRef.current = request.id
+      onPendingResourceActionHandled?.(request.id)
+      return
+    }
+    if (!copyContentReady) return
+    const action = resourceActions.find(candidate => candidate.id === request.actionId)
+    if (!action || action.disabled) return
+    lastHandledResourceActionIdRef.current = request.id
+    action.run()
+    onPendingResourceActionHandled?.(request.id)
+  }, [
+    accessRevoked,
+    copyContentReady,
+    denied,
+    gfsUri,
+    onPendingResourceActionHandled,
+    pendingResourceAction,
+    resourceActions,
+    unavailable,
+  ])
 
   const revalidateAccess = useCallback(async () => {
     if (denied || accessRevoked || !isGfsSessionGeneration(ctrl.sessionGeneration)) return

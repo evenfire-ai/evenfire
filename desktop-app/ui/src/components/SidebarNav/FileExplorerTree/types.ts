@@ -1,8 +1,25 @@
 import type { DragEvent as ReactDragEvent } from 'react'
+import type { GfsResourceMenuOpenRequest } from '@components/GfsResourceMenu/types'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import type { GfsResourceActionId } from '@lib/gfsResourceActions'
 import type { GfsDropVerdict } from '@/gfs/dragSession'
 import type { Tone } from '@/uiTypes'
+
+export type FileExplorerMenuOwner = {
+  resourceId: string
+  request: GfsResourceMenuOpenRequest
+  sessionScope: string
+  sessionGeneration: number | null
+  phase: 'open' | 'replace'
+}
+
+export type FileExplorerMenuEscapeState = {
+  phase: FileExplorerMenuOwner['phase']
+  menuOpen: boolean
+  shareOpen: boolean
+  admissionPending: boolean
+}
 
 /**
  * Actions the sidebar file explorer hands back to the app. A file activates on
@@ -14,8 +31,17 @@ export interface FileExplorerTreeProps {
   onOpenFolder: (gfsUri: string) => void
   /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void
+  /** Run an action for the exact tree row, independent of the main-pane selection. */
+  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
   /** Transient success/error feedback for the download fallback. */
   pushToast: (message: string, tone: Tone) => void
+  /** False while the compact sidebar is hidden/inert. */
+  sidebarVisible?: boolean
+  /** Current tree-owner state mirrored to SidebarNav's compact Escape guard. */
+  onContextMenuEscapeStateChange?: (
+    requestId: number,
+    state: FileExplorerMenuEscapeState | null
+  ) => void
 }
 
 export interface FileExplorerNodeProps {
@@ -26,6 +52,9 @@ export interface FileExplorerNodeProps {
   scope: string
   /** Published main-process generation that owns this authority query. */
   sessionGeneration: number | null
+  sidebarVisible: boolean
+  contextMenuOwner: FileExplorerMenuOwner | null
+  onContextMenuEscapeStateChange?: FileExplorerTreeProps['onContextMenuEscapeStateChange']
   /** Session access is live: gates the per-node children fetch the same way the
    *  controller gates its own children query — a revoked session fetches nothing. */
   accessActive: boolean
@@ -50,6 +79,21 @@ export interface FileExplorerNodeProps {
   onToggle: (resourceId: string) => void
   onActivateFolder: (node: GfsBrowserChild) => void
   onActivateFile: (node: GfsBrowserChild) => void
+  onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
+  onContextMenuRequest: (
+    node: GfsBrowserChild,
+    clientX: number | null,
+    clientY: number | null
+  ) => void
+  isContextOwnerCurrent: (
+    resourceId: string,
+    requestId: number,
+    phase?: 'open' | 'replace'
+  ) => boolean
+  clearContextOwner: (resourceId: string, requestId: number, force?: boolean) => void
+  clearContextOwnerForUnmount: (resourceId: string) => void
+  startReplaceSelection: (resourceId: string, requestId: number) => void
+  finishReplaceSelection: (resourceId: string, requestId: number) => void
   /** Fail-closed hook: a listing authority error revokes the session. */
   onAuthorityFailure: (message: string, scope: string, sessionGeneration: number) => void
   onNodeDragStart: (
@@ -69,6 +113,4 @@ export interface FileExplorerNodeProps {
     event: ReactDragEvent<HTMLElement>,
     ancestorIds: readonly (string | null)[]
   ) => void
-  /** Open the existing Move dialog for this node (row action / Shift+F10). */
-  onRequestMove: (node: GfsBrowserChild, ancestorCrumbs: readonly GfsCrumb[]) => void
 }

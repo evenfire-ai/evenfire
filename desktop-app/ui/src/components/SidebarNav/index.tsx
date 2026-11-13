@@ -15,6 +15,7 @@ import { useClickOutside } from '@hooks/useClickOutside'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import type { NavItem } from '@/uiTypes'
 import { FileExplorerTree } from './FileExplorerTree'
+import type { FileExplorerMenuEscapeState } from './FileExplorerTree/types'
 import {
   IconAgents,
   IconChat,
@@ -32,6 +33,16 @@ import type { SidebarNavProps } from './types'
 const COMPACT_SIDEBAR_OPEN_CLASS = 'compact-sidebar-open'
 const SESSION_KEY_SEPARATOR = '\u001f'
 
+export function shouldDeferCompactSidebarEscape(
+  target: EventTarget | null,
+  menuState: { phase: 'open' | 'replace'; menuOpen: boolean; admissionPending: boolean } | null
+) {
+  if (target instanceof Element && target.closest('[data-presentation="sidebar-context"]')) {
+    return true
+  }
+  return Boolean(menuState?.phase === 'open' && (menuState.menuOpen || menuState.admissionPending))
+}
+
 export function SidebarNav({
   navItem,
   collapsed,
@@ -48,6 +59,7 @@ export function SidebarNav({
   onSelect,
   onOpenFilesSection,
   onOpenPreviewSection,
+  onGfsResourceAction = () => {},
   pushToast,
   toggleRequestId = 0,
 }: SidebarNavProps) {
@@ -77,6 +89,23 @@ export function SidebarNav({
     deletion: QueuedChatDelete
   } | null>(null)
   const lastToggleRequestIdRef = useRef(0)
+  const contextMenuEscapeStateRef = useRef<{
+    requestId: number
+    state: FileExplorerMenuEscapeState
+  } | null>(null)
+  const updateContextMenuEscapeState = React.useCallback(
+    (requestId: number, state: FileExplorerMenuEscapeState | null) => {
+      const current = contextMenuEscapeStateRef.current
+      if (state === null) {
+        if (current?.requestId === requestId) contextMenuEscapeStateRef.current = null
+        return
+      }
+      if (!current || requestId >= current.requestId) {
+        contextMenuEscapeStateRef.current = { requestId, state }
+      }
+    },
+    []
+  )
   const desktopAppInfo = useDesktopAppInfo()
   const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
   const sidebarRef = useRef<HTMLElement | null>(null)
@@ -187,6 +216,13 @@ export function SidebarNav({
     if (!compactMenuOpen) return undefined
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      if (
+        shouldDeferCompactSidebarEscape(
+          event.target,
+          contextMenuEscapeStateRef.current?.state ?? null
+        )
+      )
+        return
       event.preventDefault()
       event.stopPropagation()
       closeCompactMenu()
@@ -691,7 +727,10 @@ export function SidebarNav({
                     onOpenPreviewSection(preview)
                     closeCompactMenu()
                   }}
+                  onResourceAction={onGfsResourceAction}
                   pushToast={pushToast}
+                  sidebarVisible={!compactMode || compactMenuOpen}
+                  onContextMenuEscapeStateChange={updateContextMenuEscapeState}
                 />
               </div>
             )}

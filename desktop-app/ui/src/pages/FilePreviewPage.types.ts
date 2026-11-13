@@ -1,3 +1,4 @@
+import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import type { Tone } from '@/uiTypes'
 
 export interface FilePreviewPageProps {
@@ -17,6 +18,9 @@ export interface FilePreviewPageProps {
   onOpenRoute?: () => void
   /** Refresh the app-owned preview tab from the server after a successful rename. */
   onRenameCommitted?: (gfsUri: string) => void
+  /** One-shot copy action requested by a sidebar row and executed by Preview. */
+  pendingResourceAction?: GfsResourceActionRequest | null
+  onPendingResourceActionHandled?: (requestId: number) => void
   /** Native titlebar action slot supplied by the app shell. */
   titlebarLeadingTarget?: HTMLElement | null
 }

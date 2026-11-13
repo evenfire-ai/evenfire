@@ -301,37 +301,55 @@ export function useNavigationController() {
   // Open/focus a files tab at `path` (a gfsUri, or `null` for the virtual root).
   // Dedupes by path in the store: the sidebar "Files" entry (root) and a plugin
   // deep-link to a specific gfsUri both route here (mini-spec 06 §3).
-  const openFilesSection = useCallback(
+  const openFilesSectionWithReceipt = useCallback(
     (path: string | null = null) => {
-      beginUserNavigationIntent()
+      const intentSequence = beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
-      setWorkspaceTabs(current => openFilesTab(current, { id, path }))
+      const next = openFilesTab(workspaceTabsRef.current, { id, path })
+      const ownerTabId = next.activeTabId
+      if (!ownerTabId) return null
+      setWorkspaceTabs(next)
+      return { ownerTabId, intentSequence }
     },
-    [beginUserNavigationIntent, nextWorkspaceTabId]
+    [beginUserNavigationIntent, nextWorkspaceTabId, setWorkspaceTabs]
+  )
+  const openFilesSection = useCallback(
+    (path: string | null = null) => {
+      openFilesSectionWithReceipt(path)
+    },
+    [openFilesSectionWithReceipt]
   )
 
   // Open/focus a preview tab for a previewable file (spec 18 §3.B.1). Dedupes by
   // gfsUri in the store: opening the same file twice focuses its existing tab
   // instead of stacking duplicates. A direct clone of `openFilesSection`.
-  const openPreviewSection = useCallback(
+  const openPreviewSectionWithReceipt = useCallback(
     (preview: GfsPreviewResource) => {
-      beginUserNavigationIntent()
+      const intentSequence = beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
-      setWorkspaceTabs(current =>
-        openPreviewTab(current, {
-          id,
-          title: preview.name,
-          gfsUri: preview.gfsUri,
-          fileKind: preview.kind,
-          byteLength: preview.bytes,
-          ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
-          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
-        })
-      )
+      const next = openPreviewTab(workspaceTabsRef.current, {
+        id,
+        title: preview.name,
+        gfsUri: preview.gfsUri,
+        fileKind: preview.kind,
+        byteLength: preview.bytes,
+        ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
+        ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+      })
+      const ownerTabId = next.activeTabId
+      if (!ownerTabId) return null
+      setWorkspaceTabs(next)
+      return { ownerTabId, intentSequence }
     },
-    [beginUserNavigationIntent, nextWorkspaceTabId]
+    [beginUserNavigationIntent, nextWorkspaceTabId, setWorkspaceTabs]
+  )
+  const openPreviewSection = useCallback(
+    (preview: GfsPreviewResource) => {
+      openPreviewSectionWithReceipt(preview)
+    },
+    [openPreviewSectionWithReceipt]
   )
 
   const beginGfsResourceNavigation = useCallback(
@@ -545,7 +563,9 @@ export function useNavigationController() {
     activateChatTab,
     lastActiveChatTabId,
     openFilesSection,
+    openFilesSectionWithReceipt,
     openPreviewSection,
+    openPreviewSectionWithReceipt,
     // Agent/chat selection state (stays here through this slice; §4).
     selectedAgent,
     selectedAgentRoute,

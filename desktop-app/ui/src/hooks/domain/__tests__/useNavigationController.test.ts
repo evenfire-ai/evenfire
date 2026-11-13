@@ -394,3 +394,51 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     expect(controller.selectedTeam).toBeUndefined()
   })
 })
+
+describe('Files and Preview navigation receipts', () => {
+  it('returns the owning Files tab and navigation intent for the requested folder', () => {
+    const { result } = renderHook(() => useNavigationController())
+    let receipt: ReturnType<typeof result.current.openFilesSectionWithReceipt> | null = null
+    act(() => {
+      receipt = result.current.openFilesSectionWithReceipt(
+        'gfs://main/0123456789abcdef0123456789abcdef'
+      )
+    })
+    expect(receipt).toEqual({
+      ownerTabId: result.current.workspaceTabs.activeTabId,
+      intentSequence: result.current.navigationIntentSequence,
+    })
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(result.current.activeTab).toMatchObject({
+      kind: 'files',
+      files: { path: 'gfs://main/0123456789abcdef0123456789abcdef' },
+    })
+  })
+
+  it('returns the owning Preview tab and preserves the selected resource version', () => {
+    const { result } = renderHook(() => useNavigationController())
+    let receipt: ReturnType<typeof result.current.openPreviewSectionWithReceipt> | null = null
+    act(() => {
+      receipt = result.current.openPreviewSectionWithReceipt({
+        kind: 'image',
+        gfsUri: 'gfs://main/abcdefabcdefabcdefabcdefabcdefab',
+        name: 'receipt.png',
+        bytes: 128,
+        mimeType: 'image/png',
+        version: 9,
+      })
+    })
+    expect(receipt).toEqual({
+      ownerTabId: result.current.workspaceTabs.activeTabId,
+      intentSequence: result.current.navigationIntentSequence,
+    })
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.preview)
+    expect(result.current.activeTab).toMatchObject({
+      kind: 'preview',
+      preview: {
+        gfsUri: 'gfs://main/abcdefabcdefabcdefabcdefabcdefab',
+        resourceVersion: 9,
+      },
+    })
+  })
+})

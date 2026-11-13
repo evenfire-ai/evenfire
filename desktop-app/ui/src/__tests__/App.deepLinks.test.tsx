@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  type ComponentProps,
   Fragment,
   type ReactElement,
   type ReactNode,
@@ -187,6 +188,7 @@ const sidebarHarness = vi.hoisted(() => ({
     onCollapsedChange?: (next: boolean) => void
     availableSandboxUiApps?: SidebarLaunchApp[]
     onOpenSandboxUiApp?: (app: SidebarLaunchApp) => void
+    onGfsResourceAction?: ComponentProps<typeof FileExplorerTree>['onResourceAction']
   },
 }))
 
@@ -351,10 +353,12 @@ vi.mock('@pages/FilesPage', async () => {
           filesPageHarness.showMoveSidebarProbe
             ? createElement(
                 'div',
-                { 'data-testid': 'lag-sidebar' },
+                { 'data-testid': 'lag-sidebar', className: 'left-nav' },
                 createElement(FileExplorerTree, {
                   onOpenFolder: () => undefined,
                   onOpenPreview: () => undefined,
+                  onResourceAction: (...args) =>
+                    sidebarHarness.props?.onGfsResourceAction?.(...args),
                   pushToast: () => undefined,
                 })
               )
@@ -5680,7 +5684,7 @@ describe('App deep-link orchestration', () => {
     'files-folder',
     'sidebar-file',
     'sidebar-folder',
-    'sidebar-dialog',
+    'sidebar-menu',
   ] as const)(
     'R6-M4 rejects an old published Move owner while main replacement publication is held (%s)',
     async surface => {
@@ -5728,6 +5732,29 @@ describe('App deep-link orchestration', () => {
         }),
         childView(destinationId, 'Target', 'directory', { parentResourceId: rootId }),
       ]
+      if (surface === 'sidebar-menu') {
+        const getBoundingClientRect = HTMLElement.prototype.getBoundingClientRect
+        vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+          this: HTMLElement
+        ) {
+          if (this.classList.contains('left-nav')) {
+            const width = 328
+            const height = window.innerHeight || 768
+            return {
+              x: 0,
+              y: 0,
+              left: 0,
+              top: 0,
+              right: width,
+              bottom: height,
+              width,
+              height,
+              toJSON: () => ({}),
+            } as DOMRect
+          }
+          return getBoundingClientRect.call(this)
+        })
+      }
       const patches: Array<{ token: string | undefined; body: unknown; path: string }> = []
       const request = vi.fn(
         async (method: string, input: string, options?: { token?: string; body?: unknown }) => {
@@ -5818,8 +5845,10 @@ describe('App deep-link orchestration', () => {
         })
       }
       const gesture = async (expectAdmission: boolean) => {
-        if (surface === 'sidebar-dialog') {
+        if (surface === 'sidebar-menu') {
           fireEvent.keyDown(sourceButton(), { key: 'F10', shiftKey: true })
+          const menu = await view.findByRole('menu', { name: `Actions for ${sourceName}` })
+          fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
           const dialog = await view.findByRole('dialog', { name: `Move file ${sourceName}` })
           fireEvent.click(await within(dialog).findByRole('button', { name: 'Target' }))
           fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Target)' }))
@@ -5857,7 +5886,7 @@ describe('App deep-link orchestration', () => {
         expect(getController().sessionGeneration).toBe(authoritativeGeneration)
         panel = sidebar ? within(await view.findByTestId('lag-sidebar')) : within(view.container)
         // Publication retires old gestures; only a fresh explicit gesture may mutate.
-        if (surface === 'sidebar-dialog') {
+        if (surface === 'sidebar-menu') {
           const oldDialog = view.queryByRole('dialog', { name: `Move file ${sourceName}` })
           if (oldDialog) fireEvent.click(within(oldDialog).getByRole('button', { name: 'Cancel' }))
         }

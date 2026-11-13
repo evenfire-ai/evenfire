@@ -115,6 +115,15 @@ function hasBit(affordances: { held?: string[] } | null | undefined, bit: string
   return Boolean(affordances?.held?.includes(bit))
 }
 
+function matchesCurrentResourceUri(
+  current: GfsCrumb | null | undefined,
+  targetUri: string | null
+): current is GfsCrumb {
+  if (!current || !targetUri || current.gfsUri !== targetUri) return false
+  const targetResourceId = targetUri.slice(targetUri.lastIndexOf('/') + 1)
+  return current.resourceId.replace(/-/g, '').toLowerCase() === targetResourceId.toLowerCase()
+}
+
 /** Maps a permission set onto the Share dialog's two roles (Editor > Read). */
 function roleForAccessPermissions(permissions: string[]): GfsAccessRole {
   return permissions.some(permission => ['write', 'delete', 'manage_acl'].includes(permission))
@@ -351,6 +360,8 @@ export function FilesPage({
   onOpenPendingGfsPreview,
   routeDialogRequestId = 0,
   onRouteDialogRequestHandled,
+  pendingResourceAction,
+  onPendingResourceActionHandled,
 }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
@@ -441,6 +452,44 @@ export function FilesPage({
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
+  const lastHandledResourceActionIdRef = useRef<number | null>(null)
+  const pendingResourceActionRef = useRef(pendingResourceAction)
+  const previousPendingResourceAction = pendingResourceActionRef.current
+  const currentPendingResourceAction =
+    pendingResourceAction?.id === lastHandledResourceActionIdRef.current
+      ? null
+      : pendingResourceAction
+  const pendingActionSeedRef = useRef<{ id: number; path: string | null | undefined } | null>(null)
+  const isActionOwnedFileSeed = (
+    request: typeof pendingResourceAction,
+    path: string | null | undefined
+  ) =>
+    Boolean(
+      request &&
+      request.targetResource?.kind === 'file' &&
+      request.targetUri ===
+        (request.navigationUri === undefined ? request.targetUri : request.navigationUri) &&
+      path === request.targetUri
+    )
+  if (
+    currentPendingResourceAction &&
+    pendingActionSeedRef.current?.id !== currentPendingResourceAction.id
+  ) {
+    pendingActionSeedRef.current = {
+      id: currentPendingResourceAction.id,
+      path: pendingGfsUri,
+    }
+  } else if (
+    !currentPendingResourceAction &&
+    previousPendingResourceAction &&
+    pendingActionSeedRef.current?.id === previousPendingResourceAction.id
+  ) {
+    lastHandledResourceActionIdRef.current = previousPendingResourceAction.id
+    if (!isActionOwnedFileSeed(previousPendingResourceAction, pendingActionSeedRef.current.path)) {
+      pendingActionSeedRef.current = null
+    }
+  }
+  pendingResourceActionRef.current = currentPendingResourceAction
   // The FULL verdict is stored — not just its state — so the deny reason
   // reaches the row (`data-drop-reason`), the tooltip and the announcements
   // (UX matrix §5.1); a same-state reason change must still repaint.
@@ -490,8 +539,18 @@ export function FilesPage({
   const seedPendingRef = useRef(false)
   const beginExplicitFilesNavigation = useCallback(() => {
     seedPendingRef.current = false
+    pendingActionSeedRef.current = null
     onExplicitNavigationIntent?.()
   }, [onExplicitNavigationIntent])
+  const pendingActionForSeed = pendingResourceActionRef.current
+  const pendingFilesActionSeedId =
+    pendingActionForSeed &&
+    isActionOwnedFileSeed(pendingActionForSeed, pendingActionSeedRef.current?.path) &&
+    pendingActionSeedRef.current?.id === pendingActionForSeed.id &&
+    pendingActionSeedRef.current?.path === pendingGfsUri
+      ? pendingActionForSeed.id
+      : null
+
   useEffect(() => {
     pageActiveRef.current = true
     return () => {
@@ -1640,7 +1699,8 @@ export function FilesPage({
     openPendingPreview?: (
       preview: GfsPreviewResource,
       returnLocation: { gfsUri: string | null; name: string | null }
-    ) => boolean
+    ) => boolean,
+    filesActionSeedRequestId?: number
   ) => {
     const returnCrumbs = [...crumbs]
     const shouldContinue = () => pageActiveRef.current && (isCurrent?.() ?? true)
@@ -1653,6 +1713,13 @@ export function FilesPage({
     // preview, start a download, or restore this page's breadcrumbs.
     if (!shouldContinue()) return false
     if (opened === false) return false
+    if (
+      filesActionSeedRequestId !== undefined &&
+      pendingResourceActionRef.current?.id === filesActionSeedRequestId
+    ) {
+      onOpened?.()
+      return true
+    }
     if (typeof opened === 'object' && opened.kind === 'file') {
       const preview = resolveGfsPreview(opened)
       // A valid pending-link preview callback may select its new Preview tab.
@@ -1688,13 +1755,54 @@ export function FilesPage({
    */
   useEffect(() => {
     if (!pendingGfsUri || pendingGfsDeepLink) return
-    // Re-arm on every non-null seed so a deep-link onto an already-mounted page
-    // suppresses the pre-open location the same way the initial mount does.
+    const request = pendingResourceActionRef.current
+    const navigationUri = request
+      ? request.navigationUri === undefined
+        ? request.targetUri
+        : request.navigationUri
+      : null
+    const filesActionOwnsSeed = Boolean(
+      request &&
+      request.actionId !== 'copy-content' &&
+      request.actionId !== 'preview' &&
+      request.actionId !== 'open-folder' &&
+      navigationUri === pendingGfsUri &&
+      pendingActionSeedRef.current?.id === request.id &&
+      pendingActionSeedRef.current.path === pendingGfsUri
+    )
+    const isCurrentActionSeed =
+      filesActionOwnsSeed && request
+        ? () => pendingResourceActionRef.current?.id === request.id
+        : undefined
+    if (!filesActionOwnsSeed) {
+      if (
+        request &&
+        pendingActionSeedRef.current?.id === request.id &&
+        pendingActionSeedRef.current.path !== pendingGfsUri
+      ) {
+        lastHandledResourceActionIdRef.current = request.id
+        pendingResourceActionRef.current = null
+        if (!isActionOwnedFileSeed(request, pendingActionSeedRef.current.path)) {
+          pendingActionSeedRef.current = null
+        }
+        onPendingResourceActionHandled?.(request.id)
+      }
+      pendingActionSeedRef.current = null
+    }
+    // Re-arm on every non-null seed and newly accepted action receipt so a
+    // same-URI successor is resolved under its own request identity.
     seedPendingRef.current = true
     onPendingGfsUriHandled?.()
-    void handleOpenGfsLink(pendingGfsUri)
+    void handleOpenGfsLink(
+      pendingGfsUri,
+      undefined,
+      undefined,
+      isCurrentActionSeed,
+      undefined,
+      filesActionOwnsSeed ? request?.id : undefined
+    )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingGfsUri])
+  }, [pendingGfsUri, pendingFilesActionSeedId])
 
   const deepLinkRetryRequest =
     pendingGfsDeepLink && gfsDeepLinkRetry?.id === pendingGfsDeepLink.id
@@ -1807,6 +1915,12 @@ export function FilesPage({
   const currentGfsUri = current?.gfsUri ?? null
   const currentName = current?.name ?? null
   useEffect(() => {
+    if (
+      pendingActionSeedRef.current?.id === lastHandledResourceActionIdRef.current &&
+      pendingActionSeedRef.current.path === currentGfsUri
+    ) {
+      return
+    }
     if (seedPendingRef.current) {
       // Seed still resolving: suppress the pre-seed root (null) that would clobber
       // the tab's persisted path. Once the stack lands (`current` non-null), the
@@ -3180,6 +3294,160 @@ export function FilesPage({
       })
     )
   }
+
+  useEffect(() => {
+    const request = pendingResourceAction
+    if (
+      !request ||
+      request.actionId === 'copy-content' ||
+      request.actionId === 'preview' ||
+      request.actionId === 'open-folder' ||
+      lastHandledResourceActionIdRef.current === request.id
+    ) {
+      return
+    }
+    const navigationUri =
+      request.navigationUri === undefined ? request.targetUri : request.navigationUri
+    const markHandled = () => {
+      lastHandledResourceActionIdRef.current = request.id
+      pendingResourceActionRef.current = null
+      if (!isActionOwnedFileSeed(request, pendingActionSeedRef.current?.path)) {
+        pendingActionSeedRef.current = null
+      }
+      onPendingResourceActionHandled?.(request.id)
+    }
+    if (
+      pendingActionSeedRef.current?.id === request.id &&
+      pendingActionSeedRef.current.path !== pendingGfsUri
+    ) {
+      markHandled()
+      return
+    }
+
+    const target = request.targetResource
+    if (!target) {
+      markHandled()
+      pushToast?.('This action no longer has its original resource context.', 'error')
+      return
+    }
+    const normalizeId = (id: string) => id.replace(/-/g, '').toLowerCase()
+    const exactTarget = (resource: GfsDriveResource | GfsCrumb | null | undefined) =>
+      Boolean(
+        resource &&
+        normalizeId(resource.resourceId) === normalizeId(target.resourceId) &&
+        resource.kind === target.kind &&
+        resource.gfsUri === request.targetUri &&
+        resource.name === target.name &&
+        resource.version === target.version
+      )
+    const runAction = (actions: ReturnType<typeof buildGfsResourceActions>) => {
+      const action = actions.find(candidate => candidate.id === request.actionId)
+      if (!action) {
+        markHandled()
+        pushToast?.('This action is no longer available for this resource.', 'error')
+        return
+      }
+      if (action.disabled) return
+      markHandled()
+      try {
+        action.run(request.file)
+      } catch (actionError) {
+        pushToast?.(
+          actionError instanceof Error ? actionError.message : String(actionError),
+          'error'
+        )
+      }
+    }
+
+    if (request.navigationUri !== undefined) {
+      if (ctrl.resolving || ctrl.authorityPending || loadingCurrentView) return
+      const parentIsCurrent =
+        navigationUri === null
+          ? current === null
+          : matchesCurrentResourceUri(current, navigationUri)
+      if (!parentIsCurrent || (navigationUri !== null && current?.kind !== 'directory')) {
+        if (ctrl.openError) {
+          markHandled()
+          pushToast?.(ctrl.openError, 'error')
+        }
+        return
+      }
+      if (error) {
+        markHandled()
+        pushToast?.(error, 'error')
+        return
+      }
+      if (accessibleError || ctrl.discoveryFailure) {
+        markHandled()
+        pushToast?.(
+          accessibleError ?? ctrl.discoveryFailure?.message ?? 'Shared files could not be loaded.',
+          'error'
+        )
+        return
+      }
+      const row = visibleResources.find(resource => exactTarget(resource))
+      if (!row || row.parentResourceId !== target.parentResourceId) {
+        markHandled()
+        pushToast?.('This resource is no longer available from its parent folder.', 'error')
+        return
+      }
+      if (request.actionId === 'move' && loadingAffordances) return
+      const permissionStatus = ctrl.rowPermissionStatusByResourceId?.[row.resourceId]
+      if (
+        request.actionId !== 'move' &&
+        (permissionStatus?.status === 'checking' || permissionStatus?.status === 'stale')
+      ) {
+        return
+      }
+      if (request.actionId !== 'move' && permissionStatus?.status === 'error') {
+        markHandled()
+        pushToast?.(
+          permissionStatus.message ?? 'Could not verify permissions for this resource.',
+          'error'
+        )
+        return
+      }
+      runAction(resourceMenuActionsFor(row))
+      return
+    }
+
+    if (!matchesCurrentResourceUri(current, request.targetUri)) {
+      if (ctrl.openError && !ctrl.resolving) {
+        markHandled()
+        pushToast?.(ctrl.openError, 'error')
+      }
+      return
+    }
+    if (ctrl.resolving || ctrl.authorityPending) return
+    if (!exactTarget(current)) {
+      markHandled()
+      pushToast?.('This resource changed before the action could run.', 'error')
+      return
+    }
+    runAction(currentResourceActions)
+  }, [
+    accessibleError,
+    ctrl.authorityPending,
+    ctrl.discoveryFailure,
+    ctrl.openError,
+    ctrl.resolving,
+    ctrl.rowPermissionStatusByResourceId,
+    current?.gfsUri,
+    current?.kind,
+    current?.name,
+    current?.resourceId,
+    current?.version,
+    currentResourceActions,
+    error,
+    loadingAffordances,
+    loadingCurrentView,
+    onPendingResourceActionHandled,
+    pendingGfsUri,
+    pendingResourceAction,
+    pushToast,
+    resourceMenuActionsFor,
+    visibleResources,
+  ])
 
   const currentIsBeingRenamed = renameTarget?.resourceId === current?.resourceId
   const currentIsInBreadcrumbs = Boolean(

@@ -37,6 +37,7 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
+import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import type { WorkspaceNavigationSnapshot } from '@hooks/domain/useNavigationController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
@@ -66,6 +67,7 @@ import {
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
+import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
@@ -389,6 +391,18 @@ export function App() {
   const [activeGfsDeepLink, setActiveGfsDeepLink] =
     React.useState<GfsResourceNavigationRequest | null>(null)
   const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
+  const [pendingGfsResourceAction, setPendingGfsResourceAction] =
+    React.useState<GfsResourceActionRequest | null>(null)
+  const pendingGfsResourceActionRef = React.useRef(pendingGfsResourceAction)
+  pendingGfsResourceActionRef.current = pendingGfsResourceAction
+  const gfsResourceActionRequestIdRef = React.useRef(0)
+  const gfsResourceActionRouteRef = React.useRef<{
+    id: number
+    ownerTabId: string
+    intentSequence: number
+    sessionGeneration: number | null
+    kind: 'files' | 'preview'
+  } | null>(null)
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
   // The universal tab store lives in the controller (single writer; `vm.navItem`
   // is its projection). App composes the strip/reveal/reconcile over it.
@@ -407,6 +421,15 @@ export function App() {
   navigationIntentSequenceRef.current = vm.navigationIntentSequence
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
+  const filesSeedRef = React.useRef<{
+    id: string | null
+    path: string | null
+    intentSequence: number
+  }>({
+    id: null,
+    path: null,
+    intentSequence: vm.navigationIntentSequence,
+  })
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
   // Mirrors `chatDrawerVisible` so the chat-tab handlers (which run from stable
   // callbacks) can tell whether a reveal should target the in-app drawer or the
@@ -476,6 +499,39 @@ export function App() {
   availableSandboxUiAppsRef.current = availableSandboxUiApps
   const setWorkspaceTabsRef = React.useRef(setWorkspaceTabs)
   setWorkspaceTabsRef.current = setWorkspaceTabs
+
+  const consumeActionOwnedFilesLocation = React.useCallback(
+    (route: (typeof gfsResourceActionRouteRef)['current']) => {
+      const request = pendingGfsResourceActionRef.current
+      if (
+        !route ||
+        route.kind !== 'files' ||
+        !request ||
+        request.id !== route.id ||
+        request.targetResource?.kind !== 'file' ||
+        request.targetUri !==
+          (request.navigationUri === undefined ? request.targetUri : request.navigationUri)
+      ) {
+        return
+      }
+      const owner = workspaceTabsRef.current.tabs.find(
+        tab => tab.id === route.ownerTabId && tab.kind === 'files'
+      )
+      if (!owner || owner.files?.path !== request.targetUri) return
+      if (
+        filesSeedRef.current.id === route.ownerTabId &&
+        filesSeedRef.current.path === request.targetUri
+      ) {
+        filesSeedRef.current = {
+          ...filesSeedRef.current,
+          id: route.ownerTabId,
+          path: null,
+        }
+      }
+      setWorkspaceTabs(state => setFilesTabPath(state, route.ownerTabId, null))
+    },
+    [setWorkspaceTabs]
+  )
 
   // The app chrome tied to a live embed: what it was opened from and the shell
   // overlays raised over it.
@@ -810,12 +866,28 @@ export function App() {
     [leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
   )
 
+  const cancelPendingGfsResourceAction = React.useCallback(
+    (ownerTabId?: string) => {
+      const route = gfsResourceActionRouteRef.current
+      if (route) {
+        if (ownerTabId && route.ownerTabId !== ownerTabId) return
+        consumeActionOwnedFilesLocation(route)
+        gfsResourceActionRouteRef.current = null
+        setPendingGfsResourceAction(current => (current?.id === route.id ? null : current))
+        return
+      }
+      if (!ownerTabId) setPendingGfsResourceAction(null)
+    },
+    [consumeActionOwnedFilesLocation]
+  )
+
   // Global strip selection: activate the tab (so `navItem` derives this commit),
   // then reveal its content.
   const handleSelectWorkspaceTab = React.useCallback(
     (id: string) => {
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
       if (!tab) return
+      cancelPendingGfsResourceAction()
       vm.beginUserNavigationIntent()
       // Re-clicking the active app tab relaunches it only when its view is gone;
       // a live view is left as it is (Refresh is the explicit reload).
@@ -825,7 +897,12 @@ export function App() {
         ACTIVE_TAB_LAUNCH
       )
     },
-    [activateAndLaunch, revealWorkspaceTab, vm.beginUserNavigationIntent]
+    [
+      activateAndLaunch,
+      cancelPendingGfsResourceAction,
+      revealWorkspaceTab,
+      vm.beginUserNavigationIntent,
+    ]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -836,11 +913,12 @@ export function App() {
         candidate => candidate.id === id && candidate.kind === 'chat'
       )
       if (tab) {
+        cancelPendingGfsResourceAction()
         vm.beginUserNavigationIntent()
         revealWorkspaceTab(tab, true, true)
       }
     },
-    [revealWorkspaceTab, vm.beginUserNavigationIntent]
+    [cancelPendingGfsResourceAction, revealWorkspaceTab, vm.beginUserNavigationIntent]
   )
 
   const handleCloseWorkspaceTab = React.useCallback(
@@ -849,6 +927,7 @@ export function App() {
       const wasActive = current.activeTabId === id
       const projected = closeWorkspaceTab(current, id)
       if (projected === current) return
+      cancelPendingGfsResourceAction(id)
       releaseComposerDraftForWorkspaceTab(id)
       if (wasActive || activeGfsDeepLinkRef.current?.ownerTabId === id) {
         vm.beginUserNavigationIntent()
@@ -863,7 +942,12 @@ export function App() {
         ACTIVATED_TAB_LAUNCH
       )
     },
-    [activateAndLaunch, revealWorkspaceTab, vm.beginUserNavigationIntent]
+    [
+      activateAndLaunch,
+      cancelPendingGfsResourceAction,
+      revealWorkspaceTab,
+      vm.beginUserNavigationIntent,
+    ]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -876,6 +960,7 @@ export function App() {
   )
 
   const handleNewWorkspaceChatTab = React.useCallback(() => {
+    cancelPendingGfsResourceAction()
     const sourceTab = vm.activeWorkspaceTab
     const agentRef = vm.selectedAgent
     vm.beginUserNavigationIntent()
@@ -926,6 +1011,7 @@ export function App() {
     setComposerFocusRequestId(value => value + 1)
   }, [
     leaveSandboxForChat,
+    cancelPendingGfsResourceAction,
     nextChatTabId,
     setWorkspaceTabs,
     vm.clearAppsPicker,
@@ -936,10 +1022,193 @@ export function App() {
   ])
 
   const handleOpenGfsRoute = React.useCallback(() => {
+    cancelPendingGfsResourceAction()
     const requestId = ++gfsRouteDialogRequestSequenceRef.current
     setGfsRouteDialogRequestId(requestId)
     vm.openFilesSection(null)
-  }, [vm.openFilesSection])
+  }, [cancelPendingGfsResourceAction, vm.openFilesSection])
+
+  const beginSidebarFilesAction = React.useCallback(
+    (request: GfsResourceActionRequest, navigationUri: string | null) => {
+      const previousRoute = gfsResourceActionRouteRef.current
+      const previousRequest = pendingGfsResourceActionRef.current
+      const isSameUriSuccessor = Boolean(
+        previousRoute?.kind === 'files' &&
+        previousRequest?.id === previousRoute.id &&
+        previousRoute.ownerTabId === workspaceTabsRef.current.activeTabId &&
+        previousRequest.targetResource?.kind === 'file' &&
+        previousRequest.targetUri === request.targetUri &&
+        request.targetResource?.kind === 'file' &&
+        navigationUri === request.targetUri
+      )
+      if (previousRoute && !isSameUriSuccessor) cancelPendingGfsResourceAction()
+      const receipt = vm.openFilesSectionWithReceipt(navigationUri)
+      if (!receipt) {
+        if (isSameUriSuccessor) cancelPendingGfsResourceAction()
+        gfsResourceActionRouteRef.current = null
+        setPendingGfsResourceAction(null)
+        return
+      }
+      gfsResourceActionRouteRef.current = {
+        id: request.id,
+        ownerTabId: receipt.ownerTabId,
+        intentSequence: receipt.intentSequence,
+        sessionGeneration: vm.sessionGeneration ?? null,
+        kind: 'files',
+      }
+      setPendingGfsResourceAction(request)
+    },
+    [
+      cancelPendingGfsResourceAction,
+      vm.activeWorkspaceTab,
+      vm.openFilesSectionWithReceipt,
+      vm.sessionGeneration,
+    ]
+  )
+
+  const beginSidebarPreviewAction = React.useCallback(
+    (request: GfsResourceActionRequest, preview: GfsPreviewResource) => {
+      cancelPendingGfsResourceAction()
+      const receipt = vm.openPreviewSectionWithReceipt(preview)
+      if (!receipt) {
+        gfsResourceActionRouteRef.current = null
+        setPendingGfsResourceAction(null)
+        return
+      }
+      gfsResourceActionRouteRef.current = {
+        id: request.id,
+        ownerTabId: receipt.ownerTabId,
+        intentSequence: receipt.intentSequence,
+        sessionGeneration: vm.sessionGeneration ?? null,
+        kind: 'preview',
+      }
+      setPendingGfsResourceAction(request)
+    },
+    [cancelPendingGfsResourceAction, vm.openPreviewSectionWithReceipt, vm.sessionGeneration]
+  )
+
+  const handleSidebarGfsResourceAction = React.useCallback(
+    (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => {
+      if (actionId === 'preview') {
+        const preview = resolveGfsPreview(resource)
+        if (preview) {
+          cancelPendingGfsResourceAction()
+          vm.openPreviewSection(preview)
+        }
+        return
+      }
+      if (actionId === 'open-folder') {
+        cancelPendingGfsResourceAction()
+        vm.openFilesSection(resource.gfsUri)
+        return
+      }
+      if (actionId === 'open-route' || actionId === 'refresh' || actionId === 'download-zip') return
+
+      const targetResource = {
+        resourceId: resource.resourceId,
+        name: resource.name,
+        kind: resource.kind,
+        version: resource.version,
+        parentResourceId: resource.parentResourceId,
+      }
+      const request: GfsResourceActionRequest = {
+        id: ++gfsResourceActionRequestIdRef.current,
+        targetUri: resource.gfsUri,
+        actionId,
+        targetResource,
+        ...(file ? { file } : {}),
+      }
+
+      if (actionId === 'copy-content') {
+        const preview = resolveGfsPreview(resource)
+        if (preview?.kind === 'image' || preview?.kind === 'markdown') {
+          beginSidebarPreviewAction(request, preview)
+        }
+        return
+      }
+
+      let navigationUri: string | null = resource.gfsUri
+      if (actionId === 'move' || resource.readable === false) {
+        if (resource.parentResourceId === null) {
+          navigationUri = null
+        } else {
+          navigationUri =
+            normalizeGfsResourceUri(
+              `gfs://${resource.drive}/${resource.parentResourceId.replace(/-/g, '').toLowerCase()}`
+            ) ?? ''
+          if (!navigationUri) {
+            vm.pushToast('This resource has an invalid parent location.', 'error')
+            return
+          }
+        }
+        request.navigationUri = navigationUri
+      }
+      beginSidebarFilesAction(request, navigationUri)
+    },
+    [
+      beginSidebarFilesAction,
+      beginSidebarPreviewAction,
+      cancelPendingGfsResourceAction,
+      vm.openFilesSection,
+      vm.openPreviewSection,
+      vm.pushToast,
+    ]
+  )
+
+  const handleSidebarPreviewSection = React.useCallback(
+    (preview: GfsPreviewResource) => {
+      cancelPendingGfsResourceAction()
+      vm.openPreviewSection(preview)
+    },
+    [cancelPendingGfsResourceAction, vm.openPreviewSection]
+  )
+
+  const handleSidebarOpenFilesSection = React.useCallback(
+    (uri: string) => {
+      cancelPendingGfsResourceAction()
+      vm.openFilesSection(uri)
+    },
+    [cancelPendingGfsResourceAction, vm.openFilesSection]
+  )
+
+  const handleGfsResourceActionHandled = React.useCallback(
+    (requestId: number) => {
+      const route = gfsResourceActionRouteRef.current
+      if (route?.id === requestId) {
+        consumeActionOwnedFilesLocation(route)
+        gfsResourceActionRouteRef.current = null
+      }
+      setPendingGfsResourceAction(current => (current?.id === requestId ? null : current))
+    },
+    [consumeActionOwnedFilesLocation]
+  )
+
+  React.useEffect(() => {
+    const route = gfsResourceActionRouteRef.current
+    if (!route || pendingGfsResourceAction?.id !== route.id) return
+    const ownerTab = workspaceTabs.tabs.find(tab => tab.id === route.ownerTabId)
+    const previewVersionChanged =
+      route.kind === 'preview' &&
+      ownerTab?.kind === 'preview' &&
+      ownerTab.preview?.resourceVersion !== pendingGfsResourceAction?.targetResource?.version
+    if (
+      !ownerTab ||
+      previewVersionChanged ||
+      workspaceTabs.activeTabId !== route.ownerTabId ||
+      !vm.isNavigationIntentCurrent(route.intentSequence) ||
+      vm.sessionGeneration !== route.sessionGeneration
+    ) {
+      cancelPendingGfsResourceAction()
+    }
+  }, [
+    cancelPendingGfsResourceAction,
+    pendingGfsResourceAction?.id,
+    vm.isNavigationIntentCurrent,
+    vm.navigationIntentSequence,
+    vm.sessionGeneration,
+    workspaceTabs.activeTabId,
+    workspaceTabs.tabs,
+  ])
 
   const handleGfsRouteDialogRequestHandled = React.useCallback((requestId: number) => {
     setGfsRouteDialogRequestId(current => (current === requestId ? 0 : current))
@@ -1051,12 +1320,13 @@ export function App() {
         String(notification.agentName || '').trim() !== '' &&
         (!notification.teamId || notification.teamId === vm.getCurrentTeamId())
       if (surfacesInDrawer) {
+        cancelPendingGfsResourceAction()
         setChatDrawerOpen(true)
         return vm.handleOpenNotification(notification, { keepNavItem: true })
       }
       return vm.handleOpenNotification(notification, options)
     },
-    [vm.getCurrentTeamId, vm.handleOpenNotification]
+    [cancelPendingGfsResourceAction, vm.getCurrentTeamId, vm.handleOpenNotification]
   )
 
   const closeChatLocalSearch = React.useCallback((restoreFocus = true) => {
@@ -1092,13 +1362,14 @@ export function App() {
       // same commit). This wrapper only adds drawer-awareness: while the drawer
       // is visible, selection swaps the drawer's chat in place (`keepNavItem`)
       // instead of navigating to full-screen and tearing the live app down.
+      cancelPendingGfsResourceAction()
       vm.clearAppsPicker()
       vm.handleSelectChatAgent(
         agentName,
         chatDrawerVisibleRef.current ? { ...options, keepNavItem: true } : options
       )
     },
-    [vm.clearAppsPicker, vm.handleSelectChatAgent]
+    [cancelPendingGfsResourceAction, vm.clearAppsPicker, vm.handleSelectChatAgent]
   )
   const bootSplashLoading = vm.booting || vm.initialExperienceLoading
   const isAgentChatView =
@@ -1319,12 +1590,15 @@ export function App() {
       : null
   const activeFilesTabIdRef = React.useRef<string | null>(null)
   activeFilesTabIdRef.current = activeFilesTabId
-  const filesSeedRef = React.useRef<{ id: string | null; path: string | null }>({
-    id: null,
-    path: null,
-  })
-  if (filesSeedRef.current.id !== activeFilesTabId) {
-    filesSeedRef.current = { id: activeFilesTabId, path: activeFilesTab?.files?.path ?? null }
+  if (
+    filesSeedRef.current.id !== activeFilesTabId ||
+    filesSeedRef.current.intentSequence !== vm.navigationIntentSequence
+  ) {
+    filesSeedRef.current = {
+      id: activeFilesTabId,
+      path: activeFilesTab?.files?.path ?? null,
+      intentSequence: vm.navigationIntentSequence,
+    }
   }
   const filesSeedPath = filesSeedRef.current.path
   // Keep browser updates tied to the files tab and navigation intent that own
@@ -1359,6 +1633,11 @@ export function App() {
       vm.navigationIntentSequence,
     ]
   )
+  const handleFilesExplicitNavigationIntent = React.useCallback(() => {
+    const intentSequence = vm.beginUserNavigationIntent()
+    filesSeedRef.current = { ...filesSeedRef.current, intentSequence }
+    return intentSequence
+  }, [vm.beginUserNavigationIntent])
   const isActiveGfsDeepLinkCurrent = React.useCallback(() => {
     const request = activeGfsDeepLinkRef.current
     return Boolean(
@@ -1959,6 +2238,7 @@ export function App() {
 
   const handleSidebarNavSelect = React.useCallback(
     (item: NavItem) => {
+      cancelPendingGfsResourceAction()
       setSandboxUiConversationOrigin(
         getConversationOriginForNavigation(
           item,
@@ -1968,11 +2248,17 @@ export function App() {
       )
       vm.handleNavSelect(item)
     },
-    [activeConversationOrigin, sandboxUiConversationOrigin, vm.handleNavSelect]
+    [
+      activeConversationOrigin,
+      cancelPendingGfsResourceAction,
+      sandboxUiConversationOrigin,
+      vm.handleNavSelect,
+    ]
   )
 
   const handleOpenSandboxUiApp = React.useCallback(
     (app: ActiveSandboxUiApp) => {
+      cancelPendingGfsResourceAction()
       const conversationOrigin = getConversationOriginForAppLaunch(
         vm.navItem,
         activeConversationOrigin,
@@ -1980,7 +2266,13 @@ export function App() {
       )
       launchSandboxUiApp(app, conversationOrigin)
     },
-    [activeConversationOrigin, launchSandboxUiApp, sandboxUiConversationOrigin, vm.navItem]
+    [
+      activeConversationOrigin,
+      cancelPendingGfsResourceAction,
+      launchSandboxUiApp,
+      sandboxUiConversationOrigin,
+      vm.navItem,
+    ]
   )
 
   const setPendingSandboxUiDeepLinkState = React.useCallback((next: PendingSandboxUiDeepLink[]) => {
@@ -4480,8 +4772,9 @@ export function App() {
                                 onOpenSandboxUiApp={handleOpenSandboxUiApp}
                                 onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                                 onSelect={handleSidebarNavSelect}
-                                onOpenFilesSection={vm.openFilesSection}
-                                onOpenPreviewSection={vm.openPreviewSection}
+                                onOpenFilesSection={handleSidebarOpenFilesSection}
+                                onOpenPreviewSection={handleSidebarPreviewSection}
+                                onGfsResourceAction={handleSidebarGfsResourceAction}
                                 pushToast={vm.pushToast}
                                 toggleRequestId={sidebarToggleRequestId}
                               />
@@ -4660,7 +4953,9 @@ export function App() {
                                         activeGfsDeepLinkForFiles?.ownerTabId
                                       }
                                       isPendingGfsDeepLinkCurrent={isActiveGfsDeepLinkCurrent}
-                                      onExplicitNavigationIntent={vm.beginUserNavigationIntent}
+                                      onExplicitNavigationIntent={
+                                        handleFilesExplicitNavigationIntent
+                                      }
                                       onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
                                       remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                       onLocationChange={handleActiveFilesLocationChange}
@@ -4669,6 +4964,16 @@ export function App() {
                                       routeDialogRequestId={gfsRouteDialogRequestId}
                                       onRouteDialogRequestHandled={
                                         handleGfsRouteDialogRequestHandled
+                                      }
+                                      pendingResourceAction={
+                                        gfsResourceActionRouteRef.current?.kind === 'files' &&
+                                        gfsResourceActionRouteRef.current.ownerTabId ===
+                                          activeFilesTabId
+                                          ? pendingGfsResourceAction
+                                          : null
+                                      }
+                                      onPendingResourceActionHandled={
+                                        handleGfsResourceActionHandled
                                       }
                                     />
                                   )}
@@ -4683,6 +4988,18 @@ export function App() {
                                         byteLength={activePreviewPayload.byteLength}
                                         reloadVersion={activePreviewPayload.reloadVersion}
                                         unavailable={activePreviewPayload.unavailable}
+                                        pendingResourceAction={
+                                          gfsResourceActionRouteRef.current?.kind === 'preview' &&
+                                          gfsResourceActionRouteRef.current.ownerTabId ===
+                                            activePreviewTabId &&
+                                          pendingGfsResourceAction?.targetResource?.version ===
+                                            activePreviewTab?.preview?.resourceVersion
+                                            ? pendingGfsResourceAction
+                                            : null
+                                        }
+                                        onPendingResourceActionHandled={
+                                          handleGfsResourceActionHandled
+                                        }
                                         pushToast={vm.pushToast}
                                         onOpenRoute={handleOpenGfsRoute}
                                         onRenameCommitted={renamedUri => {
