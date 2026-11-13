@@ -4,7 +4,11 @@ import { Pool } from 'pg'
 import request from 'supertest'
 import type { LlmProviderId } from '@clerum/llm-providers'
 import { VENDORED_MODELS_DEV_SNAPSHOT } from '../src/data/modelsDevSnapshot.js'
-import type { CatalogPruneHooks, CatalogPruneResult } from '../src/services/llmCatalogPrune.js'
+import type {
+  CatalogPrune,
+  CatalogPruneHooks,
+  CatalogPruneResult,
+} from '../src/services/llmCatalogPrune.js'
 import type { CatalogSyncResult, SyncConnector } from '../src/services/llmCatalogSync.js'
 import {
   type DiscoveredModel,
@@ -314,6 +318,8 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
     connector?: Pool
     txPool?: Pool
     publishRetry?: InstanceType<typeof mod.AllowlistPublishRetry>
+    /** Wrap the production prune (to make it misbehave). */
+    wrapPrune?: (prune: CatalogPrune) => CatalogPrune
   }
 
   const consumerSources = (db: import('../src/db.js').DbClient) =>
@@ -350,7 +356,7 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
         autoEnableMaxPerProviderPerRun: o.maxPerProvider ?? 1_000,
         autoEnableMaxPerRun: o.autoEnableMaxPerRun ?? 10_000,
         ...(o.publishRetry ? { publishRetry: o.publishRetry } : {}),
-        ...(o.noPrune ? {} : { prune: prune(o) }),
+        ...(o.noPrune ? {} : { prune: o.wrapPrune ? o.wrapPrune(prune(o)) : prune(o) }),
       },
       (o.connector ?? corePool) as unknown as SyncConnector
     )
@@ -1020,6 +1026,99 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       expect((await row(m)).enabled).toBe(true)
       expect(await pruneRuns()).toMatchObject([{ aborted: true, abort_reason: 'prefilter_failed' }])
     })
+
+    it('a prune that throws past its own guard neither fails the sync nor holds back what it pruned', async () => {
+      const m = pick(0)
+      await makeStale(m)
+      const res = await sync(gone(m), {
+        wrapPrune: real => async run => {
+          await real(run)
+          throw new Error('unexpected failure after the prune committed')
+        },
+      })
+      // The sync reports the prune as aborted; what it had committed stays
+      // disabled and reaches the ConfigMap through the publication after it.
+      expect(res).toMatchObject({ pruneAborted: true })
+      expect((await row(m)).enabled).toBe(false)
+      expect(isPublished(m)).toBe(false)
+      expect(await audits('auto_disable', m)).toEqual([SYNC_ACTOR])
+      // The prune's own row, then the escape, recorded like any other abort.
+      expect(await pruneRuns()).toEqual([
+        {
+          candidates: 1,
+          prefiltered: 0,
+          examined_locked: 1,
+          pruned: 1,
+          aborted: false,
+          abort_reason: null,
+        },
+        {
+          candidates: 0,
+          prefiltered: 0,
+          examined_locked: 0,
+          pruned: 0,
+          aborted: true,
+          abort_reason: 'prune_threw',
+        },
+      ])
+    })
+
+    it.each([
+      ['its INSERT is rejected', 'insert'],
+      ['no connection is available', 'connect'],
+    ] as const)(
+      'an escaped prune whose run cannot be recorded because %s still does not fail the sync',
+      async (_label, failing) => {
+        const m = pick(0)
+        await makeStale(m)
+        let reconciled = false
+        // What the escape tried to do once the prune had started: without
+        // these the test would pass if nothing ever tried to record the run.
+        let attempts = 0
+        // The sync's own connector: the reconciliation gets real clients, and
+        // once the prune has started every connection or the run INSERT fails.
+        const connector = {
+          connect: async () => {
+            if (reconciled && failing === 'connect') {
+              attempts += 1
+              throw new Error('pool exhausted')
+            }
+            const client = await corePool.connect()
+            return new Proxy(client, {
+              get(target, prop) {
+                if (prop === 'query') {
+                  return (text: unknown, values?: unknown) => {
+                    if (
+                      reconciled &&
+                      failing === 'insert' &&
+                      typeof text === 'string' &&
+                      text.includes('INSERT INTO llm_catalog_prune_runs')
+                    ) {
+                      attempts += 1
+                      return Promise.reject(new Error('permission denied for table'))
+                    }
+                    return (target.query as (...a: unknown[]) => unknown)(text, values)
+                  }
+                }
+                const value = Reflect.get(target, prop, target)
+                return typeof value === 'function' ? value.bind(target) : value
+              },
+            })
+          },
+        }
+        const res = await sync(gone(m), {
+          connector: connector as unknown as Pool,
+          wrapPrune: () => async () => {
+            reconciled = true
+            throw new Error('unexpected failure before pruning anything')
+          },
+        })
+        expect(res).toMatchObject({ pruneAborted: true, pruned: 0 })
+        expect(attempts).toBe(1)
+        expect((await row(m)).enabled).toBe(true)
+        expect(await pruneRuns()).toEqual([])
+      }
+    )
 
     it('S-17: the whole run, prune included, works with the control_api_runtime role', async () => {
       const m = pick(0)

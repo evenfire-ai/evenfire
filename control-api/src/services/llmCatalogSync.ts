@@ -111,11 +111,18 @@ import { config } from '../config.js'
 import { pool } from '../db.js'
 import { safeErrorLogMessage } from '../http/errorHandler.js'
 import { rootLogger } from '../observability/logger.js'
-import { llmAllowlistConfigMapWriteFailuresTotal } from '../observability/metrics.js'
+import {
+  llmAllowlistConfigMapWriteFailuresTotal,
+  llmCatalogPruneRunsTotal,
+} from '../observability/metrics.js'
 import { MAX_CONTEXT_WINDOW_TOKENS, writeCatalogSyncAudit } from './llmAllowedModels.js'
 import type { AllowedModelsConfigMapPublisher } from './llmAllowedModelsConfigMap.js'
 import { type AllowlistPublishRetry, llmAllowlistPublishRetry } from './llmAllowlistPublishRetry.js'
-import type { CatalogPrune, CatalogPruneResult } from './llmCatalogPrune.js'
+import {
+  type CatalogPrune,
+  type CatalogPruneResult,
+  recordCatalogPruneRun,
+} from './llmCatalogPrune.js'
 import { acquireCatalogSyncLock } from './llmCatalogSyncLock.js'
 import {
   type CatalogPolicyProviderId,
@@ -1048,7 +1055,7 @@ export async function syncDiscoveredModels(
   let materialized = publication.written
   let prune: CatalogPruneResult | undefined
   if (opts.prune) {
-    prune = await runPruneSafely(opts.prune, { decidable, syncRanAt: committed.ranAt })
+    prune = await runPruneSafely(opts.prune, { decidable, syncRanAt: committed.ranAt }, connector)
     publication = await publish()
     materialized ||= publication.written
   }
@@ -1088,11 +1095,22 @@ function sumProviderCounts(
 /**
  * The prune never throws by contract; this keeps that true for an injected one
  * too, because an error escaping here would be read by the boot sync as "the
- * run failed before committing" and reconcile again.
+ * run failed before committing" and reconcile again. The escape is recorded
+ * like any other abort (a `llm_catalog_prune_runs` row and the aborted
+ * outcome), with zero counts: whatever the prune did before throwing is not
+ * known here. Its disables, if any, are committed and audited on their own.
+ *
+ * Only a prune injected in place of the production one can get here, since
+ * the production prune catches everything itself. That is why two things are
+ * accepted rather than avoided: a prune that recorded its own row before
+ * throwing leaves two rows for one run, and two counts in the runs metric; and
+ * the escape is recorded even on a run that was not decidable, because once
+ * the prune threw there is no telling whether it got past that check.
  */
 async function runPruneSafely(
   prune: CatalogPrune,
-  run: Parameters<CatalogPrune>[0]
+  run: Parameters<CatalogPrune>[0],
+  connector: SyncConnector
 ): Promise<CatalogPruneResult> {
   try {
     return await prune(run)
@@ -1101,7 +1119,7 @@ async function runPruneSafely(
       { event: 'llm_catalog_prune_escaped', err: safeErrorLogMessage(err) },
       'llm catalog prune threw; treated as aborted'
     )
-    return {
+    const result: CatalogPruneResult = {
       skipped: false,
       candidates: 0,
       prefiltered: 0,
@@ -1110,6 +1128,31 @@ async function runPruneSafely(
       aborted: true,
       abortReason: 'prune_threw',
     }
+    await recordEscapedPrune(connector, run, result)
+    llmCatalogPruneRunsTotal.inc({ outcome: 'aborted' })
+    return result
+  }
+}
+
+async function recordEscapedPrune(
+  connector: SyncConnector,
+  run: Parameters<CatalogPrune>[0],
+  result: CatalogPruneResult
+): Promise<void> {
+  let client: SyncTxClient
+  try {
+    client = await connector.connect()
+  } catch (err) {
+    log.error(
+      { event: 'llm_catalog_prune_run_record_failed', err: safeErrorLogMessage(err) },
+      'llm catalog prune: could not record the escaped prune in llm_catalog_prune_runs'
+    )
+    return
+  }
+  try {
+    await recordCatalogPruneRun(client, run, result)
+  } finally {
+    client.release()
   }
 }
 

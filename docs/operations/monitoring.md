@@ -171,7 +171,7 @@ your own NetworkPolicy that allows your Prometheus to reach those ports.
 | `clerum_llm_fallback_total`                           | mcp-host    | mcp-host switched to a configured fallback provider/model, labelled `from`, `to`, `reason`                   |
 | `mcp_host_runtime_auth_degraded`                      | mcp-host    | Gauge. Runtime auth is degraded; readiness returns `503` while it is set                                     |
 | `clerum_llm_allowlist_configmap_write_failures_total` | control-api | Failed writes of the `clerum-llm-allowed-models` ConfigMap, by `phase` (`mutation`, `boot`, `sync`)          |
-| `clerum_llm_catalog_prune_runs_total`                 | control-api | Catalog prune runs, by `outcome` (`completed`, `aborted` on a failed LIST or query, `skipped`)               |
+| `clerum_llm_catalog_prune_runs_total`                 | control-api | Catalog prune runs, by `outcome` (`completed`, `aborted` on a failed LIST/query or `prune_threw`, `skipped`) |
 | `clerum_llm_catalog_pruned_models_total`              | control-api | Stale catalog models nobody used that the catalog prune disabled                                             |
 
 For guardrail behaviour, see [Configure guardrails](../how-to/configure-guardrails.md).

@@ -31,7 +31,9 @@
  * already pruned (each prune committed on its own). An escaping error would
  * read as "the sync failed before committing" to the boot sync, which would
  * reconcile again. Every run that got past the decidability check appends one
- * row to `llm_catalog_prune_runs`, aborted or not.
+ * row to `llm_catalog_prune_runs`, aborted or not. A prune injected in place
+ * of this one that throws past it gets one more row, written by the sync (see
+ * `runPruneSafely` in llmCatalogSync.ts).
  *
  * Runs after the sync's COMMIT and outside its lock: the K8s LISTs here must
  * not hold the catalog sync lock.
@@ -205,7 +207,11 @@ async function pruneLocked(
   return 'pruned'
 }
 
-async function recordRun(
+/**
+ * Append the run's row to `llm_catalog_prune_runs`. Best-effort: a failure is
+ * logged and swallowed, because the prune (and the sync around it) never throws.
+ */
+export async function recordCatalogPruneRun(
   db: DbClient,
   run: CatalogPruneRun,
   result: CatalogPruneResult
@@ -322,7 +328,7 @@ export async function pruneStaleCatalogModels(
     )
   }
 
-  await recordRun(txPool, run, result)
+  await recordCatalogPruneRun(txPool, run, result)
   llmCatalogPruneRunsTotal.inc({ outcome: result.aborted ? 'aborted' : 'completed' })
   log.info(
     {
