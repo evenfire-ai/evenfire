@@ -1,4 +1,5 @@
 import type { DragEvent as ReactDragEvent } from 'react'
+import type { GfsResourceMenuOpenRequest } from '@components/GfsResourceMenu/types'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import type { CopyIdFocusRecovery, GfsResourceActionId } from '@lib/gfsResourceActions'
@@ -8,6 +9,14 @@ import type { Tone } from '@/uiTypes'
 export type GfsResourceQuerySource =
   | { kind: 'accessible' }
   | { kind: 'children'; parentResourceId: string }
+
+export type FileExplorerMenuOwner = {
+  resourceId: string
+  request: GfsResourceMenuOpenRequest
+  sessionScope: string
+  sessionGeneration: number | null
+  phase: 'open' | 'replace'
+}
 
 /**
  * Actions the sidebar file explorer hands back to the app. A file activates on
@@ -35,6 +44,8 @@ export interface FileExplorerTreeProps {
   ) => CopyIdFocusRecovery | undefined
   /** Transient success/error feedback for the download fallback. */
   pushToast: (message: string, tone: Tone) => void
+  /** False while the compact sidebar is hidden/inert. */
+  sidebarVisible?: boolean
 }
 
 export interface FileExplorerNodeProps {
@@ -47,6 +58,8 @@ export interface FileExplorerNodeProps {
   querySource: GfsResourceQuerySource
   /** Published main-process generation that owns this authority query. */
   sessionGeneration: number | null
+  sidebarVisible: boolean
+  contextMenuOwner: FileExplorerMenuOwner | null
   /** Session access is live: gates the per-node children fetch the same way the
    *  controller gates its own children query — a revoked session fetches nothing. */
   accessActive: boolean
@@ -84,6 +97,20 @@ export interface FileExplorerNodeProps {
     opener: HTMLButtonElement,
     sessionGeneration: number | null
   ) => CopyIdFocusRecovery | undefined
+  onContextMenuRequest: (
+    node: GfsBrowserChild,
+    clientX: number | null,
+    clientY: number | null
+  ) => void
+  isContextOwnerCurrent: (
+    resourceId: string,
+    requestId: number,
+    phase?: 'open' | 'replace'
+  ) => boolean
+  clearContextOwner: (resourceId: string, requestId: number, force?: boolean) => void
+  clearContextOwnerForUnmount: (resourceId: string) => void
+  startReplaceSelection: (resourceId: string, requestId: number) => void
+  finishReplaceSelection: (resourceId: string, requestId: number) => void
   /** Fail-closed hook: a listing authority error revokes the session. */
   onAuthorityFailure: (message: string, scope: string, sessionGeneration: number) => void
   onNodeDragStart: (

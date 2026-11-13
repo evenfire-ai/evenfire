@@ -349,7 +349,7 @@ vi.mock('@pages/FilesPage', async () => {
           filesPageHarness.showMoveSidebarProbe
             ? createElement(
                 'div',
-                { 'data-testid': 'lag-sidebar' },
+                { 'data-testid': 'lag-sidebar', className: 'left-nav' },
                 createElement(FileExplorerTree, {
                   onOpenFolder: () => undefined,
                   onOpenPreview: () => undefined,
@@ -5332,6 +5332,29 @@ describe('App deep-link orchestration', () => {
         }),
         childView(destinationId, 'Target', 'directory', { parentResourceId: rootId }),
       ]
+      if (surface === 'sidebar-menu') {
+        const getBoundingClientRect = HTMLElement.prototype.getBoundingClientRect
+        vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+          this: HTMLElement
+        ) {
+          if (this.classList.contains('left-nav')) {
+            const width = 328
+            const height = window.innerHeight || 768
+            return {
+              x: 0,
+              y: 0,
+              left: 0,
+              top: 0,
+              right: width,
+              bottom: height,
+              width,
+              height,
+              toJSON: () => ({}),
+            } as DOMRect
+          }
+          return getBoundingClientRect.call(this)
+        })
+      }
       const patches: Array<{ token: string | undefined; body: unknown; path: string }> = []
       const request = vi.fn(
         async (method: string, input: string, options?: { token?: string; body?: unknown }) => {

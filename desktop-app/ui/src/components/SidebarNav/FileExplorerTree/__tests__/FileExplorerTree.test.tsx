@@ -129,18 +129,38 @@ function renderTree(
   )
   render(
     <QueryClientProvider client={queryClient}>
-      <FileExplorerTree
-        onOpenFolder={onOpenFolder}
-        onOpenPreview={onOpenPreview}
-        onResourceAction={onResourceAction}
-        pushToast={pushToast}
-      />
+      <div className="left-nav">
+        <FileExplorerTree
+          onOpenFolder={onOpenFolder}
+          onOpenPreview={onOpenPreview}
+          onResourceAction={onResourceAction}
+          pushToast={pushToast}
+        />
+      </div>
     </QueryClientProvider>
   )
   return { onOpenFolder, onOpenPreview, onResourceAction, pushToast, queryClient }
 }
 
 beforeEach(() => {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+    this: HTMLElement
+  ) {
+    if (this.classList.contains('left-nav')) {
+      return {
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 280,
+        bottom: 600,
+        width: 280,
+        height: 600,
+        toJSON: () => ({}),
+      } as DOMRect
+    }
+    return DOMRect.fromRect()
+  })
   // jsdom has no object-URL implementation; the download fallback needs both.
   Object.defineProperty(URL, 'createObjectURL', {
     configurable: true,
@@ -516,16 +536,18 @@ describe('FileExplorerTree — folder activation focuses an existing files tab',
       <>
         <div data-testid="tab-count">{state.tabs.length}</div>
         <div data-testid="active-path">{activeWorkspaceTab(state)?.files?.path ?? 'none'}</div>
-        <FileExplorerTree
-          onOpenFolder={uri =>
-            setState(current =>
-              openFilesTab(current, { id: `files-new-${(counter.current += 1)}`, path: uri })
-            )
-          }
-          onOpenPreview={vi.fn()}
-          onResourceAction={vi.fn()}
-          pushToast={vi.fn()}
-        />
+        <div className="left-nav">
+          <FileExplorerTree
+            onOpenFolder={uri =>
+              setState(current =>
+                openFilesTab(current, { id: `files-new-${(counter.current += 1)}`, path: uri })
+              )
+            }
+            onOpenPreview={vi.fn()}
+            onResourceAction={vi.fn()}
+            pushToast={vi.fn()}
+          />
+        </div>
       </>
     )
   }
@@ -898,12 +920,14 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
   const tree = () => (
     <QueryClientProvider client={queryClient}>
       <GfsDragSessionProvider>
-        <FileExplorerTree
-          onOpenFolder={onOpenFolder}
-          onOpenPreview={onOpenPreview}
-          onResourceAction={onResourceAction}
-          pushToast={pushToast}
-        />
+        <div className="left-nav">
+          <FileExplorerTree
+            onOpenFolder={onOpenFolder}
+            onOpenPreview={onOpenPreview}
+            onResourceAction={onResourceAction}
+            pushToast={pushToast}
+          />
+        </div>
       </GfsDragSessionProvider>
     </QueryClientProvider>
   )
@@ -2372,6 +2396,8 @@ describe('FileExplorerTree — resource action menus', () => {
       expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
       const shareMenu = await screen.findByRole('menu', { name: `Share options for ${root.name}` })
+      expect(shareMenu).toBe(menu)
+      expect(screen.getAllByRole('menu')).toHaveLength(1)
       fireEvent.click(
         within(shareMenu).getByRole('menuitem', {
           name: root.kind === 'directory' ? 'Copy folder ID' : 'Copy file ID',
@@ -2535,6 +2561,8 @@ describe('FileExplorerTree — resource action menus', () => {
     const menu = await screen.findByRole('menu', { name: `Actions for ${second.name}` })
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
     const shareMenu = await screen.findByRole('menu', { name: `Share options for ${second.name}` })
+    expect(shareMenu).toBe(menu)
+    expect(screen.getAllByRole('menu')).toHaveLength(1)
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
@@ -2780,12 +2808,14 @@ describe('FileExplorerTree — resource action menus', () => {
       return (
         <QueryClientProvider client={queryClient}>
           {visible ? (
-            <FileExplorerTree
-              onOpenFolder={vi.fn()}
-              onOpenPreview={vi.fn()}
-              onResourceAction={onResourceAction}
-              pushToast={vi.fn()}
-            />
+            <div className="left-nav">
+              <FileExplorerTree
+                onOpenFolder={vi.fn()}
+                onOpenPreview={vi.fn()}
+                onResourceAction={onResourceAction}
+                pushToast={vi.fn()}
+              />
+            </div>
           ) : null}
         </QueryClientProvider>
       )
@@ -2843,10 +2873,14 @@ describe('FileExplorerTree — resource action menus', () => {
     const trigger = row.querySelector('.da-file-explorer__label') as HTMLButtonElement
     openContextMenuFor(row)
     const menu = await screen.findByRole('menu', { name: 'Actions for pointer-target.md' })
-    await user.hover(within(menu).getByRole('menuitem', { name: 'Share' }))
+    const shareEntry = within(menu).getByRole('menuitem', { name: 'Share' })
+    await user.hover(shareEntry)
+    expect(screen.getByRole('menu', { name: 'Actions for pointer-target.md' })).toBe(menu)
+    await user.click(shareEntry)
     const shareMenu = await screen.findByRole('menu', {
       name: 'Share options for pointer-target.md',
     })
+    expect(shareMenu).toBe(menu)
     await user.click(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
@@ -2966,15 +3000,17 @@ describe('FileExplorerTree — resource action menus', () => {
       const [dialogOpen, setDialogOpen] = useState(false)
       return (
         <QueryClientProvider client={queryClient}>
-          <FileExplorerTree
-            onOpenFolder={vi.fn()}
-            onOpenPreview={vi.fn()}
-            onResourceAction={(item, action) => {
-              onResourceAction(item, action)
-              if (action === 'delete') setDialogOpen(true)
-            }}
-            pushToast={vi.fn()}
-          />
+          <div className="left-nav">
+            <FileExplorerTree
+              onOpenFolder={vi.fn()}
+              onOpenPreview={vi.fn()}
+              onResourceAction={(item, action) => {
+                onResourceAction(item, action)
+                if (action === 'delete') setDialogOpen(true)
+              }}
+              pushToast={vi.fn()}
+            />
+          </div>
           {dialogOpen ? (
             <div role="dialog" aria-label="Delete dialog">
               <button autoFocus>Confirm delete</button>
@@ -3053,6 +3089,8 @@ describe('FileExplorerTree — resource action menus', () => {
     const menu = await screen.findByRole('menu', { name: 'Actions for Nested folder' })
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
     const shareMenu = await screen.findByRole('menu', { name: 'Share options for Nested folder' })
+    expect(shareMenu).toBe(menu)
+    expect(screen.getAllByRole('menu')).toHaveLength(1)
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy folder ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
@@ -3098,8 +3136,10 @@ describe('FileExplorerTree — resource action menus', () => {
     const fileMenu = await screen.findByRole('menu', { name: 'Actions for report.pdf' })
     fireEvent.click(within(fileMenu).getByRole('menuitem', { name: 'Share' }))
     const shareMenu = await screen.findByRole('menu', { name: 'Share options for report.pdf' })
+    expect(shareMenu).toBe(fileMenu)
+    expect(screen.getAllByRole('menu')).toHaveLength(1)
     expect(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
-    expect(within(fileMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
+    expect(within(fileMenu).queryByRole('menuitem', { name: 'Download' })).toBeNull()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
     expect(within(shareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'Delete' })).toBeNull()
@@ -3195,12 +3235,14 @@ describe('FileExplorerTree — resource action menus', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
       <QueryClientProvider client={queryClient}>
-        <FileExplorerTree
-          onOpenFolder={vi.fn()}
-          onOpenPreview={vi.fn()}
-          onResourceAction={vi.fn()}
-          pushToast={vi.fn()}
-        />
+        <div className="left-nav">
+          <FileExplorerTree
+            onOpenFolder={vi.fn()}
+            onOpenPreview={vi.fn()}
+            onResourceAction={vi.fn()}
+            pushToast={vi.fn()}
+          />
+        </div>
         <AccessStateProbe />
       </QueryClientProvider>
     )

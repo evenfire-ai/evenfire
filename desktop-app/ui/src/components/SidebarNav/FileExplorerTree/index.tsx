@@ -1,9 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
-import type { GfsResourceMenuOpenRequest } from '@components/GfsResourceMenu/types'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
   GFS_DRIVE_MAIN,
@@ -23,6 +22,7 @@ import {
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import type { CopyIdFocusRecovery, GfsResourceActionId } from '@lib/gfsResourceActions'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
@@ -40,7 +40,7 @@ import {
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { IconChevronRight, IconContexts } from '../icons'
-import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
+import type { FileExplorerMenuOwner, FileExplorerNodeProps, FileExplorerTreeProps } from './types'
 
 // A folder's single-click (toggle) must not act before we know a double-click
 // (open its files tab) is not coming, so it is deferred by this window to let a
@@ -57,6 +57,22 @@ function errorMessage(error: unknown): string | null {
 
 function hasBit(affordances: GfsBrowserAffordances | undefined, bit: string): boolean {
   return Boolean(affordances?.held.includes(bit))
+}
+
+function isSidebarVisibleNow(): boolean {
+  if (typeof document === 'undefined') return false
+  const sidebar = document.querySelector<HTMLElement>('.left-nav')
+  if (!sidebar || sidebar.hasAttribute('inert') || sidebar.getAttribute('aria-hidden') === 'true')
+    return false
+  const rect = sidebar.getBoundingClientRect()
+  return (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    rect.right > 0 &&
+    rect.left < window.innerWidth &&
+    rect.bottom > 0 &&
+    rect.top < window.innerHeight
+  )
 }
 
 // A GFS name is externally controlled (anyone who can write to a shared drive the
@@ -94,6 +110,8 @@ function FileExplorerNode({
   scope,
   querySource,
   sessionGeneration,
+  sidebarVisible,
+  contextMenuOwner,
   accessActive,
   expandedIds,
   selectedId,
@@ -108,6 +126,12 @@ function FileExplorerNode({
   onActivateFile,
   onResourceAction,
   onCopyIdFocusStart,
+  onContextMenuRequest,
+  isContextOwnerCurrent,
+  clearContextOwner,
+  clearContextOwnerForUnmount,
+  startReplaceSelection,
+  finishReplaceSelection,
   onAuthorityFailure,
   onNodeDragStart,
   onNodeDragEnd,
@@ -120,9 +144,9 @@ function FileExplorerNode({
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
+  const owner = contextMenuOwner?.resourceId === node.resourceId ? contextMenuOwner : null
+  const ownerRequest = owner?.phase === 'open' ? owner.request : null
   const [resourceMenuOpen, setResourceMenuOpen] = useState(false)
-  const [menuOpenRequest, setMenuOpenRequest] = useState<GfsResourceMenuOpenRequest | null>(null)
-  const menuRequestIdRef = useRef(0)
   const rowLabelRef = useRef<HTMLButtonElement | null>(null)
   const touchStartRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
   const touchMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -144,7 +168,12 @@ function FileExplorerNode({
       sessionGeneration
     ),
     queryFn: () => window.clerum.gfs.affordances(node.resourceId, node.drive),
-    enabled: resourceMenuOpen && accessActive && isGfsSessionGeneration(sessionGeneration),
+    enabled:
+      resourceMenuOpen &&
+      owner !== null &&
+      sidebarVisible &&
+      accessActive &&
+      isGfsSessionGeneration(sessionGeneration),
     refetchOnMount: 'always',
     refetchOnWindowFocus: 'always',
     staleTime: 0,
@@ -166,6 +195,33 @@ function FileExplorerNode({
   const canCopyContent = Boolean(
     canPreview && (preview?.kind === 'image' || preview?.kind === 'markdown')
   )
+  const dispatchOwnedAction = useCallback(
+    (actionId: GfsResourceActionId, file?: File, copyIdFocusRecovery?: CopyIdFocusRecovery) => {
+      const ownerId = owner?.request.id
+      const phase = actionId === 'replace' && file ? 'replace' : 'open'
+      if (!ownerId || !isContextOwnerCurrent(node.resourceId, ownerId, phase)) return
+      if (actionId === 'copy-route') {
+        onResourceAction(
+          node,
+          actionId,
+          undefined,
+          sessionGeneration,
+          copyIdFocusRecovery,
+          querySource
+        )
+      } else if (file) onResourceAction(node, actionId, file)
+      else onResourceAction(node, actionId)
+    },
+    [
+      isContextOwnerCurrent,
+      node,
+      onResourceAction,
+      owner?.request.id,
+      querySource,
+      sessionGeneration,
+    ]
+  )
+
   const resourceActions = useMemo(
     () =>
       getGfsMenuActions(
@@ -174,40 +230,45 @@ function FileExplorerNode({
           uri: node.gfsUri,
           handlers: {
             refresh:
-              accessActive && !isUnreadable ? () => onResourceAction(node, 'refresh') : undefined,
-            'copy-link': () => onResourceAction(node, 'copy-link'),
+              accessActive && !isUnreadable ? () => dispatchOwnedAction('refresh') : undefined,
+            'copy-link': () => dispatchOwnedAction('copy-link'),
             'copy-route': (_file, context) =>
-              onResourceAction(
-                node,
-                'copy-route',
-                undefined,
-                sessionGeneration,
-                context?.copyIdFocusRecovery,
-                querySource
-              ),
-            'open-route': () => onResourceAction(node, 'open-route'),
-            rename: () => onResourceAction(node, 'rename'),
-            move: () => onResourceAction(node, 'move'),
-            'new-folder': () => onResourceAction(node, 'new-folder'),
-            'upload-file': () => onResourceAction(node, 'upload-file'),
-            share: () => onResourceAction(node, 'share'),
-            'copy-content': canCopyContent
-              ? () => onResourceAction(node, 'copy-content')
+              dispatchOwnedAction('copy-route', undefined, context?.copyIdFocusRecovery),
+            'open-route': () => dispatchOwnedAction('open-route'),
+            rename: () => dispatchOwnedAction('rename'),
+            move: () => dispatchOwnedAction('move'),
+            'new-folder': () => dispatchOwnedAction('new-folder'),
+            'upload-file': () => dispatchOwnedAction('upload-file'),
+            share: () => dispatchOwnedAction('share'),
+            'copy-content': canCopyContent ? () => dispatchOwnedAction('copy-content') : undefined,
+            preview: canPreview
+              ? () => {
+                  if (owner?.request.id && isContextOwnerCurrent(node.resourceId, owner.request.id))
+                    onActivateFile(node)
+                }
               : undefined,
-            preview: canPreview ? () => onActivateFile(node) : undefined,
             download:
               node.kind === 'file' && !isUnreadable
-                ? () => onResourceAction(node, 'download')
+                ? () => dispatchOwnedAction('download')
                 : undefined,
             replace:
               node.kind === 'file' && !isUnreadable && hasBit(affordances, 'write')
                 ? (file, context) => {
-                    if (file) onResourceAction(node, 'replace', file)
+                    if (file) dispatchOwnedAction('replace', file)
                     else context?.requestFileSelection?.()
                   }
                 : undefined,
-            'open-folder': isDirectory && !isUnreadable ? () => onActivateFolder(node) : undefined,
-            delete: () => onResourceAction(node, 'delete'),
+            'open-folder':
+              isDirectory && !isUnreadable
+                ? () => {
+                    if (
+                      owner?.request.id &&
+                      isContextOwnerCurrent(node.resourceId, owner.request.id)
+                    )
+                      onActivateFolder(node)
+                  }
+                : undefined,
+            delete: () => dispatchOwnedAction('delete'),
           },
           canRename: hasBit(affordances, 'write'),
           canMove: accessActive && node.parentResourceId != null,
@@ -224,6 +285,7 @@ function FileExplorerNode({
       ),
     [
       accessActive,
+      dispatchOwnedAction,
       affordances,
       canCopyContent,
       canPreview,
@@ -232,7 +294,8 @@ function FileExplorerNode({
       node,
       onActivateFile,
       onActivateFolder,
-      onResourceAction,
+      owner?.request.id,
+      isContextOwnerCurrent,
     ]
   )
 
@@ -299,10 +362,42 @@ function FileExplorerNode({
       touchMenuTimerRef.current = null
     }
   }, [])
-  const requestResourceMenu = useCallback((clientX: number | null, clientY: number | null) => {
-    menuRequestIdRef.current += 1
-    setMenuOpenRequest({ id: menuRequestIdRef.current, clientX, clientY })
-  }, [])
+  const requestResourceMenu = useCallback(
+    (clientX: number | null, clientY: number | null) => {
+      onContextMenuRequest(node, clientX, clientY)
+    },
+    [node, onContextMenuRequest]
+  )
+  useLayoutEffect(() => {
+    if (!owner) return
+    const requestId = owner.request.id
+    return () => clearContextOwner(node.resourceId, requestId, true)
+  }, [clearContextOwner, node.resourceId, owner?.request.id])
+  useLayoutEffect(() => {
+    return () => clearContextOwnerForUnmount(node.resourceId)
+  }, [clearContextOwnerForUnmount, node.resourceId])
+  const handleMenuOpenChange = useCallback(
+    (isOpen: boolean) => {
+      setResourceMenuOpen(isOpen)
+      if (!isOpen && owner) clearContextOwner(node.resourceId, owner.request.id)
+    },
+    [clearContextOwner, node.resourceId, owner]
+  )
+  const isCurrentMenuOwner = useCallback(
+    (phase: 'open' | 'replace' = 'open') => {
+      return Boolean(owner && isContextOwnerCurrent(node.resourceId, owner.request.id, phase))
+    },
+    [isContextOwnerCurrent, node.resourceId, owner]
+  )
+  const clearCurrentMenuOwner = useCallback(() => {
+    if (owner) clearContextOwner(node.resourceId, owner.request.id)
+  }, [clearContextOwner, node.resourceId, owner])
+  const startCurrentReplace = useCallback(() => {
+    if (owner) startReplaceSelection(node.resourceId, owner.request.id)
+  }, [node.resourceId, owner, startReplaceSelection])
+  const finishCurrentReplace = useCallback(() => {
+    if (owner) finishReplaceSelection(node.resourceId, owner.request.id)
+  }, [finishReplaceSelection, node.resourceId, owner])
   useEffect(
     () => () => {
       clearTouchMenuTimer()
@@ -609,7 +704,7 @@ function FileExplorerNode({
         </Button>
         <GfsResourceMenu
           actions={resourceActions}
-          contextOpenRequest={menuOpenRequest}
+          contextOpenRequest={ownerRequest}
           contextTargetRef={rowLabelRef}
           onActionStart={(actionId, keyboardActivated, opener) => {
             if (actionId !== 'copy-route' || !keyboardActivated || !opener) return undefined
@@ -620,7 +715,13 @@ function FileExplorerNode({
             )
             return recovery ? { copyIdFocusRecovery: recovery } : undefined
           }}
-          onOpenChange={setResourceMenuOpen}
+          contextVisible={sidebarVisible}
+          isContextOwnerCurrent={isCurrentMenuOwner}
+          onContextUnavailable={clearCurrentMenuOwner}
+          onOpenChange={handleMenuOpenChange}
+          onReplaceSelectionStart={startCurrentReplace}
+          onReplaceSelectionEnd={finishCurrentReplace}
+          presentation="sidebar-context"
           resourceName={label}
           triggerMode="context"
         />
@@ -660,6 +761,14 @@ function FileExplorerNode({
               scope={scope}
               querySource={{ kind: 'children', parentResourceId: node.resourceId }}
               sessionGeneration={sessionGeneration}
+              sidebarVisible={sidebarVisible}
+              contextMenuOwner={contextMenuOwner}
+              onContextMenuRequest={onContextMenuRequest}
+              isContextOwnerCurrent={isContextOwnerCurrent}
+              clearContextOwner={clearContextOwner}
+              clearContextOwnerForUnmount={clearContextOwnerForUnmount}
+              startReplaceSelection={startReplaceSelection}
+              finishReplaceSelection={finishReplaceSelection}
               selectedId={selectedId}
             />
           ))}
@@ -705,6 +814,7 @@ export function FileExplorerTree({
   onResourceAction,
   onCopyIdFocusStart,
   pushToast,
+  sidebarVisible = true,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
   const queryClient = useQueryClient()
@@ -749,6 +859,117 @@ export function FileExplorerTree({
     destination: { resourceId: string; name: string }
   } | null>(null)
   const mountedRef = useRef(false)
+  const [contextMenuOwner, setContextMenuOwner] = useState<FileExplorerMenuOwner | null>(null)
+  const contextMenuOwnerRef = useRef<FileExplorerMenuOwner | null>(null)
+  const nextContextMenuRequestIdRef = useRef(0)
+  const sidebarVisibleRef = useRef(sidebarVisible)
+  const authorityOwnerRef = useRef({
+    sessionScope: ctrl.sessionScope ?? 'anonymous',
+    sessionGeneration: ctrl.sessionGeneration,
+  })
+
+  const setContextOwner = useCallback((owner: FileExplorerMenuOwner | null) => {
+    contextMenuOwnerRef.current = owner
+    setContextMenuOwner(owner)
+  }, [])
+
+  const clearContextOwner = useCallback((resourceId: string, requestId: number, force = false) => {
+    const current = contextMenuOwnerRef.current
+    if (!current || current.resourceId !== resourceId || current.request.id !== requestId) return
+    if (current.phase === 'replace' && !force) return
+    contextMenuOwnerRef.current = null
+    setContextMenuOwner(null)
+  }, [])
+
+  const clearContextOwnerForUnmount = useCallback(
+    (resourceId: string) => {
+      const current = contextMenuOwnerRef.current
+      if (current?.resourceId === resourceId) {
+        clearContextOwner(resourceId, current.request.id, true)
+      }
+    },
+    [clearContextOwner]
+  )
+
+  const isContextOwnerCurrent = useCallback(
+    (resourceId: string, requestId: number, phase: 'open' | 'replace' = 'open') => {
+      const current = contextMenuOwnerRef.current
+      const authority = authorityOwnerRef.current
+      const visibleElement = isSidebarVisibleNow()
+      return Boolean(
+        sidebarVisibleRef.current &&
+        visibleElement &&
+        current &&
+        current.resourceId === resourceId &&
+        current.request.id === requestId &&
+        current.phase === phase &&
+        current.sessionScope === authority.sessionScope &&
+        current.sessionGeneration === authority.sessionGeneration
+      )
+    },
+    []
+  )
+
+  const requestContextMenu = useCallback(
+    (node: GfsBrowserChild, clientX: number | null, clientY: number | null) => {
+      if (!sidebarVisible || !isSidebarVisibleNow()) return
+      const request = { id: ++nextContextMenuRequestIdRef.current, clientX, clientY }
+      setContextOwner({
+        resourceId: node.resourceId,
+        request,
+        sessionScope: ctrl.sessionScope ?? 'anonymous',
+        sessionGeneration: ctrl.sessionGeneration,
+        phase: 'open',
+      })
+    },
+    [ctrl.sessionGeneration, ctrl.sessionScope, setContextOwner, sidebarVisible]
+  )
+
+  const startReplaceSelection = useCallback(
+    (resourceId: string, requestId: number) => {
+      const current = contextMenuOwnerRef.current
+      if (
+        !current ||
+        current.resourceId !== resourceId ||
+        current.request.id !== requestId ||
+        !isContextOwnerCurrent(resourceId, requestId, 'open')
+      )
+        return
+      setContextOwner({ ...current, phase: 'replace' })
+    },
+    [isContextOwnerCurrent, setContextOwner]
+  )
+
+  const finishReplaceSelection = useCallback(
+    (resourceId: string, requestId: number) => {
+      clearContextOwner(resourceId, requestId, true)
+    },
+    [clearContextOwner]
+  )
+
+  useLayoutEffect(() => {
+    sidebarVisibleRef.current = sidebarVisible
+    authorityOwnerRef.current = {
+      sessionScope: ctrl.sessionScope ?? 'anonymous',
+      sessionGeneration: ctrl.sessionGeneration,
+    }
+    const current = contextMenuOwnerRef.current
+    if (!current) return
+    if (
+      !sidebarVisible ||
+      current.sessionScope !== authorityOwnerRef.current.sessionScope ||
+      current.sessionGeneration !== authorityOwnerRef.current.sessionGeneration
+    ) {
+      clearContextOwner(current.resourceId, current.request.id, true)
+    }
+  }, [clearContextOwner, ctrl.sessionGeneration, ctrl.sessionScope, sidebarVisible])
+
+  useLayoutEffect(
+    () => () => {
+      contextMenuOwnerRef.current = null
+    },
+    []
+  )
 
   useEffect(() => {
     mountedRef.current = true
@@ -1342,6 +1563,14 @@ export function FileExplorerTree({
               scope={ctrl.sessionScope ?? 'anonymous'}
               querySource={{ kind: 'accessible' }}
               sessionGeneration={ctrl.sessionGeneration}
+              sidebarVisible={sidebarVisible}
+              contextMenuOwner={contextMenuOwner}
+              onContextMenuRequest={requestContextMenu}
+              isContextOwnerCurrent={isContextOwnerCurrent}
+              clearContextOwner={clearContextOwner}
+              clearContextOwnerForUnmount={clearContextOwnerForUnmount}
+              startReplaceSelection={startReplaceSelection}
+              finishReplaceSelection={finishReplaceSelection}
               selectedId={selectedId}
             />
           ))}
