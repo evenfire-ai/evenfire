@@ -21,5 +21,36 @@
       "name": "mcp-evenfire-google-workspace-admin-director-v10-20-300-beta-12"
     }
   ],
-  "catalog": []
+  "catalog": [
+    {
+      "catalogId": "@evenfire/notion-remote",
+      "grantScope": "user",
+      "name": "mcp-evenfire-notion-remote-u-51704373"
+    },
+    {
+      "catalogId": "@evenfire/notion-remote",
+      "grantScope": "context",
+      "name": "mcp-evenfire-notion-remote-c-65156605"
+    },
+    {
+      "catalogId": "@evenfire/atlassian-remote",
+      "grantScope": "user",
+      "name": "mcp-evenfire-atlassian-remote-u-338995f5"
+    },
+    {
+      "catalogId": "@evenfire/atlassian-remote",
+      "grantScope": "context",
+      "name": "mcp-evenfire-atlassian-remote-c-3a665ddb"
+    },
+    {
+      "catalogId": "@evenfire/google-workspace-admin-directory-remote",
+      "grantScope": "user",
+      "name": "mcp-evenfire-google-workspace-admin-director-u-d66b7c10"
+    },
+    {
+      "catalogId": "@evenfire/google-workspace-admin-directory-remote",
+      "grantScope": "context",
+      "name": "mcp-evenfire-google-workspace-admin-director-c-44df4b56"
+    }
+  ]
 }
