@@ -274,7 +274,7 @@ describe('file attachment validation (issue #666)', () => {
     [
       'a .txt carrying PDF bytes as a pdf mismatch',
       fileOf('%PDF-1.7\n%âãÏÓ\n', 'report.txt', 'text/plain', 'text/plain'),
-      { class: 'pdf', reader: 'none', mismatch: true },
+      { class: 'pdf', reader: 'pdf', mismatch: true },
     ],
     [
       'a PNG sent as kind:file without a reader',

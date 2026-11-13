@@ -6,7 +6,7 @@ import {
 } from '../../progress/intentExtraction.js'
 import type { ToolCallTokens } from '../../progress/types.js'
 import { ToolError } from '../errors'
-import type { ExecutionContext } from '../interfaces'
+import type { ExecutionContext, RequestImageUsage } from '../interfaces'
 import { RingBuffer } from '../tools/ringBuffer'
 import type { TokenUsage, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
@@ -31,7 +31,8 @@ export async function executeSingleTool(
     | 'measureToolMessage'
   >,
   iteration?: number,
-  transformResult?: (result: ToolResult) => Promise<ToolResult>
+  transformResult?: (result: ToolResult) => Promise<ToolResult>,
+  requestImages?: RequestImageUsage
 ): Promise<ToolResult> {
   const { toolRegistry, toolOutputProcessor, events, toolTimeout } = config
 
@@ -100,6 +101,7 @@ export async function executeSingleTool(
   const executionContext: ExecutionContext = {
     onOutput: chunk => ringBuffer?.append(chunk),
     visualInput: config.visualInput,
+    ...(requestImages ? { requestImages } : {}),
     measureResult: config.measureToolMessage
       ? content => measureContent(renderContent(content))
       : undefined,
@@ -157,12 +159,6 @@ export async function executeSingleTool(
     )
 
     const attachments = output.is_error ? undefined : output.attachments
-    if (!output.is_error) {
-      for (const attachment of attachments ?? []) {
-        if (attachment.kind === 'image' && !attachment.visualSource)
-          config.visualInput?.budget.observeExternalImage(attachment.dataBase64)
-      }
-    }
     let wrappedContent: string
     if (tool.requiresSanitization()) {
       wrappedContent = toolOutputProcessor.afterExecution(call.name, output)
@@ -270,6 +266,14 @@ export async function executeSingleTool(
       const finalCost = measureContent(result.content)
       if (result.emittedMessageCost !== finalCost) {
         throw new Error('Final tool-message measurement does not match its budget debit')
+      }
+    }
+    // Charge the visual budget only for images that are actually published: a
+    // tool's final budget fence may replace its result, attachments included.
+    if (!result.is_error) {
+      for (const attachment of result.attachments ?? []) {
+        if (attachment.kind === 'image' && !attachment.visualSource)
+          config.visualInput?.budget.observeExternalImage(attachment.dataBase64)
       }
     }
     return result

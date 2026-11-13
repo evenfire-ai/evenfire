@@ -374,6 +374,13 @@ export interface ToolResult {
    * model call is made. Later calls of the batch are answered without running.
    */
   stopTurn?: { message: string }
+  /**
+   * Set on a result a pending approval carries from an earlier batch of its
+   * turn: the approval's `context_snapshot` already holds this result's tool
+   * message, so a resume must not append it again. Tool-call ids cannot tell
+   * the batches apart, because some drivers restart them on every response.
+   */
+  answeredInSnapshot?: true
 }
 
 export interface ToolOutput {

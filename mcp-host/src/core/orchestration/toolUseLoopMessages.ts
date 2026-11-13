@@ -2,6 +2,7 @@ import {
   GFS_TOOL_RESULT_IMAGE_TEXT,
   TOOL_RESULT_IMAGE_TEXT,
 } from '../../visualInput/messageProjection'
+import type { RequestImageUsage } from '../interfaces'
 import {
   isInternalGeneratedArtifactAttachment,
   isInternalGeneratedArtifactSourceTool,
@@ -160,6 +161,43 @@ function imagePart(attachment: Attachment, toolCallId: string): MessageContentPa
       ? { source: { ...attachment.visualSource, attachmentId: attachment.id, toolCallId } }
       : {}),
   }
+}
+
+/**
+ * The images the next model request will carry: every image part already in
+ * `messages`, plus every PNG/JPEG image of the successful `toolResults` that
+ * `appendToolResults` has not added yet. Counts each occurrence, so repeated
+ * bytes and parts an adapter later withholds are included: it never reports
+ * fewer images than the request holds.
+ */
+export function requestImageUsage(
+  messages: ChatMessage[],
+  toolResults: ToolResult[]
+): RequestImageUsage {
+  let images = 0
+  let bytes = 0
+  let maxSide = 0
+  const add = (data: string, width: number | undefined, height: number | undefined): void => {
+    images += 1
+    bytes += Buffer.byteLength(data, 'base64')
+    maxSide = Math.max(
+      maxSide,
+      width === undefined || height === undefined ? Infinity : Math.max(width, height)
+    )
+  }
+  for (const message of messages) {
+    for (const part of message.contentParts ?? []) {
+      if (part.type === 'image') add(part.data, part.width, part.height)
+    }
+  }
+  for (const result of toolResults) {
+    if (result.is_error) continue
+    for (const attachment of result.attachments ?? []) {
+      if (!imagePart(attachment, result.tool_call_id)) continue
+      add(attachment.dataBase64, attachment.width, attachment.height)
+    }
+  }
+  return { images, bytes, maxSide }
 }
 
 export function appendToolResults(

@@ -114,6 +114,12 @@ export class VisualInputBudget {
     return this.readLimit - this.consumed
   }
 
+  /** Resident bytes a new image may still take: none once closed or overflowed. */
+  get remainingResidentBytes(): number {
+    if (this.closed || this.ledger.externalOverflow) return 0
+    return this.residentLimit - this.ledger.resident
+  }
+
   get isClosed(): boolean {
     return this.closed
   }
