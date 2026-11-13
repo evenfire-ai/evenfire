@@ -10,6 +10,10 @@ import {
   testTeamSwitchResult,
 } from '../../testSupport/authTestFixtures.js'
 
+function discoveryResponseUrl(restBaseUrl: string): string {
+  return new URL(`${restBaseUrl.replace(/\/+$/, '')}/api/v1/desktop/environment`).href
+}
+
 afterEach(async () => {
   vi.useRealTimers()
   await cleanupNativeCommitTestHarness()
@@ -67,6 +71,7 @@ describe('AppService deliberate team transition ownership', () => {
     })
     const discovery = deferred<{
       externalRestApiBaseUrl: string
+      responseUrl: string
       rpcProxyBaseUrl: string
       appName: string
     }>()
@@ -85,12 +90,12 @@ describe('AppService deliberate team transition ownership', () => {
       getMeStarted.resolve()
       return getMeResponse.promise
     })
-    const getDesktopEnvironment = vi.fn(() => {
+    const getDesktopEnvironmentForEndpoint = vi.fn(() => {
       discoveryStarted.resolve()
       return discovery.promise
     })
     app.authClient = {
-      getDesktopEnvironment,
+      getDesktopEnvironmentForEndpoint,
       getMe,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
@@ -103,6 +108,7 @@ describe('AppService deliberate team transition ownership', () => {
     expect(getMe).not.toHaveBeenCalled()
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })
@@ -122,11 +128,12 @@ describe('AppService deliberate team transition ownership', () => {
     })
     const discovery = deferred<{
       externalRestApiBaseUrl: string
+      responseUrl: string
       rpcProxyBaseUrl: string
       appName: string
     }>()
     const discoveryStarted = deferred<void>()
-    const getDesktopEnvironment = vi.fn(() => {
+    const getDesktopEnvironmentForEndpoint = vi.fn(() => {
       discoveryStarted.resolve()
       return discovery.promise
     })
@@ -143,7 +150,7 @@ describe('AppService deliberate team transition ownership', () => {
       return loginResponse.promise
     })
     app.authClient = {
-      getDesktopEnvironment,
+      getDesktopEnvironmentForEndpoint,
       googleLogin,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
@@ -156,6 +163,7 @@ describe('AppService deliberate team transition ownership', () => {
     expect(googleLogin).not.toHaveBeenCalled()
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })
@@ -170,6 +178,7 @@ describe('AppService deliberate team transition ownership', () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     const discovery = deferred<{
       externalRestApiBaseUrl: string
+      responseUrl: string
       rpcProxyBaseUrl: string
       appName: string
     }>()
@@ -188,12 +197,12 @@ describe('AppService deliberate team transition ownership', () => {
     }
     app.tokenStore.getSessionToken.mockResolvedValue('saved-session-a')
     const getMe = vi.fn().mockResolvedValue(me)
-    const getDesktopEnvironment = vi.fn(() => {
+    const getDesktopEnvironmentForEndpoint = vi.fn(() => {
       discoveryStarted.resolve()
       return discovery.promise
     })
     app.authClient = {
-      getDesktopEnvironment,
+      getDesktopEnvironmentForEndpoint,
       getMe,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
@@ -210,12 +219,13 @@ describe('AppService deliberate team transition ownership', () => {
     expect(getMe).not.toHaveBeenCalled()
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })
     await save
     await expect(restore).resolves.toEqual({ authenticated: true, me, sessionGeneration: 3 })
-    expect(getDesktopEnvironment).toHaveBeenCalledOnce()
+    expect(getDesktopEnvironmentForEndpoint).toHaveBeenCalledOnce()
 
     expect(runtimeConfig.getDesktopRuntimeConfigState().currentConfig.rpcProxyBaseUrl).toBe(
       'https://rpc-discovered.example.test'
@@ -331,13 +341,13 @@ describe('AppService deliberate team transition ownership', () => {
         appName: 'Environment A',
       })
       const me = testSessionMe()
-      const getDesktopEnvironment = vi
+      const getDesktopEnvironmentForEndpoint = vi
         .fn()
         .mockRejectedValue(new Error('RPC discovery unavailable'))
       const googleLogin = vi.fn().mockResolvedValue(testLoginResult('google-session-a', me))
       const passwordLogin = vi.fn().mockResolvedValue(testLoginResult('password-session-a', me))
       const app = service as unknown as { authClient: unknown }
-      app.authClient = { getDesktopEnvironment, googleLogin, passwordLogin }
+      app.authClient = { getDesktopEnvironmentForEndpoint, googleLogin, passwordLogin }
 
       const result =
         loginMethod === 'Google'
@@ -345,7 +355,7 @@ describe('AppService deliberate team transition ownership', () => {
           : await service.passwordLogin('user-a@example.test', 'synthetic-password')
 
       expect(result).toMatchObject({ authenticated: true, me })
-      expect(getDesktopEnvironment).toHaveBeenCalledOnce()
+      expect(getDesktopEnvironmentForEndpoint).toHaveBeenCalledOnce()
       if (loginMethod === 'Google') {
         expect(googleLogin).toHaveBeenCalledWith('synthetic-google-token')
         expect(passwordLogin).not.toHaveBeenCalled()
@@ -378,11 +388,12 @@ describe('AppService deliberate team transition ownership', () => {
     const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
     const discovery = deferred<{
       externalRestApiBaseUrl: string
+      responseUrl: string
       rpcProxyBaseUrl: string
       appName: string
     }>()
     const discoveryStarted = deferred<void>()
-    const getDesktopEnvironment = vi.fn(() => {
+    const getDesktopEnvironmentForEndpoint = vi.fn(() => {
       discoveryStarted.resolve()
       return discovery.promise
     })
@@ -396,7 +407,7 @@ describe('AppService deliberate team transition ownership', () => {
     }
     app.authClient = {
       googleLogin: vi.fn().mockResolvedValue(testLoginResult()),
-      getDesktopEnvironment,
+      getDesktopEnvironmentForEndpoint,
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
     app.rpcClient = { health: vi.fn().mockResolvedValue({ status: 'ok' }) }
@@ -413,6 +424,7 @@ describe('AppService deliberate team transition ownership', () => {
     await expect(service.logout()).resolves.toBeTypeOf('number')
     discovery.resolve({
       externalRestApiBaseUrl: restA,
+      responseUrl: discoveryResponseUrl(restA),
       rpcProxyBaseUrl: 'https://rpc-discovered.example.test',
       appName: 'Environment A',
     })

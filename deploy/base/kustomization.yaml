@@ -22,6 +22,20 @@ resources:
 
 replacements:
   - source:
+      version: v1
+      kind: ConfigMap
+      name: desktop-profile-ui-config
+      namespace: profiles
+      fieldPath: data.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
+    targets:
+      - select:
+          version: v1
+          kind: ConfigMap
+          name: control-api-config
+          namespace: control-plane
+        fieldPaths:
+          - data.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
+  - source:
       group: clerum.io
       version: v1alpha1
       kind: PublicEgressExceptionSet

@@ -206,6 +206,14 @@ export function useAppController() {
     logoutForEnvironmentMismatch,
   })
 
+  useEffect(
+    () =>
+      window.clerum.auth.onProfileUiDispatchFailed?.(() => {
+        fullSetStatus('Profile UI could not be opened in your browser.', 'error')
+      }),
+    [fullSetStatus]
+  )
+
   // ─── First-run onboarding ───
   const onboarding = useOnboardingController()
   // Onboarding owns the unauthenticated screen only while the app has no

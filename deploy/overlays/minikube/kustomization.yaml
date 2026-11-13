@@ -118,6 +118,23 @@ patchesStrategicMerge:
 patches:
   # ConfigMap overrides: replace base values with minikube-specific config
   - path: configmaps/control-api-config.yaml
+  - path: configmaps/desktop-profile-ui-config.yaml
   - path: configmaps/codex-llm-proxy-config.yaml
   - path: configmaps/grok-llm-proxy-config.yaml
   - path: configmaps/channel-reader-config.yaml
+
+replacements:
+  - source:
+      version: v1
+      kind: ConfigMap
+      name: desktop-profile-ui-config
+      namespace: profiles
+      fieldPath: data.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
+    targets:
+      - select:
+          version: v1
+          kind: ConfigMap
+          name: control-api-config
+          namespace: control-plane
+        fieldPaths:
+          - data.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL

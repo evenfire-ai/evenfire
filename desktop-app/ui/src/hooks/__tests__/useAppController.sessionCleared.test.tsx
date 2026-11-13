@@ -14,6 +14,30 @@ afterEach(() => {
 })
 
 describe('useAppController session-cleared notice', () => {
+  it('surfaces a correlated late Profile UI dispatch failure', async () => {
+    const { clerum } = installAppControllerClerum()
+    let reportFailure: ((correlationId: string) => void) | null = null
+    const auth = (
+      clerum as unknown as {
+        auth: { onProfileUiDispatchFailed: ReturnType<typeof vi.fn> }
+      }
+    ).auth
+    auth.onProfileUiDispatchFailed = vi.fn((listener: (correlationId: string) => void) => {
+      reportFailure = listener
+      return () => undefined
+    })
+
+    const app = renderAppController()
+    await waitFor(() => expect(reportFailure).toBeTypeOf('function'))
+    act(() => reportFailure?.('profile-action-1'))
+
+    await waitFor(() =>
+      expect(app.result.current.statusText).toBe('Profile UI could not be opened in your browser.')
+    )
+    expect(app.result.current.statusTone).toBe('error')
+    app.unmount()
+  })
+
   it('runs the signed-out transition when main ends the session', async () => {
     const { clerum, handle } = installAppControllerClerum()
     let notifySessionCleared: (() => void) | null = null

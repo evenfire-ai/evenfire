@@ -9,6 +9,7 @@ vi.mock('../src/authToken.js', () => authTokenMock)
 const originalEnv = {
   publicBaseUrl: process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL,
   rpcProxyBaseUrl: process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL,
+  profileUiBaseUrl: process.env.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL,
   desktopAppName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME,
   desktopReleaseBaseUrl: process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL,
 }
@@ -26,6 +27,7 @@ describe('routes/desktop', () => {
     authTokenMock.verifyToken.mockReset()
     process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL = 'https://api.example.com/'
     process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL = 'https://rpc.example.com/'
+    process.env.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL = 'https://profile.example.com'
     process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME = 'Example Tenant'
     process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL =
       'https://github.com/example/evenfire/releases/'
@@ -39,6 +41,11 @@ describe('routes/desktop', () => {
       delete process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL
     } else {
       process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL = originalEnv.rpcProxyBaseUrl
+    }
+    if (originalEnv.profileUiBaseUrl === undefined) {
+      delete process.env.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
+    } else {
+      process.env.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL = originalEnv.profileUiBaseUrl
     }
     if (originalEnv.desktopAppName === undefined)
       delete process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME
@@ -66,6 +73,13 @@ describe('routes/desktop', () => {
       .expect(200)
 
     expect(res.body).toEqual({ ...desktopEnvironmentFixture, appName: 'Evenfire' })
+  })
+
+  it('advertises the configured Profile UI origin from the real discovery producer', async () => {
+    const res = await request(await buildApp())
+      .get('/api/v1/desktop/environment')
+      .expect(200)
+    expect(res.body).toEqual(desktopEnvironmentFixture)
   })
 
   it('requires auth before returning desktop release policy', async () => {

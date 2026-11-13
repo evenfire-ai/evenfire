@@ -14,7 +14,7 @@ Set on the **control-api** container (in your overlay's ConfigMap):
 
 Requirements:
 
-- `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` and `CONTROL_API_CONTROL_UI_BASE_URL`
+- `DESKTOP_PROFILE_UI_PUBLIC_BASE_URL` and `CONTROL_API_CONTROL_UI_BASE_URL`
   must point at **real, publicly resolvable domains** (e.g.
   `https://profile.acme.com`). Hosted mode refuses `localhost`, IP literals, and
   dotless hostnames — invitation links are emailed to recipients, so they must
@@ -54,7 +54,7 @@ surprises you or your invitees.
 ### Enrollment happens once, at boot
 
 When control-api starts in hosted mode, it takes the hostnames of
-`CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` and `CONTROL_API_CONTROL_UI_BASE_URL`
+`DESKTOP_PROFILE_UI_PUBLIC_BASE_URL` and `CONTROL_API_CONTROL_UI_BASE_URL`
 (deduplicated — ports are ignored) and registers each one with the hub in a
 single call per domain. The hub answers with a credential — a tenant id like
 `ext-…`, a key id, and a signing secret — bound to that domain. There is no

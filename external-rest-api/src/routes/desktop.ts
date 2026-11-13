@@ -13,6 +13,7 @@ export function createDesktopRouter(): Router {
       appName: config.desktopAppName,
       externalRestApiBaseUrl: config.publicBaseUrl,
       rpcProxyBaseUrl: config.desktopRpcProxyBaseUrl,
+      profileUiBaseUrl: config.desktopProfileUiBaseUrl,
     })
   })
 

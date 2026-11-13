@@ -94,12 +94,22 @@ declare global {
         probeLocalhostReachable: () => Promise<boolean>
         openDeploymentDocs: () => Promise<{ opened: true }>
         openHostedSignup: () => Promise<{ opened: true }>
-        startDesktopSetup: (email: string) => Promise<{ profileUiUrl: string; appName: string }>
-        openForgotPassword: (email?: string) => Promise<{ profileUiUrl: string }>
+        startDesktopSetup: (email: string) => Promise<{
+          profileUiUrl: string
+          appName: string
+          dispatchAccepted: true
+          correlationId: string
+        }>
+        openForgotPassword: (email?: string) => Promise<{
+          profileUiUrl: string
+          dispatchAccepted: true
+          correlationId: string
+        }>
         openProfileSettings: (
           email?: string,
           options?: ProfileSettingsOpenOptions
-        ) => Promise<{ profileUiUrl: string }>
+        ) => Promise<{ profileUiUrl: string; dispatchAccepted: true; correlationId: string }>
+        onProfileUiDispatchFailed?: (callback: (correlationId: string) => void) => () => void
         completeDesktopSetup: (
           email: string,
           authorizationToken: string

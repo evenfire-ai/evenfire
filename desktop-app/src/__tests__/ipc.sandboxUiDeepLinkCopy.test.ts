@@ -26,7 +26,12 @@ vi.mock('../appService.js', () => ({ AppService: class {} }))
 
 const sharedUrl = 'https://profile.example/apps/open?team=team-1'
 const service = {
-  createSandboxUiDeepLink: vi.fn(async () => ({ url: sharedUrl })),
+  createSandboxUiDeepLink: vi.fn(
+    async (_teamId?: string, writeClipboard?: (url: string) => Promise<void>) => {
+      if (writeClipboard) await writeClipboard(sharedUrl)
+      return { url: sharedUrl }
+    }
+  ),
 }
 const trusted = { senderFrame: { url: 'file:///app/index.html' } }
 
@@ -53,7 +58,7 @@ describe('sandboxUi:copyDeepLink trusted clipboard handoff', () => {
     })
 
     expect(service.createSandboxUiDeepLink).toHaveBeenCalledOnce()
-    expect(service.createSandboxUiDeepLink).toHaveBeenCalledWith('team-1')
+    expect(service.createSandboxUiDeepLink).toHaveBeenCalledWith('team-1', expect.any(Function))
     expect(electron.writeText).toHaveBeenCalledOnce()
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
@@ -80,7 +85,7 @@ describe('sandboxUi:copyDeepLink trusted clipboard handoff', () => {
     await expect(result).resolves.toEqual({ url: sharedUrl })
     expect(settled).toBe(true)
     expect(service.createSandboxUiDeepLink).toHaveBeenCalledOnce()
-    expect(service.createSandboxUiDeepLink).toHaveBeenCalledWith('team-1')
+    expect(service.createSandboxUiDeepLink).toHaveBeenCalledWith('team-1', expect.any(Function))
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })
 
@@ -92,7 +97,7 @@ describe('sandboxUi:copyDeepLink trusted clipboard handoff', () => {
     )
 
     expect(service.createSandboxUiDeepLink).toHaveBeenCalledOnce()
-    expect(service.createSandboxUiDeepLink).toHaveBeenCalledWith('team-1')
+    expect(service.createSandboxUiDeepLink).toHaveBeenCalledWith('team-1', expect.any(Function))
     expect(electron.writeText).toHaveBeenCalledOnce()
     expect(electron.writeText).toHaveBeenCalledWith(sharedUrl)
   })

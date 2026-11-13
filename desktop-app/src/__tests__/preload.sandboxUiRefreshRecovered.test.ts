@@ -49,4 +49,66 @@ describe('preload sandboxUi refresh recovery contract', () => {
     dispose()
     expect(electron.off).toHaveBeenCalledWith('sandboxUi:refreshRecovered', listener)
   })
+
+  it('correlates a late Profile UI failure with its completed invoke result', async () => {
+    let resolveInvoke!: (value: unknown) => void
+    electron.invoke.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveInvoke = resolve
+        })
+    )
+    await import('../preload.js')
+
+    const exposed = electron.exposeInMainWorld.mock.calls.find(
+      ([name]) => name === 'clerum'
+    )?.[1] as { auth: typeof window.clerum.auth }
+    const callback = vi.fn()
+    const dispose = exposed.auth.onProfileUiDispatchFailed?.(callback)
+    const failureListener = electron.on.mock.calls.find(
+      ([channel]) => channel === 'auth:profileUiDispatchFailed'
+    )?.[1]
+    expect(failureListener).toBeTypeOf('function')
+
+    const action = exposed.auth.openForgotPassword('user@example.test')
+    failureListener?.({}, { correlationId: 'profile-action-1' })
+    expect(callback).not.toHaveBeenCalled()
+    resolveInvoke({
+      dispatchAccepted: true,
+      correlationId: 'profile-action-1',
+      profileUiUrl: 'https://profile.example.test/forgot-password',
+    })
+    await expect(action).resolves.toMatchObject({ correlationId: 'profile-action-1' })
+    expect(callback).toHaveBeenCalledOnce()
+    expect(callback).toHaveBeenCalledWith('profile-action-1')
+
+    dispose?.()
+  })
+
+  it('reports a Profile UI failure that arrives after dispatch acceptance', async () => {
+    electron.invoke.mockResolvedValue({
+      dispatchAccepted: true,
+      correlationId: 'profile-action-late',
+      profileUiUrl: 'https://profile.example.test/forgot-password',
+    })
+    await import('../preload.js')
+
+    const exposed = electron.exposeInMainWorld.mock.calls.find(
+      ([name]) => name === 'clerum'
+    )?.[1] as { auth: typeof window.clerum.auth }
+    const callback = vi.fn()
+    const dispose = exposed.auth.onProfileUiDispatchFailed?.(callback)
+    const failureListener = electron.on.mock.calls.find(
+      ([channel]) => channel === 'auth:profileUiDispatchFailed'
+    )?.[1]
+
+    await exposed.auth.openForgotPassword('user@example.test')
+    failureListener?.({}, { correlationId: 'different-action' })
+    expect(callback).not.toHaveBeenCalled()
+    failureListener?.({}, { correlationId: 'profile-action-late' })
+
+    expect(callback).toHaveBeenCalledOnce()
+    expect(callback).toHaveBeenCalledWith('profile-action-late')
+    dispose?.()
+  })
 })

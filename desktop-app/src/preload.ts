@@ -102,6 +102,53 @@ function cancellableGfsInvoke<T>(
     .finally(() => signal.removeEventListener('abort', onAbort)) as Promise<T>
 }
 
+const profileUiDispatchListeners = new Set<(correlationId: string) => void>()
+const acceptedProfileUiDispatches = new Set<string>()
+const earlyProfileUiDispatchFailures = new Map<string, ReturnType<typeof setTimeout>>()
+let pendingProfileUiInvokes = 0
+
+function publishProfileUiDispatchFailure(correlationId: string): void {
+  if (profileUiDispatchListeners.size === 0) return
+  for (const callback of profileUiDispatchListeners) callback(correlationId)
+}
+
+ipcRenderer.on('auth:profileUiDispatchFailed', (_event, payload: { correlationId?: unknown }) => {
+  const correlationId = payload?.correlationId
+  if (typeof correlationId !== 'string') return
+  if (acceptedProfileUiDispatches.delete(correlationId)) {
+    publishProfileUiDispatchFailure(correlationId)
+    return
+  }
+  if (pendingProfileUiInvokes === 0 || earlyProfileUiDispatchFailures.has(correlationId)) return
+  const timeout = setTimeout(() => earlyProfileUiDispatchFailures.delete(correlationId), 10_000)
+  earlyProfileUiDispatchFailures.set(correlationId, timeout)
+})
+
+function invokeProfileUiAction<T extends { dispatchAccepted?: unknown; correlationId?: unknown }>(
+  channel: string,
+  payload: Record<string, unknown>
+): Promise<T> {
+  pendingProfileUiInvokes += 1
+  return (ipcRenderer.invoke(channel, payload) as Promise<T>)
+    .then(result => {
+      const correlationId = result?.correlationId
+      if (result?.dispatchAccepted !== true || typeof correlationId !== 'string') return result
+      const earlyFailure = earlyProfileUiDispatchFailures.get(correlationId)
+      if (earlyFailure) {
+        clearTimeout(earlyFailure)
+        earlyProfileUiDispatchFailures.delete(correlationId)
+        publishProfileUiDispatchFailure(correlationId)
+      } else {
+        acceptedProfileUiDispatches.add(correlationId)
+        setTimeout(() => acceptedProfileUiDispatches.delete(correlationId), 10_000)
+      }
+      return result
+    })
+    .finally(() => {
+      pendingProfileUiInvokes -= 1
+    })
+}
+
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
   return typeof value === 'string' && DESKTOP_COMMAND_IDS.has(value as DesktopCommandId)
 }
@@ -158,11 +205,16 @@ const clerum = Object.freeze({
     probeLocalhostReachable: () => ipcRenderer.invoke('auth:probeLocalhostReachable'),
     openDeploymentDocs: () => ipcRenderer.invoke('auth:openDeploymentDocs'),
     openHostedSignup: () => ipcRenderer.invoke('auth:openHostedSignup'),
-    startDesktopSetup: (email: string) => ipcRenderer.invoke('auth:startDesktopSetup', { email }),
+    startDesktopSetup: (email: string) =>
+      invokeProfileUiAction('auth:startDesktopSetup', { email }),
     openForgotPassword: (email?: string) =>
-      ipcRenderer.invoke('auth:openForgotPassword', { email }),
+      invokeProfileUiAction('auth:openForgotPassword', { email }),
     openProfileSettings: (email?: string, options?: ProfileSettingsOpenOptions) =>
-      ipcRenderer.invoke('auth:openProfileSettings', { email, ...options }),
+      invokeProfileUiAction('auth:openProfileSettings', { email, ...options }),
+    onProfileUiDispatchFailed: (callback: (correlationId: string) => void) => {
+      profileUiDispatchListeners.add(callback)
+      return () => profileUiDispatchListeners.delete(callback)
+    },
     completeDesktopSetup: (email: string, authorizationToken: string) =>
       ipcRenderer.invoke('auth:completeDesktopSetup', { email, authorizationToken }),
     onDesktopSetupToken: (

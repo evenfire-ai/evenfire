@@ -128,7 +128,8 @@ port-forwards; set them in your overlay:
 | Variable                                                                                                                              | Where                |
 | ------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | `CONTROL_API_CONTROL_UI_BASE_URL`                                                                                                     | `control-api-config` |
-| `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`, `CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL`, `CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL` | `control-api-config` |
+| `DESKTOP_PROFILE_UI_PUBLIC_BASE_URL` | `desktop-profile-ui-config` (profiles namespace; projected to External REST and Control API) |
+| `CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL`, `CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL` | `control-api-config` |
 | `CONTROL_API_OAUTH_CALLBACK_BASE_URL`                                                                                                 | `control-api-config` |
 | `CONTROL_API_GOOGLE_CLIENT_ID` (placeholder in base)                                                                                  | `control-api-config` |
 | `RPC_PROXY_CORS_ORIGIN`, `RPC_PROXY_OAUTH_CALLBACK_BASE_URL`                                                                          | `rpc-proxy-config`   |
