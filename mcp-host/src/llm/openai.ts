@@ -2,6 +2,8 @@
  * OpenAI LLM provider with tool/function calling support.
  */
 import OpenAI from 'openai'
+
+import { OPENAI_TOOL_NAME_RULE, ToolNameAliaser } from './toolNameAlias'
 import {
   CompletionResponse,
   ChatMessage as CoreChatMessage,
@@ -131,13 +133,14 @@ export class OpenAIProvider implements SingleTurnProvider {
     const openaiMessages = this.convertToOpenAIMessages(messages)
 
     // OpenAI rejects tools: [] with 400 error — must be undefined when empty
+    const aliaser = new ToolNameAliaser(OPENAI_TOOL_NAME_RULE)
     const openaiTools =
       tools.length > 0
         ? tools.map(t => ({
             type: 'function' as const,
             function: {
-              name: t.name,
-              description: t.description,
+              name: aliaser.alias(t.name),
+              description: aliaser.describe(t.name, t.description),
               parameters: t.parameters,
             },
           }))
@@ -167,7 +170,7 @@ export class OpenAIProvider implements SingleTurnProvider {
     const toolCalls =
       message.tool_calls?.map(tc => ({
         id: tc.id,
-        name: tc.function.name,
+        name: aliaser.resolve(tc.function.name),
         arguments: this.parseArguments(tc.function.arguments),
       })) ?? null
     const reasoningContent = (message as { reasoning_content?: unknown }).reasoning_content

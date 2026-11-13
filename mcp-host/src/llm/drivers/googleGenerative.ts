@@ -26,6 +26,7 @@ import {
 } from '../../core/types'
 import type { ProviderCredentials } from '../../types'
 import { classifyUnknown } from '../errorClassification'
+import { ToolNameAliaser, VERTEX_TOOL_NAME_RULE } from '../toolNameAlias'
 import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
 import type { LlmProvider } from '../registryCore'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
@@ -126,9 +127,10 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
     }
   ): Promise<ToolCompletionResponse> {
     const { systemInstruction, contents } = this.toGeminiContents(messages)
+    const aliaser = new ToolNameAliaser(VERTEX_TOOL_NAME_RULE)
     const functionDeclarations = tools.map(t => ({
-      name: t.name,
-      description: t.description,
+      name: aliaser.alias(t.name),
+      description: aliaser.describe(t.name, t.description),
       parameters: t.parameters,
     }))
 
@@ -158,7 +160,7 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
       .filter(p => p.functionCall)
       .map(p => ({
         id: `call_${callIndex++}`,
-        name: p.functionCall!.name,
+        name: aliaser.resolve(p.functionCall!.name),
         arguments: (p.functionCall!.args ?? {}) as Record<string, unknown>,
       }))
 

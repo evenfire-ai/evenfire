@@ -2,6 +2,8 @@
  * Anthropic Claude LLM provider with tool/function calling support.
  */
 import Anthropic from '@anthropic-ai/sdk'
+
+import { ANTHROPIC_TOOL_NAME_RULE, ToolNameAliaser } from './toolNameAlias'
 import { LlmErrorCode } from '../core/errors'
 import type { SystemPromptParts } from '../core/reasoning/systemPrompt'
 import {
@@ -203,9 +205,10 @@ export class ClaudeProvider implements SingleTurnProvider {
     const { systemPrompt, claudeMessages } = this.separateSystemMessage(messages)
     const formattedMessages = this.convertToClaudeMessages(claudeMessages)
 
+    const aliaser = new ToolNameAliaser(ANTHROPIC_TOOL_NAME_RULE)
     const claudeTools = tools.map(t => ({
-      name: t.name,
-      description: t.description,
+      name: aliaser.alias(t.name),
+      description: aliaser.describe(t.name, t.description),
       input_schema: t.parameters as Anthropic.Tool['input_schema'],
     }))
 
@@ -238,7 +241,7 @@ export class ClaudeProvider implements SingleTurnProvider {
       toolUseBlocks.length > 0
         ? toolUseBlocks.map(b => ({
             id: b.id,
-            name: b.name,
+            name: aliaser.resolve(b.name),
             arguments: b.input as Record<string, unknown>,
           }))
         : null
@@ -278,12 +281,13 @@ export class ClaudeProvider implements SingleTurnProvider {
     }
   ): Promise<ToolCompletionResponse> {
     const formattedMessages = this.convertToClaudeMessages(messages)
+    const aliaser = new ToolNameAliaser(ANTHROPIC_TOOL_NAME_RULE)
     const claudeTools = tools
       .slice()
       .sort((a, b) => a.name.localeCompare(b.name))
       .map(t => ({
-        name: t.name,
-        description: t.description,
+        name: aliaser.alias(t.name),
+        description: aliaser.describe(t.name, t.description),
         input_schema: t.parameters as Anthropic.Tool['input_schema'],
       }))
 
@@ -332,7 +336,7 @@ export class ClaudeProvider implements SingleTurnProvider {
       toolUseBlocks.length > 0
         ? toolUseBlocks.map(b => ({
             id: b.id,
-            name: b.name,
+            name: aliaser.resolve(b.name),
             arguments: b.input as Record<string, unknown>,
           }))
         : null
