@@ -92,34 +92,51 @@ prepare-release.mjs ──► release-prep commit ──► tag vX.Y.Z
    [`release-images.yml`](../../.github/workflows/release-images.yml). For each
    published image in [`deploy/images.json`](../../deploy/images.json),
    [`resolve-release-images.mjs`](../../scripts/release/resolve-release-images.mjs)
-   resolves `:latest` to a digest once, then refuses the image if:
+   tries these tags in order and takes the first that passes:
+   1. `:vX.Y.Z` itself, when an earlier run of this release already wrote it;
+   2. `:latest`;
+   3. `:sha-<7>` for each commit on `main`'s first-parent line since the
+      previous release, newest first (built on `main` with `build-publish.yml`
+      `hotfix_images`). The image must record exactly that commit;
+   4. the previous release's `:vX.Y.Z`.
+
+   Each candidate is resolved to a digest once, and rejected if:
+   - the tag does not exist;
    - it has no revision annotation;
    - the revision it was built from is not an ancestor of the tagged commit;
    - its source paths changed between that revision and the tagged commit.
 
+   Any other registry or git error fails the image instead of falling back to
+   an older candidate. When every candidate is rejected, the image is refused,
+   with one reason per candidate.
+
    [`promote-release-images.sh`](../../scripts/release/promote-release-images.sh)
-   then checks that the digest is a manifest list with both `amd64` and `arm64`,
-   and copies it (with `crane copy`) to `:vX.Y.Z`. For a strict `vX.Y.Z` tag it
-   also copies it to `:stable`. If any image is refused, the job fails, but the
-   other images are still copied, so a failed run can leave a partial release.
-   A manual
-   `workflow_dispatch` run is a dry run: it prints what it would promote and
-   copies nothing.
+   then checks that each digest is a manifest list with both `amd64` and
+   `arm64`. Promotion is all or nothing: if any image is refused or fails a
+   check, the job fails and copies nothing. Otherwise it copies (with
+   `crane copy`) every image to `:vX.Y.Z` first, and only then to `:stable`. If
+   a run fails partway through the copies, run it again: each image's own
+   `:vX.Y.Z` is its first candidate, so the re-run finishes the same release.
+   A manual `workflow_dispatch` run is a dry run: it prints what it would
+   promote and through which candidate, and copies nothing.
 
 The hosted evenfire service deploys from these same images through a separate,
 private pipeline. That pipeline is not part of this repository.
 
 ### What is fixed and what moves
 
-| Tag                   | Moves?                                                                                             |
-| --------------------- | -------------------------------------------------------------------------------------------------- |
-| `:latest`, `:sha-<7>` | `:latest` moves on every `dev` build of that image. `:sha-<7>` names one build.                    |
-| `:vX.Y.Z`             | Written by the release workflow for that tag. Nothing in normal operation rewrites it.             |
-| `:stable`             | Moves to whichever strict `vX.Y.Z` tag was promoted last (a patch to an older line moves it back). |
-| `@sha256:…` digest    | Never moves. Use a digest when you need a byte-for-byte guarantee.                                 |
+| Tag                   | Moves?                                                                                                                                                                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `:latest`, `:sha-<7>` | `:latest` moves on every `dev` build of that image. `:sha-<7>` names one build.                                                                                                    |
+| `:vX.Y.Z`             | Written by the release workflow for that tag. A run never points an existing `:vX.Y.Z` at another digest.                                                                          |
+| `:stable`             | Only moves forward: to a strict `vX.Y.Z` that is not below any other release tag, and whose commit contains the highest other one. A patch to an older line leaves it where it is. |
+| `@sha256:…` digest    | Never moves. Use a digest when you need a byte-for-byte guarantee.                                                                                                                 |
 
-The release workflow has no guard that stops a second run from writing
-`:vX.Y.Z` again. If you need an image that cannot change, pin the digest.
+Runs of the release workflow for the same tag wait for each other. Before it
+moves `:stable`, a run fetches the release tags again, so a higher release
+pushed in the meantime keeps `:stable` where it is. Anyone who can write to the
+registry can still re-tag an image by hand: if you need an image that cannot
+change, pin the digest.
 
 ## Run a specific release
 
