@@ -6,6 +6,9 @@ import type {
   DesktopRuntimeConfigHandoffSelection,
   EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
+  GfsWatchEvent,
+  GfsWatchSubscriptionRequest,
+  GfsWatchSubscriptionResult,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
@@ -460,6 +463,45 @@ const clerum = Object.freeze({
       return async () => {
         ipcRenderer.removeListener('entityChanges:streamEvent', listener)
         await ipcRenderer.invoke('entityChanges:streamStop', { streamId })
+      }
+    },
+  },
+  gfsWatch: {
+    /**
+     * Registers this window with the GFS watch and sends its first list. The
+     * event listener is installed before the first request, so an event main
+     * emits while it is in flight (an access change during a reopen) still
+     * arrives. `sessionExpired` tells a window that mounts after the session
+     * already expired, before any event could reach it.
+     */
+    open: async (onEvent: (event: GfsWatchEvent) => void, initial: GfsWatchSubscriptionRequest) => {
+      const listener = (_event: unknown, payload: unknown) => {
+        if (payload && typeof payload === 'object') onEvent(payload as GfsWatchEvent)
+      }
+      ipcRenderer.on('gfsWatch:event', listener)
+      const setSubscriptions = async (
+        request: GfsWatchSubscriptionRequest
+      ): Promise<GfsWatchSubscriptionResult> => {
+        const result = (await ipcRenderer.invoke('gfsWatch:setSubscriptions', {
+          keys: request.keys,
+          userId: request.userId,
+        })) as Partial<GfsWatchSubscriptionResult> | null
+        return { sessionExpired: result?.sessionExpired === true }
+      }
+      let first: GfsWatchSubscriptionResult
+      try {
+        first = await setSubscriptions(initial)
+      } catch (error) {
+        ipcRenderer.removeListener('gfsWatch:event', listener)
+        throw error
+      }
+      return {
+        sessionExpired: first.sessionExpired,
+        setSubscriptions,
+        close: async () => {
+          ipcRenderer.removeListener('gfsWatch:event', listener)
+          await ipcRenderer.invoke('gfsWatch:stop')
+        },
       }
     },
   },

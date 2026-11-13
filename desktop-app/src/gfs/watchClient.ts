@@ -1,4 +1,5 @@
 import { ApiError, requestJson } from '../httpClient.js'
+import type { GfsWatchEvent } from '../types.js'
 import {
   BACKOFF_CAP_MS,
   DEFERRED_RETRY_CAP_MS,
@@ -26,6 +27,7 @@ import {
   parseRetryAfterMs,
   trunc64,
 } from './watchProtocol.js'
+import { gfsWatchTransportDefaults } from './watchTransportDefaults.js'
 
 /**
  * The GFS watch client of the main process: one long-lived NDJSON stream per
@@ -41,13 +43,7 @@ import {
  * clear-and-null, so a stored handle is non-null exactly while it is pending.
  */
 
-export type GfsWatchEvent =
-  | { type: 'changed'; keys: string[] }
-  | { type: 'resync'; keys: string[] }
-  | { type: 'rejected'; keys: string[] }
-  | { type: 'accessChanged' }
-  | { type: 'accessChangedRoots' }
-  | { type: 'sessionExpired' }
+export type { GfsWatchEvent }
 
 /** A renderer that receives watch events; wired by the IPC layer to a `webContents`. */
 export interface GfsWatchOwner {
@@ -203,7 +199,8 @@ const intersects = (a: ReadonlySet<string>, b: ReadonlySet<string>) => [...a].so
 export type GfsWatchClient = ReturnType<typeof createGfsWatchClient>
 
 export function createGfsWatchClient(deps: GfsWatchClientDeps) {
-  const doFetch = deps.fetch ?? ((input, init) => fetch(input, init))
+  const fallback = gfsWatchTransportDefaults()
+  const doFetch = deps.fetch ?? fallback.fetch ?? ((input, init) => fetch(input, init))
   const putJson: PutTransport = deps.requestJson ?? ((m, url, o) => requestJson<unknown>(m, url, o))
   const clock = deps.clock ?? realClock
   const random = deps.random ?? Math.random
@@ -296,6 +293,11 @@ export function createGfsWatchClient(deps: GfsWatchClientDeps) {
 
   function emit(event: GfsWatchEvent): void {
     for (const owner of owners.values()) {
+      // Without a frame token the window has no accepted document (after a
+      // renderer crash, until the next navigation): an event sent now would land
+      // in whatever document loads next. That document asks for the session
+      // state in its first setSubscriptions, so nothing is lost by skipping it.
+      if (owner.frameToken === null) continue
       try {
         if (owner.handle.isDestroyed()) continue
         owner.handle.send(event)
@@ -981,7 +983,7 @@ export function createGfsWatchClient(deps: GfsWatchClientDeps) {
 
   // ─── Public API ────────────────────────────────────────────────────────────
 
-  return {
+  const client = {
     /** The committed session token changed (login, refresh, team switch, hop restore, logout). Never throws. */
     onSessionToken(token: string | null): void {
       guarded('sessionToken', undefined, () => onSessionTokenInner(token))
@@ -1157,4 +1159,6 @@ export function createGfsWatchClient(deps: GfsWatchClientDeps) {
       }
     },
   }
+  bestEffort(() => fallback.onClientCreated?.(client))
+  return client
 }

@@ -305,6 +305,24 @@ export type EntityChangeStreamEvent =
   | { type: 'error'; message: string }
   | { type: 'closed' }
 
+/** An event of the GFS watch, pushed by main to every subscribed window on `gfsWatch:event`. */
+export type GfsWatchEvent =
+  | { type: 'changed'; keys: string[] }
+  | { type: 'resync'; keys: string[] }
+  | { type: 'rejected'; keys: string[] }
+  | { type: 'accessChanged' }
+  | { type: 'accessChangedRoots' }
+  | { type: 'sessionExpired' }
+
+/**
+ * A window's GFS watch list. `keys` is ordered by priority; `userId` is the id
+ * of the user the list was derived for (`me.id`), so a list built for a
+ * previous session is dropped instead of being watched for the next one.
+ */
+export type GfsWatchSubscriptionRequest = { keys: string[]; userId: string | null }
+
+export type GfsWatchSubscriptionResult = { sessionExpired: boolean }
+
 export type WorkflowInputContractProperty = {
   type: 'string' | 'integer' | 'number' | 'boolean'
   default?: string | number | boolean

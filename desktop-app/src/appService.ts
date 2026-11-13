@@ -34,6 +34,11 @@ import {
   formatGfsUploadLimit,
 } from './gfs/upload.js'
 import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
+import {
+  type GfsWatchClient,
+  type GfsWatchClientDeps,
+  createGfsWatchClient,
+} from './gfs/watchClient.js'
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
 import { tryGetPluginSdkRuntime } from './pluginSdkRuntime.js'
@@ -882,6 +887,8 @@ export interface AppServiceOptions {
   tokenStore?: TokenStore
   onSandboxUiSessionInvalidated?: () => void
   onSessionCleared?: () => void
+  /** Transport, clock and logging seams of the GFS watch client; tests only. */
+  gfsWatch?: Pick<GfsWatchClientDeps, 'fetch' | 'requestJson' | 'clock' | 'random' | 'log'>
 }
 
 export class AppService {
@@ -1002,11 +1009,26 @@ export class AppService {
     string,
     { ownerId: number; stop: (opts?: { silent?: boolean }) => void }
   >()
+  // Built here rather than by the IPC layer so it sees every session token
+  // published from the first one on, whatever order startup runs in.
+  readonly gfsWatch: GfsWatchClient
 
   constructor(options: AppServiceOptions = {}) {
     this.tokenStore = options.tokenStore ?? new TokenStore()
     this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
     this.onSessionCleared = options.onSessionCleared
+    this.gfsWatch = createGfsWatchClient({
+      ...options.gfsWatch,
+      baseUrl: () => config.externalRestApiBaseUrl,
+      readHopDepth: () => this.gfsTransientTeamHopDepth,
+      onSessionExpiredVerdict: () =>
+        this.confirmCommittedSessionWithMe().catch(error => {
+          console.warn(
+            '[AppService] Could not check the session after the GFS watch expired:',
+            error
+          )
+        }),
+    })
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1301,6 +1323,7 @@ export class AppService {
 
   private enterGfsTransientTeamHop(): () => void {
     this.gfsTransientTeamHopDepth += 1
+    this.gfsWatch.onHopEnter()
     let released = false
     return () => {
       if (released) return
@@ -1310,6 +1333,9 @@ export class AppService {
         this.entityChangeSessionExpiryDeferred = false
         this.emitEntityChangeSessionExpired()
       }
+      // A hop that does not restore the original team commits its token without
+      // publishing it; the watch learns it here, once the last hop is released.
+      this.gfsWatch.onHopRelease(this.sessionToken)
     }
   }
 
@@ -1464,6 +1490,7 @@ export class AppService {
             }
             if (restoredOriginalTeam && this.sessionToken) {
               this.updateEntityChangeSessionToken(this.sessionToken)
+              this.gfsWatch.onSessionToken(this.sessionToken)
               this.restartEntityChangeStreamForSessionReplacement()
             } else if (
               shouldRestore &&
@@ -1477,6 +1504,7 @@ export class AppService {
               // then rebind session-scoped consumers to the token that remains.
               this.sessionGeneration += 1
               this.updateEntityChangeSessionToken(this.sessionToken)
+              this.gfsWatch.onSessionToken(this.sessionToken)
               this.restartEntityChangeStreamForSessionReplacement()
             }
             if (restoreFailed && !operationFailed) throw restoreFailure
@@ -1587,6 +1615,7 @@ export class AppService {
   private clearAuthenticatedSessionState(): void {
     this.sessionGeneration += 1
     this.updateEntityChangeSessionToken(null)
+    this.gfsWatch.onSessionToken(null)
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = true
     this.gfsScopeIdentity = null
@@ -1914,6 +1943,7 @@ export class AppService {
         this.me = restoredMe
         this.savedSessionRestoreAttemptedEnvKey = environmentKey
         this.updateEntityChangeSessionToken(token)
+        this.gfsWatch.onSessionToken(token)
         this.restartEntityChangeStreamForSessionReplacement()
         this.accessCatalog = null
         this.teamDirectoryCache = null
@@ -2026,6 +2056,7 @@ export class AppService {
       this.sessionToken = result.token
       this.me = result.me
       this.updateEntityChangeSessionToken(result.token)
+      this.gfsWatch.onSessionToken(result.token)
       this.restartEntityChangeStreamForSessionReplacement()
       await this.bindCurrentChatStore(result.me.id)
       this.accessCatalog = null
@@ -2138,6 +2169,7 @@ export class AppService {
       const hadAuthenticatedScope = Boolean(this.sessionToken && this.me)
       this.entityChangeEnvironmentSwitching = true
       this.entityChangeConnectionStop?.({ silent: true })
+      this.gfsWatch.onEnvSwitchStart()
       // Invalidate a restore that may still be awaiting keychain/getMe before it
       // can bind an old-environment token to the newly selected runtime.
       this.sessionGeneration += 1
@@ -2184,10 +2216,14 @@ export class AppService {
       return this.sessionGeneration
     } finally {
       this.entityChangeEnvironmentSwitching = false
-      if (
+      const environmentUnchanged =
         getActiveEnvKey() === oldEnvKey &&
         normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
-      ) {
+      // Same predicate as the session clearing above: reporting a change here
+      // that did not clear the session would drop a session that is still valid.
+      // First, so that nothing thrown below leaves the watch switching for good.
+      this.gfsWatch.onEnvSwitchEnd(!environmentUnchanged)
+      if (environmentUnchanged) {
         this.ensureEntityChangeConnection()
       }
       releasePrewarm()
@@ -4083,6 +4119,7 @@ export class AppService {
     this.entityChangeSessionExpiryDeferred = false
     this.entityChangeConnectionStop?.({ silent: true })
     this.entityChangeCursor = null
+    this.gfsWatch.onStopAllStreams()
   }
 
   getWorkflowNotificationStreamStatus(): {
@@ -4319,6 +4356,7 @@ export class AppService {
         }
         this.activateGfsAuthScope()
         this.updateEntityChangeSessionToken(this.sessionToken)
+        this.gfsWatch.onSessionToken(this.sessionToken)
         this.stopAllStreams()
         // Grants are keyed by userId, not by team, so they carry over — but every
         // cached org/agents/contexts answer is now about the wrong team. Drop the

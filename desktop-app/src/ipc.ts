@@ -21,6 +21,7 @@ import {
 } from './chatStoreBinding.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import type { GfsWatchClient, GfsWatchOwner } from './gfs/watchClient.js'
 import {
   abortZipJob,
   appendZipEntry,
@@ -401,6 +402,85 @@ export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): v
   }
 }
 
+/**
+ * Electron throws while a frame is being disposed (e.g. inside
+ * `render-process-gone`), so every read of a frame token goes through here.
+ */
+function frameTokenOf(webContents: Electron.WebContents): string | null {
+  try {
+    const token = webContents.mainFrame.frameToken
+    return typeof token === 'string' ? token : null
+  } catch {
+    return null
+  }
+}
+
+function senderFrameTokenOf(event: IpcMainInvokeEvent): string | null {
+  try {
+    const token = event.senderFrame?.frameToken
+    return typeof token === 'string' ? token : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The GFS watch IPC. The owner is the sending `webContents`, never a value of
+ * the payload; the document inside it is identified by Electron's main-frame
+ * token, which changes on every navigation, so a late IPC of a previous
+ * document or one from a subframe is dropped by the client.
+ */
+export function registerGfsWatchIpcHandlers(client: GfsWatchClient): void {
+  const lifecycleInstalled = new Set<number>()
+
+  const ownerOf = (webContents: Electron.WebContents): GfsWatchOwner => ({
+    id: webContents.id,
+    isDestroyed: () => webContents.isDestroyed(),
+    mainFrameToken: () => frameTokenOf(webContents),
+    send: event => webContents.send('gfsWatch:event', event),
+  })
+
+  // Installed once per webContents and removed only when it is destroyed: the
+  // owner outlives navigations, so removing them on the first navigation would
+  // leave a dead owner holding its keys after the window closes.
+  const installLifecycle = (webContents: Electron.WebContents) => {
+    const id = webContents.id
+    if (lifecycleInstalled.has(id)) return
+    lifecycleInstalled.add(id)
+    // `did-navigate` fires only for a committed main-frame navigation, which is
+    // exactly when the document (and its frame token) is replaced.
+    const onNavigated = () => client.ownerNavigated(id, frameTokenOf(webContents))
+    const onProcessGone = () => client.ownerProcessGone(id)
+    const onDestroyed = () => {
+      lifecycleInstalled.delete(id)
+      webContents.removeListener('did-navigate', onNavigated)
+      webContents.removeListener('render-process-gone', onProcessGone)
+      client.ownerDestroyed(id)
+    }
+    webContents.on('did-navigate', onNavigated)
+    webContents.on('render-process-gone', onProcessGone)
+    webContents.once('destroyed', onDestroyed)
+  }
+
+  ipcMain.handle('gfsWatch:setSubscriptions', (event, payload: unknown) => {
+    assertTrustedSender(event)
+    const webContents = event.sender
+    const result = client.setSubscriptions(
+      ownerOf(webContents),
+      payload && typeof payload === 'object' ? payload : null,
+      senderFrameTokenOf(event)
+    )
+    if (client.hasOwner(webContents.id)) installLifecycle(webContents)
+    return { sessionExpired: result.sessionExpired === true }
+  })
+
+  ipcMain.handle('gfsWatch:stop', event => {
+    assertTrustedSender(event)
+    client.stopOwner(ownerOf(event.sender), senderFrameTokenOf(event))
+    return { ok: true }
+  })
+}
+
 /** Register the trusted renderer's read-only snapshot of the native GFS inbox. */
 export function registerGfsDeepLinkListHandler(queue: {
   list(): GfsResourceDeepLinkEnvelope[]
@@ -455,6 +535,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
+  registerGfsWatchIpcHandlers(service.gfsWatch)
 
   // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
   // R1-M1): the renderer attaches a requestId to an invoke and fires
