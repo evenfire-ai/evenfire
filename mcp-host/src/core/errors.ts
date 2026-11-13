@@ -45,11 +45,26 @@ export enum LlmErrorCode {
   ControlPlaneUnavailable = 'LLM_CONTROL_PLANE_UNAVAILABLE',
   /**
    * Issue #720 — a subscription proxy reported `upstream_rejected`: the
-   * provider answered a 4xx the proxy has no specific code for (Grok 402/403
-   * entitlement, 404, 409, 422). The same request gets the same answer, so it
-   * is not retryable and never fails over.
+   * provider answered a 4xx the proxy has no specific code for (400, Grok
+   * 402/403 entitlement, 404, 409, 422). #1433 — also an HTTP 400 on a
+   * provider call that no body code maps elsewhere: an OpenAI-family or
+   * Anthropic API-key 400 (`errorClassification.ts`); any numeric HTTP 400
+   * the Vertex SDK surfaces, which includes the Google token endpoint's
+   * `invalid_grant` for a bad service-account key (#1437), and the statuses
+   * `INVALID_ARGUMENT` and `FAILED_PRECONDITION`
+   * (`drivers/googleGenerative.ts`); and a Bedrock `ValidationException` or
+   * unmodeled HTTP 400 (`drivers/bedrockConverse.ts`). Not retryable, and
+   * never a failover trigger.
    */
   UpstreamRejected = 'LLM_UPSTREAM_REJECTED',
+  /**
+   * Issue #1433 — the Host refused a request before dispatch because its text
+   * cannot be sent as written: repairing invalid Unicode (lone UTF-16
+   * surrogates) would make two keys of one object equal
+   * (`llm/wellFormedRequestText.ts`). Nothing left the process; the same
+   * request is refused again, so it is not retryable and never fails over.
+   */
+  RequestTextRejected = 'LLM_REQUEST_TEXT_REJECTED',
   /** One model response asked for more tool calls than the provider contract allows. */
   ToolCallLimitExceeded = 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
   /**

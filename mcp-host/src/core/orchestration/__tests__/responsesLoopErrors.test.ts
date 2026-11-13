@@ -88,8 +88,9 @@ describe('T-E3 the provider rejects a replayed continuation', () => {
     expect(result.type).toBe('error')
     const error = (result as { type: 'error'; error: Error }).error
     expect(error).toBeInstanceOf(LlmError)
+    // #1433: a provider HTTP 400 is a rejected request, not "Connection Error".
     expect(error).toMatchObject({
-      code: LlmErrorCode.ApiCallFailed,
+      code: LlmErrorCode.UpstreamRejected,
       retryable: false,
       httpStatus: 400,
       providerCode: 'invalid_encrypted_content',

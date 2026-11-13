@@ -19,6 +19,7 @@
  * warning.
  */
 import { type Tiktoken, encoding_for_model, get_encoding } from 'tiktoken'
+import { type ToolNameEnvelopeKey, toWireRequest } from '../../llm/toolWireNames'
 import { logger } from '../../logger'
 import type { ChatMessage, ToolDefinition } from '../types'
 import { encodeLength } from './encodeLength'
@@ -84,6 +85,12 @@ function byteLengthFallback(messages: ChatMessage[], tools: ToolDefinition[]): n
 
 export { encodeLength } from './encodeLength'
 
+// The factory hands this counter only to the providers whose descriptor says
+// `tokenizer: 'openai'` (`openai`, `azure`), and both send tools under `W`.
+// Counting the canonical request would miss the aliases and the annotation
+// prepended to every aliased description.
+const COUNTED_ENVELOPE: ToolNameEnvelopeKey = 'W'
+
 export class OpenAITokenCounter implements TokenCounter {
   readonly providerName = 'openai' as const
   private encoder: Tiktoken | null = null
@@ -122,7 +129,8 @@ export class OpenAITokenCounter implements TokenCounter {
     return this.countSync(messages, tools)
   }
 
-  countSync(messages: ChatMessage[], tools: ToolDefinition[] = []): number {
+  countSync(canonicalMessages: ChatMessage[], canonicalTools: ToolDefinition[] = []): number {
+    const { messages, tools } = toWireRequest(canonicalMessages, canonicalTools, COUNTED_ENVELOPE)
     if (!this.encoder) {
       tokenizerFallbackTotal.inc({ provider: 'openai', reason: 'no_warmup' })
       warnEncodeFailureOnce('no_warmup')

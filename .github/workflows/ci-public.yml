@@ -27,6 +27,14 @@ jobs:
             echo "$tracked"
             exit 1
           fi
+      - name: No tracked file may match a .gitignore
+        # The step above covers one directory. This one covers every ignore rule
+        # in the tree: a file force-added under an ignored path (a session
+        # handoff under .local-notes/, run evidence, local notes) fails CI unless
+        # the check's allowlist names it with a reason.
+        run: bash scripts/ci/check-tracked-ignored-files.sh
+      - name: Test the tracked-and-ignored file check
+        run: bash scripts/tests/test-check-tracked-ignored-files.sh
       - name: Shipped shell scripts must be executable
         # The sync-to-OSS pipeline has stripped exec bits before (every .sh at
         # mode 100644), which breaks `make minikube-setup` with Permission
@@ -1122,6 +1130,12 @@ jobs:
 
       - name: Test the image manifest
         run: bash scripts/tests/test-images-manifest.sh
+
+      # PyYAML, not yq: OSS runners have no yq. Install it only if missing.
+      - name: Test the build-publish hotfix mode
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user --quiet pyyaml
+          python3 scripts/tests/test-build-publish-hotfix-mode.py
 
       - name: Test the ghcr-images kustomize component
         run: bash scripts/tests/test-ghcr-component.sh
