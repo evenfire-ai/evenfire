@@ -46,10 +46,10 @@ and `GFS_RECOVER_ABANDONED_STATE=true` only in the `minikube-t2` transition;
 other security gates refresh MCP auth without mutating GFS. Do not insert
 manual repair scripts between runs. Harness GFS reconciles settle Ready-reader
 leftovers first (`settle-gfs-reader-rollout.sh`) and judge reader rollout
-completion by readiness via the `gfs-rollout-shim` PATH prefix, because
-HCC's gfsReconciler now preserves the `restartedAt` annotation, and the
-harness still judges reader readiness via the shim so leftover ReplicaSets
-cannot turn a generation-based `kubectl rollout status` into a timeout.
+completion by revision and readiness via the `gfs-rollout-shim` PATH prefix.
+Unlike `kubectl rollout status`, the shim's wait also blocks on any live unready
+pod and does not stop at the progress deadline. The deploy's auth-key sync uses
+the same wait.
 Follow the rule
 `.cursor/rules/minikube-t0-t1-t2.mdc` and the skill
 `.cursor/skills/minikube-t0-t1-t2/SKILL.md` for the certification workflow.

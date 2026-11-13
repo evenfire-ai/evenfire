@@ -549,9 +549,8 @@ incremental_restart_targets() {
     ${KC} rollout restart "deployment/${deployment}" -n "${namespace}" >/dev/null
     log "Restarted ${namespace}/${deployment} for image selector ${selector}"
     if [[ "${namespace}/${deployment}" == "gfs/gfsc-reader" ]]; then
-      # HCC now preserves kubectl's restartedAt. The canonical shim still
-      # judges Ready replicas/pods because leftover ReplicaSets can poison a
-      # generation-based wait.
+      # The canonical shim judges the rollout and every live reader pod
+      # (wait-gfs-reader-ready.sh).
       PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
         CONTEXT="${PROFILE}" ${KC} rollout status "deployment/${deployment}" \
           -n "${namespace}" --timeout=120s >/dev/null
