@@ -82,6 +82,8 @@ export class FakeSocket implements WatchSocket {
   ended = 0
   violations: string[] = []
   conn: WatchConnection | null = null
+  /** Event number of the admission (the open's synchronous part), or null before it. */
+  admittedEv: number | null = null
   onFrame: ((frame: Record<string, unknown>, ev: number) => void) | null = null
   private gone: (() => void)[] = []
   private drains: (() => void)[] = []
@@ -167,6 +169,8 @@ export class Gate {
   hook: ((label: string) => Promise<void>) | null = null
   held: Waiter[] = []
   calls = 0
+  /** Calls whose boundary step settled (resolved or rejected) after passing the gate. */
+  done = 0
 
   async pass(label: string, signal?: AbortSignal): Promise<void> {
     this.calls += 1
@@ -206,6 +210,8 @@ type AuthenticatedSession = Parameters<GfsWatchRegistry['open']>[0]['authenticat
 
 export type TestUser = {
   userId: Uuid
+  /** The team whose membership the session was issued under. */
+  teamId: string
   token: string
   authenticate(): Promise<AuthenticatedSession>
 }
@@ -213,7 +219,7 @@ export type TestUser = {
 export type BuiltRegistry = {
   registry: GfsWatchRegistry
   clock: VirtualWatchClock
-  gates: { cte: Gate; read: Gate; mint: Gate; observe: Gate }
+  gates: { cte: Gate; read: Gate; mint: Gate; observe: Gate; expansion: Gate }
   open(
     user: TestUser,
     keys: Iterable<GfsKey>,
@@ -374,6 +380,123 @@ export async function createRegistryHarness(adminUrl: string) {
   }
   const key = (kind: 'file' | 'dir', id: string) => `${kind}:gfs://main/${toRid(id)}` as GfsKey
 
+  // Authorization writes through the production writers, so each fires the
+  // real gfs_authz_changed trigger with the rows they really write: grants
+  // through the grant route's batch writer as a Control UI operator,
+  // memberships through the directory service. The stand-in gfsc's
+  // decisions stay the test's, through `decisions`.
+  const linkModule = await import('../../src/services/gfsDesktopOperatorLinkService.js')
+  const adminAuthModule = await import('../../src/services/adminAuthService.js')
+  const grantsModule = await import('../../src/routes/gfs/grants.js')
+  const membershipModule = await import('../../src/services/directory/membership.js')
+  const operatorAdminId = (
+    await writer.query<{ id: string }>(
+      `INSERT INTO control_admin_users (username, password_hash)
+       VALUES ($1, 'x') RETURNING id::text AS id`,
+      [`gfs-watch-operator-${randomUUID()}`]
+    )
+  ).rows[0]!.id
+  const operatorReq = {
+    adminAuth: { sub: operatorAdminId },
+    ip: '127.0.0.1',
+    gfsRequestId: randomUUID(),
+  } as unknown as import('express').Request
+  const operatorCaller = grantsModule.resolveCaller(operatorReq)
+  type SubjectType = 'user' | 'team' | 'operator' | 'host' | 'context'
+  async function writeGrant(
+    db: import('../../src/db.js').DbClient,
+    resourceId: string,
+    subjectType: SubjectType,
+    subjectId: string,
+    permissions: string[]
+  ): Promise<string> {
+    const subject =
+      subjectType === 'operator' ? { type: subjectType } : { type: subjectType, id: subjectId }
+    const { error } = await grantsModule.writeGfsGrantBatchInTransaction(db, {
+      req: operatorReq,
+      caller: operatorCaller,
+      drive: 'main',
+      resourceId,
+      subjects: [subject],
+      permissions: permissions as import('../../src/routes/gfs/grants.js').GfsPermission[],
+      inherit: true,
+    })
+    if (error) throw error
+    const row = await db.query<{ id: string }>(
+      `SELECT id::text AS id FROM gfs_grants
+        WHERE drive = 'main' AND resource_id = $1 AND subject_type = $2 AND subject_id = $3`,
+      [resourceId, subjectType, subjectType === 'operator' ? '' : subjectId]
+    )
+    return row.rows[0]!.id
+  }
+  const authz = {
+    async grant(
+      resourceId: string,
+      subjectType: SubjectType,
+      subjectId: string,
+      permissions: string[] = ['read']
+    ): Promise<string> {
+      return dbModule.withTransaction(db =>
+        writeGrant(db, resourceId, subjectType, subjectId, permissions)
+      )
+    },
+    /** One transaction, one grant per resource: Postgres folds identical payloads. */
+    async grantMany(resourceIds: string[], subjectType: 'user' | 'team', subjectId: string) {
+      await dbModule.withTransaction(async db => {
+        for (const r of resourceIds) await writeGrant(db, r, subjectType, subjectId, ['read'])
+      })
+    },
+    /**
+     * The statement the grant route's DELETE runs; that handler is not
+     * exported and needs an authenticated Control UI request around it.
+     */
+    async revoke(grantId: string): Promise<void> {
+      await writer.query(`DELETE FROM gfs_grants WHERE id = $1::uuid`, [grantId])
+    },
+    async createTeam(): Promise<string> {
+      const r = await writer.query<{ id: string }>(
+        `INSERT INTO teams (name) VALUES ('gfs-watch-authz') RETURNING id::text AS id`
+      )
+      return r.rows[0]!.id
+    },
+    async join(teamId: string, userId: string): Promise<void> {
+      await membershipModule.addMemberToTeam(teamId, userId, operatorAdminId)
+    },
+    async leave(teamId: string, userId: string): Promise<void> {
+      await membershipModule.softDeleteMember(teamId, userId, operatorAdminId)
+    },
+    async createAdmin(): Promise<string> {
+      const r = await writer.query<{ id: string }>(
+        `INSERT INTO control_admin_users (username, password_hash)
+         VALUES ($1, 'x') RETURNING id::text AS id`,
+        [`gfs-watch-${randomUUID()}`]
+      )
+      return r.rows[0]!.id
+    },
+    async link(userId: string, adminId: string): Promise<void> {
+      await linkModule.gfsDesktopOperatorLinkService.link({
+        desktopUserId: userId,
+        controlAdminId: adminId,
+        source: 'initial_setup',
+        operatorSub: adminId,
+        requestId: `gfs-watch-${randomUUID()}`,
+      })
+    },
+    async unlink(userId: string, adminId: string): Promise<void> {
+      await linkModule.gfsDesktopOperatorLinkService.unlink({
+        desktopUserId: userId,
+        controlAdminId: adminId,
+        operatorSub: adminId,
+        reason: 'gfs watch test',
+        requestId: `gfs-watch-${randomUUID()}`,
+      })
+    },
+    /** The real password writer: bumps the admin's session_version. */
+    async bumpAdmin(adminId: string): Promise<void> {
+      await adminAuthModule.updateAdminPassword(adminId, `x-${randomUUID()}`)
+    },
+  }
+
   const policy = {
     issueV1: true,
     acceptV1: true,
@@ -413,6 +536,7 @@ export async function createRegistryHarness(adminUrl: string) {
     ).token
     return {
       userId,
+      teamId,
       token,
       async authenticate() {
         const a = await authnModule.authenticateExternalUserSession(token, { purpose: 'protected' })
@@ -442,6 +566,23 @@ export async function createRegistryHarness(adminUrl: string) {
     throw new Error('NOTIFY barrier not delivered')
   }
 
+  /**
+   * Terminates the registry's LISTEN backend; returns how many backends it
+   * ended. pg_stat_activity shows a backend's last statement: the listener's
+   * is its LISTEN until its first ping, then the parameterized ping. The
+   * barrier's ping is a literal, so it never matches.
+   */
+  async function terminateListener(): Promise<number> {
+    const r = await writer.query<{ n: number }>(
+      `SELECT count(*) FILTER (WHERE pg_terminate_backend(pid))::int AS n
+         FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()
+          AND (query LIKE 'LISTEN gfs_resource_changed%'
+               OR query = 'SELECT pg_notify(''gfs_watch_ping'', $1)')`
+    )
+    return r.rows[0]!.n
+  }
+
   async function notifyCmd(cmd: Parameters<typeof schemas.serializeWatchCmd>[0]): Promise<void> {
     await writer.query('SELECT pg_notify($1, $2)', [
       schemas.GFS_WATCH_CMD_CHANNEL,
@@ -456,7 +597,18 @@ export async function createRegistryHarness(adminUrl: string) {
     overrides: Partial<GfsWatchRegistryDeps> & { permits?: number } = {}
   ): Promise<BuiltRegistry> {
     const clock = createVirtualWatchClock({ random: () => 0.5 })
-    const gates = { cte: new Gate(), read: new Gate(), mint: new Gate(), observe: new Gate() }
+    const gates = {
+      cte: new Gate(),
+      read: new Gate(),
+      mint: new Gate(),
+      observe: new Gate(),
+      expansion: new Gate(),
+    }
+    const expansionLatencyMs = Number(process.env.GFS_WATCH_TEST_EXPANSION_LATENCY_MS ?? 0)
+    const expansionTexts: unknown[] = [
+      registryModule.GFS_WATCH_EXPAND_TEAMS_SQL,
+      registryModule.GFS_WATCH_EXPAND_ADMINS_SQL,
+    ]
     const watchPool = watchPoolModule.createGfsWatchPool(connectionString)
     const gatedPool = {
       query: (async (config: unknown, ...rest: unknown[]) => {
@@ -466,6 +618,20 @@ export async function createRegistryHarness(adminUrl: string) {
           (config as { text?: unknown }).text === registryModule.GFS_WATCH_ANCESTRY_CTE
         ) {
           await gates.cte.pass('cte')
+        } else if (
+          typeof config === 'object' &&
+          config !== null &&
+          expansionTexts.includes((config as { text?: unknown }).text)
+        ) {
+          try {
+            await gates.expansion.pass('expansion')
+            // Optional real latency on the expansion, to show a rest predicate
+            // that does not wait for it is not one.
+            if (expansionLatencyMs > 0) await sleep(expansionLatencyMs)
+            return await (watchPool.query as (...a: unknown[]) => Promise<unknown>)(config, ...rest)
+          } finally {
+            gates.expansion.done += 1
+          }
         } else {
           await gates.observe.pass('observe')
         }
@@ -510,6 +676,7 @@ export async function createRegistryHarness(adminUrl: string) {
             requestId: opts.requestId ?? randomUUID(),
           })
           for (const c of registry.state.byConnId.values()) if (!before.has(c)) socket.conn = c
+          if (socket.conn) socket.admittedEv = nextEv()
           return p
         })().finally(() => {
           done = true
@@ -522,8 +689,14 @@ export async function createRegistryHarness(adminUrl: string) {
         return socket.conn ?? undefined
       },
       async settle(predicate, timeoutMs = 5_000) {
+        // An expansion still in flight resumes into a flush that can close
+        // streams, so the registry is not at rest until it has settled.
         const quiet =
-          predicate ?? (() => registry.state.opsInFlight.size === 0 && opening.size === 0)
+          predicate ??
+          (() =>
+            registry.state.opsInFlight.size === 0 &&
+            opening.size === 0 &&
+            gates.expansion.calls === gates.expansion.done)
         const start = Date.now()
         while (Date.now() - start < timeoutMs) {
           await flushMicrotasks()
@@ -589,10 +762,12 @@ export async function createRegistryHarness(adminUrl: string) {
     writer,
     corePool,
     tree,
+    authz,
     key,
     toRid,
     createUser,
     barrier,
+    terminateListener,
     notifyCmd,
     invalidCount,
     decisions,

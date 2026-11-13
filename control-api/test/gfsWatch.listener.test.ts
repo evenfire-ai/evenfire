@@ -109,6 +109,7 @@ function setup({
   const recentDirty = createRecentDirty(clock.now)
   const onCmd = vi.fn()
   const onResourceChanged = vi.fn()
+  const onAuthzChanged = vi.fn()
   const resetWindows = vi.fn(() => events.push('resetWindows'))
   const onExpansionFailed = vi.fn(() => events.push('onExpansionFailed'))
   let listener!: ReturnType<typeof createGfsWatchListener<Conn>>
@@ -130,6 +131,7 @@ function setup({
     closeConn,
     onCmd,
     onResourceChanged,
+    onAuthzChanged,
     resetWindows,
     onExpansionFailed,
     instanceId,
@@ -149,6 +151,7 @@ function setup({
     recentDirty,
     onCmd,
     onResourceChanged,
+    onAuthzChanged,
     resetWindows,
     onExpansionFailed,
     closeConn,
@@ -163,14 +166,14 @@ const conn = (id: string, op = false): Conn => ({
 })
 
 describe('connectListener and the echo liveness proof', () => {
-  it('connects, LISTENs only the three PR channels, and pings through its own connection', async () => {
+  it('connects, LISTENs the resource, authorization, ping and command channels, and pings through its own connection', async () => {
     const t = setup()
     t.listener.startGfsWatchRegistry()
     await flushMicrotasks()
     expect(t.listener.state.listenerReady).toBe(true)
     expect(t.clients).toHaveLength(1)
     expect(t.clients[0]!.queries[0]!.text).toBe(
-      'LISTEN gfs_resource_changed; LISTEN gfs_watch_ping; LISTEN gfs_watch_cmd'
+      'LISTEN gfs_resource_changed; LISTEN gfs_authz_changed; LISTEN gfs_watch_ping; LISTEN gfs_watch_cmd'
     )
     await t.clock.advanceAsync(30_000)
     const pings = t.clients[0]!.queries.filter(q => q.text.includes('pg_notify'))
@@ -500,6 +503,53 @@ describe('dispatch is total and validates each channel', () => {
       before + 1
     )
     expect(t.recentDirty.overflowed()).toBe(true)
+  })
+
+  it('passes a valid authorization key normalized to its handler, and fails an invalid one closed', async () => {
+    const withOp = conn('a', true)
+    const t = await ready([withOp])
+    const id = '0F1C4F5E-1B2A-4C3D-9E8F-001122334455'
+    t.listener.dispatch(t.n('gfs_authz_changed', `s:team:${id}`), t.epoch)
+    expect(t.onAuthzChanged).toHaveBeenCalledWith({ kind: 's', t: 'team', id: id.toLowerCase() })
+    expect(t.onExpansionFailed).not.toHaveBeenCalled()
+    const before = await counterValue(gfsWatchNotifyInvalidTotal, { channel: 'gfs_authz_changed' })
+    t.listener.dispatch(t.n('gfs_authz_changed', 'x:garbage'), t.epoch)
+    expect(t.onAuthzChanged).toHaveBeenCalledTimes(1)
+    expect(await counterValue(gfsWatchNotifyInvalidTotal, { channel: 'gfs_authz_changed' })).toBe(
+      before + 1
+    )
+    expect(t.recentDirty.overflowed()).toBe(true)
+    expect(withOp.op!.dirtyOverflow).toBe(true)
+    expect(t.onExpansionFailed).toHaveBeenCalledTimes(1)
+  })
+
+  it('a revocation handler that throws fails closed like an unreadable hint; a command handler does not', async () => {
+    const withOp = conn('a', true)
+    const t = await ready([withOp])
+    const id = '0f1c4f5e-1b2a-4c3d-9e8f-001122334455'
+    t.onAuthzChanged.mockImplementation(() => {
+      throw new Error('authz handler failed')
+    })
+    t.listener.dispatch(t.n('gfs_authz_changed', `u:${id}`), t.epoch)
+    expect(t.onExpansionFailed).toHaveBeenCalledTimes(1)
+    expect(t.recentDirty.overflowed()).toBe(true)
+    expect(withOp.op!.dirtyOverflow).toBe(true)
+
+    t.onResourceChanged.mockImplementation(() => {
+      throw new Error('resource handler failed')
+    })
+    t.listener.dispatch(t.n('gfs_resource_changed', `${id},,${id},1,1,u`), t.epoch)
+    expect(t.onExpansionFailed).toHaveBeenCalledTimes(2)
+
+    t.onCmd.mockImplementation(() => {
+      throw new Error('cmd handler failed')
+    })
+    const before = await counterValue(gfsWatchDispatchFailedTotal, { channel: 'gfs_watch_cmd' })
+    t.listener.dispatch(t.n('gfs_watch_cmd', validCmd()), t.epoch)
+    expect(t.onExpansionFailed).toHaveBeenCalledTimes(2)
+    expect(await counterValue(gfsWatchDispatchFailedTotal, { channel: 'gfs_watch_cmd' })).toBe(
+      before + 1
+    )
   })
 
   it('an invalid revocation hint during shutdown does nothing', async () => {

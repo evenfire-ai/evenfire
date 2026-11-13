@@ -5,6 +5,8 @@ import {
   gfsWatchNotifyInvalidTotal,
 } from '../../observability/metrics.js'
 import {
+  type AuthzKey,
+  GFS_AUTHZ_CHANGED_CHANNEL,
   GFS_RESOURCE_CHANGED_CHANNEL,
   GFS_WATCH_CMD_CHANNEL,
   GFS_WATCH_PING_CHANNEL,
@@ -12,6 +14,7 @@ import {
   type WatchCmd,
   type WatchPing,
   isRevocationChannel,
+  parseAuthzKey,
   parsePing,
   parseResourceChanged,
   parseWatchCmd,
@@ -28,6 +31,7 @@ export const GFS_WATCH_INSTANCE_ID = randomBytes(16).toString('hex')
 
 export const GFS_WATCH_LISTEN_CHANNELS = Object.freeze([
   GFS_RESOURCE_CHANGED_CHANNEL,
+  GFS_AUTHZ_CHANGED_CHANNEL,
   GFS_WATCH_PING_CHANNEL,
   GFS_WATCH_CMD_CHANNEL,
 ] as const)
@@ -50,6 +54,11 @@ const RECONNECT_CAP_MS = 8_000
 const DISPOSE_DESTROY_AFTER_MS = 1_000
 const MASS_CLOSE_SPREAD_PER_CONN_MS = 40
 const MASS_CLOSE_SPREAD_CAP_MS = 10_000
+
+/** Reopens of a mass close are spread over this window, 40 ms per victim up to 10 s. */
+export function massCloseSpreadMs(victims: number): number {
+  return Math.min(MASS_CLOSE_SPREAD_CAP_MS, MASS_CLOSE_SPREAD_PER_CONN_MS * victims)
+}
 
 /** The part of a pg Client the listener drives. */
 export type ListenerClient = {
@@ -82,6 +91,7 @@ export type GfsWatchListenerDeps<C extends ListenerConn> = {
   closeConn: (conn: C, reason: ListenerLostReason, opts: { spreadMs: number }) => void
   onCmd: (cmd: WatchCmd) => void
   onResourceChanged: (change: ResourceChanged) => void
+  onAuthzChanged: (key: AuthzKey) => void
   /** Drops the authorization/session windows of the registry; both process transitions call it. */
   resetWindows: () => void
   /**
@@ -113,6 +123,7 @@ type Validated =
   | { ok: true; channel: typeof GFS_WATCH_PING_CHANNEL; value: WatchPing }
   | { ok: true; channel: typeof GFS_WATCH_CMD_CHANNEL; value: WatchCmd }
   | { ok: true; channel: typeof GFS_RESOURCE_CHANGED_CHANNEL; value: ResourceChanged }
+  | { ok: true; channel: typeof GFS_AUTHZ_CHANGED_CHANNEL; value: AuthzKey }
   | { ok: false }
 
 function validate(channel: string, payload: unknown): Validated {
@@ -127,6 +138,10 @@ function validate(channel: string, payload: unknown): Validated {
     }
     case GFS_RESOURCE_CHANGED_CHANNEL: {
       const value = parseResourceChanged(payload)
+      return value ? { ok: true, channel, value } : { ok: false }
+    }
+    case GFS_AUTHZ_CHANGED_CHANNEL: {
+      const value = parseAuthzKey(payload)
       return value ? { ok: true, channel, value } : { ok: false }
     }
     default:
@@ -231,10 +246,7 @@ export function createGfsWatchListener<C extends ListenerConn>(deps: GfsWatchLis
 
   function closeAllOnCopy(reason: ListenerLostReason): void {
     const victims = [...deps.connections()]
-    const spreadMs = Math.min(
-      MASS_CLOSE_SPREAD_CAP_MS,
-      MASS_CLOSE_SPREAD_PER_CONN_MS * victims.length
-    )
+    const spreadMs = massCloseSpreadMs(victims.length)
     for (const conn of victims) rt.guarded(conn, () => deps.closeConn(conn, reason, { spreadMs }))
   }
 
@@ -307,7 +319,8 @@ export function createGfsWatchListener<C extends ListenerConn>(deps: GfsWatchLis
   /**
    * Runs inside pg's socket 'data' handler and never throws. NOTIFY needs no
    * privilege, so every payload is validated against its channel's schema
-   * before touching state.
+   * before touching state. On a revocation channel, both an invalid payload
+   * and a handler that throws fail closed.
    */
   function dispatch(n: Notification, e: number): void {
     try {
@@ -324,10 +337,17 @@ export function createGfsWatchListener<C extends ListenerConn>(deps: GfsWatchLis
           return deps.onCmd(v.value)
         case GFS_RESOURCE_CHANGED_CHANNEL:
           return deps.onResourceChanged(v.value)
+        case GFS_AUTHZ_CHANGED_CHANNEL:
+          return deps.onAuthzChanged(v.value)
       }
     } catch (err) {
       rt.log.error({ err, channel: n.channel }, 'gfs watch dispatch failed')
       gfsWatchDispatchFailedTotal.inc({ channel: n.channel })
+      // A revocation whose handler threw was not applied; dropping it would
+      // fail open, so it is treated like one that could not be read.
+      if (isRevocationChannel(n.channel)) {
+        rt.guardedTick('revocation-dispatch-failed', () => onInvalidRevocationHint(n.channel))
+      }
     }
   }
 

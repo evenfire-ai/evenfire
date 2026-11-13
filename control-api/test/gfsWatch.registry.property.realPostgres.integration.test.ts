@@ -359,12 +359,13 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
   class ListenerLostCmd implements fc.AsyncCommand<object, Real> {
     check = () => true
     async run(_m: object, real: Real) {
-      await adminPool!.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-          WHERE datname = $1 AND query LIKE 'LISTEN gfs_resource_changed%'`,
-        [registryTestDatabase]
-      )
+      const terminated = await h.terminateListener()
       for (let i = 0; i < 400 && real.b.registry.listenerReady(); i += 1) await sleep(5)
+      if (terminated !== 1 || real.b.registry.listenerReady()) {
+        real.failures.push(`harness: listener loss not induced (${terminated} backends ended)`)
+        return
+      }
+      coverage.listenerLost += 1
       real.b.clock.advance(1_200)
       for (let i = 0; i < 1_000 && !real.b.registry.listenerReady(); i += 1) await sleep(5)
     }
@@ -465,6 +466,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
     suspect: 0,
     subscriptions: 0,
     closedReady: 0,
+    listenerLost: 0,
   }
 
   function recordCoverage(real: Real): void {
@@ -534,7 +536,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
       {
         // fast-check counts the examples inside numRuns; add them back so the
         // number of random runs is the one requested.
-        numRuns: Number(process.env.GFS_WATCH_MODEL_RUNS ?? 25) + 1,
+        numRuns: Number(process.env.GFS_WATCH_MODEL_RUNS ?? 25) + 2,
         endOnFailure: true,
         verbose: 1,
         // A fixed sequence that reaches every decision path, so the coverage
@@ -551,6 +553,20 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
               new PutCmd(0, [1, 3], 'next'),
               new SettleCmd(),
               new ListenerLostCmd(),
+            ] as unknown as Iterable<fc.AsyncCommand<object, Real>>,
+          ],
+          // A listener that has already pinged: its backend's last statement
+          // is the ping, no longer the LISTEN.
+          [
+            fc.sample(fc.scheduler(), { seed: 2, numRuns: 1 })[0]!,
+            [
+              new OpenCmd(0, [1]),
+              new SettleCmd(),
+              new AdvanceCmd(6_000),
+              new AdvanceCmd(6_000),
+              new ListenerLostCmd(),
+              new OpenCmd(1, [3]),
+              new SettleCmd(),
             ] as unknown as Iterable<fc.AsyncCommand<object, Real>>,
           ],
         ],

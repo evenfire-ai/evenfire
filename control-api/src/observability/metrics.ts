@@ -218,6 +218,12 @@ export const gfsWatchCmdDroppedTotal = getOrCreateCounter({
   labelNames: ['reason'] as const as Array<'reason'>,
 })
 
+export const gfsWatchExpansionFailclosedTotal = getOrCreateCounter({
+  name: 'gfs_watch_expansion_failclosed_total',
+  help: 'GFS watch fail-closed holds of every connected user: an authorization expansion failed twice, or a revocation hint was unreadable.',
+  labelNames: [],
+})
+
 export const gfsWatchTotalFailedTotal = getOrCreateCounter({
   name: 'gfs_watch_total_failed_total',
   help: 'GFS watch awaited steps that failed, classified as transient infrastructure or defect.',

@@ -17,6 +17,7 @@ import {
   gfsWatchCmdDroppedTotal,
   gfsWatchConnectionsActive,
   gfsWatchDisconnectsTotal,
+  gfsWatchExpansionFailclosedTotal,
   gfsWatchFramesSentTotal,
 } from '../../observability/metrics.js'
 import { STREAM_HEADERS } from '../../routes/streamHeaders.js'
@@ -43,8 +44,8 @@ import {
   rids,
   toRid32,
 } from './keys.js'
-import { type GfsWatchListenerDeps, createGfsWatchListener } from './listener.js'
-import type { ResourceChanged, WatchCmd } from './notifySchemas.js'
+import { type GfsWatchListenerDeps, createGfsWatchListener, massCloseSpreadMs } from './listener.js'
+import type { AuthzKey, ResourceChanged, WatchCmd } from './notifySchemas.js'
 import { type ReadSlots, createReadSlots, runLimited } from './readSlots.js'
 import { type RecentDirty, createRecentDirty } from './recentDirty.js'
 import { FAILED, type TimerHandle, type WatchClock, createWatchRuntime } from './runtime.js'
@@ -110,6 +111,29 @@ export const GFS_WATCH_ANCESTRY_CTE = `
    ORDER BY requested_id, depth`
 
 const CTE_QUERY_TIMEOUT_MS = 2_000
+
+const AUTHZ_WINDOW_MS = 250
+/**
+ * Ids one authorization window may accumulate. NOTIFY needs no privilege, so
+ * any database role can name ids without bound, and the window's cost (the
+ * expansion parameters, the flush) grows with them. Past the cap the window
+ * fails closed instead: every connected user is held and reauthorized, a cost
+ * that does not depend on how many ids arrived.
+ */
+export const GFS_WATCH_AUTHZ_WINDOW_MAX_IDS = 10_000
+const EXPANSION_RETRY_MS = 500
+const FAIL_CLOSED_CEILING_MS = 5_000
+
+/**
+ * Active members of the changed teams. An inactive member needs no
+ * expansion: its own membership change already names it.
+ */
+export const GFS_WATCH_EXPAND_TEAMS_SQL = `SELECT user_id::text AS u FROM team_members
+  WHERE team_id = ANY($1::uuid[]) AND status = 'active'`
+
+/** Desktop users linked to the changed admins; revoked links stay in the table as history. */
+export const GFS_WATCH_EXPAND_ADMINS_SQL = `SELECT user_id::text AS u FROM gfs_desktop_operator_links
+  WHERE control_admin_id = ANY($1::uuid[]) AND state = 'active'`
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -352,14 +376,32 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   const opsInFlight = new Set<WatchConnection>()
   const admittedPerPrincipal = new Map<Uuid, number>()
 
-  // Retention and the authorization/roots windows. Nothing here fills them
-  // yet, but every reader (`retenida`, the open's admission, `closeConn`)
-  // already honours them, so a retained user can neither receive a decision
-  // nor open a stream.
+  // Retention and the authorization/roots windows. Every reader (`retenida`,
+  // the open's admission, `closeConn`) honours them, so a retained user can
+  // neither receive a decision nor open a stream.
   const holdUsers = new Map<Uuid, number>()
   const reauthPending = { users: new Set<Uuid>(), conns: new Set<WatchConnection>() }
   const rootsPending = new Set<WatchConnection>()
   const linkedOperators = new Set<WatchConnection>()
+
+  // Process-level window handles; `rt.cancel` takes the holder and the field.
+  const windows: {
+    authzWindow: TimerHandle | null
+    expansionRetry: TimerHandle | null
+    failClosedTimer: TimerHandle | null
+  } = { authzWindow: null, expansionRetry: null, failClosedTimer: null }
+  // Team and admin ids still to expand, and those whose expansion failed once.
+  let authzTeams = new Set<Uuid>()
+  let authzAdmins = new Set<Uuid>()
+  let retryTeams = new Set<Uuid>()
+  let retryAdmins = new Set<Uuid>()
+  // The fail-closed's own hold reason: a user enters (and is held) once,
+  // and the copy that empties it is what gets released.
+  let failClosedPending = new Set<Uuid>()
+  let lastFailClosedAt = Number.NEGATIVE_INFINITY
+  // Bumped on every process transition: a window that resumes from its
+  // await under another epoch describes connections that no longer exist.
+  let windowEpoch = 0
 
   const listener = createGfsWatchListener<WatchConnection>({
     connectionString: deps.listenConnectionString,
@@ -370,6 +412,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
     closeConn: (conn, reason, opts) => closeConn(conn, reason, opts),
     onCmd,
     onResourceChanged,
+    onAuthzChanged,
     resetWindows,
     onExpansionFailed,
     ...(deps.createListenClient ? { createClient: deps.createListenClient } : {}),
@@ -394,15 +437,222 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
     return reauthPending.conns.has(conn) || usuarioRetenido(conn.binding.userId)
   }
 
+  const shuttingDown = () => listener.state.shuttingDown
+
+  /**
+   * Synchronous; both process transitions call it, before closing every
+   * connection. What the windows hold describes connections about to close,
+   * so applying it after a reconnect would reauthorize streams opened against
+   * the new state.
+   */
   function resetWindows(): void {
-    // The authorization and session windows do not exist yet; the listener
-    // already calls this on every process transition.
+    windowEpoch += 1
+    resetAuthzWindow()
+    resetFailClosed()
+    rootsPending.clear()
   }
 
+  function resetAuthzWindow(): void {
+    rt.cancel(windows, 'authzWindow', 'expansionRetry')
+    authzTeams = new Set()
+    authzAdmins = new Set()
+    retryTeams = new Set()
+    retryAdmins = new Set()
+    reauthPending.users.clear()
+    reauthPending.conns.clear()
+  }
+
+  function resetFailClosed(): void {
+    rt.cancel(windows, 'failClosedTimer')
+    const u = failClosedPending
+    failClosedPending = new Set()
+    for (const uid of u) unhold(uid)
+  }
+
+  // ─── Authorization window ────────────────────────────────────────────────
+
+  function onAuthzChanged(key: AuthzKey): void {
+    if (shuttingDown()) return
+    if (byUser.size === 0) return
+    if (key.kind === 'u' || (key.kind === 's' && key.t === 'user')) {
+      if (key.id === null) return
+      reauthPending.users.add(key.id)
+    } else if (key.kind === 's' && key.t === 'team') {
+      if (key.id === null) return
+      authzTeams.add(key.id)
+    } else if (key.kind === 'a') {
+      authzAdmins.add(key.id)
+    } else {
+      // operator, host and context subjects have no desktop user.
+      return
+    }
+    // Measured on arrival, where the accumulation grows: the window then
+    // never holds more than the cap, whatever the volume of the burst.
+    if (
+      authzTeams.size + authzAdmins.size + reauthPending.users.size >
+      GFS_WATCH_AUTHZ_WINDOW_MAX_IDS
+    ) {
+      // The fail-closed holds every connected user, which covers every id
+      // dropped here, so the accumulation is released before it runs.
+      authzTeams = new Set()
+      authzAdmins = new Set()
+      reauthPending.users.clear()
+      onExpansionFailed()
+      return
+    }
+    armAuthzWindow()
+  }
+
+  /** The only place that arms the window; the a=1 path of resource changes shares it. */
+  function armAuthzWindow(): void {
+    if (windows.authzWindow === null) {
+      windows.authzWindow = rt.timer(AUTHZ_WINDOW_MS, () =>
+        rt.guardedTick('authz-window', onAuthzWindow)
+      )
+    }
+  }
+
+  async function onAuthzWindow(): Promise<void> {
+    windows.authzWindow = null
+    // Own state first: a key that arrives during the expansion opens another window.
+    const t = authzTeams
+    const a = authzAdmins
+    authzTeams = new Set()
+    authzAdmins = new Set()
+    if (shuttingDown()) return
+    const e = windowEpoch
+    const r = t.size > 0 || a.size > 0 ? await expand(t, a) : new Set<Uuid>()
+    if (shuttingDown() || windowEpoch !== e) return
+    if (r === FAILED) {
+      // Accumulated, so two failed windows share one retry. reauthPending
+      // stays as it is: its users remain retained until the retry flushes.
+      for (const id of t) retryTeams.add(id)
+      for (const id of a) retryAdmins.add(id)
+      // Failed windows add up while the retry waits, so the window cap alone
+      // does not bound the retry's query. Past it, fail closed instead. The
+      // retry stays armed: with nothing left to expand it still flushes the
+      // direct users and connections this window kept retained.
+      if (retryTeams.size + retryAdmins.size > GFS_WATCH_AUTHZ_WINDOW_MAX_IDS) {
+        retryTeams = new Set()
+        retryAdmins = new Set()
+        onExpansionFailed()
+      }
+      if (windows.expansionRetry === null) {
+        windows.expansionRetry = rt.timer(EXPANSION_RETRY_MS, () =>
+          rt.guardedTick('expansion-retry', onExpansionRetry)
+        )
+      }
+      return
+    }
+    addExpanded(r)
+    flushReauth()
+  }
+
+  async function onExpansionRetry(): Promise<void> {
+    windows.expansionRetry = null
+    const t = retryTeams
+    const a = retryAdmins
+    retryTeams = new Set()
+    retryAdmins = new Set()
+    if (shuttingDown()) return
+    const e = windowEpoch
+    const r = await expand(t, a)
+    if (shuttingDown() || windowEpoch !== e) return
+    if (r === FAILED) onExpansionFailed()
+    else addExpanded(r)
+    // The direct users and the a=1 connections do not wait for the fail-closed ceiling.
+    flushReauth()
+  }
+
+  /** At most one query per kind and window, on the watch pool. */
+  async function expand(teams: ReadonlySet<Uuid>, admins: ReadonlySet<Uuid>) {
+    const qs: Promise<{ rows: unknown[] } | typeof FAILED>[] = []
+    if (teams.size > 0) {
+      qs.push(
+        rt.total(
+          () => deps.watchPool.query({ text: GFS_WATCH_EXPAND_TEAMS_SQL, values: [[...teams]] }),
+          'expansion'
+        )
+      )
+    }
+    if (admins.size > 0) {
+      qs.push(
+        rt.total(
+          () => deps.watchPool.query({ text: GFS_WATCH_EXPAND_ADMINS_SQL, values: [[...admins]] }),
+          'expansion'
+        )
+      )
+    }
+    const rs = await Promise.all(qs)
+    const users = new Set<Uuid>()
+    for (const r of rs) {
+      if (r === FAILED) return FAILED
+      // Projected through the normalizer: the pg row keeps Postgres' text form.
+      for (const row of r.rows as { u?: unknown }[]) {
+        const u = normUid(row.u)
+        if (u !== null) users.add(u)
+      }
+    }
+    return users
+  }
+
+  function addExpanded(users: ReadonlySet<Uuid>): void {
+    for (const u of users) if (byUser.has(u)) reauthPending.users.add(u)
+  }
+
+  /** Synchronous. Targets are read from the current byUser, so a stream opened meanwhile closes too. */
+  function flushReauth(): void {
+    const targets = new Set(reauthPending.conns)
+    for (const u of reauthPending.users) for (const conn of byUser.get(u) ?? []) targets.add(conn)
+    reauthPending.users.clear()
+    reauthPending.conns.clear()
+    closeAllSpread([...targets], 'reauthorize')
+  }
+
+  function closeAllSpread(victims: WatchConnection[], reason: WatchCloseReason): void {
+    const spreadMs = massCloseSpreadMs(victims.length)
+    for (const conn of victims) rt.guarded(conn, () => closeConn(conn, reason, { spreadMs }))
+  }
+
+  // ─── Fail-closed ─────────────────────────────────────────────────────────
+
+  /**
+   * Synchronous. Every connected user is retained at once, whatever its
+   * principal kind; the close waits for the ceiling of one application every
+   * 5 s per replica.
+   */
   function onExpansionFailed(): void {
-    // Without the authorization windows there is no expansion to fail; an
-    // unreadable revocation hint is covered by the suspect marking the
-    // listener applies before calling this.
+    if (shuttingDown()) return
+    gfsWatchExpansionFailclosedTotal.inc()
+    for (const uid of byUser.keys()) {
+      if (!failClosedPending.has(uid)) {
+        hold(uid)
+        failClosedPending.add(uid)
+      }
+    }
+    if (windows.failClosedTimer === null) {
+      const d = Math.max(0, lastFailClosedAt + FAIL_CLOSED_CEILING_MS - rt.now())
+      windows.failClosedTimer = rt.timer(d, () =>
+        rt.guardedTick('failclosed-apply', applyFailClosed)
+      )
+    }
+  }
+
+  function applyFailClosed(): void {
+    windows.failClosedTimer = null
+    // A failure after this point opens a new reason with its own holds.
+    const u = failClosedPending
+    failClosedPending = new Set()
+    lastFailClosedAt = rt.now()
+    try {
+      if (shuttingDown()) return
+      const victims: WatchConnection[] = []
+      for (const uid of u) for (const conn of byUser.get(uid) ?? []) victims.push(conn)
+      closeAllSpread(victims, 'reauthorize')
+    } finally {
+      // Over the copy, never byUser: a user who left meanwhile is released too.
+      for (const uid of u) unhold(uid)
+    }
   }
 
   // ─── Socket ──────────────────────────────────────────────────────────────
@@ -990,6 +1240,27 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
         else o.dirtyRids.add(x)
       }
     }
+    // An ancestry change can revoke what a user was granted through the old
+    // chain. Keys of the op in flight are left to the suspect marking above;
+    // a rejected key is not indexed, and an operator's access does not
+    // depend on the chain.
+    if (a === 1) {
+      let added = false
+      const candidates = new Set([...(byResource.get(x) ?? []), ...(byAncestor.get(x) ?? [])])
+      for (const conn of candidates) {
+        if (conn.principalKind !== 'user' || reauthPending.conns.has(conn)) continue
+        const inFlight = conn.op?.added
+        for (const [k, r] of conn.keys) {
+          if (r.state !== 'accepted' || inFlight?.has(k)) continue
+          if (rid(k) === x || r.chain?.includes(x)) {
+            reauthPending.conns.add(conn)
+            added = true
+            break
+          }
+        }
+      }
+      if (added) armAuthzWindow()
+    }
   }
 
   // ─── Open ────────────────────────────────────────────────────────────────
@@ -1174,6 +1445,19 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       byAncestor: byAncestor as ReadonlyMap<Rid32, ReadonlySet<WatchConnection>>,
       opsInFlight: opsInFlight as ReadonlySet<WatchConnection>,
       holdUsers: holdUsers as ReadonlyMap<Uuid, number>,
+      /** A snapshot of the authorization window and the fail-closed. */
+      windows: () => ({
+        ...windows,
+        authzTeams: new Set(authzTeams),
+        authzAdmins: new Set(authzAdmins),
+        retryTeams: new Set(retryTeams),
+        retryAdmins: new Set(retryAdmins),
+        failClosedPending: new Set(failClosedPending),
+        reauthUsers: new Set(reauthPending.users),
+        reauthConns: new Set(reauthPending.conns),
+        rootsPending: new Set(rootsPending),
+        windowEpoch,
+      }),
       readSlots,
       recentDirty,
       listener: listener.state,

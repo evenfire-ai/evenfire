@@ -859,11 +859,7 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     const opening = b.open(user, [h.key('file', f)])
     await until(() => b.gates.read.held.length === 1)
     const openingConn = b.connOf(opening.socket)!
-    await adminPool!.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-          WHERE datname = $1 AND query LIKE 'LISTEN gfs_resource_changed%'`,
-      [registryTestDatabase]
-    )
+    expect(await h.terminateListener()).toBe(1)
     await until(() => !b.registry.listenerReady())
     // 3 connections: spread 120 ms; the clock's random is 0.5.
     for (const r of readyOnes) {
