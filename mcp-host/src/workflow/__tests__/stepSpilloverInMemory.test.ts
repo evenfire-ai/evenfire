@@ -75,6 +75,35 @@ describe('createStepSpillover — results are kept in memory', () => {
     expect(JSON.parse(res.text.slice(res.text.indexOf('\n') + 1))).toEqual(expected)
   })
 
+  it.each([
+    ['with a trailing line feed', `${'row\n'.repeat(2000)}`],
+    ['without a trailing line feed', `${'row\n'.repeat(2000)}last`],
+    ['with blank lines', `${'row\n\n'.repeat(1500)}end\n`],
+  ])('counts lines as the first-party store does for raw text %s', async (_label, text) => {
+    const firstParty = new SpilloverStorage({
+      workspacePath: outputDir,
+      thresholdBytes: THRESHOLD,
+      ttlMs: 0,
+      gcIntervalMs: 0,
+    })
+    const expected = await firstParty.maybePersist({
+      taskId: 'review',
+      toolCallId: 'c1',
+      toolName: 'srv__read',
+      content: text,
+      isError: false,
+    })
+    // Witness: the input is large enough to be stored by both stores.
+    expect(expected).not.toBeNull()
+
+    const res = await persist(make(), 'c1', text)
+
+    expect(res.spilled).toBe(true)
+    const summary = JSON.parse(res.text.slice(res.text.indexOf('\n') + 1))
+    expect(summary.line_count).toBe(expected!.line_count)
+    expect(summary).toEqual(expected)
+  })
+
   it('reads a stored result back, and finds nothing after release', async () => {
     const s = make()
     expect((await persist(s, 'c1')).spilled).toBe(true)
@@ -106,7 +135,7 @@ describe('createStepSpillover — results are kept in memory', () => {
     )
     expect(refused).toHaveLength(1)
     expect(refused[0]![0]).toMatchObject({ stepId: 'review', toolName: 't' })
-    // Unlike a failed disk write, this does not stop later results from being stored.
+    // A refused call id does not stop later results from being stored.
     expect((await persist(s, 'c2')).spilled).toBe(true)
   })
 
@@ -242,9 +271,11 @@ describe('WorkflowService step spillover — results are kept in memory', () => 
       usage,
       finish_reason: 'tool_use',
     })) as never)
+    // Recorded inside the provider and asserted after the step: an assertion that
+    // threw inside the provider would only make the step fail, as expected anyway.
+    let readableWhenAborted: Awaited<ReturnType<typeof afterStepRead>> | undefined
     vi.mocked(llm.completeSingleTurnWithTools).mockImplementationOnce((async () => {
-      // Witness: the first result is stored and readable when the abort arrives.
-      expect((await afterStepRead()).success).toBe(true)
+      readableWhenAborted = await afterStepRead()
       controller.abort('client-disconnected')
       return { content: 'done', tool_calls: null, usage, finish_reason: 'stop' }
     }) as never)
@@ -255,8 +286,41 @@ describe('WorkflowService step spillover — results are kept in memory', () => 
       { signal: controller.signal }
     )
 
+    // Witness: the first result was stored and readable when the abort arrived.
+    expect(readableWhenAborted?.success).toBe(true)
     expect(res.status).toBe('failed')
+    expect(res.error).toContain('client-disconnected')
     expect(await fs.readdir(outputDir)).toEqual([])
     expect(await afterStepRead()).toEqual({ success: false, error: 'spillover blob not found' })
   })
+
+  it('drops the results when the step times out after a result was stored', async () => {
+    const llm = provider([{ tool: { name: 'srv__read', arguments: {} } }, {}])
+    vi.mocked(llm.completeSingleTurnWithTools).mockImplementationOnce((async () => ({
+      content: null,
+      tool_calls: [{ name: 'srv__read', arguments: {} }],
+      usage,
+      finish_reason: 'tool_use',
+    })) as never)
+    let readableAtTimeout: Awaited<ReturnType<typeof afterStepRead>> | undefined
+    vi.mocked(llm.completeSingleTurnWithTools).mockImplementationOnce((async () => {
+      readableAtTimeout = await afterStepRead()
+      // Outlasts the step's 1 s timeout.
+      await new Promise(resolve => setTimeout(resolve, 1500))
+      return { content: 'done', tool_calls: null, usage, finish_reason: 'stop' }
+    }) as never)
+
+    const res = await service(llm, client('L'.repeat(100 * 1024))).executeStep({
+      stepId: 'review',
+      instruction: 'go',
+      mcpServers: SERVERS,
+      timeoutSeconds: 1,
+    })
+
+    // Witness: the first result was stored and readable while the step ran.
+    expect(readableAtTimeout?.success).toBe(true)
+    expect(res).toMatchObject({ status: 'failed', error: 'step-timeout' })
+    expect(await fs.readdir(outputDir)).toEqual([])
+    expect(await afterStepRead()).toEqual({ success: false, error: 'spillover blob not found' })
+  }, 10_000)
 })
