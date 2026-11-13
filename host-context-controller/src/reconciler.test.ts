@@ -3118,7 +3118,18 @@ function h3Cluster(options: { rolloutReady?: boolean } = {}) {
     services.delete(name)
     return {}
   })
-  coreApi.readNamespacedConfigMap.mockRejectedValue(h3Absent())
+  const configMaps = new Map<string, any>()
+  coreApi.readNamespacedConfigMap.mockImplementation(async ({ name }: any) => {
+    const configMap = configMaps.get(name)
+    if (!configMap) throw h3Absent()
+    return structuredClone(configMap)
+  })
+  coreApi.createNamespacedConfigMap.mockImplementation(async ({ body }: any) =>
+    store(configMaps, body)
+  )
+  coreApi.replaceNamespacedConfigMap.mockImplementation(async ({ body }: any) =>
+    store(configMaps, body)
+  )
   coreApi.readNamespacedSecret.mockImplementation(readSecret)
   const status = installLiveStatus(customApi)
   const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
@@ -3137,6 +3148,8 @@ function h3Cluster(options: { rolloutReady?: boolean } = {}) {
     status,
     listener,
     deployments,
+    services,
+    configMaps,
     readDeployment,
     readSecret,
     setRolloutReady: (ready: boolean) => {
@@ -4375,6 +4388,114 @@ describe('#1338: transient failures of the other managed reconcile calls', () =>
 
     expect(f.appsApi.createNamespacedDeployment.mock.calls.length).toBe(createsBefore + 1)
     expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
+  })
+
+  function failRolloutRead(f: ReturnType<typeof h3Cluster>): () => number {
+    const before = f.appsApi.readNamespacedDeployment.mock.calls.length
+    f.appsApi.readNamespacedDeployment
+      .mockImplementationOnce(f.readDeployment)
+      .mockRejectedValueOnce(h3Timeout('readNamespacedDeployment'))
+    return () => f.appsApi.readNamespacedDeployment.mock.calls.length - before
+  }
+
+  it('publishes not-ready when a Service deleted out of band is re-created and the rollout read times out', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    f.services.delete('h3-server')
+    const createsBefore = f.coreApi.createNamespacedService.mock.calls.length
+    const publishedBefore = await reconcileCallFailures('rollout_read', 'not_ready_published')
+    const rolloutReads = failRolloutRead(f)
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.coreApi.createNamespacedService.mock.calls.length).toBe(createsBefore + 1)
+    expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(rolloutReads()).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+    expect(await reconcileCallFailures('rollout_read', 'not_ready_published')).toBe(
+      publishedBefore + 1
+    )
+  })
+
+  function remoteH3Server(): McpServerCRD {
+    const server = h3Server()
+    return { ...server, spec: { ...server.spec, remote: { baseUrl: 'https://api.example.com' } } }
+  }
+
+  it('keeps ready for an unchanged remote server whose ConfigMap needs no write keeps ready when the rollout read times out', async () => {
+    const server = remoteH3Server()
+    const f = await h3ReadyCluster(server)
+    expect(f.configMaps.has('h3-server-nginx-conf')).toBe(true)
+    const createsBefore = f.coreApi.createNamespacedConfigMap.mock.calls.length
+    const cmReadsBefore = f.coreApi.readNamespacedConfigMap.mock.calls.length
+    const keptBefore = await reconcileCallFailures('rollout_read', 'verdict_kept')
+    const rolloutReads = failRolloutRead(f)
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.coreApi.readNamespacedConfigMap.mock.calls.length).toBeGreaterThan(cmReadsBefore)
+    expect(f.coreApi.createNamespacedConfigMap.mock.calls.length).toBe(createsBefore)
+    expect(f.coreApi.replaceNamespacedConfigMap).not.toHaveBeenCalled()
+    expect(rolloutReads()).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true, authoritative: true })
+    expect(await reconcileCallFailures('rollout_read', 'verdict_kept')).toBe(keptBefore + 1)
+  })
+
+  it('publishes not-ready when a remote server ConfigMap deleted out of band is re-created and the rollout read times out', async () => {
+    const server = remoteH3Server()
+    const f = await h3ReadyCluster(server)
+    f.configMaps.delete('h3-server-nginx-conf')
+    const createsBefore = f.coreApi.createNamespacedConfigMap.mock.calls.length
+    const publishedBefore = await reconcileCallFailures('rollout_read', 'not_ready_published')
+    const rolloutReads = failRolloutRead(f)
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.coreApi.createNamespacedConfigMap.mock.calls.length).toBe(createsBefore + 1)
+    expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(rolloutReads()).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+    expect(await reconcileCallFailures('rollout_read', 'not_ready_published')).toBe(
+      publishedBefore + 1
+    )
+  })
+
+  it('publishes not-ready when a drifted Service is replaced and the rollout read times out', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const live = f.services.get('h3-server')
+    live.spec.ports[0].port = live.spec.ports[0].port + 1
+    const publishedBefore = await reconcileCallFailures('rollout_read', 'not_ready_published')
+    const rolloutReads = failRolloutRead(f)
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(1)
+    expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(rolloutReads()).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+    expect(await reconcileCallFailures('rollout_read', 'not_ready_published')).toBe(
+      publishedBefore + 1
+    )
+  })
+
+  it('publishes not-ready when a drifted remote ConfigMap is replaced and the rollout read times out', async () => {
+    const server = remoteH3Server()
+    const f = await h3ReadyCluster(server)
+    const live = f.configMaps.get('h3-server-nginx-conf')
+    for (const key of Object.keys(live.data)) live.data[key] = live.data[key] + '\n# drift'
+    const publishedBefore = await reconcileCallFailures('rollout_read', 'not_ready_published')
+    const rolloutReads = failRolloutRead(f)
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.coreApi.replaceNamespacedConfigMap).toHaveBeenCalledTimes(1)
+    expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(rolloutReads()).toBe(2)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false, authoritative: true })
+    expect(await reconcileCallFailures('rollout_read', 'not_ready_published')).toBe(
+      publishedBefore + 1
+    )
   })
 
   it('after a restart, a revision learned from an up-to-date Deployment detects a later missed rotation', async () => {
