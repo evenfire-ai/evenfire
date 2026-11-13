@@ -38,6 +38,14 @@ on:
         description: 'Build and push every image regardless of changed paths'
         type: boolean
         default: false
+      # Prod hotfix lane: build a fix on main without moving :latest or
+      # deploying dev. Checked by "Validate manual run" in detect, applied by
+      # "Select this image" in build-push and merge. The infra repo mirrors
+      # and deploys these sha-<7> tags itself.
+      hotfix_images:
+        description: 'Hotfix build on main only: space/comma-separated matrix image names. Builds just these, tags sha-<7> only (no :latest), never dispatches infra.'
+        type: string
+        default: ''
 
 # Least-privilege default: only build-push and merge need to write packages
 # (build-push pushes per-arch digests, merge pushes the combined manifest
@@ -95,6 +103,72 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+
+      # Fails detect, and with it every later job, before anything is built.
+      # main never builds on push, so a bare manual run there would rebuild
+      # every image and move :latest; it must name hotfix_images or set
+      # build_all. Image names are checked against the build-push matrix with
+      # awk because OSS runners have no yq. Keep this step above the filter
+      # step: test-images-manifest.sh reads `filters:` through the blank line
+      # before `build-push:`.
+      - name: Validate manual run
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          REF: ${{ github.ref }}
+          BUILD_ALL: ${{ inputs.build_all }}
+          HOTFIX_IMAGES: ${{ inputs.hotfix_images }}
+          WORKFLOW: .github/workflows/build-publish.yml
+        run: |
+          set -euo pipefail
+          if [ -z "$HOTFIX_IMAGES" ]; then
+            if [ "$REF" = "refs/heads/main" ] && [ "$BUILD_ALL" != "true" ]; then
+              echo "::error::A manual run on main needs hotfix_images or build_all=true. Without either it rebuilds every image and moves :latest."
+              exit 1
+            fi
+            exit 0
+          fi
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::hotfix_images is only allowed on main, not $REF."
+            exit 1
+          fi
+          if [ "$BUILD_ALL" = "true" ]; then
+            echo "::error::hotfix_images and build_all=true cannot be combined."
+            exit 1
+          fi
+          charset='^[a-z0-9 ,-]+$'
+          if ! [[ "$HOTFIX_IMAGES" =~ $charset ]]; then
+            echo "::error::hotfix_images may only hold image names separated by spaces or commas."
+            exit 1
+          fi
+          known="$(awk '/^  build-push:/,/^  merge:/' "$WORKFLOW" | sed -n 's/^ *- image: *//p')"
+          if [ -z "$known" ]; then
+            echo "::error::Could not read the build-push matrix from $WORKFLOW."
+            exit 2
+          fi
+          # Commas become spaces; set -f keeps the split from globbing.
+          set -f
+          seen=" "
+          count=0
+          # shellcheck disable=SC2046
+          for name in $(printf '%s' "$HOTFIX_IMAGES" | tr ',' ' '); do
+            if ! grep -qxF -- "$name" <<< "$known"; then
+              echo "::error::Unknown image '$name': it is not in the build-push matrix."
+              exit 1
+            fi
+            case "$seen" in
+              *" $name "*)
+                echo "::error::Image '$name' is listed more than once."
+                exit 1
+                ;;
+            esac
+            seen="$seen$name "
+            count=$((count + 1))
+          done
+          if [ "$count" -eq 0 ]; then
+            echo "::error::hotfix_images names no image."
+            exit 1
+          fi
+          echo "Hotfix build on main for:$seen"
 
       - name: Resolve build mode
         id: base
@@ -163,12 +237,14 @@ jobs:
               - 'packages/display-field/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/grok-provider-attempt-contract/**'
+              - 'packages/llm-providers/**'
             control-ui:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/display-field/**'
               - 'packages/frontend-components/**'
               - 'packages/gfs-interaction-policy/**'
+              - 'packages/llm-providers/**'
               - 'scripts/qa-recorder/**'
             external-rest-api:
               - 'external-rest-api/**'
@@ -179,12 +255,14 @@ jobs:
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
             mcp-host:
               - 'mcp-host/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
               - 'packages/grok-provider-attempt-contract/**'
               - 'packages/gfs-interaction-policy/**'
+              - 'packages/llm-providers/**'
             mcp-proxy:
               - 'mcp-proxy/**'
             gfs-controller:
@@ -208,6 +286,7 @@ jobs:
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
               - 'packages/grok-provider-attempt-contract/**'
+              - 'packages/llm-providers/**'
               - 'scripts/e2e/**'
               - 'tests/e2e/fixtures/**'
             stdio-bridge:
@@ -243,8 +322,9 @@ jobs:
       contents: read
       packages: write
     # Gate at step level: the `matrix` context is not available in a job-level
-    # `if`, so each step checks whether this image changed (or a full build was
-    # requested). Unchanged images spin an empty job and exit fast.
+    # `if`, so the first step ("Select this image") decides whether this leg
+    # builds and every later step checks its output. Unselected images spin an
+    # empty job and exit fast.
     strategy:
       fail-fast: false
       matrix:
@@ -403,18 +483,46 @@ jobs:
             rooted: true
             changed: ${{ needs.detect.outputs.grok-llm-proxy }}
     steps:
+      # Same body in merge. With hotfix_images set, only the named images
+      # build: force_all (always true on a manual run) and change detection
+      # are ignored. Otherwise an image builds when it changed or a full
+      # build was requested.
+      - name: Select this image
+        id: select
+        env:
+          HOTFIX_IMAGES: ${{ inputs.hotfix_images }}
+          IMAGE: ${{ matrix.image }}
+          CHANGED: ${{ matrix.changed }}
+          FORCE_ALL: ${{ needs.detect.outputs.force_all }}
+        run: |
+          set -euo pipefail
+          build=false
+          if [ -n "$HOTFIX_IMAGES" ]; then
+            set -f
+            # shellcheck disable=SC2046
+            for name in $(printf '%s' "$HOTFIX_IMAGES" | tr ',' ' '); do
+              if [ "$name" = "$IMAGE" ]; then
+                build=true
+              fi
+            done
+          elif [ "$CHANGED" = "true" ] || [ "$FORCE_ALL" = "true" ]; then
+            build=true
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "$IMAGE: build=$build"
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
 
       # No QEMU: each leg now builds only its own native arch (amd64 on
       # ubuntu-latest, arm64 on ubuntu-24.04-arm), so there is nothing to
       # emulate. This is the whole point of the split.
       - name: Set up Docker Buildx
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Log in to ghcr.io
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -422,7 +530,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve build context and Dockerfile
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         id: buildargs
         env:
           MATRIX_PATH: ${{ matrix.path }}
@@ -452,7 +560,7 @@ jobs:
           fi
 
       - name: Build and push by digest
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
@@ -486,13 +594,13 @@ jobs:
       # means "this image is real", which is only true once the manifest list
       # exists, not merely once one arch's digest has landed).
       - name: Record built-image digest
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         run: |
           mkdir -p /tmp/digests
           echo -n "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.image }}-${{ matrix.arch }}"
 
       - name: Upload digest artifact
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digest-${{ matrix.image }}-${{ matrix.arch }}
@@ -501,7 +609,8 @@ jobs:
           if-no-files-found: warn
 
   # Combines the two per-arch digests from build-push into one multi-platform
-  # manifest list per image, and pushes the sha-<7> and latest tags. This is
+  # manifest list per image, and pushes the sha-<7> tag plus latest (a hotfix
+  # build pushes sha-<7> only). This is
   # also where the built-image marker now lives (moved from build-push): the
   # marker means "this image is real", which is only true once the manifest
   # list exists — a lone amd64 or arm64 digest is not a publishable image.
@@ -590,12 +699,37 @@ jobs:
           - image: grok-llm-proxy
             changed: ${{ needs.detect.outputs.grok-llm-proxy }}
     steps:
+      # Same body as build-push's "Select this image".
+      - name: Select this image
+        id: select
+        env:
+          HOTFIX_IMAGES: ${{ inputs.hotfix_images }}
+          IMAGE: ${{ matrix.image }}
+          CHANGED: ${{ matrix.changed }}
+          FORCE_ALL: ${{ needs.detect.outputs.force_all }}
+        run: |
+          set -euo pipefail
+          build=false
+          if [ -n "$HOTFIX_IMAGES" ]; then
+            set -f
+            # shellcheck disable=SC2046
+            for name in $(printf '%s' "$HOTFIX_IMAGES" | tr ',' ' '); do
+              if [ "$name" = "$IMAGE" ]; then
+                build=true
+              fi
+            done
+          elif [ "$CHANGED" = "true" ] || [ "$FORCE_ALL" = "true" ]; then
+            build=true
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "$IMAGE: build=$build"
+
       - name: Set up Docker Buildx
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Log in to ghcr.io
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -607,31 +741,44 @@ jobs:
       # mcp-host-full, mcp-host-desktop), and a wildcard suffix on the image
       # name would also match the sibling images' digest artifacts.
       - name: Download amd64 digest
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: digest-${{ matrix.image }}-amd64
           path: /tmp/digests
 
       - name: Download arm64 digest
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: digest-${{ matrix.image }}-arm64
           path: /tmp/digests
 
       - name: Compute short SHA
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         id: shortsha
         run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Create the manifest list
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
+        env:
+          IMG_REF: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}
+          SHORT_SHA: ${{ steps.shortsha.outputs.sha }}
+          HOTFIX_IMAGES: ${{ inputs.hotfix_images }}
         run: |
           set -euo pipefail
-          IMG="${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}"
-          AMD64_DIGEST="$(cat "/tmp/digests/${{ matrix.image }}-amd64")"
-          ARM64_DIGEST="$(cat "/tmp/digests/${{ matrix.image }}-arm64")"
+          IMG="$IMG_REF"
+          # The digest files are named after the matrix image, the last
+          # path segment of IMG_REF.
+          IMAGE="${IMG_REF##*/}"
+          AMD64_DIGEST="$(cat "/tmp/digests/${IMAGE}-amd64")"
+          ARM64_DIGEST="$(cat "/tmp/digests/${IMAGE}-arm64")"
+          # A hotfix build pushes sha-<7> only. :latest keeps pointing at the
+          # last dev build, which is what release image resolution promotes.
+          tags=(-t "$IMG:sha-$SHORT_SHA")
+          if [ -z "$HOTFIX_IMAGES" ]; then
+            tags+=(-t "$IMG:latest")
+          fi
           # The per-leg label on each platform manifest's config is not
           # readable from the index itself (imagetools inspect --raw on the
           # tag shows no revision without resolving a child manifest and
@@ -640,8 +787,7 @@ jobs:
           # so it also needs to be an index-level annotation.
           docker buildx imagetools create \
             --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
-            -t "$IMG:sha-${{ steps.shortsha.outputs.sha }}" \
-            -t "$IMG:latest" \
+            "${tags[@]}" \
             "$IMG@$AMD64_DIGEST" \
             "$IMG@$ARM64_DIGEST"
 
@@ -649,11 +795,11 @@ jobs:
       # notify-infra can tell the infra repo EXACTLY which images to mirror/pin
       # (build-publish is change-detected — an incremental merge builds a subset).
       - name: Record built-image marker
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         run: mkdir -p /tmp/built && echo "${{ matrix.image }}" > "/tmp/built/${{ matrix.image }}"
 
       - name: Upload built-image marker
-        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        if: ${{ steps.select.outputs.build == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: built-${{ matrix.image }}
@@ -676,7 +822,9 @@ jobs:
     # actually built something — failing GREEN with no ghcr mirror and no
     # clerum-dev apply.
     needs: merge
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_all }}
+    # Never for a hotfix build: those images are main-only and reach prod
+    # through the infra repo's hotfix lane, not the dev deploy.
+    if: ${{ !inputs.hotfix_images && (github.event_name != 'workflow_dispatch' || inputs.build_all) }}
     steps:
       - name: Collect built-image markers
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
