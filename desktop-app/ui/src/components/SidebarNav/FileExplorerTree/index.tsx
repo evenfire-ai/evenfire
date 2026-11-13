@@ -40,7 +40,7 @@ import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import { IconChevronRight, IconContexts } from '../icons'
-import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
+import type { FileExplorerNodeProps, FileExplorerTreeProps, VisibleExpandedFolder } from './types'
 
 // A folder's single-click (toggle) must not act before we know a double-click
 // (open its files tab) is not coming, so it is deferred by this window to let a
@@ -64,6 +64,15 @@ function displayName(name: string): string {
   return sanitizeAppTabTitle(name) || 'Unnamed'
 }
 
+/** Pre-order comparison of two sibling-index paths: the order rows appear on screen. */
+function compareVisibleOrder(left: readonly number[], right: readonly number[]): number {
+  const length = Math.min(left.length, right.length)
+  for (let index = 0; index < length; index += 1) {
+    if (left[index] !== right[index]) return left[index]! - right[index]!
+  }
+  return left.length - right.length
+}
+
 /** Folders first, then files, each alphabetical — the VSCode tree ordering. */
 function sortTreeItems(items: GfsBrowserChild[]): GfsBrowserChild[] {
   return [...items].sort((left, right) => {
@@ -85,6 +94,8 @@ function sortTreeItems(items: GfsBrowserChild[]): GfsBrowserChild[] {
 function FileExplorerNode({
   node,
   level,
+  visibleOrder,
+  onExpandedFolderVisibility,
   scope,
   sessionGeneration,
   accessActive,
@@ -111,6 +122,14 @@ function FileExplorerNode({
   const isDirectory = node.kind === 'directory'
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
+  const visibleOrderKey = visibleOrder.join('.')
+  useEffect(() => {
+    if (!isExpanded) return
+    onExpandedFolderVisibility(node.resourceId, { gfsUri: node.gfsUri, order: visibleOrder })
+    return () => onExpandedFolderVisibility(node.resourceId, null)
+    // visibleOrder is a fresh array each render; its content is visibleOrderKey.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isExpanded, node.gfsUri, node.resourceId, onExpandedFolderVisibility, visibleOrderKey])
   const label = displayName(node.name)
   // Server-computed: the row is visible but the session cannot read it (a
   // folder grant without inheritance; a file whose parent does not inherit).
@@ -409,8 +428,10 @@ function FileExplorerNode({
             </p>
           ) : null}
           {childError ? <StatusBanner tone="error" text={childError} compact /> : null}
-          {childItems.map(child => (
+          {childItems.map((child, index) => (
             <FileExplorerNode
+              visibleOrder={[...visibleOrder, index]}
+              onExpandedFolderVisibility={onExpandedFolderVisibility}
               accessActive={accessActive}
               ancestorCrumbs={nextAncestorCrumbs}
               ancestorIds={nextAncestorIds}
@@ -477,6 +498,7 @@ export function FileExplorerTree({
   onOpenFolder,
   onOpenPreview,
   pushToast,
+  onVisibleExpandedFoldersChange,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
   const queryClient = useQueryClient()
@@ -493,6 +515,37 @@ export function FileExplorerTree({
   })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [visibleExpandedFolders, setVisibleExpandedFolders] = useState<
+    ReadonlyMap<string, VisibleExpandedFolder>
+  >(() => new Map())
+  const handleExpandedFolderVisibility = useCallback(
+    (resourceId: string, folder: VisibleExpandedFolder | null) => {
+      setVisibleExpandedFolders(current => {
+        if (!folder && !current.has(resourceId)) return current
+        const next = new Map(current)
+        if (folder) next.set(resourceId, folder)
+        else next.delete(resourceId)
+        return next
+      })
+    },
+    []
+  )
+  const visibleExpandedFolderUris = useMemo(
+    () =>
+      [...visibleExpandedFolders.values()]
+        .sort((left, right) => compareVisibleOrder(left.order, right.order))
+        .map(folder => folder.gfsUri),
+    [visibleExpandedFolders]
+  )
+  const visibleExpandedFolderSignature = visibleExpandedFolderUris.join('\n')
+  const onVisibleExpandedFoldersChangeRef = useRef(onVisibleExpandedFoldersChange)
+  onVisibleExpandedFoldersChangeRef.current = onVisibleExpandedFoldersChange
+  useEffect(() => {
+    onVisibleExpandedFoldersChangeRef.current?.(visibleExpandedFolderUris)
+    // The signature carries the list's content; the array identity is irrelevant.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleExpandedFolderSignature])
+  useEffect(() => () => onVisibleExpandedFoldersChangeRef.current?.([]), [])
   const [dropStatesByResourceId, setDropStatesByResourceId] = useState<
     Record<string, GfsDropVerdict>
   >({})
@@ -1213,8 +1266,10 @@ export function FileExplorerTree({
         <p className="da-file-explorer__message muted">No shared files yet.</p>
       ) : (
         <div className="da-file-explorer__tree" role="tree" aria-label="Shared files">
-          {roots.map(node => (
+          {roots.map((node, index) => (
             <FileExplorerNode
+              visibleOrder={[index]}
+              onExpandedFolderVisibility={handleExpandedFolderVisibility}
               accessActive={ctrl.accessState === 'active'}
               ancestorCrumbs={[]}
               ancestorIds={node.parentResourceId != null ? [node.parentResourceId] : []}

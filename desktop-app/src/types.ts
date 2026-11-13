@@ -274,37 +274,6 @@ export type WorkflowNotificationStreamEvent =
       type: 'closed'
     }
 
-export type EntityChangeScope = 'gfs' | 'authorization'
-
-export type EntityChangeStreamEvent =
-  | { type: 'open' }
-  | {
-      type: 'resync_required'
-      schemaVersion: 1
-      cursor: string
-      scopes: EntityChangeScope[]
-    }
-  | {
-      type: 'scope.invalidated'
-      schemaVersion: 1
-      cursor: string
-      scopes: EntityChangeScope[]
-    }
-  | {
-      type: 'heartbeat'
-      schemaVersion: 1
-      cursor: string
-      observedAt: string
-    }
-  | {
-      type: 'stream.closing'
-      schemaVersion: 1
-      cursor: string
-      reason: 'max_lifetime' | 'session_expired' | 'server_shutdown' | 'slow_consumer'
-    }
-  | { type: 'error'; message: string }
-  | { type: 'closed' }
-
 /** An event of the GFS watch, pushed by main to every subscribed window on `gfsWatch:event`. */
 export type GfsWatchEvent =
   | { type: 'changed'; keys: string[] }

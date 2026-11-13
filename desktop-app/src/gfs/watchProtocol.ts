@@ -33,7 +33,7 @@ export const FIRST_FAILURE_SPREAD_MS = 5_000
 export const HEARTBEAT_MIN_MS = 5_000
 export const HEARTBEAT_MAX_MS = 25_000
 export const WATCHDOG_HEARTBEATS = 3
-/** Same line and buffer bound as the base entity-change stream. */
+/** Longest line the reader buffers; anything longer is a broken stream, not a frame. */
 export const MAX_FRAME_CHARS = 16 * 1024
 /** The server's per-set ceiling: the GET line and the command NOTIFY are sized for it. */
 export const MAX_KEYS = 64

@@ -6,7 +6,6 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
 import { App } from '@/App'
-import { USER_SCOPE_INVALIDATED } from '@/gfs/__fixtures__/entityChangeFixtures'
 import {
   downloadResult,
   openGfsResourcePayload,
@@ -14,9 +13,11 @@ import {
   resolveResource,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { GfsWatchEventSource, mainDriveKey } from '@/gfs/__fixtures__/gfsWatchEvents'
 
 const USER = { id: 'user-a', email: 'a@clerum.io', name: 'A', teamId: null, teamName: null }
-const URI = 'gfs://main/plugin-diagram'
+const RID = 'd1a6a3f0c2b44e8e9f7a5b3c1d2e4f60'
+const URI = `gfs://main/${RID}`
 const NAME = 'plugin-diagram.png'
 const ALT = `Preview of ${NAME}`
 const DIALOG = '.da-gfs-image-preview-dialog'
@@ -26,8 +27,10 @@ type Download = Awaited<ReturnType<typeof downloadResult>>
 const frames: FrameRequestCallback[] = []
 
 function fileAt(version: number, bytes: number) {
-  return resolvedFile('plugin-diagram', NAME, { gfsUri: URI, version, bytes })
+  return resolvedFile(RID, NAME, { gfsUri: URI, version, bytes })
 }
+
+let watchEvents: GfsWatchEventSource
 
 function installBridge() {
   installAppControllerClerum({
@@ -79,13 +82,8 @@ function installBridge() {
       return vi.fn()
     }),
   }
-  let dispatchEntityChange: ((event: unknown) => void) | null = null
-  bridge.entityChanges = {
-    subscribe: vi.fn((handler: (event: unknown) => void) => {
-      dispatchEntityChange = handler
-      return Promise.resolve(vi.fn())
-    }),
-  }
+  const watch = watchEvents.connectRenderer()
+  bridge.gfsWatch = watch.bridge
   const pending: Array<{ resolve: (value: Download) => void; reject: (error: unknown) => void }> =
     []
   const downloadPreview = vi.fn(
@@ -119,11 +117,9 @@ function installBridge() {
     // A newer version lands on the server and the change reaches the renderer.
     publishNewVersion: async (version: number, bytes: number) => {
       current = fileAt(version, bytes)
-      await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
-      const dispatch = dispatchEntityChange!
+      await waitFor(() => expect(watch.opens).toBe(1))
       await act(async () => {
-        dispatch({ ...USER_SCOPE_INVALIDATED })
-        await Promise.resolve()
+        await watchEvents.changed([mainDriveKey('file', RID)])
       })
     },
   }
@@ -157,7 +153,8 @@ async function imageDownload(seed: number): Promise<Download> {
 describe('App plugin GFS image overlay in-place reload', () => {
   let createdUrls: string[] = []
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    watchEvents = await new GfsWatchEventSource().start([mainDriveKey('file', RID)])
     frames.length = 0
     createdUrls = []
     window.localStorage.clear()
@@ -210,6 +207,7 @@ describe('App plugin GFS image overlay in-place reload', () => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     uninstallMockClerum()
+    await watchEvents.stop()
   })
 
   it('swaps in the new version without remounting the overlay or revoking the visible URL early', async () => {

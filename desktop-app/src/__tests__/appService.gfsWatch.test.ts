@@ -486,12 +486,12 @@ describe('AppService GFS watch — environment switch', () => {
   it('an error after the environment switch never leaves the watch switching', async () => {
     const { token } = await readyWithKeys()
     const getsBefore = h.server.gets.length
-    const internals = h.service as unknown as { ensureEntityChangeConnection: () => void }
-    internals.ensureEntityChangeConnection = () => {
-      throw new Error('entity-change reconnect failed')
+    const internals = h.service as unknown as { beginPrewarmAuthTransition: () => () => void }
+    internals.beginPrewarmAuthTransition = () => () => {
+      throw new Error('prewarm release failed')
     }
     await expect(h.service.applyRuntimeEnvironmentChange(async () => undefined)).rejects.toThrow(
-      'entity-change reconnect failed'
+      'prewarm release failed'
     )
     await h.settle()
     expect(h.client.inspect().envSwitching).toBe(false)

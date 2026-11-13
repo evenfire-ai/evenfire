@@ -96,6 +96,7 @@ function renderTree(
         onOpenFolder={onOpenFolder}
         onOpenPreview={onOpenPreview}
         pushToast={pushToast}
+        onVisibleExpandedFoldersChange={props.onVisibleExpandedFoldersChange}
       />
     </QueryClientProvider>
   )
@@ -177,6 +178,47 @@ describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
     // Collapsing hides the children again (a container is collapsible at any level).
     fireEvent.click(screen.getByRole('button', { name: 'Collapse Reports' }))
     expect(screen.queryByRole('button', { name: 'Sub' })).toBeNull()
+  })
+})
+
+describe('FileExplorerTree — expanded folders on screen', () => {
+  it('reports the expanded, rendered folders in screen order, and none once collapsed or unmounted', async () => {
+    const listChildren = vi.fn(async (resourceId: string) =>
+      resourceId === 'alpha'
+        ? listChildrenPage([
+            childView('alpha-sub', 'Sub', 'directory', { parentResourceId: 'alpha' }),
+          ])
+        : listChildrenPage([])
+    )
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('beta', 'Beta', 'directory'),
+          accessibleResource('alpha', 'Alpha', 'directory'),
+        ])
+      ),
+      listChildren,
+    })
+    const onVisibleExpandedFoldersChange = vi.fn()
+    renderTree({ onVisibleExpandedFoldersChange })
+    const last = () => onVisibleExpandedFoldersChange.mock.calls.at(-1)?.[0]
+
+    await screen.findByRole('button', { name: 'Alpha' })
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Beta' }))
+    await waitFor(() => expect(last()).toEqual(['gfs://main/beta']))
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Alpha' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Sub' }))
+    // Alpha sorts above Beta, and its expanded child sits between them.
+    await waitFor(() =>
+      expect(last()).toEqual(['gfs://main/alpha', 'gfs://main/alpha-sub', 'gfs://main/beta'])
+    )
+
+    // Collapsing Alpha hides Sub too, though Sub is still marked expanded.
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Alpha' }))
+    await waitFor(() => expect(last()).toEqual(['gfs://main/beta']))
+
+    cleanup()
+    expect(last()).toEqual([])
   })
 })
 

@@ -62,7 +62,6 @@ import {
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
-  EntityChangeStreamEvent,
   ExternalChannelsSummary,
   HostActivitySnapshot,
   HostActivityStreamEvent,
@@ -107,10 +106,6 @@ import {
 // `diagnoseLoginBackend`. Kept short so a post-login-failure diagnosis never
 // makes the failure feel slower than it already did.
 const BACKEND_PROBE_TIMEOUT_MS = 1500
-const ENTITY_CHANGE_RETRY_AFTER_CAP_MS = 5 * 60 * 1000
-// Two maximum server heartbeat intervals plus its maximum poll delay. This
-// matches the operator-stream liveness watchdog and bounds half-open sockets.
-const ENTITY_CHANGE_STREAM_IDLE_TIMEOUT_MS = 2 * (60_000 + 5_000)
 
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
 const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
@@ -121,21 +116,6 @@ type RuntimeConfigDiscovery = {
   externalRestApiBaseUrl: string
   rpcProxyBaseUrl: string
   appName: string
-}
-
-function parseEntityChangeRetryAfterMs(
-  value: string | undefined,
-  nowMs = Date.now()
-): number | undefined {
-  const retryAfter = value?.trim()
-  if (!retryAfter) return undefined
-
-  const seconds = Number(retryAfter)
-  const retryAtMs =
-    Number.isFinite(seconds) && seconds >= 0 ? nowMs + seconds * 1_000 : Date.parse(retryAfter)
-  if (!Number.isFinite(retryAtMs)) return undefined
-
-  return Math.min(ENTITY_CHANGE_RETRY_AFTER_CAP_MS, Math.max(0, retryAtMs - nowMs))
 }
 
 function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
@@ -995,16 +975,6 @@ export class AppService {
       stop: (opts?: { silent?: boolean }) => void
     }
   >()
-  private readonly entityChangeSubscribers = new Map<
-    string,
-    { ownerId: number; onEvent: (event: EntityChangeStreamEvent) => void }
-  >()
-  private entityChangeConnectionStop: ((opts?: { silent?: boolean }) => void) | null = null
-  private entityChangeSessionToken: string | null = null
-  private entityChangeSessionGeneration = 0
-  private entityChangeEnvironmentSwitching = false
-  private entityChangeSessionExpiryDeferred = false
-  private entityChangeCursor: string | null = null
   private progressStreams = new Map<
     string,
     { ownerId: number; stop: (opts?: { silent?: boolean }) => void }
@@ -1247,10 +1217,6 @@ export class AppService {
       this.profileUiBaseUrlCache = null
       this.accessCatalog = null
       await this.tokenStore.setSessionToken(token, getActiveEnvKey())
-      if (this.gfsTransientTeamHopDepth === 0) {
-        this.updateEntityChangeSessionToken(token)
-        this.restartEntityChangeStreamForSessionReplacement()
-      }
     }
     if (options.refreshMe) {
       try {
@@ -1329,10 +1295,6 @@ export class AppService {
       if (released) return
       released = true
       this.gfsTransientTeamHopDepth = Math.max(0, this.gfsTransientTeamHopDepth - 1)
-      if (this.gfsTransientTeamHopDepth === 0 && this.entityChangeSessionExpiryDeferred) {
-        this.entityChangeSessionExpiryDeferred = false
-        this.emitEntityChangeSessionExpired()
-      }
       // A hop that does not restore the original team commits its token without
       // publishing it; the watch learns it here, once the last hop is released.
       this.gfsWatch.onHopRelease(this.sessionToken)
@@ -1489,9 +1451,7 @@ export class AppService {
               }
             }
             if (restoredOriginalTeam && this.sessionToken) {
-              this.updateEntityChangeSessionToken(this.sessionToken)
               this.gfsWatch.onSessionToken(this.sessionToken)
-              this.restartEntityChangeStreamForSessionReplacement()
             } else if (
               shouldRestore &&
               hopSessionToken &&
@@ -1503,9 +1463,7 @@ export class AppService {
               // session. Publish it as a new session before releasing the owner,
               // then rebind session-scoped consumers to the token that remains.
               this.sessionGeneration += 1
-              this.updateEntityChangeSessionToken(this.sessionToken)
               this.gfsWatch.onSessionToken(this.sessionToken)
-              this.restartEntityChangeStreamForSessionReplacement()
             }
             if (restoreFailed && !operationFailed) throw restoreFailure
           }
@@ -1614,7 +1572,6 @@ export class AppService {
 
   private clearAuthenticatedSessionState(): void {
     this.sessionGeneration += 1
-    this.updateEntityChangeSessionToken(null)
     this.gfsWatch.onSessionToken(null)
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = true
@@ -1942,9 +1899,7 @@ export class AppService {
         })
         this.me = restoredMe
         this.savedSessionRestoreAttemptedEnvKey = environmentKey
-        this.updateEntityChangeSessionToken(token)
         this.gfsWatch.onSessionToken(token)
-        this.restartEntityChangeStreamForSessionReplacement()
         this.accessCatalog = null
         this.teamDirectoryCache = null
         this.workflowApprovalTeamById.clear()
@@ -2055,9 +2010,7 @@ export class AppService {
       if (hadAuthenticatedScope) this.invalidateSandboxUiSession()
       this.sessionToken = result.token
       this.me = result.me
-      this.updateEntityChangeSessionToken(result.token)
       this.gfsWatch.onSessionToken(result.token)
-      this.restartEntityChangeStreamForSessionReplacement()
       await this.bindCurrentChatStore(result.me.id)
       this.accessCatalog = null
       this.teamDirectoryCache = null
@@ -2167,8 +2120,6 @@ export class AppService {
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const hadAuthenticatedScope = Boolean(this.sessionToken && this.me)
-      this.entityChangeEnvironmentSwitching = true
-      this.entityChangeConnectionStop?.({ silent: true })
       this.gfsWatch.onEnvSwitchStart()
       // Invalidate a restore that may still be awaiting keychain/getMe before it
       // can bind an old-environment token to the newly selected runtime.
@@ -2215,7 +2166,6 @@ export class AppService {
       }
       return this.sessionGeneration
     } finally {
-      this.entityChangeEnvironmentSwitching = false
       const environmentUnchanged =
         getActiveEnvKey() === oldEnvKey &&
         normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
@@ -2223,9 +2173,6 @@ export class AppService {
       // that did not clear the session would drop a session that is still valid.
       // First, so that nothing thrown below leaves the watch switching for good.
       this.gfsWatch.onEnvSwitchEnd(!environmentUnchanged)
-      if (environmentUnchanged) {
-        this.ensureEntityChangeConnection()
-      }
       releasePrewarm()
     }
   }
@@ -3770,203 +3717,6 @@ export class AppService {
     return result
   }
 
-  startEntityChangeStream(
-    streamId: string,
-    ownerId: number,
-    onEvent: (event: EntityChangeStreamEvent) => void
-  ): void {
-    this.entityChangeSubscribers.set(streamId, { ownerId, onEvent })
-    this.ensureEntityChangeConnection()
-  }
-
-  private emitEntityChangeEvent(event: EntityChangeStreamEvent): void {
-    if ('cursor' in event) this.entityChangeCursor = event.cursor
-    for (const subscriber of Array.from(this.entityChangeSubscribers.values())) {
-      try {
-        subscriber.onEvent(event)
-      } catch {
-        // A destroyed renderer must not interrupt delivery to other windows.
-      }
-    }
-  }
-
-  private updateEntityChangeSessionToken(token: string | null): void {
-    if (this.entityChangeSessionToken === token) return
-    this.entityChangeSessionToken = token
-    this.entityChangeSessionGeneration += 1
-  }
-
-  private handleEntityChangeSessionExpiry(connectionGeneration: number): void {
-    const hasNewerCommittedSession =
-      this.entityChangeSessionGeneration > connectionGeneration &&
-      Boolean(this.entityChangeSessionToken)
-    if (hasNewerCommittedSession) {
-      this.restartEntityChangeStreamForSessionReplacement()
-      return
-    }
-
-    this.entityChangeConnectionStop?.({ silent: true })
-    if (this.gfsTransientTeamHopDepth > 0) {
-      this.entityChangeSessionExpiryDeferred = true
-      return
-    }
-
-    this.emitEntityChangeSessionExpired()
-  }
-
-  private emitEntityChangeSessionExpired(): void {
-    this.emitEntityChangeEvent({
-      type: 'stream.closing',
-      schemaVersion: 1,
-      cursor: this.entityChangeCursor ?? '00000000-0000-0000-0000-000000000000',
-      reason: 'session_expired',
-    })
-    // Keep renderer-owned subscriptions dormant so a newly committed session
-    // can rebind the stream without requiring a renderer remount. The expired
-    // connection itself is already stopped; logout and renderer teardown remove
-    // these owners through stopAllStreams/stopEntityChangeStreamsForOwner.
-    //
-    // The stream ending says the token expired; /me decides whether the session
-    // really ended. Not awaited: when this runs inside the commit owner (a hop
-    // release), the check waits in the queue instead of blocking it.
-    void this.confirmCommittedSessionWithMe().catch(error => {
-      console.warn(
-        '[AppService] Could not check the session after the live-update stream expired:',
-        error
-      )
-    })
-  }
-
-  private ensureEntityChangeConnection(): void {
-    if (this.entityChangeEnvironmentSwitching) return
-    if (this.entityChangeConnectionStop || this.entityChangeSubscribers.size === 0) return
-    if (
-      !this.entityChangeSessionToken &&
-      this.sessionToken &&
-      this.gfsTransientTeamHopDepth === 0
-    ) {
-      this.updateEntityChangeSessionToken(this.sessionToken)
-    }
-    if (!this.entityChangeSessionToken) return
-    let closed = false
-    let abortController: AbortController | null = null
-    let retryTimer: NodeJS.Timeout | null = null
-    let idleTimer: NodeJS.Timeout | null = null
-    let backoffMs = 1000
-    let serverRetryAfterMs: number | undefined
-    const clearRetry = () => {
-      if (retryTimer) clearTimeout(retryTimer)
-      retryTimer = null
-    }
-    const clearIdleTimer = () => {
-      if (idleTimer) clearTimeout(idleTimer)
-      idleTimer = null
-    }
-    const armIdleTimer = (attemptController: AbortController) => {
-      clearIdleTimer()
-      idleTimer = setTimeout(() => {
-        idleTimer = null
-        if (!closed && abortController === attemptController) attemptController.abort()
-      }, ENTITY_CHANGE_STREAM_IDLE_TIMEOUT_MS)
-    }
-    const stop = (opts?: { silent?: boolean }) => {
-      if (closed) return
-      closed = true
-      clearRetry()
-      clearIdleTimer()
-      abortController?.abort()
-      if (this.entityChangeConnectionStop === stop) this.entityChangeConnectionStop = null
-      if (!opts?.silent) this.emitEntityChangeEvent({ type: 'closed' })
-    }
-    this.entityChangeConnectionStop = stop
-
-    const connect = async () => {
-      if (closed) return
-      const connectionToken = this.entityChangeSessionToken
-      const connectionGeneration = this.entityChangeSessionGeneration
-      if (!connectionToken) return
-      const attemptController = new AbortController()
-      abortController = attemptController
-      armIdleTimer(attemptController)
-      try {
-        await this.authClient.openEntityChangeStream(
-          connectionToken,
-          this.entityChangeCursor,
-          event => {
-            if (closed) return
-            if (
-              event.type === 'heartbeat' ||
-              event.type === 'scope.invalidated' ||
-              event.type === 'resync_required' ||
-              event.type === 'stream.closing'
-            ) {
-              armIdleTimer(attemptController)
-              // Transport-open is synthetic: it proves only that fetch
-              // returned headers. Reset retry pressure only after the server
-              // produces a validated schema-v1 frame.
-              backoffMs = 1000
-            }
-            if (event.type === 'stream.closing' && event.reason === 'session_expired') {
-              this.handleEntityChangeSessionExpiry(connectionGeneration)
-              return
-            }
-            this.emitEntityChangeEvent(event)
-          },
-          attemptController.signal
-        )
-      } catch (error) {
-        if (!closed) {
-          if (error instanceof ApiError && error.status === 401) {
-            this.handleEntityChangeSessionExpiry(connectionGeneration)
-          } else {
-            serverRetryAfterMs =
-              error instanceof ApiError
-                ? parseEntityChangeRetryAfterMs(error.retryAfter)
-                : undefined
-            this.emitEntityChangeEvent({
-              type: 'error',
-              message: 'Live updates disconnected; reconnecting.',
-            })
-          }
-        }
-      } finally {
-        if (closed) return
-        clearIdleTimer()
-        clearRetry()
-        const localBackoffMs = backoffMs + Math.floor(Math.random() * Math.max(1, backoffMs * 0.2))
-        const delay = Math.max(localBackoffMs, serverRetryAfterMs ?? 0)
-        serverRetryAfterMs = undefined
-        backoffMs = Math.min(backoffMs * 2, 15_000)
-        retryTimer = setTimeout(() => void connect(), delay)
-      }
-    }
-
-    void connect()
-  }
-
-  private restartEntityChangeStreamForSessionReplacement(): void {
-    this.entityChangeSessionExpiryDeferred = false
-    this.entityChangeCursor = null
-    this.entityChangeConnectionStop?.({ silent: true })
-    this.ensureEntityChangeConnection()
-  }
-
-  stopEntityChangeStream(streamId: string, requesterOwnerId?: number): boolean {
-    const subscriber = this.entityChangeSubscribers.get(streamId)
-    if (!subscriber) return true
-    if (requesterOwnerId !== undefined && subscriber.ownerId !== requesterOwnerId) return false
-    this.entityChangeSubscribers.delete(streamId)
-    if (this.entityChangeSubscribers.size === 0) this.entityChangeConnectionStop?.({ silent: true })
-    return true
-  }
-
-  stopEntityChangeStreamsForOwner(ownerId: number): void {
-    for (const [streamId, subscriber] of this.entityChangeSubscribers) {
-      if (subscriber.ownerId === ownerId) this.entityChangeSubscribers.delete(streamId)
-    }
-    if (this.entityChangeSubscribers.size === 0) this.entityChangeConnectionStop?.({ silent: true })
-  }
-
   startWorkflowNotificationStream(
     streamId: string,
     ownerId: number,
@@ -4115,10 +3865,6 @@ export class AppService {
     for (const entry of Array.from(this.hostActivityStreams.values())) entry.stop({ silent: true })
     for (const entry of Array.from(this.hostStatusStreams.values())) entry.stop({ silent: true })
     for (const entry of Array.from(this.notificationStreams.values())) entry.stop({ silent: true })
-    this.entityChangeSubscribers.clear()
-    this.entityChangeSessionExpiryDeferred = false
-    this.entityChangeConnectionStop?.({ silent: true })
-    this.entityChangeCursor = null
     this.gfsWatch.onStopAllStreams()
   }
 
@@ -4355,7 +4101,6 @@ export class AppService {
           throw error
         }
         this.activateGfsAuthScope()
-        this.updateEntityChangeSessionToken(this.sessionToken)
         this.gfsWatch.onSessionToken(this.sessionToken)
         this.stopAllStreams()
         // Grants are keyed by userId, not by team, so they carry over — but every

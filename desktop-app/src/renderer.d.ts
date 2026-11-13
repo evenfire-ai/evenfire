@@ -21,7 +21,6 @@ import {
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
-  EntityChangeStreamEvent,
   ExternalChannelsSummary,
   GfsWatchEvent,
   GfsWatchSubscriptionRequest,
@@ -517,11 +516,6 @@ declare global {
         onAction: (callback: (payload: { id: string; action: string }) => void) => () => void
         onFailed: (callback: (payload: { id: string; error: string }) => void) => () => void
         ack: (notificationId: string) => Promise<{ ok: boolean; status: string }>
-      }
-      entityChanges: {
-        subscribe: (
-          onEvent: (event: EntityChangeStreamEvent) => void
-        ) => Promise<() => Promise<void>>
       }
       gfsWatch: {
         open: (

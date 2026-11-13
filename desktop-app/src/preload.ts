@@ -4,7 +4,6 @@ import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfigHandoffSelection,
-  EntityChangeStreamEvent,
   GfsResourceDeepLinkEnvelope,
   GfsWatchEvent,
   GfsWatchSubscriptionRequest,
@@ -430,41 +429,6 @@ const clerum = Object.freeze({
         ok: boolean
         status: string
       }>,
-  },
-  entityChanges: {
-    subscribe: async (onEvent: (event: EntityChangeStreamEvent) => void) => {
-      let streamId = ''
-      const pending: unknown[] = []
-      const listener = (_event: unknown, payload: unknown) => {
-        const parsed = payload as { streamId?: string; event?: EntityChangeStreamEvent }
-        if (!streamId) {
-          if (pending.length < 100) pending.push(payload)
-          return
-        }
-        if (parsed?.streamId === streamId && parsed.event) onEvent(parsed.event)
-      }
-      ipcRenderer.on('entityChanges:streamEvent', listener)
-      try {
-        const started = (await ipcRenderer.invoke('entityChanges:streamStart')) as {
-          streamId: string
-        }
-        streamId = String(started?.streamId || '').trim()
-        if (!streamId) throw new Error('Failed to start entity-change stream')
-        for (const item of pending) {
-          const parsed = item as { streamId?: string; event?: EntityChangeStreamEvent }
-          if (parsed?.streamId === streamId && parsed.event) onEvent(parsed.event)
-        }
-        pending.length = 0
-      } catch (error) {
-        ipcRenderer.removeListener('entityChanges:streamEvent', listener)
-        throw error
-      }
-
-      return async () => {
-        ipcRenderer.removeListener('entityChanges:streamEvent', listener)
-        await ipcRenderer.invoke('entityChanges:streamStop', { streamId })
-      }
-    },
   },
   gfsWatch: {
     /**
