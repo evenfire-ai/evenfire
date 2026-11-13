@@ -29,6 +29,7 @@ import type {
 } from './openaiFamily/protocols/types'
 import { classifyFamilyError } from './openaiFamily/shared'
 import type { LlmProvider } from './registryCore'
+import { fromWireResponse, toWireRequest } from './toolWireNames'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 const PROTOCOLS: Record<WireProtocolId, WireProtocol> = {
@@ -125,10 +126,14 @@ export class OpenAIProvider implements SingleTurnProvider {
   ): Promise<ToolCompletionResponse> {
     const options = applyOptionPolicy(rawOptions, this.profile.options)
     const ctx = this.encodeContext()
+    // Encode and decode both see wire names, so the Responses continuation
+    // digest is computed over the same names it is later checked against.
+    const wire = toWireRequest(messages, tools, this.profile.toolNameEnvelope)
     const payload = this.protocol.encodeTools(
       {
-        messages,
-        tools,
+        messages: wire.messages,
+        tools: wire.tools,
+        // Only modes reach here today; a tool name would need `wire.names.toWire`.
         tool_choice: options?.tool_choice,
         max_tokens: options?.max_tokens,
         temperature: options?.temperature,
@@ -142,6 +147,6 @@ export class OpenAIProvider implements SingleTurnProvider {
       this.getVisualDeliveryLimits('completeWithTools')
     )
     const response = await this.protocol.send(this.client, payload, options?.signal)
-    return this.protocol.decodeTools(response, this.decodeContext())
+    return fromWireResponse(this.protocol.decodeTools(response, this.decodeContext()), wire.names)
   }
 }
