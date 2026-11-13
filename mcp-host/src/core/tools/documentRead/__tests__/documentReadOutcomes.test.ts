@@ -464,7 +464,7 @@ describe('document reader admission order (zach88 R2-L5)', () => {
 })
 
 describe('document reader memory refusal text (review R1-M1)', () => {
-  it('tells the model the Host cannot start the reader without promising a retry', async () => {
+  it('tells the model the Host could not start this read, promising neither a retry nor permanence', async () => {
     const file = admittedFile('refused', await textPdf(['refused']), 'application/pdf')
     const refuse: RunDocumentJob = async () =>
       ({ ok: false, reason: 'host_memory_unavailable' }) as never
@@ -474,9 +474,12 @@ describe('document reader memory refusal text (review R1-M1)', () => {
     )
     const body = JSON.parse(output.content)
     expect(body).toMatchObject({ status: 'error', reason: 'host_memory_unavailable' })
-    // A missing kernel setting, cgroup or calibration never clears on retry.
+    // A missing kernel setting, cgroup or calibration never clears on retry,
+    // while `host_headroom` is measured per job and can (review round 2, N2):
+    // the one message serves both, so it promises neither.
     expect(body.message).not.toMatch(/retry/i)
-    expect(body.message).toMatch(/^This Host cannot start the document reader/)
+    expect(body.message).not.toMatch(/cannot/i)
+    expect(body.message).toMatch(/^This Host could not start the document reader for this read/)
     expect(body.message).toMatch(/Host log/)
   })
 })
