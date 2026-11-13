@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
+import os from 'node:os'
+import path from 'node:path'
 import { createStaticRuntimeTokenProvider } from '@clerum/workflow-runtime-core'
 import { SnippetRunnerClient } from '../../../src/workflow/snippetRunnerClient'
+import { createSnippetRunnerServer } from '../../../src/workflow/snippetRunnerServer'
 
 describe('SnippetRunnerClient', () => {
   afterEach(() => {
@@ -184,27 +188,6 @@ describe('SnippetRunnerClient', () => {
     expect(signal?.aborted).toBe(true)
   })
 
-  it('aborts the health request after reading the status so the response body is released', async () => {
-    let abortedAtCall: boolean | undefined
-    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-      abortedAtCall = init.signal?.aborted
-      return { ok: true, status: 200 }
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const client = new SnippetRunnerClient(
-      'http://snippet-runner:8095',
-      createStaticRuntimeTokenProvider({ snippetRunnerToken: 'jwt-a' })
-    )
-    const result = await client.healthCheck()
-
-    expect(result).toEqual({ status: 'healthy' })
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(abortedAtCall).toBe(false)
-    const init = fetchMock.mock.calls[0][1] as RequestInit
-    expect(init.signal?.aborted).toBe(true)
-  })
-
   it('releases the connection when GET /health sends headers but never finishes the body', async () => {
     const sockets = new Set<Socket>()
     let resolveHealthSocketClosed: () => void = () => {}
@@ -247,6 +230,50 @@ describe('SnippetRunnerClient', () => {
     } finally {
       clearTimeout(timeout)
       for (const socket of sockets) socket.destroy()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+})
+
+describe('SnippetRunnerClient health check against the snippet runner server', () => {
+  let tokenDir: string
+  let outputDir: string
+
+  beforeEach(async () => {
+    tokenDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-runner-token-'))
+    outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-runner-output-'))
+    const tokenPath = path.join(tokenDir, 'token')
+    await fs.writeFile(tokenPath, 'runner-token\n', 'utf8')
+    vi.stubEnv('SNIPPET_RUNNER_TOKEN_FILE', tokenPath)
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_DIR', outputDir)
+  })
+
+  afterEach(async () => {
+    vi.unstubAllEnvs()
+    await fs.rm(tokenDir, { recursive: true, force: true })
+    await fs.rm(outputDir, { recursive: true, force: true })
+  })
+
+  it('reports healthy from the runner server and unhealthy under a wrong base URL', async () => {
+    const server = createSnippetRunnerServer()
+    const received: string[] = []
+    server.on('request', req => received.push(`${req.method} ${req.url}`))
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = server.address() as AddressInfo
+      const tokenProvider = createStaticRuntimeTokenProvider({ snippetRunnerToken: 'runner-token' })
+
+      await expect(
+        new SnippetRunnerClient(`http://127.0.0.1:${port}`, tokenProvider).healthCheck()
+      ).resolves.toEqual({ status: 'healthy' })
+      await expect(
+        new SnippetRunnerClient(`http://127.0.0.1:${port}/wrong`, tokenProvider).healthCheck()
+      ).resolves.toEqual({ status: 'unhealthy' })
+      // Liveness witness: both probes reached this server, so the unhealthy verdict is its
+      // 404 for an unknown route, not a refused connection.
+      expect(received).toEqual(['GET /health', 'GET /wrong/health'])
+    } finally {
+      server.closeAllConnections()
       await new Promise<void>(resolve => server.close(() => resolve()))
     }
   })
