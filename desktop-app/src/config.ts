@@ -1045,7 +1045,7 @@ function prepareRuntimeConfigSave(next: DesktopRuntimeConfig): {
   let profileAfter: StoredRuntimeProfile
   let profilesAfter: StoredRuntimeProfile[]
   let targetPath: string
-  let expectedProfile: { filePath: string; revision: string | null } | null = null
+  let expectedProfile: { filePath: string; revision: string | null }
   let rotateIncarnations: string[] = []
   if (explicitPath) {
     targetPath = explicitPath
@@ -1109,7 +1109,7 @@ function prepareRuntimeConfigSave(next: DesktopRuntimeConfig): {
   const mutation: PreparedRuntimeConfigMutation = {
     checkIndexRevision: !explicitPath,
     expectedIndexRevision: explicitPath ? null : fileRevision(runtimeConfigIndexPath()),
-    expectedFileRevisions: expectedProfile ? [expectedProfile] : [],
+    expectedFileRevisions: [expectedProfile],
     transaction: { version: 1, writes, deletes: [] },
     profilesAfter,
     activeProfileAfter,
