@@ -2202,7 +2202,7 @@ describe('deleteArtifactFile — per-file artifact delete', () => {
   })
 })
 
-// --- R1-M1: stored tool calls are bounded in serialized bytes ---------------
+// --- Stored tool calls are bounded in serialized bytes ---------------------
 
 describe('postStepStatus with byte-heavy tool calls', () => {
   it('stores a byte-heavy report within the serialized limit, raw or coordinator-bounded', async () => {
@@ -2212,8 +2212,9 @@ describe('postStepStatus with byte-heavy tool calls', () => {
     const toolsCalled: Array<Record<string, unknown>> = Array.from({ length: 60 }, (_, i) => ({
       serverName: 'git',
       toolName: 'read_file',
-      // Odd calls are over the character limit; even calls fit it but, for the
-      // CJK unit, not the byte limit.
+      // Odd calls are over the character limit. Even calls carry 900 characters,
+      // which as JSON text fit the character limit only for the CJK unit (and
+      // then exceed the byte limit); the quote and control units escape past it.
       args: { query: fill(units[i % 3], i % 2 ? 5_000 : 900) },
       result:
         i % 2 ? [{ type: 'text', text: fill(units[i % 3], 5_000) }] : fill(units[i % 3], 1_024),
@@ -2281,5 +2282,74 @@ describe('postStepStatus with byte-heavy tool calls', () => {
       expect(Buffer.byteLength(JSON.stringify(call.result))).toBeLessThanOrEqual(maxValueBytes)
     }
     expect(fromBounded).toEqual(fromRaw)
+  })
+
+  it('extracts a byte-heavy accepted artifact and bounds previews and non-record args from either report', async () => {
+    const artifact = {
+      name: 'report.docx',
+      format: 'docx',
+      path: '/output/report.docx',
+      sizeBytes: 2048,
+      createdAt: '2026-10-16T00:00:00.000Z',
+    }
+    const stringArgs = '日'.repeat(680)
+    const toolsCalled = [
+      {
+        serverName: 'clerum',
+        toolName: 'generate_docx',
+        args: {},
+        // Fits the 1,024-character limit but not the 2,048-byte limit.
+        result: { success: true, artifact, content: '日'.repeat(800) },
+        durationMs: 1,
+      },
+      {
+        serverName: 'srv',
+        toolName: 'tool',
+        args: stringArgs,
+        result: { truncated: true, preview: '\u0001'.repeat(1_024) },
+        durationMs: 2,
+      },
+    ]
+    const stored = async (calls: unknown[]) => {
+      const customApi = makeCustomApi({
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { name: 'my-recipe', resourceVersion: '1' },
+          spec: { steps: [{ id: 's1' }] },
+          status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+        }),
+      })
+      const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+      const result = await h.postStepStatus('my-recipe', makeClaims(), {
+        stepId: 's1',
+        phase: 'completed',
+        toolsCalled: calls as never,
+      })
+      expect(result.status).toBe(200)
+      const patchOps = getStatusPatchOps(customApi)
+      return {
+        toolsCalled: (
+          patchOps.find(op => op.path === '/status/steps/-')?.value as {
+            toolsCalled?: Array<{ args?: unknown; result?: unknown }>
+          }
+        ).toolsCalled,
+        artifacts: patchOps.filter(op => op.path === '/status/artifacts/-').map(op => op.value),
+      }
+    }
+
+    const fromBounded = await stored(boundToolsCalledForStatus(toolsCalled))
+    const fromRaw = await stored(toolsCalled)
+
+    for (const report of [fromBounded, fromRaw]) {
+      // Liveness: both calls stored and the artifact extracted.
+      expect(report.toolsCalled).toHaveLength(2)
+      expect(report.artifacts).toEqual([expect.objectContaining({ name: 'report.docx' })])
+      expect(report.toolsCalled?.[1].args).toEqual({ truncated: true, preview: stringArgs })
+      const preview = report.toolsCalled?.[1].result as { truncated: boolean; preview: string }
+      expect(preview.truncated).toBe(true)
+      expect(preview.preview.length).toBeGreaterThan(300)
+      expect(Buffer.byteLength(JSON.stringify(preview))).toBeLessThanOrEqual(2 * 1024 + 31)
+    }
+    // The coordinator sends the reduced artifact, which WRC stores as is.
+    expect(fromBounded.toolsCalled?.[0].result).toEqual({ success: true, artifact })
   })
 })

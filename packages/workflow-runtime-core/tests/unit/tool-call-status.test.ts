@@ -203,6 +203,22 @@ describe('boundToolsCalledForStatus', () => {
     })
   })
 
+  it('reduces an accepted artifact result that fits the character limit but not the byte limit', () => {
+    const result = { ...artifactResult('report.docx'), content: '日'.repeat(800) }
+    // Precondition: only the byte limit makes this result oversized.
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(STATUS_TOOL_RESULT_PREVIEW_LIMIT)
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(
+      2 * STATUS_TOOL_RESULT_PREVIEW_LIMIT
+    )
+    const bounded = boundToolsCalledForStatus([
+      { serverName: 'clerum', toolName: 'generate_docx', result },
+      { serverName: 'clerum', toolName: 'generate_docx', result: JSON.stringify(result) },
+    ]) as Array<{ result: unknown }>
+
+    expect(bounded[0].result).toEqual(artifactResult('report.docx'))
+    expect(bounded[1].result).toEqual(artifactResult('report.docx'))
+  })
+
   it('previews an oversized artifact result that WRC would reject', () => {
     const result = {
       success: true,
@@ -244,10 +260,12 @@ describe('boundToolsCalledForStatus', () => {
   })
 })
 
-// --- R1-M1: the limits also count serialized UTF-8 bytes -------------------
+// --- The limits also count serialized UTF-8 bytes --------------------------
 
 // The most one args or result value costs once serialized: a preview of
 // 2 x 1,024 bytes inside its `{"truncated":true,"preview":""}` wrapper (31 bytes).
+// A result reduced to its accepted artifact metadata is the exception (up to
+// about 4.7 KB); the calls below carry only artifacts WRC rejects.
 const MAX_VALUE_BYTES = 2 * STATUS_TOOL_RESULT_PREVIEW_LIMIT + 31
 const serializedBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value))
 const fill = (unit: string, chars: number) =>
@@ -380,7 +398,7 @@ describe('serialized size of bounded tool calls', () => {
   })
 })
 
-// --- R1-L6 (only if the owner includes the guard change) --------------------
+// --- An existing preview passes through only within both limits ------------
 
 describe('preview pass-through guard, serialized size', () => {
   it('re-bounds a preview-shaped value whose text is over the byte limit', () => {

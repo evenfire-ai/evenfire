@@ -66,7 +66,8 @@ export function normalizeToolResultForStatus(result: unknown): unknown {
  * later calls are kept (without args), and an artifact result too large for a
  * preview is reduced to the artifact metadata WRC accepts (normalized: at
  * most 768 characters of metadata, which can serialize to about 4.7 KB)
- * rather than truncated. Past the
+ * rather than truncated. WRC stores metadata over the byte limit as a
+ * preview, but still lists the artifact in status.artifacts. Past the
  * cap, artifacts from a step with more than 2 x MAX_STATUS_TOOL_CALLS calls
  * are dropped to keep the report bounded.
  * Entries are not validated here; WRC rejects malformed ones.
