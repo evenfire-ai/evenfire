@@ -894,3 +894,84 @@ describe('WorkflowService step spillover — metrics', () => {
     expect(await metricTotal('clerum_workflow_step_spillover_reads_total')).toBe(before.step)
   })
 })
+
+/** Bytes of the regular files under `dir`, by a walk that is not the quota's. */
+async function treeBytes(dir: string): Promise<number> {
+  let total = 0
+  let entries
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) total += await treeBytes(full)
+    else if (entry.isFile()) total += (await fs.stat(full)).size
+  }
+  return total
+}
+
+describe('WorkflowService step spillover — artifact quota', () => {
+  it('does not count spilled results against the artifact quota, and still counts artifacts', async () => {
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_QUOTA_MB', '1')
+    const MIB = 1024 * 1024
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      {
+        content: null,
+        tool_calls: [
+          {
+            name: 'clerum__generate_markdown',
+            arguments: { filename: 'report.md', content: big(200 * 1024) },
+          },
+        ],
+      },
+      {
+        content: null,
+        tool_calls: [
+          {
+            name: 'clerum__generate_markdown',
+            arguments: { filename: 'second.md', content: big(900 * 1024) },
+          },
+        ],
+      },
+      { content: 'done', tool_calls: null },
+    ])
+    // Bytes under `.spill` at each model call: the second and third calls are
+    // made right before each generator runs.
+    const spillBytesAtCall: number[] = []
+    const answer = llm.completeSingleTurnWithTools
+    llm.completeSingleTurnWithTools = vi.fn().mockImplementation(async (...args: unknown[]) => {
+      spillBytesAtCall.push(await treeBytes(path.join(outputDir, '.spill')))
+      return (answer as (...a: unknown[]) => unknown)(...args)
+    })
+    const client = mockMcpClient([{ name: 'read' }], {
+      read: { content: big(Math.floor(1.2 * MIB)) },
+    })
+
+    const res = await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    // Witness: when each generator ran, the spilled result was on disk and
+    // alone larger than the 1 MB quota.
+    expect(spillBytesAtCall[0]).toBe(0)
+    expect(spillBytesAtCall[1]).toBeGreaterThan(MIB)
+    expect(spillBytesAtCall[2]).toBeGreaterThan(MIB)
+    const records = res.toolsCalled ?? []
+    // The spilled bytes do not make the artifact write fail.
+    expect(records[1]?.result).toMatchObject({ artifact: { name: 'report.md' } })
+    expect((await fs.stat(path.join(outputDir, 'report.md'))).size).toBe(200 * 1024)
+    // Witness: the quota still counts artifacts, and only them (0.2 MB held).
+    expect(JSON.stringify(records[2]?.result)).toMatch(
+      /Output quota exceeded: the output folder holds 0\.2 MB and this file needs 0\.9 MB/
+    )
+    await expect(fs.stat(path.join(outputDir, 'second.md'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  })
+})

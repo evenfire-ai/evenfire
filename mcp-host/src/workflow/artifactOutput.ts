@@ -128,6 +128,13 @@ export function isPartialArtifactName(name: string): boolean {
   return path.basename(name).startsWith(PARTIAL_PREFIX)
 }
 
+/**
+ * Directory in a workflow run's output folder where a step keeps the tool
+ * results it stores outside the prompt (stepSpillover.ts). They are not
+ * artifacts: the run's output quota does not count them.
+ */
+export const STEP_SPILL_DIR = '.spill'
+
 /** A partial file this old was left by a write that never finished. */
 const ABANDONED_PARTIAL_MS = 60 * 60 * 1000
 
@@ -290,16 +297,17 @@ const DEFAULT_QUOTA_MB = 50
 
 /**
  * Recursively sum the size of all regular files under `dir`.
- * Returns 0 if the directory does not exist.
+ * Returns 0 if the directory does not exist. A directory named
+ * `skipTopLevelDir` directly under `dir` is not entered; deeper ones are.
  */
-export function getDirectorySize(dir: string): number {
+export function getDirectorySize(dir: string, skipTopLevelDir?: string): number {
   if (!fs.existsSync(dir)) return 0
   let total = 0
   const entries = fs.readdirSync(dir, { withFileTypes: true })
   for (const entry of entries) {
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) {
-      total += getDirectorySize(full)
+      if (entry.name !== skipTopLevelDir) total += getDirectorySize(full)
     } else if (entry.isFile() && !isPartialArtifactName(entry.name)) {
       try {
         total += fs.statSync(full).size
@@ -342,23 +350,27 @@ function outputQuotaMB(raw: string | undefined): number {
  *
  * Reads the ceiling from `CLERUM_WORKFLOW_OUTPUT_QUOTA_MB` (default: 50 MB).
  * Throws if the current directory usage + `incomingBytes` would exceed the cap.
- * `replacingBytes` is the size of a file the write overwrites, which stops
- * counting once it is replaced.
+ * In a workflow run's output the step spill directory (`.spill` at the top
+ * level, stepSpillover.ts) is not counted, whatever the spillover switch says;
+ * a chat caller's folder is counted whole. `replacingBytes` is the size of a
+ * file the write overwrites, which stops counting once it is replaced.
  *
  * Known limitation (race condition): When the LLM issues multiple tool calls
  * concurrently (e.g., generate_pdf + generate_xlsx in the same turn), both
  * calls read the directory size before either has written its file. Both see
  * the same "current" size and both pass the quota check, even though the
  * combined output would exceed the 50 MB cap. This is a best-effort soft
- * quota; the 1Gi PVC hard cap enforced by kubelet is the primary defense.
+ * quota; the size of the run's output volume (256Mi by default; a recipe can
+ * set another size) is the hard cap.
  */
 export function enforceQuota(outputDir: string, incomingBytes: number, replacingBytes = 0): void {
   const quotaMB = outputQuotaMB(process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB)
   const quotaBytes = quotaMB * 1024 * 1024
+  const callerFolder = path.basename(outputDir) === CALLER_OUTPUTS_DIR
 
   let size: number
   try {
-    size = getDirectorySize(outputDir)
+    size = getDirectorySize(outputDir, callerFolder ? undefined : STEP_SPILL_DIR)
   } catch (err) {
     throw storageError(err, 'Could not measure the output folder')
   }
@@ -373,8 +385,7 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
         'raise CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
     )
   }
-  if (path.basename(outputDir) === CALLER_OUTPUTS_DIR)
-    enforceFreeSpaceFloor(outputDir, incomingBytes)
+  if (callerFolder) enforceFreeSpaceFloor(outputDir, incomingBytes)
 }
 
 /**

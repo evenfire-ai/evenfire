@@ -22,6 +22,9 @@
  *     the same execution, and reads at most the threshold.
  *   - The budget caps the result bytes persisted by one execution; a result
  *     that does not fit stays inline and later results that fit still spill.
+ *   - Files under `.spill` are not artifacts: the run's artifact quota
+ *     (`enforceQuota`) does not count them. The budget and the size of the
+ *     run's output volume are their only bounds.
  *   - Logs carry tool names, sizes and refs only, never result content or
  *     arguments.
  *
@@ -37,6 +40,7 @@ import { SpilloverStorage, parseSpilloverRef } from '../core/spillover'
 import type { SpilloverInstruments } from '../core/spillover/types'
 import { SpilloverReadTool } from '../core/tools/spilloverRead'
 import { logger } from '../logger'
+import { STEP_SPILL_DIR } from './artifactOutput'
 import type { InternalToolDefinition, InternalToolResult } from './types'
 
 export const STEP_SPILLOVER_READ_TOOL_NAME = 'clerum__spillover_read'
@@ -53,7 +57,8 @@ export const DEFAULT_STEP_SPILLOVER_BUDGET_BYTES = 16777216
 const MIN_BUDGET_BYTES = 1048576
 const MAX_BUDGET_BYTES = 268435456
 
-const SPILL_DIR = '.spill'
+// The artifact quota skips this directory by the same name.
+const SPILL_DIR = STEP_SPILL_DIR
 const STORE_ROOT = 'spillover'
 const SEGMENT_RE = /^[A-Za-z0-9_-]+$/
 const EXECUTION_DIR_RE = /^[0-9a-f]{16}$/
