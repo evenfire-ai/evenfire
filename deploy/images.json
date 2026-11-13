@@ -149,7 +149,8 @@
     {
       "name": "gfs-controller",
       "path": "gfs-controller",
-      "source_paths": ["gfs-controller/**"],
+      "rooted": true,
+      "source_paths": ["gfs-controller/**", "packages/action-context-contracts/**"],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -280,7 +281,8 @@
     {
       "name": "workspace-files-controller",
       "path": "workspace-files-controller",
-      "source_paths": ["workspace-files-controller/**"],
+      "rooted": true,
+      "source_paths": ["workspace-files-controller/**", "packages/action-context-contracts/**"],
       "published": true,
       "deployed_to_minikube": true
     },

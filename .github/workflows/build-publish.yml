@@ -269,6 +269,7 @@ jobs:
               - 'mcp-proxy/**'
             gfs-controller:
               - 'gfs-controller/**'
+              - 'packages/action-context-contracts/**'
             nginx-egress-proxy:
               - 'nginx-egress-proxy/**'
             profile-ui:
@@ -297,6 +298,7 @@ jobs:
               - 'stdio-bridge/**'
             workspace-files-controller:
               - 'workspace-files-controller/**'
+              - 'packages/action-context-contracts/**'
             airtable-mcp-server:
               - 'mcp-servers/airtable/**'
             playwright-server:
@@ -421,6 +423,7 @@ jobs:
             changed: ${{ needs.detect.outputs.mcp-proxy }}
           - image: gfs-controller
             path: gfs-controller
+            rooted: true
             changed: ${{ needs.detect.outputs.gfs-controller }}
           - image: nginx-egress-proxy
             path: nginx-egress-proxy
@@ -456,6 +459,7 @@ jobs:
             changed: ${{ needs.detect.outputs.stdio-bridge }}
           - image: workspace-files-controller
             path: workspace-files-controller
+            rooted: true
             changed: ${{ needs.detect.outputs.workspace-files-controller }}
           - image: airtable-mcp-server
             path: mcp-servers/airtable

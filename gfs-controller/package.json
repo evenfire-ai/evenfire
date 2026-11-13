@@ -22,6 +22,7 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@clerum/action-context-contracts": "file:../packages/action-context-contracts",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.13.1"
   },

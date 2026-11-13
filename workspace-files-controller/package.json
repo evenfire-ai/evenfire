@@ -22,6 +22,7 @@
   ],
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
+    "@clerum/action-context-contracts": "file:../packages/action-context-contracts",
     "express": "^5.2.1",
     "jose": "^6.2.1",
     "multer": "^2.2.0",

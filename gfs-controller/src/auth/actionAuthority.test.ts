@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
-import { hashActionTarget } from '../../../packages/action-context-contracts/index.cjs'
+import { hashActionTarget } from '@clerum/action-context-contracts'
 import {
   createGfsAuthorityCheckpointer,
   parseGfsActionAuthority,

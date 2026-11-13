@@ -746,6 +746,16 @@ assert_manifest_source_mutations_rejected
 assert_root_build_context rpc-proxy
 assert_publish_root_build_context rpc-proxy
 
+# gfs-controller and workspace-files-controller import the action-authority
+# checkpoint parser from @clerum/action-context-contracts, so both build from
+# the repository root and copy the package before each npm ci.
+for service in gfs-controller workspace-files-controller; do
+  assert_copy_before_every_ci "$service/Dockerfile" action-context-contracts
+  assert_root_build_context "$service"
+  assert_publish_root_build_context "$service"
+  assert_service_secret_exclusions_after_allowlist "$service"
+done
+
 # workflow-runtime-core is built in a separate stage before workflow-recipes;
 # these are the packages needed by that stage, while the application install
 # also needs the recipe and image policy packages in its final stage.

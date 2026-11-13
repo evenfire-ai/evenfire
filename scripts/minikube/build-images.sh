@@ -1240,11 +1240,13 @@ build_image "nginx-egress-proxy" \
   "${PROJECT_DIR}/nginx-egress-proxy" \
   "clerum/nginx-egress-proxy:test"
 
-# gfsc (Global File System controller) — self-contained build (own Dockerfile,
-# no @clerum/* workspace deps). HCC's gfsReconciler spawns it from this image.
+# gfsc (Global File System controller) — root build context: it depends on
+# @clerum/action-context-contracts through file:../packages. HCC's
+# gfsReconciler spawns it from this image.
 build_image "gfs-controller" \
-  "${PROJECT_DIR}/gfs-controller" \
-  "clerum/gfs-controller:test"
+  "${PROJECT_DIR}" \
+  "clerum/gfs-controller:test" \
+  "${PROJECT_DIR}/gfs-controller/Dockerfile"
 
 build_image "control-api" \
   "${PROJECT_DIR}" \
@@ -1319,8 +1321,9 @@ build_image "stdio-bridge" \
   "clerum/stdio-bridge:test"
 
 build_image "workspace-files-controller" \
-  "${PROJECT_DIR}/workspace-files-controller" \
-  "clerum/workspace-files-controller:test"
+  "${PROJECT_DIR}" \
+  "clerum/workspace-files-controller:test" \
+  "${PROJECT_DIR}/workspace-files-controller/Dockerfile"
 
 build_section "Building UI Services"
 
