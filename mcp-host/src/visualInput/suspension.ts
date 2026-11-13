@@ -33,6 +33,7 @@ function projectResult(result: ToolResult): ToolResult {
     is_error: result.is_error,
     ...(result.metadata ? { metadata: result.metadata } : {}),
     attachments: attachments?.length ? attachments : undefined,
+    ...(result.answeredInSnapshot ? { answeredInSnapshot: true as const } : {}),
   }
 }
 

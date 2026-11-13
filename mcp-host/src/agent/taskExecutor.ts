@@ -316,27 +316,30 @@ interface TaskToolRegistry {
 }
 
 /**
- * The batch results a resume appends after its frozen messages: those that
- * answer a call of the snapshot's last tool-call message and that no tool
- * message after it answers yet. A suspension inside a resumed turn freezes
- * messages that already hold the earlier batch, while its `completed_results`
- * keep that batch too (they carry its attachments through a cold restart).
- * Appending those again would add tool results that answer no open call
- * (independent review round 2, P1).
+ * The batch results a resume appends after its frozen messages. A suspension
+ * inside a resumed turn freezes messages that already hold the earlier batch;
+ * when the turn has attachments, its `completed_results` keep that batch too,
+ * to carry the attachments through a cold restart. Appending those again
+ * would add tool results that answer no open call (independent review round
+ * 2, P1). They carry `answeredInSnapshot`, since a tool-call id cannot tell
+ * the batches apart: some drivers restart ids on every response (round 3,
+ * A-1). Approvals saved before that mark existed are filtered by id: only
+ * results that answer an open call of the snapshot's last tool-call message.
  */
 function unansweredBatchResults(snapshot: ChatMessage[], results: ToolResult[]): ToolResult[] {
+  const current = results.filter(result => result.answeredInSnapshot !== true)
   let callIndex = snapshot.length - 1
   while (callIndex >= 0) {
     const message = snapshot[callIndex]!
     if (message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0) break
     callIndex -= 1
   }
-  if (callIndex < 0) return results
+  if (callIndex < 0) return current
   const open = new Set(snapshot[callIndex]!.tool_calls!.map(call => call.id))
   for (const message of snapshot.slice(callIndex + 1)) {
     if (message.role === 'tool' && message.tool_call_id) open.delete(message.tool_call_id)
   }
-  return results.filter(result => open.has(result.tool_call_id))
+  return current.filter(result => open.has(result.tool_call_id))
 }
 
 export class TaskExecutor {
@@ -907,9 +910,10 @@ export class TaskExecutor {
 
       // Reconstruct messages using the resolved completed_results.
       // `resolvedCompletedResults` is `approval.completed_results` with any
-      // spillover refs swapped in for their blob bodies (invariant #2), so the
-      // rebuilt tool messages carry no ref. Only the results the snapshot does
-      // not answer yet are appended (P1). The batch is appended the way the
+      // spillover ref's blob body swapped in for its content (invariant #2);
+      // the map below drops the ref, so the rebuilt tool messages carry none.
+      // Only the results the snapshot does not answer yet are appended (P1,
+      // A-1). The batch is appended the way the
       // loop appends it, image parts included: a visual read's pages reach
       // the model and match the image count forwarded above (review M1). The
       // scratch collection starts from the turn's attachments before this
@@ -946,9 +950,14 @@ export class TaskExecutor {
             ...(result.approval.attachments || []),
             ...previousAttachments,
           ]
+          // The new snapshot already holds this batch's tool messages; the
+          // results stay for their attachments, marked so the next resume
+          // does not append them again (A-1).
           result.approval.completed_results = [
-            ...(approval.completed_results || []),
-            toolResult,
+            ...[...(approval.completed_results || []), toolResult].map(prior => ({
+              ...prior,
+              answeredInSnapshot: true as const,
+            })),
             ...(result.approval.completed_results || []),
           ]
         }

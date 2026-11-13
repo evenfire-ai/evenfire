@@ -1526,6 +1526,99 @@ describe('TaskExecutor', () => {
     expect(vi.mocked(executeSingleTool).mock.calls[1]![4]).toMatchObject({ images: 1 })
   })
 
+  it('A-1: a second suspension sends no answered result when tool-call ids restart per response', async () => {
+    // The Gemini driver numbers tool calls from call_0 on every response
+    // (googleGenerative.ts), so an id names a call only within its own batch
+    // and the earlier batch's call_0 is not the new call_0 (independent
+    // review round 3, A-1).
+    const frame = createImageAttachment({
+      id: 'frame-1',
+      mimeType: 'image/png',
+      dataBase64: PNG_2X2_BASE64,
+      filename: 'frame.png',
+      width: 2,
+      height: 2,
+    })
+    const firstBatch = [
+      { id: 'call_0', name: 'capture', arguments: {} },
+      { id: 'call_1', name: 'shell_exec', arguments: { command: 'one' } },
+    ]
+    const secondCall = { id: 'call_0', name: 'shell_exec', arguments: { command: 'two' } }
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-first',
+          tool_name: 'shell_exec',
+          parameters: { command: 'one' },
+          description: 'Shell command',
+          tool_call_id: 'call_1',
+          context_snapshot: [
+            { role: 'user', content: 'Capture, then run two commands' },
+            { role: 'assistant', content: '', tool_calls: firstBatch },
+          ],
+          completed_results: [
+            {
+              tool_call_id: 'call_0',
+              name: 'capture',
+              content: 'Captured',
+              is_error: false,
+              attachments: [frame],
+            },
+          ],
+        },
+      } as any)
+      // Frozen the way toolUseLoopToolBatch freezes it (see the P1 test).
+      .mockImplementationOnce(async (_config, messages) => ({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-second',
+          tool_name: 'shell_exec',
+          parameters: secondCall.arguments,
+          description: 'Shell command',
+          tool_call_id: secondCall.id,
+          context_snapshot: [
+            ...structuredClone(messages),
+            { role: 'assistant', content: '', tool_calls: [secondCall] },
+          ],
+          completed_results: [],
+        },
+      }))
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+    vi.mocked(executeSingleTool)
+      .mockResolvedValueOnce({
+        tool_call_id: 'call_1',
+        name: 'shell_exec',
+        content: 'one',
+        is_error: false,
+      })
+      .mockResolvedValueOnce({
+        tool_call_id: 'call_0',
+        name: 'shell_exec',
+        content: 'two',
+        is_error: false,
+      })
+    const executor = new TaskExecutor(createTask('Capture, then run two commands'), createDeps())
+    await executor.run()
+    await executor.resumeAfterApproval(false)
+    expect(executor.executorState).toBe('waiting_approval')
+    await executor.resumeAfterApproval(false)
+    expect(executor.executorState).toBe('completed')
+
+    const messages = vi.mocked(runToolUseLoop).mock.calls[2]![1] as ChatMessage[]
+    const lastCall = messages.map(message => message.role).lastIndexOf('assistant')
+    // Only the approved call answers the second tool-call message.
+    expect(messages.slice(lastCall + 1).map(message => [message.role, message.content])).toEqual([
+      ['tool', 'two'],
+    ])
+    expect(messages.filter(m => m.role === 'tool').map(m => m.content)).toEqual([
+      'Captured',
+      'one',
+      'two',
+    ])
+    expect(vi.mocked(executeSingleTool).mock.calls[1]![4]).toMatchObject({ images: 1 })
+  })
+
   it('U5: a 401 on resume re-suspends as connect_required, then re-executes on connect (no double approval)', async () => {
     vi.mocked(runToolUseLoop)
       // Round A — the LLM calls an oauth MCP tool → approval_required.
