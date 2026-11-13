@@ -886,8 +886,9 @@ export class WorkflowService {
     }
 
     // Spill files a dead process left in the output folder are removed once per
-    // process, before any step creates its own store. Started here, before the
-    // first await, so concurrent first steps share one removal.
+    // process. The memo makes every step share one removal; a step waits for it
+    // before it can write a spill file (see the wait before
+    // `createStepSpillover`).
     const leftoverSpillRemoval = (this.leftoverSpillRemoval ??=
       removeLeftoverStepSpillover(getOutputDir()))
 
@@ -1187,8 +1188,15 @@ export class WorkflowService {
       // not write to the disk and the read tool is not offered until a result
       // is actually spilled, so steps without large results keep today's
       // prompts and toolset. Leftovers of a dead process are removed first,
-      // also when spillover is disabled.
-      await leftoverSpillRemoval
+      // also when spillover is disabled. The removal is shared by every step
+      // of the process, so a step waits for it only while the step itself may
+      // run: an abort or timeout during the wait fails the step with its abort
+      // reason. A step that is already aborted does not wait; it never writes
+      // to the store, because results are persisted only inside the loop
+      // below, after the loop's abort check.
+      if (!abortController.signal.aborted) {
+        await withTimeout(leftoverSpillRemoval, timeoutMs, abortController.signal)
+      }
       const spilloverConfig = resolveStepSpilloverConfig()
       if (spilloverConfig.enabled && toolDefs.length > 0) {
         stepSpillover = createStepSpillover({
