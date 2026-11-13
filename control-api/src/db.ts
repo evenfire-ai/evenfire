@@ -52,7 +52,10 @@ import {
   applyGrokSubscriptionTerminalConnectionKeySchema,
   applyLlmProviderAttemptsGrokBrokerSchema,
 } from './services/grokSubscriptionSchema.js'
-import { applyLlmCatalogPruneStateSchema } from './services/llmCatalogPruneStateSchema.js'
+import {
+  applyLlmCatalogPruneColumnsSchema,
+  applyLlmCatalogPruneStateSchema,
+} from './services/llmCatalogPruneStateSchema.js'
 import {
   applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptConnectionIntegritySchema,
@@ -6424,7 +6427,15 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: backfillLegacyPasswordSecurityEpochs,
   },
   {
-    version: '0139_llm_catalog_prune_state',
+    version: '0139_llm_catalog_prune_columns',
+    // The alias is the version an earlier head of this change applied both
+    // parts under, in one migration; such a database already has the columns
+    // and the CHECK, and the next migration is idempotent over it.
+    legacyVersions: ['0139_llm_catalog_prune_state'],
+    apply: applyLlmCatalogPruneColumnsSchema,
+  },
+  {
+    version: '0140_llm_catalog_prune_episodes',
     apply: applyLlmCatalogPruneStateSchema,
   },
 ]

@@ -1,18 +1,31 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import { initDb } from '../src/db.js'
+import { type LlmProviderId } from '@clerum/llm-providers'
+import { initDb, withTransaction } from '../src/db.js'
 import { PR1_MIGRATION_VERSIONS } from '../src/migrations/migrationRunner.js'
 import { PR1_ONLINE_INDEX_PLAN } from '../src/migrations/pr1OnlineIndexPlan.js'
+import { updateAllowedModel } from '../src/services/llmAllowedModels.js'
+import { type SyncConnector, syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
+import {
+  PROVIDER_KEY_MAP,
+  type RawModelsDevCatalog,
+  mapCatalogToProviders,
+} from '../src/services/modelsDevClient.js'
+import {
+  LIVE_MODELS_DEV_CAPTURED_AT,
+  loadStub,
+  trimLiveCatalog,
+} from './helpers/modelsDevFixtures.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 /*
  * The PR1 migration Job runs while the previous control-api, external-rest-api
  * and workflow-recipes images keep serving the same tables. A PR1 transaction
  * must therefore never hold AccessExclusiveLock (blocks readers) or ShareLock
- * (in-transaction CREATE INDEX) on a table that existed before PR1. The locks
- * are read from pg_locks just before each PR1 transaction commits, when every
- * lock it took is still held.
+ * (in-transaction CREATE INDEX) on a table that existed before PR1, except for
+ * the closed list below. The locks are read from pg_locks just before each PR1
+ * transaction commits, when every lock it took is still held.
  */
 
 type DbConnector = NonNullable<Parameters<typeof initDb>[0]>
@@ -28,6 +41,22 @@ const runtimeRoles = [
 ] as const
 
 const PR1_VERSIONS = new Set<string>(PR1_MIGRATION_VERSIONS)
+
+/**
+ * The only blocking locks a PR1 transaction may hold on a pre-existing table,
+ * each valid only in a commit of that version alone. Adding a column cannot be
+ * done without an AccessExclusiveLock; the migration adds all of them in one
+ * catalog-only ALTER TABLE (constant defaults, CHECK NOT VALID) under a 2 s
+ * lock_timeout, and does everything slower in the next version.
+ */
+const ALLOWED_BLOCKING_LOCKS = [
+  {
+    versions: '0139_llm_catalog_prune_columns',
+    relname: 'llm_allowed_models',
+    mode: 'AccessExclusiveLock',
+    reason: 'ADD COLUMN, catalog only, lock_timeout 2s',
+  },
+] as const
 const ACCESS_FOUNDATION_MARKER = 'CREATE TABLE IF NOT EXISTS external_user_sessions'
 // Online indexes the removed catalog migration (0133) and the removed
 // catalog rows of 0137 used to build; none of them may exist.
@@ -110,15 +139,43 @@ async function triggerDefinitions(pool: Pool): Promise<string[]> {
 type MigrationRun = {
   preExistingTables: Set<string>
   commits: CommitSnapshot[]
+  /** `pg_class.relfilenode` of llm_allowed_models before PR1; a rewrite changes it. */
+  allowedModelsFilenodeBefore: number | null
 }
 
-async function migrate(pool: Pool, observer: Pool): Promise<MigrationRun> {
+async function allowedModelsFilenode(observer: Pool): Promise<number | null> {
+  const result = await observer.query<{ relfilenode: string }>(
+    `SELECT c.relfilenode::text AS relfilenode
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = current_schema() AND c.relname = 'llm_allowed_models'`
+  )
+  return result.rows[0] ? Number(result.rows[0].relfilenode) : null
+}
+
+/**
+ * Run initDb, recording the locks each PR1 commit holds. On a fresh database
+ * the pre-PR1 tables are captured when 0137 starts; on one that already ran
+ * part of PR1 the caller passes them (tables an earlier head of PR1 created are
+ * not among them: the previous image never touches those).
+ */
+async function migrate(
+  pool: Pool,
+  observer: Pool,
+  options: { preExistingTables?: Set<string> } = {}
+): Promise<MigrationRun> {
   const run: MigrationRun = {
     preExistingTables: new Set(),
     commits: [],
+    allowedModelsFilenodeBefore: null,
   }
   const pendingVersions: string[] = []
   let accessFoundationSeen = false
+  if (options.preExistingTables) {
+    accessFoundationSeen = true
+    run.preExistingTables = options.preExistingTables
+    run.allowedModelsFilenodeBefore = await allowedModelsFilenode(observer)
+  }
 
   const connector = {
     connect: async () => {
@@ -132,6 +189,7 @@ async function migrate(pool: Pool, observer: Pool): Promise<MigrationRun> {
             // The 0137 transaction has not created anything yet, so the
             // committed catalog holds exactly the tables that predate PR1.
             run.preExistingTables = await committedTables(observer)
+            run.allowedModelsFilenodeBefore = await allowedModelsFilenode(observer)
           }
           if (text.includes('INSERT INTO schema_migrations')) {
             pendingVersions.push(String(values?.[0]))
@@ -214,7 +272,116 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
     expect(fresh.preExistingTables.has('users')).toBe(true)
     expect(fresh.preExistingTables.has('external_user_sessions')).toBe(false)
 
-    expect(blockingLocks(fresh)).toEqual([])
+    const isAllowed = (lock: RelationLock & { versions: string }) =>
+      ALLOWED_BLOCKING_LOCKS.some(
+        allowed =>
+          allowed.versions === lock.versions &&
+          allowed.relname === lock.relname &&
+          allowed.mode === lock.mode
+      )
+    const observed = blockingLocks(fresh)
+    // Exactly the allowed exceptions, all of them: one that stops being taken
+    // is a stale exception, and one taken in a commit with other versions is
+    // not covered by it.
+    expect(
+      observed.filter(isAllowed).map(({ versions, relname, mode }) => ({ versions, relname, mode }))
+    ).toEqual(
+      ALLOWED_BLOCKING_LOCKS.map(({ versions, relname, mode }) => ({ versions, relname, mode }))
+    )
+    expect(observed.filter(lock => !isAllowed(lock))).toEqual([])
+  })
+
+  it('adds the prune columns to llm_allowed_models without rewriting it', async () => {
+    expect(fresh.allowedModelsFilenodeBefore).not.toBeNull()
+    expect(await allowedModelsFilenode(freshObserver)).toBe(fresh.allowedModelsFilenodeBefore)
+  })
+
+  // An earlier head of this change applied both parts under one version. Such
+  // a database records the columns migration through its legacy alias, without
+  // running it, and runs the state migration over a trigger that already
+  // exists: dropping it there would take an AccessExclusiveLock.
+  it('upgrades a database that ran the single earlier migration without a blocking lock', async () => {
+    // Rows the earlier head already classified, from the real producers: one an
+    // operator enabled (its audit names `enabled`) and one the sync turned
+    // stale (the trigger opened its episode). The re-run backfill must leave
+    // both as they are.
+    const provider = 'openai'
+    const catalog = trimLiveCatalog({ [PROVIDER_KEY_MAP[provider]]: 4 })
+    const ids = (mapCatalogToProviders(catalog)[provider as LlmProviderId] ?? []).map(
+      m => m.model_id
+    )
+    const [operatorModel, staleModel] = [ids[0]!, ids[1]!]
+    const runSync = (source: RawModelsDevCatalog) =>
+      syncDiscoveredModels(
+        {
+          materializer: { materializeIfChanged: async () => 'unchanged' as const },
+          loadCatalog: loadStub(source, 'live', LIVE_MODELS_DEV_CAPTURED_AT),
+          minPlausibleLiveTotal: 1,
+          providerMinLive: 0,
+        },
+        freshPool as unknown as SyncConnector
+      )
+    await runSync(catalog)
+    const key = PROVIDER_KEY_MAP[provider]
+    const without = structuredClone(catalog)
+    for (const rawId of Object.keys(without[key]!.models)) {
+      const [m] = mapCatalogToProviders({
+        [key]: { ...without[key]!, models: { [rawId]: without[key]!.models[rawId]! } },
+      })[provider as LlmProviderId]!
+      if (m?.model_id === staleModel) delete without[key]!.models[rawId]
+    }
+    await runSync(without)
+    const operatorId = (
+      await freshPool.query<{ id: string }>(
+        `SELECT id FROM llm_allowed_models WHERE provider = $1 AND model = $2`,
+        [provider, operatorModel]
+      )
+    ).rows[0]!.id
+    await withTransaction(
+      db => updateAllowedModel(operatorId, { enabled: true }, 'test-admin', db),
+      freshPool
+    )
+    const classified = () =>
+      freshPool.query(
+        `SELECT model, enabled_managed_by, stale, stale_since::text AS stale_since,
+                stale_episode, deprecated_episode
+           FROM llm_allowed_models
+          WHERE provider = $1 AND model = ANY($2::text[])
+          ORDER BY model`,
+        [provider, [operatorModel, staleModel]]
+      )
+    const before = (await classified()).rows
+    expect(before.find(r => r.model === operatorModel)).toMatchObject({
+      enabled_managed_by: 'operator',
+    })
+    expect(before.find(r => r.model === staleModel)).toMatchObject({
+      enabled_managed_by: 'catalog',
+      stale: true,
+      stale_episode: 1,
+    })
+    expect(before.find(r => r.model === staleModel)!.stale_since).not.toBeNull()
+
+    await freshPool.query(
+      `DELETE FROM schema_migrations WHERE version = ANY($1::text[]);
+       INSERT INTO schema_migrations (version) VALUES ('0139_llm_catalog_prune_state');`.replace(
+        '$1::text[]',
+        `ARRAY['0139_llm_catalog_prune_columns', '0140_llm_catalog_prune_episodes']`
+      )
+    )
+    const upgrade = await migrate(freshPool, freshObserver, {
+      preExistingTables: fresh.preExistingTables,
+    })
+    expect(upgrade.commits.map(commit => commit.versions)).toEqual([
+      ['0139_llm_catalog_prune_columns'],
+      ['0140_llm_catalog_prune_episodes'],
+    ])
+    expect(upgrade.preExistingTables.has('llm_allowed_models')).toBe(true)
+    expect(blockingLocks(upgrade)).toEqual([])
+    expect(await allowedModelsFilenode(freshObserver)).toBe(upgrade.allowedModelsFilenodeBefore)
+    expect(await triggerDefinitions(freshPool)).toEqual(
+      expect.arrayContaining([expect.stringContaining('llm_allowed_models_track_episodes')])
+    )
+    expect((await classified()).rows).toEqual(before)
   })
 
   it('builds every planned index online and leaves it valid', async () => {

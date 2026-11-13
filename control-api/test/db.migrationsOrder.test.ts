@@ -80,8 +80,10 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
     // Later post-dev migrations follow the Task 106 sequence.
-    expect(versions[versions.indexOf(task106.at(-1)!) + 1]).toBe('0139_llm_catalog_prune_state')
-    expect(versions.at(-1)).toBe('0139_llm_catalog_prune_state')
+    expect(
+      versions.slice(versions.indexOf(task106.at(-1)!) + 1, versions.indexOf(task106.at(-1)!) + 3)
+    ).toEqual(['0139_llm_catalog_prune_columns', '0140_llm_catalog_prune_episodes'])
+    expect(versions.at(-1)).toBe('0140_llm_catalog_prune_episodes')
   })
 
   it('keeps legacy aliases unique and distinct from current versions', async () => {

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import request from 'supertest'
@@ -23,14 +24,16 @@ import {
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 
-// Migration 0139 and the writers of the authority over `enabled`, on real
-// PostgreSQL: who owns `enabled` after a sync INSERT and after each kind of
-// admin PUT (decided on the row the service locks), the episode trigger as the
-// sync drives it, the conservative backfill over a database whose rows came
-// from the real producers, and the runtime role's grants on the prune log.
-// Rows are only ever written by the sync, the admin router or service, the
-// legacy seed migrations and 0139 itself. Skipped without
-// CONTROL_API_REAL_PG_ADMIN_URL.
+// Migrations 0139/0140 and the writers of the authority over `enabled`, on
+// real PostgreSQL: who owns `enabled` after a sync INSERT and after each kind
+// of admin PUT (decided on the row the service locks), the episode trigger as
+// the sync drives it, the conservative backfill over a database whose rows
+// came from the real producers, the runtime role's grants on the prune log,
+// the columns migration's lock_timeout behind a reader, and the previous
+// image's statements over the migrated table. Rows are only ever written by
+// the sync, the admin router or service, the legacy seed migrations, the
+// migrations themselves and the previous image's verbatim statements. Skipped
+// without CONTROL_API_REAL_PG_ADMIN_URL.
 
 const mockVerifyAdminToken = vi.fn()
 const mockIsAdminTokenRevoked = vi.fn()
@@ -65,7 +68,7 @@ const ACTIVE_ADMIN = {
 }
 const COOKIE = 'control_ui_admin_session=admin-token'
 const MODELS_PATH = '/api/v1/admin/llm-models'
-const MIGRATION = '0139_llm_catalog_prune_state'
+const MIGRATIONS = ['0139_llm_catalog_prune_columns', '0140_llm_catalog_prune_episodes']
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -156,7 +159,119 @@ async function stateOf(pool: Pool, model: string): Promise<StateRow> {
   return rows[0]!
 }
 
-describeRealPostgres('0139 enabled authority and episodes (real PostgreSQL)', () => {
+/** Back to the schema before the prune-state migrations, keeping every row. */
+async function undoPruneStateMigrations(pool: Pool): Promise<void> {
+  await pool.query(`
+    DROP TRIGGER llm_allowed_models_track_episodes ON llm_allowed_models;
+    DROP FUNCTION llm_allowed_models_track_episodes();
+    ALTER TABLE llm_allowed_models
+      DROP COLUMN enabled_managed_by,
+      DROP COLUMN auto_disabled_at,
+      DROP COLUMN stale_since,
+      DROP COLUMN stale_episode,
+      DROP COLUMN deprecated_episode,
+      DROP COLUMN attention_ack;
+    DROP TABLE llm_catalog_prune_runs;
+  `)
+  await pool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [MIGRATIONS])
+}
+
+/**
+ * Back to the database between the two migrations: the columns at the
+ * defaults the columns migration gives every existing row, no trigger.
+ */
+async function undoEpisodesMigration(pool: Pool): Promise<void> {
+  await pool.query(`
+    DROP TRIGGER llm_allowed_models_track_episodes ON llm_allowed_models;
+    DROP FUNCTION llm_allowed_models_track_episodes();
+    DROP TABLE llm_catalog_prune_runs;
+    UPDATE llm_allowed_models
+       SET enabled_managed_by = 'operator', auto_disabled_at = NULL, stale_since = NULL,
+           stale_episode = 0, deprecated_episode = 0, attention_ack = NULL;
+  `)
+  await pool.query('DELETE FROM schema_migrations WHERE version = $1', [MIGRATIONS[1]])
+}
+
+async function pruneStateColumns(pool: Pool): Promise<string[]> {
+  const { rows } = await pool.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'llm_allowed_models'
+        AND column_name = ANY($1::text[])
+      ORDER BY column_name`,
+    [PRUNE_STATE_COLUMNS]
+  )
+  return rows.map(r => r.column_name)
+}
+
+async function recordedPruneStateVersions(pool: Pool): Promise<string[]> {
+  const { rows } = await pool.query<{ version: string }>(
+    `SELECT version FROM schema_migrations WHERE version = ANY($1::text[]) ORDER BY version`,
+    [MIGRATIONS]
+  )
+  return rows.map(r => r.version)
+}
+
+const PRUNE_STATE_COLUMNS = [
+  'attention_ack',
+  'auto_disabled_at',
+  'deprecated_episode',
+  'enabled_managed_by',
+  'stale_episode',
+  'stale_since',
+]
+
+/*
+ * The statements the image before this change runs on llm_allowed_models,
+ * copied verbatim from the merge base (control-api/src/services/llmCatalogSync.ts
+ * and the SET list llmAllowedModels.ts builds for an `enabled` PUT). They are
+ * checked against that commit below when it is in the clone.
+ */
+// The commit this change branched from. When a sync with dev brings changes to
+// these statements, move it to the new merge base and copy them again.
+const PREVIOUS_IMAGE_BASE = 'e611ebfcb'
+const PREVIOUS_SYNC_INSERT = `INSERT INTO llm_allowed_models
+       (provider, model, enabled, source, discovered_at, last_seen_at, stale,
+        context_window_tokens, display_name, image_input, catalog_status)
+     VALUES ($1, $2,
+             $6::boolean AND NOT EXISTS (
+               SELECT 1 FROM llm_catalog_dismissed d
+                WHERE d.provider = $1 AND d.model = $2
+             ),
+             'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7)
+     ON CONFLICT (provider, model) DO NOTHING
+     RETURNING enabled,
+               EXISTS (
+                 SELECT 1 FROM llm_catalog_dismissed d
+                  WHERE d.provider = $1 AND d.model = $2
+               ) AS dismissed`
+const PREVIOUS_SYNC_MARK_STALE = `UPDATE llm_allowed_models
+        SET stale = true
+      WHERE provider = $1
+        AND source = 'discovery'
+        AND stale = false
+        AND model <> ALL($2::text[])`
+const PREVIOUS_MODEL_COLUMNS = `
+  id, provider, model, vendor, display_name,
+  context_window_tokens, enabled, source, discovered_at, last_seen_at, stale,
+  image_input, created_at, updated_at
+`
+const PREVIOUS_PUT_LOCK_ROW = `SELECT ${PREVIOUS_MODEL_COLUMNS} FROM llm_allowed_models WHERE id = $1 FOR UPDATE`
+const PREVIOUS_PUT_ENABLED = `UPDATE llm_allowed_models
+          SET enabled = $1, updated_at = NOW()
+        WHERE id = $2`
+
+function previousImageSource(path: string): string | null {
+  try {
+    return execFileSync('git', ['show', `${PREVIOUS_IMAGE_BASE}:control-api/${path}`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+  } catch {
+    return null
+  }
+}
+
+describeRealPostgres('0139/0140 enabled authority and episodes (real PostgreSQL)', () => {
   const database = `control_api_prune_state_${randomBytes(6).toString('hex')}`
   // describe.skip still runs this factory, so it must not build a URL without the env.
   const connectionString = adminUrl ? databaseUrl(adminUrl, database) : ''
@@ -174,6 +289,7 @@ describeRealPostgres('0139 enabled authority and episodes (real PostgreSQL)', ()
     initDb: typeof import('../src/db.js').initDb
     withTransaction: typeof import('../src/db.js').withTransaction
     syncDiscoveredModels: typeof import('../src/services/llmCatalogSync.js').syncDiscoveredModels
+    discoveryImageInput: typeof import('../src/services/llmCatalogSync.js').discoveryImageInput
     updateAllowedModel: typeof import('../src/services/llmAllowedModels.js').updateAllowedModel
     deleteAllowedModel: typeof import('../src/services/llmAllowedModels.js').deleteAllowedModel
     setProviderAutoEnable: typeof import('../src/services/llmProviderCatalogSettings.js').setProviderAutoEnable
@@ -206,6 +322,7 @@ describeRealPostgres('0139 enabled authority and episodes (real PostgreSQL)', ()
       initDb: dbMod.initDb,
       withTransaction: dbMod.withTransaction,
       syncDiscoveredModels: syncMod.syncDiscoveredModels,
+      discoveryImageInput: syncMod.discoveryImageInput,
       updateAllowedModel: allowlistMod.updateAllowedModel,
       deleteAllowedModel: allowlistMod.deleteAllowedModel,
       setProviderAutoEnable: policyMod.setProviderAutoEnable,
@@ -683,19 +800,7 @@ describeRealPostgres('0139 enabled authority and episodes (real PostgreSQL)', ()
 
       // Back to the schema before 0139, keeping every row: the producers above
       // run the current code, which writes 0139's columns.
-      await pool.query(`
-        DROP TRIGGER llm_allowed_models_track_episodes ON llm_allowed_models;
-        DROP FUNCTION llm_allowed_models_track_episodes();
-        ALTER TABLE llm_allowed_models
-          DROP COLUMN enabled_managed_by,
-          DROP COLUMN auto_disabled_at,
-          DROP COLUMN stale_since,
-          DROP COLUMN stale_episode,
-          DROP COLUMN deprecated_episode,
-          DROP COLUMN attention_ack;
-        DROP TABLE llm_catalog_prune_runs;
-      `)
-      await pool.query('DELETE FROM schema_migrations WHERE version = $1', [MIGRATION])
+      await undoPruneStateMigrations(pool)
       await mod.initDb({ connect: () => pool.connect() })
 
       const all = await pool.query<Record<string, unknown>>(`SELECT * FROM llm_allowed_models`)
@@ -774,6 +879,304 @@ describeRealPostgres('0139 enabled authority and episodes (real PostgreSQL)', ()
         expect(r.attention_ack, k).toBeNull()
       }
       expect([...rows.values()].some(r => r.catalog_status === 'deprecated')).toBe(true)
+    })
+  })
+
+  describe('the columns migration under a lock_timeout', () => {
+    it('gives up after about 2 s behind a reader, leaves nothing applied, and converges on the retry', async () => {
+      const name = `control_api_prune_locks_${randomBytes(6).toString('hex')}`
+      await adminPool.query(`CREATE DATABASE "${name}"`)
+      extraDatabases.push(name)
+      const pool = new Pool({ connectionString: databaseUrl(adminUrl!, name), max: 4 })
+      pool.on('error', () => {})
+      extraPools.push(pool)
+      await mod.initDb({ connect: () => pool.connect() })
+      await undoPruneStateMigrations(pool)
+      expect(await pruneStateColumns(pool)).toEqual([])
+
+      // A reader of the previous image, mid-transaction: AccessShareLock held.
+      const reader = await pool.connect()
+      let failure: unknown
+      let elapsedMs = 0
+      try {
+        await reader.query('BEGIN')
+        await reader.query('SELECT count(*) FROM llm_allowed_models')
+        const started = Date.now()
+        failure = await mod.initDb({ connect: () => pool.connect() }).then(
+          () => null,
+          (err: unknown) => err
+        )
+        elapsedMs = Date.now() - started
+      } finally {
+        await reader.query('ROLLBACK').catch(() => {})
+        reader.release()
+      }
+      expect(failure).toMatchObject({ code: '55P03' })
+      // Bounded by the migration's own 2 s, not by the Job's 10 s default.
+      expect(elapsedMs).toBeGreaterThanOrEqual(1_800)
+      expect(elapsedMs).toBeLessThan(6_000)
+      expect(await pruneStateColumns(pool)).toEqual([])
+      expect(await recordedPruneStateVersions(pool)).toEqual([])
+
+      await mod.initDb({ connect: () => pool.connect() })
+      expect(await pruneStateColumns(pool)).toEqual(PRUNE_STATE_COLUMNS)
+      expect(await recordedPruneStateVersions(pool)).toEqual(MIGRATIONS)
+      const { rows } = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_trigger
+          WHERE tgname = 'llm_allowed_models_track_episodes' AND NOT tgisinternal`
+      )
+      expect(rows).toEqual([{ n: 1 }])
+    }, 60_000)
+  })
+
+  // The episodes migration against a writer of the previous image that lands
+  // between its backfill and its trigger. The migration is paused there by the
+  // test's own connector, just before the statement that creates the trigger.
+  describe('the episodes migration against a concurrent writer of the previous image', () => {
+    async function pausedMigration(pool: Pool) {
+      let reached!: () => void
+      const atTrigger = new Promise<void>(resolve => (reached = resolve))
+      let release!: () => void
+      const resume = new Promise<void>(resolve => (release = resolve))
+      const connect = async () => {
+        const client = await pool.connect()
+        return new Proxy(client, {
+          get(target, prop) {
+            if (prop === 'query') {
+              return async (text: unknown, values?: unknown) => {
+                if (
+                  typeof text === 'string' &&
+                  text.includes('CREATE OR REPLACE FUNCTION llm_allowed_models_track_episodes')
+                ) {
+                  reached()
+                  await resume
+                }
+                return (target.query as (...a: unknown[]) => unknown)(text, values)
+              }
+            }
+            const value = Reflect.get(target, prop, target)
+            return typeof value === 'function' ? value.bind(target) : value
+          },
+        })
+      }
+      const migration = mod.initDb({ connect } as never)
+      return { migration, atTrigger, release }
+    }
+
+    /** Resolve once `pid` waits on a lock, or `settled` resolves first. */
+    async function blockedOrDone(pool: Pool, pid: number, settled: Promise<unknown>) {
+      let done = false
+      void settled.finally(() => (done = true))
+      const deadline = Date.now() + 5_000
+      while (!done && Date.now() < deadline) {
+        const { rows } = await pool.query<{ waiting: boolean }>(
+          `SELECT wait_event_type = 'Lock' AS waiting FROM pg_stat_activity WHERE pid = $1`,
+          [pid]
+        )
+        if (rows[0]?.waiting) return 'blocked'
+        await new Promise(r => setTimeout(r, 20))
+      }
+      return done ? 'done' : 'neither'
+    }
+
+    async function prepared() {
+      const name = `control_api_prune_episodes_${randomBytes(6).toString('hex')}`
+      await adminPool.query(`CREATE DATABASE "${name}"`)
+      extraDatabases.push(name)
+      const pool = new Pool({ connectionString: databaseUrl(adminUrl!, name), max: 6 })
+      pool.on('error', () => {})
+      extraPools.push(pool)
+      await mod.initDb({ connect: () => pool.connect() })
+      await autoEnable(false, pool)
+      await sync(FULL_CATALOG, pool)
+      // An operator's enable: its audit names `enabled`, so the backfill
+      // neither classifies nor locks this row.
+      const operatorRow = await stateOf(pool, pick(0))
+      await mod.withTransaction(
+        db => mod.updateAllowedModel(operatorRow.id, { enabled: true }, 'test-admin', db),
+        pool
+      )
+      // Stale before the episodes migration: its backfill gives it stale_since
+      // and an episode, so it locks this row.
+      await sync(withoutModel(FULL_CATALOG, pick(2)), pool)
+      await undoEpisodesMigration(pool)
+      return { pool, unlocked: pick(0), backfilled: pick(1), stale: pick(2) }
+    }
+
+    /** The previous image's sync marking `model` stale (every other model listed). */
+    function markStale(pool: Pool, model: string) {
+      const listed = discovered(FULL_CATALOG)
+        .map(m => m.model_id)
+        .filter(m => m !== model)
+      return pool.connect().then(async client => {
+        const pid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        const write = client.query(PREVIOUS_SYNC_MARK_STALE, [PROVIDER, listed])
+        write.finally(() => client.release()).catch(() => {})
+        return { pid, write }
+      })
+    }
+
+    it('a PUT of the previous image that already holds its row FOR UPDATE does not deadlock', async () => {
+      const ctx = await prepared()
+      const { id } = await stateOf(ctx.pool, ctx.stale)
+      const writer = await ctx.pool.connect()
+      let migrated: Promise<unknown> = Promise.resolve(null)
+      try {
+        const writerPid = Number((await writer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        // The previous PUT: row lock first, its UPDATE after.
+        await writer.query('BEGIN')
+        await writer.query(PREVIOUS_PUT_LOCK_ROW, [id])
+        migrated = mod.initDb({ connect: () => ctx.pool.connect() }).then(
+          () => null,
+          (err: unknown) => err
+        )
+        expect(await otherSessionWaits(ctx.pool, writerPid, migrated)).toBe(true)
+        const finished = (async () => {
+          await writer.query(PREVIOUS_PUT_ENABLED, [false, id])
+          await writer.query('COMMIT')
+        })().then(
+          () => null,
+          (err: unknown) => err
+        )
+        expect(await finished).toBeNull()
+        expect(await migrated).toBeNull()
+      } finally {
+        await writer.query('ROLLBACK').catch(() => {})
+        writer.release()
+        await migrated
+      }
+      const row = await stateOf(ctx.pool, ctx.stale)
+      expect(row).toMatchObject({ enabled: false, stale: true, stale_episode: 1 })
+      expect(row.stale_since).toBeInstanceOf(Date)
+    }, 60_000)
+
+    /** True once a session other than `pid` waits on a lock, false if `settled` resolves first. */
+    async function otherSessionWaits(pool: Pool, pid: number, settled: Promise<unknown>) {
+      let done = false
+      void settled.finally(() => (done = true))
+      const deadline = Date.now() + 5_000
+      while (!done && Date.now() < deadline) {
+        const { rows } = await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND pid <> $1 AND pid <> pg_backend_pid()
+              AND wait_event_type = 'Lock'`,
+          [pid]
+        )
+        if (rows[0]!.n > 0) return true
+        await new Promise(r => setTimeout(r, 20))
+      }
+      return false
+    }
+
+    it.each([
+      ['a row the backfill does not lock waits for the trigger', 'unlocked'],
+      ['a row the backfill locked does not deadlock', 'backfilled'],
+    ] as const)(
+      '%s',
+      async (_label, which) => {
+        const ctx = await prepared()
+        const model = ctx[which]
+        const { migration, atTrigger, release } = await pausedMigration(ctx.pool)
+        const migrated = migration.then(
+          () => null,
+          (err: unknown) => err
+        )
+        await atTrigger
+        const writer = await markStale(ctx.pool, model)
+        const written = writer.write.then(
+          () => null,
+          (err: unknown) => err
+        )
+        // The writer is held back by the migration's table lock before the
+        // trigger exists; it must not commit a stale row the trigger never saw.
+        expect(await blockedOrDone(ctx.pool, writer.pid, written)).toBe('blocked')
+        release()
+        expect(await migrated).toBeNull()
+        expect(await written).toBeNull()
+        const row = await stateOf(ctx.pool, model)
+        expect(row.stale).toBe(true)
+        expect(row.stale_since).toBeInstanceOf(Date)
+        expect(row.stale_episode).toBe(1)
+      },
+      60_000
+    )
+  })
+
+  describe('the image before this change, after the migrations', () => {
+    it('runs its statements verbatim from the merge base', ctx => {
+      const sync = previousImageSource('src/services/llmCatalogSync.ts')
+      const allowed = previousImageSource('src/services/llmAllowedModels.ts')
+      // A clone without that commit (a shallow CI checkout) cannot check the copy.
+      if (sync === null || allowed === null) {
+        ctx.skip()
+        return
+      }
+      expect(sync).toContain(PREVIOUS_SYNC_INSERT)
+      expect(sync).toContain(PREVIOUS_SYNC_MARK_STALE)
+      expect(sync).not.toContain('enabled_managed_by')
+      // The PUT builds `SET ${sets.join(', ')}` from `<column> = $<n>` and then
+      // appends `updated_at = NOW()`; for an `enabled`-only body that is the
+      // statement above.
+      expect(allowed).toContain(
+        "`UPDATE llm_allowed_models\n          SET ${sets.join(', ')}\n        WHERE id = $${idx}"
+      )
+      expect(allowed).toContain('sets.push(`updated_at = NOW()`)')
+      expect(allowed).toContain('const MODEL_COLUMNS = `' + PREVIOUS_MODEL_COLUMNS + '`')
+      expect(allowed).toContain(
+        '`SELECT ${MODEL_COLUMNS} FROM llm_allowed_models WHERE id = $1 FOR UPDATE`'
+      )
+      expect(allowed).not.toContain('enabled_managed_by')
+    })
+
+    it('gets the defaults: operator rows, no token, episodes opened by the trigger', async () => {
+      const [ga, deprecated] = [pick(0), pick(1)]
+      // The parameters the previous sync passes, from the same producers.
+      const entry = (model: string) => ELIGIBLE.find(m => m.model_id === model)!
+      const insert = (model: string, status: string | null) =>
+        corePool.query(PREVIOUS_SYNC_INSERT, [
+          PROVIDER,
+          model,
+          null,
+          entry(model).display_name ?? null,
+          JSON.stringify(
+            mod.discoveryImageInput(
+              entry(model).image_input_state,
+              LIVE_MODELS_DEV_CAPTURED_AT,
+              86_400_000
+            )
+          ),
+          true,
+          status,
+        ])
+      await insert(ga, null)
+      await insert(deprecated, 'deprecated')
+      const fresh = await stateOf(corePool, ga)
+      expect(fresh).toMatchObject({
+        enabled: true,
+        enabled_managed_by: 'operator',
+        auto_disabled_at: null,
+        stale_since: null,
+        stale_episode: 0,
+        deprecated_episode: 0,
+        attention_ack: null,
+      })
+      expect(await stateOf(corePool, deprecated)).toMatchObject({
+        enabled_managed_by: 'operator',
+        deprecated_episode: 1,
+      })
+
+      await corePool.query(PREVIOUS_SYNC_MARK_STALE, [PROVIDER, [deprecated]])
+      const stale = await stateOf(corePool, ga)
+      expect(stale).toMatchObject({ stale: true, stale_episode: 1, enabled_managed_by: 'operator' })
+      expect(stale.stale_since).toBeInstanceOf(Date)
+
+      await corePool.query(PREVIOUS_PUT_ENABLED, [false, fresh.id])
+      expect(await stateOf(corePool, ga)).toMatchObject({
+        enabled: false,
+        enabled_managed_by: 'operator',
+        auto_disabled_at: null,
+        stale_episode: 1,
+      })
     })
   })
 })

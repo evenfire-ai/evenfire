@@ -3,36 +3,78 @@ import { PROVIDER_KEY_MAP } from './modelsDevClient.js'
 
 /**
  * State the catalog prune and the attention feed read on `llm_allowed_models`,
- * plus the prune's own run log. The statements run in this order on purpose:
- * columns, then the backfill, then the trigger. The backfill writes
- * `stale_since` and the episode counters directly; created before it, the
- * trigger would not overwrite them (it never touches a row that is not
- * entering a state), but it would still be firing on every backfilled row for
- * nothing.
+ * plus the prune's own run log, in two migrations.
+ *
+ * The first only adds the columns, in one ALTER TABLE: it is the only statement
+ * of the change that needs an AccessExclusiveLock on `llm_allowed_models`, and
+ * it holds it for a catalog update only (constant defaults, so no rewrite; the
+ * CHECK is NOT VALID, so no scan). The lock waits at most 2 s behind the
+ * readers the previous image keeps running; a timeout fails the migration
+ * whole and the Job retries it. Anything slower (the scan that validates the
+ * CHECK, the backfills) belongs to the second, which takes no lock that blocks
+ * readers.
  */
-export async function applyLlmCatalogPruneStateSchema(db: DbClient): Promise<void> {
+export async function applyLlmCatalogPruneColumnsSchema(db: DbClient): Promise<void> {
+  // Short on purpose: while it waits, every new reader of the table queues
+  // behind it (admin routes, Host validation, the plugin-workload gate, the
+  // ConfigMap publisher).
+  await db.query(`SET LOCAL lock_timeout = '2s'`)
   // - enabled_managed_by: who decided the current `enabled`. 'catalog' rows may
   //   be pruned and re-enabled by the sync; 'operator' rows never are. The
-  //   default is the safe side: a row nobody classifies stays the operator's.
+  //   default is the safe side: a row nobody classifies stays the operator's,
+  //   including every row an image without this column inserts.
   // - auto_disabled_at: set only by the prune. It is the token that lets the
   //   sync turn the row back on if the model returns to the catalog.
-  // - stale_since / stale_episode / deprecated_episode: kept by the trigger
-  //   below. The episodes are `integer`, not `bigint`: node-pg returns int8 as
-  //   a string, and the attention feed compares the episode an operator
-  //   acknowledged with `===`.
+  // - stale_since / stale_episode / deprecated_episode: kept by the trigger of
+  //   the next migration. The episodes are `integer`, not `bigint`: node-pg
+  //   returns int8 as a string, and the attention feed compares the episode an
+  //   operator acknowledged with `===`.
   // - attention_ack: per-kind acknowledgement of an attention item.
   // The runtime's table-level DML grant on llm_allowed_models covers the new
   // columns.
+  // No IF NOT EXISTS: the statement is atomic, it runs once per database, and
+  // a database that already has the columns (an earlier head of this change)
+  // records this migration through its legacy alias without running it.
   await db.query(`
     ALTER TABLE llm_allowed_models
-      ADD COLUMN IF NOT EXISTS enabled_managed_by TEXT NOT NULL DEFAULT 'operator'
-        CONSTRAINT llm_allowed_models_enabled_managed_by_check
-        CHECK (enabled_managed_by IN ('catalog', 'operator')),
-      ADD COLUMN IF NOT EXISTS auto_disabled_at TIMESTAMPTZ NULL,
-      ADD COLUMN IF NOT EXISTS stale_since TIMESTAMPTZ NULL,
-      ADD COLUMN IF NOT EXISTS stale_episode INTEGER NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS deprecated_episode INTEGER NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS attention_ack JSONB NULL;
+      ADD COLUMN enabled_managed_by TEXT NOT NULL DEFAULT 'operator',
+      ADD COLUMN auto_disabled_at TIMESTAMPTZ NULL,
+      ADD COLUMN stale_since TIMESTAMPTZ NULL,
+      ADD COLUMN stale_episode INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN deprecated_episode INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN attention_ack JSONB NULL,
+      ADD CONSTRAINT llm_allowed_models_enabled_managed_by_check
+        CHECK (enabled_managed_by IN ('catalog', 'operator')) NOT VALID;
+  `)
+}
+
+/**
+ * The rest of the state, none of it blocking plain readers of
+ * `llm_allowed_models`: the whole migration holds an ExclusiveLock (writers and
+ * row-locking reads wait, plain SELECTs do not), which covers VALIDATE
+ * CONSTRAINT, the backfills and CREATE OR REPLACE TRIGGER (a DROP TRIGGER would
+ * take an AccessExclusiveLock, which is why the trigger is replaced, not
+ * dropped). The statements run in this order on purpose: the backfill, then
+ * the trigger. The backfill writes `stale_since` and the episode counters
+ * directly; created before it, the trigger would not overwrite them (it never
+ * touches a row that is not entering a state), but it would still be firing on
+ * every backfilled row for nothing.
+ */
+export async function applyLlmCatalogPruneStateSchema(db: DbClient): Promise<void> {
+  // Taken first and held to the commit, so no writer of the previous image is
+  // half-way through the table while the backfill locks rows and the trigger
+  // is created; asked for later, the trigger's lock deadlocks with a writer
+  // waiting on a backfilled row. EXCLUSIVE, not SHARE ROW EXCLUSIVE: the
+  // previous image's PUT reads its row with SELECT ... FOR UPDATE (RowShare)
+  // before its UPDATE, and SHARE ROW EXCLUSIVE does not conflict with RowShare,
+  // so it would be granted between the two and deadlock all the same. It also
+  // keeps every write out until the trigger exists, so no row turns stale
+  // without its stale_since and episode. Plain SELECTs never wait;
+  // SELECT ... FOR UPDATE / FOR SHARE do.
+  await db.query(`LOCK TABLE llm_allowed_models IN EXCLUSIVE MODE`)
+  await db.query(`
+    ALTER TABLE llm_allowed_models
+      VALIDATE CONSTRAINT llm_allowed_models_enabled_managed_by_check;
   `)
 
   // Rows already stale start their grace period at the upgrade, which is the
@@ -113,8 +155,7 @@ export async function applyLlmCatalogPruneStateSchema(db: DbClient): Promise<voi
     $$;
     REVOKE ALL ON FUNCTION llm_allowed_models_track_episodes() FROM PUBLIC;
 
-    DROP TRIGGER IF EXISTS llm_allowed_models_track_episodes ON llm_allowed_models;
-    CREATE TRIGGER llm_allowed_models_track_episodes
+    CREATE OR REPLACE TRIGGER llm_allowed_models_track_episodes
       BEFORE INSERT OR UPDATE ON llm_allowed_models
       FOR EACH ROW EXECUTE FUNCTION llm_allowed_models_track_episodes();
   `)

@@ -330,7 +330,7 @@ export interface AttentionCandidateRow {
   display_name: string | null
   stale: boolean
   deprecated: boolean
-  /** Episode counters kept by the 0139 trigger; `integer`, so node-pg returns numbers. */
+  /** Episode counters kept by the 0140 trigger; `integer`, so node-pg returns numbers. */
   stale_episode: number
   deprecated_episode: number
   /** Raw `attention_ack` jsonb; the feed parses it defensively. */
