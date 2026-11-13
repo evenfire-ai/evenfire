@@ -50,6 +50,7 @@ import {
   resolvedFile,
   resourceAffordances,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { listChildrenPaged } from '../../../../control-api/src/gfs/tree.js'
 import { type A01A4Input, evaluateA01A4 } from '../test-utils/a01CopyIdR17A4Oracle'
 
 type AppController = ReturnType<typeof useAppController>
@@ -567,11 +568,12 @@ async function renderActualA01App(
   options: {
     readable?: boolean
     accessibleRows?: ReturnType<typeof accessibleResource>[]
+    operatorRootResourceId?: string
     childRowsByParent?: Map<string, ReturnType<typeof childView>[]>
   } = {}
 ) {
   const byUri = new Map(resources.map(resource => [resource.gfsUri, resource]))
-  const accessPage = await listAccessiblePage(
+  const accessiblePage = await listAccessiblePage(
     options.accessibleRows ??
       resources.map(resource =>
         Object.assign(
@@ -589,6 +591,13 @@ async function renderActualA01App(
         )
       )
   )
+  const accessPage = options.operatorRootResourceId
+    ? {
+        ...accessiblePage,
+        rootResourceId: options.operatorRootResourceId,
+        view: 'operator' as const,
+      }
+    : accessiblePage
   const sessionAuthority = {
     authenticated: true,
     generation: 1,
@@ -1786,6 +1795,60 @@ describe('App → Files action lifecycle integration', () => {
     )
     expect(invalidate).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(desktopQueryClient.isFetching({ queryKey, exact: true })).toBe(0))
+  })
+
+  it('A01 H1: linked-admin operator root Copy ID accepts omitted parent metadata', async () => {
+    const id = 'c4'.repeat(16)
+    const file = await resolveResource(resolvedFile(id, 'a01-operator-root.txt'))
+    const operatorPage = await listChildrenPaged(
+      {
+        listChildren: async () => [
+          {
+            resourceId: id,
+            name: file.name,
+            kind: 'file',
+            pathCache: `/${file.name}`,
+            bytes: 4,
+            version: 1,
+            updatedAt: '2026-11-13T00:00:00.000Z',
+          },
+        ],
+      },
+      'main',
+      'operator-root',
+      { limit: 20 }
+    )
+    const rawOperatorRoot = operatorPage.items[0]
+    expect(rawOperatorRoot).toBeDefined()
+    expect(rawOperatorRoot).not.toHaveProperty('parentResourceId')
+    const writeText = vi.fn(async (_uri: string) => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const invalidate = vi.spyOn(desktopQueryClient, 'invalidateQueries')
+    const { controller } = await renderActualA01App([file], writeText, {
+      accessibleRows: [rawOperatorRoot as unknown as ReturnType<typeof accessibleResource>],
+      operatorRootResourceId: 'c5'.repeat(16),
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    const toggle = screen.getByRole('button', { name: 'Collapse file explorer' })
+    const focusToggle = vi.spyOn(toggle, 'focus')
+
+    await chooseRowAction(file.name, 'Copy file ID')
+    await act(async () => Promise.resolve())
+
+    expect(writeText).toHaveBeenCalledOnce()
+    expect(writeText).toHaveBeenCalledWith(file.gfsUri)
+    expect(controller.current?.toasts).not.toContainEqual(
+      expect.objectContaining({
+        text: 'This resource is no longer available from its parent folder.',
+        tone: 'error',
+      })
+    )
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(focusToggle).not.toHaveBeenCalled()
   })
 
   it('A01 model probe: changed child URI refreshes only its exact parent query once', async () => {
