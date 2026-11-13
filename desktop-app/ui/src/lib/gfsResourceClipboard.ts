@@ -11,7 +11,7 @@ export function sameGfsResourceBinding(
     current.resourceId === clicked.resourceId &&
     current.gfsUri === clicked.gfsUri &&
     current.kind === clicked.kind &&
-    current.parentResourceId === clicked.parentResourceId
+    (current.parentResourceId ?? null) === (clicked.parentResourceId ?? null)
   )
 }
 
