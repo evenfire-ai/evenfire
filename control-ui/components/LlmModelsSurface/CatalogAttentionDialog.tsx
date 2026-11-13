@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { DataTable, DialogShell } from '@clerum/frontend-components'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
@@ -192,13 +192,21 @@ function ReviewedAttentionSection({
   onUndoReviewed,
   expanded,
 }: ReviewedAttentionSectionProps) {
+  // `expanded` only opens the section, it never closes it: binding `open` to it
+  // collapsed the list under the operator after an Undo brought one item back
+  // to pending, hiding the remaining Undo buttons.
+  const [open, setOpen] = useState(expanded)
+  useEffect(() => {
+    if (expanded) setOpen(true)
+  }, [expanded])
   if (items.length === 0) return null
   return (
     // Expanded when nothing is pending: the list is then the dialog's only
     // content, and a lone collapsed summary would read as an empty dialog.
     <details
       className="cu-advanced-details cu-model-attention__group cu-model-attention__reviewed"
-      open={expanded}
+      open={open}
+      onToggle={event => setOpen(event.currentTarget.open)}
     >
       <summary>Reviewed ({items.length})</summary>
       <p className="cu-model-attention__lede">

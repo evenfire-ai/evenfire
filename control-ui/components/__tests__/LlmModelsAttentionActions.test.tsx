@@ -367,6 +367,9 @@ describe('catalog attention dialog actions', () => {
     ).toBeInTheDocument()
     expect(vi.mocked(unackAdminAttention)).toHaveBeenCalledTimes(1)
     expect(screen.getByText(BANNER_TEXT)).toHaveTextContent('1 deprecated')
+    // The remaining Undo buttons stay visible: the section does not collapse
+    // under the operator once something is pending again.
+    expect(reviewedSection(dialog)).toHaveAttribute('open')
   })
 
   it('keeps the dialog open with focus inside when the last pending item is reviewed', async () => {
