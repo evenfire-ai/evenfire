@@ -580,7 +580,12 @@ jobs:
         with:
           context: ${{ steps.buildargs.outputs.context }}
           file: ${{ steps.buildargs.outputs.file }}
-          build-args: ${{ steps.buildargs.outputs.build_args }}
+          # One build-args key: YAML/Actions reject a duplicated key, and the
+          # profile-ui handoff argument is empty for every other image.
+          build-args: |
+            EVENFIRE_SOURCE_REVISION=${{ github.sha }}
+            EVENFIRE_SERVICE_VERSION=${{ steps.buildargs.outputs.service-version }}
+            ${{ steps.buildargs.outputs.build_args }}
           platforms: linux/${{ matrix.arch }}
           # Attestations are disabled per-leg. Provenance attestations don't
           # push cleanly in push-by-digest mode (they need a repo:tag target,
@@ -594,9 +599,6 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
-          build-args: |
-            EVENFIRE_SOURCE_REVISION=${{ github.sha }}
-            EVENFIRE_SERVICE_VERSION=${{ steps.buildargs.outputs.service-version }}
           # Per-arch scope: each arch now builds in its own job/leg (see the
           # split above), so each needs its own gha cache scope. Before this
           # change, one job built both platforms in a single buildx
