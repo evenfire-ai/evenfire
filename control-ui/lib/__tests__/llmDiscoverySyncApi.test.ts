@@ -3,6 +3,7 @@ import {
   sumProviderCounts,
   syncResultCase,
   syncResultLegacyCase,
+  syncResultWithReEnable,
 } from '../../test/fixtures/llmCatalogSyncResult'
 import { parseDiscoverySyncResult, syncDiscovery } from '../api'
 
@@ -39,6 +40,8 @@ describe('catalog sync api helper', () => {
       autoEnabled: sumProviderCounts(body, 'autoEnabled'),
       heldUndecidable: 0,
       deferredByCap: 0,
+      reEnabled: 0,
+      reEnableDeferredByCap: 0,
     })
     // More than one provider contributes, so reading one cannot pass.
     const contributing = Object.values(body.providerCounts ?? {}).filter(c => c.autoEnabled > 0)
@@ -73,6 +76,19 @@ describe('catalog sync api helper', () => {
     expect(result.decidable).toBeNull()
     expect(result.outcome).toBeNull()
     expect(result.added).toBe(body.added)
+  })
+
+  it('sums the re-enabled rows apart from the inserted ones', () => {
+    const body = syncResultWithReEnable('decidable_auto_enabled', 'openai', {
+      reEnabled: 3,
+      reEnableDeferredByCap: 2,
+    })
+    const result = parseDiscoverySyncResult(body)
+    expect(result.outcome?.reEnabled).toBe(3)
+    expect(result.outcome?.reEnableDeferredByCap).toBe(2)
+    // Re-enabled rows are not inserted: `added` and `autoEnabled` are unchanged.
+    expect(result.added).toBe(syncResultCase('decidable_auto_enabled').added)
+    expect(result.outcome?.autoEnabled).toBe(sumProviderCounts(body, 'autoEnabled'))
   })
 
   it('reads an unknown source as the vendored fallback', () => {

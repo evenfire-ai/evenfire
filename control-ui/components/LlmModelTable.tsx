@@ -10,7 +10,12 @@ import {
 } from '@clerum/frontend-components'
 import { PROVIDER_AUTH_MODE, familyProviderIds, isLlmProviderId } from '@clerum/llm-providers'
 import type { LlmAllowedModel } from '@lib/api'
-import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
+import {
+  catalogGroupKey,
+  formatContextWindow,
+  formatLocalTimestamp,
+  getProviderDisplayLabel,
+} from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'
 import { FilterSelect } from './FilterSelect'
 import type { LlmModelTableProps } from './LlmModelTable.types'
@@ -83,6 +88,24 @@ function collapseFamilyRows(family: string, models: LlmAllowedModel[]): DisplayM
   })
 }
 
+/** Row action that pins a catalog-pruned row off; none for any other row. */
+function keepDisabledActions(
+  row: LlmAllowedModel | undefined,
+  label: string,
+  keepingDisabledId: string | null,
+  onKeepDisabled: (model: LlmAllowedModel) => Promise<void>
+) {
+  if (!row?.auto_disabled_at) return []
+  return [
+    {
+      key: `keep-disabled-${row.id}`,
+      label: keepingDisabledId === row.id ? 'Saving…' : label,
+      disabled: keepingDisabledId === row.id,
+      onClick: () => void onKeepDisabled(row),
+    },
+  ]
+}
+
 type EnabledFilter = 'all' | 'enabled' | 'disabled'
 type SourceFilter = 'all' | 'manual' | 'discovery'
 
@@ -93,8 +116,10 @@ export function LlmModelTable({
   onCreate,
   onEdit,
   onDelete,
+  onKeepDisabled,
   onRefresh,
   deletingId,
+  keepingDisabledId,
   refreshing,
   loading,
 }: LlmModelTableProps) {
@@ -486,6 +511,14 @@ export function LlmModelTable({
                         >
                           {model.enabled ? 'Enabled' : 'Disabled'}
                         </span>
+                        {model.auto_disabled_at ? (
+                          <span
+                            className="cu-llm-model-row__auto-off"
+                            title={`Turned off by catalog sync on ${formatLocalTimestamp(model.auto_disabled_at)}: no Host, grant or recipe used it after the catalog stopped listing it.`}
+                          >
+                            Turned off by catalog sync
+                          </span>
+                        ) : null}
                       </td>
                       <td>
                         <>
@@ -523,6 +556,18 @@ export function LlmModelTable({
                                     label: 'Edit subscription',
                                     onClick: () => onEdit(model.subscriptionRow!.id),
                                   },
+                                  ...keepDisabledActions(
+                                    model.apiKeyRow,
+                                    'Keep API key disabled',
+                                    keepingDisabledId,
+                                    onKeepDisabled
+                                  ),
+                                  ...keepDisabledActions(
+                                    model.subscriptionRow,
+                                    'Keep subscription disabled',
+                                    keepingDisabledId,
+                                    onKeepDisabled
+                                  ),
                                   {
                                     key: 'delete-api-key',
                                     label:
@@ -550,6 +595,12 @@ export function LlmModelTable({
                                     label: 'Edit',
                                     onClick: () => onEdit(model.id),
                                   },
+                                  ...keepDisabledActions(
+                                    model,
+                                    'Keep disabled',
+                                    keepingDisabledId,
+                                    onKeepDisabled
+                                  ),
                                   {
                                     key: 'delete',
                                     label: deletingId === model.id ? 'Deleting…' : 'Delete',

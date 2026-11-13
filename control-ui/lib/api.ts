@@ -2285,6 +2285,9 @@ export type LlmAllowedModel = {
   stale: boolean
   discovered_at?: string | null
   last_seen_at?: string | null
+  // Set while the catalog sync keeps the row off for having no consumers after
+  // it went stale; null otherwise. An older control-api omits it (→ null).
+  auto_disabled_at: string | null
   created_at: string
   updated_at: string
 }
@@ -2303,6 +2306,7 @@ function normalizeLlmAllowedModel(row: LlmAllowedModel): LlmAllowedModel {
     stale: row.stale === true,
     discovered_at: row.discovered_at ?? null,
     last_seen_at: row.last_seen_at ?? null,
+    auto_disabled_at: typeof row.auto_disabled_at === 'string' ? row.auto_disabled_at : null,
   }
 }
 
@@ -2316,7 +2320,12 @@ export type CreateLlmModelInput = {
   enabled?: boolean
 }
 
-export type UpdateLlmModelInput = Partial<CreateLlmModelInput>
+export type UpdateLlmModelInput = Partial<CreateLlmModelInput> & {
+  // Makes the operator the authority over `enabled` even when the value sent
+  // equals the stored one, so the catalog sync stops turning the row on or off.
+  // control-api rejects it (400) unless `enabled` is sent too.
+  pinEnabled?: true
+}
 
 /**
  * True when a create/update/delete was rejected with 503 `configmap_write_failed`.
@@ -2403,24 +2412,41 @@ export type ModelReferences = {
   grantsAffected: ModelGrantReference[]
 }
 
+/** A WorkflowRecipe that names a (provider, model) pair. */
+export type ModelRecipeReference = {
+  namespace: string
+  name: string
+}
+
+/** The kinds an operator can acknowledge (`POST /admin/attention/ack`). */
+export type AdminAckableAttentionKind = 'stale_model_referenced' | 'deprecated_model_enabled'
+
 /**
- * A `stale` (gone from the provider catalog) and still-enabled model that a live
- * Host/grant still references. `displayName` is optional (omitted, not null).
+ * An enabled model somebody uses that needs a decision: the catalog no longer
+ * lists it (`stale_model_referenced`) or tags it deprecated
+ * (`deprecated_model_enabled`). A Host role `implicit` means an all-models Host
+ * offers it without naming it. `episode` and `consumerKeys` are sent back
+ * verbatim on acknowledge; `episode` is null only from a control-api that
+ * predates acknowledgements, and such an item cannot be acknowledged.
  */
-export type AdminStaleModelReferencedItem = ModelReferences & {
-  kind: 'stale_model_referenced'
+export type AdminModelAttentionItem = ModelReferences & {
+  kind: AdminAckableAttentionKind
   provider: string
   model: string
   displayName?: string
+  recipesAffected: ModelRecipeReference[]
+  episode: number | null
+  consumerKeys: string[]
+  /** True only for an item an acknowledgement still covers (`includeAcknowledged`). */
+  acknowledged: boolean
 }
 
 /**
- * An enabled catalog model flagged from its own row, referenced or not: the
- * catalog marks it deprecated, or a discovered model vanished from the latest
- * catalog. Carries no references.
+ * A discovered model the latest catalog no longer lists. Only an older
+ * control-api emits it; it carries no references and cannot be acknowledged.
  */
-export type AdminCatalogModelAttentionItem = {
-  kind: 'deprecated_model_enabled' | 'stale_discovery_enabled'
+export type AdminStaleDiscoveryAttentionItem = {
+  kind: 'stale_discovery_enabled'
   provider: string
   model: string
   displayName?: string
@@ -2431,7 +2457,7 @@ export type AdminCatalogModelAttentionItem = {
  * an open union: kinds this client does not know are dropped while parsing, so
  * this union only holds what the banner can render.
  */
-export type AdminAttentionItem = AdminStaleModelReferencedItem | AdminCatalogModelAttentionItem
+export type AdminAttentionItem = AdminModelAttentionItem | AdminStaleDiscoveryAttentionItem
 
 /** The `GET /admin/attention` response contract consumed by the banner. */
 export type AdminAttentionReport = {
@@ -2482,6 +2508,20 @@ function coerceModelGrantReferences(raw: unknown): ModelGrantReference[] {
   })
 }
 
+function coerceModelRecipeReferences(raw: unknown): ModelRecipeReference[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== 'object') return []
+    const rec = entry as Record<string, unknown>
+    if (typeof rec.namespace !== 'string' || typeof rec.name !== 'string') return []
+    return [{ namespace: rec.namespace, name: rec.name }]
+  })
+}
+
+function coerceAttentionEpisode(raw: unknown): number | null {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : null
+}
+
 // Malformed items and kinds a newer backend added are dropped rather than
 // tumbling the whole feed.
 function coerceAttentionItem(raw: unknown): AdminAttentionItem[] {
@@ -2491,6 +2531,7 @@ function coerceAttentionItem(raw: unknown): AdminAttentionItem[] {
   const displayName = typeof rec.displayName === 'string' ? { displayName: rec.displayName } : {}
   switch (rec.kind) {
     case 'stale_model_referenced':
+    case 'deprecated_model_enabled':
       return [
         {
           kind: rec.kind,
@@ -2498,10 +2539,15 @@ function coerceAttentionItem(raw: unknown): AdminAttentionItem[] {
           model: rec.model,
           hostsAffected: coerceModelHostReferences(rec.hostsAffected),
           grantsAffected: coerceModelGrantReferences(rec.grantsAffected),
+          recipesAffected: coerceModelRecipeReferences(rec.recipesAffected),
+          episode: coerceAttentionEpisode(rec.episode),
+          consumerKeys: Array.isArray(rec.consumerKeys)
+            ? rec.consumerKeys.filter((key): key is string => typeof key === 'string')
+            : [],
+          acknowledged: rec.acknowledged === true,
           ...displayName,
         },
       ]
-    case 'deprecated_model_enabled':
     case 'stale_discovery_enabled':
       return [{ kind: rec.kind, provider: rec.provider, model: rec.model, ...displayName }]
     default:
@@ -2518,8 +2564,53 @@ export function parseAdminAttentionReport(raw: unknown): AdminAttentionReport {
   }
 }
 
-export async function getAdminAttention(): Promise<AdminAttentionReport> {
-  return parseAdminAttentionReport(await apiGet('/api/v1/admin/attention'))
+/**
+ * Reads the attention feed. `includeAcknowledged` also returns the items an
+ * acknowledgement covers, flagged `acknowledged: true`. A `signal` keeps the
+ * read out of the client's in-flight GET dedup, so a read issued after a
+ * mutation never resolves with a response fetched before it.
+ */
+export async function getAdminAttention(
+  opts: { includeAcknowledged?: boolean; signal?: AbortSignal } = {}
+): Promise<AdminAttentionReport> {
+  const query = opts.includeAcknowledged ? { includeAcknowledged: '1' } : {}
+  const options = opts.signal ? { signal: opts.signal } : {}
+  return parseAdminAttentionReport(await apiGet('/api/v1/admin/attention', query, options))
+}
+
+/** An item the operator can acknowledge: an ackable kind with a known episode. */
+export type AdminAckableAttentionItem = AdminModelAttentionItem & { episode: number }
+
+/**
+ * Marks an attention item as reviewed with the `episode` and `consumerKeys` the
+ * feed returned for it. A 409 `attention_episode_changed` means the item changed
+ * since the feed was read (see `isAttentionEpisodeChanged`); reload the feed.
+ */
+export async function ackAdminAttention(item: AdminAckableAttentionItem): Promise<void> {
+  await apiSend('POST', '/api/v1/admin/attention/ack', {
+    provider: item.provider,
+    model: item.model,
+    kind: item.kind,
+    episode: item.episode,
+    consumerKeys: item.consumerKeys,
+  })
+}
+
+/** Undoes an acknowledgement. Idempotent on the server (204 either way). */
+export async function unackAdminAttention(
+  item: Pick<AdminModelAttentionItem, 'provider' | 'model' | 'kind'>
+): Promise<void> {
+  await apiSend('DELETE', '/api/v1/admin/attention/ack', {
+    provider: item.provider,
+    model: item.model,
+    kind: item.kind,
+  })
+}
+
+/** True when an acknowledge was rejected because the item changed since it was read. */
+export function isAttentionEpisodeChanged(err: unknown): boolean {
+  if ((err as { status?: number })?.status !== 409) return false
+  return apiErrorBody(err)?.error === 'attention_episode_changed'
 }
 
 /**
@@ -2608,13 +2699,21 @@ function sumSyncOutcome(providerCounts: unknown): LlmDiscoverySyncOutcome | null
   if (!providerCounts || typeof providerCounts !== 'object' || Array.isArray(providerCounts)) {
     return null
   }
-  const outcome: LlmDiscoverySyncOutcome = { autoEnabled: 0, heldUndecidable: 0, deferredByCap: 0 }
+  const outcome: LlmDiscoverySyncOutcome = {
+    autoEnabled: 0,
+    heldUndecidable: 0,
+    deferredByCap: 0,
+    reEnabled: 0,
+    reEnableDeferredByCap: 0,
+  }
   for (const entry of Object.values(providerCounts)) {
     if (!entry || typeof entry !== 'object') continue
     const count = entry as Record<string, unknown>
     outcome.autoEnabled += syncCount(count.autoEnabled)
     outcome.heldUndecidable += syncCount(count.skippedUndecidable)
     outcome.deferredByCap += syncCount(count.deferredByCap)
+    outcome.reEnabled += syncCount(count.reEnabled)
+    outcome.reEnableDeferredByCap += syncCount(count.reEnableDeferredByCap)
   }
   return outcome
 }

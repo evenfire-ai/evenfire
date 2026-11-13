@@ -20,6 +20,7 @@ import {
   getUnpricedModels,
   isLlmModelConfigMapDeferred,
   isSilentApiError,
+  updateLlmModel,
 } from '@lib/api'
 import { getProviderDisplayLabel } from '@lib/llm'
 import { buildUnpricedKeys } from '@lib/llmModelUnpriced'
@@ -41,6 +42,7 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [keepingDisabledId, setKeepingDisabledId] = useState<string | null>(null)
   // Bumped after each successful mutation so the attention banner re-fetches
   // and drops any item the operator just resolved (on demand, no polling).
   const [attentionRefreshKey, setAttentionRefreshKey] = useState(0)
@@ -136,6 +138,60 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
     if (forceRemove) await deleteWithImpactGate(model, label, true)
   }
 
+  // Pins a row the catalog sync turned off, so a later sync listing the model
+  // again leaves it off. The row is normally disabled already, so no impact gate
+  // runs; but the sync may have turned it back on since the list loaded, and
+  // then the PUT is a real disable that control-api gates with 409
+  // `model_in_use`, answered with the same impact confirm as a delete.
+  async function keepDisabledWithImpactGate(model: LlmAllowedModel, force: boolean) {
+    const label = `${getProviderDisplayLabel(model.provider)}/${model.model}`
+    setKeepingDisabledId(model.id)
+    setError('')
+    let impact: ReturnType<typeof getModelInUseImpact> = null
+    try {
+      await updateLlmModel(
+        model.id,
+        { enabled: false, pinEnabled: true },
+        force ? { force: true } : {}
+      )
+      await loadAll()
+      setAttentionRefreshKey(key => key + 1)
+      showToast(`${label} stays disabled; catalog syncs will not turn it back on.`, {
+        tone: 'success',
+      })
+      return
+    } catch (caught) {
+      if (isSilentApiError(caught)) return
+      if (isLlmModelConfigMapDeferred(caught)) {
+        await loadAll()
+        setAttentionRefreshKey(key => key + 1)
+        showToast(`${label} stays disabled. ${CONFIGMAP_DEFERRED_WARNING}`, { tone: 'info' })
+        return
+      }
+      impact = getModelInUseImpact(caught)
+      if (!impact) {
+        setError(caught instanceof Error ? caught.message : `Failed to keep ${label} disabled`)
+        return
+      }
+    } finally {
+      setKeepingDisabledId(null)
+    }
+
+    const forced = await confirm({
+      title: 'Model still in use',
+      message: `${label} was turned back on and is referenced again. Disabling it leaves these references pointing at a disabled model:`,
+      details: (
+        <ModelReferences
+          hostsAffected={impact.hostsAffected}
+          grantsAffected={impact.grantsAffected}
+        />
+      ),
+      confirmLabel: 'Disable anyway',
+      tone: 'danger',
+    })
+    if (forced) await keepDisabledWithImpactGate(model, true)
+  }
+
   useEffect(() => {
     if (authState.isLoggedIn && !authState.isLoading) {
       void loadAll()
@@ -174,8 +230,10 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
           onCreate={() => router.push(CONTROL_ROUTES.llmModels.new)}
           onEdit={id => router.push(CONTROL_ROUTES.llmModels.edit(id))}
           onDelete={handleDelete}
+          onKeepDisabled={model => keepDisabledWithImpactGate(model, false)}
           onRefresh={loadAll}
           deletingId={deletingId}
+          keepingDisabledId={keepingDisabledId}
           refreshing={loading}
           loading={loading && models.length === 0}
         />

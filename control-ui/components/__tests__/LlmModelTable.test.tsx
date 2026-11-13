@@ -15,6 +15,7 @@ const baseModel: LlmAllowedModel = {
   stale: false,
   discovered_at: null,
   last_seen_at: null,
+  auto_disabled_at: null,
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
 }
@@ -27,8 +28,10 @@ function renderTable(items: LlmAllowedModel[], unpricedKeys = new Set<string>())
       onCreate={vi.fn()}
       onEdit={vi.fn()}
       onDelete={vi.fn().mockResolvedValue(undefined)}
+      onKeepDisabled={vi.fn().mockResolvedValue(undefined)}
       onRefresh={vi.fn()}
       deletingId={null}
+      keepingDisabledId={null}
       refreshing={false}
       loading={false}
     />
@@ -696,5 +699,60 @@ describe('LlmModelTable sorting', () => {
     // the previous direction — so the operator gets the most useful ordering.
     fireEvent.click(screen.getByRole('button', { name: 'Sort by Context window descending' }))
     expect(expandedRowOrder()).toEqual(['bravo', 'alpha'])
+  })
+})
+
+describe('LlmModelTable rows the catalog sync turned off', () => {
+  const pruned: LlmAllowedModel = {
+    ...baseModel,
+    id: 'pruned',
+    model: 'claude-old',
+    enabled: false,
+    source: 'discovery',
+    stale: true,
+    auto_disabled_at: '2026-11-01T00:00:00.000Z',
+  }
+
+  function renderWith(onKeepDisabled = vi.fn().mockResolvedValue(undefined)) {
+    render(
+      <LlmModelTable
+        items={[pruned, baseModel]}
+        unpricedKeys={new Set()}
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        onKeepDisabled={onKeepDisabled}
+        onRefresh={vi.fn()}
+        deletingId={null}
+        keepingDisabledId={null}
+        refreshing={false}
+        loading={false}
+      />
+    )
+    expandAnthropicModels()
+    return onKeepDisabled
+  }
+
+  it('marks the row and dates the marker', () => {
+    renderWith()
+    const marker = screen.getByText('Turned off by catalog sync')
+    expect(marker.closest('tr')).toHaveTextContent('claude-old')
+    expect(marker).toHaveAttribute(
+      'title',
+      expect.stringContaining(new Date(pruned.auto_disabled_at!).toLocaleString())
+    )
+    expect(screen.getAllByText('Turned off by catalog sync')).toHaveLength(1)
+  })
+
+  it('offers Keep disabled only on that row', () => {
+    const onKeepDisabled = renderWith()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for model claude/claude-old' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Keep disabled' }))
+    expect(onKeepDisabled).toHaveBeenCalledWith(expect.objectContaining({ id: 'pruned' }))
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for model claude/claude-sonnet-4-6' })
+    )
+    expect(screen.queryByRole('menuitem', { name: 'Keep disabled' })).not.toBeInTheDocument()
   })
 })

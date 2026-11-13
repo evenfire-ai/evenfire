@@ -9,6 +9,7 @@ import {
   sumProviderCounts,
   syncResultCase,
   syncResultLegacyCase,
+  syncResultWithReEnable,
 } from '../../test/fixtures/llmCatalogSyncResult'
 import { catalogPolicyCase } from '../../test/fixtures/llmProviderCatalogPolicy'
 import { LlmDiscoveryPanel } from '../LlmDiscoveryPanel'
@@ -410,6 +411,23 @@ describe('LlmDiscoveryPanel sync feedback', () => {
     expect(notice()).toHaveAttribute('role', 'status')
     expect(notice()).toHaveTextContent(
       `${deferred} more new models were not added yet (auto-enable limit for this run reached); run the sync again to add them.`
+    )
+  })
+
+  it('reports rows the sync turned back on and those the cap held back', async () => {
+    const body = syncResultWithReEnable('decidable_auto_enabled', 'claude', {
+      reEnabled: 2,
+      reEnableDeferredByCap: 1,
+    })
+    useSyncCase(body)
+
+    const toast = await syncAndReadToast()
+
+    expect(toast).toHaveTextContent(
+      `Synced from live: +${body.added} new (${sumProviderCounts(body, 'autoEnabled')} enabled automatically), ${body.updated} updated, ${body.staled} marked stale, 2 turned back on. Enabled models are in the Catalog tab.`
+    )
+    expect(notice()).toHaveTextContent(
+      '1 model the catalog lists again was not turned back on yet (auto-enable limit for this run reached); run the sync again to finish.'
     )
   })
 

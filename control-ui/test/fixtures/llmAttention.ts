@@ -37,3 +37,29 @@ export function attentionWireBodyOf(...kinds: string[]): AttentionWire {
   const body = attentionWireBody()
   return { ...body, items: body.items.filter(item => kinds.includes(item.kind)) }
 }
+
+type AttentionWireItem = AttentionWire['items'][number]
+
+/**
+ * A generated item as the feed returns it with `includeAcknowledged=1` once the
+ * operator acknowledged it: the producer only adds `acknowledged: true` to the
+ * item it would otherwise omit (llmAttention.ts `itemFor`), every other field is
+ * unchanged. The wire file is generated without acknowledgements, so this is the
+ * one field derived here; extend the generator to replace it.
+ */
+export function acknowledgedWireItem(item: AttentionWireItem): AttentionWireItem {
+  return { ...structuredClone(item), acknowledged: true }
+}
+
+/**
+ * A generated item for a model a WorkflowRecipe also names: the producer adds
+ * `recipesAffected` (an array of `{ namespace, name }`) only when the list is
+ * non-empty (llmAttention.ts `itemFor`). The generator has no recipe consumer
+ * yet, so this is the one field derived here; extend the generator to replace it.
+ */
+export function withRecipesWireItem(
+  item: AttentionWireItem,
+  recipes: Array<{ namespace: string; name: string }>
+): AttentionWireItem {
+  return { ...structuredClone(item), recipesAffected: recipes }
+}
