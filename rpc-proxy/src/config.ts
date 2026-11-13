@@ -341,7 +341,10 @@ export const config: Config = {
     'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
   ),
   hostNamespace: requiredOrDevDefault('RPC_PROXY_HOST_NAMESPACE', 'mcp-host'),
-  mcpServerNamespace: requiredOrDevDefault('RPC_PROXY_MCP_SERVER_NAMESPACE', 'mcp-server'),
+  // Read only on the V2 MCP path. Defaulted (not required) so an image of this
+  // release can boot under an older base manifest that lacks the variable; it
+  // must equal control-api's CONTROL_API_MCP_SERVERS_NAMESPACE (same default).
+  mcpServerNamespace: process.env.RPC_PROXY_MCP_SERVER_NAMESPACE || 'mcp-server',
   desktopCookieName: process.env.RPC_PROXY_DESKTOP_COOKIE_NAME || 'clerum_desktop_session',
   desktopCookieMaxAgeMs: Number(process.env.RPC_PROXY_DESKTOP_COOKIE_MAX_AGE_MS || 3_600_000),
   desktopCookieSecret: requiredOrDevDefault(

@@ -60,16 +60,13 @@ describe('rpc-proxy HCC base URL default', () => {
 
 describe('rpc-proxy base namespace configuration', () => {
   const repoRoot = path.join(__dirname, '../..')
-  const configSource = readFileSync(path.join(__dirname, 'config.ts'), 'utf8')
   const deployment = readFileSync(
     path.join(repoRoot, 'deploy/base/rpc-proxy/rpc-proxy.yaml'),
     'utf8'
   )
 
-  it('keeps the base deployment on the required MCP server namespace', () => {
-    expect(configSource).toMatch(
-      /requiredOrDevDefault\('RPC_PROXY_MCP_SERVER_NAMESPACE',\s*'mcp-server'\)/
-    )
+  // The code default is pinned by __tests__/config.productionBoot.test.ts.
+  it('keeps the base deployment on the mcp-server MCP server namespace', () => {
     expect(deployment).toMatch(/- name: RPC_PROXY_MCP_SERVER_NAMESPACE\s+value: mcp-server/)
   })
 })

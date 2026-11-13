@@ -139,6 +139,11 @@ connectors, also set `MCP_OAUTH_BROKER_ENABLED: "true"` in `control-api-config`.
 Base leaves it off, and without it the agent asks for consent forever even after
 the user authorizes. See [OAuth connectors](../how-to/connect-oauth-connector.md).
 
+`RPC_PROXY_MCP_SERVER_NAMESPACE` (base Deployment `env`, default `mcp-server`
+when unset) names the namespace of the MCP servers for rpc-proxy. If you move the
+MCP servers, set it to the same value as control-api's
+`CONTROL_API_MCP_SERVERS_NAMESPACE`.
+
 ## Outbound destinations
 
 The NetworkPolicies are port and CIDR rules, not hostname rules. Agent pods
