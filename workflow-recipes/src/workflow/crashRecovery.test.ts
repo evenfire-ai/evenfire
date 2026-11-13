@@ -110,6 +110,39 @@ describe('crash recovery pod readiness classification', () => {
       ready: true,
     })
   })
+
+  it('reports when the pod was created and when its deletion is due', () => {
+    const status = { phase: 'Running', conditions: [{ type: 'Ready', status: 'False' }] }
+
+    expect(
+      inspectPodReadiness({
+        metadata: { uid: 'pod-uid-2', creationTimestamp: new Date('2026-11-13T10:00:00.000Z') },
+        status,
+      })
+    ).toEqual({
+      phase: 'Running',
+      ready: false,
+      uid: 'pod-uid-2',
+      createdAt: '2026-11-13T10:00:00.000Z',
+    })
+
+    expect(
+      inspectPodReadiness({
+        metadata: {
+          uid: 'pod-uid-2',
+          creationTimestamp: new Date('2026-11-13T10:00:00.000Z'),
+          deletionTimestamp: new Date('2026-11-13T10:05:30.000Z'),
+        },
+        status,
+      })
+    ).toEqual({
+      phase: 'Running',
+      ready: false,
+      uid: 'pod-uid-2',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      deletingAt: '2026-11-13T10:05:30.000Z',
+    })
+  })
 })
 
 describe('getPodPresence', () => {

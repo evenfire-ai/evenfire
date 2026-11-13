@@ -10184,8 +10184,8 @@ describe('WorkflowRecipeReconciler', () => {
 
   // §5: a `deploying` PROGRESS requeue must be a FIXED interval (no exponential
   // backoff) — requeueFixedInterval signals the watcher to skip backoff and reset
-  // attempts, else the poll cadence degrades toward the 60s cap and the 240s
-  // mcp-host readiness deadline can still be exceeded.
+  // attempts, else the poll cadence degrades toward the 60s cap and slows every
+  // deploying sub-phase of the run.
   it('marks a deploying workflow requeue as fixed-interval (no transient backoff)', async () => {
     const workflowReconcile = vi.fn().mockResolvedValue({
       phase: 'deploying',
@@ -10680,7 +10680,7 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   // The fixed interval exists for `deploying`, where the controller polls for a
-  // Pod it cannot watch and must beat the 240s mcp-host readiness deadline.
+  // Pod it cannot watch.
   // Plugin Workload SDK policy-pending waits for an operator grant instead, which
   // polling cannot advance, so it must requeue on the backoff path.
   it('requeues a workflow awaiting Plugin Workload SDK policy without a fixed interval', async () => {

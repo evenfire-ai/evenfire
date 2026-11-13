@@ -1380,14 +1380,33 @@ function workflowPhaseForMcpHostReadinessWait(
   return execution?.phase === 'recovering' ? 'recovering' : 'initializing'
 }
 
+/**
+ * The wait for an mcp-host pod starts at the later of the run start and the
+ * creation of that pod. A pod created after the run started (the output
+ * anchor/prepare pods ran first, or crash recovery replaced it) gets the whole
+ * window; a pod that predates the run is measured from the run start. A pod
+ * that is being deleted is the predecessor of the pod this run waits for: its
+ * creation is not counted, and the window starts at its deletionTimestamp (the
+ * deletion request plus its grace period), so a predecessor that never goes
+ * away still ends the wait.
+ */
 function hasMcpHostReadinessWaitExpired(
   execution: WorkflowExecutionStatus | undefined,
+  readiness: PodReadiness,
   nowMs = Date.now()
 ): boolean {
   if (!execution?.startedAt) return false
 
   const startedAtMs = Date.parse(execution.startedAt)
-  return Number.isFinite(startedAtMs) && nowMs - startedAtMs >= MCP_HOST_READINESS_WAIT_TIMEOUT_MS
+  const podWaitStartedAt = readiness.deletingAt ?? readiness.createdAt
+  const waitStartedAtMs =
+    podWaitStartedAt === undefined
+      ? startedAtMs
+      : Math.max(startedAtMs, Date.parse(podWaitStartedAt))
+  return (
+    Number.isFinite(waitStartedAtMs) &&
+    nowMs - waitStartedAtMs >= MCP_HOST_READINESS_WAIT_TIMEOUT_MS
+  )
 }
 
 function trimOutputClaimName(spec: WorkflowRecipeSpec | undefined): string | undefined {
@@ -2945,7 +2964,7 @@ export class WorkflowReconciler {
         )
         if (!readiness.ready) {
           const message = mcpHostReadinessMessage(readiness)
-          if (hasMcpHostReadinessWaitExpired(currentStatus?.workflowExecution)) {
+          if (hasMcpHostReadinessWaitExpired(currentStatus?.workflowExecution, readiness)) {
             return withWorkflowConditions({
               phase: 'failed',
               message: `${message}; readiness deadline exceeded`,

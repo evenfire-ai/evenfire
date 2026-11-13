@@ -34,6 +34,13 @@ export interface PodReadiness {
   schedulingReason?: string
   /** Pod UID — changes on recreate, lets callers detect a restarted pod. */
   uid?: string
+  /** `metadata.creationTimestamp` (ISO 8601). A recreated pod carries a new value. */
+  createdAt?: string
+  /**
+   * `metadata.deletionTimestamp` (ISO 8601), set only while the pod is being
+   * deleted: the deletion request time plus the pod's grace period.
+   */
+  deletingAt?: string
 }
 
 export function evaluateCompletedRuntimePodRecovery(
@@ -226,6 +233,12 @@ export function inspectPodReadiness(pod: k8s.V1Pod): PodReadiness {
     ...(waitingReason && { waitingReason }),
     ...(scheduledCondition?.reason && { schedulingReason: scheduledCondition.reason }),
     ...(pod.metadata?.uid && { uid: pod.metadata.uid }),
+    ...(pod.metadata?.creationTimestamp && {
+      createdAt: new Date(pod.metadata.creationTimestamp).toISOString(),
+    }),
+    ...(pod.metadata?.deletionTimestamp && {
+      deletingAt: new Date(pod.metadata.deletionTimestamp).toISOString(),
+    }),
   }
 }
 

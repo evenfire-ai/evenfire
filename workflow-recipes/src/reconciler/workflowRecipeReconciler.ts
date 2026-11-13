@@ -684,10 +684,10 @@ export interface ReconcileResult {
    * backoff. Set for steady-state PROGRESS requeues (phase === 'deploying',
    * waiting on a Pod we created to advance). Progress is not an error, so it
    * must NOT inherit the transient-error backoff curve: exponential growth would
-   * stretch the poll cadence toward the 60s cap and re-expose the 240s mcp-host
-   * readiness deadline (MCP_HOST_READINESS_WAIT_TIMEOUT_MS) that this requeue
-   * exists to beat. Transient-ERROR requeues (skipStatusPatch) leave this
-   * false/undefined so genuine flakiness still backs off.
+   * stretch the poll cadence toward the 60s cap and delay each deploying
+   * sub-phase of a run by up to that long. Transient-ERROR requeues
+   * (skipStatusPatch) leave this false/undefined so genuine flakiness still
+   * backs off.
    */
   requeueFixedInterval?: boolean
   /** A legacy-only timer must not repeat the recipe's runtime lifecycle. */
@@ -2627,9 +2627,8 @@ export class WorkflowRecipeReconciler {
         // path requeues at a FIXED interval (requeueFixedInterval) so a run
         // advancing through its deploying sub-phases does NOT inherit the
         // transient-error backoff curve — exponential growth there would
-        // degrade the poll cadence toward the 60s cap and re-expose the 240s
-        // mcp-host readiness deadline this requeue exists to beat (see §5 and
-        // requeueFixedInterval doc).
+        // degrade the poll cadence toward the 60s cap and delay each deploying
+        // sub-phase by up to that long (see §5 and requeueFixedInterval doc).
         //
         // Plugin Workload SDK policy-pending also requeues, but on the backoff
         // path: it waits for an operator grant, which arrives by event or by the

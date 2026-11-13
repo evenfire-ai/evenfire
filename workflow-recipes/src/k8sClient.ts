@@ -1270,7 +1270,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
    *   waiting on a Pod we created): FIXED `delay = baseMs` with `attempts` RESET
    *   to 0. Progress is not an error and must not inherit the error backoff
    *   curve — exponential growth would stretch the poll cadence toward the cap
-   *   and re-expose the 240s mcp-host readiness deadline this requeue beats.
+   *   and delay each deploying sub-phase of a run by up to that long.
    *   Resetting attempts means a later GENUINE transient error starts backoff
    *   fresh from base rather than from a counter inflated by normal progress.
    *
@@ -1329,9 +1329,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // transient-error requeues preserve a growing attempt count so they back off.
     // NOTE: a fixed 5s interval × N concurrent deploying runs is N/5 reconciles
     // per second. We accept that load tradeoff for prompt progress; the inner
-    // reconcile advances past the waiting state once the awaited Pod succeeds,
-    // and the 240s readiness deadline / dbRunProcessor max-duration paths
-    // terminate any run permanently stuck in deploying, so this is bounded.
+    // reconcile advances past the waiting state once the awaited Pod succeeds.
+    // The mcp-host readiness wait ends at its 240s deadline, measured from the
+    // later of the run start and that pod's creation (or, for a pod being
+    // deleted, its deletionTimestamp), and dbRunProcessor fails a run that
+    // exceeds its max_duration_seconds when one is set.
     this.transientRetries.set(name, {
       timer,
       attempts: fixedInterval ? 0 : attempts + 1,
