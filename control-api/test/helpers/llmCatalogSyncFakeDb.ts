@@ -263,7 +263,7 @@ function sqlError(code: string, message: string): Error {
 const norm = (sql: string) => sql.replace(/\s+/g, ' ').trim()
 
 const MODEL_COLUMNS =
-  'id, provider, model, vendor, display_name, context_window_tokens, enabled, source, discovered_at, last_seen_at, stale, image_input, created_at, updated_at'
+  'id, provider, model, vendor, display_name, context_window_tokens, enabled, source, discovered_at, last_seen_at, stale, auto_disabled_at, image_input, created_at, updated_at'
 const PRICE_COLUMNS =
   'id, provider, model, input_token_price, output_token_price, cache_read_token_price, cache_write_token_price, currency, effective_from, enabled, created_at, updated_at'
 const SETTINGS_COLUMNS = 'provider, auto_enable, updated_at, updated_by'

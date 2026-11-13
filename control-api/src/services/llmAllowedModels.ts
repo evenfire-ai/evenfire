@@ -42,6 +42,14 @@ export type LlmAllowedModel = {
   last_seen_at: string | null
   stale: boolean
   /**
+   * When the catalog sync's prune turned this row off for having no consumers;
+   * null otherwise. Cleared when the row is re-enabled, renamed, or an operator
+   * PUT takes authority over `enabled` (changing it or sending `pinEnabled`), so
+   * a non-null value always means "off because of the catalog, still the
+   * catalog's to turn back on".
+   */
+  auto_disabled_at: string | null
+  /**
    * Model-level image-input capability + evidence (#654). ALWAYS normalized
    * through the shared contract: a NULL/malformed stored value reads as
    * `{ state: 'unknown' }`, never as affirmative support.
@@ -248,6 +256,7 @@ function rowToModel(row: Record<string, unknown>): LlmAllowedModel {
     discovered_at: toNullableIso(row.discovered_at),
     last_seen_at: toNullableIso(row.last_seen_at),
     stale: Boolean(row.stale),
+    auto_disabled_at: toNullableIso(row.auto_disabled_at),
     // NULL / malformed / legacy → `{ state: 'unknown' }` (never affirmative).
     image_input: normalizeImageInputCapability(row.image_input),
     created_at: toIso(row.created_at),
@@ -258,7 +267,7 @@ function rowToModel(row: Record<string, unknown>): LlmAllowedModel {
 const MODEL_COLUMNS = `
   id, provider, model, vendor, display_name,
   context_window_tokens, enabled, source, discovered_at, last_seen_at, stale,
-  image_input, created_at, updated_at
+  auto_disabled_at, image_input, created_at, updated_at
 `
 
 async function writeAudit(

@@ -15,6 +15,7 @@
           "discovered_at": "2026-11-01T00:00:00.000Z",
           "last_seen_at": "2026-11-01T00:00:00.000Z",
           "stale": false,
+          "auto_disabled_at": null,
           "image_input": {
             "state": "unknown"
           },
@@ -33,6 +34,7 @@
           "discovered_at": "2026-11-01T00:00:00.000Z",
           "last_seen_at": "2026-11-01T00:00:00.000Z",
           "stale": false,
+          "auto_disabled_at": null,
           "image_input": {
             "state": "unknown"
           },
@@ -56,6 +58,7 @@
       "discovered_at": null,
       "last_seen_at": null,
       "stale": false,
+      "auto_disabled_at": null,
       "image_input": {
         "state": "unknown"
       },
@@ -91,6 +94,7 @@
       "discovered_at": "2026-11-01T00:00:00.000Z",
       "last_seen_at": "2026-11-01T00:00:00.000Z",
       "stale": false,
+      "auto_disabled_at": null,
       "image_input": {
         "state": "unknown"
       },

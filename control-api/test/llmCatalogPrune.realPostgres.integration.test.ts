@@ -1451,6 +1451,38 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       expect(isPublished(m)).toBe(true)
     })
 
+    it('the model responses expose auto_disabled_at while the prune owns the row, and null once it does not', async () => {
+      const [pinned, edited, relisted] = [pick(0), pick(1), pick(2)]
+      await makePruned(pinned, edited, relisted)
+      const listed = async () => {
+        const res = await request(app()).get(MODELS_PATH).set('Cookie', COOKIE).expect(200)
+        const rows = res.body.rows as Array<{ model: string; auto_disabled_at: unknown }>
+        return (model: string) => rows.find(r => r.model === model)?.auto_disabled_at
+      }
+      const stored = async (model: string) => (await row(model)).auto_disabled_at!.toISOString()
+
+      const afterPrune = await listed()
+      for (const m of [pinned, edited, relisted]) {
+        expect(afterPrune(m), m).toBe(await stored(m))
+      }
+      const id = await rowId(pinned)
+      const got = await request(app()).get(`${MODELS_PATH}/${id}`).set('Cookie', COOKIE).expect(200)
+      expect(got.body.auto_disabled_at).toBe(await stored(pinned))
+
+      // "Keep disabled": the PUT response and the list drop the timestamp.
+      const kept = await put(id, { enabled: false, pinEnabled: true }).expect(200)
+      expect(kept.body).toMatchObject({ enabled: false, auto_disabled_at: null })
+      // An edit that leaves `enabled` alone keeps the row the catalog's.
+      const edit = await put(await rowId(edited), { display_name: 'Edited' }).expect(200)
+      expect(edit.body.auto_disabled_at).toBe(await stored(edited))
+
+      await sync(gone(pinned, edited))
+      const afterRelist = await listed()
+      expect(afterRelist(pinned)).toBeNull()
+      expect(afterRelist(edited)).toBe(await stored(edited))
+      expect(afterRelist(relisted)).toBeNull()
+    })
+
     it('a PUT read before a prune that commits first decides authority on the locked row', async () => {
       const m = pick(0)
       await makeStale(m)
