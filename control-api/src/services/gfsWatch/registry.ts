@@ -32,6 +32,7 @@ import {
   type Rid32,
   type Uuid,
   type WatchPrincipalKind,
+  byKey,
   drivesOf,
   groupBy,
   keyDrive,
@@ -45,7 +46,13 @@ import {
   toRid32,
 } from './keys.js'
 import { type GfsWatchListenerDeps, createGfsWatchListener, massCloseSpreadMs } from './listener.js'
-import type { AuthzKey, ResourceChanged, WatchCmd } from './notifySchemas.js'
+import type {
+  AuthzKey,
+  ResourceChangeOp,
+  ResourceChanged,
+  SessionHint,
+  WatchCmd,
+} from './notifySchemas.js'
 import { type ReadSlots, createReadSlots, runLimited } from './readSlots.js'
 import { type RecentDirty, createRecentDirty } from './recentDirty.js'
 import { FAILED, type TimerHandle, type WatchClock, createWatchRuntime } from './runtime.js'
@@ -134,6 +141,33 @@ export const GFS_WATCH_EXPAND_TEAMS_SQL = `SELECT user_id::text AS u FROM team_m
 /** Desktop users linked to the changed admins; revoked links stay in the table as history. */
 export const GFS_WATCH_EXPAND_ADMINS_SQL = `SELECT user_id::text AS u FROM gfs_desktop_operator_links
   WHERE control_admin_id = ANY($1::uuid[]) AND state = 'active'`
+
+const ROOTS_WINDOW_MS = 250
+const ROOTS_MIN_INTERVAL_MS = 2_000
+const SESSION_WINDOW_MS = 250
+
+/**
+ * Users who list a changed resource among their roots: direct grantees with
+ * `read` (a root listing only returns resources granted or shared directly),
+ * and the active members of a team grantee. subject_id is TEXT and holds
+ * non-uuid ids for host and context subjects, so it is compared as text: a
+ * `::uuid` cast would fail the whole window on the first such row.
+ */
+export const GFS_WATCH_ROOTS_GRANTEES_SQL = `WITH g AS (
+    SELECT subject_type, subject_id FROM gfs_grants
+     WHERE resource_id = ANY($1::uuid[]) AND 'read' = ANY(permissions)
+    UNION
+    SELECT subject_type, subject_id FROM gfs_shares
+     WHERE resource_id = ANY($1::uuid[]) AND 'read' = ANY(permissions))
+  SELECT g.subject_id AS u FROM g WHERE g.subject_type = 'user'
+  UNION
+  SELECT tm.user_id::text AS u FROM g
+    JOIN team_members tm ON tm.team_id::text = g.subject_id AND tm.status = 'active'
+   WHERE g.subject_type = 'team'`
+
+/** The row is the authority on a session hint; the hint only says which users to read. */
+export const GFS_WATCH_SESSION_CONFIRM_SQL = `SELECT id::text AS id, lifecycle_state, lifecycle_version
+  FROM users WHERE id = ANY($1::uuid[])`
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -389,7 +423,15 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
     authzWindow: TimerHandle | null
     expansionRetry: TimerHandle | null
     failClosedTimer: TimerHandle | null
-  } = { authzWindow: null, expansionRetry: null, failClosedTimer: null }
+    rootsWindow: TimerHandle | null
+    sessionWindow: TimerHandle | null
+  } = {
+    authzWindow: null,
+    expansionRetry: null,
+    failClosedTimer: null,
+    rootsWindow: null,
+    sessionWindow: null,
+  }
   // Team and admin ids still to expand, and those whose expansion failed once.
   let authzTeams = new Set<Uuid>()
   let authzAdmins = new Set<Uuid>()
@@ -398,6 +440,12 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   // The fail-closed's own hold reason: a user enters (and is held) once,
   // and the copy that empties it is what gets released.
   let failClosedPending = new Set<Uuid>()
+  // Rids of the roots window whose direct grantees must hear of the change.
+  let rootsRids = new Set<Rid32>()
+  // The session hint's own hold reason, released through the copy that empties it.
+  let sessionPending = new Set<Uuid>()
+  // The users of each confirmation awaiting its query: still held, by no pending set.
+  const sessionConfirming = new Set<ReadonlySet<Uuid>>()
   let lastFailClosedAt = Number.NEGATIVE_INFINITY
   // Bumped on every process transition: a window that resumes from its
   // await under another epoch describes connections that no longer exist.
@@ -413,6 +461,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
     onCmd,
     onResourceChanged,
     onAuthzChanged,
+    onSessionHint,
     resetWindows,
     onExpansionFailed,
     ...(deps.createListenClient ? { createClient: deps.createListenClient } : {}),
@@ -449,7 +498,23 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
     windowEpoch += 1
     resetAuthzWindow()
     resetFailClosed()
+    resetRootsWindow()
+    resetSessionWindow()
+  }
+
+  /** A trailing `roots_changed` belongs to its connection, and its closeConn cancels it. */
+  function resetRootsWindow(): void {
+    rt.cancel(windows, 'rootsWindow')
+    rootsRids = new Set()
     rootsPending.clear()
+  }
+
+  // A confirmation already past its window releases its own users in its finally.
+  function resetSessionWindow(): void {
+    rt.cancel(windows, 'sessionWindow')
+    const u = sessionPending
+    sessionPending = new Set()
+    for (const uid of u) unhold(uid)
   }
 
   function resetAuthzWindow(): void {
@@ -651,6 +716,163 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       closeAllSpread(victims, 'reauthorize')
     } finally {
       // Over the copy, never byUser: a user who left meanwhile is released too.
+      for (const uid of u) unhold(uid)
+    }
+  }
+
+  // ─── Roots window ────────────────────────────────────────────────────────
+
+  function onRootsHint(x: Rid32, op: ResourceChangeOp): void {
+    if (shuttingDown() || byConnId.size === 0) return
+    // A linked operator lists the whole drive, so any visible change of any
+    // resource changes its roots. With one drive per instance, every linked
+    // operator is exactly the drive's operators.
+    for (const conn of linkedOperators) rootsPending.add(conn)
+    // A new resource has no grants yet, and one granted in the same
+    // transaction fires its own authorization hint.
+    if (op !== 'i' && byUser.size > 0) rootsRids.add(x)
+    if (rootsPending.size > 0 || rootsRids.size > 0) armRootsWindow()
+  }
+
+  function armRootsWindow(): void {
+    if (windows.rootsWindow === null) {
+      windows.rootsWindow = rt.timer(ROOTS_WINDOW_MS, () =>
+        rt.guardedTick('roots-window', onRootsWindow)
+      )
+    }
+  }
+
+  async function onRootsWindow(): Promise<void> {
+    windows.rootsWindow = null
+    const r = rootsRids
+    rootsRids = new Set()
+    if (shuttingDown()) return
+    const e = windowEpoch
+    if (r.size > 0) {
+      const res = await rt.total(
+        () => deps.watchPool.query({ text: GFS_WATCH_ROOTS_GRANTEES_SQL, values: [rids(r)] }),
+        'roots'
+      )
+      if (shuttingDown() || windowEpoch !== e) return
+      // A failed query only loses a roots notice, never a revocation: the
+      // client refetches its roots on every ready and on focus.
+      if (res !== FAILED) {
+        for (const row of res.rows as { u?: unknown }[]) {
+          const u = normUid(row.u)
+          if (u === null) continue
+          for (const conn of byUser.get(u) ?? []) rootsPending.add(conn)
+        }
+      }
+    }
+    const p = [...rootsPending]
+    rootsPending.clear()
+    for (const conn of p) rt.guarded(conn, () => emitRoots(conn))
+  }
+
+  /** At most one `roots_changed` every 2 s per connection, the last one trailing. */
+  function emitRoots(conn: WatchConnection): void {
+    if (rt.now() - conn.rootsLastSentAt >= ROOTS_MIN_INTERVAL_MS) {
+      // Only a frame that went out starts the interval: one dropped while the
+      // connection was opening or retained must not delay the next.
+      if (send(conn, { type: 'roots_changed' })) conn.rootsLastSentAt = rt.now()
+    } else if (conn.timers.rootsTrailing === null) {
+      conn.timers.rootsTrailing = rt.timerAt(conn.rootsLastSentAt + ROOTS_MIN_INTERVAL_MS, () =>
+        rt.guarded(conn, () => {
+          conn.timers.rootsTrailing = null
+          if (send(conn, { type: 'roots_changed' })) conn.rootsLastSentAt = rt.now()
+        })
+      )
+    }
+  }
+
+  // ─── Session hints ───────────────────────────────────────────────────────
+
+  /**
+   * A session NOTIFY is only a hint: NOTIFY needs no privilege, so closing on
+   * it would let any database role end every session. The user is held at
+   * once and the users row decides. A version at or below the connection's
+   * generation never closes, so a late NOTIFY cannot end a newer session.
+   */
+  function onSessionHint(hint: SessionHint): void {
+    if (shuttingDown()) return
+    const { uid, state, version } = hint
+    let affected = false
+    for (const conn of byUser.get(uid) ?? []) {
+      if (state !== 'active' || version > conn.binding.authGeneration) {
+        affected = true
+        break
+      }
+    }
+    if (!affected) return
+    if (!sessionPending.has(uid)) {
+      hold(uid)
+      sessionPending.add(uid)
+    }
+    if (windows.sessionWindow === null) {
+      windows.sessionWindow = rt.timer(SESSION_WINDOW_MS, () =>
+        rt.guardedTick('session-window', onSessionWindow)
+      )
+    }
+  }
+
+  async function onSessionWindow(): Promise<void> {
+    windows.sessionWindow = null
+    // A hint for a user of U that arrives during the query opens another
+    // window with its own hold.
+    const u = sessionPending
+    sessionPending = new Set()
+    sessionConfirming.add(u)
+    const e = windowEpoch
+    try {
+      const res = await rt.total(
+        () => deps.watchPool.query({ text: GFS_WATCH_SESSION_CONFIRM_SQL, values: [[...u]] }),
+        'session-confirm'
+      )
+      // After a process transition every connection of U is already closed.
+      if (shuttingDown() || windowEpoch !== e) return
+      // Keyed through the same normalizer as the hint's uid: the pg row keeps
+      // Postgres' text form.
+      const rows =
+        res === FAILED
+          ? FAILED
+          : byKey(
+              res.rows as {
+                id?: unknown
+                lifecycle_state?: unknown
+                lifecycle_version?: unknown
+              }[],
+              row => normUid(row.id)
+            )
+      // The whole plan is read before the first close: a close can empty a
+      // user's byUser entry, and a throw must not skip the users after it.
+      const plan: [WatchConnection, WatchCloseReason][] = []
+      for (const uid of u) {
+        rt.guardedTick('session-confirm-user', () => {
+          for (const conn of [...(byUser.get(uid) ?? [])]) {
+            if (rows === FAILED) {
+              // Not confirmable: the reopen authenticates again and decides.
+              plan.push([conn, 'reauthorize'])
+              continue
+            }
+            const row = rows.get(uid)
+            if (!row || row.lifecycle_state !== 'active') {
+              plan.push([conn, 'session_expired'])
+              continue
+            }
+            // BIGINT arrives as a string; compared raw it would never equal the generation.
+            const v = positiveGeneration(row.lifecycle_version)
+            if (v === null) plan.push([conn, 'reauthorize'])
+            else if (v !== conn.binding.authGeneration) plan.push([conn, 'session_expired'])
+          }
+        })
+      }
+      const spreadMs = massCloseSpreadMs(plan.length)
+      for (const [conn, reason] of plan) {
+        rt.guarded(conn, () => closeConn(conn, reason, { spreadMs }))
+      }
+    } finally {
+      sessionConfirming.delete(u)
+      // Over U, never byUser: a user who left meanwhile is released too.
       for (const uid of u) unhold(uid)
     }
   }
@@ -1261,6 +1483,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       }
       if (added) armAuthzWindow()
     }
+    if (change.h === 1) onRootsHint(x, op)
   }
 
   // ─── Open ────────────────────────────────────────────────────────────────
@@ -1456,6 +1679,10 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
         reauthUsers: new Set(reauthPending.users),
         reauthConns: new Set(reauthPending.conns),
         rootsPending: new Set(rootsPending),
+        rootsRids: new Set(rootsRids),
+        sessionPending: new Set(sessionPending),
+        /** The users of each session confirmation awaiting its query. */
+        sessionConfirming: [...sessionConfirming].map(s => new Set(s)),
         windowEpoch,
       }),
       readSlots,

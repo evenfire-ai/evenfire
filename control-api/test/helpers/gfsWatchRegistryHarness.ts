@@ -219,7 +219,17 @@ export type TestUser = {
 export type BuiltRegistry = {
   registry: GfsWatchRegistry
   clock: VirtualWatchClock
-  gates: { cte: Gate; read: Gate; mint: Gate; observe: Gate; expansion: Gate }
+  gates: {
+    cte: Gate
+    read: Gate
+    mint: Gate
+    observe: Gate
+    expansion: Gate
+    /** The roots window's grantee query. */
+    roots: Gate
+    /** The session confirmation query. */
+    session: Gate
+  }
   open(
     user: TestUser,
     keys: Iterable<GfsKey>,
@@ -389,6 +399,9 @@ export async function createRegistryHarness(adminUrl: string) {
   const adminAuthModule = await import('../../src/services/adminAuthService.js')
   const grantsModule = await import('../../src/routes/gfs/grants.js')
   const membershipModule = await import('../../src/services/directory/membership.js')
+  const sharesModule = await import('../../src/routes/gfs/shares.js')
+  const usersModule = await import('../../src/services/directory/users.js')
+  const passwordModule = await import('../../src/services/directory/memberPassword.js')
   const operatorAdminId = (
     await writer.query<{ id: string }>(
       `INSERT INTO control_admin_users (username, password_hash)
@@ -446,6 +459,30 @@ export async function createRegistryHarness(adminUrl: string) {
         for (const r of resourceIds) await writeGrant(db, r, subjectType, subjectId, ['read'])
       })
     },
+    /** A share through the share route's batch writer. */
+    async share(
+      resourceId: string,
+      subjectType: SubjectType,
+      subjectId: string,
+      permissions: string[] = ['read']
+    ): Promise<void> {
+      await dbModule.withTransaction(async db => {
+        const { error } = await sharesModule.writeGfsShareBatchInTransaction(db, {
+          req: operatorReq,
+          caller: operatorCaller,
+          drive: 'main',
+          resourceId,
+          subjects: [
+            subjectType === 'operator'
+              ? { type: subjectType }
+              : { type: subjectType, id: subjectId },
+          ],
+          permissions: permissions as import('../../src/routes/gfs/grants.js').GfsPermission[],
+          includeDescendants: true,
+        })
+        if (error) throw error
+      })
+    },
     /**
      * The statement the grant route's DELETE runs; that handler is not
      * exported and needs an authenticated Control UI request around it.
@@ -497,6 +534,62 @@ export async function createRegistryHarness(adminUrl: string) {
     },
   }
 
+  // Every lifecycle write goes through its production writer, so the users
+  // triggers emit exactly the session hints those writers cause.
+  const retirementActor = randomUUID()
+  await writer.query(`INSERT INTO users (id, email, name) VALUES ($1, $2, 'gfs-watch-actor')`, [
+    retirementActor,
+    `${retirementActor}@example.test`,
+  ])
+  const lifecycle = {
+    /** Retired with operator-link history, physically deleted without it. */
+    async retire(userId: string) {
+      return dbModule.withTransaction(db =>
+        usersModule.retireDesktopUser(
+          { kind: 'platform_user', desktopUserId: retirementActor },
+          userId,
+          'gfs watch test',
+          `gfs-watch-${randomUUID()}`,
+          `gfs-watch-${randomUUID()}`,
+          { db }
+        )
+      )
+    },
+    /**
+     * The member's own password change. The current password is put in place
+     * first with a plain hash update, which does not touch lifecycle_* and so
+     * emits nothing.
+     */
+    async changePassword(userId: string): Promise<void> {
+      const current = `pw-${randomUUID()}`
+      const bcrypt = (await import('bcryptjs')).default
+      await writer.query(`UPDATE users SET password_hash = $2 WHERE id = $1`, [
+        userId,
+        await bcrypt.hash(current, 4),
+      ])
+      const r = await passwordModule.updateUserPassword(
+        userId,
+        `${userId}@example.test`,
+        current,
+        `pw-${randomUUID()}`
+      )
+      if (!('updated' in r)) throw new Error(`password change failed: ${JSON.stringify(r)}`)
+    },
+    async revokeAll(userId: string): Promise<void> {
+      await dbModule.withTransaction(db =>
+        userSessions.revokeAllUserSessions(userId, 'gfs-watch-test', db)
+      )
+    },
+    async version(userId: string): Promise<{ state: string; version: number } | null> {
+      const r = await writer.query<{ s: string; v: string }>(
+        `SELECT lifecycle_state AS s, lifecycle_version::text AS v FROM users WHERE id = $1`,
+        [userId]
+      )
+      const row = r.rows[0]
+      return row ? { state: row.s, version: Number(row.v) } : null
+    },
+  }
+
   const policy = {
     issueV1: true,
     acceptV1: true,
@@ -521,6 +614,11 @@ export async function createRegistryHarness(adminUrl: string) {
     await dbModule.withTransaction(db =>
       userSessions.revokeAllUserSessions(userId, 'gfs-watch-registry-fixture', db)
     )
+    return issueSession(userId, teamId)
+  }
+
+  /** A V1 session for the user's current authorization generation. */
+  async function issueSession(userId: Uuid, teamId: string): Promise<TestUser> {
     const token = (
       await issuance.issueExternalUserSession(
         {
@@ -546,6 +644,9 @@ export async function createRegistryHarness(adminUrl: string) {
       },
     }
   }
+
+  /** The same user, signed in again after a lifecycle write moved its generation. */
+  const reissue = (user: TestUser) => issueSession(user.userId, user.teamId)
 
   async function invalidCount(channel: string): Promise<number> {
     const { values } = await metrics.gfsWatchNotifyInvalidTotal.get()
@@ -603,7 +704,16 @@ export async function createRegistryHarness(adminUrl: string) {
       mint: new Gate(),
       observe: new Gate(),
       expansion: new Gate(),
+      roots: new Gate(),
+      session: new Gate(),
     }
+    // Optional real latency on the window queries, to show a rest predicate
+    // that does not wait for them is not one.
+    const sessionLatencyMs = Number(process.env.GFS_WATCH_TEST_SESSION_LATENCY_MS ?? 0)
+    const windowGates = new Map<unknown, [Gate, string, number]>([
+      [registryModule.GFS_WATCH_ROOTS_GRANTEES_SQL, [gates.roots, 'roots', sessionLatencyMs]],
+      [registryModule.GFS_WATCH_SESSION_CONFIRM_SQL, [gates.session, 'session', sessionLatencyMs]],
+    ])
     const expansionLatencyMs = Number(process.env.GFS_WATCH_TEST_EXPANSION_LATENCY_MS ?? 0)
     const expansionTexts: unknown[] = [
       registryModule.GFS_WATCH_EXPAND_TEAMS_SQL,
@@ -631,6 +741,19 @@ export async function createRegistryHarness(adminUrl: string) {
             return await (watchPool.query as (...a: unknown[]) => Promise<unknown>)(config, ...rest)
           } finally {
             gates.expansion.done += 1
+          }
+        } else if (
+          typeof config === 'object' &&
+          config !== null &&
+          windowGates.has((config as { text?: unknown }).text)
+        ) {
+          const [gate, label, latency] = windowGates.get((config as { text?: unknown }).text)!
+          try {
+            await gate.pass(label)
+            if (latency > 0) await sleep(latency)
+            return await (watchPool.query as (...a: unknown[]) => Promise<unknown>)(config, ...rest)
+          } finally {
+            gate.done += 1
           }
         } else {
           await gates.observe.pass('observe')
@@ -689,14 +812,17 @@ export async function createRegistryHarness(adminUrl: string) {
         return socket.conn ?? undefined
       },
       async settle(predicate, timeoutMs = 5_000) {
-        // An expansion still in flight resumes into a flush that can close
-        // streams, so the registry is not at rest until it has settled.
+        // An expansion, grantee query or session confirmation still in flight
+        // resumes into closes or frames, so the registry is not at rest until
+        // each has settled.
         const quiet =
           predicate ??
           (() =>
             registry.state.opsInFlight.size === 0 &&
             opening.size === 0 &&
-            gates.expansion.calls === gates.expansion.done)
+            gates.expansion.calls === gates.expansion.done &&
+            gates.roots.calls === gates.roots.done &&
+            gates.session.calls === gates.session.done)
         const start = Date.now()
         while (Date.now() - start < timeoutMs) {
           await flushMicrotasks()
@@ -763,9 +889,11 @@ export async function createRegistryHarness(adminUrl: string) {
     corePool,
     tree,
     authz,
+    lifecycle,
     key,
     toRid,
     createUser,
+    reissue,
     barrier,
     terminateListener,
     notifyCmd,

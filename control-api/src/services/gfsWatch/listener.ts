@@ -10,13 +10,16 @@ import {
   GFS_RESOURCE_CHANGED_CHANNEL,
   GFS_WATCH_CMD_CHANNEL,
   GFS_WATCH_PING_CHANNEL,
+  GFS_WATCH_SESSION_CHANNEL,
   type ResourceChanged,
+  type SessionHint,
   type WatchCmd,
   type WatchPing,
   isRevocationChannel,
   parseAuthzKey,
   parsePing,
   parseResourceChanged,
+  parseSessionHint,
   parseWatchCmd,
 } from './notifySchemas.js'
 import type { RecentDirty } from './recentDirty.js'
@@ -32,6 +35,7 @@ export const GFS_WATCH_INSTANCE_ID = randomBytes(16).toString('hex')
 export const GFS_WATCH_LISTEN_CHANNELS = Object.freeze([
   GFS_RESOURCE_CHANGED_CHANNEL,
   GFS_AUTHZ_CHANGED_CHANNEL,
+  GFS_WATCH_SESSION_CHANNEL,
   GFS_WATCH_PING_CHANNEL,
   GFS_WATCH_CMD_CHANNEL,
 ] as const)
@@ -92,7 +96,8 @@ export type GfsWatchListenerDeps<C extends ListenerConn> = {
   onCmd: (cmd: WatchCmd) => void
   onResourceChanged: (change: ResourceChanged) => void
   onAuthzChanged: (key: AuthzKey) => void
-  /** Drops the authorization/session windows of the registry; both process transitions call it. */
+  onSessionHint: (hint: SessionHint) => void
+  /** Drops the authorization, roots and session windows of the registry; both process transitions call it. */
   resetWindows: () => void
   /**
    * Fail-closed reaction to an unreadable revocation hint, after the
@@ -124,6 +129,7 @@ type Validated =
   | { ok: true; channel: typeof GFS_WATCH_CMD_CHANNEL; value: WatchCmd }
   | { ok: true; channel: typeof GFS_RESOURCE_CHANGED_CHANNEL; value: ResourceChanged }
   | { ok: true; channel: typeof GFS_AUTHZ_CHANGED_CHANNEL; value: AuthzKey }
+  | { ok: true; channel: typeof GFS_WATCH_SESSION_CHANNEL; value: SessionHint }
   | { ok: false }
 
 function validate(channel: string, payload: unknown): Validated {
@@ -142,6 +148,10 @@ function validate(channel: string, payload: unknown): Validated {
     }
     case GFS_AUTHZ_CHANGED_CHANNEL: {
       const value = parseAuthzKey(payload)
+      return value ? { ok: true, channel, value } : { ok: false }
+    }
+    case GFS_WATCH_SESSION_CHANNEL: {
+      const value = parseSessionHint(payload)
       return value ? { ok: true, channel, value } : { ok: false }
     }
     default:
@@ -339,6 +349,8 @@ export function createGfsWatchListener<C extends ListenerConn>(deps: GfsWatchLis
           return deps.onResourceChanged(v.value)
         case GFS_AUTHZ_CHANGED_CHANNEL:
           return deps.onAuthzChanged(v.value)
+        case GFS_WATCH_SESSION_CHANNEL:
+          return deps.onSessionHint(v.value)
       }
     } catch (err) {
       rt.log.error({ err, channel: n.channel }, 'gfs watch dispatch failed')

@@ -110,6 +110,7 @@ function setup({
   const onCmd = vi.fn()
   const onResourceChanged = vi.fn()
   const onAuthzChanged = vi.fn()
+  const onSessionHint = vi.fn()
   const resetWindows = vi.fn(() => events.push('resetWindows'))
   const onExpansionFailed = vi.fn(() => events.push('onExpansionFailed'))
   let listener!: ReturnType<typeof createGfsWatchListener<Conn>>
@@ -132,6 +133,7 @@ function setup({
     onCmd,
     onResourceChanged,
     onAuthzChanged,
+    onSessionHint,
     resetWindows,
     onExpansionFailed,
     instanceId,
@@ -152,6 +154,7 @@ function setup({
     onCmd,
     onResourceChanged,
     onAuthzChanged,
+    onSessionHint,
     resetWindows,
     onExpansionFailed,
     closeConn,
@@ -166,14 +169,14 @@ const conn = (id: string, op = false): Conn => ({
 })
 
 describe('connectListener and the echo liveness proof', () => {
-  it('connects, LISTENs the resource, authorization, ping and command channels, and pings through its own connection', async () => {
+  it('connects, LISTENs the resource, authorization, session, ping and command channels, and pings through its own connection', async () => {
     const t = setup()
     t.listener.startGfsWatchRegistry()
     await flushMicrotasks()
     expect(t.listener.state.listenerReady).toBe(true)
     expect(t.clients).toHaveLength(1)
     expect(t.clients[0]!.queries[0]!.text).toBe(
-      'LISTEN gfs_resource_changed; LISTEN gfs_authz_changed; LISTEN gfs_watch_ping; LISTEN gfs_watch_cmd'
+      'LISTEN gfs_resource_changed; LISTEN gfs_authz_changed; LISTEN gfs_watch_session; LISTEN gfs_watch_ping; LISTEN gfs_watch_cmd'
     )
     await t.clock.advanceAsync(30_000)
     const pings = t.clients[0]!.queries.filter(q => q.text.includes('pg_notify'))
@@ -521,6 +524,32 @@ describe('dispatch is total and validates each channel', () => {
     expect(t.recentDirty.overflowed()).toBe(true)
     expect(withOp.op!.dirtyOverflow).toBe(true)
     expect(t.onExpansionFailed).toHaveBeenCalledTimes(1)
+  })
+
+  it('passes a valid session hint normalized to its handler, and fails an invalid one closed', async () => {
+    const withOp = conn('a', true)
+    const t = await ready([withOp])
+    const id = '0F1C4F5E-1B2A-4C3D-9E8F-001122334455'
+    t.listener.dispatch(t.n('gfs_watch_session', `${id}:retired:7`), t.epoch)
+    expect(t.onSessionHint).toHaveBeenCalledWith({
+      uid: id.toLowerCase(),
+      state: 'retired',
+      version: 7,
+    })
+    expect(t.onExpansionFailed).not.toHaveBeenCalled()
+    const before = await counterValue(gfsWatchNotifyInvalidTotal, { channel: 'gfs_watch_session' })
+    t.listener.dispatch(t.n('gfs_watch_session', `${id}:purged:7`), t.epoch)
+    expect(t.onSessionHint).toHaveBeenCalledTimes(1)
+    expect(await counterValue(gfsWatchNotifyInvalidTotal, { channel: 'gfs_watch_session' })).toBe(
+      before + 1
+    )
+    expect(withOp.op!.dirtyOverflow).toBe(true)
+    expect(t.onExpansionFailed).toHaveBeenCalledTimes(1)
+    t.onSessionHint.mockImplementation(() => {
+      throw new Error('session handler failed')
+    })
+    t.listener.dispatch(t.n('gfs_watch_session', `${id}:active:8`), t.epoch)
+    expect(t.onExpansionFailed).toHaveBeenCalledTimes(2)
   })
 
   it('a revocation handler that throws fails closed like an unreadable hint; a command handler does not', async () => {
