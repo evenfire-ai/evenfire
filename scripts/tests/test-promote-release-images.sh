@@ -705,6 +705,26 @@ assert_an_annotated_release_tag_still_moves_stable() {
   rm -rf "$d" "$origin"
 }
 
+assert_a_release_tag_moved_during_the_run_stops_before_stable() {
+  local d; d="$(mktemp -d)"; stub_two_images "$d"
+  # While this run copied, v0.2.0 was deleted and pushed again at another
+  # commit. The forced tag fetch moves the local tag with it; :stable must not
+  # then move to the images of the withdrawn commit.
+  local origin moved; origin="$(mktemp -d)"
+  git clone -q --bare "$d" "$origin/repo.git"
+  moved="$(git -C "$d" -c user.email=t@t -c user.name=t commit-tree -p "$HEAD_SHA" -m moved "$HEAD_SHA^{tree}")"
+  git -C "$d" push -q --force "$origin/repo.git" "$moved:refs/tags/v0.2.0"
+  git -C "$d" remote add origin "$origin/repo.git"
+  local out rc; run_promote "$d" false v0.2.0
+  if [ "$rc" -eq 1 ] && [ "$(grep -c ':v0.2.0$' "$d/copy-log")" -eq 2 ] && ! grep -q ':stable$' "$d/copy-log" \
+      && grep -qF "::error::the release tag v0.2.0 now points at $moved instead of $HEAD_SHA, so :stable was not moved" <<< "$out"; then
+    pass "a release tag moved to another commit during the run stops it before :stable"
+  else
+    fail "expected rc=1, two :v0.2.0 copies, no :stable and the moved-tag error; got rc=$rc copy-log='$(cat "$d/copy-log")' out='$out'"
+  fi
+  rm -rf "$d" "$origin"
+}
+
 assert_a_higher_version_tagged_at_an_older_commit_does_not_move_stable() {
   local d; d="$(mktemp -d)"; stub_two_images "$d"
   # v0.2.1 is the next commit. v0.2.2 is then tagged at the OLDER commit: the
@@ -872,6 +892,7 @@ assert_a_failing_crane_manifest_in_the_arch_check_fails_the_image
 assert_a_higher_tag_pushed_to_origin_meanwhile_keeps_stable
 assert_a_failed_tag_fetch_stops_before_stable
 assert_an_annotated_release_tag_still_moves_stable
+assert_a_release_tag_moved_during_the_run_stops_before_stable
 assert_a_higher_version_tagged_at_an_older_commit_does_not_move_stable
 assert_an_ancestry_check_error_fails_instead_of_moving_stable
 assert_a_dry_run_from_a_ref_that_is_not_an_image_tag_skips_the_version_tag_check

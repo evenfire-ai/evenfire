@@ -195,11 +195,22 @@ done
 # release tag as a lightweight ref (+<commit>:refs/tags/<tag>), and a plain
 # fetch refuses to replace it, which would stop every annotated release here.
 # A failed fetch stops here, with every version tag written: a re-run
-# converges on them and moves :stable then.
+# converges on them and moves :stable then. --force also follows a release tag
+# that was deleted and pushed again at another commit during this run, so the
+# tag must still name the commit this run promoted: otherwise :stable would
+# move to the images of a withdrawn release. An annotated tag peels to the
+# same commit.
 if [[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  if git remote get-url origin >/dev/null 2>&1 && ! git fetch --quiet --tags --force origin; then
-    echo "::error::could not fetch the release tags from origin, so :stable was not moved; every :$TAG is written, so re-run this release to move :stable"
-    exit 1
+  if git remote get-url origin >/dev/null 2>&1; then
+    if ! git fetch --quiet --tags --force origin; then
+      echo "::error::could not fetch the release tags from origin, so :stable was not moved; every :$TAG is written, so re-run this release to move :stable"
+      exit 1
+    fi
+    tag_now="$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}" || true)"
+    if [ "$tag_now" != "$TAG_SHA" ]; then
+      echo "::error::the release tag $TAG now points at ${tag_now:-nothing} instead of $TAG_SHA, so :stable was not moved"
+      exit 1
+    fi
   fi
   stable_decision
 fi
