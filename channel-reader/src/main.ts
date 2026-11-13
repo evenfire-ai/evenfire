@@ -1609,12 +1609,21 @@ export class ChannelReader {
         try {
           await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext, pendingRetry)
         } catch (err) {
-          console.error(`[Main] Progress flow failed, falling back:`, err)
           if (msg.channelType === 'telegram') {
-            // A progress failure may follow an accepted message POST. Never
-            // submit again without an acceptance receipt.
+            // rpcClient.sendMessage does not throw, so this catch is reached
+            // only after the Host answered the async POST: the status message
+            // send threw (the task was accepted and runs), or sendReply threw
+            // in the no-taskId branch (the Host already answered). The
+            // admission-limit answer (Host answered without accepting) returns
+            // before either. A re-submit would be a second submission, so
+            // Telegram does not fall back.
+            console.error(
+              `[Main] Progress flow failed after the Host answered; Telegram does not re-submit:`,
+              err
+            )
             continue
           }
+          console.error(`[Main] Progress flow failed, falling back:`, err)
           // Fall back to synchronous
           const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
           this.releaseProviderEventAfterAdmissionLimit(msg, response)
