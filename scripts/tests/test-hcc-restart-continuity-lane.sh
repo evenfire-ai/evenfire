@@ -39,7 +39,7 @@ extract_function() {
   ' "$LANE"
 }
 
-for fn in die start_sampler stop_sampler teardown host_received_fixture_fleet run_mid_pass_attempts; do
+for fn in die start_sampler stop_sampler teardown host_received_fixture_fleet run_mid_pass_attempts kill_hcc; do
   extract_function "$fn" >"${WORK}/fn-${fn}.sh"
   if [ -s "${WORK}/fn-${fn}.sh" ] && [[ "$(tail -n 1 "${WORK}/fn-${fn}.sh")" == *"}" ]]; then
     pass "extracted ${fn} from the lane"
@@ -297,6 +297,60 @@ else
   fail "mid-pass kill outside then NO_PASS_START twice: exit=${status} steps=$(mid_steps) output=$(tr '\n' ';' <"${WORK}/mid/out")"
 fi
 
+# ─── kill_hcc: the node output decides the status ─────────────────────
+cat >"${WORK}/minikube-stub" <<'STUB'
+#!/bin/sh
+printf '%b' "$STUB_KILL_OUTPUT"
+exit "${STUB_KILL_RC:-0}"
+STUB
+chmod +x "${WORK}/minikube-stub"
+# run_kill_case <node output> <ssh status>: two idle kill_hcc calls; prints the
+# subshell's exit status, the results are in ${WORK}/kill/out.
+run_kill_case() {
+  rm -rf "${WORK}/kill" && mkdir -p "${WORK}/kill/evidence"
+  (
+    set -euo pipefail
+    RED='' NC=''
+    EVIDENCE_DIR="${WORK}/kill/evidence" MINIKUBE_BIN="${WORK}/minikube-stub" E2E_KUBECONTEXT=ctx
+    NODE_KILL_PATH=/tmp/node-kill.sh KILL_WATCH_SEC=60 KILLS=0 KILL_ATTEMPTS=0
+    export STUB_KILL_OUTPUT="$1" STUB_KILL_RC="$2"
+    # shellcheck disable=SC1090
+    source "${WORK}/fn-kill_hcc.sh"
+    rc=0
+    kill_hcc idle || rc=$?
+    echo "first rc=${rc} kills=${KILLS}"
+    rc=0
+    kill_hcc idle || rc=$?
+    echo "second rc=${rc} kills=${KILLS} attempts=${KILL_ATTEMPTS}"
+  ) >"${WORK}/kill/out" 2>&1
+  echo $?
+}
+kill_out() { tr '\n' ';' <"${WORK}/kill/out"; }
+
+status="$(run_kill_case 'KILLED pid=7 container=c0ffee\nNO_PASS_START\n' 3)"
+if [ "$status" = 0 ] && grep -qx 'first rc=0 kills=1' "${WORK}/kill/out" &&
+   grep -qx 'second rc=0 kills=2 attempts=2' "${WORK}/kill/out"; then
+  pass "kill_hcc: a KILLED line wins over a later NO_PASS_START from a process not yet reaped"
+else
+  fail "kill_hcc KILLED then NO_PASS_START: exit=${status} out=$(kill_out)"
+fi
+status="$(run_kill_case 'NO_PASS_START\n' 3)"
+if [ "$status" = 0 ] && grep -qx 'first rc=3 kills=0' "${WORK}/kill/out" &&
+   grep -qx 'second rc=3 kills=0 attempts=2' "${WORK}/kill/out" &&
+   grep -qx 'NO_PASS_START' "${WORK}/kill/evidence/kill-1.log" &&
+   grep -qx 'NO_PASS_START' "${WORK}/kill/evidence/kill-2.log"; then
+  pass "kill_hcc: NO_PASS_START is status 3 and each attempt keeps its own node log"
+else
+  fail "kill_hcc NO_PASS_START: exit=${status} out=$(kill_out) logs=$(ls "${WORK}/kill/evidence" | tr '\n' ' ')"
+fi
+status="$(run_kill_case 'KILL_ERROR watcher ended after 0s of 60s without a pass start\n' 2)"
+if [ "$status" = 0 ] && grep -qx 'first rc=2 kills=0' "${WORK}/kill/out" &&
+   grep -qF 'node kill failed (ssh rc=2): KILL_ERROR watcher ended' "${WORK}/kill/out"; then
+  pass "kill_hcc: a watcher that ended early is a kill failure (status 2), not NO_PASS_START"
+else
+  fail "kill_hcc early watcher end: exit=${status} out=$(kill_out)"
+fi
+
 # ─── host_received_fixture_fleet under pipefail ───────────────────────
 BIG_LOG="${WORK}/big-host.log"
 {
@@ -404,8 +458,8 @@ else
   fail "mcp-host/src/mcp/manager.ts no longer logs 'Removed server'; C7 would pass vacuously"
 fi
 
-if [ "$TOTAL" -lt 27 ]; then
-  echo "FAIL: expected at least 27 checks, ran ${TOTAL}"
+if [ "$TOTAL" -lt 31 ]; then
+  echo "FAIL: expected at least 31 checks, ran ${TOTAL}"
   exit 1
 fi
 if [ "$FAIL" != 0 ]; then

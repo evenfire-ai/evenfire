@@ -220,6 +220,8 @@ SAMPLER_STOP="${EVIDENCE_DIR}/sampler.stop"
 SERIES="${EVIDENCE_DIR}/series.tsv"
 KILL_EPOCH=""
 KILLS=0
+# One node-output log per kill_hcc call, so a failed attempt's output is kept.
+KILL_ATTEMPTS=0
 
 log "run ${RUN_ID} mode=${MODE} vacuity=${VACUITY:-none} evidence=${EVIDENCE_DIR}"
 
@@ -1295,11 +1297,14 @@ copy_node_kill_script() {
   "$MINIKUBE_BIN" -p "$E2E_KUBECONTEXT" cp "$NODE_KILL_SCRIPT" "$NODE_KILL_PATH" >/dev/null
 }
 
-# kill_hcc <idle|mid-pass>: returns 0 when the controller was killed,
-# 3 when mid-pass saw no pass start (a failed attempt: run_mid_pass_attempts
-# runs the next one), 2 on lookup failure.
+# kill_hcc <idle|mid-pass>: returns 0 when the controller was killed (a KILLED
+# line wins over any later line the node script printed), 3 when mid-pass saw
+# no pass start (a failed attempt: run_mid_pass_attempts runs the next one),
+# 2 on a lookup or watcher failure.
 kill_hcc() {
-  local kill_mode=$1 out="${EVIDENCE_DIR}/kill-$((KILLS + 1)).log" pid rc
+  local kill_mode=$1 out pid rc
+  KILL_ATTEMPTS=$((KILL_ATTEMPTS + 1))
+  out="${EVIDENCE_DIR}/kill-${KILL_ATTEMPTS}.log"
   : >"$out"
   "$MINIKUBE_BIN" -p "$E2E_KUBECONTEXT" ssh -- sudo sh "$NODE_KILL_PATH" "$kill_mode" "$KILL_WATCH_SEC" >"$out" 2>&1 &
   pid=$!

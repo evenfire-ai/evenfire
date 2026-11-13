@@ -22,7 +22,8 @@
 # Output lines (parsed by the caller):
 #   ARMED log=<path>          watcher start position fixed (mid-pass only)
 #   KILLED pid=<pid> container=<id>
-#   KILL_ERROR <reason>       exit 2: container lookup failed
+#   KILL_ERROR <reason>       exit 2: container lookup failed, or the watcher
+#                             ended before its bound
 #   NO_PASS_START             exit 3: no pass started within the timeout
 set -eu
 
@@ -58,6 +59,7 @@ case "$mode" in
     # the dead container will never write. pkill -f reads its pattern as an
     # extended regular expression, where a bare `+` is a quantifier: `[+]`
     # matches the literal `+` of the tail arguments.
+    watch_started=$(date +%s)
     if timeout "$wait_sec" tail -c "+${start}" -F "$log" 2>/dev/null | while IFS= read -r line; do
       case "$line" in
         *networkpolicy-pass-start*)
@@ -71,6 +73,14 @@ case "$mode" in
       :
     fi
     if kill -0 "$pid" 2>/dev/null; then
+      # A watcher that ended before its bound did not watch for the whole
+      # window (timeout or tail missing or failing): that is not a pass that
+      # never started.
+      elapsed=$(($(date +%s) - watch_started))
+      if [ "$elapsed" -lt "$wait_sec" ]; then
+        echo "KILL_ERROR watcher ended after ${elapsed}s of ${wait_sec}s without a pass start"
+        exit 2
+      fi
       echo "NO_PASS_START"
       exit 3
     fi

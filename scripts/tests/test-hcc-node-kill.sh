@@ -45,6 +45,8 @@ cat >"${STUBS}/timeout" <<'STUB'
 sec=$1
 shift
 echo "$*" >>"$STUB_CALLS"
+# STUB_TIMEOUT_FAIL: the watcher cannot run (timeout or tail missing).
+[ -z "${STUB_TIMEOUT_FAIL:-}" ] || exit 127
 [ -z "${STUB_GAP_LINE:-}" ] || printf '%s\n' "$STUB_GAP_LINE" >>"$STUB_LOG"
 "$@" &
 cpid=$!
@@ -145,6 +147,16 @@ for shell in "${SHELLS[@]}"; do
     fi
   done
 
+  name="${tag}-watcher-fails"
+  STUB_TIMEOUT_FAIL=1 run_case "$name" "$shell" mid-pass 20
+  if [ "$(cat "${WORK}/${name}/status")" = 2 ] &&
+    grep -q '^KILL_ERROR watcher ended after [0-9]*s of 20s without a pass start' "${WORK}/${name}/out" &&
+    ! grep -q 'NO_PASS_START' "${WORK}/${name}/out" && alive "$name" && watcher_ran_from_start "$name"; then
+    pass "${tag}: a watcher that ends before its bound is a kill error, exit 2, not NO_PASS_START"
+  else
+    fail "${tag}: watcher that fails at once: $(show "$name")"
+  fi
+
   name="${tag}-idle"
   run_case "$name" "$shell" idle 2
   if [ "$(cat "${WORK}/${name}/status")" = 0 ] && grep -q '^KILLED pid=' "${WORK}/${name}/out" &&
@@ -173,9 +185,9 @@ for shell in "${SHELLS[@]}"; do
   fi
 done
 
-EXPECTED=$((2 + 7 * ${#SHELLS[@]}))
-if [ "$TOTAL" -lt "$EXPECTED" ] || [ "$TOTAL" -lt 9 ]; then
-  echo "FAIL: expected at least ${EXPECTED} checks (and never fewer than 9), ran ${TOTAL}"
+EXPECTED=$((2 + 8 * ${#SHELLS[@]}))
+if [ "$TOTAL" -lt "$EXPECTED" ] || [ "$TOTAL" -lt 10 ]; then
+  echo "FAIL: expected at least ${EXPECTED} checks (and never fewer than 10), ran ${TOTAL}"
   FAIL=1
 fi
 if [ "$FAIL" != 0 ]; then
