@@ -12,6 +12,10 @@ import {
 import { CONTROL_ROUTES } from '../../app/constants/routes'
 import RegistryEntryDetailPage from '../../app/registry/entries/[name]/[version]/page'
 import { getRegistryCatalog } from '../../lib/api'
+import {
+  describeRemoteOAuthNotInstallable,
+  getRemoteOAuthCatalogBlock,
+} from '../../lib/oauthInstall'
 import { CATALOG_BUMPED_VERSION, CATALOG_SLOTS } from '../../test/fixtures/catalogRemoteOAuthWire'
 import { ToastProvider } from '../Toast'
 
@@ -130,8 +134,16 @@ describe('Marketplace entry detail of a remote-OAuth entry', () => {
     vi.mocked(getRegistryCatalog).mockResolvedValue(CATALOG_SLOTS)
     render(<RegistryEntryDetailPage />)
 
+    const entry = CATALOG_SLOTS.data.find(item => item.name === '@evenfire/broken-remote')!
+    const view = getRemoteOAuthCatalogBlock(entry)
+    expect(view).toMatchObject({ valid: false, reason: 'setup_guide_required' })
     expect(
-      await screen.findByText(/This entry cannot be installed \(setup_guide_required\)/)
+      await screen.findByText(
+        describeRemoteOAuthNotInstallable(
+          'This entry',
+          view?.valid === false ? view.reason : undefined
+        )
+      )
     ).toBeInTheDocument()
     expect(screen.queryByRole('list', { name: 'Install slots' })).toBeNull()
     expect(screen.queryByRole('button', { name: /^Install/ })).toBeNull()

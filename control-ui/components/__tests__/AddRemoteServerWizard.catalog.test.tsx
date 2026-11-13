@@ -5,6 +5,10 @@ import { CONTROL_ROUTES } from '../../app/constants/routes'
 import AddRemoteServerPage from '../../app/mcp-servers/remote/new/page'
 import { apiSend, getRegistryEntryVersion } from '../../lib/api'
 import type { RegistryEntry } from '../../lib/api'
+import {
+  describeRemoteOAuthNotInstallable,
+  getRemoteOAuthCatalogBlock,
+} from '../../lib/oauthInstall'
 import { REMOTE_MCP_BASE } from '../../lib/remoteMcp'
 import type { DiscoverRemoteResponse, InstallRemoteResponse } from '../../lib/remoteMcp.types'
 import {
@@ -206,8 +210,13 @@ describe('AddRemoteServerWizard — Marketplace catalog mode', () => {
   it('an entry control-api marked invalid shows an error with a way back, not the wizard', async () => {
     openPage(CURATOR_INVALID_ENTRY, catalogQuery(CURATOR_INVALID_ENTRY, 'user'))
 
+    const view = getRemoteOAuthCatalogBlock(CURATOR_INVALID_ENTRY)
+    expect(view).toMatchObject({ valid: false, reason: 'setup_guide_required' })
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      '@evenfire/broken-remote v1.0.0 cannot be installed (setup_guide_required)'
+      describeRemoteOAuthNotInstallable(
+        `${CURATOR_INVALID_ENTRY.name} v${CURATOR_INVALID_ENTRY.version}`,
+        view?.valid === false ? view.reason : undefined
+      )
     )
     expect(apiSendMock).not.toHaveBeenCalled()
     expect(screen.queryByLabelText(/Remote server URL/)).not.toBeInTheDocument()
@@ -242,8 +251,10 @@ describe('AddRemoteServerWizard — Marketplace catalog mode', () => {
     // The entry looked valid when loaded but control-api's own read refuses it.
     serveApi({ discover: [{ reject: apiErrorFrom(CATALOG_INVALID_DISCOVER_FAILURE) }] })
     openPage(CURATOR_CIMD_USER_ONLY_ENTRY, catalogQuery(CURATOR_CIMD_USER_ONLY_ENTRY, 'user'))
+    const { reason } = CATALOG_INVALID_DISCOVER_FAILURE.body as { reason?: string }
+    expect(reason).toBe('setup_guide_required')
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'This Marketplace entry cannot be installed (setup_guide_required). Report it to the Marketplace curator.'
+      describeRemoteOAuthNotInstallable('This Marketplace entry', reason)
     )
   })
 
