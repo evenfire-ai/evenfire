@@ -13,6 +13,8 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import type { MessageCountTokensParams } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import { convertToClaudeMessages, separateSystemMessage } from '../../llm/claude/messageTranslate'
+import { type ToolNameEnvelopeKey, toWireRequest } from '../../llm/toolWireNames'
+import { logger } from '../../logger'
 import type { ChatMessage, ToolDefinition } from '../types'
 import { heuristicCount, heuristicCountTools } from './heuristic'
 import {
@@ -28,12 +30,19 @@ export interface AnthropicTokenCounterOptions {
    * heuristic upper bound. Backed by `CLERUM_TOKENIZER_OFFLINE`.
    */
   offline?: boolean
+  /**
+   * Envelope of the provider whose requests are counted. `countTokens` rejects
+   * the same names `messages.create` does, so the count must use the same
+   * projection; the provider that creates the counter passes its own.
+   */
+  toolNameEnvelope?: ToolNameEnvelopeKey
 }
 
 export class AnthropicTokenCounter implements TokenCounter {
   readonly providerName = 'claude' as const
   private observed: number | null = null
   private readonly offline: boolean
+  private readonly toolNameEnvelope: ToolNameEnvelopeKey
 
   constructor(
     private readonly client: Anthropic,
@@ -41,6 +50,7 @@ export class AnthropicTokenCounter implements TokenCounter {
     options: AnthropicTokenCounterOptions = {}
   ) {
     this.offline = options.offline ?? false
+    this.toolNameEnvelope = options.toolNameEnvelope ?? 'W_c'
   }
 
   async warmup(): Promise<void> {
@@ -58,11 +68,12 @@ export class AnthropicTokenCounter implements TokenCounter {
     }
     const endTimer = tokenizerCountDurationSeconds.startTimer({ provider: 'claude' })
     try {
-      const { systemPrompt, claudeMessages } = separateSystemMessage(messages)
+      const wire = toWireRequest(messages, tools, this.toolNameEnvelope)
+      const { systemPrompt, claudeMessages } = separateSystemMessage(wire.messages)
       const anthropicMessages = convertToClaudeMessages(claudeMessages)
       const translatedTools =
-        tools.length > 0
-          ? tools.map(t => ({
+        wire.tools.length > 0
+          ? wire.tools.map(t => ({
               name: t.name,
               description: t.description,
               input_schema: t.parameters as Anthropic.Tool['input_schema'],
@@ -84,10 +95,9 @@ export class AnthropicTokenCounter implements TokenCounter {
     } catch (err) {
       const reason = classifyFallbackReason(err)
       this.incrementFallback(reason)
-      console.warn(
-        `[TokenCounter:claude] countTokens failed (${reason}), falling back to heuristic: ${
-          (err as Error).message ?? err
-        }`
+      logger.warn(
+        { provider: 'claude', reason, err },
+        'countTokens failed, falling back to heuristic'
       )
       return Math.ceil(heuristicCount(messages) * 1.5)
     } finally {
