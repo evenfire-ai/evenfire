@@ -29,9 +29,10 @@ import {
   shouldFailClosedForSecretFailure,
 } from './mcpServerSafety'
 import {
+  type VerdictCallSite,
+  countMcpServerVerdictCallFailure,
   createsTotal,
   mcpserverMissingSecret,
-  mcpserverReconcileCallFailuresTotal,
 } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
@@ -124,13 +125,6 @@ export type McpServerFullReconcileOptions = {
 export type McpServerMutationOptions = {
   isCurrent?: () => boolean
 }
-
-/**
- * The reconcile steps whose failed Kubernetes call can decide the published
- * readiness verdict. Used as the `site` label of
- * `clerum_hcc_mcpserver_reconcile_call_failures_total`.
- */
-type VerdictCallSite = 'secret_read' | 'resource_sync' | 'pre_deploy_handshake' | 'rollout_read'
 
 /**
  * Transport error codes that mean the request got no answer from the
@@ -2931,10 +2925,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       published.authoritative === true &&
       (!published.ready || (transient && !this.secretChangeObserved(server.name)))
     if (!keep) {
-      mcpserverReconcileCallFailuresTotal.inc({
-        site: 'secret_read',
-        outcome: 'not_ready_published',
-      })
+      countMcpServerVerdictCallFailure('secret_read', 'not_ready_published')
       return false
     }
     this.reportVerdictKept(server, 'secret_read', detail)
@@ -2968,7 +2959,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       published.authoritative === true &&
       published.ready
     if (!keep) {
-      mcpserverReconcileCallFailuresTotal.inc({ site, outcome: 'not_ready_published' })
+      countMcpServerVerdictCallFailure(site, 'not_ready_published')
       return false
     }
     this.reportVerdictKept(server, site, error instanceof Error ? error.message : String(error))
@@ -2976,7 +2967,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   private reportVerdictKept(server: McpServerCRD, site: VerdictCallSite, detail: string): void {
-    mcpserverReconcileCallFailuresTotal.inc({ site, outcome: 'verdict_kept' })
+    countMcpServerVerdictCallFailure(site, 'verdict_kept')
     hccLogger.warn('[Reconciler] Kubernetes call failed; published McpServer verdict kept', {
       event: 'mcpserver-call-failed',
       serverName: server.name,

@@ -60,6 +60,8 @@ import {
   sameMcpServerPolicyRevision,
 } from './mcpServerSafety'
 import {
+  type NetworkPolicyPassOverrunPhase,
+  type NetworkPolicyPassOverrunSeverity,
   contextMetadataOnlyEventsTotal,
   hostDeleteCleanupTotal,
   hostFleetLifecycleCatchTotal,
@@ -78,7 +80,6 @@ import {
 } from './metrics'
 import {
   DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
-  type NetworkPolicyPassPhase,
   NetworkPolicyReconciler,
   sameContextDesiredRevision,
 } from './networkPolicyReconciler'
@@ -324,7 +325,7 @@ type NetworkPolicyPassEffect = {
  */
 type NetworkPolicyPassProgress = {
   startedAtMs: number
-  phase: NetworkPolicyPassPhase | 'starting'
+  phase: NetworkPolicyPassOverrunPhase
   pendingEffect: NetworkPolicyPassEffect | null
 }
 
@@ -3574,7 +3575,7 @@ export class McpServerWatcher implements McpServerProvider {
     this.networkPolicyPassProgress = null
   }
 
-  private reportNetworkPolicyPassOverrun(severity: 'warn' | 'fatal'): void {
+  private reportNetworkPolicyPassOverrun(severity: NetworkPolicyPassOverrunSeverity): void {
     const pass = this.activeNetworkPolicyPass
     const progress = this.networkPolicyPassProgress
     if (pass === null || progress === null) {
