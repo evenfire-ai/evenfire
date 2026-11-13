@@ -5,7 +5,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
-import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { App } from '@/App'
 import {
   cleanupNativeCommitTestHarness,
@@ -22,7 +21,6 @@ let emitEnvironmentSetup:
   | ((payload: { appName: string; externalRestApiBaseUrl: string }) => Promise<void>)
   | null = null
 const visibilityLifecycleEvents: string[] = []
-let appQueryClient: QueryClient | null = null
 
 const MEASURED_SLOT = {
   x: 0,
@@ -132,7 +130,6 @@ function installPlatformBoundary(updateRequired = true, desktopEnvironmentHandof
 
 function renderApp() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  appQueryClient = queryClient
   return render(
     <QueryClientProvider client={queryClient}>
       <AgentTaskTrackerProvider>
@@ -179,7 +176,6 @@ describe('PR1087 App-root native visibility owners', () => {
     frames.length = 0
     visibilityLifecycleEvents.length = 0
     historyResolvers.length = 0
-    appQueryClient = null
     window.localStorage.clear()
     vi.stubGlobal('PointerEvent', TestPointerEvent)
     Object.defineProperty(window, 'PointerEvent', {
@@ -215,7 +211,6 @@ describe('PR1087 App-root native visibility owners', () => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     uninstallMockClerum()
-    appQueryClient = null
     await cleanupNativeCommitTestHarness()
   })
 
@@ -277,21 +272,7 @@ describe('PR1087 App-root native visibility owners', () => {
     ]
     expect(requestedChatId).toBe(chatId)
 
-    await act(async () => {
-      appQueryClient!.setQueryData(desktopQueryKeys.accessCatalog, {
-        userId: 'user-1',
-        teamId: 'team-1',
-        agentNames: [],
-        userAgentNames: [],
-        teamAgentNames: [],
-        mcpServersByAgent: {},
-        agentContextByName: {},
-        agentProviderByName: {},
-        contextIds: [],
-        userContextIds: [],
-        teamContextIds: [],
-      })
-    })
+    fireEvent.click(screen.getByTestId('nav-files'))
     await waitFor(() => expect(screen.queryByTestId('chat-input')).toBeNull())
 
     const trigger = screen.getByTestId('compact-navigation-toggle')
@@ -299,21 +280,7 @@ describe('PR1087 App-root native visibility owners', () => {
     fireEvent.click(document.querySelector('.sidebar-mobile-backdrop')!)
     await waitFor(() => expect(document.activeElement).toBe(trigger))
 
-    await act(async () => {
-      appQueryClient!.setQueryData(desktopQueryKeys.accessCatalog, {
-        userId: 'user-1',
-        teamId: 'team-1',
-        agentNames: ['agent-x'],
-        userAgentNames: ['agent-x'],
-        teamAgentNames: [],
-        mcpServersByAgent: {},
-        agentContextByName: {},
-        agentProviderByName: {},
-        contextIds: [],
-        userContextIds: [],
-        teamContextIds: [],
-      })
-    })
+    fireEvent.click(screen.getByTestId('nav-chat'))
     const composer = await screen.findByTestId('chat-input')
     expect(firstComposer.isConnected).toBe(false)
     expect(composer).not.toBe(firstComposer)

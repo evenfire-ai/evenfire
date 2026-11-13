@@ -27,11 +27,11 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
     if (best) onSelectAgent(best, { selectLatest: false })
   }, [agentNames, agentLastActiveByAgent, selectedAgent, onSelectAgent])
 
-  if (loading && !agentNames.length) {
+  if (loading && !agentNames.length && !selectedAgent) {
     return <ChatPageSkeleton />
   }
 
-  if (!agentNames.length) {
+  if (!agentNames.length && !selectedAgent) {
     return (
       <section className="page">
         <div className="page-header">
