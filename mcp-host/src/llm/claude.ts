@@ -23,6 +23,7 @@ import { convertToClaudeMessages, separateSystemMessage } from './claude/message
 import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
 import type { ImageTransportOperation } from './imageInput'
 import type { LlmProvider } from './registryCore'
+import { type ToolNameEnvelopeKey, fromWireResponse, toWireRequest } from './toolWireNames'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export class ClaudeProvider implements SingleTurnProvider {
@@ -57,7 +58,19 @@ export class ClaudeProvider implements SingleTurnProvider {
    * provider also brings a fresh counter for free.
    */
   createTokenCounter(modelName: string, options?: AnthropicTokenCounterOptions): TokenCounter {
-    return new AnthropicTokenCounter(this.client, modelName, options)
+    return new AnthropicTokenCounter(this.client, modelName, {
+      ...options,
+      toolNameEnvelope: this.toolNameEnvelope(),
+    })
+  }
+
+  /**
+   * The counter takes it from here so it counts the names that are sent. Only a
+   * name with lone surrogates differs: the counter sees it before
+   * `withWellFormedRequestText` repairs the request.
+   */
+  protected toolNameEnvelope(): ToolNameEnvelopeKey {
+    return 'W_c'
   }
 
   classifyError(err: unknown): ClassifiedError {
@@ -202,10 +215,11 @@ export class ClaudeProvider implements SingleTurnProvider {
       verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
-    const { systemPrompt, claudeMessages } = this.separateSystemMessage(messages)
+    const wire = toWireRequest(messages, tools, this.toolNameEnvelope())
+    const { systemPrompt, claudeMessages } = this.separateSystemMessage(wire.messages)
     const formattedMessages = this.convertToClaudeMessages(claudeMessages)
 
-    const claudeTools = tools.map(t => ({
+    const claudeTools = wire.tools.map(t => ({
       name: t.name,
       description: t.description,
       input_schema: t.parameters as Anthropic.Tool['input_schema'],
@@ -245,16 +259,19 @@ export class ClaudeProvider implements SingleTurnProvider {
           }))
         : null
 
-    return {
-      content: textContent,
-      tool_calls: toolCalls,
-      usage: {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-        total_tokens: response.usage.input_tokens + response.usage.output_tokens,
+    return fromWireResponse(
+      {
+        content: textContent,
+        tool_calls: toolCalls,
+        usage: {
+          input_tokens: response.usage.input_tokens,
+          output_tokens: response.usage.output_tokens,
+          total_tokens: response.usage.input_tokens + response.usage.output_tokens,
+        },
+        finish_reason: this.mapStopReason(response.stop_reason),
       },
-      finish_reason: this.mapStopReason(response.stop_reason),
-    }
+      wire.names
+    )
   }
 
   // ─── T2.2 Cache-aware single-turn methods ─────────────────────────
@@ -279,15 +296,19 @@ export class ClaudeProvider implements SingleTurnProvider {
       verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
-    const formattedMessages = this.convertToClaudeMessages(messages)
-    const claudeTools = tools
-      .slice()
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map(t => ({
-        name: t.name,
-        description: t.description,
-        input_schema: t.parameters as Anthropic.Tool['input_schema'],
-      }))
+    // Sorted by canonical name before projecting, so the tools cache slot
+    // keeps the order it has today.
+    const wire = toWireRequest(
+      messages,
+      tools.slice().sort((a, b) => a.name.localeCompare(b.name)),
+      this.toolNameEnvelope()
+    )
+    const formattedMessages = this.convertToClaudeMessages(wire.messages)
+    const claudeTools = wire.tools.map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.parameters as Anthropic.Tool['input_schema'],
+    }))
 
     const systemBlocks: Array<Anthropic.TextBlockParam> = []
     if (parts.stable) {
@@ -344,18 +365,21 @@ export class ClaudeProvider implements SingleTurnProvider {
       cache_read_input_tokens?: number | null
       cache_creation_input_tokens?: number | null
     }
-    return {
-      content: textContent,
-      tool_calls: toolCalls,
-      usage: {
-        input_tokens: u.input_tokens,
-        output_tokens: u.output_tokens,
-        total_tokens: u.input_tokens + u.output_tokens,
-        cache_read_tokens: u.cache_read_input_tokens ?? 0,
-        cache_write_tokens: u.cache_creation_input_tokens ?? 0,
+    return fromWireResponse(
+      {
+        content: textContent,
+        tool_calls: toolCalls,
+        usage: {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          total_tokens: u.input_tokens + u.output_tokens,
+          cache_read_tokens: u.cache_read_input_tokens ?? 0,
+          cache_write_tokens: u.cache_creation_input_tokens ?? 0,
+        },
+        finish_reason: this.mapStopReason(response.stop_reason),
       },
-      finish_reason: this.mapStopReason(response.stop_reason),
-    }
+      wire.names
+    )
   }
 
   /**
