@@ -247,6 +247,37 @@ describe('createStepSpillover', () => {
       expect(budgetWarnings).toHaveLength(1)
     })
 
+    it('warns once per execution however many results miss the budget', async () => {
+      const warn = vi.spyOn(logger, 'warn')
+      const budgetWarnings = () =>
+        warn.mock.calls.filter(
+          ([, msg]) =>
+            msg ===
+            'Tool result does not fit in the step spillover budget; it stays inline (logged once per step)'
+        )
+      const run = async (spillover: StepSpillover): Promise<boolean[]> => {
+        const outcomes: boolean[] = []
+        for (const callId of ['c1', 'c2', 'c3']) {
+          const res = await spillover.persist({
+            callId,
+            toolName: 't',
+            content: 'b'.repeat(6000),
+            isError: false,
+          })
+          outcomes.push(res.spilled)
+        }
+        return outcomes
+      }
+
+      expect(await run(make({ budgetBytes: 10000 }))).toEqual([true, false, false])
+      expect(budgetWarnings()).toHaveLength(1)
+      expect(budgetWarnings()[0]![0]).toMatchObject({ stepId: 'review-step', budgetBytes: 10000 })
+
+      // Another execution of the same step logs its own first miss.
+      expect(await run(make({ budgetBytes: 10000 }))).toEqual([true, false, false])
+      expect(budgetWarnings()).toHaveLength(2)
+    })
+
     it('stops trying to write for the rest of the step after one write failure', async () => {
       const warn = vi.spyOn(logger, 'warn')
       const blocker = path.join(outputDir, '.spill')
@@ -555,6 +586,19 @@ describe('removeLeftoverStepSpillover', () => {
     expect((await fs.readdir(path.join(outputDir, '.spill'))).sort()).toEqual([...kept].sort())
   })
 
+  it.each([
+    ['x0123456789abcdef', 'an id after another character'],
+    ['0123456789abcdef1', '17 hex characters'],
+    ['x0123456789abcdef1', 'an id inside a longer name'],
+    ['0123456789abcdef0123456789abcdef', '32 hex characters'],
+  ])('keeps %s (%s)', async name => {
+    await seed('fedcba9876543210/spillover/review/i1c0.json')
+    await seed(`${name}/x.json`)
+    await removeLeftoverStepSpillover(outputDir)
+    // The seeded execution root is gone, so the removal ran and matched ids.
+    expect(await fs.readdir(path.join(outputDir, '.spill'))).toEqual([name])
+  })
+
   it('creates nothing when there is no .spill', async () => {
     await fs.writeFile(path.join(outputDir, 'report.md'), 'artifact')
     await removeLeftoverStepSpillover(outputDir)
@@ -610,23 +654,27 @@ describe('removeLeftoverStepSpillover', () => {
     ).toHaveLength(1)
   })
 
-  it('logs, keeps going and resolves when one entry cannot be removed', async () => {
-    const warn = vi.spyOn(logger, 'warn')
-    await seed('0123456789abcdef/spillover/review/i1c0.json')
-    await seed('fedcba9876543210/spillover/review/i1c0.json')
-    // A read-only `.spill` makes removing its entries fail with EACCES.
-    await fs.chmod(path.join(outputDir, '.spill'), 0o500)
-    await expect(removeLeftoverStepSpillover(outputDir)).resolves.toBeUndefined()
-    const removeWarnings = warn.mock.calls.filter(([, msg]) =>
-      String(msg).includes('Could not remove leftover')
-    )
-    expect(removeWarnings).toHaveLength(2)
-    await fs.chmod(path.join(outputDir, '.spill'), 0o700)
-    expect((await fs.readdir(path.join(outputDir, '.spill'))).sort()).toEqual([
-      '0123456789abcdef',
-      'fedcba9876543210',
-    ])
-  })
+  // root ignores directory modes, so the removal would succeed.
+  it.skipIf(process.getuid?.() === 0)(
+    'logs, keeps going and resolves when one entry cannot be removed',
+    async () => {
+      const warn = vi.spyOn(logger, 'warn')
+      await seed('0123456789abcdef/spillover/review/i1c0.json')
+      await seed('fedcba9876543210/spillover/review/i1c0.json')
+      // A read-only `.spill` makes removing its entries fail with EACCES.
+      await fs.chmod(path.join(outputDir, '.spill'), 0o500)
+      await expect(removeLeftoverStepSpillover(outputDir)).resolves.toBeUndefined()
+      const removeWarnings = warn.mock.calls.filter(([, msg]) =>
+        String(msg).includes('Could not remove leftover')
+      )
+      expect(removeWarnings).toHaveLength(2)
+      await fs.chmod(path.join(outputDir, '.spill'), 0o700)
+      expect((await fs.readdir(path.join(outputDir, '.spill'))).sort()).toEqual([
+        '0123456789abcdef',
+        'fedcba9876543210',
+      ])
+    }
+  )
 })
 
 describe('summarizeSpilloverReadForRecord', () => {

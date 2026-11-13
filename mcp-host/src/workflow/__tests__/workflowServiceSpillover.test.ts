@@ -11,6 +11,7 @@ import {
   clerumSpilloverReadsTotal,
   clerumToolOutputBytes,
 } from '../../core/spillover'
+import { SpilloverReadTool } from '../../core/tools/spilloverRead'
 import { FinishReason } from '../../core/types'
 import type { SingleTurnProvider } from '../../llm'
 import { logger } from '../../logger'
@@ -852,5 +853,44 @@ describe('WorkflowService step spillover — metrics', () => {
       persisted + 1
     )
     expect(await metricTotal('clerum_tool_output_bytes', { tool: 'probe' })).toBe(observed + 1)
+  })
+
+  it('counts reads of a store built without instruments under the first-party counter', async () => {
+    expect(register.getSingleMetric('clerum_spillover_reads_total')).toBe(clerumSpilloverReadsTotal)
+    const storage = new SpilloverStorage({
+      workspacePath: outputDir,
+      thresholdBytes: 10,
+      ttlMs: 0,
+      gcIntervalMs: 0,
+    })
+    const summary = await storage.maybePersist({
+      taskId: 'task',
+      toolCallId: 'call',
+      toolName: 'probe',
+      content: 'x'.repeat(100),
+      isError: false,
+    })
+    const reader = new SpilloverReadTool(storage)
+    const before = {
+      whole: await metricTotal('clerum_spillover_reads_total', { with_range: 'false' }),
+      ranged: await metricTotal('clerum_spillover_reads_total', { with_range: 'true' }),
+      step: await metricTotal('clerum_workflow_step_spillover_reads_total'),
+    }
+
+    const whole = await reader.execute({ ref: summary!.spillover_ref })
+    const ranged = await reader.execute({
+      ref: summary!.spillover_ref,
+      range: { start: 0, end: 10 },
+    })
+
+    expect(whole).toMatchObject({ is_error: false, content: 'x'.repeat(100) })
+    expect(ranged).toMatchObject({ is_error: false, content: 'x'.repeat(10) })
+    expect(await metricTotal('clerum_spillover_reads_total', { with_range: 'false' })).toBe(
+      before.whole + 1
+    )
+    expect(await metricTotal('clerum_spillover_reads_total', { with_range: 'true' })).toBe(
+      before.ranged + 1
+    )
+    expect(await metricTotal('clerum_workflow_step_spillover_reads_total')).toBe(before.step)
   })
 })
