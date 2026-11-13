@@ -10,7 +10,6 @@ import {
 } from '@testing-library/react'
 import { CONTROL_ROUTES } from '../../app/constants/routes'
 import * as api from '../../lib/api'
-import type { ContextResource, HostResource } from '../../lib/api'
 import { __resetRegistryCapabilityCacheForTests } from '../../lib/hooks/useRegistryCapability'
 import { CATALOG_SLOTS } from '../../test/fixtures/catalogRemoteOAuthWire'
 import {
@@ -19,6 +18,10 @@ import {
   okJsonResponse,
   unknownMcpServerBody,
 } from '../../test/fixtures/contextMcpServerRejection'
+import {
+  buildContextResource,
+  buildHostReferencesForContext,
+} from '../../test/fixtures/contextResource'
 import RegistryCatalog from '../RegistryCatalog'
 import { ToastProvider } from '../Toast'
 
@@ -244,6 +247,15 @@ describe('Marketplace Remote OAuth filter', () => {
   })
 })
 
+function supportAgentScenario() {
+  const context = buildContextResource({ metadata: { name: 'ctx-support' } })
+  const host = buildHostReferencesForContext('ctx-support', ['support']).support
+  return {
+    contexts: [context],
+    hosts: [{ ...host, spec: { ...host.spec, host: 'Support' } }],
+  }
+}
+
 describe('Marketplace slot actions', () => {
   it('uninstalls through the connector DELETE and re-reads the catalog', async () => {
     fetchMock.mockResolvedValueOnce(okJsonResponse({ name: LINEAR_USER_SERVER }))
@@ -261,15 +273,7 @@ describe('Marketplace slot actions', () => {
   })
 
   it('closes Agents… on a vanished connector, says so and re-reads the catalog', async () => {
-    const contexts: ContextResource[] = [
-      {
-        metadata: { name: 'ctx-support', namespace: 'default', resourceVersion: '11' },
-        spec: { contextId: 'ctx-support', mcpServers: [] },
-      } as ContextResource,
-    ]
-    const hosts: HostResource[] = [
-      { metadata: { name: 'support' }, spec: { host: 'Support', contextRef: 'ctx-support' } },
-    ] as HostResource[]
+    const { contexts, hosts } = supportAgentScenario()
     vi.mocked(api.getContexts).mockResolvedValue({ items: contexts })
     vi.mocked(api.getHosts).mockResolvedValue({ items: hosts })
     fetchMock.mockResolvedValueOnce(
@@ -299,15 +303,7 @@ describe('Marketplace slot actions', () => {
   })
 
   it('closes Agents… when the re-read after a refused write fails, keeping the error', async () => {
-    const contexts: ContextResource[] = [
-      {
-        metadata: { name: 'ctx-support', namespace: 'default', resourceVersion: '11' },
-        spec: { contextId: 'ctx-support', mcpServers: [] },
-      } as ContextResource,
-    ]
-    const hosts: HostResource[] = [
-      { metadata: { name: 'support' }, spec: { host: 'Support', contextRef: 'ctx-support' } },
-    ] as HostResource[]
+    const { contexts, hosts } = supportAgentScenario()
     vi.mocked(api.getContexts)
       .mockResolvedValueOnce({ items: contexts })
       .mockRejectedValueOnce(new Error('contexts unavailable'))
