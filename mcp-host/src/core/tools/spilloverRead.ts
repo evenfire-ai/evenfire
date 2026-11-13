@@ -17,7 +17,13 @@ import { SpilloverStorage, clerumSpilloverReadsTotal } from '../spillover'
 import { ToolOutput } from '../types'
 
 export class SpilloverReadTool implements Tool {
-  constructor(private readonly storage: SpilloverStorage) {}
+  constructor(
+    private readonly storage: Pick<SpilloverStorage, 'load'>,
+    /** Where reads are counted: the first-party counter unless the caller keeps its own. */
+    private readonly instruments: {
+      reads?: { inc(labels: { with_range: 'true' | 'false' }): void }
+    } = { reads: clerumSpilloverReadsTotal }
+  ) {}
 
   name(): string {
     return 'clerum__spillover_read'
@@ -110,7 +116,7 @@ export class SpilloverReadTool implements Tool {
         rangeEnd <= rangeStart ||
         rangeEnd > blob.byte_size
       ) {
-        clerumSpilloverReadsTotal?.inc({ with_range: 'true' })
+        this.instruments.reads?.inc({ with_range: 'true' })
         return {
           content: `Error: invalid range [${String(rangeStart)}, ${String(rangeEnd)}) for byte_size=${blob.byte_size}.`,
           duration_ms: Date.now() - start,
@@ -120,7 +126,7 @@ export class SpilloverReadTool implements Tool {
       const slice = Buffer.from(blob.content, 'utf8')
         .subarray(rangeStart, rangeEnd)
         .toString('utf8')
-      clerumSpilloverReadsTotal?.inc({ with_range: 'true' })
+      this.instruments.reads?.inc({ with_range: 'true' })
       return {
         content: slice,
         duration_ms: Date.now() - start,
@@ -128,7 +134,7 @@ export class SpilloverReadTool implements Tool {
       }
     }
 
-    clerumSpilloverReadsTotal?.inc({ with_range: 'false' })
+    this.instruments.reads?.inc({ with_range: 'false' })
     return {
       content: blob.content,
       duration_ms: Date.now() - start,

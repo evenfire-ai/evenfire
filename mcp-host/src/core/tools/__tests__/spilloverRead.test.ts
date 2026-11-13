@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
-import { SpilloverStorage } from '../../spillover'
+import { register } from 'prom-client'
+import { SpilloverStorage, clerumSpilloverReadsTotal } from '../../spillover'
 import { SpilloverReadTool } from '../spilloverRead'
 
 describe('SpilloverReadTool', () => {
@@ -34,6 +35,33 @@ describe('SpilloverReadTool', () => {
 
   it('declares its output exempt from spillover, so reading a blob back never re-persists it', () => {
     expect(tool.spilloverExempt?.()).toBe(true)
+  })
+
+  it('counts reads under the first-party counter when built with a store only', async () => {
+    // Witness: the counter is the registered one, so the test cannot pass on a missing counter.
+    expect(register.getSingleMetric('clerum_spillover_reads_total')).toBe(clerumSpilloverReadsTotal)
+    const reads = async (withRange: 'true' | 'false'): Promise<number> => {
+      const { values } = await clerumSpilloverReadsTotal!.get()
+      return values
+        .filter(v => v.labels.with_range === withRange)
+        .reduce((sum, v) => sum + v.value, 0)
+    }
+    const summary = await storage.maybePersist({
+      taskId: 'taskA',
+      toolCallId: 'call1',
+      toolName: 'file_read',
+      content: 'x'.repeat(100),
+      isError: false,
+    })
+    const before = { whole: await reads('false'), ranged: await reads('true') }
+
+    const whole = await tool.execute({ ref: summary!.spillover_ref })
+    const ranged = await tool.execute({ ref: summary!.spillover_ref, range: { start: 0, end: 10 } })
+
+    expect(whole).toMatchObject({ is_error: false, content: 'x'.repeat(100) })
+    expect(ranged).toMatchObject({ is_error: false, content: 'x'.repeat(10) })
+    expect(await reads('false')).toBe(before.whole + 1)
+    expect(await reads('true')).toBe(before.ranged + 1)
   })
 
   it('returns the full blob content for a valid ref', async () => {
