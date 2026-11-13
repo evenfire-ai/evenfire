@@ -556,15 +556,11 @@ export function LlmModelTable({
                                     label: 'Edit subscription',
                                     onClick: () => onEdit(model.subscriptionRow!.id),
                                   },
+                                  // Only the API-key row: the catalog prune turns
+                                  // off catalog providers only, never a subscription.
                                   ...keepDisabledActions(
                                     model.apiKeyRow,
                                     'Keep API key disabled',
-                                    keepingDisabledId,
-                                    onKeepDisabled
-                                  ),
-                                  ...keepDisabledActions(
-                                    model.subscriptionRow,
-                                    'Keep subscription disabled',
                                     keepingDisabledId,
                                     onKeepDisabled
                                   ),
