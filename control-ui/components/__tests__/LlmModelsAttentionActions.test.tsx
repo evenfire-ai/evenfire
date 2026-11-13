@@ -16,6 +16,7 @@ import { getProviderDisplayLabel } from '@lib/llm'
 import {
   acknowledgedWireItem,
   attentionWireBody,
+  legacyAttentionWireBody,
   withRecipesWireItem,
 } from '../../test/fixtures/llmAttention'
 import { LlmModelsSurface } from '../LlmModelsSurface'
@@ -393,6 +394,36 @@ describe('catalog attention dialog actions', () => {
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Done' })).toHaveFocus())
     expect(screen.getByText(`${items.length} models reviewed`)).toBeInTheDocument()
     expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
+  })
+})
+
+describe('catalog attention from a control-api without acknowledgements', () => {
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  it('still lists every item, stale_discovery_enabled included, without review actions', async () => {
+    const items = legacyAttentionWireBody().items
+    const haiku = items.find(
+      item => item.kind === 'stale_discovery_enabled' && item.model === 'claude-haiku-4-5'
+    )!
+    vi.mocked(getLlmModels).mockResolvedValue({ rows: rowsFor(items) })
+    vi.mocked(getUnpricedModels).mockResolvedValue({ rows: [] })
+    serveFeed(items, new Set())
+
+    renderSurface()
+
+    expect(await screen.findByText(BANNER_TEXT)).toHaveTextContent(
+      'Models need review: 1 still referenced · 1 deprecated · 1 no longer listed'
+    )
+    const dialog = await openReview()
+    expect(within(dialog).getByText(String(haiku.displayName))).toBeInTheDocument()
+    // No item carries an episode, so none can be acknowledged or pinned through one.
+    expect(
+      within(dialog).queryAllByRole('button', { name: /^(Mark reviewed|Keep enabled): / })
+    ).toHaveLength(0)
+    expect(vi.mocked(ackAdminAttention)).not.toHaveBeenCalled()
   })
 })
 
