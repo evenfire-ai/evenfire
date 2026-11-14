@@ -558,12 +558,12 @@ failure of the reconcile's next call.
 Apply the updated McpServer CRD (`charts/clerum-crds/crds/mcpserver.yaml`)
 before you roll the new HCC image. The status schema prunes undeclared fields:
 on a cluster whose CRD lacks the property the write is dropped and HCC behaves
-as before for that case. On GKE the deploy workflows run
-`deploy/scripts/crd-guard.sh`, which fails the deploy while the cluster's CRD
-differs from the release's file. The first completed reconcile of each
-Secret-backed McpServer after the upgrade writes the field once; afterwards it
-changes only when the Secret data changes. Rolling back to an older image
-ignores the field.
+as before for that case. On GKE the evenfire-infra deploy workflows run a CRD
+guard (`deploy/scripts/crd-guard.sh` in evenfire-infra) that fails the deploy
+while the cluster's CRD differs from the release's file. The first completed
+reconcile of each Secret-backed McpServer after the upgrade writes the field
+once; afterwards it changes when the Secret data changes, and it is removed when
+`envSecret` is removed. Rolling back to an older image ignores the field.
 
 ### Numeric settings in plain digits
 
@@ -578,14 +578,16 @@ digits, or the component refuses to start.
 
 Values that used to be accepted and now stop the pod: surrounding white space,
 `+5000`, `05000`, `5e3`, `0x1388`, `5000.0`, and for the catalog-bootstrap
-variables also a fraction such as `2000.5`. A value of only white space used to
+variables and `CLERUM_DYNAMIC_TOOLS_THRESHOLD` also a fraction such as `2000.5`
+(the threshold used to truncate it). A value of only white space used to
 mean the default for the HCC variables and `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`;
-it now stops the pod. `deploy/base` and the minikube overlay set the three HCC
-variables in plain digits and set none of the mcp-host ones.
+it now stops the pod. `deploy/base` sets the three HCC variables in plain
+digits, the minikube overlay sets `CONTEXT_MAPPER_HEARTBEAT_POLL_MS` in plain
+digits, and neither sets any of the mcp-host ones.
 
 A value that used to be replaced by the default with a warning
-(`CLERUM_DYNAMIC_TOOLS_THRESHOLD`: `0`, a negative number or text) now stops the
-Host at startup; `60abc` used to become `60` and now stops it too.
+(`CLERUM_DYNAMIC_TOOLS_THRESHOLD`: `0`, a negative number, text or `0x3c`) now
+stops the Host at startup; `60abc` used to become `60` and now stops it too.
 
 `""` now means the default for the catalog-bootstrap variables; it used to stop
 the Host.

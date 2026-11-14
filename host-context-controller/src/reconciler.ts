@@ -3094,10 +3094,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * published as today whenever the runtime is known to differ from it: this
    * reconcile attempted a ConfigMap, Service or Deployment write (the live
    * object differed from desired, or was absent), the Secret revision it read
-   * differs from the one this process last applied, or this server has
-   * undischarged Secret-change evidence. Not-ready verdicts, first deploys and new generations
+   * differs from the one this process last applied (after a restart: from the
+   * record in status, until the Deployment compares up to date), or this server
+   * has undischarged Secret-change evidence. Not-ready verdicts, first deploys and new generations
    * are published as today. A ready verdict has no maximum age while reads keep
-   * failing: this process only knows of Secret changes it observed or read.
+   * failing: HCC only knows of Secret changes it observed, read, or recorded.
    * When a resource sync that attempted a write or read another Secret revision
    * fails, the reconcile also stops a live readiness poll, so the not-ready
    * verdict stands until the next completed reconcile publishes one.
@@ -3334,14 +3335,17 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     // Ensure resources exist and are up to date. A create or replace attempt, or
-    // a Secret revision other than the one this process last applied (after a
-    // restart: the one recorded in status), means the live runtime differed from
-    // desired (or was absent), so a later transient failure in this reconcile
-    // must not keep the published verdict (#1338, L1a).
+    // a Secret revision other than the one this process last applied, means the
+    // live runtime differed from desired (or was absent), so a later transient
+    // failure in this reconcile must not keep the published verdict (#1338).
+    // After a restart a revision other than the one recorded in status is
+    // treated the same way until the Deployment compares up to date (L1a); a
+    // record whose write failed before the restart can be stale, which errs on
+    // the not-ready side.
     const knownRevision = this.appliedSecretRevisions.get(server.name)
     const wantedRecord = appliedCredentialsRecord(secretResult.revision)
     // L1a: after a restart this process has no in-memory revision; the record
-    // persisted in status says what the Deployment was last synced with.
+    // persisted in status is the last revision HCC confirmed it applied.
     const persistedRecord = server.status?.appliedCredentialsRevision
     const differsFromRecordOnly =
       knownRevision === undefined &&
