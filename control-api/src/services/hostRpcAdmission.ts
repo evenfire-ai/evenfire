@@ -31,7 +31,11 @@ export function hostRpcAdmissionBucketKey(verifiedSubject: string): string {
   return `${HOST_RPC_ADMISSION_BUCKET_PREFIX}${verifiedSubject}`
 }
 
-/** One durable, subject-wide budget shared by legacy Host routes and v2 checkpoints. */
+/**
+ * One durable, subject-wide budget. Its only caller is the V2 action checkpoint
+ * route (routes/internal/actionAuthorityCheckpoint.ts); legacy Host routes are
+ * not charged.
+ */
 export async function admitHostRpc(
   verifiedSubject: string,
   check: typeof checkAndIncrementStrict = checkAndIncrementStrict

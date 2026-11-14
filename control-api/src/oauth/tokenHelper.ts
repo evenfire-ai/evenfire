@@ -113,9 +113,12 @@ export async function getAccessToken(
   input: GetAccessTokenInput,
   deps: GetAccessTokenDeps
 ): Promise<GetAccessTokenResult> {
-  // Resolve the CURRENT declaration before reading or returning any grant.
-  // A cached provider token must not outlive removal or ambiguity of its
-  // recipe-client identity.
+  // Resolve the CURRENT declaration before reading or returning any grant in
+  // this function. Its callers are the refresh path of getAccessTokenReactive
+  // (a stale token with a refresh token) and the proactive refresh sweep. The
+  // reactive fast path returns a cached token that is not stale before this
+  // function runs, without reading the recipe (reactiveTokenHelper.ts), so
+  // this check does not cover that token.
   let recipe: RecipeWithOAuthClients | null
   try {
     recipe = await deps.recipeReader.read(input.recipeName, input.recipeNamespace)
