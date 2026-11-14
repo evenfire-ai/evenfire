@@ -1,9 +1,9 @@
 import * as k8s from '@kubernetes/client-node'
 
-export const HOST_K8S_REQUEST_TIMEOUT_CODE = 'HCC_HOST_K8S_REQUEST_TIMEOUT'
+export const K8S_REQUEST_TIMEOUT_CODE = 'HCC_K8S_REQUEST_TIMEOUT'
 
-export class HostK8sRequestTimeoutError extends Error {
-  readonly code = HOST_K8S_REQUEST_TIMEOUT_CODE
+export class K8sRequestTimeoutError extends Error {
+  readonly code = K8S_REQUEST_TIMEOUT_CODE
 
   constructor(
     readonly operation: string,
@@ -14,7 +14,7 @@ export class HostK8sRequestTimeoutError extends Error {
       `Kubernetes request ${operation} exceeded its ${timeoutMs}ms deadline`,
       options?.cause === undefined ? undefined : { cause: options.cause }
     )
-    this.name = 'HostK8sRequestTimeoutError'
+    this.name = 'K8sRequestTimeoutError'
   }
 }
 
@@ -81,9 +81,9 @@ function apiMethodNames(client: object): Set<PropertyKey> {
  * Kubernetes API client. The returned promise deliberately waits for the
  * underlying client to reject after abort; it does not race a detached timer.
  */
-export function withHostK8sRequestDeadline<T extends object>(client: T, timeoutMs: number): T {
+export function withK8sRequestDeadline<T extends object>(client: T, timeoutMs: number): T {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
-    throw new Error(`Host Kubernetes request timeout must be a positive integer, got ${timeoutMs}`)
+    throw new Error(`Kubernetes request timeout must be a positive integer, got ${timeoutMs}`)
   }
 
   const methodNames = apiMethodNames(client)
@@ -100,7 +100,7 @@ export function withHostK8sRequestDeadline<T extends object>(client: T, timeoutM
 
       const wrapped = (...args: unknown[]): Promise<unknown> => {
         const operation = `${clientName}.${String(property)}`
-        const timeoutError = new HostK8sRequestTimeoutError(operation, timeoutMs)
+        const timeoutError = new K8sRequestTimeoutError(operation, timeoutMs)
         const deadlineController = new AbortController()
         let combinedSignal: CombinedAbortSignal | undefined
         let cleanedUp = false
@@ -149,7 +149,7 @@ export function withHostK8sRequestDeadline<T extends object>(client: T, timeoutM
             },
             error => {
               if (combinedSignal?.source() === 'deadline') {
-                throw new HostK8sRequestTimeoutError(operation, timeoutMs, { cause: error })
+                throw new K8sRequestTimeoutError(operation, timeoutMs, { cause: error })
               }
               throw error
             }
@@ -163,10 +163,10 @@ export function withHostK8sRequestDeadline<T extends object>(client: T, timeoutM
   })
 }
 
-export function makeHostK8sApiClient<T extends k8s.ApiType>(
+export function makeK8sApiClientWithDeadline<T extends k8s.ApiType>(
   kubeConfig: k8s.KubeConfig,
   apiClientType: k8s.ApiConstructor<T>,
   timeoutMs: number
 ): T {
-  return withHostK8sRequestDeadline(kubeConfig.makeApiClient(apiClientType), timeoutMs)
+  return withK8sRequestDeadline(kubeConfig.makeApiClient(apiClientType), timeoutMs)
 }
