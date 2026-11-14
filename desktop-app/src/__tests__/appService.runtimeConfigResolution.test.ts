@@ -993,9 +993,11 @@ describe('AppService runtime config discovery ownership', () => {
 
     expect(getDesktopEnvironmentForEndpoint).toHaveBeenCalledTimes(2)
     expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('https://rpc-new.example.test')
-    expect(runtimeConfig.getActiveRuntimeConfigProfileIdentity()).toMatchObject({
-      profileId: 'custom-file',
-      profileUiBaseUrl: 'https://profile-new.example.test',
+    await vi.waitFor(() => {
+      expect(runtimeConfig.getActiveRuntimeConfigProfileIdentity()).toMatchObject({
+        profileId: 'custom-file',
+        profileUiBaseUrl: 'https://profile-new.example.test',
+      })
     })
   })
 
