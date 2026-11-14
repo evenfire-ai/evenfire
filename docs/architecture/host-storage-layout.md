@@ -63,16 +63,28 @@ and the `memory/` folder of named notes. A `memory_write` with any other
 relative path that it does not refuse writes a Markdown note under
 `users/<key>/memory/` (`.md` is
 appended unless the name already ends in `.md`), and `memory_read` resolves a
-path the same way (`mcp-host/src/workspace/memoryNotePath.ts`). Every
+path the same way (`mcp-host/src/workspace/memoryNotePath.ts`). When the Host
+has a session database (`CLERUM_SESSION_STORE=sqlite` or `dual`), every
 successful `memory_write` adds one row to the `memory_writes` table of
 `state.db` (migration `018-memory-writes`): user key, scope (`collective` or
 `user`), path relative to that scope's root, mode, sha256 of the content the
-write left in the file, and time. A failed record does not fail the write; it
-is logged (`memory write record failed`) and counted
+write left in the file, and time. With `CLERUM_SESSION_STORE=memory` nothing is
+recorded. Writes that do not go through `memory_write` (the compaction archive
+in `daily/`, `file_write` and the shell) are not recorded. A failed record does
+not fail the write; it is logged (`memory write record failed`) and counted
 (`clerum_memory_write_record_failures_total`). The memory scan covers
 `memory_write` writes to `MEMORY.md` (shared and private), `memories/` and
 `daily/`; named notes in `memory/` are not scanned or capped, and `file_write`
 and the shell are not scanned.
+
+Notes that an earlier version wrote at another path of the person's folder
+(for example `users/<key>/projects/acme.md`) stay where they are.
+`memory_read` and `memory_write` no longer address them: the same path now
+names `users/<key>/memory/projects/acme.md`, so a read answers
+`File not found` and an append starts a new note. `memory_search` can still
+return a line from such a file when it ends in `.md`; it is then a workspace
+file, not memory. Files that an agent's memory depends on are moved into
+`memory/` by the operator when this version is deployed.
 
 ## The previous split layout
 

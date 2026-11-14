@@ -19,7 +19,7 @@ afterEach(async () => {
   await fs.rm(baseRoot, { recursive: true, force: true })
 })
 
-describe('memoryNotePath — paths refused today are returned unchanged and refused as today', () => {
+describe('memoryNotePath — paths refused by their text are returned unchanged and refused as before', () => {
   it.each([
     ['a NUL byte', 'notes\0.md', 'Path contains null bytes'],
     ['an absolute path', '/etc/x', 'Absolute paths not allowed'],

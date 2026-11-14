@@ -585,7 +585,7 @@ async function failureCount(scope: 'collective' | 'user'): Promise<number> {
   return metric.values.find(v => v.labels.scope === scope)?.value ?? 0
 }
 
-describe('memory_write records every successful write', () => {
+describe('memory_write with a record log records each successful write', () => {
   let baseRoot: string
   let provider: ScopedWorkspaceProvider
   let log: CapturingLog

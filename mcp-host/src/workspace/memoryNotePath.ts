@@ -4,9 +4,13 @@
  * A named note of a person lives in their `memory/` folder: a free relative
  * path `p` becomes `memory/<p>`, and every note is Markdown (trailing dots of
  * the last path segment are removed, then `.md` is appended unless that segment
- * already ends in `.md`; `notes.` and `notes` are the same note). Paths that are refused
- * today, collective paths and `daily/...` are returned unchanged, so they keep
- * today's routing and today's refusal messages.
+ * already ends in `.md`; `notes.` and `notes` are the same note). Paths refused
+ * by their text (a NUL byte, an absolute path, `..`, a protected or locked name,
+ * another user's namespace, the caller's folder itself), collective paths and
+ * `daily/...` are returned unchanged and keep their routing and messages. A
+ * refusal that depended on what the path pointed to (a symlink, an existing
+ * directory) no longer applies to a free name: the name now addresses a note
+ * under `memory/`.
  *
  * The function is pure and knows nothing of the workspace type: on a
  * `ScopedWorkspace` the result is relative to the caller's folder (or the Host
@@ -37,7 +41,7 @@ function withMarkdownExtension(relativePath: string): string {
   return lastSegment.endsWith('.md') ? stripped : `${stripped}.md`
 }
 
-/** Path the memory tools use for `raw`. Unchanged when `raw` is refused by its text or exempt; else `memory/<normalized>` as a Markdown note. */
+/** Path the memory tools use for `raw`. Unchanged when `raw` is refused by its text, collective or under `daily/`; else `memory/<normalized>` as a Markdown note. */
 export function memoryNotePath(raw: string): string {
   // Refused by WorkspaceService.resolvePath with today's error.
   if (raw.includes('\0') || path.isAbsolute(raw) || raw.includes('..')) return raw
