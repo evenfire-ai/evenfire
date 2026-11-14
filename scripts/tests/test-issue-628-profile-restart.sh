@@ -30,6 +30,8 @@ if [[ "$target" == branch-profile-info ]]; then
 fi
 if [[ "$target" == branch-profile-stop && "$TEST_CASE" == stop-fails ]]; then exit 1; fi
 if [[ "$target" == branch-profile-start && "$TEST_CASE" == start-fails ]]; then exit 1; fi
+if [[ "$target" == branch-profile-pf && "$TEST_CASE" == forward-fails ]]; then exit 1; fi
+if [[ "$target" == branch-profile-health && "$TEST_CASE" == health-fails && "$(grep -c '^branch-profile-health$' "$TEST_CALLS")" -gt 1 ]]; then exit 1; fi
 STUB
 cat >"$TMP/bin/minikube" <<'STUB'
 #!/bin/bash
@@ -54,6 +56,43 @@ case "$1" in
   *) exit 2 ;;
 esac
 STUB
+cat >"$TMP/bin/kubectl" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+[[ "$1" == "--context=$TEST_PROFILE" && "$2" == --request-timeout=20s && "$3" == -n ]] || exit 1
+namespace="$4"
+shift 4
+[[ "$1" == get ]] || exit 1
+case "$2" in
+  svc)
+    service="$3"
+    printf 'service-check=%s/%s\n' "$namespace" "$service" >>"$TEST_CALLS"
+    if [[ "$TEST_CASE" == service-read-fails ]]; then exit 1; fi
+    if [[ "$TEST_CASE" == optional-read-fails && "$service" == profile-ui ]]; then exit 1; fi
+    if [[ "$TEST_CASE" == required-absent && "$service" == control-ui ]]; then exit 0; fi
+    if [[ "$TEST_CASE" == optional-absent && ( "$service" == profile-ui || "$service" == member-registration-service || "$service" == registry-api || "$service" == workflow-approval-request-reader ) ]]; then exit 0; fi
+    if [[ "$TEST_CASE" == mcp-fallback && "$namespace" == mcp-host && "$service" == chatllm ]]; then exit 0; fi
+    printf '{"spec":{"selector":{"app":"%s"}}}\n' "$service"
+    ;;
+  pods)
+    [[ "$3" == -l && "$4" == app=* ]] || exit 1
+    service="${4#app=}"
+    printf 'pod-check=%s/%s\n' "$namespace" "$service" >>"$TEST_CALLS"
+    if [[ "$TEST_CASE" == pod-read-fails ]]; then exit 1; fi
+    if [[ "$TEST_CASE" == malformed-pods ]]; then printf '{"items":null}\n'; exit 0; fi
+    if [[ "$TEST_CASE" == pending-pod && "$service" == control-ui && ! -e "$TEST_POD_SEEN" ]]; then
+      : >"$TEST_POD_SEEN"
+      printf '{"items":[{"metadata":{},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"False"}]}}]}\n'
+    elif [[ "$TEST_CASE" == terminating-pod && "$service" == control-ui && ! -e "$TEST_POD_SEEN" ]]; then
+      : >"$TEST_POD_SEEN"
+      printf '{"items":[{"metadata":{"deletionTimestamp":"2026-01-01T00:00:00Z"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}\n'
+    else
+      printf '{"items":[{"metadata":{},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}\n'
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+STUB
 cat >"$TMP/bin/node" <<'STUB'
 #!/bin/bash
 set -euo pipefail
@@ -67,11 +106,11 @@ fi
 [[ "$E2E_REPORT_PATH" == /* ]] || exit 1
 printf 'playwright\n' >>"$TEST_CALLS"
 STUB
-chmod +x "$TMP/bin/make" "$TMP/bin/minikube" "$TMP/bin/node"
+chmod +x "$TMP/bin/make" "$TMP/bin/minikube" "$TMP/bin/kubectl" "$TMP/bin/node"
 
 run_case() {
   local name="$1"; shift
-  TEST_CALLS="$TMP/$name.calls" TEST_IP_SEEN="$TMP/$name.ip" TEST_CASE="$name" \
+  TEST_CALLS="$TMP/$name.calls" TEST_IP_SEEN="$TMP/$name.ip" TEST_POD_SEEN="$TMP/$name.pod" TEST_CASE="$name" \
     TEST_PROFILE=clerum-restart-test-1234abcd \
     MINIKUBE_PROFILE=clerum-restart-test-1234abcd \
     CONTROL_API_REAL_PG_CONTEXT=clerum-restart-test-1234abcd \
@@ -144,6 +183,57 @@ grep -q '^branch-profile-pf$' "$TMP/stop-unobserved.calls" || fail 'unobserved s
 grep -q '^ISSUE628_RESTART_STOP_UNOBSERVED' "$TMP/stop-unobserved.out" || fail 'unobserved stop lacked its reason'
 printf 'PASS: restart restores the profile but fails when stopped state was unobserved\n'
 
+if run_case service-read-fails env; then fail 'service read failure accepted'; fi
+! grep -q '^branch-profile-pf$' "$TMP/service-read-fails.calls" || fail 'failed service read reached port-forwards'
+grep -q '^ISSUE628_RESTART_READINESS_FAILED' "$TMP/service-read-fails.out" || fail 'service read failure lacked its reason'
+printf 'PASS: restart fails closed if forwarded services cannot be inspected\n'
+
+if run_case optional-read-fails env; then fail 'optional service read failure accepted'; fi
+! grep -q '^branch-profile-pf$' "$TMP/optional-read-fails.calls" || fail 'optional service read failure reached port-forwards'
+grep -q '^ISSUE628_RESTART_READINESS_FAILED' "$TMP/optional-read-fails.out" || fail 'optional service read failure lacked its reason'
+printf 'PASS: an API error is not treated as an absent optional service\n'
+
+if run_case required-absent env; then fail 'absent required service accepted'; fi
+! grep -q '^branch-profile-pf$' "$TMP/required-absent.calls" || fail 'absent required service reached port-forwards'
+grep -q '^ISSUE628_RESTART_READINESS_FAILED' "$TMP/required-absent.out" || fail 'absent required service lacked its reason'
+printf 'PASS: restart rejects an absent required service\n'
+
+if run_case pod-read-fails env; then fail 'pod read failure accepted'; fi
+! grep -q '^branch-profile-pf$' "$TMP/pod-read-fails.calls" || fail 'failed pod read reached port-forwards'
+grep -q '^ISSUE628_RESTART_READINESS_FAILED' "$TMP/pod-read-fails.out" || fail 'pod read failure lacked its reason'
+printf 'PASS: restart fails closed if selected Pods cannot be inspected\n'
+
+if run_case malformed-pods env; then fail 'malformed Pod list accepted'; fi
+! grep -q '^branch-profile-pf$' "$TMP/malformed-pods.calls" || fail 'malformed Pod list reached port-forwards'
+grep -q '^ISSUE628_RESTART_READINESS_FAILED' "$TMP/malformed-pods.out" || fail 'malformed Pod list lacked its reason'
+printf 'PASS: restart rejects malformed Pod inventory\n'
+
+if ! run_case pending-pod env; then cat "$TMP/pending-pod.out" >&2; fail 'a Pod that became ready did not recover'; fi
+[[ "$(grep -c '^pod-check=control-plane/control-ui$' "$TMP/pending-pod.calls")" -ge 2 ]] || fail 'port-forwards did not wait for the pending Pod'
+printf 'PASS: restart waits for a forwarded Pod to become ready\n'
+
+if ! run_case terminating-pod env; then cat "$TMP/terminating-pod.out" >&2; fail 'a replacement Pod did not recover'; fi
+[[ "$(grep -c '^pod-check=control-plane/control-ui$' "$TMP/terminating-pod.calls")" -ge 2 ]] || fail 'terminating Pod was accepted as ready'
+printf 'PASS: restart waits for a non-terminating ready Pod\n'
+
+if ! run_case optional-absent env; then cat "$TMP/optional-absent.out" >&2; fail 'absent optional services prevented recovery'; fi
+grep -q '^branch-profile-pf$' "$TMP/optional-absent.calls" || fail 'absent optional services prevented port-forwards'
+! grep -q '^pod-check=profiles/profile-ui$' "$TMP/optional-absent.calls" || fail 'absent optional service was treated as present'
+printf 'PASS: restart skips only confirmed absent optional services\n'
+
+if ! run_case mcp-fallback env; then cat "$TMP/mcp-fallback.out" >&2; fail 'MCP service fallback did not recover'; fi
+grep -q '^pod-check=mcp-host/mcp-host$' "$TMP/mcp-fallback.calls" || fail 'alternate MCP service was not checked'
+! grep -q '^pod-check=mcp-host/chatllm$' "$TMP/mcp-fallback.calls" || fail 'absent preferred MCP service was treated as present'
+printf 'PASS: restart follows the profile MCP service selection\n'
+
+if run_case forward-fails env; then fail 'failed port-forward accepted'; fi
+grep -q '^ISSUE628_RESTART_FORWARD_FAILED' "$TMP/forward-fails.out" || fail 'failed port-forward lacked its reason'
+printf 'PASS: restart reports a failed port-forward\n'
+
+if run_case health-fails env; then fail 'failed profile health accepted'; fi
+grep -q '^ISSUE628_RESTART_HEALTH_FAILED' "$TMP/health-fails.out" || fail 'failed profile health lacked its reason'
+printf 'PASS: restart reports a failed health check\n'
+
 if ! run_case success env; then cat "$TMP/success.out" >&2; fail 'valid restart failed'; fi
 [[ "$(grep -c '^lease$' "$TMP/success.calls")" -eq 2 ]] || fail 'lease was not revalidated before stop and start'
 grep -q '^branch-profile-stop$' "$TMP/success.calls" || fail 'stop was not called'
@@ -153,7 +243,16 @@ grep -q '^RESTART_PHASE=stopped$' "$TMP/success.out" || fail 'stopped state was 
 grep -q '^RESTART_PHASE=running$' "$TMP/success.out" || fail 'running state was not recorded'
 printf '%s\n' lease branch-profile-health minikube-ip branch-profile-stop minikube-status \
   lease branch-profile-start minikube-ip branch-profile-pf branch-profile-health >"$TMP/expected-order"
-cmp -s "$TMP/expected-order" "$TMP/success.calls" || fail 'restart operations ran out of order'
+grep -v -E '^(service-check|pod-check)=' "$TMP/success.calls" >"$TMP/success.operations"
+cmp -s "$TMP/expected-order" "$TMP/success.operations" || fail 'restart operations ran out of order'
+for service in control-plane/control-ui profiles/profile-ui control-plane/control-api profiles/external-rest-api profiles/member-registration-service rpc-proxy/rpc-proxy registry/registry-api channels/workflow-approval-request-reader mcp-host/chatllm; do
+  grep -q "^pod-check=$service$" "$TMP/success.calls" || fail "forwarded service was not checked: $service"
+done
+awk '
+  /^branch-profile-pf$/ { if (!ready) invalid=1; forwarded=1; next }
+  /^(service-check|pod-check)=/ { if (forwarded) invalid=1; if (/^pod-check=/) ready=1 }
+  END { exit invalid || !forwarded }
+' "$TMP/success.calls" || fail 'port-forwards started before all readiness checks'
 printf 'PASS: restart preserves the lease and restores the owned profile\n'
 
 if env -i HOME="$HOME" PATH="$TMP/bin:$PATH" \
