@@ -1091,6 +1091,9 @@ jobs:
       - name: Test Plugin Workload SDK auth bootstrap policy
         run: bash scripts/tests/test-plugin-workload-sdk-auth-bootstrap.sh
 
+      - name: Test isolated Minikube prerequisite environment
+        run: bash scripts/tests/test-check-prereqs-isolated-dotenv.sh
+
       - name: Test GFS grant WorkflowRecipe seed rendering
         run: bash scripts/tests/test-seed-gfs-grant-workflow.sh
 

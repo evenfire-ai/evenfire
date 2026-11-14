@@ -225,7 +225,17 @@ echo
 . "$PROJECT_DIR/scripts/e2e/load-dotenv.sh"
 ENV_DIR="$(dotenv_canonical_dir "$PROJECT_DIR")"
 ENV_FILE="$ENV_DIR/.env"
-if [ ! -f "$ENV_FILE" ]; then
+if [ "${E2E_DISABLE_CANONICAL_DOTENV:-false}" = true ]; then
+  # Match the isolated test loader: never inspect the canonical .env and
+  # require the caller to provide its local test credential explicitly.
+  if [ -n "${ADMIN_PASSWORD:-}" ]; then
+    ok "isolated test environment: ADMIN_PASSWORD set"
+  else
+    err "isolated test environment requires ADMIN_PASSWORD"
+    MISSING=$((MISSING + 1))
+  fi
+  warn "isolated test environment uses local test integration configuration"
+elif [ ! -f "$ENV_FILE" ]; then
   err ".env     not found at ${ENV_FILE} — setup aborts in Step 1"
   if [ "$ENV_DIR" != "$PROJECT_DIR" ]; then
     echo    "        This is a Git worktree; setup reads the primary checkout's .env,"
