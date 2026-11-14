@@ -112,6 +112,7 @@ function makeConfig() {
     workflowStatefulSetMaxReplicas: 20,
     workflowStatefulSetMaxVolumeClaimTemplates: 4,
     workflowStatefulSetMaxPvcPreflightChecks: 80,
+    workflowOutputStorageSize: '1Gi',
   }
 }
 
@@ -1564,6 +1565,110 @@ describe('WorkflowReconciler — reconcile loop', () => {
     expect(result.workflowPhase).toBe('failed')
     expect(result.message).toContain('not managed by WRC for workflow output scope "test-wf"')
     expect(coreApi.createNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  describe('managed workflow output PVC size', () => {
+    async function createdPvcStorage(
+      output: WorkflowRecipeSpec['output'],
+      workflowOutputStorageSize: string,
+      steps?: WorkflowRecipeSpec['steps']
+    ): Promise<unknown> {
+      const coreApi = makeCoreApi() as ReturnType<typeof makeCoreApi>
+      const reconciler = new WorkflowReconciler(
+        makeDeps({
+          coreApi: coreApi as never,
+          config: {
+            ...makeConfig(),
+            enableSnippetRuntime: true,
+            snippetRunnerImage: 'clerum/workflow-snippet-runner:test',
+            workflowOutputStorageSize,
+          } as never,
+        })
+      )
+      await reconciler.reconcile(
+        'test-wf',
+        'uid-123',
+        'sandbox-recipes',
+        makeSpec({
+          ...(steps ? { agent: undefined, steps } : {}),
+          output,
+        })
+      )
+      // Liveness witness: the managed claim was created exactly once.
+      expect(coreApi.createNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
+      const [arg] = coreApi.createNamespacedPersistentVolumeClaim.mock.calls[0]
+      return arg.body.spec.resources.requests.storage
+    }
+
+    const snippetSteps = [{ id: 'snippet', run: snippetRun() }]
+
+    it('uses the operator default when the recipe sets no size', async () => {
+      await expect(createdPvcStorage({ destination: 'pvc' }, '1Gi', snippetSteps)).resolves.toBe(
+        '1Gi'
+      )
+    })
+
+    it('uses the operator-configured size when the recipe sets no size', async () => {
+      await expect(createdPvcStorage({ destination: 'pvc' }, '3Gi', snippetSteps)).resolves.toBe(
+        '3Gi'
+      )
+    })
+
+    it('prefers spec.output.storageSize over the operator size', async () => {
+      await expect(
+        createdPvcStorage({ destination: 'pvc', storageSize: '2Gi' }, '3Gi', snippetSteps)
+      ).resolves.toBe('2Gi')
+    })
+
+    it('sizes the managed claim of an agentic recipe without an output destination', async () => {
+      await expect(createdPvcStorage(undefined, '3Gi')).resolves.toBe('3Gi')
+    })
+  })
+
+  it('reuses an existing WRC-managed workflow output PVC without creating or resizing it', async () => {
+    const coreApi = makeCoreApi() as ReturnType<typeof makeCoreApi>
+    coreApi.createNamespacedPersistentVolumeClaim = vi.fn().mockRejectedValue({ code: 409 })
+    coreApi.readNamespacedPersistentVolumeClaim = vi.fn().mockResolvedValue({
+      metadata: {
+        name: 'test-wf-workflow-output',
+        labels: {
+          'clerum.io/managed-by': 'wrc',
+          'clerum.io/component': 'workflow-output',
+          'clerum.io/workflow-output-claim': 'test-wf-workflow-output',
+          'clerum.io/workflow-output-scope': 'test-wf',
+        },
+      },
+      spec: { resources: { requests: { storage: '256Mi' } } },
+      status: { phase: 'Bound' },
+    })
+    const reconciler = new WorkflowReconciler(
+      makeDeps({
+        coreApi: coreApi as never,
+        config: {
+          ...makeConfig(),
+          enableSnippetRuntime: true,
+          snippetRunnerImage: 'clerum/workflow-snippet-runner:test',
+          workflowOutputStorageSize: '3Gi',
+        } as never,
+      })
+    )
+
+    const result = await reconciler.reconcile(
+      'test-wf',
+      'uid-123',
+      'sandbox-recipes',
+      makeSpec({
+        agent: undefined,
+        steps: [{ id: 'snippet', run: snippetRun() }],
+        output: { destination: 'pvc' },
+      })
+    )
+
+    expect(coreApi.createNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
+    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalled()
+    expect(result.phase).not.toBe('failed')
+    // Liveness witness: the run went on to create its runtime pods on the reused claim.
+    expect(getCreatedSnippetRunnerPod(coreApi)).toBeDefined()
   })
 
   it('waits for a terminating explicit workflow output PVC before creating runtime pods', async () => {

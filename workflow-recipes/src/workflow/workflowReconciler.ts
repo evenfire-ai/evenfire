@@ -197,7 +197,6 @@ import {
 } from './types'
 import { validateWorkflowRecipeLimits } from './workflowLimits'
 
-const DEFAULT_WORKFLOW_OUTPUT_STORAGE_SIZE = '256Mi'
 const WORKFLOW_OUTPUT_PVC_DELETE_WAIT_MS = 30_000
 const WORKFLOW_OUTPUT_PVC_DELETE_POLL_MS = 1_000
 const MAX_WORKFLOW_OUTPUT_PREPARE_ATTEMPTS = 3
@@ -3247,7 +3246,7 @@ export class WorkflowReconciler {
         accessModes: ['ReadWriteOnce'],
         resources: {
           requests: {
-            storage: spec.output?.storageSize ?? DEFAULT_WORKFLOW_OUTPUT_STORAGE_SIZE,
+            storage: spec.output?.storageSize ?? this.deps.config.workflowOutputStorageSize,
           },
         },
       },

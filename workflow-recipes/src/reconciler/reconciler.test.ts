@@ -17081,6 +17081,7 @@ describe('WorkflowRecipeReconciler', () => {
         maxWorkflowSteps: 100,
         runtimeTokenTtlSeconds: 3600,
         runtimeTokenRefreshBeforeSeconds: 300,
+        workflowOutputStorageSize: '1Gi',
       },
       tokenFactory: {
         signWrcArtifactDeleteToken: vi.fn().mockResolvedValue('t'),

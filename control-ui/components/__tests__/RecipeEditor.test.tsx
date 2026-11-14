@@ -534,6 +534,32 @@ describe('RecipeEditor — render', () => {
     }
   })
 
+  it('leaves the PVC size of pvc templates to the operator default', () => {
+    vi.stubEnv('NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES', 'true')
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+
+    const templateSelect = screen.getByRole('combobox')
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    const labels = Array.from(templateSelect.querySelectorAll('option'))
+      .map(option => option.getAttribute('value') ?? '')
+      .filter(value => value !== '')
+    // Witness: every template is visible with local templates on.
+    expect(labels).toHaveLength(11)
+
+    let pvcTemplates = 0
+    for (const label of labels) {
+      fireEvent.change(templateSelect, { target: { value: label } })
+      const parsed = JSON.parse(textarea.value) as {
+        spec: { output?: Record<string, unknown> }
+      }
+      if (parsed.spec.output?.destination !== 'pvc') continue
+      pvcTemplates += 1
+      expect('storageSize' in parsed.spec.output, label).toBe(false)
+    }
+    // Witness: every pvc template was parsed and checked.
+    expect(pvcTemplates).toBe(6)
+  })
+
   it('renders textarea pre-filled with initial recipe name in edit mode', () => {
     const initial: WorkflowRecipeResource = {
       apiVersion: 'clerum.io/v1alpha1',

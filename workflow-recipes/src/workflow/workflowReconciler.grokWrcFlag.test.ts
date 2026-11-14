@@ -141,6 +141,7 @@ function createHarness(grokSubscriptionEnabled: boolean, pluginWorkloadSdkEnable
       maxWorkflowSteps: 100,
       runtimeTokenTtlSeconds: 3600,
       runtimeTokenRefreshBeforeSeconds: 300,
+      workflowOutputStorageSize: '1Gi',
       grokSubscriptionEnabled,
       pluginWorkloadSdkEnabled,
     },

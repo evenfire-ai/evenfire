@@ -38,6 +38,7 @@ describe('WRC code defaults against deploy/base', () => {
     process.env = { ...originalEnv }
     delete process.env.WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS
     delete process.env.WRC_EXTERNAL_EGRESS_MAX_ENTRIES
+    delete process.env.CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE
   })
 
   afterEach(() => {
@@ -53,6 +54,12 @@ describe('WRC code defaults against deploy/base', () => {
   it('the external-egress entry cap equals the deploy/base value', () => {
     expect(String(loadConfig().externalEgressMaxEntries)).toBe(
       baseValue('WRC_EXTERNAL_EGRESS_MAX_ENTRIES')
+    )
+  })
+
+  it('the managed output PVC size equals the deploy/base value', () => {
+    expect(loadConfig().workflowOutputStorageSize).toBe(
+      baseValue('CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE')
     )
   })
 })

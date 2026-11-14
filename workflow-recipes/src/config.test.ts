@@ -40,6 +40,7 @@ describe('loadConfig', () => {
     delete process.env.CLERUM_NETWORK_POLICY_ENFORCEMENT_MODE
     delete process.env.CLERUM_NETWORK_POLICY_ENFORCEMENT_CONFIRMED
     delete process.env.GOVERNED_TRACING_ENABLED
+    delete process.env.CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE
     const config = loadConfig()
     expect(config.port).toBe(8082)
     expect(config.namespace).toBe('mcp-server')
@@ -69,6 +70,29 @@ describe('loadConfig', () => {
     expect(config.workflowStatefulSetMaxReplicas).toBe(20)
     expect(config.workflowStatefulSetMaxVolumeClaimTemplates).toBe(4)
     expect(config.workflowStatefulSetMaxPvcPreflightChecks).toBe(80)
+    expect(config.workflowOutputStorageSize).toBe('1Gi')
+  })
+
+  describe('CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE', () => {
+    it('defaults to 1Gi when unset or empty', () => {
+      delete process.env.CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE
+      expect(loadConfig().workflowOutputStorageSize).toBe('1Gi')
+      process.env.CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE = ''
+      expect(loadConfig().workflowOutputStorageSize).toBe('1Gi')
+    })
+
+    it.each(['2Gi', '512Mi'])('returns %s as given', value => {
+      process.env.CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE = value
+      expect(loadConfig().workflowOutputStorageSize).toBe(value)
+    })
+
+    it.each(['0Gi', '0Mi', '01Gi', '1G', '1Ti', '2gi', ' 2Gi', 'abc'])(
+      'fails startup on %j',
+      value => {
+        process.env.CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE = value
+        expect(() => loadConfig()).toThrow(/CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE/)
+      }
+    )
   })
 
   it('should read CLERUM_OPERATOR_PORT from env (Risk 1.6)', () => {

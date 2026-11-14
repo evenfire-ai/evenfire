@@ -185,6 +185,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       maxWorkflowSteps: 100,
       runtimeTokenTtlSeconds: 3600,
       runtimeTokenRefreshBeforeSeconds: 300,
+      workflowOutputStorageSize: '1Gi',
     },
     tokenFactory: mockTokenFactory,
     pluginWorkloadSdkRevocationClient: {
@@ -2229,6 +2230,7 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         maxWorkflowSteps: 100,
         runtimeTokenTtlSeconds: 3600,
         runtimeTokenRefreshBeforeSeconds: 300,
+        workflowOutputStorageSize: '1Gi',
         pluginWorkloadSdkEnabled: true,
       },
       tokenFactory: mockTokenFactory,
