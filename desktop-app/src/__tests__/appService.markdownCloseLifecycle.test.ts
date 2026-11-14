@@ -1,9 +1,16 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
+import {
+  cleanupNativeCommitTestHarness,
+  createNativeCommitTestHarness,
+} from '../../testSupport/appService.nativeCommitTestHarness.js'
+import { testLoginResult } from '../../testSupport/authTestFixtures.js'
 import { AppService } from '../appService'
 
 const binding = {
   requestId: 'tab-a:close-1',
+  documentEpoch: '00000000-0000-4000-8000-000000000042',
+  sequence: 1,
   tabId: 'tab-a',
   sessionGeneration: 0,
   ownerIdentities: ['owner-a'],
@@ -11,6 +18,7 @@ const binding = {
 
 function serviceWithCloseApi() {
   const service = new AppService() as any
+  service.beginMarkdownTabCloseDocument(42, binding.documentEpoch)
   return {
     authorize: () => service.authorizeMarkdownTabClose(42, binding),
     status: (candidate = binding, senderId = 42) =>
@@ -25,6 +33,8 @@ function serviceWithCloseApi() {
 type CloseState = 'unknown' | 'granted' | 'denied' | 'consumed' | 'cancelled' | 'expired'
 type CloseModel = { state: CloseState; otherSenderState: CloseState }
 type CloseReal = { service: any }
+
+afterEach(cleanupNativeCommitTestHarness)
 
 class Authorize implements fc.Command<CloseModel, CloseReal> {
   check() {
@@ -127,6 +137,8 @@ describe('AppService Markdown tab close request lifecycle', () => {
     fc.assert(
       fc.property(fc.commands(commands, { maxCommands: 40 }), generated => {
         const service = new AppService() as any
+        service.beginMarkdownTabCloseDocument(42, binding.documentEpoch)
+        service.beginMarkdownTabCloseDocument(43, binding.documentEpoch)
         fc.modelRun(
           () => ({
             model: { state: 'unknown' as CloseState, otherSenderState: 'unknown' as CloseState },
@@ -144,6 +156,7 @@ describe('AppService Markdown tab close request lifecycle', () => {
     await fc.assert(
       fc.asyncProperty(fc.scheduler(), async scheduler => {
         const service = new AppService() as any
+        service.beginMarkdownTabCloseDocument(42, binding.documentEpoch)
         const order: string[] = []
         let authorizeState: CloseState | undefined
         let cancelState: CloseState | undefined
@@ -230,7 +243,56 @@ describe('AppService Markdown tab close request lifecycle', () => {
     expect(close.status(reboundOwner)).toBe('unknown')
     expect(close.cancel(reboundOwner)).toBe('unknown')
     expect(close.consume(reboundOwner)).toBe('unknown')
+    const reboundSequence = { ...binding, sequence: binding.sequence + 1 }
+    expect(close.status(reboundSequence)).toBe('unknown')
+    expect(close.cancel(reboundSequence)).toBe('unknown')
+    expect(close.consume(reboundSequence)).toBe('unknown')
+    const reboundGeneration = { ...binding, sessionGeneration: binding.sessionGeneration + 1 }
+    expect(close.status(reboundGeneration)).toBe('unknown')
+    expect(close.cancel(reboundGeneration)).toBe('unknown')
+    expect(close.consume(reboundGeneration)).toBe('unknown')
     expect(close.status()).toBe('granted')
     expect(close.consume()).toBe('consumed')
+  })
+
+  it('keeps one idempotent terminal receipt and advances only on the exact next sequence', () => {
+    const service = new AppService() as any
+    service.beginMarkdownTabCloseDocument(42, binding.documentEpoch)
+    expect(service.authorizeMarkdownTabClose(42, binding)).toBe('granted')
+    expect(service.consumeMarkdownTabClosePermit(42, binding)).toBe('consumed')
+    expect(service.acknowledgeMarkdownTabClose(42, binding)).toBe(2)
+    expect(service.acknowledgeMarkdownTabClose(42, binding)).toBe(2)
+    expect(service.authorizeMarkdownTabClose(42, binding)).toBe('consumed')
+
+    const gap = { ...binding, requestId: 'tab-a:close-3', sequence: 3 }
+    expect(service.authorizeMarkdownTabClose(42, gap)).toBe('unknown')
+    expect(service.markdownTabCloseDocuments.get(42).slot.kind).toBe('ack')
+
+    const next = { ...binding, requestId: 'tab-a:close-2', sequence: 2 }
+    expect(service.authorizeMarkdownTabClose(42, next)).toBe('granted')
+    expect(service.getMarkdownTabClosePermitStatus(42, binding)).toBe('unknown')
+    expect(service.getMarkdownTabClosePermitStatus(42, next)).toBe('granted')
+    service.retireMarkdownTabCloseDocument(42, binding.documentEpoch)
+    expect(service.markdownTabCloseDocuments.size).toBe(0)
+    service.beginMarkdownTabCloseDocument(42, '00000000-0000-4000-8000-000000000043')
+    expect(service.authorizeMarkdownTabClose(42, next)).toBe('unknown')
+  })
+
+  it('the real logout retires the outgoing renderer close document', async () => {
+    const { service } = await createNativeCommitTestHarness()
+    service.authClient = {
+      googleLogin: vi.fn().mockResolvedValue(testLoginResult()),
+    }
+    await service.googleLogin('fixture-login')
+    const closeService = service as any
+    closeService.beginMarkdownTabCloseDocument(42, binding.documentEpoch)
+    const currentBinding = { ...binding, sessionGeneration: closeService.sessionGeneration }
+    expect(closeService.authorizeMarkdownTabClose(42, currentBinding)).toBe('granted')
+    closeService.reserveSessionPreclear('logout')
+    expect(closeService.getMarkdownTabClosePermitStatus(42, currentBinding)).toBe('cancelled')
+    expect(closeService.consumeMarkdownTabClosePermit(42, currentBinding)).toBe('cancelled')
+    await service.logout()
+    expect(closeService.markdownTabCloseDocuments.size).toBe(0)
+    expect(closeService.getMarkdownTabClosePermitStatus(42, currentBinding)).toBe('unknown')
   })
 })

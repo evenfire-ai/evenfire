@@ -8,7 +8,7 @@ import { testLoginResult } from '../../testSupport/authTestFixtures.js'
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService Markdown close and auth ordering', () => {
-  it('keeps a close-first grant consumable after a failed logout recovers the same session', async () => {
+  it('does not revive a close grant canceled by a failed logout', async () => {
     const { service } = await createNativeCommitTestHarness()
     const closeService = service as any
     const login = testLoginResult()
@@ -21,10 +21,13 @@ describe('AppService Markdown close and auth ordering', () => {
     const sessionGeneration = closeService.getSessionGeneration()
     const binding = {
       requestId: 'markdown-tab:close-first',
+      documentEpoch: '11111111-1111-4111-8111-111111111111',
+      sequence: 1,
       tabId: 'markdown-tab',
       sessionGeneration,
       ownerIdentities: ['owner-17'],
     }
+    expect(closeService.beginMarkdownTabCloseDocument(42, binding.documentEpoch)).toBe(true)
     expect(closeService.authorizeMarkdownTabClose(42, binding)).toBe('granted')
 
     service.tokenStore.clearSessionToken = vi
@@ -37,9 +40,9 @@ describe('AppService Markdown close and auth ordering', () => {
 
     expect(service.getCachedUserId()).toBe(login.me.id)
     expect(cancelled).toHaveBeenCalledOnce()
-    expect(closeService.getMarkdownTabClosePermitStatus(42, binding)).toBe('granted')
-    expect(closeService.cancelMarkdownTabClosePermit(42, binding)).toBe('granted')
-    expect(closeService.consumeMarkdownTabClosePermit(42, binding)).toBe('consumed')
+    expect(closeService.getMarkdownTabClosePermitStatus(42, binding)).toBe('cancelled')
+    expect(closeService.cancelMarkdownTabClosePermit(42, binding)).toBe('cancelled')
+    expect(closeService.consumeMarkdownTabClosePermit(42, binding)).toBe('cancelled')
   })
 
   it('denies and retains a close request when main session preclear wins first', async () => {
@@ -64,11 +67,14 @@ describe('AppService Markdown close and auth ordering', () => {
     await vi.waitFor(() => expect(notices).toHaveLength(1))
     const binding = {
       requestId: 'markdown-tab:auth-first',
+      documentEpoch: '22222222-2222-4222-8222-222222222222',
+      sequence: 1,
       tabId: 'markdown-tab',
       sessionGeneration: notices[0]!.sessionGeneration,
       ownerIdentities: ['owner-18'],
     }
 
+    expect(closeService.beginMarkdownTabCloseDocument(42, binding.documentEpoch)).toBe(true)
     expect(closeService.authorizeMarkdownTabClose(42, binding)).toBe('denied')
     expect(closeService.getMarkdownTabClosePermitStatus(42, binding)).toBe('denied')
     expect(closeService.consumeMarkdownTabClosePermit(42, binding)).toBe('denied')

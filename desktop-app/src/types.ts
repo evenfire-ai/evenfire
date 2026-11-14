@@ -30,6 +30,8 @@ export type MarkdownTabCloseState =
 
 export type MarkdownTabCloseBinding = Readonly<{
   requestId: string
+  documentEpoch: string
+  sequence: number
   tabId: string
   sessionGeneration: number
   ownerIdentities: readonly string[]

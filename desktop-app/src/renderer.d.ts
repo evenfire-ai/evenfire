@@ -73,6 +73,16 @@ declare global {
       }
       auth: {
         getSessionState: () => Promise<SessionState>
+        getRendererSessionView: () => Promise<{
+          documentEpoch: string
+          receiptId: string
+          state: SessionState
+        } | null>
+        commitRendererSessionView: (receipt: {
+          documentEpoch: string
+          receiptId: string
+        }) => Promise<boolean>
+        getMarkdownTabCloseDocumentEpoch: () => string | null
         getSessionGeneration: () => Promise<number>
         getDependenciesHealth: () => Promise<{
           externalRestApi: { ok: boolean; detail?: string }
@@ -137,6 +147,7 @@ declare global {
         consumeMarkdownTabClosePermit: (
           binding: MarkdownTabCloseBinding
         ) => Promise<MarkdownTabCloseState>
+        acknowledgeMarkdownTabClose: (binding: MarkdownTabCloseBinding) => Promise<number | null>
         onSessionPreclear: (
           callback: (notice: {
             transitionId: number
@@ -153,6 +164,7 @@ declare global {
         ) => () => void
         onExternalLogout: (callback: () => void) => () => void
         onSessionCleared: (callback: () => void) => () => void
+        onMarkdownDraftLost: (callback: () => void) => () => void
         logout: () => Promise<{ ok: true; sessionGeneration: number }>
       }
       team: {
@@ -755,7 +767,10 @@ declare global {
       }
       app: {
         openUrl: (url: string) => Promise<void>
-        rendererReady: () => Promise<void>
+        rendererReady: () => Promise<{
+          documentEpoch: string
+          sessionTransitionRevealPending: boolean
+        }>
       }
       window: {
         getVisibility: () => Promise<{ visible: boolean; focused: boolean }>

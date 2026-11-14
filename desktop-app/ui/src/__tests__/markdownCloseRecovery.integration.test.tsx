@@ -552,4 +552,98 @@ describe('App Markdown close recovery', () => {
     ).toBe(true)
     restoreBridge()
   })
+
+  it('does not dequeue a close when acknowledgement settles under an auth-neutral barrier', async () => {
+    let acknowledgeFirst!: (sequence: number) => void
+    const restoreBridge = installAuthBridge({
+      acknowledgeMarkdownTabClose: vi.fn(({ sequence }: { sequence: number }) =>
+        sequence === 1
+          ? new Promise<number>(resolve => {
+              acknowledgeFirst = resolve
+            })
+          : Promise.resolve(sequence + 1)
+      ),
+    })
+    const firstTabId = 'markdown-neutral-first'
+    const queuedTabId = 'markdown-neutral-queued'
+    const firstUri = 'gfs://main/markdown-neutral-first'
+    const queuedUri = 'gfs://main/markdown-neutral-queued'
+    const firstTab = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: firstTabId,
+      title: 'first.md',
+      gfsUri: firstUri,
+      fileKind: 'markdown',
+      byteLength: 16,
+    })
+    const tabs = openPreviewTab(firstTab, {
+      id: queuedTabId,
+      title: 'queued.md',
+      gfsUri: queuedUri,
+      fileKind: 'markdown',
+      byteLength: 16,
+    })
+    harness.controller = makeController(tabs)
+    const owner = harness.controller.markdownDraftOwner
+    for (const [tabId, gfsUri] of [
+      [firstTabId, firstUri],
+      [queuedTabId, queuedUri],
+    ] as const) {
+      const binding = {
+        principalOwner: harness.controller.markdownPrincipalOwner!,
+        scopeKey: 'integration-principal-owner/team-a/default',
+        tabId,
+        gfsUri,
+      }
+      owner.open(binding, { sessionGeneration: 1 })
+      const read = owner.beginStableRead(binding)!
+      owner.completeStableRead(read, { content: `saved ${tabId}`, version: 1, stable: true })
+      const capability = owner.beginCapabilityRefresh(binding)!
+      owner.completeCapabilityRefresh(capability, true)
+      if (tabId === firstTabId) {
+        owner.beginEdit(binding)
+        owner.type(binding, `unsaved ${tabId}`)
+      }
+    }
+
+    render(
+      <QueryClientProvider client={desktopQueryClient}>
+        <App />
+      </QueryClientProvider>
+    )
+    const notice = {
+      transitionId: 100,
+      sessionGeneration: 1,
+      reason: 'logout' as const,
+    }
+    const authorize = window.clerum.auth.authorizeMarkdownTabClose
+    fireEvent.click(screen.getByRole('button', { name: 'Close first.md' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Discard and Close' }))
+    await waitFor(() => expect(authorize).toHaveBeenCalledOnce())
+    await waitFor(() =>
+      expect(harness.controller.workspaceTabs.tabs.some(tab => tab.id === firstTabId)).toBe(false)
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close queued.md' }))
+    expect(authorize).toHaveBeenCalledOnce()
+
+    act(() => harness.onPreclear?.(notice))
+    expect(await screen.findByTestId('markdown-auth-neutral-surface')).toBeTruthy()
+    await act(async () => {
+      acknowledgeFirst(2)
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(authorize).toHaveBeenCalledOnce()
+    expect(harness.controller.workspaceTabs.tabs.some(tab => tab.id === queuedTabId)).toBe(true)
+
+    await act(async () => {
+      harness.onPreclearCancelled?.(notice)
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(owner.getAuthBarrier()).toBeNull()
+    await waitFor(() => expect(authorize).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(harness.controller.workspaceTabs.tabs.some(tab => tab.id === queuedTabId)).toBe(false)
+    )
+    restoreBridge()
+  })
 })

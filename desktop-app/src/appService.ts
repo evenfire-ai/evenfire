@@ -886,6 +886,11 @@ export interface AppServiceOptions {
   onSessionPreclear?: (notice: SessionPreclearNotice) => boolean | void
   onSessionPreclearTimeout?: (notice: SessionPreclearNotice) => void
   onSessionPreclearCancelled?: (notice: SessionPreclearNotice) => void
+  onSessionPreclearRecoveryRequired?: (
+    notice: SessionPreclearNotice,
+    state: { attemptsRemaining: number; retryAvailable: boolean }
+  ) => void
+  onSessionPreclearRetired?: (notice: SessionPreclearNotice) => void
 }
 
 export type SessionPreclearReason = 'logout' | 'session-ended' | 'environment-change'
@@ -896,20 +901,52 @@ export interface SessionPreclearNotice {
   reason: SessionPreclearReason
 }
 
+type MarkdownTabCloseStoredBinding = Omit<MarkdownTabCloseBinding, 'ownerIdentities'>
+
 type MarkdownTabCloseRequest = {
-  binding: MarkdownTabCloseBinding
+  binding: MarkdownTabCloseStoredBinding
   ownerIdentityDigest: string
   state: Exclude<MarkdownTabCloseState, 'unknown'>
   expiresAt: number
 }
 
+type MarkdownTabCloseReceipt = {
+  binding: MarkdownTabCloseStoredBinding
+  ownerIdentityDigest: string
+  terminalState: Exclude<MarkdownTabCloseState, 'unknown' | 'pending' | 'granted'>
+  nextSequence: number
+}
+
+type MarkdownTabCloseDocument = {
+  epoch: string
+  nextSequence: number
+  slot:
+    | { kind: 'active'; request: MarkdownTabCloseRequest }
+    | { kind: 'ack'; receipt: MarkdownTabCloseReceipt }
+    | null
+}
+
 interface PendingSessionPreclear {
   notice: SessionPreclearNotice
+  sessionToken: string
+  sessionTokenFingerprint: string
+  principalId: string
+  teamId: string
+  environmentKey: string
   promise: Promise<boolean>
   resolve: (acknowledged: boolean) => void
   settled: boolean
   logoutQueued: boolean
+  recoveryAttempts: number
+  recoveryAttemptId: number
+  recoveryChecking: boolean
+  recoveryTerminal: boolean
+  recoveryExited: boolean
 }
+
+const SESSION_PRECLEAR_RECOVERY_DEADLINE_MS = 3_000
+const SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS = 3
+const SESSION_PRECLEAR_MAX_UNRESOLVED_READS = 3
 
 export class AppService {
   private readonly authClient = new AuthClient()
@@ -930,6 +967,9 @@ export class AppService {
   private readonly onSessionPreclear?: (notice: SessionPreclearNotice) => boolean | void
   private readonly onSessionPreclearTimeout?: (notice: SessionPreclearNotice) => void
   private readonly onSessionPreclearCancelled?: (notice: SessionPreclearNotice) => void
+  private readonly onSessionPreclearRecoveryRequired?: AppServiceOptions['onSessionPreclearRecoveryRequired']
+  private readonly onSessionPreclearRetired?: AppServiceOptions['onSessionPreclearRetired']
+  private readonly unresolvedSessionPreclearReads = new Set<symbol>()
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -989,7 +1029,7 @@ export class AppService {
   private nextSessionPreclearId = 0
   private pendingSessionPreclear: PendingSessionPreclear | null = null
   private pendingLogout: Promise<number> | null = null
-  private readonly markdownTabCloseRequests = new Map<string, MarkdownTabCloseRequest>()
+  private readonly markdownTabCloseDocuments = new Map<number, MarkdownTabCloseDocument>()
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
@@ -1046,6 +1086,8 @@ export class AppService {
     this.onSessionPreclear = options.onSessionPreclear
     this.onSessionPreclearTimeout = options.onSessionPreclearTimeout
     this.onSessionPreclearCancelled = options.onSessionPreclearCancelled
+    this.onSessionPreclearRecoveryRequired = options.onSessionPreclearRecoveryRequired
+    this.onSessionPreclearRetired = options.onSessionPreclearRetired
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1642,6 +1684,7 @@ export class AppService {
 
   private clearAuthenticatedSessionState(): void {
     this.sessionGeneration += 1
+    this.markdownTabCloseDocuments.clear()
     this.updateEntityChangeSessionToken(null)
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = true
@@ -1686,12 +1729,23 @@ export class AppService {
         sessionGeneration: this.sessionGeneration,
         reason,
       },
+      sessionToken: this.sessionToken,
+      sessionTokenFingerprint: createHash('sha256').update(this.sessionToken).digest('hex'),
+      principalId: this.me.id,
+      teamId: String(this.me.teamId || ''),
+      environmentKey: getActiveEnvKey(),
       promise,
       resolve,
       settled: false,
       logoutQueued: reason === 'logout',
+      recoveryAttempts: 0,
+      recoveryAttemptId: 0,
+      recoveryChecking: false,
+      recoveryTerminal: false,
+      recoveryExited: false,
     }
     this.pendingSessionPreclear = pending
+    this.cancelMarkdownTabCloseGrantsForPreclear()
 
     // In tests and startup paths without an authenticated renderer, there is no
     // visible surface to neutralize. Production main always supplies a sender.
@@ -1750,10 +1804,7 @@ export class AppService {
       pending.notice.sessionGeneration === this.sessionGeneration
     )
       return
-    this.pendingSessionPreclear = null
-    pending.settled = true
-    pending.resolve(false)
-    this.onSessionPreclearCancelled?.(pending.notice)
+    this.beginSessionPreclearRecovery(pending)
   }
 
   private releaseSessionPreclear(
@@ -1762,6 +1813,209 @@ export class AppService {
   ): void {
     if (this.pendingSessionPreclear !== pending) return
     if (pending.logoutQueued && releasingReason !== 'logout') return
+    if (!this.onSessionPreclear) {
+      this.finishSessionPreclearUnchanged(pending)
+      return
+    }
+    this.beginSessionPreclearRecovery(pending)
+  }
+
+  /** Retry the server-backed authority check after an unreadable preclear recovery. */
+  retrySessionPreclearRecovery(notice: SessionPreclearNotice): boolean {
+    const pending = this.pendingSessionPreclear
+    if (
+      !pending ||
+      pending.notice.transitionId !== notice.transitionId ||
+      pending.notice.sessionGeneration !== notice.sessionGeneration ||
+      pending.recoveryTerminal ||
+      pending.recoveryExited ||
+      pending.recoveryChecking ||
+      pending.recoveryAttempts >= SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS ||
+      this.unresolvedSessionPreclearReads.size >= SESSION_PRECLEAR_MAX_UNRESOLVED_READS
+    )
+      return false
+    this.beginSessionPreclearRecovery(pending)
+    return true
+  }
+
+  /** End an unresolved recovery without revealing its captured renderer. */
+  exitSessionPreclearRecovery(notice: SessionPreclearNotice): boolean {
+    const pending = this.pendingSessionPreclear
+    if (
+      !pending ||
+      pending.notice.transitionId !== notice.transitionId ||
+      pending.notice.sessionGeneration !== notice.sessionGeneration ||
+      pending.recoveryTerminal
+    )
+      return false
+    pending.recoveryExited = true
+    pending.recoveryTerminal = true
+    this.pendingSessionPreclear = null
+    pending.settled = true
+    pending.resolve(false)
+    return true
+  }
+
+  private beginSessionPreclearRecovery(pending: PendingSessionPreclear): void {
+    if (
+      this.pendingSessionPreclear !== pending ||
+      pending.recoveryTerminal ||
+      pending.recoveryExited ||
+      pending.recoveryChecking
+    )
+      return
+    if (
+      pending.recoveryAttempts >= SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS ||
+      this.unresolvedSessionPreclearReads.size >= SESSION_PRECLEAR_MAX_UNRESOLVED_READS
+    ) {
+      this.onSessionPreclearRecoveryRequired?.(pending.notice, {
+        attemptsRemaining: SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS - pending.recoveryAttempts,
+        retryAvailable: false,
+      })
+      return
+    }
+
+    const attemptId = ++pending.recoveryAttemptId
+    pending.recoveryAttempts += 1
+    pending.recoveryChecking = true
+    const readId = Symbol('session-preclear-authority-read')
+    this.unresolvedSessionPreclearReads.add(readId)
+    const controller = new AbortController()
+    let timedOut = false
+    let settled = false
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const request = this.authClient.getMe(pending.sessionToken, controller.signal).then(
+      me => ({ kind: 'ok' as const, me }),
+      error => ({ kind: 'error' as const, error })
+    )
+    void request.then(() => {
+      settled = true
+      this.unresolvedSessionPreclearReads.delete(readId)
+      const recovery = this.pendingSessionPreclear
+      if (timedOut && recovery && !recovery.recoveryTerminal && !recovery.recoveryExited) {
+        this.publishSessionPreclearRecoveryRequired(recovery)
+      }
+    })
+    const timeout = new Promise<{ kind: 'timeout' }>(resolve => {
+      timeoutId = setTimeout(
+        () => resolve({ kind: 'timeout' }),
+        SESSION_PRECLEAR_RECOVERY_DEADLINE_MS
+      )
+    })
+
+    void Promise.race([request, timeout]).then(result => {
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+      if (
+        this.pendingSessionPreclear !== pending ||
+        pending.recoveryTerminal ||
+        pending.recoveryExited ||
+        pending.recoveryAttemptId !== attemptId
+      )
+        return
+      if (result.kind === 'timeout') {
+        timedOut = true
+        pending.recoveryChecking = false
+        controller.abort()
+        this.publishSessionPreclearRecoveryRequired(pending)
+        return
+      }
+      if (!settled) {
+        // The wrapped request settles before this continuation; this is defensive.
+        return
+      }
+      if (result.kind === 'error') {
+        pending.recoveryChecking = false
+        if (AppService.isSessionEndedByMe(result.error)) {
+          this.retireSessionPreclearAuthority(pending)
+        } else {
+          this.publishSessionPreclearRecoveryRequired(pending)
+        }
+        return
+      }
+      pending.recoveryChecking = false
+      this.resolveSessionPreclearAuthority(pending, result.me)
+    })
+  }
+
+  private publishSessionPreclearRecoveryRequired(pending: PendingSessionPreclear): void {
+    this.onSessionPreclearRecoveryRequired?.(pending.notice, {
+      attemptsRemaining: SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS - pending.recoveryAttempts,
+      retryAvailable:
+        !pending.recoveryChecking &&
+        pending.recoveryAttempts < SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS &&
+        this.unresolvedSessionPreclearReads.size < SESSION_PRECLEAR_MAX_UNRESOLVED_READS,
+    })
+  }
+
+  private resolveSessionPreclearAuthority(pending: PendingSessionPreclear, me: SessionMe): void {
+    const currentMe = this.me
+    const currentToken = this.sessionToken
+    const currentEnvironmentKey = getActiveEnvKey()
+    const currentMatchesCaptured =
+      currentToken !== null &&
+      createHash('sha256').update(currentToken).digest('hex') === pending.sessionTokenFingerprint &&
+      currentMe?.id === pending.principalId &&
+      String(currentMe.teamId || '') === pending.teamId &&
+      currentEnvironmentKey === pending.environmentKey
+    if (!me?.id || me.teamId === undefined) {
+      this.publishSessionPreclearRecoveryRequired(pending)
+      return
+    }
+    if (
+      currentMatchesCaptured &&
+      me.id === pending.principalId &&
+      String(me.teamId || '') === pending.teamId
+    ) {
+      this.finishSessionPreclearUnchanged(pending)
+      return
+    }
+    if (currentMatchesCaptured) {
+      pending.recoveryTerminal = true
+      pending.settled = true
+      pending.resolve(false)
+      this.clearAuthenticatedSessionState()
+      this.onSessionCleared?.()
+    } else {
+      pending.recoveryTerminal = true
+      if (this.pendingSessionPreclear === pending) this.pendingSessionPreclear = null
+      pending.settled = true
+      pending.resolve(false)
+      this.onSessionPreclearRetired?.(pending.notice)
+    }
+  }
+
+  private retireSessionPreclearAuthority(pending: PendingSessionPreclear): void {
+    const currentToken = this.sessionToken
+    const currentMe = this.me
+    const stillCaptured =
+      currentToken !== null &&
+      createHash('sha256').update(currentToken).digest('hex') === pending.sessionTokenFingerprint &&
+      currentMe?.id === pending.principalId &&
+      String(currentMe.teamId || '') === pending.teamId
+    pending.recoveryTerminal = true
+    if (stillCaptured) {
+      pending.settled = true
+      pending.resolve(false)
+      this.clearAuthenticatedSessionState()
+      this.onSessionCleared?.()
+      return
+    }
+    if (this.pendingSessionPreclear === pending) this.pendingSessionPreclear = null
+    pending.settled = true
+    pending.resolve(false)
+    this.onSessionPreclearRetired?.(pending.notice)
+  }
+
+  private finishSessionPreclearUnchanged(pending: PendingSessionPreclear): void {
+    if (this.pendingSessionPreclear !== pending || pending.recoveryTerminal) return
+    try {
+      if (this.sessionToken && this.me) this.activateGfsAuthScope()
+    } catch {
+      pending.recoveryChecking = false
+      this.publishSessionPreclearRecoveryRequired(pending)
+      return
+    }
+    pending.recoveryTerminal = true
     this.pendingSessionPreclear = null
     pending.settled = true
     pending.resolve(false)
@@ -1806,6 +2060,28 @@ export class AppService {
   }
 
   /** Main-process linearization point for a renderer tab-close attempt. */
+  beginMarkdownTabCloseDocument(senderWebContentsId: number, documentEpoch: string): boolean {
+    if (
+      !Number.isSafeInteger(senderWebContentsId) ||
+      senderWebContentsId <= 0 ||
+      typeof documentEpoch !== 'string' ||
+      !/^[a-f0-9-]{36}$/i.test(documentEpoch)
+    )
+      return false
+    this.markdownTabCloseDocuments.set(senderWebContentsId, {
+      epoch: documentEpoch,
+      nextSequence: 1,
+      slot: null,
+    })
+    return true
+  }
+
+  retireMarkdownTabCloseDocument(senderWebContentsId: number, documentEpoch?: string): void {
+    const document = this.markdownTabCloseDocuments.get(senderWebContentsId)
+    if (!document || (documentEpoch !== undefined && document.epoch !== documentEpoch)) return
+    this.markdownTabCloseDocuments.delete(senderWebContentsId)
+  }
+
   authorizeMarkdownTabClose(
     senderWebContentsId: number,
     input: MarkdownTabCloseBinding
@@ -1814,16 +2090,25 @@ export class AppService {
     if (!binding || !Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0)
       return 'denied'
 
-    const key = this.markdownTabCloseRequestKey(senderWebContentsId, binding.requestId)
-    const existing = this.markdownTabCloseRequests.get(key)
-    if (existing)
-      return this.sameMarkdownTabCloseBinding(existing, binding) ? existing.state : 'unknown'
+    const document = this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    if (!document) return 'unknown'
+    const current = this.ensureMarkdownTabCloseSequence(document, binding)
+    if (current === 'invalid') return 'unknown'
+    if (current && typeof current === 'object' && current.kind === 'replay')
+      return current.terminalState
+    if (current && typeof current === 'object' && current.kind === 'active') {
+      this.expireMarkdownTabCloseRequest(current.request)
+      return current.request.state
+    }
 
     const state =
       this.pendingSessionPreclear || binding.sessionGeneration !== this.sessionGeneration
         ? 'denied'
         : 'granted'
-    this.markdownTabCloseRequests.set(key, this.createMarkdownTabCloseRequest(binding, state))
+    document.slot = {
+      kind: 'active',
+      request: this.createMarkdownTabCloseRequest(binding, state),
+    }
     return state
   }
 
@@ -1831,10 +2116,17 @@ export class AppService {
     senderWebContentsId: number,
     input: MarkdownTabCloseBinding
   ): MarkdownTabCloseState {
-    const request = this.findMarkdownTabCloseRequest(senderWebContentsId, input)
-    if (!request) return 'unknown'
-    this.expireMarkdownTabCloseRequest(request)
-    return request.state
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    const document = binding && this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    if (!binding || !document) return 'unknown'
+    const slot = document.slot
+    if (slot?.kind === 'ack' && this.sameMarkdownTabCloseReceipt(slot.receipt, binding)) {
+      return slot.receipt.terminalState
+    }
+    if (slot?.kind !== 'active' || !this.sameMarkdownTabCloseBinding(slot.request, binding))
+      return 'unknown'
+    this.expireMarkdownTabCloseRequest(slot.request)
+    return slot.request.state
   }
 
   cancelMarkdownTabClosePermit(
@@ -1845,20 +2137,25 @@ export class AppService {
     if (!binding || !Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0)
       return 'unknown'
 
-    const key = this.markdownTabCloseRequestKey(senderWebContentsId, binding.requestId)
-    const request = this.markdownTabCloseRequests.get(key)
-    if (!request) {
-      this.markdownTabCloseRequests.set(
-        key,
-        this.createMarkdownTabCloseRequest(binding, 'cancelled')
-      )
+    const document = this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    if (!document) return 'unknown'
+    const current = this.ensureMarkdownTabCloseSequence(document, binding)
+    if (current === 'invalid') return 'unknown'
+    if (current && typeof current === 'object' && current.kind === 'replay')
+      return current.terminalState
+    if (!current) {
+      document.slot = {
+        kind: 'active',
+        request: this.createMarkdownTabCloseRequest(binding, 'cancelled'),
+      }
       return 'cancelled'
     }
-    if (!this.sameMarkdownTabCloseBinding(request, binding)) return 'unknown'
+    if (current.kind !== 'active' || !this.sameMarkdownTabCloseBinding(current.request, binding))
+      return 'unknown'
 
-    this.expireMarkdownTabCloseRequest(request)
-    if (request.state === 'pending') request.state = 'cancelled'
-    return request.state
+    this.expireMarkdownTabCloseRequest(current.request)
+    if (current.request.state === 'pending') current.request.state = 'cancelled'
+    return current.request.state
   }
 
   consumeMarkdownTabClosePermit(
@@ -1868,14 +2165,51 @@ export class AppService {
     const request = this.findMarkdownTabCloseRequest(senderWebContentsId, input)
     if (!request) return 'unknown'
     this.expireMarkdownTabCloseRequest(request)
-    if (request.state === 'granted') request.state = 'consumed'
+    if (request.state === 'granted') {
+      if (
+        this.pendingSessionPreclear ||
+        request.binding.sessionGeneration !== this.sessionGeneration
+      ) {
+        request.state = 'cancelled'
+      } else {
+        request.state = 'consumed'
+      }
+    }
     return request.state
   }
 
   clearMarkdownTabCloseRequests(senderWebContentsId: number): void {
-    for (const [key, request] of this.markdownTabCloseRequests) {
-      if (key.startsWith(`${senderWebContentsId}:`)) this.markdownTabCloseRequests.delete(key)
+    this.retireMarkdownTabCloseDocument(senderWebContentsId)
+  }
+
+  acknowledgeMarkdownTabClose(
+    senderWebContentsId: number,
+    input: MarkdownTabCloseBinding
+  ): number | null {
+    const binding = this.normalizeMarkdownTabCloseBinding(input)
+    const document = binding && this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    if (!binding || !document) return null
+    const slot = document.slot
+    if (slot?.kind === 'ack') {
+      return this.sameMarkdownTabCloseReceipt(slot.receipt, binding)
+        ? slot.receipt.nextSequence
+        : null
     }
+    if (slot?.kind !== 'active' || !this.sameMarkdownTabCloseBinding(slot.request, binding))
+      return null
+    this.expireMarkdownTabCloseRequest(slot.request)
+    if (slot.request.state === 'pending' || slot.request.state === 'granted') return null
+
+    const nextSequence = binding.sequence + 1
+    const receipt: MarkdownTabCloseReceipt = {
+      binding: slot.request.binding,
+      ownerIdentityDigest: slot.request.ownerIdentityDigest,
+      terminalState: slot.request.state,
+      nextSequence,
+    }
+    document.nextSequence = nextSequence
+    document.slot = { kind: 'ack', receipt }
+    return nextSequence
   }
 
   private normalizeMarkdownTabCloseBinding(
@@ -1885,6 +2219,10 @@ export class AppService {
       !input ||
       typeof input.requestId !== 'string' ||
       !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.requestId) ||
+      typeof input.documentEpoch !== 'string' ||
+      !/^[a-f0-9-]{36}$/i.test(input.documentEpoch) ||
+      !Number.isSafeInteger(input.sequence) ||
+      input.sequence < 1 ||
       typeof input.tabId !== 'string' ||
       !input.tabId.trim() ||
       input.tabId.length > 256 ||
@@ -1901,14 +2239,12 @@ export class AppService {
       return null
     return Object.freeze({
       requestId: input.requestId,
+      documentEpoch: input.documentEpoch,
+      sequence: input.sequence,
       tabId: input.tabId,
       sessionGeneration: input.sessionGeneration,
       ownerIdentities: Object.freeze([...input.ownerIdentities].sort()),
     })
-  }
-
-  private markdownTabCloseRequestKey(senderWebContentsId: number, requestId: string): string {
-    return `${senderWebContentsId}:${requestId}`
   }
 
   private createMarkdownTabCloseRequest(
@@ -1916,7 +2252,13 @@ export class AppService {
     state: Exclude<MarkdownTabCloseState, 'unknown'>
   ): MarkdownTabCloseRequest {
     return {
-      binding,
+      binding: {
+        requestId: binding.requestId,
+        documentEpoch: binding.documentEpoch,
+        sequence: binding.sequence,
+        tabId: binding.tabId,
+        sessionGeneration: binding.sessionGeneration,
+      },
       ownerIdentityDigest: createHash('sha256')
         .update(JSON.stringify(binding.ownerIdentities))
         .digest('hex'),
@@ -1932,10 +2274,45 @@ export class AppService {
     const binding = this.normalizeMarkdownTabCloseBinding(input)
     if (!binding || !Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0)
       return null
-    const request = this.markdownTabCloseRequests.get(
-      this.markdownTabCloseRequestKey(senderWebContentsId, binding.requestId)
-    )
-    return request && this.sameMarkdownTabCloseBinding(request, binding) ? request : null
+    const document = this.getMarkdownTabCloseDocument(senderWebContentsId, binding)
+    const slot = document?.slot
+    return slot?.kind === 'active' && this.sameMarkdownTabCloseBinding(slot.request, binding)
+      ? slot.request
+      : null
+  }
+
+  private getMarkdownTabCloseDocument(
+    senderWebContentsId: number,
+    binding: MarkdownTabCloseBinding
+  ): MarkdownTabCloseDocument | null {
+    if (!Number.isSafeInteger(senderWebContentsId) || senderWebContentsId <= 0) return null
+    const document = this.markdownTabCloseDocuments.get(senderWebContentsId)
+    return document?.epoch === binding.documentEpoch ? document : null
+  }
+
+  private ensureMarkdownTabCloseSequence(
+    document: MarkdownTabCloseDocument,
+    binding: MarkdownTabCloseBinding
+  ):
+    | { kind: 'active'; request: MarkdownTabCloseRequest }
+    | { kind: 'replay'; terminalState: MarkdownTabCloseReceipt['terminalState'] }
+    | null
+    | 'invalid' {
+    const slot = document.slot
+    if (slot?.kind === 'active') {
+      return this.sameMarkdownTabCloseBinding(slot.request, binding)
+        ? { kind: 'active', request: slot.request }
+        : 'invalid'
+    }
+    if (slot?.kind === 'ack') {
+      if (this.sameMarkdownTabCloseReceipt(slot.receipt, binding)) {
+        return { kind: 'replay', terminalState: slot.receipt.terminalState }
+      }
+      if (binding.sequence !== document.nextSequence) return 'invalid'
+      document.slot = null
+      return null
+    }
+    return binding.sequence === document.nextSequence ? null : 'invalid'
   }
 
   private sameMarkdownTabCloseBinding(
@@ -1943,9 +2320,35 @@ export class AppService {
     binding: MarkdownTabCloseBinding
   ): boolean {
     return (
+      request.binding.requestId === binding.requestId &&
+      request.binding.documentEpoch === binding.documentEpoch &&
+      request.binding.sequence === binding.sequence &&
       request.binding.tabId === binding.tabId &&
       request.binding.sessionGeneration === binding.sessionGeneration &&
       request.ownerIdentityDigest ===
+        createHash('sha256').update(JSON.stringify(binding.ownerIdentities)).digest('hex')
+    )
+  }
+
+  private cancelMarkdownTabCloseGrantsForPreclear(): void {
+    for (const document of this.markdownTabCloseDocuments.values()) {
+      if (document.slot?.kind !== 'active') continue
+      const request = document.slot.request
+      if (request.state === 'pending' || request.state === 'granted') request.state = 'cancelled'
+    }
+  }
+
+  private sameMarkdownTabCloseReceipt(
+    receipt: MarkdownTabCloseReceipt,
+    binding: MarkdownTabCloseBinding
+  ): boolean {
+    return (
+      receipt.binding.requestId === binding.requestId &&
+      receipt.binding.documentEpoch === binding.documentEpoch &&
+      receipt.binding.sequence === binding.sequence &&
+      receipt.binding.tabId === binding.tabId &&
+      receipt.binding.sessionGeneration === binding.sessionGeneration &&
+      receipt.ownerIdentityDigest ===
         createHash('sha256').update(JSON.stringify(binding.ownerIdentities)).digest('hex')
     )
   }

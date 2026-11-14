@@ -102,7 +102,7 @@ describe('AppService logout recovery ownership', () => {
     await expect(service.listGfsUploadSessions()).resolves.toEqual([])
   })
 
-  it('releases the renderer preclear when token removal and `/me` both fail transiently', async () => {
+  it('keeps the renderer hidden when token removal and `/me` both fail transiently', async () => {
     const { service } = await createNativeCommitTestHarness()
     const login = testLoginResult()
     service.authClient = {
@@ -115,14 +115,34 @@ describe('AppService logout recovery ownership', () => {
       .mockRejectedValue(new Error('keychain unavailable'))
     service.authClient.getMe = vi.fn().mockRejectedValue(new Error('network unavailable'))
     const preclearCancelled = vi.fn()
-    service.onSessionPreclearCancelled = preclearCancelled
+    const recoveryRequired = vi.fn()
+    let notice: Parameters<typeof service.retrySessionPreclearRecovery>[0] | null = null
+    const internals = service as unknown as {
+      onSessionPreclear: (current: NonNullable<typeof notice>) => boolean
+      onSessionPreclearCancelled: typeof preclearCancelled
+      onSessionPreclearRecoveryRequired: typeof recoveryRequired
+    }
+    internals.onSessionPreclear = current => {
+      notice = current
+      queueMicrotask(() => service.acknowledgeSessionPreclear(current))
+      return true
+    }
+    internals.onSessionPreclearCancelled = preclearCancelled
+    internals.onSessionPreclearRecoveryRequired = recoveryRequired
 
     await expect(service.logout()).rejects.toThrow('keychain unavailable')
 
     expect(service.getCachedUserId()).toBe('user-a')
     expect(service.sessionToken).toBe('synthetic-session-a')
+    expect(service.pendingSessionPreclear).not.toBeNull()
+    expect(preclearCancelled).not.toHaveBeenCalled()
+    expect(recoveryRequired).toHaveBeenCalledOnce()
+    expect(notice).not.toBeNull()
+
+    service.authClient.getMe = vi.fn().mockResolvedValue(login.me)
+    expect(service.retrySessionPreclearRecovery(notice!)).toBe(true)
+    await vi.waitFor(() => expect(preclearCancelled).toHaveBeenCalledOnce())
     expect(service.pendingSessionPreclear).toBeNull()
-    expect(preclearCancelled).toHaveBeenCalledOnce()
     await expect(service.listGfsUploadSessions()).resolves.toEqual([])
   })
 
@@ -153,6 +173,7 @@ describe('AppService logout recovery ownership', () => {
     const login = testLoginResult()
     service.authClient = {
       googleLogin: vi.fn().mockResolvedValue(login),
+      getMe: vi.fn().mockResolvedValue(login.me),
     } as never
     await service.googleLogin('initial-login')
     service.tokenStore.clearSessionToken = vi
@@ -175,6 +196,7 @@ describe('AppService logout recovery ownership', () => {
     const login = testLoginResult()
     service.authClient = {
       googleLogin: vi.fn().mockResolvedValue(login),
+      getMe: vi.fn().mockResolvedValue(login.me),
     } as never
     await service.googleLogin('initial-login')
 
@@ -216,6 +238,7 @@ describe('AppService logout recovery ownership', () => {
     const login = testLoginResult()
     service.authClient = {
       googleLogin: vi.fn().mockResolvedValue(login),
+      getMe: vi.fn().mockResolvedValue(login.me),
     } as never
     await service.googleLogin('initial-login')
 

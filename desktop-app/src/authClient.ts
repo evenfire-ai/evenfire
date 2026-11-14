@@ -400,9 +400,10 @@ export class AuthClient {
     }
   }
 
-  async getMe(sessionToken: string): Promise<SessionMe> {
+  async getMe(sessionToken: string, signal?: AbortSignal): Promise<SessionMe> {
     return requestJson<SessionMe>('GET', url('/api/v1/me'), {
       token: sessionToken,
+      signal,
     })
   }
 

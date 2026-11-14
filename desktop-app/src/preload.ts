@@ -43,6 +43,23 @@ function parseSandboxUiSessionInvalidation(value: unknown): SandboxUiSessionInva
   }
 }
 
+let rendererDocumentEpoch: string | null = null
+let rendererReadyChallenge: string | null = null
+
+ipcRenderer.on('auth:markdownDocumentHandshake', (_event, payload: unknown) => {
+  if (!payload || typeof payload !== 'object') return
+  const value = payload as Record<string, unknown>
+  if (
+    typeof value.documentEpoch !== 'string' ||
+    !/^[a-f0-9-]{36}$/i.test(value.documentEpoch) ||
+    typeof value.challenge !== 'string' ||
+    !/^[a-f0-9-]{36}$/i.test(value.challenge)
+  )
+    return
+  rendererDocumentEpoch = value.documentEpoch
+  rendererReadyChallenge = value.challenge
+})
+
 // Sandboxed Electron preloads cannot load relative runtime modules. Keep this
 // allowlist self-contained and pin it to the authoritative registry in
 // desktopCommands.test.ts, matching the existing sandbox embed-preload pattern.
@@ -128,6 +145,10 @@ const clerum = Object.freeze({
   },
   auth: {
     getSessionState: () => ipcRenderer.invoke('auth:getSessionState'),
+    getRendererSessionView: () => ipcRenderer.invoke('auth:getRendererSessionView'),
+    commitRendererSessionView: (receipt: { documentEpoch: string; receiptId: string }) =>
+      ipcRenderer.invoke('auth:commitRendererSessionView', receipt) as Promise<boolean>,
+    getMarkdownTabCloseDocumentEpoch: (): string | null => rendererDocumentEpoch,
     getSessionGeneration: () => ipcRenderer.invoke('auth:getSessionGeneration'),
     getDependenciesHealth: () => ipcRenderer.invoke('auth:getDependenciesHealth'),
     getRuntimeConfigState: () => ipcRenderer.invoke('auth:getRuntimeConfigState'),
@@ -214,6 +235,8 @@ const clerum = Object.freeze({
       binding: MarkdownTabCloseBinding
     ): Promise<MarkdownTabCloseState> =>
       ipcRenderer.invoke('auth:consumeMarkdownTabClosePermit', binding),
+    acknowledgeMarkdownTabClose: (binding: MarkdownTabCloseBinding): Promise<number | null> =>
+      ipcRenderer.invoke('auth:acknowledgeMarkdownTabClose', binding),
     onSessionPreclear: (
       callback: (notice: {
         transitionId: number
@@ -251,6 +274,11 @@ const clerum = Object.freeze({
       const listener = () => callback()
       ipcRenderer.on('auth:sessionCleared', listener)
       return () => ipcRenderer.off('auth:sessionCleared', listener)
+    },
+    onMarkdownDraftLost: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('auth:markdownDraftLost', listener)
+      return () => ipcRenderer.off('auth:markdownDraftLost', listener)
     },
     logout: () => ipcRenderer.invoke('auth:logout'),
   },
@@ -763,7 +791,15 @@ const clerum = Object.freeze({
   },
   app: {
     openUrl: (url: string) => ipcRenderer.invoke('app:openUrl', { url }),
-    rendererReady: () => ipcRenderer.invoke('app:rendererReady'),
+    rendererReady: () => {
+      const challenge = rendererReadyChallenge
+      if (!challenge) return Promise.reject(new Error('Current renderer handshake is unavailable'))
+      rendererReadyChallenge = null
+      return ipcRenderer.invoke('app:rendererReady', { challenge }) as Promise<{
+        documentEpoch: string
+        sessionTransitionRevealPending: boolean
+      }>
+    },
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),

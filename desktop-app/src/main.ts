@@ -1,7 +1,16 @@
-import { BrowserWindow, IpcMainEvent, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
+import {
+  BrowserWindow,
+  IpcMainEvent,
+  app,
+  dialog,
+  ipcMain,
+  nativeTheme,
+  powerMonitor,
+} from 'electron'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { AppService } from './appService.js'
+import { AppService, type SessionPreclearNotice } from './appService.js'
 import { routeClerumOauthCompleted } from './clerumDeepLink.js'
 import {
   config,
@@ -79,12 +88,106 @@ let mainWindow: BrowserWindow | null = null
 let forceFreshRendererAfterSessionClear = false
 let sessionTransitionRevealPending = false
 let pendingSessionClearedNotifications = 0
+let pendingMarkdownDraftLossNotification = false
+let currentRendererDocumentEpoch: string | null = null
+let currentRendererReadyChallenge: string | null = null
+let currentRendererSessionViewReceipt: {
+  documentEpoch: string
+  receiptId: string
+  sessionGeneration: number
+  authenticated: boolean
+  userId: string | null
+  teamId: string | null
+} | null = null
+const sessionPreclearRendererLost = new Set<number>()
+const activeSessionPreclearTransitions = new Set<number>()
+type SessionRecoveryDialogState = { attemptsRemaining: number; retryAvailable: boolean }
+const activeSessionRecoveryDialogs = new Map<
+  number,
+  {
+    state: SessionRecoveryDialogState | null
+    wake: ((state: SessionRecoveryDialogState | null) => void) | null
+    terminal: boolean
+  }
+>()
+function finishSessionRecoveryDialog(notice: Pick<SessionPreclearNotice, 'transitionId'>): void {
+  const current = activeSessionRecoveryDialogs.get(notice.transitionId)
+  if (!current) return
+  current.terminal = true
+  current.wake?.(null)
+  current.wake = null
+}
+function showSessionRecoveryDialog(
+  notice: SessionPreclearNotice,
+  state: SessionRecoveryDialogState
+): void {
+  if (activeSessionRecoveryDialogs.has(notice.transitionId)) {
+    const existing = activeSessionRecoveryDialogs.get(notice.transitionId)!
+    existing.state = state
+    existing.wake?.(state)
+    existing.wake = null
+    return
+  }
+  const recovery: {
+    state: SessionRecoveryDialogState | null
+    wake: ((state: SessionRecoveryDialogState | null) => void) | null
+    terminal: boolean
+  } = { state, wake: null, terminal: false }
+  activeSessionRecoveryDialogs.set(notice.transitionId, recovery)
+  void (async () => {
+    try {
+      while (!recovery.terminal) {
+        const canRetry = recovery.state?.retryAvailable === true
+        const result = await dialog.showMessageBox({
+          type: 'warning',
+          title: 'Session could not be verified',
+          message:
+            'Evenfire could not confirm that this session is still current. The window will stay hidden until the session is verified.',
+          detail: canRetry
+            ? `You can retry the check (${recovery.state?.attemptsRemaining ?? 0} attempts remain) or exit.\n\nNo Markdown draft will be recovered after exiting.`
+            : 'An authority check is still unresolved or this recovery has no attempts left. Retry may become available after an outstanding check settles; you can exit now. No Markdown draft will be recovered after exiting.',
+          buttons: canRetry ? ['Retry', 'Exit'] : ['Exit'],
+          defaultId: canRetry ? 0 : 0,
+          cancelId: canRetry ? 1 : 0,
+          noLink: true,
+        })
+        if (recovery.terminal) break
+        if (!canRetry && recovery.state?.retryAvailable && result.response === 0) {
+          // A formerly unresolved request settled while the Exit-only notice
+          // was open. Re-present the now-available Retry choice before honoring
+          // the user's response.
+          continue
+        }
+        if (!canRetry || result.response !== 0) {
+          appService.exitSessionPreclearRecovery(notice)
+          app.quit()
+          break
+        }
+        recovery.state = null
+        if (!appService.retrySessionPreclearRecovery(notice)) {
+          recovery.state = {
+            attemptsRemaining: 0,
+            retryAvailable: false,
+          }
+          continue
+        }
+        recovery.state = await new Promise<SessionRecoveryDialogState | null>(resolve => {
+          recovery.wake = resolve
+        })
+      }
+    } finally {
+      activeSessionRecoveryDialogs.delete(notice.transitionId)
+    }
+  })()
+}
 const reloadHiddenRendererAfterSessionTransition = () => {
   const window = mainWindow
   if (!forceFreshRendererAfterSessionClear || !window || window.isDestroyed()) return
   forceFreshRendererAfterSessionClear = false
   sessionTransitionRevealPending = true
   mainWindowRendererReady = false
+  currentRendererReadyChallenge = null
+  currentRendererSessionViewReceipt = null
   window.webContents.reload()
 }
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
@@ -104,10 +207,17 @@ const appService = new AppService({
     }
   },
   onSessionCleared: () => {
+    for (const transitionId of activeSessionRecoveryDialogs.keys()) {
+      finishSessionRecoveryDialog({ transitionId })
+    }
+    activeSessionPreclearTransitions.clear()
+    sessionPreclearRendererLost.clear()
+    pendingMarkdownDraftLossNotification = false
     // Keep the previous authenticated React tree hidden until a fresh renderer
     // installs its session-cleared listener and reads the cleared main session.
     pendingSessionClearedNotifications += 1
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
+    retireCurrentMarkdownRendererDocument()
     forceFreshRendererAfterSessionClear = true
     reloadHiddenRendererAfterSessionTransition()
   },
@@ -117,26 +227,55 @@ const appService = new AppService({
     // Hide synchronously at the main-process reservation point, before a queued
     // renderer commit can paint and before the notice/any await.
     window.hide()
+    activeSessionPreclearTransitions.add(notice.transitionId)
     if (window.webContents.isDestroyed() || window.webContents.isLoading()) {
-      forceFreshRendererAfterSessionClear = true
+      sessionPreclearRendererLost.add(notice.transitionId)
       return false
     }
     window.webContents.send('auth:sessionWillClear', notice)
     return true
   },
   onSessionPreclearTimeout: () => {
-    forceFreshRendererAfterSessionClear = true
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
   },
+  onSessionPreclearRecoveryRequired: (notice, state) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
+    showSessionRecoveryDialog(notice, state)
+  },
   onSessionPreclearCancelled: notice => {
-    if (forceFreshRendererAfterSessionClear) {
+    finishSessionRecoveryDialog(notice)
+    activeSessionPreclearTransitions.delete(notice.transitionId)
+    if (sessionPreclearRendererLost.delete(notice.transitionId)) {
+      pendingMarkdownDraftLossNotification = true
+      forceFreshRendererAfterSessionClear = true
       reloadHiddenRendererAfterSessionTransition()
     } else if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('auth:sessionClearCancelled', notice)
       mainWindow.show()
     }
   },
+  onSessionPreclearRetired: notice => {
+    finishSessionRecoveryDialog(notice)
+    activeSessionPreclearTransitions.delete(notice.transitionId)
+    if (sessionPreclearRendererLost.delete(notice.transitionId)) {
+      pendingMarkdownDraftLossNotification = true
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.hide()
+    retireCurrentMarkdownRendererDocument()
+    forceFreshRendererAfterSessionClear = true
+    reloadHiddenRendererAfterSessionTransition()
+  },
 })
+function retireCurrentMarkdownRendererDocument(): void {
+  const window = mainWindow
+  if (window && currentRendererDocumentEpoch) {
+    appService.retireMarkdownTabCloseDocument(window.webContents.id, currentRendererDocumentEpoch)
+  }
+  currentRendererDocumentEpoch = null
+  currentRendererReadyChallenge = null
+  currentRendererSessionViewReceipt = null
+}
 const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
 const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()
 const logoutAndClearGfsResourceDeepLinks = createLogoutWithGfsResourceDeepLinkClear(
@@ -311,17 +450,30 @@ ipcMain.handle('window:close', event => {
   mainWindow?.close()
 })
 
-ipcMain.handle('app:rendererReady', event => {
+ipcMain.handle('app:rendererReady', (event, payload: unknown) => {
   assertTrustedSender(event)
   if (!mainWindow || event.sender !== mainWindow.webContents) return
+  if (
+    event.senderFrame !== event.sender.mainFrame ||
+    !currentRendererDocumentEpoch ||
+    !currentRendererReadyChallenge ||
+    !payload ||
+    typeof payload !== 'object'
+  )
+    return
   mainWindowRendererReady = true
+  if ((payload as Record<string, unknown>).challenge !== currentRendererReadyChallenge) {
+    mainWindowRendererReady = false
+    return
+  }
+  currentRendererReadyChallenge = null
+  if (!appService.beginMarkdownTabCloseDocument(event.sender.id, currentRendererDocumentEpoch)) {
+    mainWindowRendererReady = false
+    return
+  }
   while (pendingSessionClearedNotifications > 0) {
     pendingSessionClearedNotifications -= 1
     mainWindow.webContents.send('auth:sessionCleared')
-  }
-  if (sessionTransitionRevealPending && !forceFreshRendererAfterSessionClear) {
-    sessionTransitionRevealPending = false
-    mainWindow.show()
   }
   emitWindowControlsState(mainWindow)
   evenfireDeepLinkRouter.drainPending()
@@ -330,6 +482,83 @@ ipcMain.handle('app:rendererReady', event => {
   // useAppController's effect, which runs before App's rendererReady effect, so
   // it is guaranteed installed by the time this handshake fires.
   mcpOauthCompletionQueue.drain()
+  return {
+    documentEpoch: currentRendererDocumentEpoch,
+    sessionTransitionRevealPending,
+  }
+})
+
+ipcMain.handle('auth:getRendererSessionView', async event => {
+  assertTrustedSender(event)
+  const window = mainWindow
+  const documentEpoch = currentRendererDocumentEpoch
+  if (
+    !window ||
+    window.isDestroyed() ||
+    event.sender !== window.webContents ||
+    event.senderFrame !== event.sender.mainFrame ||
+    !mainWindowRendererReady ||
+    !documentEpoch
+  )
+    return null
+  const state = await appService.getSessionState()
+  if (
+    mainWindow !== window ||
+    currentRendererDocumentEpoch !== documentEpoch ||
+    event.senderFrame !== event.sender.mainFrame
+  )
+    return null
+  const receiptId = randomUUID()
+  currentRendererSessionViewReceipt = {
+    documentEpoch,
+    receiptId,
+    sessionGeneration: state.sessionGeneration ?? appService.getSessionGeneration(),
+    authenticated: state.authenticated,
+    userId: state.me?.id ?? null,
+    teamId: state.me?.teamId ?? null,
+  }
+  return { documentEpoch, receiptId, state }
+})
+
+ipcMain.handle('auth:commitRendererSessionView', async (event, payload: unknown) => {
+  assertTrustedSender(event)
+  const window = mainWindow
+  const receipt = currentRendererSessionViewReceipt
+  if (
+    !window ||
+    window.isDestroyed() ||
+    event.sender !== window.webContents ||
+    event.senderFrame !== event.sender.mainFrame ||
+    !receipt ||
+    !payload ||
+    typeof payload !== 'object' ||
+    (payload as Record<string, unknown>).documentEpoch !== receipt.documentEpoch ||
+    (payload as Record<string, unknown>).receiptId !== receipt.receiptId ||
+    currentRendererDocumentEpoch !== receipt.documentEpoch
+  )
+    return false
+  const state = await appService.getSessionState()
+  if (
+    mainWindow !== window ||
+    currentRendererSessionViewReceipt !== receipt ||
+    currentRendererDocumentEpoch !== receipt.documentEpoch ||
+    event.senderFrame !== event.sender.mainFrame ||
+    state.sessionGeneration !== receipt.sessionGeneration ||
+    state.authenticated !== receipt.authenticated ||
+    (state.me?.id ?? null) !== receipt.userId ||
+    (state.me?.teamId ?? null) !== receipt.teamId
+  )
+    return false
+  currentRendererSessionViewReceipt = null
+  if (sessionTransitionRevealPending && !forceFreshRendererAfterSessionClear) {
+    sessionTransitionRevealPending = false
+    if (pendingMarkdownDraftLossNotification) {
+      pendingMarkdownDraftLossNotification = false
+      window.webContents.send('auth:markdownDraftLost')
+    }
+    window.show()
+  }
+  return true
 })
 
 ipcMain.handle('sandboxUi:listPendingDeepLinks', event => {
@@ -630,6 +859,7 @@ async function createWindow(): Promise<void> {
   mainWindowRendererReady = false
   window.on('closed', () => {
     if (mainWindow === window) {
+      retireCurrentMarkdownRendererDocument()
       mainWindow = null
       mainWindowRendererReady = false
     }
@@ -641,6 +871,29 @@ async function createWindow(): Promise<void> {
       mainWindowRendererReady = false
     },
     sandboxUi: appService,
+  })
+  window.webContents.on('did-navigate', () => {
+    if (mainWindow !== window || window.isDestroyed()) return
+    retireCurrentMarkdownRendererDocument()
+    const documentEpoch = randomUUID()
+    const challenge = randomUUID()
+    currentRendererDocumentEpoch = documentEpoch
+    currentRendererReadyChallenge = challenge
+    try {
+      window.webContents.mainFrame.send('auth:markdownDocumentHandshake', {
+        documentEpoch,
+        challenge,
+      })
+    } catch {
+      currentRendererReadyChallenge = null
+    }
+  })
+  window.webContents.on('render-process-gone', () => {
+    if (mainWindow !== window) return
+    for (const transitionId of activeSessionPreclearTransitions) {
+      sessionPreclearRendererLost.add(transitionId)
+    }
+    retireCurrentMarkdownRendererDocument()
   })
 
   wireWindowVisibility(window)
