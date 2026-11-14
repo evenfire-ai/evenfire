@@ -69,7 +69,10 @@ successful `memory_write` adds one row to the `memory_writes` table of
 `user`), path relative to that scope's root, mode, sha256 of the content the
 write left in the file, and time. A failed record does not fail the write; it
 is logged (`memory write record failed`) and counted
-(`clerum_memory_write_record_failures_total`).
+(`clerum_memory_write_record_failures_total`). The memory scan covers
+`memory_write` writes to `MEMORY.md` (shared and private), `memories/` and
+`daily/`; named notes in `memory/` are not scanned or capped, and `file_write`
+and the shell are not scanned.
 
 ## The previous split layout
 

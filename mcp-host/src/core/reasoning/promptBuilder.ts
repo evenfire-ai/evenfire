@@ -41,9 +41,11 @@ export const MEMORY_GUIDANCE_TEXT =
   'memory/ folder. Recall it only with memory_search (it covers both scopes) or ' +
   'memory_read, never by browsing other workspace files with file_read or the shell: a ' +
   'workspace file is not memory, even when memory_search returns a line from it.\n\n' +
-  'Memory writes are scanned and may be rejected. If a write is rejected, paraphrase ' +
-  'the content without raw paths to secrets, exfiltration command shapes, invisible ' +
-  'Unicode, or system-prompt markers, then try again. Consolidate existing entries when ' +
+  'Writes made with memory_write to MEMORY.md (shared and private), to shared notes under ' +
+  'memories/ and to your daily/ log are scanned and may be rejected. If a write is ' +
+  'rejected, paraphrase the content without raw paths to secrets, exfiltration command ' +
+  'shapes, invisible Unicode, or system-prompt markers, then try again. Named notes in ' +
+  'memory/ are not scanned. Consolidate existing entries when ' +
   'MEMORY.md approaches its size cap (8 KB) instead of appending unbounded; a shared note ' +
   'under memories/ has the same cap, and named notes in memory/ have none.'
 

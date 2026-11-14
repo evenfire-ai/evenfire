@@ -399,6 +399,19 @@ describe('memory tools — named notes live in the caller memory/ folder', () =>
     expect(note.content).toBe('Written to memory/notes.md (append)')
   })
 
+  it('the guidance scan sentence holds: MEMORY.md, memories/ and daily/ are scanned, a named note is not', async () => {
+    const content = 'see credentials.json'
+    for (const target of ['memory', 'memory_private', 'memories/r.md', 'daily_log']) {
+      const out = await alice.write.execute({ content, target })
+      expect(out.is_error).toBe(true)
+      expect(out.content).toContain('rejected')
+    }
+    const note = await alice.write.execute({ content, target: 'rules' })
+    expect(note.is_error).toBe(false)
+    expect(note.content).toBe('Written to memory/rules.md (append)')
+    await expect(fs.readFile(userFile('alice', 'memory/rules.md'), 'utf-8')).resolves.toBe(content)
+  })
+
   it('rows 29, 30: daily/ and ./memory become notes and do not block the daily log', async () => {
     const d = await alice.write.execute({ content: 'zzdailyfolder', target: 'daily/' })
     expect(d.content).toBe('Written to memory/daily.md (append)')

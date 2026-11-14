@@ -49,6 +49,15 @@ describe('DefaultPromptBuilder — memory guidance (P.4)', () => {
     expect(MEMORY_GUIDANCE_TEXT).not.toMatch(/keep[^.]*ledger/i)
   })
 
+  it('names the locations memory_write scans and says named notes in memory/ are not scanned', () => {
+    expect(MEMORY_GUIDANCE_TEXT).toContain(
+      'Writes made with memory_write to MEMORY.md (shared and private), to shared notes under ' +
+        'memories/ and to your daily/ log are scanned and may be rejected.'
+    )
+    expect(MEMORY_GUIDANCE_TEXT).toContain('Named notes in memory/ are not scanned.')
+    expect(MEMORY_GUIDANCE_TEXT).not.toContain('Memory writes are scanned')
+  })
+
   it('says memory is in one place and is read only through the memory tools (D83, D91)', () => {
     expect(MEMORY_GUIDANCE_TEXT).toContain('Memory is in one place')
     expect(MEMORY_GUIDANCE_TEXT).toContain(
