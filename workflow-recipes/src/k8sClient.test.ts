@@ -3094,6 +3094,61 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
     }
   })
 
+  // Issue #1349 — a recorded terminal run child returns before the accumulator, so
+  // the refresh skips it; an unrecorded or latched one still takes a forced pass.
+  it('refreshExternalEgressForActiveRecipes skips a terminal run child whose teardown is recorded, unless it is latched', async () => {
+    const completedAt = '2026-11-12T10:00:00.000Z'
+    const terminalRunChild = (
+      name: string,
+      status: Partial<NonNullable<WorkflowRecipeCRD['status']>>
+    ): WorkflowRecipeCRD => {
+      const parent = makeWorkloadEgressRecipe(name)
+      return makeWorkflowRecipe({
+        metadata: {
+          name,
+          namespace: 'sandbox-recipes',
+          labels: { 'clerum.io/workflow-run-id': `run-${name}` },
+        },
+        spec: {
+          ...parent.spec,
+          steps: [
+            { id: 'step-1', run: { type: 'snippet', language: 'typescript', code: 'return {}' } },
+          ],
+        },
+        status: {
+          phase: 'active',
+          workflowExecution: { phase: 'completed' },
+          ...status,
+        } as WorkflowRecipeCRD['status'],
+      })
+    }
+    const { internal, enqueue, handleRecipeEvent } = makeInternal([
+      makeWorkloadEgressRecipe('parent'),
+      terminalRunChild('child-recorded', { terminalRunTeardown: { completedAt } }),
+      terminalRunChild('child-unrecorded', {}),
+      terminalRunChild('child-recorded-latched', {
+        phase: 'failed',
+        message: 'Workflow failed',
+        workflowExecution: {
+          phase: 'failed',
+          message: 'FetchError: request failed, reason: connect ETIMEDOUT 10.96.0.1:443',
+        },
+        terminalRunTeardown: { completedAt },
+      }),
+    ])
+
+    await internal.refreshExternalEgressForActiveRecipes()
+
+    // Witness: the external-egress parent still takes a forced pass.
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', internal.recipes.get('parent'), {
+      forceReconcile: true,
+    })
+    expect(enqueue).toHaveBeenCalledWith('child-unrecorded', expect.any(Function))
+    expect(enqueue).toHaveBeenCalledWith('child-recorded-latched', expect.any(Function))
+    expect(enqueue).not.toHaveBeenCalledWith('child-recorded', expect.any(Function))
+    expect(enqueue).toHaveBeenCalledTimes(3)
+  })
+
   it('refreshExternalEgressForActiveRecipes is a no-op while stopped', async () => {
     const { internal, enqueue } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
     internal.stopped = true
