@@ -42,6 +42,7 @@ import {
   sameMcpServerPolicyRevision,
 } from './mcpServerSafety'
 import {
+  type NetworkPolicyPassPhase,
   netPolOrphanSweepCappedTotal,
   netPolOrphansDeletedTotal,
   networkPolicySafetyPassDurationSeconds,
@@ -458,19 +459,6 @@ function k8sApiEgressPodSelector(namespace: string): k8s.V1LabelSelector {
   // with this platform-owned label instead of inheriting namespace-wide egress.
   return { matchLabels: { 'clerum.io/k8s-api-egress': 'true' } }
 }
-
-/**
- * Ordered stages of one full NetworkPolicy reconciliation. The owner records
- * the current stage so a pass that overruns its bound can say where it stopped.
- */
-export type NetworkPolicyPassPhase =
-  | 'ensure-defaults'
-  | 'inventory-list'
-  | 'context-orphan-cleanup'
-  | 'context-revocation'
-  | 'server-orphan-cleanup'
-  | 'server-revocation'
-  | 'additive'
 
 export interface NetworkPolicyFullReconcileOptions {
   serverInventoryComplete?: boolean

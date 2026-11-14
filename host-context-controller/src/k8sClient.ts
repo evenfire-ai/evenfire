@@ -61,7 +61,10 @@ import {
   sameMcpServerPolicyRevision,
 } from './mcpServerSafety'
 import {
+  type NetworkPolicyPassOverrunPhase,
+  type NetworkPolicyPassOverrunSeverity,
   contextMetadataOnlyEventsTotal,
+  countNetworkPolicyPassOverrun,
   hostDeleteCleanupTotal,
   hostFleetLifecycleCatchTotal,
   hostFleetRequestsTotal,
@@ -76,11 +79,9 @@ import {
   netPolDefaultsOnlyTickDurationSeconds,
   netPolDefaultsOnlyTicksTotal,
   netPolResyncTicksSkippedTotal,
-  networkPolicyPassOverrunsTotal,
 } from './metrics'
 import {
   DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
-  type NetworkPolicyPassPhase,
   NetworkPolicyReconciler,
   sameContextDesiredRevision,
 } from './networkPolicyReconciler'
@@ -338,7 +339,7 @@ type NetworkPolicyPassEffect = {
  */
 type NetworkPolicyPassProgress = {
   startedAtMs: number
-  phase: NetworkPolicyPassPhase | 'starting'
+  phase: NetworkPolicyPassOverrunPhase
   pendingEffect: NetworkPolicyPassEffect | null
 }
 
@@ -3795,7 +3796,7 @@ export class McpServerWatcher implements McpServerProvider {
     this.networkPolicyPassProgress = null
   }
 
-  private reportNetworkPolicyPassOverrun(severity: 'warn' | 'fatal'): void {
+  private reportNetworkPolicyPassOverrun(severity: NetworkPolicyPassOverrunSeverity): void {
     const pass = this.activeNetworkPolicyPass
     const progress = this.networkPolicyPassProgress
     if (pass === null || progress === null) {
@@ -3819,7 +3820,7 @@ export class McpServerWatcher implements McpServerProvider {
               seconds: Math.round((now - effect.sinceMs) / 1000),
             },
     }
-    networkPolicyPassOverrunsTotal.inc({ severity, phase: progress.phase })
+    countNetworkPolicyPassOverrun(severity, progress.phase)
     if (severity === 'warn') {
       hccLogger.warn('[K8s] NetworkPolicy pass overrun', fields)
       return

@@ -157,34 +157,51 @@ prepare-release.mjs ──► release-prep commit ──► tag vX.Y.Z
    [`release-images.yml`](../../.github/workflows/release-images.yml). For each
    published image in [`deploy/images.json`](../../deploy/images.json),
    [`resolve-release-images.mjs`](../../scripts/release/resolve-release-images.mjs)
-   resolves `:latest` to a digest once, then refuses the image if:
+   tries these tags in order and takes the first that passes:
+   1. `:vX.Y.Z` itself, when an earlier run of this release already wrote it;
+   2. `:latest`;
+   3. `:sha-<7>` for each commit on `main`'s first-parent line since the
+      previous release, newest first (built on `main` with `build-publish.yml`
+      `hotfix_images`). The image must record exactly that commit;
+   4. the previous release's `:vX.Y.Z`.
+
+   Each candidate is resolved to a digest once, and rejected if:
+   - the tag does not exist;
    - it has no revision annotation;
    - the revision it was built from is not an ancestor of the tagged commit;
    - its source paths changed between that revision and the tagged commit.
 
+   Any other registry or git error fails the image instead of falling back to
+   an older candidate. When every candidate is rejected, the image is refused,
+   with one reason per candidate.
+
    [`promote-release-images.sh`](../../scripts/release/promote-release-images.sh)
-   then checks that the digest is a manifest list with both `amd64` and `arm64`,
-   and copies it (with `crane copy`) to `:vX.Y.Z`. For a strict `vX.Y.Z` tag it
-   also copies it to `:stable`. If any image is refused, the job fails, but the
-   other images are still copied, so a failed run can leave a partial release.
-   A manual
-   `workflow_dispatch` run is a dry run: it prints what it would promote and
-   copies nothing.
+   then checks that each digest is a manifest list with both `amd64` and
+   `arm64`. Promotion is all or nothing: if any image is refused or fails a
+   check, the job fails and copies nothing. Otherwise it copies (with
+   `crane copy`) every image to `:vX.Y.Z` first, and only then to `:stable`. If
+   a run fails partway through the copies, run it again: each image's own
+   `:vX.Y.Z` is its first candidate, so the re-run finishes the same release.
+   A manual `workflow_dispatch` run is a dry run: it prints what it would
+   promote and through which candidate, and copies nothing.
 
 The hosted evenfire service deploys from these same images through a separate,
 private pipeline. That pipeline is not part of this repository.
 
 ### What is fixed and what moves
 
-| Tag                   | Moves?                                                                                             |
-| --------------------- | -------------------------------------------------------------------------------------------------- |
-| `:latest`, `:sha-<7>` | `:latest` moves on every `dev` build of that image. `:sha-<7>` names one build.                    |
-| `:vX.Y.Z`             | Written by the release workflow for that tag. Nothing in normal operation rewrites it.             |
-| `:stable`             | Moves to whichever strict `vX.Y.Z` tag was promoted last (a patch to an older line moves it back). |
-| `@sha256:…` digest    | Never moves. Use a digest when you need a byte-for-byte guarantee.                                 |
+| Tag                   | Moves?                                                                                                                                                                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `:latest`, `:sha-<7>` | `:latest` moves on every `dev` build of that image. `:sha-<7>` names one build.                                                                                                    |
+| `:vX.Y.Z`             | Written by the release workflow for that tag. A run never points an existing `:vX.Y.Z` at another digest.                                                                          |
+| `:stable`             | Only moves forward: to a strict `vX.Y.Z` that is not below any other release tag, and whose commit contains the highest other one. A patch to an older line leaves it where it is. |
+| `@sha256:…` digest    | Never moves. Use a digest when you need a byte-for-byte guarantee.                                                                                                                 |
 
-The release workflow has no guard that stops a second run from writing
-`:vX.Y.Z` again. If you need an image that cannot change, pin the digest.
+Runs of the release workflow for the same tag wait for each other. Before it
+moves `:stable`, a run fetches the release tags again, so a higher release
+pushed in the meantime keeps `:stable` where it is. Anyone who can write to the
+registry can still re-tag an image by hand: if you need an image that cannot
+change, pin the digest.
 
 ## Run a specific release
 
@@ -296,20 +313,20 @@ Read the notes for every release you skip over, not only the target release.
 
 ### Feature-specific notes
 
-| Note                                                                               | Read it when                                                                                                                               |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                                 |
-| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                                       |
-| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                          |
-| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                                |
-| [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network.  |
-| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.           |
-| [User access foundation upgrade](user-access-foundation-upgrade.md)                | You upgrade to the release with External REST user sessions. It has a required order: edge before control-api.                             |
-| [Changed code defaults](#changed-code-defaults-first-release-after-v0120)          | You run HCC, WRC, control-api, control-ui or the approval reader with a variable unset. The pull Secret change restarts Host pods once; plan a window. |
-| [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.   |
-| [HCC NetworkPolicy pass bounds](#hcc-networkpolicy-pass-bounds) | You upgrade host-context-controller. It can now exit and restart when a NetworkPolicy pass reaches its hard limit. The pass bounds need no RBAC change. |
-| [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor) | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`. |
-| [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac) | Every cluster. Apply the updated Role before you roll the new host-context-controller image. |
+| Note                                                                               | Read it when                                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Workflow output PVC upgrade](workflow-output-pvc-upgrade.md)                      | You use WorkflowRecipes with `spec.output.destination: pvc`. The default PVC is now one per parent recipe.                                                                                                                                                                                                                    |
+| [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md) | You use the Plugin Workload SDK. It has a required order with the SDK turned off during the upgrade.                                                                                                                                                                                                                          |
+| [GFS permission-store credential lifecycle](gfs-permission-store.md)               | You run the Global File System. It covers provisioning, rotating, and recovering the `gfs_controller` credential.                                                                                                                                                                                                             |
+| [Host PVC layout upgrade](host-pvc-layout-upgrade.md)                              | You upgrade from v0.10.x or v0.11.x and have created stateless Hosts. Run the inventory before the upgrade.                                                                                                                                                                                                                   |
+| [Snippet runner Node permissions](#snippet-runner-node-permissions)                | You run workflow snippets with your own runner image (`CLERUM_SNIPPET_RUNNER_IMAGE`). It must run Node 24.x; Node 25+ blocks its network.                                                                                                                                                                                     |
+| [rpc-proxy default changes](#rpc-proxy-default-changes)                            | You run rpc-proxy from a ConfigMap without `RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS`, or you set a status or activity stream cap.                                                                                                                                                                                              |
+| [User access foundation upgrade](user-access-foundation-upgrade.md)                | You upgrade to the release with External REST user sessions. It has a required order: edge before control-api.                                                                                                                                                                                                                |
+| [Changed code defaults](#changed-code-defaults-first-release-after-v0120)          | You run HCC, WRC, control-api, control-ui or the approval reader with a variable unset. The pull Secret change restarts Host pods once; plan a window.                                                                                                                                                                        |
+| [LLM catalog seed retirement](llm-catalog-seed-retirement-upgrade.md)              | You upgrade across migration `0135_llm_retire_seeded_catalog`, use `cost` budgets, or install fresh. Review the kept placeholder prices.                                                                                                                                                                                      |
+| [HCC NetworkPolicy pass bounds](#hcc-networkpolicy-pass-bounds)                    | You upgrade host-context-controller. It can now exit and restart when a NetworkPolicy pass reaches its hard limit, and it refuses to start when `HCC_K8S_REQUEST_TIMEOUT_MS`, `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` or the hard limit is not plain digits, or when a request timeout is not below the hard limit. No RBAC change. |
+| [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor)          | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`.                                                                                                                                                               |
+| [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac)                            | Every cluster. Apply the updated Role before you roll the new host-context-controller image.                                                                                                                                                                                                                                  |
 
 #### Snippet runner Node permissions
 
@@ -436,15 +453,24 @@ default and the cap check apply when the new pods start.
 
 This release bounds every host-context-controller (HCC) NetworkPolicy pass
 (#1338). A pass is single-flight, so one pass that never finished used to block
-every later pass. Two settings are new. `deploy/base` sets neither, so both
-take their code defaults:
+every later pass. Two settings are new, `HCC_K8S_REQUEST_TIMEOUT_MS` and
+`HCC_NETPOL_PASS_HARD_LIMIT_MS`; `deploy/base` sets neither, so both take their
+code defaults. The table also lists the existing
+`HCC_HOST_K8S_REQUEST_TIMEOUT_MS` (`deploy/base` sets `30000`), because the hard
+limit now bounds it too:
 
-| Variable                        | Default            | Meaning                                                                                                                                                                                                                                                                                     |
-| ------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HCC_K8S_REQUEST_TIMEOUT_MS`    | `30000`            | Deadline in milliseconds for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding reconcilers, of the watcher's McpServer/Context and Secret clients, and of the list requests of the mcp-server SecretInformer and the Deployment informer. A timed-out request fails with error code `HCC_K8S_REQUEST_TIMEOUT`, and the pass fails and retries. |
-| `HCC_NETPOL_PASS_HARD_LIMIT_MS` | `1800000` (30 min) | Longest a NetworkPolicy pass may run. It must be above `300000`, the 5-minute overrun mark.                                                                                                                                                                                                  |
+| Variable                          | Default            | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HCC_K8S_REQUEST_TIMEOUT_MS`      | `30000`            | Deadline in milliseconds for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding reconcilers, of the watcher's McpServer/Context and Secret clients, and of the list requests of the mcp-server SecretInformer and the Deployment informer. A timed-out request fails with error code `HCC_K8S_REQUEST_TIMEOUT`, and the pass fails and retries. It must be below `HCC_NETPOL_PASS_HARD_LIMIT_MS`. |
+| `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` | `30000`            | Deadline in milliseconds for each finite Kubernetes request on the Host convergence path, including Host work queued behind a Context. It must be below `HCC_NETPOL_PASS_HARD_LIMIT_MS`.                                                                                                                                                                                                                                          |
+| `HCC_NETPOL_PASS_HARD_LIMIT_MS`   | `1800000` (30 min) | Longest a NetworkPolicy pass may run. It must be above `300000`, the 5-minute overrun mark.                                                                                                                                                                                                                                                                                                                                       |
 
-Both fail startup when set to `""` or to a value out of range; the
+All three accept plain decimal digits only. Unset or `""` means the default;
+any other spelling (`3e4`, `+30000`, `030000`, `30000.0`, surrounding white
+space) or a value out of range fails startup. HCC also refuses to start when
+either request timeout is not below the hard limit: a request that runs to its
+deadline would hold the pass to the hard limit and exit the process instead of
+failing the pass. The
 [HCC README](../../host-context-controller/README.md#networkpolicy) has the full
 rules.
 
@@ -457,6 +483,17 @@ container, so the HCC pod's restart count grows, and the startup pass converges
 again. Such a restart is expected behaviour, not a crash to roll back; look at
 the `networkpolicy-pass-hard-limit` log line for the stage and the pending
 effect the pass was waiting on.
+
+The hard limit restarts HCC; it does not keep consumers serving until then.
+Once a Context or McpServer changes while a pass is stuck, or when the stuck
+pass is the startup pass, HCC's request lane answers 503. A pass stuck on a
+Kubernetes request ends at its 30 s deadline and retries; when a retry
+certifies within the mcp-host bound, no fleet is revoked. A pass stuck on
+anything else stays stuck: mcp-host revokes each Host's MCP fleet `HCC_AUTHORITY_MAX_STALENESS_MS`
+(180 s by default) after that Host's last successful poll, and mcp-proxy fails
+readiness 300 s after its last successful poll, until HCC exits and its startup
+pass certifies. Act on the first `networkpolicy-pass-overrun` line (5 minutes)
+and treat the exit as the backstop.
 
 Timeouts on the Host path now use the same error code and name as the other
 bounded clients: `HCC_K8S_REQUEST_TIMEOUT` and `K8sRequestTimeoutError`, where
@@ -510,6 +547,13 @@ The poll interval must be a positive whole number of milliseconds in plain
 digits, at most 2147483647, in every mode, including dev mode. `30s`, `3e4` and
 `30_000` used to be read as 30 ms, 3 ms and 30 ms, and now stop startup. So do
 `030000`, ` 30000`, `+30000` and `30000.5`, which work today as 30 s.
+
+`HCC_AUTHORITY_MAX_STALENESS_MS` also accepts plain digits only, in every mode.
+Unlike the poll interval, an empty value is not an error: unset or `""` means
+the 180000 ms default, while an empty poll interval stops startup. It used to be read with
+`parseInt`: `abc`, `0` or `-5` fell back to the default with a warning, and
+`180s` or `1e5` were read as 180 ms and 1 ms (in dev mode they started that
+way). Every such value now stops startup.
 
 The rule also caps the poll interval. With the default
 `HCC_AUTHORITY_MAX_STALENESS_MS` (180000 ms) the poll interval may be at most

@@ -392,3 +392,30 @@ NP08_MCP_HOST_CONFIG_SOURCE="${source_default_45s}" assert_rejected \
   "${SOURCE_RENDER}" \
   'must equal the mcp-host source defaults' \
   'an overlay pin that differs from the source default'
+
+# The same for the staleness bound, whose default is a named constant.
+source_default_staleness_200s="${tmpdir}/config-default-staleness-200s.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  pattern = /^export const HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS = [0-9_]+$/
+  abort("fixture: expected exactly one HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS in #{source}") unless text.scan(pattern).length == 1
+  File.write(destination, text.sub(pattern, "export const HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS = 200_000"))
+' "${ROOT}/mcp-host/src/config.ts" "${source_default_staleness_200s}"
+NP08_MCP_HOST_CONFIG_SOURCE="${source_default_staleness_200s}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  'must equal the mcp-host source defaults' \
+  'an overlay staleness pin that differs from the source default'
+
+source_without_staleness_default="${tmpdir}/config-without-staleness-default.ts"
+RUBYOPT=--disable=gems ruby -e '
+  source, destination = ARGV
+  text = File.read(source, encoding: "UTF-8")
+  pattern = /^export const HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS = [0-9_]+$/
+  abort("fixture: expected exactly one HCC_AUTHORITY_MAX_STALENESS_DEFAULT_MS in #{source}") unless text.scan(pattern).length == 1
+  File.write(destination, text.sub(pattern, "const hccAuthorityStalenessDefaultRenamed = 180_000"))
+' "${ROOT}/mcp-host/src/config.ts" "${source_without_staleness_default}"
+NP08_MCP_HOST_CONFIG_SOURCE="${source_without_staleness_default}" assert_rejected \
+  "${SOURCE_RENDER}" \
+  'expected exactly one HCC_AUTHORITY_MAX_STALENESS_MS default' \
+  'an mcp-host source without the staleness default constant'
