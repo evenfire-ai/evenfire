@@ -260,8 +260,11 @@ async function deleteFixture(page: Page): Promise<void> {
   await expect(row).toHaveCount(0)
 }
 
-test('unauthenticated access does not expose the agent connector inventory', async ({ page }) => {
+test.beforeAll(async () => {
   await verifyTarget()
+})
+
+test('unauthenticated access does not expose the agent connector inventory', async ({ page }) => {
   // E2E_GUARDIAN_NAVIGATION: negative-route-guard — verify the protected agent route without a session.
   await page.goto('/agents/chatllm/connectors')
   await expect(page.getByLabel('Username or email')).toBeVisible()
@@ -276,7 +279,6 @@ test('Control UI connector survives provisioning and runtime restarts', async ({
   browser,
 }) => {
   test.setTimeout(3_600_000)
-  await verifyTarget()
   const original = await snapshot()
   expect(original.uid).toBeTruthy()
   expect(original.servers).not.toContain(connector)
