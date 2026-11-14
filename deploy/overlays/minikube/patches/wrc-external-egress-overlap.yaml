@@ -1,0 +1,29 @@
+---
+# Minikube: keep the WRC external-egress overlap window at 300 s.
+#
+# deploy/base sets WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS to 3600 for production,
+# and production keeps that value. This dev profile keeps the earlier 300 s
+# window because the WRC egress degradation E2E
+# (make test-e2e-wrc-egress-degradation) proves autonomous recovery inside a
+# bounded wait: scripts/e2e/_lib/wrc-egress-gate.cjs refuses a stored DNS window
+# above maxSupportedExternalEgressOverlapSeconds() (505 s) with
+# DNS_WINDOW_EXCEEDS_GATE_RECOVERY_BUDGET. WRC persists a recovered same-IP
+# observation only at overlap/2, so 3600 s would need about 30 minutes per run.
+#
+# The overlap must stay at least twice the refresh interval (60 s by default).
+# scripts/tests/test-wrc-egress-gate-overlap-render.sh checks every minikube
+# overlay against the gate's bound. minikube-ghcr, minikube-no-uis and
+# minikube-no-uis-ghcr inherit this patch.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-recipes
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: workflow-recipes
+          env:
+            - name: WRC_EXTERNAL_EGRESS_OVERLAP_SECONDS
+              value: "300"

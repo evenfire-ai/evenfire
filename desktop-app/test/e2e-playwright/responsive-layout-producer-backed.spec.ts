@@ -44,6 +44,21 @@ async function resizeDesktop(app: ElectronApplication, width: number): Promise<v
   }, width)
 }
 
+async function nativeSandboxViewState(app: ElectronApplication) {
+  return app.evaluate(({ BrowserWindow, screen }) => {
+    const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    if (!window || window.isDestroyed()) throw new Error('Desktop BrowserWindow closed')
+    const view = window.contentView.children.at(-1)
+    if (!view) throw new Error('Expected the producer-backed sandbox WebContentsView')
+    return {
+      webContentsId: view.webContents.id,
+      visible: view.getVisible(),
+      bounds: view.getBounds(),
+      scaleFactor: screen.getDisplayMatching(window.getBounds()).scaleFactor,
+    }
+  })
+}
+
 async function bounds(locator: ReturnType<Page['locator']>) {
   const box = await locator.boundingBox()
   expect(box, 'expected a visible layout element').not.toBeNull()
@@ -124,6 +139,265 @@ test('Desktop app tray layout is exercised with producer-backed notification and
 
     if (!app) throw new Error('Desktop app did not launch for responsive layout assertions')
     const page = await app.firstWindow()
+    await test.step('compact navigation covers the native embed and restores its live bounds', async () => {
+      await resizeDesktop(app!, 700)
+      await page.evaluate(() => window.localStorage.setItem('clerum.ui.sidebarWidth', '420'))
+      const savedWidthBeforeOverlay = await page.evaluate(() =>
+        window.localStorage.getItem('clerum.ui.sidebarWidth')
+      )
+      await expect.poll(async () => (await nativeSandboxViewState(app!)).visible).toBe(true)
+      const nativeViewBeforeOverlay = await nativeSandboxViewState(app!)
+      const trigger = page.getByTestId('compact-navigation-toggle')
+      await expect(trigger).toBeVisible()
+      await expect(page.locator('.sandbox-ui-embed-slot')).toBeVisible()
+      const contentBefore = await bounds(page.locator('.workspace-layout'))
+
+      await trigger.click()
+      const sidebar = page.locator('#desktop-sidebar-navigation')
+      await expect(sidebar).toBeVisible()
+      await expect(sidebar).toHaveClass(/compact-open/)
+      await expect.poll(async () => (await nativeSandboxViewState(app!)).visible).toBe(false)
+      const [sidebarBox, titlebarBox, hiddenView, contentAfter] = await Promise.all([
+        bounds(sidebar),
+        bounds(page.locator('.window-titlebar')),
+        nativeSandboxViewState(app!),
+        bounds(page.locator('.workspace-layout')),
+      ])
+      expect(Math.abs(sidebarBox.x)).toBeLessThanOrEqual(1)
+      expect(Math.abs(sidebarBox.y - titlebarBox.height)).toBeLessThanOrEqual(1)
+      expect(Math.abs(sidebarBox.width - 700)).toBeLessThanOrEqual(2)
+      expect(contentAfter.x).toBe(contentBefore.x)
+      expect(contentAfter.y).toBe(contentBefore.y)
+      expect(contentAfter.width).toBe(contentBefore.width)
+      expect(contentAfter.height).toBe(contentBefore.height)
+      expect(hiddenView.visible, 'native view must be hidden above the renderer overlay').toBe(
+        false
+      )
+      expect(hiddenView.webContentsId).toBe(nativeViewBeforeOverlay.webContentsId)
+      expect(
+        await page.locator('.workspace-layout').evaluate(element => (element as HTMLElement).inert)
+      ).toBe(true)
+      expect(
+        await page.locator('body').evaluate(element => getComputedStyle(element).overflow)
+      ).toBe('hidden')
+
+      const backdropPoint = await page.evaluate(() => {
+        const sidebar = document.querySelector('#desktop-sidebar-navigation')
+        if (!sidebar) throw new Error('Compact navigation sidebar is missing')
+        const rect = sidebar.getBoundingClientRect()
+        const point = { x: window.innerWidth - 16, y: rect.top + rect.height / 2 }
+        const target = document.elementFromPoint(point.x, point.y)
+        return {
+          ...point,
+          isBackdrop: target?.classList.contains('sidebar-mobile-backdrop') ?? false,
+        }
+      })
+      expect(backdropPoint.isBackdrop, 'right edge must be an exposed backdrop target').toBe(true)
+      await page.mouse.click(backdropPoint.x, backdropPoint.y)
+      await expect(sidebar).not.toHaveClass(/compact-open/)
+      await expect.poll(async () => (await nativeSandboxViewState(app!)).visible).toBe(true)
+      expect(await trigger.evaluate(element => element === document.activeElement)).toBe(true)
+      expect(await page.evaluate(() => window.localStorage.getItem('clerum.ui.sidebarWidth'))).toBe(
+        savedWidthBeforeOverlay
+      )
+
+      const slotBox = await bounds(page.locator('.sandbox-ui-embed-slot'))
+      const [restoredView, dpr] = await Promise.all([
+        nativeSandboxViewState(app!),
+        page.evaluate(() => window.devicePixelRatio),
+      ])
+      expect(restoredView.webContentsId).toBe(nativeViewBeforeOverlay.webContentsId)
+      const factor = dpr / restoredView.scaleFactor
+      for (const [actual, expected] of [
+        [restoredView.bounds.x, slotBox.x * factor],
+        [restoredView.bounds.y, slotBox.y * factor],
+        [restoredView.bounds.width, slotBox.width * factor],
+        [restoredView.bounds.height, slotBox.height * factor],
+      ]) {
+        expect(Math.abs(actual! - expected!)).toBeLessThanOrEqual(2)
+      }
+
+      await trigger.click()
+      const compactClose = page.locator('.sidebar-compact-close')
+      await compactClose.focus()
+      await expect(compactClose).toBeFocused()
+      await resizeDesktop(app!, 1200)
+      await expect(trigger).not.toBeVisible()
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const active = document.activeElement
+            return active?.getAttribute('data-testid') ?? null
+          })
+        )
+        .toBe('nav-sandbox-ui')
+      const desktopFocus = await page.evaluate(() => {
+        const active = document.activeElement
+        return {
+          connected: active?.isConnected ?? false,
+          visible: Boolean(active?.getClientRects().length),
+          inert: Boolean(active?.closest('[inert]')),
+        }
+      })
+      expect(desktopFocus).toEqual({ connected: true, visible: true, inert: false })
+      const readDesktopNativeGeometry = async () => {
+        const [slot, view, devicePixelRatio] = await Promise.all([
+          bounds(page.locator('.sandbox-ui-embed-slot')),
+          nativeSandboxViewState(app!),
+          page.evaluate(() => window.devicePixelRatio),
+        ])
+        const factor = devicePixelRatio / view.scaleFactor
+        const matchesSlot = [
+          [view.bounds.x, slot.x * factor],
+          [view.bounds.y, slot.y * factor],
+          [view.bounds.width, slot.width * factor],
+          [view.bounds.height, slot.height * factor],
+        ].every(([actual, expected]) => Math.abs(actual! - expected!) <= 2)
+        return { slot, view, factor, matchesSlot }
+      }
+      await expect
+        .poll(
+          async () => {
+            const { view, matchesSlot } = await readDesktopNativeGeometry()
+            return (
+              view.visible &&
+              view.webContentsId === nativeViewBeforeOverlay.webContentsId &&
+              matchesSlot
+            )
+          },
+          { timeout: 10_000 }
+        )
+        .toBe(true)
+      const {
+        slot: desktopSlot,
+        view: desktopView,
+        factor: desktopFactor,
+      } = await readDesktopNativeGeometry()
+      expect(desktopView.webContentsId).toBe(nativeViewBeforeOverlay.webContentsId)
+      expect(desktopView.visible).toBe(true)
+      for (const [actual, expected] of [
+        [desktopView.bounds.x, desktopSlot.x * desktopFactor],
+        [desktopView.bounds.y, desktopSlot.y * desktopFactor],
+        [desktopView.bounds.width, desktopSlot.width * desktopFactor],
+        [desktopView.bounds.height, desktopSlot.height * desktopFactor],
+      ]) {
+        expect(Math.abs(actual! - expected!)).toBeLessThanOrEqual(2)
+      }
+      const separator = page.getByRole('separator', { name: 'Resize sidebar' })
+      await expect(separator).toBeVisible()
+      const desktopSidebar = page.locator('.left-nav')
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(420)
+      await separator.focus()
+      await separator.press('Home')
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(192)
+      expect(await page.evaluate(() => window.localStorage.getItem('clerum.ui.sidebarWidth'))).toBe(
+        '192'
+      )
+
+      const breakpointSeparatorBox = await bounds(separator)
+      const breakpointStartX = breakpointSeparatorBox.x + breakpointSeparatorBox.width / 2
+      const breakpointStartY =
+        breakpointSeparatorBox.y + Math.min(120, breakpointSeparatorBox.height / 2)
+      await page.mouse.move(breakpointStartX, breakpointStartY)
+      await page.mouse.down()
+      await page.mouse.move(breakpointStartX + 40, breakpointStartY)
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(232)
+      expect(
+        await page
+          .locator('body')
+          .evaluate(element => element.classList.contains('sidebar-resizing'))
+      ).toBe(true)
+      await resizeDesktop(app!, 700)
+      await expect(trigger).toBeVisible()
+      await expect(separator).not.toBeVisible()
+      await expect
+        .poll(() =>
+          page.locator('body').evaluate(element => element.classList.contains('sidebar-resizing'))
+        )
+        .toBe(false)
+      expect(await page.evaluate(() => window.localStorage.getItem('clerum.ui.sidebarWidth'))).toBe(
+        '192'
+      )
+      await resizeDesktop(app!, 1200)
+      await expect(separator).toBeVisible()
+      await page.mouse.up()
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(192)
+      expect(await page.evaluate(() => window.localStorage.getItem('clerum.ui.sidebarWidth'))).toBe(
+        '192'
+      )
+
+      const separatorBox = await bounds(separator)
+      const startX = separatorBox.x + separatorBox.width / 2
+      const startY = separatorBox.y + Math.min(120, separatorBox.height / 2)
+      await page.mouse.move(startX, startY)
+      await page.mouse.down()
+      await page.mouse.move(startX + 32, startY)
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(224)
+      await separator.dispatchEvent('pointercancel', {
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true,
+      })
+      await page.mouse.up()
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(192)
+      expect(await page.evaluate(() => window.localStorage.getItem('clerum.ui.sidebarWidth'))).toBe(
+        '192'
+      )
+
+      await page.mouse.move(startX, startY)
+      await page.mouse.down()
+      await page.mouse.move(startX + 80, startY)
+      await page.mouse.up()
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(272)
+      const readResizedGeometry = async () => {
+        const [slot, view, devicePixelRatio] = await Promise.all([
+          bounds(page.locator('.sandbox-ui-embed-slot')),
+          nativeSandboxViewState(app!),
+          page.evaluate(() => window.devicePixelRatio),
+        ])
+        const scaleFactor = devicePixelRatio / view.scaleFactor
+        const matchesSlot = [
+          [view.bounds.x, slot.x * scaleFactor],
+          [view.bounds.y, slot.y * scaleFactor],
+          [view.bounds.width, slot.width * scaleFactor],
+          [view.bounds.height, slot.height * scaleFactor],
+        ].every(([actual, expected]) => Math.abs(actual! - expected!) <= 2)
+        return { slot, view, devicePixelRatio, matchesSlot }
+      }
+      await expect.poll(async () => (await readResizedGeometry()).matchesSlot).toBe(true)
+      const {
+        slot: resizedSlot,
+        view: resizedView,
+        devicePixelRatio: resizedDpr,
+      } = await readResizedGeometry()
+      expect(resizedView.webContentsId).toBe(nativeViewBeforeOverlay.webContentsId)
+      const resizedFactor = resizedDpr / resizedView.scaleFactor
+      for (const [actual, expected] of [
+        [resizedView.bounds.x, resizedSlot.x * resizedFactor],
+        [resizedView.bounds.y, resizedSlot.y * resizedFactor],
+        [resizedView.bounds.width, resizedSlot.width * resizedFactor],
+        [resizedView.bounds.height, resizedSlot.height * resizedFactor],
+      ]) {
+        expect(Math.abs(actual! - expected!)).toBeLessThanOrEqual(2)
+      }
+
+      await separator.focus()
+      await separator.press('End')
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(460)
+      await resizeDesktop(app!, 800)
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(340)
+      await resizeDesktop(app!, 1200)
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(460)
+
+      await page.getByRole('button', { name: 'Collapse sidebar' }).click()
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(74)
+      await page.getByRole('button', { name: 'Expand sidebar' }).click()
+      await expect.poll(async () => Math.round((await bounds(desktopSidebar)).width)).toBe(460)
+      expect(await page.evaluate(() => window.localStorage.getItem('clerum.ui.sidebarWidth'))).toBe(
+        '460'
+      )
+    })
+
     await test.step('desktop tray cards stay compact and top aligned', async () => {
       await resizeDesktop(app!, 1200)
       await page.getByTestId('notification-bell').click()

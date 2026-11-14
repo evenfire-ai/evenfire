@@ -174,6 +174,25 @@ export function modelInputs(runId) {
   }))
 }
 
+// Restoring a row the fixture created means deleting it, and every delete
+// leaves a permanent catalog tombstone. For a real provider model that
+// tombstone would stop the catalog sync from ever enabling it, so only the
+// run-scoped model, which no catalog lists, may be created here.
+export function requireDiscoveredCatalogModels(models, catalog, runId) {
+  const runScoped = `image-fixture-unknown-${runId.slice(-12)}`
+  const missing = models.filter(
+    model =>
+      model.model !== runScoped &&
+      !catalog.some(row => row.provider === model.provider && row.model === model.model)
+  )
+  if (missing.length > 0)
+    throw new Error(
+      `Catalog has not discovered ${missing
+        .map(model => `${model.provider}/${model.model}`)
+        .join(', ')}; wait for a live catalog sync before running the fixture`
+    )
+}
+
 export function requireOwnedResource(resource, uid, runId) {
   if (resource?.metadata?.uid !== uid || resource.metadata.annotations?.[runAnnotation] !== runId)
     throw new Error('Fixture resource owner changed; refusing mutation')
@@ -307,6 +326,8 @@ async function main() {
     return `http://127.0.0.1:${port}`
   }
   command('make', ['-f', branchMake, 'branch-profile-health'])
+  if (action === 'run')
+    command('npm', ['--prefix', 'desktop-app', 'run', 'verify:electron', '--', '--check-only'])
   const api = `${urlFor('control-api')}/api/v1`
   const kc = (args, input) =>
     command(
@@ -696,6 +717,7 @@ async function main() {
     save()
     const models = modelInputs(state.runId)
     const catalog = (await admin('GET', 'llm-models')).rows
+    requireDiscoveredCatalogModels(models, catalog, state.runId)
     for (const model of models) {
       const prior = catalog.find(
         row => row.provider === model.provider && row.model === model.model
@@ -845,7 +867,8 @@ async function main() {
       QA_RECORDER_IMAGE_MODEL_UNKNOWN: models[2].model,
       QA_RECORDER_ROOT: evidence,
     }
-    command('npm', ['run', 'verify:electron', '--prefix', 'desktop-app'])
+    // Bounded pre-flight: never pay the Electron runtime download here.
+    command('npm', ['--prefix', 'desktop-app', 'run', 'verify:electron', '--', '--check-only'])
     process.stdout.write(`Image capability fixture ready: ${state.runId} (lane ${lane})\n`)
     // Playwright's JSON reporter writes this reserved inode with writeFile. Keep
     // the descriptor until the verdict; a replacement path cannot supply proof.

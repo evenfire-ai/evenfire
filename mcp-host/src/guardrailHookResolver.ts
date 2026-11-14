@@ -147,7 +147,8 @@ function endpointFor(cr: LlmHookCR, ns: string): ResolvedEndpoint | null {
 function isDuplicatePathLoser(cr: LlmHookCR): boolean {
   const conditions = (
     cr.status as
-      { conditions?: Array<{ type?: string; status?: string; reason?: string }> } | undefined
+      | { conditions?: Array<{ type?: string; status?: string; reason?: string }> }
+      | undefined
   )?.conditions
   return (
     Array.isArray(conditions) &&

@@ -564,6 +564,15 @@ scripts/minikube/image-mode.sh --image-source   # ghcr | local
 scripts/minikube/image-mode.sh --image-tag      # the ghcr tag (empty in local mode)
 ```
 
+**Minikube redeploys do not roll out External REST before control-api**, which
+a production upgrade with External REST user sessions requires (see the [user
+access foundation upgrade note](user-access-foundation-upgrade.md)). Do not
+drive clients (Desktop App, Profile UI) during a redeploy. Moving a profile back
+to an older branch, or running
+`make minikube-deploy-service SVC=control-api NS=control-plane` on a profile
+whose External REST is older, pairs an old External REST with a new control-api
+until External REST is redeployed.
+
 ### The one-command path (both modes)
 
 ```bash

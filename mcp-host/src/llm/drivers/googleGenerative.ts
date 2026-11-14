@@ -24,10 +24,12 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../../core/types'
+import { logger } from '../../logger'
 import type { ProviderCredentials } from '../../types'
 import { classifyUnknown } from '../errorClassification'
 import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
 import type { LlmProvider } from '../registryCore'
+import { type ToolNameEnvelopeKey, fromWireResponse, toWireRequest } from '../toolWireNames'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
 
 // ─── SDK-agnostic wire shapes ────────────────────────────────────────────────
@@ -76,7 +78,7 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
   constructor(client: GeminiGenerateClient, defaultModel: string) {
     this.client = client
     this.defaultModel = defaultModel
-    console.log(`[Vertex] Initialized with model: ${defaultModel}`)
+    logger.info({ model: defaultModel }, 'Vertex transport initialized')
   }
 
   getProviderType(): LlmProvider {
@@ -85,6 +87,10 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
 
   classifyError(err: unknown): ClassifiedError {
     return classifyGoogleError(err)
+  }
+
+  protected toolNameEnvelope(): ToolNameEnvelopeKey {
+    return 'W_v'
   }
 
   // ─── Single-Turn Methods ────────────────────────────────────────────────
@@ -125,8 +131,11 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
       signal?: AbortSignal
     }
   ): Promise<ToolCompletionResponse> {
-    const { systemInstruction, contents } = this.toGeminiContents(messages)
-    const functionDeclarations = tools.map(t => ({
+    // The history is projected before `toGeminiContents`, so a
+    // `functionResponse` takes the wire name of the `functionCall` it answers.
+    const wire = toWireRequest(messages, tools, this.toolNameEnvelope())
+    const { systemInstruction, contents } = this.toGeminiContents(wire.messages)
+    const functionDeclarations = wire.tools.map(t => ({
       name: t.name,
       description: t.description,
       parameters: t.parameters,
@@ -162,12 +171,15 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
         arguments: (p.functionCall!.args ?? {}) as Record<string, unknown>,
       }))
 
-    return {
-      content: textContent,
-      tool_calls: toolCalls.length > 0 ? toolCalls : null,
-      usage: mapUsage(response),
-      finish_reason: mapFinishReason(response.candidates?.[0]?.finishReason, parts),
-    }
+    return fromWireResponse(
+      {
+        content: textContent,
+        tool_calls: toolCalls.length > 0 ? toolCalls : null,
+        usage: mapUsage(response),
+        finish_reason: mapFinishReason(response.candidates?.[0]?.finishReason, parts),
+      },
+      wire.names
+    )
   }
 
   // ─── Message translation ─────────────────────────────────────────────────
@@ -317,8 +329,13 @@ export function classifyGoogleError(err: unknown): ClassifiedError {
       return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
     if (httpStatus >= 500 && httpStatus < 600)
       return { code: LlmErrorCode.ModelOverloaded, retryable: true, message, ...diag }
+    // #1433: an HTTP 400 on the call. Either Vertex refused the request, or
+    // Google's token endpoint refused the service-account credential
+    // (`invalid_grant`) and no request reached Vertex (#1437). Both are
+    // reported as a rejected request, not retryable. Same label as the other
+    // providers' HTTP 400.
     if (httpStatus === 400)
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
+      return { code: LlmErrorCode.UpstreamRejected, retryable: false, message, ...diag }
   }
 
   switch (statusString) {
@@ -334,9 +351,10 @@ export function classifyGoogleError(err: unknown): ClassifiedError {
     case 'NOT_FOUND':
       // gRPC equivalent of a 404 — retired/inaccessible model.
       return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
+    // gRPC equivalents of the HTTP 400 above (#1433).
     case 'INVALID_ARGUMENT':
     case 'FAILED_PRECONDITION':
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
+      return { code: LlmErrorCode.UpstreamRejected, retryable: false, message, ...diag }
   }
 
   return classifyUnknown(err)

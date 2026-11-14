@@ -1,12 +1,14 @@
 import { type Mock, inject, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
+import { resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { ChatStore } from '../../../../../../src/chatStore'
 import type {
   ChatAuthorityScope,
   ChatDeleteFence,
   ChatIndex,
   ChatMessage,
+  ReplaceChatMessagesOptions,
 } from '../../../../../../src/types'
 import type {} from './mockClerumStoreRoot'
 
@@ -20,8 +22,9 @@ import type {} from './mockClerumStoreRoot'
  * hook code path and keeps the suite consistent with the rest of the repo.
  *
  * R1-M11: the transcript writes and reads (`create`, `delete`, `loadMessages`,
- * `appendMessages`, `upsertMessages`) delegate to a real `ChatStore` on a
- * per-install directory under the run's temporary root, so suites observe the
+ * `appendMessages`, `upsertMessages`, `removeMessages`) delegate to a real
+ * `ChatStore` on a per-install directory under the run's temporary root, so
+ * suites observe the
  * merge, delete tombstone and paging behavior the IPC handlers run in
  * production. They stay `vi.fn` wrappers, so call assertions and per-test
  * overrides keep working. `uninstallMockClerum` removes the bridge; the global
@@ -47,6 +50,7 @@ interface ChatMock {
   loadMessages: Fn
   appendMessages: Fn
   upsertMessages: Fn
+  removeMessages: Fn
   replaceMessages: Fn
   markUnreadTerminal: Fn
   clearUnreadTerminal: Fn
@@ -89,6 +93,16 @@ export interface MockClerum {
   persistLastActive: (agentRef: string, chatId: string) => Promise<void>
   /** Mirror the main-process ChatStore authority binding when the test App switches teams. */
   setChatStoreAuthorityScope: (scope: ChatAuthorityScope) => void
+  /**
+   * The real store's replaceMessages. The bridge's own `chat.replaceMessages`
+   * is a no-op; a test that needs a reconcile's write points it here.
+   */
+  replaceStoredMessages: (
+    agentRef: string,
+    chatId: string,
+    messages: ChatMessage[],
+    options?: ReplaceChatMessagesOptions
+  ) => Promise<void>
 }
 
 export function installMockClerum(): MockClerum {
@@ -134,6 +148,9 @@ export function installMockClerum(): MockClerum {
     ),
     upsertMessages: vi.fn((agentRef: string, chatId: string, messages: ChatMessage[]) =>
       store.upsertMessages(agentRef, chatId, messages)
+    ),
+    removeMessages: vi.fn((agentRef: string, chatId: string, messageIds: string[]) =>
+      store.removeMessages(agentRef, chatId, messageIds)
     ),
     replaceMessages: vi.fn(async () => undefined),
     markUnreadTerminal: vi.fn(async () => undefined),
@@ -182,6 +199,12 @@ export function installMockClerum(): MockClerum {
   const clerum = {
     chat,
     rpc,
+    gfs: {
+      resolve: vi.fn(async (uri: string) => {
+        const resourceId = uri.split('/').filter(Boolean).at(-1) ?? ''
+        return resolvedFile(resourceId, resourceId, { gfsUri: uri })
+      }),
+    },
     emitTaskProgress(taskId: string, event: unknown) {
       const handler = progressHandlers.get(taskId)
       if (!handler) throw new Error(`No task-progress handler registered for taskId="${taskId}"`)
@@ -200,6 +223,12 @@ export function installMockClerum(): MockClerum {
     persistLastActive: (agentRef: string, chatId: string) =>
       store.setLastActiveChatId(agentRef, chatId),
     setChatStoreAuthorityScope: (scope: ChatAuthorityScope) => store.setAuthorityScope(scope),
+    replaceStoredMessages: (
+      agentRef: string,
+      chatId: string,
+      messages: ChatMessage[],
+      options?: ReplaceChatMessagesOptions
+    ) => store.replaceMessages(agentRef, chatId, messages, options),
   }
 
   Object.defineProperty(window, 'clerum', {

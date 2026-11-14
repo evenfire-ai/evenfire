@@ -155,6 +155,10 @@ export interface GfsCrumb {
   kind: 'file' | 'directory'
   version: number
   bytes: number
+  /** Authority identity under which this resource path was resolved or listed. */
+  authorityScope?: string
+  sessionGeneration?: number | null
+  resolvedViaUri?: boolean
 }
 
 export interface GfsBrowserAffordances {
@@ -367,6 +371,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         liveSessionGenerationRef.current
       ),
     [sessionScope, sessionGeneration]
+  )
+  const isCurrentLocation = useCallback(
+    (expected: GfsCrumb) => currentCrumbRef.current === expected && ownsPublishedAuthority(),
+    [ownsPublishedAuthority]
   )
   const canListAccessibleResources = typeof window.clerum?.gfs?.listAccessible === 'function'
 
@@ -1389,6 +1397,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           // `resolve` may omit bytes (older servers) — crumbs display 0 then,
           // matching the `version ?? 0` handling above.
           bytes: resource.bytes ?? 0,
+          authorityScope: sessionScope ?? 'anonymous',
+          sessionGeneration,
+          resolvedViaUri: true,
         }
         const ancestors: GfsCrumb[] = []
         const seenResourceIds = new Set([resource.resourceId])
@@ -1414,6 +1425,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
                 kind: 'directory',
                 version: parent.version ?? 0,
                 bytes: parent.bytes ?? 0,
+                authorityScope: sessionScope ?? 'anonymous',
+                sessionGeneration,
+                resolvedViaUri: true,
               })
             }
             parentResourceId = parent.parentResourceId
@@ -1724,6 +1738,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           kind: 'directory',
           version: child.version,
           bytes: child.bytes,
+          authorityScope: sessionScope ?? 'anonymous',
+          sessionGeneration,
+          resolvedViaUri: false,
         },
       ])
     },
@@ -1743,10 +1760,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           kind: resource.kind === 'directory' ? 'directory' : 'file',
           version: resource.version,
           bytes: resource.bytes,
+          authorityScope: sessionScope ?? 'anonymous',
+          sessionGeneration,
+          resolvedViaUri: false,
         },
       ])
     },
-    [revalidateChildren]
+    [revalidateChildren, sessionScope, sessionGeneration]
   )
 
   const goToCrumb = useCallback(
@@ -1758,7 +1778,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         return next
       })
     },
-    [revalidateChildren]
+    [revalidateChildren, sessionScope, sessionGeneration]
   )
 
   /** Restore an exact browser location after a transient resource selection
@@ -1803,6 +1823,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   return {
     crumbs,
     current,
+    isCurrentLocation,
     /** Cache-owner scope without team identity, used only to fence captured Move convergence. */
     principalScope,
     /** Cache-scope key (env + user + team) so the move dialog's queries share

@@ -25,6 +25,12 @@ vi.mock('../src/controlApiClient.js', () => ({
   controlApiRequest: clientMock.controlApiRequest,
   controlApiStreamRequest: clientMock.controlApiStreamRequest,
   ControlApiError,
+  ControlApiPathError: class ControlApiPathError extends ControlApiError {
+    constructor() {
+      super('Control API request path is not allowed', 400, { error: 'invalid_request' })
+      this.name = 'ControlApiPathError'
+    }
+  },
 }))
 
 const authTokenMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
@@ -562,6 +568,31 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
       })
     expect(res.status).toBe(403)
     expect(res.body).toEqual({ error: 'escalation_rejected' })
+  })
+
+  it('forwards the GFS session-authority denial codes the Desktop acts on', async () => {
+    // CG-6: the Desktop revokes access and purges the preview when either code
+    // reaches it. Both travel the GFS route forwarder, not the global handler.
+    for (const token of ['desktop_user_retired', 'gfs_operator_link_invalid']) {
+      clientMock.controlApiRequest.mockRejectedValueOnce(
+        new ControlApiError('private gfsc detail', 403, { error: token })
+      )
+
+      const res = await request(buildApp())
+        .get('/me/gfs/resolve')
+        .set('authorization', 'Bearer sess-xyz')
+
+      expect(res.status).toBe(403)
+      expect(res.body).toStrictEqual({ error: token })
+    }
+
+    expect(clientMock.controlApiRequest).toHaveBeenCalledTimes(2)
+    expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
+      1,
+      'GET',
+      '/external/gfs/resolve',
+      expect.objectContaining({ userSessionToken: 'sess-xyz' })
+    )
   })
 
   it('preserves a public 413 payload_too_large response and its safe transport headers', async () => {

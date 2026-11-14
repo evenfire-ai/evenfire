@@ -8,6 +8,16 @@ export type GfsDriveResource = GfsBrowserChild & {
   coversDescendants?: boolean
 }
 
+export type FilesPageResolvedLocation = {
+  resourceId: string
+  gfsUri: string
+  kind: 'file' | 'directory'
+  authorityScope: string
+  sessionGeneration: number | null
+  resolvedViaUri: boolean
+  isCurrent: () => boolean
+}
+
 export interface FilesPageProps {
   /** App-level toast dispatcher for success feedback (desktop-app/ui rule). */
   pushToast?: (message: string, tone: Tone, options?: { durationMs?: number }) => void
@@ -44,7 +54,11 @@ export interface FilesPageProps {
    * changes, including back to the virtual root (`null`, `null`). The opaque
    * `gfsUri` carries no name, hence the second argument.
    */
-  onLocationChange?: (gfsUri: string | null, name: string | null) => void
+  onLocationChange?: (
+    gfsUri: string | null,
+    name: string | null,
+    resolvedLocation?: FilesPageResolvedLocation | null
+  ) => void
   /** Monotonic signal from the app-level entity stream for live path reconciliation. */
   remoteGfsChangeEpoch?: number
   /**

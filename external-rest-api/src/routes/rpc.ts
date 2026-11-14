@@ -19,7 +19,6 @@ export function createRpcRouter(): Router {
         res.status(403).json({ error: result.error })
         return
       }
-
       res.status(200).json(result)
     } catch (error) {
       next(error)

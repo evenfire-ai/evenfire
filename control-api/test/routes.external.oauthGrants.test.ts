@@ -16,6 +16,11 @@ const storeMock = vi.hoisted(() => ({
 }))
 vi.mock('../src/oauth/store.js', () => storeMock)
 
+const rateLimitMock = vi.hoisted(() => ({
+  checkAndIncrement: vi.fn(),
+}))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
+
 // Mirror the exact pattern from routes.external.workflowApprovalMediums.test.ts:
 // mock requireValidExternalSessionToken to inject req.externalAuth.
 vi.mock('../src/middleware/externalSessionAuth.js', () => ({
@@ -48,6 +53,14 @@ describe('/external/oauth/grants', () => {
     vi.clearAllMocks()
     storeMock.listUserOAuthGrants.mockResolvedValue([])
     storeMock.deleteOAuthGrant.mockResolvedValue(undefined)
+    rateLimitMock.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      count: 1,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      backendAvailable: true,
+    })
   })
 
   // T3 (route wiring): fails at the parent sha, where GET calls
@@ -135,5 +148,19 @@ describe('/external/oauth/grants', () => {
     )
     expect(res.status).toBe(400)
     expect(storeMock.deleteOAuthGrant).not.toHaveBeenCalled()
+  })
+
+  it('lists owned grants without an added user quota', async () => {
+    await request(makeApp()).get('/external/oauth/grants').expect(200)
+    expect(storeMock.listUserOAuthGrants).toHaveBeenCalledWith(expect.anything(), 'user-1', 'all')
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
+  })
+
+  it('revokes owned grants without an added user quota', async () => {
+    await request(makeApp())
+      .delete('/external/oauth/grants/sandbox-recipes/leadforge/google-gmail')
+      .expect(204)
+    expect(storeMock.deleteOAuthGrant).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
   })
 })

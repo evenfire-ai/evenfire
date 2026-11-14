@@ -15,14 +15,16 @@ import { CodexSubscriptionProvider } from '../llm/codexSubscription'
 import type { ImageInputResolver } from '../llm/imageInput'
 import { OpenAIProvider } from '../llm/openai'
 import { OpenAICompatibleProvider } from '../llm/openaiCompatible'
+import { recordedResponse } from '../llm/openaiFamily/__tests__/responsesFixtures'
 import type { LlmProvider } from '../llm/registryCore'
 import type { SingleTurnProvider } from '../llm/types'
 import { VisualInputBudget } from '../visualInput/policy'
 import { projectGfsApproval } from '../visualInput/suspension'
 import { GfsDownloadStore } from './gfsDownloadStore'
 
-const { sdkCreate, clientFactory } = vi.hoisted(() => ({
+const { sdkCreate, responsesCreate, clientFactory } = vi.hoisted(() => ({
   sdkCreate: vi.fn(),
+  responsesCreate: vi.fn(),
   clientFactory: vi.fn(),
 }))
 
@@ -46,6 +48,17 @@ vi.mock('./gfsClient', async importOriginal => ({
   getGfsToolScopes: () => new Set(['gfs.read']),
   createGfscClient: clientFactory,
 }))
+
+/** The image URLs the official endpoint receives, as Responses `input_image` parts. */
+function inputImageUrls(request: unknown): string[] {
+  return (request as { input: Array<{ content?: unknown }> }).input.flatMap(item =>
+    Array.isArray(item.content)
+      ? (item.content as Array<{ type?: string; image_url?: string }>)
+          .filter(part => part.type === 'input_image')
+          .map(part => part.image_url!)
+      : []
+  )
+}
 
 const rid = '1234567890abcdef1234567890abcdef'
 const uri = `gfs://main/${rid}`
@@ -156,6 +169,7 @@ async function setup(
     choices: [{ message: { content: 'Done' }, finish_reason: 'stop' }],
     usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
   })
+  responsesCreate.mockImplementation(async () => recordedResponse('v1-text-gpt-4.1'))
   const provider =
     options.llm?.provider ??
     new OpenAICompatibleProvider(
@@ -333,6 +347,7 @@ describe('GFS bytes to actual provider request', () => {
               {
                 baseURL: 'https://api.openai.com/v1',
                 chat: { completions: { create: sdkCreate } },
+                responses: { create: responsesCreate },
               } as never,
               targetModel
             )
@@ -353,15 +368,17 @@ describe('GFS bytes to actual provider request', () => {
       })
       const original = structuredClone(subject.messages)
       await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
-      const request = type === 'openai' ? sdkCreate.mock.calls[0]![0] : create.mock.calls[0]![0]
-      const content = (request as { messages: Array<{ content: unknown }> }).messages.flatMap(
-        message => (Array.isArray(message.content) ? message.content : [])
-      )
+      const request =
+        type === 'openai' ? responsesCreate.mock.calls[0]![0] : create.mock.calls[0]![0]
       if (type === 'openai') {
-        expect(content.find(part => part.type === 'image_url')?.image_url.url).toBe(
-          `data:image/png;base64,${bytes.toString('base64')}`
-        )
+        expect(sdkCreate).not.toHaveBeenCalled()
+        expect(inputImageUrls(request)).toEqual([
+          `data:image/png;base64,${bytes.toString('base64')}`,
+        ])
       } else {
+        const content = (request as { messages: Array<{ content: unknown }> }).messages.flatMap(
+          message => (Array.isArray(message.content) ? message.content : [])
+        )
         expect(content.find(part => part.type === 'image')?.source).toEqual({
           type: 'base64',
           media_type: 'image/png',
@@ -380,6 +397,7 @@ describe('GFS bytes to actual provider request', () => {
       const client = {
         baseURL: 'https://api.openai.com/v1',
         chat: { completions: { create: sdkCreate } },
+        responses: { create: responsesCreate },
       }
       const canvas = createCanvas(8, 8)
       canvas.getContext('2d').fillRect(1, 1, 4, 4)
@@ -395,16 +413,9 @@ describe('GFS bytes to actual provider request', () => {
       expect(JSON.parse(subject.output.content).delivery).toBe('image_input')
       await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
       expect(subject.metadataFetch).not.toHaveBeenCalled()
-      const request = sdkCreate.mock.calls[0][0]
-      const images = request.messages
-        .flatMap((message: any) => (Array.isArray(message.content) ? message.content : []))
-        .filter((part: any) => part.type === 'image_url')
-      expect(images).toEqual([
-        {
-          type: 'image_url',
-          image_url: { url: `data:${mime};base64,${bytes.toString('base64')}` },
-        },
-      ])
+      expect(sdkCreate).not.toHaveBeenCalled()
+      const request = responsesCreate.mock.calls[0][0]
+      expect(inputImageUrls(request)).toEqual([`data:${mime};base64,${bytes.toString('base64')}`])
       expect(request.model).toBe(model)
       subject.budget.close()
     }
@@ -414,6 +425,7 @@ describe('GFS bytes to actual provider request', () => {
     const client = {
       baseURL: 'https://api.openai.com/v1',
       chat: { completions: { create: sdkCreate } },
+      responses: { create: responsesCreate },
     }
     const provider = new OpenAIProvider(client as never, 'future-vision-model')
     const bytes = createCanvas(2, 2).toBuffer('image/png')
@@ -423,7 +435,10 @@ describe('GFS bytes to actual provider request', () => {
 
     expect(JSON.parse(subject.output.content).delivery).toBe('image_input')
     await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
-    expect(JSON.stringify(sdkCreate.mock.calls[0][0])).toContain(bytes.toString('base64'))
+    expect(sdkCreate).not.toHaveBeenCalled()
+    expect(inputImageUrls(responsesCreate.mock.calls[0][0])).toEqual([
+      `data:image/png;base64,${bytes.toString('base64')}`,
+    ])
     expect(subject.metadataFetch).not.toHaveBeenCalled()
     subject.budget.close()
   })
@@ -432,6 +447,7 @@ describe('GFS bytes to actual provider request', () => {
     const client = {
       baseURL: 'https://api.openai.com/v1',
       chat: { completions: { create: sdkCreate } },
+      responses: { create: responsesCreate },
     }
     const provider = new OpenAIProvider(client as never, 'gpt-4.1')
     const subject = await setup(createCanvas(2, 2).toBuffer('image/png'), {
@@ -445,6 +461,7 @@ describe('GFS bytes to actual provider request', () => {
     })
     expect(subject.output.attachments).toBeUndefined()
     expect(sdkCreate).not.toHaveBeenCalled()
+    expect(responsesCreate).not.toHaveBeenCalled()
     subject.budget.close()
   })
 

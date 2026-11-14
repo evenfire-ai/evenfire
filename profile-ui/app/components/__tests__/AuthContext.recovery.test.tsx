@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { AuthProvider, useAuth } from '../AuthContext'
+import { ToastProvider } from '../Toast'
 
 const apiMocks = vi.hoisted(() => ({
   clearToken: vi.fn(),
@@ -70,9 +71,11 @@ describe('AuthProvider verified recovery session', () => {
       .mockResolvedValueOnce(member)
 
     render(
-      <AuthProvider>
-        <AuthProbe />
-      </AuthProvider>
+      <ToastProvider>
+        <AuthProvider>
+          <AuthProbe />
+        </AuthProvider>
+      </ToastProvider>
     )
 
     await waitFor(() => expect(screen.getByTestId('auth-state')).toHaveTextContent('signed-in:'))
@@ -93,9 +96,11 @@ describe('AuthProvider verified recovery session', () => {
     apiMocks.getMe.mockReturnValueOnce(initialAnonymousCheck.promise).mockResolvedValueOnce(member)
 
     render(
-      <AuthProvider>
-        <AuthProbe />
-      </AuthProvider>
+      <ToastProvider>
+        <AuthProvider>
+          <AuthProbe />
+        </AuthProvider>
+      </ToastProvider>
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Check recovered session' }))

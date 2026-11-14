@@ -17,6 +17,8 @@ import { type GeminiGenerateClient, GoogleGenerativeDriver } from '../drivers/go
 import type { ImageInputResolver, ImageTransportOperation } from '../imageInput'
 import { OpenAIProvider } from '../openai'
 import { OpenAICompatibleProvider } from '../openaiCompatible'
+import { officialChatProfile } from '../openaiFamily/__tests__/familyHarness'
+import { recordedResponse } from '../openaiFamily/__tests__/responsesFixtures'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
 
 const EVIDENCE = {
@@ -63,7 +65,13 @@ const BEDROCK_OK = {
   usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
 }
 
-type Family = 'openai-compatible' | 'claude' | 'vertex' | 'bedrock' | 'codex'
+/**
+ * `openai-compatible` exercises the Chat serializer (the one Azure and the
+ * compatibles use) through the official profile pinned to Chat, so it covers
+ * the wire shape, not their identity or visual limits; `openai-responses` is
+ * the official OpenAI endpoint.
+ */
+type Family = 'openai-compatible' | 'openai-responses' | 'claude' | 'vertex' | 'bedrock' | 'codex'
 
 interface Harness {
   provider: SingleTurnProvider
@@ -77,7 +85,20 @@ function buildHarness(family: Family): Harness {
   switch (family) {
     case 'openai-compatible': {
       const create = vi.fn(async (_input: unknown) => OPENAI_OK)
-      const provider = new OpenAIProvider({ chat: { completions: { create } } } as never, 'gpt-4o')
+      const provider = new OpenAIProvider(
+        { chat: { completions: { create } } } as never,
+        'gpt-4o',
+        officialChatProfile()
+      )
+      return {
+        provider,
+        sdkCalls: () => create.mock.calls.length,
+        wire: () => create.mock.calls[0]?.[0],
+      }
+    }
+    case 'openai-responses': {
+      const create = vi.fn(async (_input: unknown) => recordedResponse('v1-text-gpt-4.1'))
+      const provider = new OpenAIProvider({ responses: { create } } as never, 'gpt-4.1')
       return {
         provider,
         sdkCalls: () => create.mock.calls.length,
@@ -150,6 +171,7 @@ function buildHarness(family: Family): Harness {
 /** Structural image-presence check per wire family. */
 function wireHasImage(family: Family, wire: unknown): boolean {
   const payload = wire as {
+    input?: Array<{ content?: unknown }>
     messages?: Array<{ content?: unknown }>
     contents?: Array<{ parts?: Array<{ inlineData?: unknown }> }>
   }
@@ -160,6 +182,14 @@ function wireHasImage(family: Family, wire: unknown): boolean {
           m =>
             Array.isArray(m.content) &&
             (m.content as Array<{ type?: string }>).some(p => p.type === 'image_url')
+        )
+      )
+    case 'openai-responses':
+      return Boolean(
+        payload.input?.some(
+          item =>
+            Array.isArray(item.content) &&
+            (item.content as Array<{ type?: string }>).some(p => p.type === 'input_image')
         )
       )
     case 'claude':
@@ -194,6 +224,7 @@ function wireHasImage(family: Family, wire: unknown): boolean {
 function providerIdFor(family: Family): string {
   switch (family) {
     case 'openai-compatible':
+    case 'openai-responses':
       return 'openai'
     case 'claude':
       return 'claude'
@@ -210,6 +241,8 @@ function modelFor(family: Family): string {
   switch (family) {
     case 'openai-compatible':
       return 'gpt-4o'
+    case 'openai-responses':
+      return 'gpt-4.1'
     case 'claude':
       return 'claude-sonnet-4-6'
     case 'vertex':
@@ -259,6 +292,7 @@ async function dispatch(
 /** Cells each family can really reach through the adapter. */
 const REACHABLE: Record<Family, ImageTransportOperation[]> = {
   'openai-compatible': ['complete', 'completeWithTools'],
+  'openai-responses': ['complete', 'completeWithTools'],
   claude: ['complete', 'completeWithTools', 'completeAndCache', 'completeWithToolsAndCache'],
   vertex: ['complete', 'completeWithTools'],
   bedrock: ['complete', 'completeWithTools'],
@@ -273,7 +307,14 @@ function expectedSupported(family: Family, operation: ImageTransportOperation): 
   return family === 'claude'
 }
 
-const FAMILIES: Family[] = ['openai-compatible', 'claude', 'vertex', 'bedrock', 'codex']
+const FAMILIES: Family[] = [
+  'openai-compatible',
+  'openai-responses',
+  'claude',
+  'vertex',
+  'bedrock',
+  'codex',
+]
 
 describe('#654 transport cross-suite (real serializers)', () => {
   for (const family of FAMILIES) {
@@ -313,6 +354,12 @@ describe('#654 transport cross-suite (real serializers)', () => {
     expect(openaiHarness.sdkCalls()).toBe(1)
     expect(wireHasImage('openai-compatible', openaiHarness.wire())).toBe(false)
 
+    // Official OpenAI on Responses: text completions carry role + text only.
+    const responsesHarness = buildHarness('openai-responses')
+    await responsesHarness.provider.completeSingleTurn([imageMessage()])
+    expect(responsesHarness.sdkCalls()).toBe(1)
+    expect(wireHasImage('openai-responses', responsesHarness.wire())).toBe(false)
+
     // Claude: the tool-less variant does the same.
     const claudeHarness = buildHarness('claude')
     await claudeHarness.provider.completeSingleTurn([imageMessage()])
@@ -321,7 +368,13 @@ describe('#654 transport cross-suite (real serializers)', () => {
   })
 
   it('counterfactual: the tool-bearing paths really preserve the part', async () => {
-    for (const family of ['openai-compatible', 'claude', 'vertex', 'bedrock'] as Family[]) {
+    for (const family of [
+      'openai-compatible',
+      'openai-responses',
+      'claude',
+      'vertex',
+      'bedrock',
+    ] as Family[]) {
       const harness = buildHarness(family)
       await harness.provider.completeSingleTurnWithTools([imageMessage()], [])
       expect(harness.sdkCalls()).toBe(1)

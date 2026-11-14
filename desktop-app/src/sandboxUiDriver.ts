@@ -958,6 +958,22 @@ export function setSandboxUiVisible(visible: boolean): void {
   active.view.setVisible(visible)
 }
 
+/** Hide only if the request still names the mounted WebContents it originated from. */
+export function setSandboxUiVisibleForWebContents(
+  webContentsId: number,
+  visible: boolean
+): boolean {
+  if (
+    !active ||
+    active.view.webContents.id !== webContentsId ||
+    active.view.webContents.isDestroyed()
+  ) {
+    return false
+  }
+  active.view.setVisible(visible)
+  return true
+}
+
 type FindableSandboxWebContents = Pick<
   WebContentsView['webContents'],
   'findInPage' | 'on' | 'removeListener'

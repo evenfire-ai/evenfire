@@ -334,6 +334,7 @@ export function extendMockClerumForAppController(
       onDesktopSetupToken: vi.fn(() => () => undefined),
       onDesktopEnvironmentSetup,
       onExternalLogout: vi.fn(() => () => undefined),
+      onSessionCleared: vi.fn(() => () => undefined),
     },
     team: {
       list: vi.fn(async () => teamDirectoryPayload),

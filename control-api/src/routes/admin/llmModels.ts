@@ -2,14 +2,16 @@ import { type Request, type Response, Router } from 'express'
 import { z } from 'zod'
 import { config } from '../../config.js'
 import {
-  type DbClient,
+  type DbTransactionClient,
   advisoryLockModelName,
   boundCarrierTransactionIdleTimeout,
   withTransaction,
 } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import { safeErrorLogMessage } from '../../http/errorHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
+import { rootLogger } from '../../observability/logger.js'
 import { llmAllowlistConfigMapWriteFailuresTotal } from '../../observability/metrics.js'
 import {
   LlmAllowedModelConflictError,
@@ -18,12 +20,17 @@ import {
   deleteAllowedModel,
   getAllowedModel,
   listAllowedModels,
+  listCatalogAttentionModels,
   listStaleAllowedModels,
   updateAllowedModel,
   updateLlmAllowedModelSchema,
 } from '../../services/llmAllowedModels.js'
 import { computeAttention } from '../../services/llmAttention.js'
-import { getLastCatalogSyncRun, syncDiscoveredModels } from '../../services/llmCatalogSync.js'
+import {
+  CatalogPublishAfterCommitError,
+  getLastCatalogSyncRun,
+  syncDiscoveredModels,
+} from '../../services/llmCatalogSync.js'
 import {
   type ModelImpact,
   computeModelImpact,
@@ -87,6 +94,8 @@ function actorOf(req: Request): string {
   return (req as UiAuthedRequest).adminAuth?.sub ?? 'admin'
 }
 
+const log = rootLogger.child({ module: 'admin-llm-models' })
+
 export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   const router = Router()
 
@@ -102,9 +111,13 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
       return false
     } catch (err) {
       llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'mutation' })
-      console.error(
-        '[Admin] llm allowed-models ConfigMap write failed after mutation:',
-        err instanceof Error ? err.message : String(err)
+      log.error(
+        {
+          event: 'llm_allowlist_configmap_write_failed',
+          phase: 'mutation',
+          err: safeErrorLogMessage(err),
+        },
+        'llm allowed-models ConfigMap write failed after mutation'
       )
       res.status(503).json({
         error: 'configmap_write_failed',
@@ -146,7 +159,7 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   async function gatedReduce<T>(
     provider: string,
     model: string,
-    mutate: (db: DbClient) => Promise<T>
+    mutate: (db: DbTransactionClient) => Promise<T>
   ): Promise<T> {
     return withTransaction(async db => {
       // Bound the idle-in-transaction tenancy first: the lock is held across a
@@ -179,44 +192,53 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   // ── Operator attention feed (Fase 5, Pieza C) ───────────────────────────────
   // Persistent alert backing the non-destructive Fase 4 cron: every enabled
   // `stale` catalog model that is STILL referenced by a Host/grant, so the
-  // operator can disable it through the impact-gated PUT. Only actionable items
-  // appear; an unreferenced stale model — or one already disabled — yields
-  // nothing (`listStaleAllowedModels` filters `AND enabled`). Reuses `impactSources`
+  // operator can disable it through the impact-gated PUT. For that kind an
+  // unreferenced stale model — or one already disabled — yields nothing
+  // (`listStaleAllowedModels` filters `AND enabled`). Reuses `impactSources`
   // (the same fail-loud enumeration the `?force` gate uses, regla D4): if any
   // Host LIST fails, `computeAttention` propagates → asyncHandler → 500, never a
   // partial feed that hides a live reference. Inherits the `/admin/*` control-ui
   // admin auth gate (app.ts) — no new auth. Extensible: `items[].kind` is an
-  // open union with one member today (`stale_model_referenced`).
+  // open union; the deprecated / stale-discovery kinds list every enabled match,
+  // referenced or not (see llmAttention.ts).
   router.get(
     '/admin/attention',
     asyncHandler(async (_req: Request, res: Response) => {
       const staleModels = await listStaleAllowedModels()
-      const report = await computeAttention(staleModels, impactSources)
+      const catalogRows = await listCatalogAttentionModels()
+      const report = await computeAttention(staleModels, impactSources, catalogRows)
       res.status(200).json(report)
     })
   )
 
   // ── Discovery (F2, spec 09 §2 + §8-F2) ──────────────────────────────────────
   // On-demand catalog sync from the public models.dev catalog into
-  // `llm_allowed_models` as disabled `source='discovery'` rows for operator
-  // curation. The fixed two-segment `discovery/*` paths cannot be captured by
+  // `llm_allowed_models` as `source='discovery'` rows for operator curation,
+  // disabled unless auto-enable allows them on insert (llmCatalogSync.ts header). The fixed two-segment `discovery/*` paths cannot be captured by
   // the single-segment `/:id` param route regardless of order, but they are
-  // registered before it anyway for clarity. No scheduler yet (F2 is on-demand
-  // only; a scheduled trigger is a follow-up). These routes inherit the same
+  // registered before it anyway for clarity. The cron and the boot sync run the
+  // same service (llmCatalogSyncCron.ts). These routes inherit the same
   // control-ui admin auth gate as the rest of `/admin/*` (app.ts).
   //
-  // The sync owns the re-materialization decision (#654): it publishes only when
-  // it changed `image_input` on an enabled row, and never touches `enabled` or
-  // any other serialized column of one. The route hands it the same gateway
-  // materializer every mutation route uses; a failed write is reported by the
-  // service and surfaces here as a 500 (the DB commit is already durable and the
-  // boot reconcile converges).
+  // The sync owns the publication decision: after its commit it compares the
+  // ConfigMap with what Postgres projects and writes only on a difference. The
+  // route hands it the same gateway writer every mutation route uses. A failed
+  // write comes back wrapped in CatalogPublishAfterCommitError; the route throws
+  // the K8s error itself, so the error handler answers as for any K8s write: a
+  // 4xx is forwarded with the apiserver's status message, anything else is a
+  // 500. The DB commit is already durable either way, and the sync's publish
+  // retry converges.
   router.post(
     '/admin/llm-models/discovery/sync',
     asyncHandler(async (_req: Request, res: Response) => {
-      const result = await syncDiscoveredModels({
-        materializer: gateway.llmAllowedModelsConfigMap(),
-      })
+      let result: Awaited<ReturnType<typeof syncDiscoveredModels>>
+      try {
+        result = await syncDiscoveredModels({ materializer: gateway.llmAllowedModelsConfigMap() })
+      } catch (err) {
+        // The response maps the publish failure itself, as before the sync
+        // wrapped it to tell its re-running callers that the rows committed.
+        throw err instanceof CatalogPublishAfterCommitError ? err.cause : err
+      }
       res.status(200).json(result)
     })
   )
@@ -314,16 +336,18 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
       const oldPairLeavesConfigMap = existing.enabled === true && (disables || renamed)
       // Serialize the mutation only when the gate actually runs: the OLD pair
       // leaves the ConfigMap AND this is not a `?force` override. A metadata edit
-      // that keeps the pair in the ConfigMap strands nothing, so it takes no lock
-      // and runs on the pool exactly as before (mini-spec §7, item 3).
+      // that keeps the pair in the ConfigMap strands nothing, so it takes no
+      // advisory lock. It still runs in its own transaction: the row read above
+      // is unlocked, so whether this write renames (and must tombstone the old
+      // pair atomically) is only known against the row the service locks.
       const runGate = oldPairLeavesConfigMap && !isForced(req)
+      const mutate = (db: DbTransactionClient) =>
+        updateAllowedModel(req.params.id, parsed.data, actorOf(req), db)
       let model
       try {
         model = runGate
-          ? await gatedReduce(existing.provider, existing.model, db =>
-              updateAllowedModel(req.params.id, parsed.data, actorOf(req), db)
-            )
-          : await updateAllowedModel(req.params.id, parsed.data, actorOf(req))
+          ? await gatedReduce(existing.provider, existing.model, mutate)
+          : await withTransaction(mutate)
       } catch (error) {
         if (sentModelInUse(res, error)) return
         if (handleServiceError(res, error)) return
@@ -357,15 +381,16 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
       }
       // A DELETE always removes the pair, so the gate runs unconditionally unless
       // `?force`. When it runs, the impact read + the delete are serialized under
-      // the per-model-name advisory lock (INV-1); `?force` deletes on the pool
-      // without the lock (renounces INV-1, mini-spec §6).
+      // the per-model-name advisory lock (INV-1); `?force` deletes without the
+      // lock (renounces INV-1, mini-spec §6) but still in a transaction, so the
+      // delete and its catalog tombstone commit together.
+      const mutate = (db: DbTransactionClient) =>
+        deleteAllowedModel(req.params.id, actorOf(req), db)
       let deleted
       try {
         deleted = isForced(req)
-          ? await deleteAllowedModel(req.params.id, actorOf(req))
-          : await gatedReduce(existing.provider, existing.model, db =>
-              deleteAllowedModel(req.params.id, actorOf(req), db)
-            )
+          ? await withTransaction(mutate)
+          : await gatedReduce(existing.provider, existing.model, mutate)
       } catch (error) {
         if (sentModelInUse(res, error)) return
         if (handleServiceError(res, error)) return

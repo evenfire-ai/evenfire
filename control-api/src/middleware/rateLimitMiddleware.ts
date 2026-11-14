@@ -195,14 +195,16 @@ export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLim
         'rate limit exceeded'
       )
     }
-    if (opts.onLimited) opts.onLimited(req, res, retryAfterSec)
-    else
+    if (opts.onLimited) {
+      opts.onLimited(req, res, retryAfterSec)
+    } else {
       res.status(429).json({
         error: 'Too Many Requests',
         code: 'rate_limited',
         message: `This request limit has been reached. Try again in ${retryAfterSec} seconds.`,
         retryAfterSeconds: retryAfterSec,
       })
+    }
   }
 
   return async function enforce(req: Request, res: Response, rawKey: string): Promise<boolean> {

@@ -4901,6 +4901,10 @@ td.cu-registry-description {
   margin: 0 0 var(--cu-space-2);
 }
 
+.cu-model-attention__group + .cu-model-attention__group {
+  margin-top: var(--cu-space-4);
+}
+
 .cu-model-attention__list {
   list-style: none;
   margin: 0;
@@ -11799,7 +11803,7 @@ td.cu-registry-description {
   line-height: 1.2;
 }
 
-.cu-llm-models-error {
+.cu-llm-models-banner {
   flex: 0 0 auto;
 }
 
@@ -12092,6 +12096,26 @@ td.cu-registry-description {
   align-items: center;
   flex-wrap: wrap;
   gap: var(--cu-space-2);
+}
+
+/* Discovery: per-provider catalog auto-enable dialog. */
+.cu-llm-auto-enable__provider {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  font-weight: var(--cu-font-weight-semibold);
+}
+
+.cu-llm-auto-enable__setting {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
+}
+
+.cu-llm-auto-enable__hint {
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-xs);
 }
 
 /* Discovery: bulk-enable toolbar shown when review rows are selected. */

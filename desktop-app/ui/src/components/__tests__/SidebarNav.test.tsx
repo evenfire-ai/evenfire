@@ -3,7 +3,17 @@ import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { SidebarNav } from '../SidebarNav'
+import type { FileExplorerTreeProps } from '../SidebarNav/FileExplorerTree/types'
 import type { SidebarNavProps } from '../SidebarNav/types'
+
+const sidebarNavChatState = vi.hoisted(() => ({
+  latestChatSessions: [] as Array<{
+    agentRef: string
+    id: string
+    title: string
+    remote?: boolean
+  }>,
+}))
 
 // SidebarNav pulls from four contexts. Mock each module so we only render
 // the logo block without standing up real providers, and so we never hit the
@@ -18,8 +28,9 @@ vi.mock('@contexts/AuthContext', () => ({
 vi.mock('@contexts/ChatListContext', () => ({
   useChatListContext: () => ({
     activeChatId: null,
-    latestChatSessions: [],
+    latestChatSessions: sidebarNavChatState.latestChatSessions,
     latestChatSessionsLoading: false,
+    sessionStateByChatKey: {},
   }),
 }))
 vi.mock('@contexts/AgentChatActionsContext', () => ({
@@ -40,13 +51,46 @@ vi.mock('@contexts/NavigationContext', () => ({
 // The real tree pulls TanStack Query and GFS contexts; the sidebar tests only
 // care that revealing it flips the explorer open, not what it renders.
 vi.mock('../SidebarNav/FileExplorerTree', () => ({
-  FileExplorerTree: () => <div data-testid="file-explorer-tree" />,
+  FileExplorerTree: ({ onOpenFolder, onOpenPreview }: FileExplorerTreeProps) => (
+    <div data-testid="file-explorer-tree">
+      <button data-testid="file-tree-open-folder" onClick={() => onOpenFolder('gfs://main/folder')}>
+        Open folder
+      </button>
+      <button
+        data-testid="file-tree-open-preview"
+        onClick={() =>
+          onOpenPreview({
+            bytes: 12,
+            gfsUri: 'gfs://main/readme.md',
+            kind: 'markdown',
+            name: 'readme.md',
+          })
+        }
+      >
+        Open preview
+      </button>
+    </div>
+  ),
 }))
 
 function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
   return {
     navItem: 'chat',
     collapsed: false,
+    compactMode: false,
+    compactMenuOpen: false,
+    onCompactMenuOpenChange: vi.fn(),
+    resize: {
+      width: 328,
+      maxWidth: 460,
+      cancelActiveDrag: vi.fn(),
+      onPointerDown: vi.fn(),
+      onPointerMove: vi.fn(),
+      onPointerUp: vi.fn(),
+      onPointerCancel: vi.fn(),
+      onLostPointerCapture: vi.fn(),
+      onKeyDown: vi.fn(),
+    },
     activeSandboxUiApp: null,
     availableSandboxUiApps: [],
     onCollapsedChange: vi.fn(),
@@ -63,6 +107,7 @@ function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
 describe('SidebarNav logo', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    sidebarNavChatState.latestChatSessions = []
     // jsdom does not implement matchMedia; SidebarNav reads it to detect the
     // mobile viewport. Stub it as a non-matching desktop viewport.
     if (!window.matchMedia) {
@@ -157,7 +202,7 @@ describe('SidebarNav logo', () => {
     expect(onCollapsedChange).toHaveBeenCalledWith(true)
   })
 
-  it('routes a controlled palette request through the mobile drawer behavior', () => {
+  it('routes a controlled palette request through the compact overlay behavior', () => {
     vi.spyOn(window, 'matchMedia').mockImplementation(
       query =>
         ({
@@ -173,13 +218,287 @@ describe('SidebarNav logo', () => {
     )
     const onCollapsedChange = vi.fn()
     const { container, rerender } = render(
-      <SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 0 })} />
+      <SidebarNav {...baseProps({ compactMode: true, onCollapsedChange, toggleRequestId: 0 })} />
     )
 
-    rerender(<SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 1 })} />)
+    const onCompactMenuOpenChange = vi.fn()
+    rerender(
+      <SidebarNav
+        {...baseProps({
+          compactMode: true,
+          onCollapsedChange,
+          onCompactMenuOpenChange,
+          toggleRequestId: 1,
+        })}
+      />
+    )
 
-    expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(true)
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(true)
+    expect(container.querySelector('.left-nav')?.classList.contains('compact-open')).toBe(false)
     expect(onCollapsedChange).not.toHaveBeenCalled()
+  })
+
+  it('closes the compact overlay on Escape and restores the prior body scroll style', () => {
+    document.body.style.overflow = 'clip'
+    const onCompactMenuOpenChange = vi.fn()
+    const props = baseProps({
+      compactMode: true,
+      compactMenuOpen: true,
+      onCompactMenuOpenChange,
+    })
+    const { rerender } = render(<SidebarNav {...props} />)
+
+    expect(
+      screen.getByRole('navigation').closest('aside')?.classList.contains('compact-open')
+    ).toBe(true)
+    expect(document.body.style.overflow).toBe('hidden')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, undefined)
+
+    rerender(<SidebarNav {...props} compactMenuOpen={false} />)
+    expect(document.body.style.overflow).toBe('clip')
+    document.body.style.overflow = ''
+  })
+
+  it('closes the compact overlay after navigation', () => {
+    const onSelect = vi.fn()
+    const onCompactMenuOpenChange = vi.fn()
+    render(
+      <SidebarNav
+        {...baseProps({
+          compactMode: true,
+          compactMenuOpen: true,
+          onCompactMenuOpenChange,
+          onSelect,
+        })}
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('nav-files'))
+    expect(onSelect).toHaveBeenCalledWith('files')
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, undefined)
+  })
+
+  it('clears local and mirrored compact Settings state on the explicit close control', () => {
+    const onCompactMenuOpenChange = vi.fn()
+    const onSettingsMenuOpenChange = vi.fn()
+    const { container } = render(
+      <SidebarNav
+        {...baseProps({
+          compactMode: true,
+          compactMenuOpen: true,
+          onCompactMenuOpenChange,
+          onSettingsMenuOpenChange,
+        })}
+      />
+    )
+
+    const settings = screen.getByTestId('nav-settings-menu')
+    fireEvent.click(settings)
+    expect(settings.getAttribute('aria-expanded')).toBe('true')
+    expect(document.querySelector('.sidebar-settings-menu')).toBeTruthy()
+    expect(onSettingsMenuOpenChange).toHaveBeenLastCalledWith(true)
+
+    fireEvent.click(container.querySelector('.sidebar-compact-close') as HTMLElement)
+
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, undefined)
+    expect(onSettingsMenuOpenChange).toHaveBeenLastCalledWith(false)
+    expect(settings.getAttribute('aria-expanded')).toBe('false')
+    expect(document.querySelector('.sidebar-settings-menu')).toBeNull()
+  })
+
+  it.each([
+    ['Escape', 'escape'],
+    ['the sidebar shortcut', 'shortcut'],
+    ['ordinary route selection', 'route'],
+    ['New Chat', 'new-chat'],
+    ['session selection', 'session'],
+    ['app selection', 'app'],
+    ['folder opening', 'folder'],
+    ['preview opening', 'preview'],
+    ['logout', 'logout'],
+  ] as const)('clears local and mirrored compact Settings state on %s', (_label, producer) => {
+    const onCompactMenuOpenChange = vi.fn()
+    const onSettingsMenuOpenChange = vi.fn()
+    const onSelect = vi.fn()
+    const onNewChat = vi.fn()
+    const onOpenSandboxUiApp = vi.fn()
+    const onOpenFilesSection = vi.fn()
+    const onOpenPreviewSection = vi.fn()
+    const app = {
+      appRef: 'sandbox-recipes/alpha',
+      label: 'Alpha',
+      defaultPath: '/',
+    }
+    if (producer === 'session') {
+      sidebarNavChatState.latestChatSessions = [
+        { agentRef: 'agent-x', id: 'chat-1', title: 'Saved chat' },
+      ]
+    }
+    const props = baseProps({
+      navItem: producer === 'folder' || producer === 'preview' ? 'files' : 'chat',
+      compactMode: true,
+      compactMenuOpen: true,
+      onCompactMenuOpenChange,
+      onSettingsMenuOpenChange,
+      onSelect,
+      onNewChat,
+      onOpenSandboxUiApp,
+      onOpenFilesSection,
+      onOpenPreviewSection,
+      availableSandboxUiApps: producer === 'app' ? [app] : [],
+      toggleRequestId: 0,
+    })
+    const { rerender } = render(<SidebarNav {...props} />)
+    const settingsTrigger = screen.getByTestId('nav-settings-menu')
+    fireEvent.click(settingsTrigger)
+    expect(document.querySelector('.sidebar-settings-menu')).not.toBeNull()
+    expect(settingsTrigger.getAttribute('aria-expanded')).toBe('true')
+    expect(onSettingsMenuOpenChange).toHaveBeenLastCalledWith(true)
+
+    switch (producer) {
+      case 'escape':
+        fireEvent.keyDown(document, { key: 'Escape' })
+        break
+      case 'shortcut':
+        rerender(<SidebarNav {...props} toggleRequestId={1} />)
+        break
+      case 'route':
+        fireEvent.click(screen.getByTestId('nav-agents'))
+        break
+      case 'new-chat':
+        fireEvent.click(screen.getByTestId('nav-new-chat'))
+        break
+      case 'session':
+        fireEvent.click(screen.getByRole('button', { name: 'Open Saved chat' }))
+        break
+      case 'app':
+        fireEvent.click(screen.getByRole('button', { name: 'Open Alpha' }))
+        break
+      case 'folder':
+      case 'preview':
+        fireEvent.click(screen.getByTestId('nav-files-explorer-toggle'))
+        fireEvent.click(
+          screen.getByTestId(
+            producer === 'folder' ? 'file-tree-open-folder' : 'file-tree-open-preview'
+          )
+        )
+        break
+      case 'logout':
+        fireEvent.click(screen.getByTestId('logout-btn'))
+        break
+    }
+
+    expect(document.querySelector('.sidebar-settings-menu')).toBeNull()
+    expect(settingsTrigger.getAttribute('aria-expanded')).toBe('false')
+    expect(onSettingsMenuOpenChange).toHaveBeenLastCalledWith(false)
+    expect(onCompactMenuOpenChange).toHaveBeenLastCalledWith(
+      false,
+      producer === 'new-chat' ? 'preserve-destination-focus' : undefined
+    )
+    if (producer === 'route') expect(onSelect).toHaveBeenCalledWith('agents')
+    if (producer === 'new-chat') expect(onNewChat).toHaveBeenCalledOnce()
+    if (producer === 'app') expect(onOpenSandboxUiApp).toHaveBeenCalledWith(app)
+    if (producer === 'folder') expect(onOpenFilesSection).toHaveBeenCalledOnce()
+    if (producer === 'preview') expect(onOpenPreviewSection).toHaveBeenCalledOnce()
+  })
+
+  it('clears a desktop Settings submenu when compact mode begins with navigation closed', () => {
+    const onCompactMenuOpenChange = vi.fn()
+    const onSettingsMenuOpenChange = vi.fn()
+    const props = baseProps({ onCompactMenuOpenChange, onSettingsMenuOpenChange })
+    const { rerender } = render(<SidebarNav {...props} />)
+    const settingsTrigger = screen.getByTestId('nav-settings-menu')
+    fireEvent.click(settingsTrigger)
+    expect(document.querySelector('.sidebar-settings-menu')).not.toBeNull()
+
+    rerender(<SidebarNav {...props} compactMode compactMenuOpen={false} />)
+
+    expect(document.querySelector('.sidebar-settings-menu')).toBeNull()
+    expect(screen.getByTestId('nav-settings-menu').getAttribute('aria-expanded')).toBe('false')
+    expect(onSettingsMenuOpenChange).toHaveBeenLastCalledWith(false)
+    expect(onCompactMenuOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('shows expanded navigation in compact mode without changing the desktop collapse preference', () => {
+    const onCollapsedChange = vi.fn()
+    const { container } = render(
+      <SidebarNav
+        {...baseProps({ collapsed: true, compactMode: true, compactMenuOpen: true })}
+        onCollapsedChange={onCollapsedChange}
+      />
+    )
+
+    expect(container.querySelector('.left-nav')?.classList.contains('collapsed')).toBe(false)
+    expect(screen.getByTestId('nav-new-chat')).toBeTruthy()
+    expect(onCollapsedChange).not.toHaveBeenCalled()
+  })
+
+  it('closes the compact overlay when starting a new chat', () => {
+    const onCompactMenuOpenChange = vi.fn()
+    const onNewChat = vi.fn()
+    render(
+      <SidebarNav
+        {...baseProps({
+          compactMode: true,
+          compactMenuOpen: true,
+          onCompactMenuOpenChange,
+          onNewChat,
+        })}
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('nav-new-chat'))
+
+    expect(onNewChat).toHaveBeenCalledOnce()
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, 'preserve-destination-focus')
+  })
+
+  it('closes the compact overlay after opening a file-tree folder', () => {
+    const onCompactMenuOpenChange = vi.fn()
+    const onOpenFilesSection = vi.fn()
+    const props = baseProps({
+      navItem: 'files',
+      compactMode: true,
+      compactMenuOpen: true,
+      onCompactMenuOpenChange,
+      onOpenFilesSection,
+    })
+    const { rerender } = render(<SidebarNav {...props} />)
+
+    fireEvent.click(screen.getByTestId('nav-files'))
+    rerender(<SidebarNav {...props} />)
+    onCompactMenuOpenChange.mockClear()
+    fireEvent.click(screen.getByTestId('file-tree-open-folder'))
+
+    expect(onOpenFilesSection).toHaveBeenCalledWith('gfs://main/folder')
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, undefined)
+  })
+
+  it('closes the compact overlay after opening a file-tree preview', () => {
+    const onCompactMenuOpenChange = vi.fn()
+    const onOpenPreviewSection = vi.fn()
+    const props = baseProps({
+      navItem: 'files',
+      compactMode: true,
+      compactMenuOpen: true,
+      onCompactMenuOpenChange,
+      onOpenPreviewSection,
+    })
+    const { rerender } = render(<SidebarNav {...props} />)
+
+    fireEvent.click(screen.getByTestId('nav-files'))
+    rerender(<SidebarNav {...props} />)
+    onCompactMenuOpenChange.mockClear()
+    fireEvent.click(screen.getByTestId('file-tree-open-preview'))
+
+    expect(onOpenPreviewSection).toHaveBeenCalledWith({
+      bytes: 12,
+      gfsUri: 'gfs://main/readme.md',
+      kind: 'markdown',
+      name: 'readme.md',
+    })
+    expect(onCompactMenuOpenChange).toHaveBeenCalledWith(false, undefined)
   })
 })
 

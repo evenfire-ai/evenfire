@@ -81,13 +81,25 @@ function approvalConsumeResponse(err: ApprovalConsumeError): Record<string, unkn
   }
 }
 
-function getWorkflowTeamIdForCaller(caller: WorkflowRouteCaller): string | null {
-  if (caller.kind === 'user-session') return caller.claims.teamId
+function selectedWorkflowTeamId(
+  caller: WorkflowRouteCaller,
+  userSessionGrant: WorkflowTriggerGrantResult | null
+): string | null {
+  if (
+    caller.kind === 'user-session' &&
+    userSessionGrant?.granted &&
+    userSessionGrant.source === 'team'
+  ) {
+    return userSessionGrant.teamId
+  }
   return null
 }
 
-function getWorkflowUsageTeamIdForCaller(caller: WorkflowRouteCaller): string | null {
-  if (caller.kind === 'user-session') return caller.claims.teamId
+function getWorkflowUsageTeamIdForCaller(
+  caller: WorkflowRouteCaller,
+  userSessionGrant: WorkflowTriggerGrantResult | null
+): string | null {
+  if (caller.kind === 'user-session') return selectedWorkflowTeamId(caller, userSessionGrant)
   if (caller.kind === 'admin-ui') return CONTROL_PLANE_ADMIN_USAGE_TEAM_ID
   return null
 }
@@ -95,6 +107,9 @@ function getWorkflowUsageTeamIdForCaller(caller: WorkflowRouteCaller): string | 
 function getExternalWorkflowTriggerCallerKey(
   caller: Extract<WorkflowRouteCaller, { kind: 'user-session' }>
 ): string {
+  if (caller.claims.sessionContract === 'v2') {
+    return `external-rest-api:user:${caller.claims.userId}:direct`
+  }
   return `external-rest-api:user:${caller.claims.userId}:team:${caller.claims.teamId}`
 }
 
@@ -280,8 +295,8 @@ export async function triggerWorkflow(params: {
   }
 
   const principalId = getWorkflowPrincipalId(caller)
-  const teamId = getWorkflowTeamIdForCaller(caller)
-  const usageTeamId = getWorkflowUsageTeamIdForCaller(caller)
+  const teamId = selectedWorkflowTeamId(caller, userSessionGrant)
+  const usageTeamId = getWorkflowUsageTeamIdForCaller(caller, userSessionGrant)
   const dbActorType: WorkflowRunActorType =
     caller.kind === 'mcp-host-control'
       ? 'autonomous'

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { registry } from '../src/observability/metrics.js'
+import { AllowlistPublishRetry } from '../src/services/llmAllowlistPublishRetry.js'
 import { syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
 import type { RawModelsDevCatalog } from '../src/services/modelsDevClient.js'
 
@@ -7,13 +8,18 @@ type Row = Record<string, unknown>
 
 /**
  * The sync REQUIRES a ConfigMap materializer (#654) — it can change what runtime
- * is served. Most tests here assert SQL shape on rows the run never publishes,
- * so this spy stays uncalled; the publication tests assert on it directly.
+ * is served. These tests assert SQL shape and call order only; what a publish
+ * writes is covered against the real writer in services.llmAllowlistPublication.
  */
-const materializer = { materialize: vi.fn(async () => {}) }
+const materializer = {
+  materialize: vi.fn(async () => {}),
+  materializeIfChanged: vi.fn(async () => 'unchanged' as 'written' | 'unchanged'),
+}
 
 beforeEach(() => {
   materializer.materialize.mockReset()
+  materializer.materializeIfChanged.mockReset()
+  materializer.materializeIfChanged.mockResolvedValue('unchanged')
 })
 
 /**
@@ -77,6 +83,15 @@ function catalogWith(
   return { anthropic: { name: 'Anthropic', models } }
 }
 
+/**
+ * The same, under groq: a provider whose auto-enable policy is OFF by default,
+ * so a vendored run still inserts its new models (disabled). Under claude (ON
+ * by default) such a run skips them, because it cannot decide.
+ */
+function groqCatalogWith(models: Parameters<typeof catalogWith>[0]): RawModelsDevCatalog {
+  return { groq: { name: 'Groq', models } }
+}
+
 function loadStub(
   catalog: RawModelsDevCatalog,
   source: 'live' | 'vendored' = 'vendored',
@@ -128,8 +143,8 @@ function discoveryProvenance(capturedAt: string): string {
 describe('syncDiscoveredModels — source-guarded reconciliation', () => {
   it('INSERTs a new discovered model as disabled discovery (enabled=false, ON CONFLICT DO NOTHING)', async () => {
     const { connector, calls } = makeConnector({}) // no existing rows anywhere
-    const catalog = catalogWith({
-      'claude-opus-4-5': { id: 'claude-opus-4-5', name: 'Opus', limit: { context: 200000 } },
+    const catalog = groqCatalogWith({
+      'llama-3.3-70b': { id: 'llama-3.3-70b', name: 'Llama', limit: { context: 200000 } },
     })
     const res = await syncDiscoveredModels(
       { materializer, loadCatalog: loadStub(catalog) },
@@ -142,13 +157,16 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(inserts[0].sql).toMatch(/'discovery'/)
     expect(inserts[0].sql).toMatch(/false/)
     expect(inserts[0].sql).toMatch(/ON CONFLICT \(provider, model\) DO NOTHING/)
-    // params: provider, model, ctx, display, image_input
+    // params: provider, model, ctx, display, image_input, enable decision,
+    // catalog_status. The decision is false: groq's policy is off by default.
     expect(inserts[0].params).toEqual([
-      'claude',
-      'claude-opus-4-5',
+      'groq',
+      'llama-3.3-70b',
       200000,
-      'Opus',
+      'Llama',
       discoveryProvenance('2026-07-10T00:00:00.000Z'),
+      false,
+      null,
     ])
     expect(res.added).toBe(1)
     expect(res.updated).toBe(0)
@@ -156,12 +174,12 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
 
   it('#654 stamps discovery provenance with the SOURCE capture time, never `fetchedAt`', async () => {
     const { connector, calls } = makeConnector({})
-    const catalog = catalogWith({
+    const catalog = groqCatalogWith({
       // Says nothing about modalities …
-      'claude-opus-4-5': { id: 'claude-opus-4-5' },
+      'llama-3.3-70b': { id: 'llama-3.3-70b' },
       // … and one that does, so the KNOWN-state payload is covered too.
-      'claude-sonnet-4-5': {
-        id: 'claude-sonnet-4-5',
+      'llama-4-scout': {
+        id: 'llama-4-scout',
         modalities: { input: ['text', 'image'] },
       },
     })
@@ -177,7 +195,7 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
 
     const inserts = CALL_FOR(calls, /INSERT INTO llm_allowed_models/)
     const byModel = new Map(inserts.map(c => [String(c.params[1]), c]))
-    const opus = byModel.get('claude-opus-4-5')!
+    const opus = byModel.get('llama-3.3-70b')!
     const persisted = JSON.parse(String(opus.params[4]))
     expect(persisted).toEqual({
       state: 'unknown',
@@ -196,7 +214,7 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     // A KNOWN state must carry an expiry, and it is derived from the CAPTURE
     // time: a vendored snapshot may only claim support for as long as it is
     // fresh (capturedAt + 30d, NOT fetchedAt + 30d).
-    const sonnet = JSON.parse(String(byModel.get('claude-sonnet-4-5')!.params[4]))
+    const sonnet = JSON.parse(String(byModel.get('llama-4-scout')!.params[4]))
     expect(sonnet).toEqual({
       state: 'supported',
       evidence: {
@@ -284,6 +302,8 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
         },
       }),
       '2026-08-19T16:16:10.000Z',
+      'claude',
+      'claude-opus-4-5',
     ])
   })
 
@@ -311,12 +331,17 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(sql).toMatch(/CASE\s+WHEN t\.enabled THEN t\.display_name/)
     // `enabled` is never assigned in the SET clause.
     expect(/enabled\s*=/.test(sql)).toBe(false)
+    // …then live?, catalog_status, and the pair the SELECT read.
     expect(updates[0].params).toEqual([
       'd1',
       200000,
       'Opus',
       discoveryProvenance('2026-07-10T00:00:00.000Z'),
       '2026-07-10T00:00:00.000Z',
+      false,
+      null,
+      'claude',
+      'claude-opus-4-5',
     ])
     expect(res.updated).toBe(1)
     expect(res.added).toBe(0)
@@ -352,8 +377,8 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(/WHEN t\.enabled THEN t\.image_input/.test(sql)).toBe(false)
   })
 
-  it('materializes the ConfigMap after COMMIT when an enabled row changed image_input', async () => {
-    const { connector, calls, query } = makeConnector(
+  it('publishes by state after COMMIT and after releasing the run client', async () => {
+    const { connector, calls, query, release } = makeConnector(
       { claude: [{ id: 'd1', model: 'claude-opus-4-5', source: 'discovery' }] },
       { enabled: true, image_input_changed: true }
     )
@@ -363,20 +388,26 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
       connector
     )
 
-    expect(materializer.materialize).toHaveBeenCalledTimes(1)
+    // The state-gated entry point, never the unconditional one.
+    expect(materializer.materializeIfChanged).toHaveBeenCalledTimes(1)
+    expect(materializer.materialize).not.toHaveBeenCalled()
     // AFTER commit, never inside the transaction: a ConfigMap write held open
     // would keep the advisory lock for the length of a call to the cluster.
     const commitCall = query.mock.calls.findIndex(c => /^COMMIT$/.test(String(c[0])))
     expect(commitCall).toBeGreaterThanOrEqual(0)
-    expect(materializer.materialize.mock.invocationCallOrder[0]).toBeGreaterThan(
-      query.mock.invocationCallOrder[commitCall]
-    )
+    const publishOrder = materializer.materializeIfChanged.mock.invocationCallOrder[0]
+    expect(publishOrder).toBeGreaterThan(query.mock.invocationCallOrder[commitCall])
+    // The run's client is back in the pool before the publish waits on its own
+    // lock and connection.
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(publishOrder).toBeGreaterThan(release.mock.invocationCallOrder[0])
     expect(res.enabledImageInputChanged).toBe(1)
-    expect(res.materialized).toBe(true)
+    // `materialized` reports what the writer did, not the counter.
+    expect(res.materialized).toBe(false)
     expect(CALL_FOR(calls, /SET last_seen_at/)).toHaveLength(1)
   })
 
-  it('does not materialize when only disabled rows changed', async () => {
+  it('still publishes by state when no enabled row changed (the counter only observes)', async () => {
     const { connector, calls } = makeConnector(
       { claude: [{ id: 'd1', model: 'claude-opus-4-5', source: 'discovery' }] },
       { enabled: false, image_input_changed: true }
@@ -387,9 +418,10 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
       connector
     )
 
-    expect(materializer.materialize).not.toHaveBeenCalled()
-    // Witness: the write the assertion above denies publishing DID happen — a
-    // disabled row is not in the ConfigMap, so changing it publishes nothing.
+    // A run that changed nothing served still compares the CM with Postgres: an
+    // earlier failed publish, or another writer's older snapshot, is repaired
+    // here instead of never.
+    expect(materializer.materializeIfChanged).toHaveBeenCalledTimes(1)
     expect(CALL_FOR(calls, /SET last_seen_at/)).toHaveLength(1)
     expect(res.updated).toBe(1)
     expect(res.enabledImageInputChanged).toBe(0)
@@ -403,11 +435,21 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     )
     const catalog = catalogWith({ 'claude-opus-4-5': { id: 'claude-opus-4-5' } })
     const before = await configMapWriteFailures('sync')
-    materializer.materialize.mockRejectedValueOnce(new Error('apiserver unreachable'))
+    materializer.materializeIfChanged.mockRejectedValueOnce(new Error('apiserver unreachable'))
+    const publishRetry = new AllowlistPublishRetry()
 
     await expect(
-      syncDiscoveredModels({ materializer, loadCatalog: loadStub(catalog) }, connector)
-    ).rejects.toThrow('apiserver unreachable')
+      syncDiscoveredModels(
+        { materializer, publishRetry, loadCatalog: loadStub(catalog) },
+        connector
+      )
+    ).rejects.toMatchObject({
+      name: 'CatalogPublishAfterCommitError',
+      cause: expect.objectContaining({ message: 'apiserver unreachable' }),
+    })
+    // Only the publication is owed a retry; the run itself is not repeated.
+    expect(publishRetry.isPending()).toBe(true)
+    publishRetry.stop()
 
     // The rows are durable: the failure happened after COMMIT, and nothing rolls
     // back (that COMMIT is also the witness that the run reached the publish).
@@ -484,19 +526,27 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
   })
 
   it('rolls back and releases on a mid-transaction failure', async () => {
-    const existing = { claude: [] as Array<{ id: string; model: string; source: string }> }
+    const existing = { groq: [] as Array<{ id: string; model: string; source: string }> }
     const { connector, query, release } = makeConnector(existing)
+    const statements: string[] = []
     // Make the run-summary INSERT explode after the reconciliation writes.
     query.mockImplementation(async (sql: string) => {
+      statements.push(sql)
       if (/INSERT INTO llm_catalog_sync_runs/.test(sql)) throw new Error('boom')
       if (/SELECT id, model, source/.test(sql)) return { rows: [], rowCount: 0 }
       return { rows: [], rowCount: 0 }
     })
-    const catalog = catalogWith({ 'claude-opus-4-5': { id: 'claude-opus-4-5' } })
+    // groq's policy is OFF by default, so this vendored run still writes the
+    // new model before the failure; under claude it would write nothing.
+    const catalog = groqCatalogWith({ 'llama-3.3-70b': { id: 'llama-3.3-70b' } })
     await expect(
       syncDiscoveredModels({ materializer, loadCatalog: loadStub(catalog) }, connector)
     ).rejects.toThrow('boom')
-    expect(query).toHaveBeenCalledWith('ROLLBACK')
+    const insertAt = statements.findIndex(sql => /INSERT INTO llm_allowed_models/.test(sql))
+    const failAt = statements.findIndex(sql => /INSERT INTO llm_catalog_sync_runs/.test(sql))
+    expect(insertAt).toBeGreaterThan(-1)
+    expect(insertAt).toBeLessThan(failAt)
+    expect(statements.indexOf('ROLLBACK')).toBeGreaterThan(failAt)
     expect(release).toHaveBeenCalledTimes(1)
   })
 })

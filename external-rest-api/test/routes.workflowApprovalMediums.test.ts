@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
+import { ControlApiError } from '../src/controlApiClient.js'
 import { createWorkflowApprovalMediumsRouter } from '../src/routes/workflowApprovalMediums.js'
 
 const serviceMock = vi.hoisted(() => ({
@@ -24,11 +26,7 @@ function makeApp() {
   const app = express()
   app.use(express.json())
   app.use(createWorkflowApprovalMediumsRouter())
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
-    }
-  )
+  app.use(externalRestPublicErrorHandler)
   return app
 }
 
@@ -281,5 +279,21 @@ describe('routes/workflowApprovalMediums', () => {
 
     expect(res.body.items).toHaveLength(1)
     expect(serviceMock.listApprovalChannelTargets).toHaveBeenCalledWith('session-token')
+  })
+
+  it('forwards an upstream error body verbatim', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce({ userId: 'user-1', exp: 9999999999 })
+    serviceMock.listWorkflowApprovalMediums.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 403, { error: { code: 'forbidden' } })
+    )
+
+    const response = await request(makeApp())
+      .get('/workflow-approval-mediums')
+      .set('authorization', 'Bearer session-token')
+      .set('x-correlation-id', 'approval_mediums_ID-42')
+      .expect(403)
+
+    expect(response.body).toEqual({ error: { code: 'forbidden' } })
+    expect(serviceMock.listWorkflowApprovalMediums).toHaveBeenCalledTimes(1)
   })
 })

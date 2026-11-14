@@ -4,7 +4,8 @@ const { test } = require('node:test')
 const assert = require('node:assert/strict')
 const { spawnSync } = require('node:child_process')
 const path = require('node:path')
-const { assertPolicy, validatePolicy } = require('../e2e/_lib/wrc-egress-proof.cjs')
+const fs = require('node:fs')
+const { assertPolicy, validatePolicy, MAX_ENTRIES } = require('../e2e/_lib/wrc-egress-proof.cjs')
 
 const STATE = 'clerum.io/egress-fqdn-state'
 const TARGETS = 'clerum.io/egress-fqdn-targets'
@@ -394,6 +395,19 @@ test('accepts only explicitly declared conjunctive UI-to-worker Service permissi
   }
   delete expected.internal
   assert.equal(validatePolicy(policy, expected).ok, false)
+})
+
+test('keeps the entry cap equal to the WRC default it mirrors', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'workflow-recipes', 'src', 'config.ts'),
+    'utf8'
+  )
+  const match = /export const DEFAULT_EXTERNAL_EGRESS_MAX_ENTRIES = (\d+)\b/.exec(source)
+  assert.ok(
+    match,
+    'DEFAULT_EXTERNAL_EGRESS_MAX_ENTRIES not found in workflow-recipes/src/config.ts'
+  )
+  assert.equal(MAX_ENTRIES, Number(match[1]))
 })
 
 test('accepts empty or omitted top-level egress under explicit Egress isolation', () => {

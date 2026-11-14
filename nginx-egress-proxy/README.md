@@ -30,21 +30,111 @@ For each remote McpServer, host-context-controller:
    cluster hosts (`*.svc`, `*.svc.cluster.local`, `kubernetes.default`) and
    private/link-local/loopback patterns rejected; the URL is reconstructed from
    parsed components so injected characters (e.g. newlines) are stripped.
-2. **Renders a per-server `default.conf.template` ConfigMap** pinning
-   `proxy_pass` to that single external base URL, with TLS to the upstream
-   (`proxy_ssl_verify on`, SNI, system CA bundle), SSE-friendly settings
-   (buffering/cache off, long read timeouts), and a local `/health` endpoint.
+   The hostname must stay within `[a-z0-9._-]` after parsing (the CRD schema
+   enforces the same class at admission); it is rendered unquoted, where `;`
+   would end a directive and `$name` would be an NGINX variable. Trailing dots
+   are canonicalized or rejected before any check: `svc.cluster.local.` is the
+   DNS root form of the same name and resolves like `svc.cluster.local`, so it
+   is rejected by the same internal-service checks and an external name is
+   rendered without the dot; a name the URL parser cannot canonicalize (it
+   still ends in a dot after re-reading) is rejected instead, so no rendered
+   `server` name ends in a dot.
+   Query placeholders must be complete `${NAME}` values where `NAME` matches
+   `[A-Za-z_][A-Za-z0-9_]*` (exact case) and is declared by `spec.env` or
+   `spec.envSecret`. A `spec.env` name HCC strips as forbidden
+   (`KUBERNETES_SERVICE_HOST`, `PATH`, ...) does not count as declared; neither
+   does an `envSecret` mapping whose name is exactly one the platform owns (the
+   same forbidden names in exact case, plus the proxy env below) — HCC filters
+   those declarations when checking placeholders even though the Deployment
+   currently still carries their `secretKeyRef`. The proxy env the platform
+   sets (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`, `NGINX_ENVSUBST_FILTER`,
+   `NGINX_LOCAL_RESOLVERS`, `LC_ALL`) cannot be used: envsubst would otherwise
+   fill them from the container's own environment. An exact-case
+   `KUBERNETES_*` name — the family kubelet uses for injected service env — is
+   rejected outright as a direct placeholder reference, whether it is declared
+   by `spec.env`, by `spec.envSecret` or not at all; only two family members
+   are in the enumerated strip set, so declaration alone never makes one
+   usable. Matching is exact, so a
+   distinct-case spelling (`Path`, `kubernetes_service_host`) is a different
+   variable and a Secret-backed declaration of it does count. The
+   URL parser runs first: it strips TAB/CR/LF and percent-encodes spaces and
+   other control characters, which are then accepted in encoded form. The query
+   check then rejects any `$`, brace, backslash or semicolon outside a complete
+   placeholder, and undeclared names. The path takes no placeholders; the
+   parser also percent-encodes braces in the path and turns `\` into `/`, so the
+   path check rejects `$` and `;`. Both are rendered into the NGINX template
+   unquoted.
+2. **Renders a per-server `default.conf.template` ConfigMap** that resolves and
+   re-resolves the external base URL with NGINX. The resolver comes from the
+   pod's `/etc/resolv.conf`, and the upstream `server ... resolve` directive
+   follows DNS TTL changes without restarting NGINX or opening an upstream
+   keepalive pool. TLS to the upstream remains mandatory (`proxy_ssl_verify on`,
+   SNI, system CA bundle), along with SSE-friendly settings (buffering/cache
+   off, long read timeouts) and a local `/health` endpoint.
 3. **Sanitizes each `spec.remote.authHeaders` entry** (`sanitizeAuthHeader`):
    header names restricted to `[A-Za-z0-9-]`, values capped at 2048 chars,
    CR/LF/NUL rejected (HTTP request smuggling / nginx directive-injection
    defense), backslashes and quotes escaped for nginx's quoted-string context.
+   A value that directly references a platform-owned proxy variable
+   (`NGINX_LOCAL_RESOLVERS`, `NGINX_ENTRYPOINT_LOCAL_RESOLVERS`,
+   `NGINX_ENVSUBST_FILTER`, `LC_ALL`) or a container env name the platform
+   reserves (`PATH`, ...) — including any exact-case `KUBERNETES_*` service
+   name — is rejected in both `${NAME}` and `$NAME` form: either direct
+   reference would be read from the proxy container's own environment, not
+   from `spec.envSecret`. Matching is exact and anchored: a distinct-case
+   reference, or a longer name that merely contains a reserved one, names a
+   different variable and is allowed. A rejected entry renders no header and
+   adds no env entry. Only direct references in the template are covered
+   here; a `$(VAR)` expansion inside a declared value is a separate residual
+   (see Residuals below).
 4. **Deploys this image as the only container** (`egress-proxy`) of the
    per-server Deployment. The ConfigMap mounts at `/etc/nginx/templates`, so
-   `envsubst` resolves `${VAR}` placeholders in auth headers at pod start from
-   env vars sourced from `spec.envSecret` — with `${VAR}` placeholders,
-   credentials never appear in the ConfigMap itself. A literal value inlined in
-   the CRD would be emitted (escaped) into the ConfigMap — always use
-   placeholders.
+   `envsubst` resolves `${VAR}` placeholders in auth headers and in the baseUrl
+   query at pod start from env vars sourced from `spec.env` and
+   `spec.envSecret`. With placeholders, credentials never appear in the
+   ConfigMap itself. A literal value inlined in the CRD would be emitted
+   (escaped) into the ConfigMap — always use placeholders.
+
+HCC appends `NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1` and an empty
+`NGINX_ENVSUBST_FILTER` after CRD-provided env and `spec.envSecret` entries.
+Kubernetes uses the last duplicate, so a CRD cannot disable the platform
+resolver setting or restrict which declared names `envsubst` substitutes. The
+image exports the pod's local nameservers into `NGINX_LOCAL_RESOLVERS`, which
+the generated `resolver` directive uses.
+
+### Readiness and an unresolvable upstream
+
+With `resolve`, an upstream name that does not resolve does not stop NGINX
+from starting. The pod can be Ready and answer `/health` with 200 while the
+MCP path returns 502 (`no live upstreams`). A passing readiness probe therefore
+proves that NGINX is running and serving its local health endpoint; it does not
+prove that the upstream name resolves, that the policy admits the resolved
+addresses, or that the upstream answers.
+
+Residuals:
+
+- Declared values are substituted literally by `envsubst`; HCC validates
+  placeholder names, not values. In the unquoted `baseUrl` query a value
+  containing `;` or a newline adds whole NGINX directives; in a double-quoted
+  `authHeaders` value a `"` or a `\` breaks out of the string with the same
+  effect. In both, a value containing `$name` is expanded by NGINX, so a client
+  header can reach the upstream URL, an added header or the error log. Only an
+  admin who can write the Secret or the CRD env can set such a value, and the
+  same actor can already do it on `dev` through `authHeaders`. The
+  container-start template value check that would close it is not part of
+  #1240's acceptance criteria: it lands with the #1243 egress-proxy image layer.
+  Until both changes deploy, this PR alone does not close this residual.
+- Kubernetes expands `$(VAR)` in a literal `spec.env` value at container start
+  only when `VAR` is already defined earlier in the same container's env list
+  (service env vars also count), so the value `envsubst` sees can differ from
+  the CRD literal. HCC emits `spec.env` before `spec.envSecret`, so a literal
+  `spec.env` value cannot reference a name declared only later through
+  `envSecret`: the reference stays literal. HCC validates env names and
+  `${NAME}` placeholders; it does not model kubelet `$(VAR)` expansion of
+  values. Use the documented `$$(VAR)` escape when a literal `$(VAR)` is
+  intended.
+- A literal credential written into `baseUrl` instead of a placeholder is still
+  stored in the ConfigMap. Use placeholders.
 
 ## Configuration
 
@@ -62,6 +152,28 @@ desired state owned by the CRD author. Deployment rendering always stamps the
 configured platform image for remote egress proxies, so a remote CRD's
 `spec.image` is never what runs.
 
+## Rollout and image requirements
+
+The generated template requires an image that provides:
+
+- NGINX ≥ 1.27.3, for the `resolve` parameter on an upstream `server`;
+- the base image's `15-local-resolvers.envsh`, which exports the pod's local
+  nameservers as `NGINX_LOCAL_RESOLVERS` for the generated `resolver` line.
+
+The pinned `nginx:1.30.6-alpine` base in the [Dockerfile](./Dockerfile)
+provides both, so the image built here satisfies the requirement. The release
+floor in [scripts/nginx-image-policy.sh](../scripts/nginx-image-policy.sh) is
+already above 1.27.3, so a platform-accepted official `nginx` release does not
+lack either piece.
+
+The ConfigMap and the Deployment do not update atomically. During an upgrade,
+a pod from the previous ReplicaSet that restarts after the new ConfigMap lands
+but before the rollout completes runs the same image without the env the new
+Deployment adds (`NGINX_ENTRYPOINT_LOCAL_RESOLVERS`, `NGINX_ENVSUBST_FILTER`),
+so its entrypoint never exports the local resolvers and the new template fails
+on the resolver until the Deployment finishes. The upgrade window is not
+empty.
+
 ## Ports
 
 The image `EXPOSE`s **3000**. The actual `listen` port in the generated config
@@ -73,6 +185,11 @@ comes from `spec.transport.port` (default 3000); `/health` answers on it.
   all capabilities dropped, `allowPrivilegeEscalation: false`, seccomp
   `RuntimeDefault`, `automountServiceAccountToken: false` at the pod level.
 - Proxy is pinned to exactly one sanitized external base URL over verified TLS.
+- The `baseUrl` hostname check is string-only. HCC validates the name before
+  rendering, but it does not pin the addresses the proxy resolves at runtime.
+  Continued resolution depends on TLS verification of the upstream name and on
+  the exact-host NetworkPolicy admitting the addresses the resolver returns;
+  this is not a complete anti-rebinding control.
 - The broader egress-binding CIDR model (private, metadata, link-local,
   documentation, multicast, and reserved IPv4 ranges blocked) is validated in
   [control-ui/lib/egressModel.ts](../control-ui/lib/egressModel.ts).
@@ -87,6 +204,13 @@ builds this image, renders the template through the HCC reconciler, and runs it
 against a local TLS upstream: a trusted chain (direct and with two
 intermediates) is accepted; an untrusted CA, an expired certificate, a hostname
 mismatch, and the test CA without the mounted trust store are rejected.
+The harness also covers the DNS switch (`dns-switch`) and query placeholder
+resolution (`query-accept`).
+
+The CDN answer-set rotation is proven end to end on a branch-owned minikube
+profile by [scripts/e2e/e2e-egress-cdn-rotation.sh](../scripts/e2e/e2e-egress-cdn-rotation.sh);
+see [docs/testing/egress-cdn-rotation.md](../docs/testing/egress-cdn-rotation.md)
+for the operator steps and the test-only overrides it restores.
 
 ## Updating NGINX
 

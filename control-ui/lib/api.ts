@@ -5,7 +5,12 @@ import {
   METADATA_READ_CACHE_MAX_ENTRIES,
   METADATA_READ_TTL_MS,
 } from '@constants/readRequests'
-import type { ApiRequestError, ApiRequestOptions } from './api.types'
+import type {
+  ApiRequestError,
+  ApiRequestOptions,
+  LlmDiscoverySyncOutcome,
+  LlmProviderCatalogPolicy,
+} from './api.types'
 import type { GenericDiscoveryPrefill } from './oauthGeneric.types'
 import type {
   McpSecretSummary,
@@ -2371,9 +2376,9 @@ export async function deleteLlmModel(id: string, opts: { force?: boolean } = {})
 
 // ── Model references, 409 impact + operator attention feed ─────────────────
 // See control-api/src/services/llmAttention.ts and llmModelImpact.ts. The 409
-// `model_in_use` impact body (Fase 3) and each attention item (Fase 5, Pieza C)
-// carry the SAME `hostsAffected`/`grantsAffected` shape, so both surfaces render
-// the references identically.
+// `model_in_use` impact body (Fase 3) and each `stale_model_referenced` attention
+// item (Fase 5, Pieza C) carry the SAME `hostsAffected`/`grantsAffected` shape,
+// so both surfaces render the references identically.
 
 /** A Host CR that references a (provider, model) pair, with the matched roles. */
 export type ModelHostReference = {
@@ -2399,16 +2404,34 @@ export type ModelReferences = {
 }
 
 /**
- * One actionable operator-attention item. `kind` is an OPEN string union — today
- * only `'stale_model_referenced'`; the banner switches on it and ignores kinds
- * it does not recognize. `displayName` is optional (omitted, not null).
+ * A `stale` (gone from the provider catalog) and still-enabled model that a live
+ * Host/grant still references. `displayName` is optional (omitted, not null).
  */
-export type AdminAttentionItem = ModelReferences & {
-  kind: string
+export type AdminStaleModelReferencedItem = ModelReferences & {
+  kind: 'stale_model_referenced'
   provider: string
   model: string
   displayName?: string
 }
+
+/**
+ * An enabled catalog model flagged from its own row, referenced or not: the
+ * catalog marks it deprecated, or a discovered model vanished from the latest
+ * catalog. Carries no references.
+ */
+export type AdminCatalogModelAttentionItem = {
+  kind: 'deprecated_model_enabled' | 'stale_discovery_enabled'
+  provider: string
+  model: string
+  displayName?: string
+}
+
+/**
+ * One operator-attention item, discriminated on `kind`. The backend's `kind` is
+ * an open union: kinds this client does not know are dropped while parsing, so
+ * this union only holds what the banner can render.
+ */
+export type AdminAttentionItem = AdminStaleModelReferencedItem | AdminCatalogModelAttentionItem
 
 /** The `GET /admin/attention` response contract consumed by the banner. */
 export type AdminAttentionReport = {
@@ -2459,39 +2482,44 @@ function coerceModelGrantReferences(raw: unknown): ModelGrantReference[] {
   })
 }
 
-// Keep every item whose (kind, provider, model) are strings — including unknown
-// kinds, so the banner (not the fetch layer) decides what to render. Malformed
-// items are dropped rather than tumbling the whole feed.
+// Malformed items and kinds a newer backend added are dropped rather than
+// tumbling the whole feed.
 function coerceAttentionItem(raw: unknown): AdminAttentionItem[] {
   if (!raw || typeof raw !== 'object') return []
   const rec = raw as Record<string, unknown>
-  if (
-    typeof rec.kind !== 'string' ||
-    typeof rec.provider !== 'string' ||
-    typeof rec.model !== 'string'
-  ) {
-    return []
+  if (typeof rec.provider !== 'string' || typeof rec.model !== 'string') return []
+  const displayName = typeof rec.displayName === 'string' ? { displayName: rec.displayName } : {}
+  switch (rec.kind) {
+    case 'stale_model_referenced':
+      return [
+        {
+          kind: rec.kind,
+          provider: rec.provider,
+          model: rec.model,
+          hostsAffected: coerceModelHostReferences(rec.hostsAffected),
+          grantsAffected: coerceModelGrantReferences(rec.grantsAffected),
+          ...displayName,
+        },
+      ]
+    case 'deprecated_model_enabled':
+    case 'stale_discovery_enabled':
+      return [{ kind: rec.kind, provider: rec.provider, model: rec.model, ...displayName }]
+    default:
+      return []
   }
-  const item: AdminAttentionItem = {
-    kind: rec.kind,
-    provider: rec.provider,
-    model: rec.model,
-    hostsAffected: coerceModelHostReferences(rec.hostsAffected),
-    grantsAffected: coerceModelGrantReferences(rec.grantsAffected),
+}
+
+/** Normalize a raw `GET /admin/attention` body into the typed report. */
+export function parseAdminAttentionReport(raw: unknown): AdminAttentionReport {
+  const rec = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  return {
+    items: Array.isArray(rec.items) ? rec.items.flatMap(coerceAttentionItem) : [],
+    generatedAt: typeof rec.generatedAt === 'string' ? rec.generatedAt : '',
   }
-  if (typeof rec.displayName === 'string') item.displayName = rec.displayName
-  return [item]
 }
 
 export async function getAdminAttention(): Promise<AdminAttentionReport> {
-  const raw = (await apiGet('/api/v1/admin/attention')) as {
-    items?: unknown
-    generatedAt?: unknown
-  }
-  return {
-    items: Array.isArray(raw.items) ? raw.items.flatMap(coerceAttentionItem) : [],
-    generatedAt: typeof raw.generatedAt === 'string' ? raw.generatedAt : '',
-  }
+  return parseAdminAttentionReport(await apiGet('/api/v1/admin/attention'))
 }
 
 /**
@@ -2524,8 +2552,9 @@ export function getModelInUseImpact(err: unknown): ModelInUseImpact | null {
 
 // ── Catalog discovery (spec 09 §7, F2) ────────────────────────────────────
 // Discovery pulls the public models.dev catalog into `llm_allowed_models` as
-// `source='discovery', enabled=false`. The operator reviews and enables from a
-// fresh catalog. These wrappers drive the Discovery Review section on the
+// `source='discovery'`. A new row starts enabled only when its provider's
+// auto-enable policy is on and the model qualifies; the operator reviews and
+// enables the rest. These wrappers drive the Discovery Review section on the
 // unified /llm-models surface; enable/disable/delete of discovered rows reuse
 // the existing update/delete routes above (no dedicated discovery mutation
 // endpoint).
@@ -2542,9 +2571,15 @@ export type LlmDiscoverySyncResult = {
   // DB commit time of this run — matches the status endpoint's `ranAt`, so the
   // "last synced" label is stable across a reload.
   ranAt: string
+  // Includes the rows inserted enabled (`outcome.autoEnabled`).
   added: number
   updated: number
   staled: number
+  // Whether the run could decide which new models to enable (live, plausible
+  // catalog). `null` when the control-api predates the field.
+  decidable: boolean | null
+  // Summed per-provider breakdown; `null` when the control-api predates it.
+  outcome: LlmDiscoverySyncOutcome | null
 }
 
 // Last-run summary from the optional status endpoint. `null` when discovery has
@@ -2557,13 +2592,51 @@ export type LlmDiscoveryStatus = {
   staled: number
 }
 
-// Runs the catalog sync. Rows are inserted disabled — this never changes what
-// the runtime serves; it only refreshes the review queue.
-export async function syncDiscovery() {
-  return apiSend(
-    'POST',
-    '/api/v1/admin/llm-models/discovery/sync'
-  ) as Promise<LlmDiscoverySyncResult>
+// Runs the catalog sync. New rows start disabled; only eligible models from a
+// live catalog, for a provider whose auto-enable policy is on, start enabled,
+// up to a per-run cap. Existing rows are never re-evaluated. The body is
+// parsed, not cast: the auto-enable fields are absent on older control-api.
+export async function syncDiscovery(): Promise<LlmDiscoverySyncResult> {
+  return parseDiscoverySyncResult(await apiSend('POST', '/api/v1/admin/llm-models/discovery/sync'))
+}
+
+function syncCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
+}
+
+function sumSyncOutcome(providerCounts: unknown): LlmDiscoverySyncOutcome | null {
+  if (!providerCounts || typeof providerCounts !== 'object' || Array.isArray(providerCounts)) {
+    return null
+  }
+  const outcome: LlmDiscoverySyncOutcome = { autoEnabled: 0, heldUndecidable: 0, deferredByCap: 0 }
+  for (const entry of Object.values(providerCounts)) {
+    if (!entry || typeof entry !== 'object') continue
+    const count = entry as Record<string, unknown>
+    outcome.autoEnabled += syncCount(count.autoEnabled)
+    outcome.heldUndecidable += syncCount(count.skippedUndecidable)
+    outcome.deferredByCap += syncCount(count.deferredByCap)
+  }
+  return outcome
+}
+
+/**
+ * Normalize a raw sync body. `decidable` and `providerCounts` were added to the
+ * producer after the counters, so their absence maps to `null` (an older
+ * control-api), never to "nothing happened". An unknown `source` is read as
+ * `vendored`: the fallback is the claim that promises less about the data.
+ */
+export function parseDiscoverySyncResult(raw: unknown): LlmDiscoverySyncResult {
+  const rec = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  return {
+    source: rec.source === 'live' ? 'live' : 'vendored',
+    fetchedAt: typeof rec.fetchedAt === 'string' ? rec.fetchedAt : '',
+    ranAt: typeof rec.ranAt === 'string' ? rec.ranAt : '',
+    added: syncCount(rec.added),
+    updated: syncCount(rec.updated),
+    staled: syncCount(rec.staled),
+    decidable: typeof rec.decidable === 'boolean' ? rec.decidable : null,
+    outcome: sumSyncOutcome(rec.providerCounts),
+  }
 }
 
 // Reads the last sync run. The endpoint is optional (spec 09 §7 F2): a missing
@@ -2581,6 +2654,45 @@ export async function getDiscoveryStatus(): Promise<LlmDiscoveryStatus | null> {
     if ((e as { status?: number })?.status === 404) return null
     throw e
   }
+}
+
+// ── Catalog auto-enable policy (per provider) ─────────────────────────────
+// Decides whether eligible models a live catalog sync inserts from now on start
+// enabled. Existing rows are untouched and
+// nothing is ever disabled by the policy.
+
+export async function getLlmProviderCatalogPolicies(): Promise<LlmProviderCatalogPolicy[]> {
+  const res = (await apiGet('/api/v1/admin/llm-providers/catalog-policy')) as {
+    providers?: LlmProviderCatalogPolicy[]
+  } | null
+  return res?.providers ?? []
+}
+
+/**
+ * Sets the provider's override, or clears it with `null` so the provider
+ * follows the code default again. The key is always sent: the route rejects a
+ * body without it, so a reset can never be mistaken for an empty request.
+ */
+export async function setLlmProviderCatalogAutoEnable(
+  provider: string,
+  autoEnable: boolean | null
+): Promise<LlmProviderCatalogPolicy> {
+  return apiSend(
+    'PUT',
+    `/api/v1/admin/llm-providers/${encodeURIComponent(provider)}/catalog-policy`,
+    { auto_enable: autoEnable }
+  ) as Promise<LlmProviderCatalogPolicy>
+}
+
+/**
+ * True when the toggle was refused because a catalog sync holds the policy
+ * lock (503 `catalog_sync_in_progress`). Nothing was saved and retrying is
+ * safe. Matches only the machine-readable code: a bare gateway 503 has no
+ * code and stays a generic failure.
+ */
+export function isCatalogSyncInProgressError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return (err as ApiRequestError).code === 'catalog_sync_in_progress'
 }
 
 // ── Token budgets (token-budgets P0c) ─────────────────────────────────────

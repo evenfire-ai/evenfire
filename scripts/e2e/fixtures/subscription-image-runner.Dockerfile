@@ -54,7 +54,7 @@ ENV VITE_SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM=${VITE_SHOW_GLOBAL_FILE_SYSTEM_CO
 # Recheck the actual allowlisted input around compilation. HEAD/tree/blob IDs
 # were observed by main from the clean checkout, never synthesized in the image.
 RUN node --input-type=module -e "import fs from 'node:fs'; import {verifyInputSource} from './scripts/tests/lib/subscription-image-source-context.mjs'; verifyInputSource(JSON.parse(fs.readFileSync('subscription-image-input-source.json')), process.cwd())" \
-    && npm --prefix desktop-app run verify:electron && npm --prefix desktop-app run build \
+    && sfw npm --prefix desktop-app run verify:electron && sfw npm --prefix desktop-app run build \
     && node --input-type=module -e "import fs from 'node:fs'; import {verifyInputSource} from './scripts/tests/lib/subscription-image-source-context.mjs'; verifyInputSource(JSON.parse(fs.readFileSync('subscription-image-input-source.json')), process.cwd())"
 
 FROM ${RUNNER_BASE_IMAGE} AS runner

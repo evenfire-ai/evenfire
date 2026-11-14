@@ -22,7 +22,7 @@ function patchObject(object, operations) {
     else target[key] = structuredClone(operation.value)
   }
 }
-function fixture({ seedFailure = false, imageRevokeFailure = false } = {}) {
+function fixture({ seedFailure = false, imageRevokeFailure = false, bootSyncStaysOn = false } = {}) {
   const resource = { metadata: { uid: id(1), resourceVersion: '1' }, spec: { replicas: 1,
     template: { spec: { containers: [{ name: 'control-api', image, env: [...CATALOG_CRON_KEYS.map(name => ({ name, value: 'true' })),
       { name: 'UNRELATED', value: 'keep' }] }] } } } }
@@ -34,7 +34,10 @@ function fixture({ seedFailure = false, imageRevokeFailure = false } = {}) {
   const context = { assert: (value, code) => assert(value, code), validImageId: value => value === image,
     imageId: value => value, ROOT: '/unit-source', NAMESPACE: 'control-plane', CATALOG_CRON_KEYS, snapshotDeployment, deploymentMutationPatch,
     getDeployment: () => structuredClone(resource), readyPod: () => ({ metadata: { name: 'unit-api' }, status: { containerStatuses: [{ name: 'control-api', imageID: image }] } }),
-    until: async check => check(), json: () => ({ llm: effective()[CATALOG_CRON_KEYS[0]] === 'true', subscription: effective()[CATALOG_CRON_KEYS[1]] === 'true' }),
+    until: async check => check(), json: () => ({ llm: effective().LLM_CATALOG_SYNC_CRON_ENABLED === 'true',
+      subscription: effective().SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED === 'true',
+      // Default on: only an explicit 'false' turns the boot sync off.
+      boot: bootSyncStaysOn || effective().LLM_CATALOG_BOOT_SYNC_ENABLED !== 'false' }),
     patchDeployment: (_context, _name, patch) => { patchObject(resource, patch); events.push('cron-patch'); resource.metadata.resourceVersion = String(Number(resource.metadata.resourceVersion) + 1) },
     command: () => '', catalogRestorationSafe, seedPrivateMaterial,
     restoreDeployments: async (_context, states) => {
@@ -179,4 +182,26 @@ test('final memory action detaches/revokes only two exact owned grants and prese
   assert.equal(result.state, 'revoked'); assert.equal(result.grantsRevoked, 2); assert.equal(result.retainedAuditAndQaData, true)
   assert.deepEqual(events, ['host-detached', 'grant-revoked', 'host-detached', 'grant-revoked', 'projection-published'])
   assert.equal(rows.size, 2)
+})
+
+test('the catalog fence covers the boot sync and refuses to open while it stays on', async () => {
+  assert(CATALOG_CRON_KEYS.includes('LLM_CATALOG_BOOT_SYNC_ENABLED'))
+  const world = fixture({ bootSyncStaysOn: true })
+  await assert.rejects(world.wrapper(world.options, world.material, runtime => runtime.run(world.options)),
+    /COORDINATOR_CATALOG_CRONS_STILL_ENABLED/)
+  assert(!world.events.includes('seed-sees-false'))
+  // The fence restored the original switches when it could not open.
+  assert(CATALOG_CRON_KEYS.every(name => world.effective()[name] === 'true'))
+})
+
+test('a deployment without the boot-sync switch is snapshotted and fenced with it set to false', () => {
+  const deployment = { metadata: { uid: id(1), resourceVersion: '1' }, spec: { replicas: 1, template: { spec: {
+    containers: [{ name: 'control-api', image, env: [{ name: 'LLM_CATALOG_SYNC_CRON_ENABLED', value: 'true' }] }] } } } }
+  const original = snapshotDeployment(deployment, 'control-api', CATALOG_CRON_KEYS)
+  assert.equal(original.env.LLM_CATALOG_BOOT_SYNC_ENABLED, undefined)
+  const applied = { image, env: Object.fromEntries(CATALOG_CRON_KEYS.map(name => [name, 'false'])) }
+  const fenced = structuredClone(deployment)
+  patchObject(fenced, deploymentMutationPatch(deployment, original, applied))
+  const env = Object.fromEntries(fenced.spec.template.spec.containers[0].env.map(entry => [entry.name, entry.value]))
+  assert.equal(env.LLM_CATALOG_BOOT_SYNC_ENABLED, 'false')
 })

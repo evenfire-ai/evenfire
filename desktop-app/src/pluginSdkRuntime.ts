@@ -42,6 +42,39 @@ type RuntimeDeps = {
   userDataDir?: string
 }
 
+const NOTIFICATION_DELIVERY_TIMEOUT_MS = 10_000
+const pendingPluginNotifications = new Set<Notification>()
+
+export async function showNotificationAndAwaitDelivery(
+  notification: Notification
+): Promise<boolean> {
+  pendingPluginNotifications.add(notification)
+  return new Promise<boolean>(resolve => {
+    let timer: ReturnType<typeof setTimeout>
+    const finish = (delivered: boolean) => {
+      clearTimeout(timer)
+      pendingPluginNotifications.delete(notification)
+      notification.removeListener('show', onShown)
+      notification.removeListener('failed', onFailed)
+      resolve(delivered)
+    }
+    function onShown() {
+      finish(true)
+    }
+    function onFailed() {
+      finish(false)
+    }
+    notification.once('show', onShown)
+    notification.once('failed', onFailed)
+    timer = setTimeout(() => finish(false), NOTIFICATION_DELIVERY_TIMEOUT_MS)
+    try {
+      notification.show()
+    } catch {
+      finish(false)
+    }
+  })
+}
+
 let runtime: PluginSdkRuntime | null = null
 
 export class PluginSdkRuntime {
@@ -67,7 +100,8 @@ export class PluginSdkRuntime {
       presentPrompt: request => this.sendToRenderer(PLUGIN_SDK_CONSENT_REQUESTED_CHANNEL, request),
       cancelPrompt: promptId =>
         this.sendToRenderer(PLUGIN_SDK_CONSENT_CANCELLED_CHANNEL, { promptId }),
-      setSurfaceVisible: visible => this.deps.service.setSandboxUiVisible(visible),
+      isMountCurrent: mount => resolvePluginSurface(mount.webContentsId) === mount,
+      setSurfaceVisible: (_visible, mount) => this.deps.service.hideSandboxUiForPluginMount(mount),
       isWindowReady: () => {
         const win = this.deps.getMainWindow()
         if (!win || win.isDestroyed()) return false
@@ -347,7 +381,7 @@ export class PluginSdkRuntime {
     title: string
     body?: string
     ref?: string
-  }): Promise<{ delivered: boolean; reason?: 'suppressed' | 'unsupported' }> {
+  }): Promise<{ delivered: boolean; reason?: 'suppressed' | 'unsupported' | 'failed' }> {
     // Suppressed when the user is already looking at this plugin: interrupting
     // someone about the thing on their screen is noise, not attention.
     if (this.isPluginInForeground(input.pluginId)) {
@@ -377,8 +411,8 @@ export class PluginSdkRuntime {
         ref: input.ref ?? null,
       })
     })
-    notification.show()
-    return { delivered: true }
+    const delivered = await showNotificationAndAwaitDelivery(notification)
+    return delivered ? { delivered: true } : { delivered: false, reason: 'failed' }
   }
 
   private isPluginInForeground(pluginId: string): boolean {

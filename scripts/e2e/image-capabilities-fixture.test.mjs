@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import http from 'node:http'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { spawnSync } from 'node:child_process'
-import http from 'node:http'
 import {
   baseImage,
   controlApiFetch,
@@ -15,6 +15,7 @@ import {
   playwrightLaneConfig,
   playwrightVerdict,
   proveImages,
+  requireDiscoveredCatalogModels,
   requireOwnedResource,
   runAnnotation,
   sanitizeFixtureReport,
@@ -299,6 +300,27 @@ test('fixture catalog declares supported, unsupported and run-scoped unknown wit
     )
   )
   assert.throws(() => modelInputs('../foreign'))
+})
+
+test('fixture creates only its run-scoped model, never an undiscovered real one', () => {
+  const runId = 'image-capabilities-123456abcdef'
+  const models = modelInputs(runId)
+  const [first, second, runScoped] = models
+  const row = ({ provider, model }) => ({ provider, model })
+  assert.doesNotThrow(() =>
+    requireDiscoveredCatalogModels(models, [row(first), row(second)], runId)
+  )
+  for (const [catalog, absent] of [
+    [[row(first)], second],
+    [[row(second)], first],
+    [[{ ...row(first), provider: 'other' }, row(second)], first],
+  ])
+    assert.throws(
+      () => requireDiscoveredCatalogModels(models, catalog, runId),
+      error =>
+        error.message.includes(`${absent.provider}/${absent.model};`) &&
+        !error.message.includes(runScoped.model)
+    )
 })
 
 test('restoration refuses recreated or foreign-owned Kubernetes resources', () => {

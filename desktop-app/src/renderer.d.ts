@@ -114,6 +114,7 @@ declare global {
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
         onExternalLogout: (callback: () => void) => () => void
+        onSessionCleared: (callback: () => void) => () => void
         logout: () => Promise<{ ok: true; sessionGeneration: number }>
       }
       team: {
@@ -789,6 +790,8 @@ declare global {
         ) => Promise<ChatMessage[]>
         appendMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
         upsertMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
+        /** Removes local user turns with no stored sign of a server answer and resolves the number removed. Rejects when a requested message that is stored is anything else. A deleted or missing chat removes nothing and resolves 0. */
+        removeMessages: (agentRef: string, chatId: string, messageIds: string[]) => Promise<number>
         replaceMessages: (
           agentRef: string,
           chatId: string,

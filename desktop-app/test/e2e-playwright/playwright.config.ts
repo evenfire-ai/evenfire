@@ -170,6 +170,7 @@ export default defineConfig({
         '**/subscription-image-input.spec.ts',
         '**/native-tool-discovery.spec.ts',
         '**/session-tool-approval-scope.test.ts',
+        '**/session-team-ux.test.ts',
       ],
     },
     {

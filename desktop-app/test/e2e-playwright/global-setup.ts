@@ -60,6 +60,16 @@ function isBranchScopedLocalContext(context: string): boolean {
   return /^clerum-(codex|detached)-/.test(context) || isBranchProfileContext(context)
 }
 
+/**
+ * For a lane that disrupts the cluster it runs against: admits only a branch-owned local
+ * profile, which excludes production and the shared `clerum-test` context.
+ */
+export function assertBranchOwnedContext(context: string): void {
+  if (isProductionContext(context) || !isBranchScopedLocalContext(context)) {
+    throw new Error(`[E2E-GUARD] "${context}" is not a branch-owned local profile.`)
+  }
+}
+
 function urlPort(url: string): string {
   try {
     return new URL(url).port
@@ -395,7 +405,6 @@ async function globalSetup(): Promise<void> {
 
   let loginResp: Response
   const loginPath = '/api/v1/auth/password-login'
-  let loginBody: Record<string, string> = { email }
   try {
     if (authPreflight !== 'password') {
       throw new Error(
@@ -407,12 +416,11 @@ async function globalSetup(): Promise<void> {
       process.env.E2E_TEST_PASSWORD ||
       process.env.ADMIN_PASSWORD ||
       'changeme123!'
-    loginBody = { email, password }
 
     loginResp = await fetch(`${externalRest}${loginPath}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(loginBody),
+      body: JSON.stringify({ email, password }),
     })
   } catch (err) {
     throw new Error(

@@ -197,6 +197,11 @@ const clerum = Object.freeze({
       ipcRenderer.on('auth:externalLogout', listener)
       return () => ipcRenderer.off('auth:externalLogout', listener)
     },
+    onSessionCleared: (callback: () => void) => {
+      const listener = () => callback()
+      ipcRenderer.on('auth:sessionCleared', listener)
+      return () => ipcRenderer.off('auth:sessionCleared', listener)
+    },
     logout: () => ipcRenderer.invoke('auth:logout'),
   },
   team: {
@@ -764,6 +769,8 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('chat:appendMessages', { agentRef, chatId, messages }),
     upsertMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
       ipcRenderer.invoke('chat:upsertMessages', { agentRef, chatId, messages }),
+    removeMessages: (agentRef: string, chatId: string, messageIds: string[]) =>
+      ipcRenderer.invoke('chat:removeMessages', { agentRef, chatId, messageIds }),
     replaceMessages: (
       agentRef: string,
       chatId: string,

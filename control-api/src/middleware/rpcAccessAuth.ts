@@ -6,6 +6,13 @@ type RpcAuthedRequest = Request & {
   rpcAuth?: RpcAccessClaims
 }
 
+type RpcTokenMatchFailure = 'claims_missing' | 'subject_mismatch' | 'host_claim_missing'
+type RpcTokenMatchFailureHandler = (
+  req: RpcAuthedRequest,
+  res: Response,
+  reason: RpcTokenMatchFailure
+) => void
+
 function extractRpcAccessToken(req: Request): string {
   return String(req.header('x-rpc-access-token') || '').trim()
 }
@@ -56,11 +63,19 @@ export function requireValidRpcAccessTokenAny(scopes: RpcScope[]) {
   }
 }
 
-export function requireRpcTokenUserMatch(paramName = 'userId') {
+export function requireRpcTokenUserMatch(
+  paramName = 'userId',
+  onFailure?: RpcTokenMatchFailureHandler
+) {
   return (req: RpcAuthedRequest, res: Response, next: NextFunction): void => {
     const claims = req.rpcAuth
     const userId = String(req.params?.[paramName] || '').trim()
     if (!claims || !userId || claims.sub !== userId) {
+      const reason: RpcTokenMatchFailure = claims ? 'subject_mismatch' : 'claims_missing'
+      if (onFailure) {
+        onFailure(req, res, reason)
+        return
+      }
       res.status(403).json({ error: 'Forbidden' })
       return
     }
@@ -80,11 +95,19 @@ export function requireRpcTokenTeamMatch(paramName = 'teamId') {
   }
 }
 
-export function requireRpcTokenHostMatch(paramName = 'hostRef') {
+export function requireRpcTokenHostMatch(
+  paramName = 'hostRef',
+  onFailure?: RpcTokenMatchFailureHandler
+) {
   return (req: RpcAuthedRequest, res: Response, next: NextFunction): void => {
     const claims = req.rpcAuth
     const hostRef = String(req.params?.[paramName] || '').trim()
     if (!claims || !hostRef || !claims.hostRefs.includes(hostRef)) {
+      const reason: RpcTokenMatchFailure = claims ? 'host_claim_missing' : 'claims_missing'
+      if (onFailure) {
+        onFailure(req, res, reason)
+        return
+      }
       res.status(403).json({ error: 'Forbidden' })
       return
     }

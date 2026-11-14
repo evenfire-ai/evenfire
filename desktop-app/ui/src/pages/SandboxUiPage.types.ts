@@ -23,6 +23,7 @@ export type SandboxUiPageProps = {
   sidebarShellOverlayOpen?: boolean
   toastShellOverlayOpen?: boolean
   deepLinkShellOverlayOpen?: boolean
+  appRootOverlayOpen?: boolean
   localSearchRequestId?: number
   titlebarLeadingContainer?: HTMLElement | null
   // The picker grid hands the chosen app to the owner instead of opening it

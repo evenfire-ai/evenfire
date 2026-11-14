@@ -28,8 +28,10 @@ import {
 import {
   assertTrustedSender,
   registerDeepLinkAcknowledgmentHandlers,
+  registerGfsDeepLinkListHandler,
   registerIpcHandlers,
 } from './ipc.js'
+import { mainWindowRoundedCorners } from './mainWindowChrome.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
@@ -89,6 +91,11 @@ const appService = new AppService({
         appDeepLinkMinimumId,
         gfsDeepLinkMinimumId,
       })
+    }
+  },
+  onSessionCleared: () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('auth:sessionCleared')
     }
   },
 })
@@ -289,10 +296,7 @@ ipcMain.handle('sandboxUi:clearPendingDeepLinks', event => {
   sandboxUiDeepLinkQueue.clear()
 })
 
-ipcMain.handle('gfs:listPendingDeepLinks', event => {
-  assertTrustedSender(event)
-  return { links: gfsResourceDeepLinkQueue.list() }
-})
+registerGfsDeepLinkListHandler(gfsResourceDeepLinkQueue)
 
 function isTrustedGfsNavigationSender(event: IpcMainEvent): boolean {
   try {
@@ -550,6 +554,7 @@ async function createWindow(): Promise<void> {
     height: 860,
     show: false,
     frame: false,
+    roundedCorners: mainWindowRoundedCorners(),
     title:
       devIsolationPolicy.windowTitle ??
       (config.appName === EVENFIRE_APP_NAME

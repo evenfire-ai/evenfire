@@ -14,6 +14,9 @@ Full per-service variable lists live in each service's README (see
 > you create it. Only the minikube overlay ships one
 > (`deploy/overlays/minikube/configmaps/mcp-host-config.yaml`); copy it and
 > review each value (see [Production deployment](../deploy/production.md)).
+> `HCC_AUTHORITY_MAX_STALENESS_MS` must satisfy the
+> [mcp-host authority staleness floor](../deploy/releases-and-upgrades.md#mcp-host-authority-staleness-floor),
+> or every agent pod refuses to start.
 > Variables you leave out take mcp-host's code defaults: the mcp-host rows in
 > the two "Off" tables below stay off unless your ConfigMap sets them, and the
 > mcp-host rows under [On by default](#on-by-default) stay on.
@@ -61,10 +64,46 @@ Set boolean switches to the lowercase string `true`. Some services also accept
 | Switch                                            | Service                  | Note                                                                          |
 | ------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------- |
 | `CLERUM_ENABLE_APPROVAL`                          | mcp-host                 | Human approval gate ([Configure approvals](../how-to/configure-approvals.md)) |
-| `LLM_CATALOG_SYNC_CRON_ENABLED`                   | control-api              | models.dev catalog sync; new rows arrive disabled for review                  |
+| `LLM_CATALOG_SYNC_CRON_ENABLED`                   | control-api              | models.dev catalog sync; enables eligible new models, capped per run (below)  |
+| `LLM_CATALOG_BOOT_SYNC_ENABLED`                   | control-api              | One sync at start when the cron is off, retried until a live, plausible run   |
 | `CLERUM_ENABLE_RESPONSE_ATTACHMENTS`              | channel-reader, mcp-host | Send generated files back to channels                                         |
 | `WRC_ENABLE_DETERMINISTIC`                        | workflow-recipes         | Deterministic workflow steps                                                  |
 | `WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED` | control-api              | Deliver workflow approval notifications                                       |
+
+The catalog sync enables a new model only when its provider's catalog policy is
+ON and the model is eligible. One run enables at most
+`LLM_CATALOG_AUTO_ENABLE_MAX_PER_PROVIDER_PER_RUN` models per provider
+(default 100) and `LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN` in total (default
+is 300); both accept 1–1000, and the rest wait for the next sync run (the cron's next
+tick, a manual sync or a restart; with the cron off nothing runs on its own). The newest
+releases of a provider go first, and the total is handed out in the fixed
+provider order of `PROVIDER_IDS`, so the providers further down wait for the
+ones ahead. See
+[the model allowlist](../deploy/llm-providers.md#5-the-model-allowlist).
+
+Every replica syncs once at start: as the cron's first tick, or, with the cron
+off, on its own unless `LLM_CATALOG_BOOT_SYNC_ENABLED=false` (code default
+`true`; only `true` or `false`). A boot sync that got no live, plausible catalog,
+or failed, probes models.dev again with backoff (30 s doubling up to 1 h) and
+reconciles once it does. `MODELS_DEV_API_URL` must be `https://`, must not point
+at an internal host and must not contain credentials; control-api refuses to
+start otherwise.
+
+## Bounds on by default
+
+host-context-controller bounds every NetworkPolicy pass with two settings that
+`deploy/base` does not set, so their code defaults apply. The table also lists
+`HCC_HOST_K8S_REQUEST_TIMEOUT_MS`, which `deploy/base` sets to `30000`, because
+it must stay below the hard limit too:
+
+| Variable                          | Default            | Effect                                                                                                                                                                                                       |
+| --------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `HCC_K8S_REQUEST_TIMEOUT_MS`      | `30000`            | Deadline for each finite Kubernetes request of the NetworkPolicy, McpServer runtime and binding work; a timed-out request fails the pass, which retries. Plain digits, below `HCC_NETPOL_PASS_HARD_LIMIT_MS` |
+| `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` | `30000`            | Deadline for each finite Kubernetes request on the Host convergence path. Plain digits, below `HCC_NETPOL_PASS_HARD_LIMIT_MS`                                                                                |
+| `HCC_NETPOL_PASS_HARD_LIMIT_MS`   | `1800000` (30 min) | A pass still running at this limit makes HCC exit, so its container restarts and the startup pass converges again; consumers can fail closed before it (see the upgrade note)                                |
+
+See the [upgrade note](../deploy/releases-and-upgrades.md#hcc-networkpolicy-pass-bounds)
+and the [HCC README](../../host-context-controller/README.md#networkpolicy).
 
 ## Where every variable is documented
 
