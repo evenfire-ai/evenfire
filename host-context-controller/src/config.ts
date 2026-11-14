@@ -726,7 +726,9 @@ export const config: Config = {
       cpu: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU', '100m')!,
     },
     limits: {
-      memory: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY', '512Mi')!,
+      // 2Gi leaves mcp-host's document reader room beside the Host's working
+      // set (documentRead/MEMORY_MODEL.md); at 512Mi every read was refused.
+      memory: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY', '2Gi')!,
       cpu: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU', '500m')!,
     },
   },

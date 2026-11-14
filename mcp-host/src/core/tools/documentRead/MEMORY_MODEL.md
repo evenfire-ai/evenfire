@@ -8,7 +8,8 @@ which asked for a design note instead of a fourth patch in `workerRunner.ts`.
 ## Threat
 
 The reader parses untrusted bytes in a child process. The child shares the
-Host container's cgroup (512 MiB `memory.max` by default). If the container's
+Host container's cgroup (2 GiB `memory.max` by default; see item 5 of
+"Required cluster configuration"). If the container's
 memory reaches `memory.max`, the kernel OOM killer fires. Where
 `memory.oom.group=1` it kills every process of the container, Host included.
 Kubelet sets that for every container on cgroup v2 since Kubernetes 1.28; only
@@ -127,7 +128,12 @@ container with its own memory limit so that its OOM is a container OOM.
 5. Size the Host container so that `memory.max` leaves room beyond the Host's
    steady working set plus the reserves above; admission refuses reads rather
    than starting them in a tight container, so a small container shows up as
-   `host_memory_unavailable`, not as an OOM.
+   `host_memory_unavailable`, not as an OOM. Idle Hosts on the dev cluster had
+   a working set of 135-165 MiB (`kubectl top`, 2026-11-14), so the old
+   512 MiB default refused every read. HCC now defaults
+   `CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY` to 2Gi, the hosted value: at a
+   165 MiB working set that admits the full 768 MiB reader with about 810 MiB
+   of headroom to spare.
 
 Every refusal of items 1-3 and 5 returns the same `host_memory_unavailable` to
 the model and logs one warning, `Document reader refused to start`, whose
