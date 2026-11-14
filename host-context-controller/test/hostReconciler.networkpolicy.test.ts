@@ -341,17 +341,23 @@ describe('HostReconciler.reconcile — NP wiring', () => {
       .spyOn(reconciler as any, 'ensureWorkflowApprovalReaderHostEgressNetworkPolicy')
       .mockResolvedValue('up_to_date')
     const error = vi.spyOn(HostContextLogger.prototype, 'error')
-    const supersededBefore = await supersededDurationCount()
+    try {
+      const supersededBefore = await supersededDurationCount()
 
-    await expect(reconciler.reconcile(host)).rejects.toThrow(/Host mutation dependency changed/)
+      await expect(reconciler.reconcile(host)).rejects.toThrow(/Host mutation dependency changed/)
 
-    // Witness: the first policy step ran and changed the dependencies.
-    expect(ingress).toHaveBeenCalledTimes(1)
-    expect(lastPolicy).not.toHaveBeenCalled()
-    expect(error).not.toHaveBeenCalledWith('Failed to ensure Host NetworkPolicy', expect.anything())
-    // T6.3: the reconcile is observed as superseded.
-    expect(await supersededDurationCount()).toBe(supersededBefore + 1)
-    error.mockRestore()
+      // Witness: the first policy step ran and changed the dependencies.
+      expect(ingress).toHaveBeenCalledTimes(1)
+      expect(lastPolicy).not.toHaveBeenCalled()
+      expect(error).not.toHaveBeenCalledWith(
+        'Failed to ensure Host NetworkPolicy',
+        expect.anything()
+      )
+      // T6.3: the reconcile is observed as superseded.
+      expect(await supersededDurationCount()).toBe(supersededBefore + 1)
+    } finally {
+      error.mockRestore()
+    }
   })
 
   it('T6.2 (control row) a non-benign error on one policy is logged once and the others still run', async () => {
@@ -362,16 +368,18 @@ describe('HostReconciler.reconcile — NP wiring', () => {
       .spyOn(reconciler as any, 'ensureWorkflowApprovalReaderHostEgressNetworkPolicy')
       .mockResolvedValue('up_to_date')
     const error = vi.spyOn(HostContextLogger.prototype, 'error')
+    try {
+      await reconciler.reconcile(HOST)
 
-    await reconciler.reconcile(HOST)
-
-    expect(lastPolicy).toHaveBeenCalledTimes(1)
-    expect(
-      error.mock.calls.filter(call => call[0] === 'Failed to ensure Host NetworkPolicy')
-    ).toHaveLength(1)
-    const status = (reconciler as any).statusMap.get('chatllm') as { message?: string }
-    expect(status.message).toMatch(/^degraded/i)
-    error.mockRestore()
+      expect(lastPolicy).toHaveBeenCalledTimes(1)
+      expect(
+        error.mock.calls.filter(call => call[0] === 'Failed to ensure Host NetworkPolicy')
+      ).toHaveLength(1)
+      const status = (reconciler as any).statusMap.get('chatllm') as { message?: string }
+      expect(status.message).toMatch(/^degraded/i)
+    } finally {
+      error.mockRestore()
+    }
   })
 
   it('surfaces a NetworkPolicy apply result of missing as degraded', async () => {
