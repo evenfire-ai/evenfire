@@ -4,6 +4,7 @@ import type { RuntimeTokenProvider } from '../runtime-token-provider/provider'
 import { requireRuntimeToken } from '../runtime-token-provider/provider'
 import { sendWithAuthRetryOn401 } from './authRetry'
 import { emitLog } from './logger'
+import { boundToolsCalledForStatus } from './toolCallStatus'
 
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY_MS = 200
@@ -28,6 +29,8 @@ export class StatusReporter {
   }
 
   private async report(path: string, body: Record<string, unknown>, label: string): Promise<void> {
+    const payload = JSON.stringify(body)
+    const bodyBytes = Buffer.byteLength(payload)
     let lastErr: Error | undefined
     // True only when the latest attempt was answered 503 with the run-store code;
     // the last attempt decides which error the caller receives.
@@ -43,7 +46,7 @@ export class StatusReporter {
               {
                 method: 'POST',
                 headers: await this.authHeaders(),
-                body: JSON.stringify(body),
+                body: payload,
               }
             ),
           label
@@ -55,11 +58,15 @@ export class StatusReporter {
         // Duplicate terminal step reports can happen when the first response is lost
         // after WRC already committed the status patch. Treat that idempotent conflict
         // as accepted, but fail closed for every other write error.
-        if (resp.status === 409 && (await responseHasAlreadyTerminalPhase(resp))) {
+        const responseText = await readResponseText(resp)
+        if (
+          resp.status === 409 &&
+          responseText.toLowerCase().includes('already in terminal phase')
+        ) {
           return
         }
 
-        if (resp.status === 423 && (await responseHasAuthorizationPauseCode(resp))) {
+        if (resp.status === 423 && responseHasAuthorizationPauseCode(responseText)) {
           throw new WorkflowAuthorizationPausedError()
         }
 
@@ -72,12 +79,16 @@ export class StatusReporter {
           emitLog('warn', `Non-retryable error reporting ${label}: HTTP ${resp.status}`, {
             label,
             httpStatus: resp.status,
+            bodyBytes,
           })
-          throw new Error(`WRC rejected ${label} with HTTP ${resp.status}`)
+          const reason = responseErrorReason(responseText)
+          throw new Error(
+            `WRC rejected ${label} with HTTP ${resp.status}${reason ? `: ${reason}` : ''}`
+          )
         }
         // WRC could not reach its run store to checkpoint a running boundary.
         // Retried like any 5xx; recorded so the final error can say so.
-        if (resp.status === 503 && (await responseHasRunStateUnavailableCode(resp))) {
+        if (resp.status === 503 && responseHasRunStateUnavailableCode(responseText)) {
           lastAttemptRunStateUnavailable = true
         }
         lastErr = new Error(`HTTP ${resp.status}`)
@@ -93,8 +104,12 @@ export class StatusReporter {
     }
 
     // Log only structural fields because status payloads can include step output.
-    const message = `Failed to report ${label} after ${MAX_RETRIES} attempts: ${lastErr?.message}`
-    emitLog('warn', message, { label })
+    // undici reports every socket failure as `fetch failed`; the cause code
+    // (ECONNRESET, UND_ERR_SOCKET, ...) is what tells them apart.
+    const cause = errorCauseCode(lastErr)
+    const detail = cause ? `${lastErr?.message} (${cause})` : lastErr?.message
+    const message = `Failed to report ${label} after ${MAX_RETRIES} attempts: ${detail}`
+    emitLog('warn', message, { label, bodyBytes, ...(cause && { cause }) })
     if (lastAttemptRunStateUnavailable) throw new WorkflowRunStateUnavailableError(message)
     throw new Error(message)
   }
@@ -115,7 +130,9 @@ export class StatusReporter {
       approvalBindingSha256?: string
     }
   ): Promise<void> {
-    await this.report('/status', { stepId, phase, ...meta }, 'step status')
+    const body: Record<string, unknown> = { stepId, phase, ...meta }
+    if (meta?.toolsCalled) body.toolsCalled = boundToolsCalledForStatus(meta.toolsCalled)
+    await this.report('/status', body, 'step status')
   }
 
   async reportWorkflowStatus(
@@ -150,29 +167,46 @@ export class StatusReporter {
   }
 }
 
-async function responseHasAlreadyTerminalPhase(resp: Response): Promise<boolean> {
+async function readResponseText(resp: Response): Promise<string> {
   try {
-    const text = await resp.text()
-    return text.toLowerCase().includes('already in terminal phase')
+    return await resp.text()
   } catch {
-    return false
+    return ''
   }
 }
 
-async function responseHasAuthorizationPauseCode(resp: Response): Promise<boolean> {
+/** WRC's `{ code }` on an error answer, read from the text already consumed. */
+function responseErrorCode(responseText: string): unknown {
   try {
-    const body = (await resp.json()) as { code?: unknown }
-    return body?.code === 'workflow_authorization_paused'
+    return (JSON.parse(responseText) as { code?: unknown } | null)?.code
   } catch {
-    return false
+    return undefined
   }
 }
 
-async function responseHasRunStateUnavailableCode(resp: Response): Promise<boolean> {
+function responseHasAuthorizationPauseCode(responseText: string): boolean {
+  return responseErrorCode(responseText) === 'workflow_authorization_paused'
+}
+
+function responseHasRunStateUnavailableCode(responseText: string): boolean {
+  return responseErrorCode(responseText) === 'workflow_run_state_unavailable'
+}
+
+const MAX_ERROR_REASON_CHARS = 200
+
+/** WRC's own `{ error }` text for a rejected write; never the request body. */
+function responseErrorReason(responseText: string): string | undefined {
   try {
-    const body = (await resp.json()) as { code?: unknown }
-    return body?.code === 'workflow_run_state_unavailable'
+    const parsed: unknown = JSON.parse(responseText)
+    const error = (parsed as { error?: unknown } | null)?.error
+    return typeof error === 'string' ? error.slice(0, MAX_ERROR_REASON_CHARS) : undefined
   } catch {
-    return false
+    return undefined
   }
+}
+
+/** The error code only: cause messages can carry peer addresses. */
+function errorCauseCode(err: Error | undefined): string | undefined {
+  const code = (err?.cause as { code?: unknown } | undefined)?.code
+  return typeof code === 'string' ? code : undefined
 }
