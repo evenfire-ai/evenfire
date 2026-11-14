@@ -110,7 +110,7 @@ them describes intended behaviour.
 | Flag                                          | Values           | Default    | Purpose                                                                             |
 | --------------------------------------------- | ---------------- | ---------- | ----------------------------------------------------------------------------------- |
 | `CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED`      | `true`, `false`  | `true`     | Operator kill switch for keeping oversized tool results of a step out of the prompt |
-| `CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD`    | bytes            | `32768`    | Size at or above which a tool result is kept out of the prompt                      |
+| `CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD`    | bytes            | `131072`   | Size at or above which a tool result is kept out of the prompt                      |
 | `CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES` | bytes            | `16777216` | Per-step-execution cap on result bytes held in memory                               |
 | `CLERUM_WORKFLOW_STEP_ENGINE`                 | `legacy`, `core` | `legacy`   | Reserved: selects the step execution loop                                           |
 
@@ -148,20 +148,20 @@ that every agentic step with tools gets it without configuration. That is accept
 
 It is a separate variable from the agent's `CLERUM_TOOL_SPILLOVER_ENABLED` because threshold and
 retention differ: the agent keeps results as files with a time-to-live, a step keeps them in
-memory for one step execution. The proposed step threshold is 32 KiB against the agent's 8 KiB
+memory for one step execution. The proposed step threshold is 128 KiB against the agent's 8 KiB
 (`mcp-host/src/config.ts:1127-1128`): the step loop does not compact context, so a low threshold
 would turn ordinary results into extra read iterations. When steps run on a loop with context
 compaction, the step threshold should be revisited and converged with the agent's.
 
 ## 5. Open decisions
 
-| #   | Decision                                                                                                                                                   |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Request strict field validation on platform writes of `WorkflowRecipe`                                                                                     |
-| 2   | Step spillover: accept that, once a result has been stored, the read tool is callable even when the step declares `allowedTools.include`                   |
-| 3   | Step spillover: confirm the 32 KiB threshold after measuring it against a larger value on real recipes                                                     |
-| 4   | Whether a step field that is in the schema but has no consumer is implemented or removed, case by case                                                     |
-| 5   | Where a recipe-level engine setting lives and who may set it                                                                                               |
-| 6   | Whether per-task guardrails and the per-task token brake apply to recipe steps when they run on the agent loop                                             |
-| 7   | How many CRD releases the upcoming step fields are grouped into                                                                                            |
-| 8   | Whether `status.steps[].toolsCalled[].args` and `.result` are reduced to names, sizes and the artifact reference, and how their current readers move first |
+| #   | Decision                                                                                                                                                     |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Request strict field validation on platform writes of `WorkflowRecipe`                                                                                       |
+| 2   | Step spillover: accept that, once a result has been stored, the read tool is callable even when the step declares `allowedTools.include`                     |
+| 3   | Step spillover: confirm the 128 KiB threshold with the comparison in #1454 (off, 128 KiB, 32 KiB); if 128 KiB fails and 32 KiB passes, the default is 32 KiB |
+| 4   | Whether a step field that is in the schema but has no consumer is implemented or removed, case by case                                                       |
+| 5   | Where a recipe-level engine setting lives and who may set it                                                                                                 |
+| 6   | Whether per-task guardrails and the per-task token brake apply to recipe steps when they run on the agent loop                                               |
+| 7   | How many CRD releases the upcoming step fields are grouped into                                                                                              |
+| 8   | Whether `status.steps[].toolsCalled[].args` and `.result` are reduced to names, sizes and the artifact reference, and how their current readers move first   |
