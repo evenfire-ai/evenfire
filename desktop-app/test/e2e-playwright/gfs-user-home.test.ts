@@ -389,7 +389,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await view.uploadFile(file, Buffer.from(sentinel))
         fx.childId(fx.childId(home.resourceId!, folder), file)
       })
-      await test.step('J1-Z Stop cancels a folder ZIP across the isolated bridge; the next export completes', async () => {
+      await test.step('J1-Z Stop ends a folder ZIP export: stop notice, no file written; the next export completes', async () => {
         const view = new DesktopResourceView(page)
         await openHomeFolder(page, home)
         await view.createFolder(zipFolder)
@@ -407,13 +407,18 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         // Liveness: the export really started before Stop is pressed.
         await expect(page.getByTestId('gfs-zip-progress')).toBeVisible()
         await page.getByRole('button', { name: 'Stop preparing zip' }).click()
+        // Positive witness: only the stop path pushes this notice, so the strip
+        // disappearing and the missing file below are not some other failure.
+        await expect(
+          page.getByText(`Stopped preparing ${zipFolder}.zip.`, { exact: true })
+        ).toBeVisible()
         await expect(page.getByTestId('gfs-zip-progress')).toHaveCount(0)
         expect(fs.existsSync(zipPath)).toBe(false)
         await view.downloadZip(zipFolder)
         await expect(page.getByText(/^Downloaded .*\(24 files\)$/)).toBeVisible({
           timeout: 120_000,
         })
-        // Liveness: the same folder exports in full, so the cancelled run was
+        // Liveness: the same folder exports in full, so the first run was
         // stopped by Stop, not by an export that could never succeed.
         await expect
           .poll(() => fs.existsSync(zipPath) && fs.statSync(zipPath).size > 0, {
