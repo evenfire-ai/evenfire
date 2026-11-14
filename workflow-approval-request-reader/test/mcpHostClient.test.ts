@@ -563,26 +563,9 @@ describe('mcp-host admission limit answers', () => {
     vi.restoreAllMocks()
   })
 
-  it.each([
-    ['decision', () => submitMcpHostDecision(cfg, decisionCommand)],
-    ['enrollment', () => submitMcpHostEnrollment(cfg, enrollmentCommand)],
-  ])('carries the wait of a canonical admission refusal on %s', async (_kind, submit) => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        hostAnswer(429, { error: 'runtime_service_admission_limited', retryAfterSeconds: 7 }, '7')
-      )
-    vi.stubGlobal('fetch', fetchMock)
-
-    await expect(submit()).resolves.toEqual({
-      ok: false,
-      status: 429,
-      error: 'runtime_service_admission_limited',
-      retryAfterSeconds: 7,
-    })
-    expect(fetchMock).toHaveBeenCalledOnce()
-  })
-
+  // The canonical refusal is taken from a real MCP Host in
+  // mcpHostClient.hostAdmission.integration.test.ts. The malformed answers
+  // below have no producer and stay hand-built.
   it.each([
     ['the Retry-After header is missing', null, 7],
     ['the header differs from the body', '8', 7],
