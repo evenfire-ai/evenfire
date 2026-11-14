@@ -228,7 +228,7 @@ minikube-setup-local: ## Clean install building every image from source (the pre
 	@$(MAKE) --no-print-directory minikube-setup IMAGE_SOURCE=local
 
 .PHONY: minikube-setup-e2e
-minikube-setup-e2e: ## Full setup + E2E fixtures (test user, e2e-* recipes, demo MCP servers). Pulls published images, then builds the two unpublished E2E coordinator fixtures.
+minikube-setup-e2e: ## Full setup + E2E fixtures. Existing context1 connector selections are preserved. Pulls published images, then builds the two unpublished E2E coordinator fixtures.
 	@$(MAKE) --no-print-directory minikube-setup SEED_PROFILE=e2e
 	@if [ "$(IMAGE_SOURCE)" = "ghcr" ]; then \
 		echo "Building the two unpublished E2E coordinator fixtures..."; \

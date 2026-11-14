@@ -189,7 +189,8 @@ Options:
   --seed-profile=<minimal|e2e>
                          minimal (default): a clean install — one agent, no
                          test fixtures. e2e: adds the E2E fixtures (test user,
-                         e2e-* recipes, demo MCP servers). Requires ADMIN_PASSWORD
+                         e2e-* recipes, demo MCP servers). Existing context1
+                         connector selections remain unchanged. Requires ADMIN_PASSWORD
                          unless --seed-profile=e2e.
   --defer-bootstrap-seed
                          local branch-E2E mode: skip Step 10's admin/user
@@ -1970,7 +1971,7 @@ if [ "$SEED_PROFILE" = "e2e" ]; then
   apply_bootstrap_instances "$PROFILE" \
     "${PROJECT_DIR}/deploy/overlays/minikube/instances/" \
     "${PROJECT_DIR}/deploy/overlays/minikube/instances-e2e/"
-  ok "Base and E2E demo instances applied"
+  ok "Base and E2E demo instances applied; existing context1 connector selections preserved"
 else
   log "Applying base CRD instances without demo MCP servers..."
   apply_bootstrap_instances "$PROFILE" "${PROJECT_DIR}/deploy/overlays/minikube/instances/"

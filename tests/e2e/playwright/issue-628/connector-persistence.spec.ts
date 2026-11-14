@@ -40,7 +40,12 @@ for (const key of [
 }
 clusterEnv.ALLOWED_CONTEXTS = profile
 
-async function run(command: string, args: string[], timeout = 60_000): Promise<string> {
+async function run(
+  command: string,
+  args: string[],
+  timeout = 60_000,
+  operation = path.basename(command)
+): Promise<string> {
   try {
     const result = await execFileAsync(command, args, {
       cwd: root,
@@ -62,13 +67,20 @@ async function run(command: string, args: string[], timeout = 60_000): Promise<s
       .filter(line => /^(NODE_IP_(BEFORE|AFTER)=[0-9a-fA-F.:]+|RESTART_PHASE=[a-z-]+)$/.test(line))
     const reason = (result.stderr ?? '').match(/ISSUE628_RESTART_[A-Z_]+/)?.[0]
     throw new Error(
-      ['Profile command failed: ' + String(code), reason, ...phases].filter(Boolean).join(' ')
+      ['Profile command ' + operation + ' failed: ' + String(code), reason, ...phases]
+        .filter(Boolean)
+        .join(' ')
     )
   }
 }
 
 async function onProfile(command: string, args: string[], timeout = 90_000): Promise<string> {
-  return run('bash', ['scripts/minikube/with-t2-mutation-lock.sh', '--', command, ...args], timeout)
+  return run(
+    'bash',
+    ['scripts/minikube/with-t2-mutation-lock.sh', '--', command, ...args],
+    timeout,
+    path.basename(command)
+  )
 }
 
 async function kube(args: string[], timeout = 90_000, requestTimeout = '30s'): Promise<string> {
@@ -290,18 +302,27 @@ async function invokeConnector(): Promise<string> {
 }
 
 async function waitForBusinessResult(): Promise<void> {
-  await expect
-    .poll(
-      async () => {
-        try {
-          return await invokeConnector()
-        } catch {
-          return ''
-        }
-      },
-      { timeout: 180_000, intervals: [2_000, 5_000] }
-    )
-    .toBe('42')
+  let lastFailure = ''
+  try {
+    await expect
+      .poll(
+        async () => {
+          try {
+            return await invokeConnector()
+          } catch (error) {
+            lastFailure =
+              error instanceof Error && error.message.startsWith('Profile command ')
+                ? error.message
+                : 'connector probe unavailable'
+            return ''
+          }
+        },
+        { timeout: 180_000, intervals: [2_000, 5_000] }
+      )
+      .toBe('42')
+  } catch {
+    throw new Error('Connector probe did not return 42' + (lastFailure ? ': ' + lastFailure : ''))
+  }
 }
 
 async function provisionInstances(): Promise<void> {
@@ -324,7 +345,8 @@ async function provisionInstances(): Promise<void> {
       '--overlay',
       'deploy/overlays/minikube',
     ],
-    1_230_000
+    1_230_000,
+    'provision-instances'
   )
 }
 
@@ -393,6 +415,12 @@ test('unauthenticated access does not expose the agent connector inventory', asy
   await expect(page.getByLabel('Main navigation')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Add connector', exact: true })).toHaveCount(0)
   await expect(page.getByRole('columnheader', { name: 'Connector', exact: true })).toHaveCount(0)
+  // This negative case probes the protected API without a session; it does not
+  // create or modify the state exercised by the visible journey below.
+  const response = await page.request.get('/control-api/api/v1/admin/contexts/context1', {
+    maxRedirects: 0,
+  })
+  expect(response.status()).toBe(401)
 })
 
 const persistenceTestName = profileRestart
@@ -500,7 +528,8 @@ test(persistenceTestName, async ({ page, browser }) => {
         'MINIKUBE_REAPPLY_INSTANCES=true',
         'MINIKUBE_GFS_MUTATION=false',
       ],
-      1_230_000
+      1_230_000,
+      'deploy-all'
     )
     await assertContext()
     expect(await policies()).toEqual(baselinePolicies)
@@ -538,7 +567,8 @@ test(persistenceTestName, async ({ page, browser }) => {
           'bash',
           'scripts/e2e/issue-628-profile-restart.sh',
         ],
-        1_530_000
+        1_530_000,
+        'profile-restart'
       )
       profileMayBeUnavailable = false
       test.info().annotations.push({

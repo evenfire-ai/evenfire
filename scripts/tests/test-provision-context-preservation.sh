@@ -745,6 +745,14 @@ for FAILURE in render read read-with-stdout patch create apply; do
       cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" || fail "$FAILURE changed instance state"
       [ ! -s "$CASE_DIR/mutations.log" ] || fail "$FAILURE reached an instance mutation"
       ;;
+    apply)
+      grep -Fq 'fixture: injected other-instance apply failure' "$CASE_DIR/output.log" ||
+        fail 'apply case did not fail on the intended non-Context resource'
+      grep -Fq "$(printf 'apply\tContext\tanother-team\tcontext2')" "$CASE_DIR/mutations.log" ||
+        fail 'apply case did not reach a successful earlier non-target resource'
+      ! grep -Fq "$(printf 'apply\tHost\tmcp-host\tchatllm')" "$CASE_DIR/mutations.log" ||
+        fail 'the failed Host was recorded as applied'
+      ;;
   esac
   pass "unexpected $FAILURE error fails provisioning"
 done
@@ -773,6 +781,65 @@ make_seed() {
 {"apiVersion":"clerum.io/v1alpha1","kind":"McpServer","metadata":{"name":"demo-one","namespace":"mcp-server"},"spec":{"enabled":true}}
 JSON
 }
+
+# Exercise the actual full-setup instances block in isolation. The rest of
+# full-setup has separate runtime coverage; this fixture does not claim a full
+# bootstrap or build images.
+awk '
+  /^# 6e\. Deploy CRD instances\./ { in_block = 1; next }
+  /^# 6f\./ { in_block = 0 }
+  in_block { print }
+' "$ROOT/scripts/minikube/full-setup.sh" >"$TMP/full-setup-instances.sh"
+[ -s "$TMP/full-setup-instances.sh" ] || fail 'could not find the full-setup instances block'
+
+run_setup_instances_block() {
+  local profile="$1" repo="$CASE_DIR/repo"
+  mkdir -p "$repo/deploy/overlays/minikube/instances" \
+    "$repo/deploy/overlays/minikube/instances-e2e" "$repo/scripts/minikube"
+  cp "$CASE_DIR/overlay/instances/"*.json "$repo/deploy/overlays/minikube/instances/"
+  cp "$CASE_DIR/seed/"*.json "$repo/deploy/overlays/minikube/instances-e2e/"
+  cat >"$repo/scripts/minikube/build-images.sh" <<'STUB'
+#!/bin/bash
+printf 'built\n' > "$TEST_BUILD_MARKER"
+STUB
+  TEST_STATE="$CASE_DIR/state.json" TEST_CALLS="$CASE_DIR/calls.log" \
+    TEST_MUTATIONS="$CASE_DIR/mutations.log" TEST_JQ="$JQ" \
+    TEST_RENDER=stream TEST_FAILURE=none TEST_RACE=none TEST_GET_RESPONSE=list \
+    TEST_BUILD_MARKER="$CASE_DIR/build-marker" PROFILE="$TEST_CONTEXT" \
+    SEED_PROFILE="$profile" PROJECT_DIR="$repo" SCRIPT_DIR="$repo/scripts/minikube" \
+    PATH="$TMP/bin:$PATH" "$TEST_BASH" -c '
+      set -euo pipefail
+      log() { :; }; ok() { :; }
+      source "$1"
+      source "$2"
+    ' -- "$ROOT/deploy/scripts/lib/bootstrap-instances.sh" "$TMP/full-setup-instances.sh" \
+    >"$CASE_DIR/output.log" 2>&1
+}
+
+for setup_profile in minimal e2e; do
+  init_case "full-setup-block-$setup_profile"
+  make_seed
+  "$JQ" 'map(if .kind == "Context" and .metadata.namespace == "mcp-server" and
+    .metadata.name == "context1" then .spec.mcpServers = [] else . end)' \
+    "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+  mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+  remember_existing_context
+  if ! run_setup_instances_block "$setup_profile"; then
+    cat "$CASE_DIR/output.log" >&2
+    fail "full-setup $setup_profile instances block failed"
+  fi
+  assert_state
+  if [ "$setup_profile" = e2e ]; then
+    [ -e "$CASE_DIR/build-marker" ] || fail 'E2E block did not reach its fixture build'
+    "$JQ" -e 'any(.[]; .kind == "McpServer" and .metadata.name == "demo-one")' \
+      "$CASE_DIR/state.json" >/dev/null || fail 'E2E block did not apply its seed resource'
+  else
+    [ ! -e "$CASE_DIR/build-marker" ] || fail 'minimal block built an E2E fixture'
+    "$JQ" -e 'all(.[]; .kind != "McpServer")' "$CASE_DIR/state.json" >/dev/null ||
+      fail 'minimal block applied an E2E seed resource'
+  fi
+  pass "full-setup $setup_profile instances block preserves an existing empty selection"
+done
 
 init_case shared-existing-seed
 make_seed

@@ -385,8 +385,18 @@ jobs:
         if: matrix.service == 'external-rest-api'
         working-directory: tests/e2e/playwright
         run: |
-          node node_modules/@playwright/test/cli.js test --config=issue-628.config.ts --list --reporter=list
-          ISSUE628_PROFILE_RESTART=true node node_modules/@playwright/test/cli.js test --config=issue-628.config.ts --list --reporter=list
+          set -euo pipefail
+          for restart in false true; do
+            listed="$(ISSUE628_PROFILE_RESTART="$restart" node node_modules/@playwright/test/cli.js test --config=issue-628.config.ts --list --reporter=list)"
+            printf '%s\n' "$listed"
+            printf '%s\n' "$listed" | grep -Fxq 'Total: 2 tests in 1 file'
+            printf '%s\n' "$listed" | grep -Fq 'unauthenticated access does not expose the agent connector inventory'
+            if [ "$restart" = true ]; then
+              printf '%s\n' "$listed" | grep -Fq 'Control UI connector survives a full Minikube profile restart'
+            else
+              printf '%s\n' "$listed" | grep -Fq 'Control UI connector survives provisioning and runtime restarts'
+            fi
+          done
 
       - name: Install Profile UI recovery Chromium
         if: matrix.service == 'external-rest-api'
@@ -1104,6 +1114,9 @@ jobs:
 
       - name: Test isolated Minikube prerequisite environment
         run: bash scripts/tests/test-check-prereqs-isolated-dotenv.sh
+
+      - name: Test isolated Minikube LLM Secret application
+        run: bash scripts/tests/test-apply-llm-secret-isolation.sh
 
       - name: Test GFS grant WorkflowRecipe seed rendering
         run: bash scripts/tests/test-seed-gfs-grant-workflow.sh

@@ -8,7 +8,7 @@ repo="$tmp/repo"
 bin="$tmp/bin"
 mkdir -p "$repo/scripts/e2e" "$bin"
 cp "$root/scripts/check-prereqs.sh" "$root/scripts/check-node-version.cjs" "$repo/scripts/"
-cp "$root/scripts/e2e/load-dotenv.sh" "$repo/scripts/e2e/"
+cp "$root/scripts/e2e/load-dotenv.sh" "$root/scripts/e2e/admin-credentials.sh" "$repo/scripts/e2e/"
 cp "$root/.nvmrc" "$repo/.nvmrc"
 git init -q "$repo"
 
@@ -50,6 +50,17 @@ else
   printf 'FAIL: isolated prereqs did not use only the process environment\n' >&2
   exit 1
 fi
+
+for alias in E2E_ADMIN_PASSWORD TEST_ADMIN_PASSWORD ADMIN_PASS; do
+  if run_check E2E_DISABLE_CANONICAL_DOTENV=true "$alias=fixture-process-password" &&
+     grep -Fq 'isolated test environment' "$tmp/output"; then
+    printf 'PASS: isolated prereqs accept %s\n' "$alias"
+  else
+    cat "$tmp/output" >&2
+    printf 'FAIL: isolated prereqs rejected %s\n' "$alias" >&2
+    exit 1
+  fi
+done
 
 if run_check E2E_DISABLE_CANONICAL_DOTENV=true; then
   printf 'FAIL: isolated prereqs accepted a missing process credential\n' >&2

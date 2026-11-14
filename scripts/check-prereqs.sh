@@ -238,10 +238,12 @@ ENV_FILE="$ENV_DIR/.env"
 if [ "${E2E_DISABLE_CANONICAL_DOTENV:-false}" = true ]; then
   # Match the isolated test loader: never inspect the canonical .env and
   # require the caller to provide its local test credential explicitly.
-  if [ -n "${ADMIN_PASSWORD:-}" ]; then
-    ok "isolated test environment: ADMIN_PASSWORD set"
+  # shellcheck source=scripts/e2e/admin-credentials.sh
+  . "$PROJECT_DIR/scripts/e2e/admin-credentials.sh"
+  if e2e_resolve_admin_password "$PROJECT_DIR" >/dev/null; then
+    ok "isolated test environment: local admin credential set"
   else
-    err "isolated test environment requires ADMIN_PASSWORD"
+    err "isolated test environment requires a local admin credential"
     MISSING=$((MISSING + 1))
   fi
   warn "isolated test environment uses local test integration configuration"

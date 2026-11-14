@@ -120,6 +120,11 @@ case "$CONTEXT" in
     ;;
 esac
 
+INSTANCES_DIR="$OVERLAY/instances"
+if [ "$SKIP_INSTANCES" != "1" ] && [ -d "$INSTANCES_DIR" ] && ! command -v jq >/dev/null 2>&1; then
+  die 'jq is required to apply CRD instances'
+fi
+
 kctl() {
   kubectl --context "$CONTEXT" "$@"
 }
@@ -205,8 +210,6 @@ finalize_credentials_after_overlay() {
   kctl -n gfs rollout status deployment/gfsc-reader --timeout=240s
   wait_for_globalfilesystem_ready
 }
-
-INSTANCES_DIR="$OVERLAY/instances"
 
 log "Checking required GFS platform resources"
 kctl get crd globalfilesystems.clerum.io >/dev/null

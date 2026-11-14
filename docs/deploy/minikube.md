@@ -88,6 +88,10 @@ to it.)
 | `ARGS="--force-keys"` | off | Regenerates all JWT signing keys; invalidates existing tokens. |
 | `MINIKUBE_MEMORY=<MB>`, `MINIKUBE_CPUS=<n>` | `10240`, `6` | Size of the minikube VM when setup has to start it (`scripts/minikube/start.sh`). |
 
+The E2E profile selects demo connectors only when `context1` is first created.
+On an existing context, setup preserves the connector selection; use Control UI
+to add demo connectors if needed.
+
 Combine them as needed, for example
 `make minikube-setup SKIP_UIS=true REUSE_DB=true ARGS="--skip-build"`.
 

@@ -41,6 +41,56 @@ chmod +x "$TMP/bin/bash" "$TMP/bin/kubectl"
 
 export CALL_LOG="$TMP/calls.log"
 export INSTANCE_FIXTURE="$TMP/overlay/instances/host.json"
+
+# Exercise the missing-jq path before auth sync, using only fixture commands.
+NO_JQ_BIN="$TMP/no-jq"
+mkdir -p "$NO_JQ_BIN" "$TMP/no-instances"
+for utility in dirname grep cat; do
+  ln -s "$(command -v "$utility")" "$NO_JQ_BIN/$utility"
+done
+ln -s "$TMP/bin/bash" "$NO_JQ_BIN/bash"
+ln -s "$TMP/bin/kubectl" "$NO_JQ_BIN/kubectl"
+: > "$CALL_LOG"
+if ALLOWED_CONTEXTS=clerum-dev-test PATH="$NO_JQ_BIN" /bin/bash \
+  "$ROOT/deploy/scripts/provision-gfs-runtime.sh" --context clerum-dev-test \
+  --overlay "$TMP/overlay" >"$TMP/no-jq.out" 2>&1; then
+  echo 'FAIL: instance provisioning accepted a missing jq' >&2
+  exit 1
+fi
+grep -Fq 'jq is required' "$TMP/no-jq.out" || {
+  echo 'FAIL: missing-jq case did not reach the prerequisite error' >&2
+  exit 1
+}
+[ ! -s "$CALL_LOG" ] || {
+  echo 'FAIL: missing jq reached a Kubernetes or auth-sync operation' >&2
+  exit 1
+}
+
+# Neither an explicitly skipped instance apply nor an absent directory needs jq.
+for instance_mode in skip absent; do
+  : > "$CALL_LOG"
+  if [ "$instance_mode" = skip ]; then
+    overlay="$TMP/overlay"
+    set -- --skip-instances
+  else
+    overlay="$TMP/no-instances"
+    set --
+  fi
+  if ! ALLOWED_CONTEXTS=clerum-dev-test PATH="$NO_JQ_BIN" /bin/bash \
+    "$ROOT/deploy/scripts/provision-gfs-runtime.sh" --context clerum-dev-test \
+    --overlay "$overlay" "$@" >"$TMP/no-jq-$instance_mode.out" 2>&1; then
+    cat "$TMP/no-jq-$instance_mode.out" >&2
+    echo "FAIL: $instance_mode path unexpectedly required jq" >&2
+    exit 1
+  fi
+  grep -Fq 'sync-auth-key.sh' "$CALL_LOG" || {
+    echo "FAIL: $instance_mode case did not reach auth synchronization" >&2
+    exit 1
+  }
+done
+echo 'PASS: jq is required before auth sync only when instances will be applied'
+: > "$CALL_LOG"
+
 # clerum-dev-test is not one of the generic built-in dev patterns
 # (*example-dev*, minikube, clerum-test, clerum-codex-*, ...), so authorize it
 # through the ALLOWED_CONTEXTS override — the same mechanism a self-hosted dev
