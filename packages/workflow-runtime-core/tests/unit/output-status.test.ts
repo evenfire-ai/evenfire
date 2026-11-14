@@ -8,6 +8,11 @@ import {
   extractOutputArtifactsForStatus,
   serializeOutputForStatus,
 } from '../../src/status-reporter/outputStatus'
+import {
+  boundToolsCalledForStatus,
+  normalizeArtifactForStatus,
+  parseArtifactToolResult,
+} from '../../src/status-reporter/toolCallStatus'
 
 function artifact(i: number, path = `/output/report-${i}.md`) {
   return { name: `report-${i}.md`, format: 'md', sizeBytes: 10, path, createdAt: '2026-11-12' }
@@ -132,7 +137,7 @@ describe('boundStepStatusBody', () => {
     })
   })
 
-  it('serializes a non-string output the way WRC does', () => {
+  it('serializes a non-string output as its JSON text', () => {
     const bounded = boundStepStatusBody({ stepId: 's1', phase: 'completed', output: { a: 1 } })
     expect(bounded.output).toBe('{"a":1}')
   })
@@ -174,28 +179,68 @@ describe('boundStepStatusBody', () => {
     expect(bounded.output).toBe('short')
   })
 
-  it('drops tool-call previews when needed but keeps artifact results', () => {
-    const artifactResult = { success: true, artifact: artifact(0) }
+  it('removes tool-call previews when needed and keeps the artifact metadata WRC would register', () => {
+    // The result mcp-host records for its artifact tools
+    // (mcp-host/src/workflow/artifactOutput.ts:265-275). mcp-host is not a
+    // dependency of this package, so the shape is written out.
+    const mcpHostResult = (n: number) => ({
+      success: true,
+      artifact: artifact(n),
+      content: `File generated: report-${n}.md (md).`,
+    })
     const body = {
       stepId: 's1',
       phase: 'completed',
-      output: 'short',
+      // Not cut (65,536 characters) and three bytes per character.
+      output: '中'.repeat(STATUS_OUTPUT_MAX_CHARS),
       toolsCalled: [
-        { serverName: 'files', toolName: 'write', args: { path: 'a' }, result: artifactResult },
-        ...Array.from({ length: 49 }, (_, i) => ({
+        ...Array.from({ length: 47 }, (_, i) => ({
           serverName: 'git',
           toolName: `read-${i}`,
-          args: { blob: '\u0001'.repeat(1000) },
-          result: '\u0001'.repeat(1000),
+          args: { blob: '中'.repeat(1000) },
+          result: '中'.repeat(1000),
         })),
+        // Last, because previews are removed from the last call backwards.
+        {
+          serverName: 'clerum',
+          toolName: 'generate_markdown',
+          args: { title: 'report-0' },
+          result: mcpHostResult(0),
+        },
+        {
+          serverName: 'clerum',
+          toolName: 'generate_markdown',
+          args: { title: 'report-1' },
+          result: JSON.stringify(mcpHostResult(1)),
+        },
+        {
+          serverName: 'clerum',
+          toolName: 'generate_markdown',
+          args: { title: 'report-2' },
+          result: { success: true, artifact: artifact(2) },
+        },
       ],
     }
+    const firstPass = boundToolsCalledForStatus(body.toolsCalled)
+    // Witness: after the first pass the body is still over the ceiling, so the
+    // tool-call step has to run.
+    expect(bodyBytes({ ...body, toolsCalled: firstPass })).toBeGreaterThan(STATUS_REPORT_MAX_BYTES)
+
     const bounded = boundStepStatusBody(body)
     const calls = bounded.toolsCalled as Array<Record<string, unknown>>
     expect(calls).toHaveLength(50)
-    expect(calls[0]).toEqual({ serverName: 'files', toolName: 'write', result: artifactResult })
-    expect(calls[1]).toEqual({ serverName: 'git', toolName: 'read-0' })
-    expect(bounded.output).toBe('short')
+    for (const n of [0, 1, 2]) {
+      expect(calls[47 + n]).toEqual({
+        serverName: 'clerum',
+        toolName: 'generate_markdown',
+        result: { success: true, artifact: artifact(n) },
+      })
+    }
+    // The first call keeps its previews: only as many calls as needed were reduced.
+    expect(calls[0]).toEqual(firstPass[0])
+    expect(bodyBytes(bounded)).toBeLessThanOrEqual(STATUS_REPORT_MAX_BYTES)
+    // The tool-call step, not the halving, made the body fit.
+    expect(bounded.output).toBe(body.output)
     expect(bounded.outputTruncated).toBe(false)
   })
 
@@ -219,5 +264,360 @@ describe('boundStepStatusBody', () => {
     expect((bounded.output as string).length).toBeLessThan(output.length)
     expect(output.startsWith(bounded.output as string)).toBe(true)
     expect(bounded.outputArtifacts).toEqual([artifact(0)])
+  })
+
+  it('removes previews from the last calls only, as many as the body needs', () => {
+    const body = {
+      stepId: 's1',
+      phase: 'completed',
+      executor: 'agentic',
+      output: '中'.repeat(STATUS_OUTPUT_MAX_CHARS),
+      toolsCalled: Array.from({ length: 30 }, (_, i) => ({
+        serverName: 'git',
+        toolName: `read-${i}`,
+        args: { blob: '中'.repeat(1000) },
+        result: '中'.repeat(1000),
+        durationMs: 1,
+      })),
+    }
+    const firstPass = boundToolsCalledForStatus(body.toolsCalled)
+    // Witnesses: WRC would accept the raw body, and after the first pass the
+    // body is still over the ceiling.
+    expect(bodyBytes(body)).toBeGreaterThan(STATUS_REPORT_MAX_BYTES)
+    expect(bodyBytes(body)).toBeLessThan(512 * 1024)
+    expect(bodyBytes({ ...body, toolsCalled: firstPass })).toBeGreaterThan(STATUS_REPORT_MAX_BYTES)
+
+    const bounded = boundStepStatusBody(body)
+    const calls = bounded.toolsCalled as Array<Record<string, unknown>>
+    const k = calls.findIndex(call => !('args' in call))
+    expect(k).toBeGreaterThan(0)
+    expect(k).toBeLessThan(30)
+    expect(calls.slice(0, k)).toEqual(firstPass.slice(0, k))
+    for (const call of calls.slice(k)) {
+      expect(call).not.toHaveProperty('args')
+      expect(call).not.toHaveProperty('result')
+    }
+    expect(bodyBytes(bounded)).toBeLessThanOrEqual(STATUS_REPORT_MAX_BYTES)
+    // Minimal: with call k's previews put back the body is over the ceiling.
+    const oneMore = calls.map((call, i) => (i === k ? firstPass[i] : call))
+    expect(bodyBytes({ ...bounded, toolsCalled: oneMore })).toBeGreaterThan(STATUS_REPORT_MAX_BYTES)
+    expect(bounded.output).toHaveLength(STATUS_OUTPUT_MAX_CHARS)
+    expect(bounded.outputTruncated).toBe(false)
+  })
+
+  it.each([65_536, 60_000, 2_000, 1_500, 1_025, 1_024, 500])(
+    'does not halve the output below 1,024 characters (start length %i)',
+    start => {
+      // A 300,000-character modelUsed is never reduced, so the body never fits.
+      const body = {
+        stepId: 's1',
+        phase: 'completed',
+        output: 'o'.repeat(start),
+        modelUsed: 'm'.repeat(300_000),
+      }
+      const bounded = boundStepStatusBody(body)
+      // Witness: still over the ceiling, so the halving loop ran to its end.
+      expect(bodyBytes(bounded)).toBeGreaterThan(STATUS_REPORT_MAX_BYTES)
+      expect(bounded.output).toHaveLength(Math.min(start, 1024))
+    }
+  )
+
+  it('sends the artifacts of an output it cut', () => {
+    const output = JSON.stringify({
+      report: 'r'.repeat(100_000),
+      artifact: artifact(0),
+      artifacts: [artifact(1), artifact(2)],
+    })
+    const bounded = boundStepStatusBody({ stepId: 's1', phase: 'completed', output })
+    // Witness: the body fits without any reduction, so only the cut ran.
+    expect(bodyBytes(bounded)).toBeLessThan(STATUS_REPORT_MAX_BYTES)
+    expect(bounded.outputTruncated).toBe(true)
+    expect(bounded.outputArtifacts).toEqual([artifact(0), artifact(1), artifact(2)])
+  })
+
+  it('holds its properties over a table of generated bodies', () => {
+    const tableArtifact = (i: number, name = `r-${i}.md`, path = `/output/r-${i}.md`) => ({
+      name,
+      format: 'md',
+      path,
+      sizeBytes: 10,
+      createdAt: '2026-11-12',
+    })
+    const declared = (count: number): Record<string, unknown> => {
+      if (count === 0) return {}
+      if (count === 1) return { artifact: tableArtifact(0) }
+      if (count === 21) {
+        return {
+          artifact: tableArtifact(0),
+          artifacts: Array.from({ length: 20 }, (_, i) => tableArtifact(i + 1)),
+        }
+      }
+      // 25 entries, with a repeated name and a repeated path.
+      return {
+        artifact: tableArtifact(0),
+        artifacts: [
+          tableArtifact(0),
+          tableArtifact(1, 'other.md'),
+          ...Array.from({ length: 23 }, (_, i) => tableArtifact(i + 1)),
+        ],
+      }
+    }
+    const makeOutput = (length: number, unit: string, kind: 'text' | number): string => {
+      if (kind === 'text') return unit.repeat(length)
+      const head = JSON.stringify({ ...declared(kind), pad: '' })
+      return JSON.stringify({
+        ...declared(kind),
+        pad: unit.repeat(Math.max(0, length - head.length)),
+      })
+    }
+    const makeCalls = (count: number, unit: string): Array<Record<string, unknown>> => [
+      ...Array.from({ length: count - 2 }, (_, i) => ({
+        serverName: 'git',
+        toolName: `read-${i}`,
+        args: { blob: unit.repeat(1000) },
+        result: unit.repeat(1000),
+        durationMs: 1,
+      })),
+      // The two shapes mcp-host records for artifact tools: an object and a JSON string.
+      {
+        serverName: 'clerum',
+        toolName: 'generate_markdown',
+        args: { t: 1 },
+        result: {
+          success: true,
+          content: 'File generated: tool-a.md (md).',
+          artifact: tableArtifact(100, 'tool-a.md'),
+        },
+        durationMs: 1,
+      },
+      {
+        serverName: 'clerum',
+        toolName: 'generate_markdown',
+        args: { t: 1 },
+        result: JSON.stringify({
+          success: true,
+          content: 'File generated: tool-b.md (md).',
+          artifact: tableArtifact(101, 'tool-b.md'),
+        }),
+        durationMs: 1,
+      },
+    ]
+    const toolArtifactNames = (calls: unknown): string[] =>
+      (Array.isArray(calls) ? calls : []).slice(0, 100).flatMap(call => {
+        const found = parseArtifactToolResult((call as Record<string, unknown>).result)
+        const accepted = found ? normalizeArtifactForStatus(found) : null
+        return accepted ? [accepted.name] : []
+      })
+    const outputArtifactNames = (body: Record<string, unknown>): string[] => [
+      ...extractOutputArtifactsForStatus(body.output).map(a => a.name),
+      ...((body.outputArtifacts as Array<{ name: string }> | undefined) ?? []).map(a => a.name),
+    ]
+
+    const counts = { firstPass: 0, errorCut: 0, previews: 0, halved: 0 }
+    let total = 0
+    for (const length of [0, 1_000, 65_536, 65_537, 150_000]) {
+      for (const unit of ['a', '中', '\u0001']) {
+        for (const kind of ['text', 0, 1, 21, 25] as const) {
+          for (const callCount of [0, 30, 60]) {
+            for (const withReason of [false, true]) {
+              total += 1
+              const raw: Record<string, unknown> = {
+                stepId: 's1',
+                phase: withReason ? 'failed' : 'completed',
+                output: makeOutput(length, unit, kind),
+              }
+              const calls = callCount > 0 ? makeCalls(callCount, unit) : undefined
+              if (calls) raw.toolsCalled = calls
+              if (withReason) raw.failureReason = unit.repeat(100_000)
+              const before = structuredClone(raw)
+
+              const result = boundStepStatusBody(raw)
+
+              expect(raw).toEqual(before)
+              expect(bodyBytes(result)).toBeLessThanOrEqual(STATUS_REPORT_MAX_BYTES)
+              if (result.outputTruncated === false) {
+                expect(boundStepStatusBody(result)).toEqual(result)
+              }
+              const keptOutputArtifacts = new Set(outputArtifactNames(result))
+              for (const found of extractOutputArtifactsForStatus(raw.output)) {
+                expect(keptOutputArtifacts.has(found.name)).toBe(true)
+              }
+              const keptToolArtifacts = new Set(toolArtifactNames(result.toolsCalled))
+              for (const name of toolArtifactNames(raw.toolsCalled)) {
+                expect(keptToolArtifacts.has(name)).toBe(true)
+              }
+
+              // Which branch produced the result.
+              const firstPassCalls = calls ? boundToolsCalledForStatus(calls) : []
+              const resultCalls = (result.toolsCalled ?? []) as Array<Record<string, unknown>>
+              const lostPreviews = resultCalls.some(
+                (call, i) => 'args' in (firstPassCalls[i] as object) && !('args' in call)
+              )
+              const output = raw.output as string
+              if (
+                (result.output as string).length < Math.min(output.length, STATUS_OUTPUT_MAX_CHARS)
+              ) {
+                counts.halved += 1
+              } else if (lostPreviews) {
+                counts.previews += 1
+              } else if (
+                withReason &&
+                (result.failureReason as string).length < (raw.failureReason as string).length
+              ) {
+                counts.errorCut += 1
+              } else {
+                counts.firstPass += 1
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(total).toBe(450)
+    // A table that never leaves the first branch would prove nothing.
+    expect(counts.firstPass).toBeGreaterThan(0)
+    expect(counts.errorCut).toBeGreaterThan(0)
+    expect(counts.previews).toBeGreaterThan(0)
+    expect(counts.halved).toBeGreaterThan(0)
+    expect(counts.firstPass + counts.errorCut + counts.previews + counts.halved).toBe(450)
+  }, 120_000)
+})
+
+describe('boundOutputForStatus with a live output value', () => {
+  const sharedLeaf = { id: 1 }
+  const sameObject = { name: 'x' }
+
+  it.each([
+    ['an object with a shared reference', { first: sharedLeaf, second: sharedLeaf }],
+    ['an array with the same object twice', [sameObject, sameObject]],
+    ['a top-level Date', new Date('2026-11-12T00:00:00.000Z')],
+    ['a String object', new String('boxed')],
+    ['a nested Date', { at: new Date('2026-11-12T00:00:00.000Z') }],
+    ['an object whose toJSON returns a record', { toJSON: () => ({ artifact: artifact(0) }) }],
+    ['a Map', new Map([[1, 2]])],
+    ['a number', 5],
+    ['false', false],
+    ['an empty string', ''],
+    ['an array', [1, 2]],
+  ])('reports the JSON text WRC would have received for %s', (_label, output) => {
+    // What WRC received before this PR: the output after JSON transport, then its serializer.
+    const received = JSON.parse(JSON.stringify({ output })).output
+    const expected = serializeOutputForStatus(received)
+    const bounded = boundOutputForStatus(output)
+    expect(bounded.output).toBe(expected)
+    expect(bounded.outputLength).toBe(expected.length)
+    expect(bounded.outputTruncated).toBe(false)
+  })
+
+  function f() {
+    return 1
+  }
+
+  it.each([
+    ['NaN', NaN, 'null'],
+    ['Infinity', Infinity, 'null'],
+    ['a function', f, String(f)],
+    ['a symbol', Symbol('x'), 'Symbol(x)'],
+    ['an object whose toJSON returns null', { toJSON: () => null }, 'null'],
+    ['an object whose toJSON returns undefined', { toJSON: () => undefined }, '[object Object]'],
+  ])('keeps the reported value for an output JSON cannot carry: %s', (_label, output, expected) => {
+    const bounded = boundOutputForStatus(output)
+    expect(bounded.output).toBe(expected)
+    expect(bounded.outputLength).toBe(expected.length)
+    expect(bounded.outputTruncated).toBe(false)
+  })
+
+  it.each([
+    [
+      'an object that contains itself',
+      () => {
+        const cyc: Record<string, unknown> = { k: 1 }
+        cyc.self = cyc
+        return cyc
+      },
+      '{"k":1,"self":"[Circular]"}',
+    ],
+    [
+      'a repeated leaf next to two cycles',
+      () => {
+        const leaf = { id: 1 }
+        const node: Record<string, unknown> & { list: unknown[] } = {
+          leaf,
+          again: leaf,
+          list: [leaf, leaf],
+        }
+        node.self = node
+        node.list.push(node)
+        return node
+      },
+      '{"leaf":{"id":1},"again":{"id":1},"list":[{"id":1},{"id":1},"[Circular]"],"self":"[Circular]"}',
+    ],
+    [
+      'a cycle that passes through a toJSON result',
+      () => {
+        const inner: Record<string, unknown> = { name: 'inner', holder: null }
+        const viaToJSON = { toJSON: () => inner }
+        inner.holder = viaToJSON
+        return { start: viaToJSON }
+      },
+      '{"start":{"name":"inner","holder":"[Circular]"}}',
+    ],
+    [
+      'a cycle at depth, then the same subtree as a later sibling',
+      () => {
+        const b: Record<string, unknown> = { c: {} }
+        const deep: Record<string, unknown> = { a: { b }, sibling: null }
+        ;(b.c as Record<string, unknown>).top = deep
+        deep.sibling = b
+        return deep
+      },
+      '{"a":{"b":{"c":{"top":"[Circular]"}}},"sibling":{"c":{"top":"[Circular]"}}}',
+    ],
+  ])('marks an object as circular only where it contains itself: %s', (_label, make, expected) => {
+    expect(boundOutputForStatus(make()).output).toBe(expected)
+  })
+
+  it('throws when JSON cannot serialize the output', () => {
+    expect(() => boundOutputForStatus({ n: 1n })).toThrow(TypeError)
+    expect(() => boundOutputForStatus(10n)).toThrow(TypeError)
+    const throwing = {
+      toJSON: () => {
+        throw new Error('boom')
+      },
+    }
+    expect(() => boundOutputForStatus(throwing)).toThrow('boom')
+  })
+
+  const liveArtifacts = () => [
+    { ...artifact(1), createdAt: new Date('2026-01-02T03:04:05.000Z') },
+    { ...artifact(2), sizeBytes: NaN },
+  ]
+
+  it('extracts the artifacts of a cut object output from its serialized form', () => {
+    const bounded = boundOutputForStatus({ report: 'r'.repeat(70_000), artifacts: liveArtifacts() })
+    expect(bounded.outputTruncated).toBe(true)
+    expect(bounded.outputArtifacts).toHaveLength(2)
+    expect(bounded.outputArtifacts?.[0].createdAt).toBe('2026-01-02T03:04:05.000Z')
+    expect(bounded.outputArtifacts?.[1].sizeBytes).toBe(0)
+  })
+
+  it('extracts the artifacts of a halved object output from its serialized form', () => {
+    const output = { report: '中'.repeat(60_000), artifacts: liveArtifacts() }
+    const serializedLength = JSON.stringify(output).length
+    const bounded = boundStepStatusBody({
+      stepId: 's1',
+      phase: 'failed',
+      output,
+      error: '\u0001'.repeat(20_000),
+      failureReason: '\u0001'.repeat(20_000),
+    })
+    // Witness: step 1 did not cut the output, the halving did.
+    expect(serializedLength).toBeLessThan(STATUS_OUTPUT_MAX_CHARS)
+    expect(bounded.outputTruncated).toBe(true)
+    expect((bounded.output as string).length).toBeLessThan(serializedLength)
+    const outputArtifacts = bounded.outputArtifacts as Array<Record<string, unknown>>
+    expect(outputArtifacts).toHaveLength(2)
+    expect(outputArtifacts[0].createdAt).toBe('2026-01-02T03:04:05.000Z')
+    expect(outputArtifacts[1].sizeBytes).toBe(0)
   })
 })

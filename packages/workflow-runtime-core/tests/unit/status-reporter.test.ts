@@ -147,7 +147,7 @@ describe('StatusReporter', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const sentBytes = Buffer.byteLength(fetchMock.mock.calls[0][1].body)
     expect(sentBytes).toBeGreaterThan(256 * 1024)
-    expect(logSpy).toHaveBeenCalledWith('warn', 'Step status report exceeds the size ceiling', {
+    expect(logSpy).toHaveBeenCalledWith('warn', 'Status report exceeds the size ceiling', {
       label: 'workflow status',
       bodyBytes: sentBytes,
     })
@@ -176,10 +176,26 @@ describe('StatusReporter', () => {
     expect(Buffer.byteLength(fetchMock.mock.calls[0][1].body)).toBeLessThanOrEqual(256 * 1024)
     expect(logSpy).not.toHaveBeenCalledWith(
       'warn',
-      'Step status report exceeds the size ceiling',
+      'Status report exceeds the size ceiling',
       expect.anything()
     )
     logSpy.mockRestore()
+  })
+
+  it('rejects a step report whose output cannot be serialized, without sending it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    // Liveness witness for the negative assertion below: the serialization error.
+    await expect(
+      reporter.reportStepStatus('s1', 'completed', { output: { n: 1n } })
+    ).rejects.toThrow(TypeError)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('retries 5xx status reports and succeeds on a later attempt', async () => {
@@ -486,16 +502,29 @@ describe('StatusReporter with byte-heavy tool calls', () => {
 
     const rawBody: string = fetchMock.mock.calls[0][1].body
     const body = JSON.parse(rawBody)
-    // Liveness: the report went out with the full output and every call.
-    expect(body.output).toBe(output)
+    // Liveness: the report went out with the output cut to the preview maximum and every call.
+    expect(body.output).toBe(output.slice(0, 65_536))
+    expect(body.outputLength).toBe(150_000)
+    expect(body.outputTruncated).toBe(true)
     expect(body.toolsCalled).toHaveLength(100)
     expect(body.toolsCalled[0].result.preview.length).toBeGreaterThan(300)
-    const toolsCalledBytes = Buffer.byteLength(JSON.stringify(body.toolsCalled))
-    expect(toolsCalledBytes).toBeGreaterThan(200 * 1024)
-    // 150 values of at most 2 x 1,024 + 31 bytes, plus at most 80 bytes per call.
-    expect(toolsCalledBytes).toBeLessThanOrEqual(150 * (2 * 1024 + 31) + 100 * 80)
-    // With a 150 KB output the whole body fits WRC's 512 KiB request limit.
-    expect(Buffer.byteLength(rawBody)).toBeLessThan(512 * 1024)
+    // 64 KiB of output plus more than 300 KiB of bounded tool calls is over the reporter's
+    // 256 KiB ceiling, so previews are removed from the last call backwards. WRC stores previews
+    // for the first 50 calls; at least 40 of them keep theirs.
+    const kept = body.toolsCalled.filter(
+      (call: Record<string, unknown>) => 'args' in call || 'result' in call
+    )
+    expect(kept.length).toBeGreaterThanOrEqual(40)
+    expect(body.toolsCalled.slice(0, kept.length)).toEqual(kept)
+    // Every value that is sent is at most 2 x 1,024 + 31 bytes.
+    for (const call of kept) {
+      for (const value of [call.args, call.result]) {
+        expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(2 * 1024 + 31)
+      }
+    }
+    // The body is under the ceiling and close to it: only what was needed was removed.
+    expect(Buffer.byteLength(rawBody)).toBeLessThanOrEqual(256 * 1024)
+    expect(Buffer.byteLength(rawBody)).toBeGreaterThan(200 * 1024)
   })
 
   it('sends byte-bounded artifact results, previews and non-record args in the real request body', async () => {

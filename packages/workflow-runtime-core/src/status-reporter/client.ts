@@ -32,7 +32,7 @@ export class StatusReporter {
     const bodyBytes = Buffer.byteLength(payload)
     if (bodyBytes > STATUS_REPORT_MAX_BYTES) {
       // Structural fields only; WRC decides whether to accept the body.
-      emitLog('warn', 'Step status report exceeds the size ceiling', { label, bodyBytes })
+      emitLog('warn', 'Status report exceeds the size ceiling', { label, bodyBytes })
     }
     let lastErr: Error | undefined
 

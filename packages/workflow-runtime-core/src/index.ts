@@ -24,6 +24,7 @@ export {
 } from './status-reporter/toolCallStatus'
 export type { StatusArtifact } from './status-reporter/toolCallStatus'
 export {
+  MAX_REPORTED_OUTPUT_ARTIFACTS,
   STATUS_OUTPUT_MAX_CHARS,
   STATUS_REPORT_MAX_BYTES,
   boundOutputForStatus,
