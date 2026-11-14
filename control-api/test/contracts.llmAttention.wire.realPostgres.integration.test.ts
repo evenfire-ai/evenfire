@@ -1,9 +1,9 @@
 // Regenerate after an intended contract change (needs a real Postgres):
 // `CONTROL_API_REAL_PG_ADMIN_URL=postgres://… UPDATE_WIRE_GOLDENS=1 npx vitest run test/contracts.llmAttention.wire.realPostgres.integration.test.ts`,
-// then review the JSON diff.
+// then review the JSON diff of both files it writes.
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { Pool } from 'pg'
 import request from 'supertest'
 import type { LlmProviderId } from '@clerum/llm-providers'
@@ -35,6 +35,16 @@ import './realPostgres.requirement.ts'
  * stand-ins are the admin session and the Kubernetes API (MockGateway, fake
  * ConfigMap). `generatedAt` is the one value pinned after the fact, because it
  * is the request instant.
+ *
+ * The same run then writes a second file, `llmAttention.reviewed.wire.json`,
+ * for the fields the first state never carries: a WorkflowRecipe is created
+ * through the real admin recipe route naming the dropped model `agent-a` uses,
+ * so that item gains `recipesAffected` and the recipe's key in `consumerKeys`;
+ * the deprecated item is acknowledged through the real ack route with the
+ * episode and keys the feed returned; and the feed is read with
+ * `includeAcknowledged=1`, the only read that returns it, as
+ * `acknowledged: true`. It is a separate file, captured after the first, so
+ * the first keeps describing a feed nobody has reviewed yet.
  *
  * Named `*.realPostgres.integration` so the real-Postgres CI lane runs it; the
  * ordinary matrix skips it without CONTROL_API_REAL_PG_ADMIN_URL.
@@ -76,6 +86,7 @@ const COOKIE = 'control_ui_admin_session=admin-token'
 const UPDATE = process.env.UPDATE_WIRE_GOLDENS === '1'
 const DIR = new URL('./fixtures/wire/', import.meta.url)
 const FILE = new URL('llmAttention.wire.json', DIR)
+const REVIEWED_FILE = new URL('llmAttention.reviewed.wire.json', DIR)
 const PINNED_GENERATED_AT = '2026-11-01T00:00:00.000Z'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -83,6 +94,30 @@ const describeRealPostgres = adminUrl ? describe : describe.skip
 
 const PROVIDER = 'claude' as const
 const HOST_NAMESPACE = 'mcp-host'
+const RECIPE_NAME = 'recipe-a'
+
+type AttentionWireItem = {
+  kind: string
+  provider: string
+  model: string
+  hostsAffected: Array<{ roles: string[] }>
+  episode: number
+  consumerKeys: string[]
+  recipesAffected?: Array<{ namespace: string; name: string }>
+  acknowledged?: true
+}
+type AttentionWireBody = { items: AttentionWireItem[]; generatedAt: string }
+
+function writeOrCompare(file: URL, actual: unknown): void {
+  if (UPDATE) {
+    mkdirSync(DIR, { recursive: true })
+    writeFileSync(file, `${JSON.stringify(actual, null, 2)}\n`)
+  }
+  // An assertion, not a read error, when the golden was never generated.
+  expect(existsSync(file), `${file.pathname} is committed`).toBe(true)
+  const committed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+  expect(actual).toEqual(committed)
+}
 
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
@@ -252,10 +287,7 @@ describeRealPostgres('attention wire contract (real PostgreSQL)', () => {
     }
 
     const res = await request(app).get('/api/v1/admin/attention').set('Cookie', COOKIE).expect(200)
-    const body = res.body as {
-      items: Array<{ kind: string; model: string; hostsAffected: Array<{ roles: string[] }> }>
-      generatedAt: string
-    }
+    const body = res.body as AttentionWireBody
     expect(Number.isNaN(Date.parse(body.generatedAt))).toBe(false)
     // Both kinds with an explicit consumer, plus one item carried only by the
     // implicit offer; the retired stale_discovery_enabled kind never appears.
@@ -270,12 +302,64 @@ describeRealPostgres('attention wire contract (real PostgreSQL)', () => {
       body.items.find(i => i.model === staleImplicitId)?.hostsAffected.flatMap(h => h.roles)
     ).toEqual(['implicit'])
 
-    const actual = { ...body, generatedAt: PINNED_GENERATED_AT }
-    if (UPDATE) {
-      mkdirSync(DIR, { recursive: true })
-      writeFileSync(FILE, `${JSON.stringify(actual, null, 2)}\n`)
-    }
-    const committed = JSON.parse(readFileSync(FILE, 'utf8')) as unknown
-    expect(actual).toEqual(committed)
+    writeOrCompare(FILE, { ...body, generatedAt: PINNED_GENERATED_AT })
+
+    // Reviewed state. The recipe names the model `agent-a` already names, so
+    // its item carries a Host and a recipe consumer at once.
+    const { config } = await import('../src/config.js')
+    await request(app)
+      .post('/api/v1/admin/recipes')
+      .set('Cookie', COOKIE)
+      .send({
+        metadata: { name: RECIPE_NAME },
+        spec: {
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          agent: { provider: PROVIDER, model: staleReferencedId },
+          steps: [{ id: 's1', instruction: 'go' }],
+        },
+      })
+      .expect(r => expect(r.status, JSON.stringify(r.body)).toBe(201))
+    const withRecipe = (
+      await request(app).get('/api/v1/admin/attention').set('Cookie', COOKIE).expect(200)
+    ).body as AttentionWireBody
+    const deprecatedItem = withRecipe.items.find(i => i.model === deprecatedId)
+    expect(deprecatedItem?.kind).toBe('deprecated_model_enabled')
+    await request(app)
+      .post('/api/v1/admin/attention/ack')
+      .set('Cookie', COOKIE)
+      .send({
+        provider: deprecatedItem!.provider,
+        model: deprecatedItem!.model,
+        kind: deprecatedItem!.kind,
+        episode: deprecatedItem!.episode,
+        consumerKeys: deprecatedItem!.consumerKeys,
+      })
+      .expect(200)
+    // The default read now omits the acknowledged item.
+    const unreviewed = (
+      await request(app).get('/api/v1/admin/attention').set('Cookie', COOKIE).expect(200)
+    ).body as AttentionWireBody
+    expect(unreviewed.items.map(i => i.model)).not.toContain(deprecatedId)
+
+    const reviewed = (
+      await request(app)
+        .get('/api/v1/admin/attention?includeAcknowledged=1')
+        .set('Cookie', COOKIE)
+        .expect(200)
+    ).body as AttentionWireBody
+    const recipeRef = { namespace: config.sandboxNamespace, name: RECIPE_NAME }
+    expect(reviewed.items.map(i => `${i.kind}:${i.model}`).sort()).toEqual(
+      body.items.map(i => `${i.kind}:${i.model}`).sort()
+    )
+    const recipeItem = reviewed.items.find(i => i.model === staleReferencedId)
+    expect(recipeItem?.recipesAffected).toEqual([recipeRef])
+    expect(recipeItem?.consumerKeys).toContain(`recipe:${recipeRef.namespace}/${recipeRef.name}`)
+    expect(recipeItem?.consumerKeys).toContain(`host:${HOST_NAMESPACE}/agent-a`)
+    expect(recipeItem?.acknowledged).toBeUndefined()
+    expect(reviewed.items.filter(i => i.acknowledged === true).map(i => i.model)).toEqual([
+      deprecatedId,
+    ])
+
+    writeOrCompare(REVIEWED_FILE, { ...reviewed, generatedAt: PINNED_GENERATED_AT })
   }, 60_000)
 })
