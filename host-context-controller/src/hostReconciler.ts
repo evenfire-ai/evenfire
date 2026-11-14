@@ -5606,6 +5606,9 @@ export class HostReconciler {
           throw new Error(`apply did not converge (${result})`)
         }
       } catch (err) {
+        // #1495: a superseded Host is withdrawn, as the sibling steps do; the
+        // event that moved its dependencies reconciles it again.
+        if (isBenignSupersessionError(err)) throw err
         log.error('Failed to ensure Host NetworkPolicy', { host: host.name, policy: name, err })
         npFailures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
       }
