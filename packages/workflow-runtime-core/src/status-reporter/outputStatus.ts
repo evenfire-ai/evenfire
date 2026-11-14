@@ -136,8 +136,9 @@ export function boundOutputForStatus(output: unknown): BoundedStatusOutput {
  * mutated. Character limits do not bound bytes (a control character is six
  * bytes in JSON), so the reduction runs in a fixed order and stops as soon as
  * the body fits: cut `error`/`failureReason`; remove tool-call previews from
- * the last call backwards, keeping artifact metadata; halve `output`. A body
- * that still does not fit is returned as is; the caller logs it.
+ * the last call backwards, keeping artifact metadata and leaving a call that
+ * would not get smaller as it is; halve `output`. A body that still does not
+ * fit is returned as is; the caller logs it.
  */
 export function boundStepStatusBody(body: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = { ...body }
@@ -182,9 +183,11 @@ export function boundStepStatusBody(body: Record<string, unknown>): Record<strin
 }
 
 /**
- * Remove args and result previews from the last call backwards, only from as
- * many calls as the body needs to fit. A JSON array element is serialized on
- * its own, so the bytes saved by one call are exact.
+ * Remove args and result previews from the last call backwards, until the
+ * body fits. A call whose reduced form is not smaller is left as it is: the
+ * normalized artifact metadata can be larger than the result it replaces. A
+ * JSON array element is serialized on its own, so the bytes saved by one call
+ * are exact.
  */
 function removePreviewsFromTheEnd(toolsCalled: readonly unknown[], bytes: number): unknown[] {
   const calls = [...toolsCalled]
@@ -193,7 +196,9 @@ function removePreviewsFromTheEnd(toolsCalled: readonly unknown[], bytes: number
     const call = calls[index]
     if (!isRecord(call)) continue
     const reduced = withoutPreviews(call)
-    excess -= jsonBytes(call) - jsonBytes(reduced)
+    const saved = jsonBytes(call) - jsonBytes(reduced)
+    if (saved <= 0) continue
+    excess -= saved
     calls[index] = reduced
   }
   return calls

@@ -567,4 +567,56 @@ describe('StatusReporter with byte-heavy tool calls', () => {
     expect(result.preview.length).toBeGreaterThan(300)
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(2 * 1024 + 31)
   })
+
+  it('does not halve the output when the last calls carry partial artifact metadata', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const previewCall = (i: number) => ({
+      serverName: 'git',
+      toolName: `read-${i}`,
+      args: { blob: '中'.repeat(1_500) },
+      result: '中'.repeat(1_500),
+    })
+    // WRC accepts this artifact, and its normalized form (`format`, `sizeBytes`
+    // and `createdAt` added) is larger than the result, so removing the result
+    // would make the call larger.
+    const partialArtifactCall = (i: number) => ({
+      serverName: 'custom',
+      toolName: 'write_file',
+      result: { success: true, artifact: { name: `p-${i}.md`, path: `/output/p-${i}.md` } },
+    })
+    const toolsCalled = [
+      ...Array.from({ length: 50 }, (_, i) => previewCall(i)),
+      ...Array.from({ length: 50 }, (_, i) => partialArtifactCall(i)),
+    ]
+    const output = '中'.repeat(50_650)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('build', 'failed', {
+      output,
+      error: '\u0001'.repeat(8_192),
+      failureReason: '\u0001'.repeat(8_192),
+      toolsCalled,
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const rawBody: string = fetchMock.mock.calls[0][1].body
+    const body = JSON.parse(rawBody)
+    // Liveness witness: the body needed the preview removal, which reached the preview calls.
+    const reducedPreviewCalls = body.toolsCalled
+      .slice(0, 50)
+      .filter((call: Record<string, unknown>) => !('args' in call))
+    expect(reducedPreviewCalls.length).toBeGreaterThan(0)
+    expect(Buffer.byteLength(rawBody)).toBeLessThanOrEqual(256 * 1024)
+    // The output is sent whole, and the partial-artifact calls are sent as they are.
+    expect(body.outputLength).toBe(50_650)
+    expect(body.outputTruncated).toBe(false)
+    expect(body.output).toBe(output)
+    expect(body).not.toHaveProperty('outputArtifacts')
+    expect(body.toolsCalled.slice(50)).toEqual(toolsCalled.slice(50))
+  })
 })

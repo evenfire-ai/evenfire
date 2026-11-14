@@ -305,6 +305,76 @@ describe('boundStepStatusBody', () => {
     expect(bounded.outputTruncated).toBe(false)
   })
 
+  it('leaves a call as it is when removing its previews would not make it smaller', () => {
+    // A result with partial artifact metadata. WRC accepts it, and its
+    // normalized form (`format`, `sizeBytes` and `createdAt` added) is larger.
+    const partialArtifactCall = (i: number) => ({
+      serverName: 'custom',
+      toolName: 'write_file',
+      result: {
+        success: true,
+        artifact: { name: `partial-${i}.md`, path: `/output/partial-${i}.md` },
+      },
+    })
+    // A result whose normalized form has exactly the same size: the unknown
+    // field it loses is as long as the `format` and `sizeBytes` it gains.
+    const sameSizeArtifact = {
+      name: 'same.md',
+      path: '/output/same.md',
+      createdAt: '2026-11-12',
+      pad: 'x'.repeat(17),
+    }
+    const sameSizeCall = {
+      serverName: 'custom',
+      toolName: 'write_file',
+      result: { success: true, artifact: sameSizeArtifact },
+    }
+    const sameSizeReduced = {
+      serverName: 'custom',
+      toolName: 'write_file',
+      result: { success: true, artifact: normalizeArtifactForStatus(sameSizeArtifact) },
+    }
+    const body = {
+      stepId: 's1',
+      phase: 'completed',
+      output: '中'.repeat(STATUS_OUTPUT_MAX_CHARS),
+      toolsCalled: [
+        ...Array.from({ length: 50 }, (_, i) => ({
+          serverName: 'git',
+          toolName: `read-${i}`,
+          args: { blob: 'a'.repeat(1000) },
+          result: 'b'.repeat(1000),
+        })),
+        ...Array.from({ length: 49 }, (_, i) => partialArtifactCall(i)),
+        sameSizeCall,
+      ],
+    }
+    const firstPass = boundToolsCalledForStatus(body.toolsCalled)
+    // Witnesses: the first pass sends all 100 calls, and the body is over the ceiling.
+    expect(firstPass).toHaveLength(100)
+    expect(bodyBytes({ ...body, toolsCalled: firstPass })).toBeGreaterThan(STATUS_REPORT_MAX_BYTES)
+    // Witness: the last call's reduced form differs from it and has the same size.
+    expect(sameSizeReduced).not.toEqual(sameSizeCall)
+    expect(bodyBytes(sameSizeReduced)).toBe(bodyBytes(sameSizeCall))
+
+    const bounded = boundStepStatusBody(body)
+    const calls = bounded.toolsCalled as Array<Record<string, unknown>>
+    expect(bodyBytes(bounded)).toBeLessThanOrEqual(STATUS_REPORT_MAX_BYTES)
+    // Witness: the removal went past the 50 artifact calls and reduced earlier ones.
+    const k = calls.findIndex(call => !('args' in call))
+    expect(k).toBeGreaterThan(0)
+    expect(k).toBeLessThan(50)
+    expect(calls.slice(0, k)).toEqual(firstPass.slice(0, k))
+    // Only as many as needed: the first-pass calls with one reduction fewer are over the ceiling.
+    const oneFewer = firstPass.map((call, i) => (i > k && i < 50 ? calls[i] : call))
+    expect(bodyBytes({ ...bounded, toolsCalled: oneFewer })).toBeGreaterThan(
+      STATUS_REPORT_MAX_BYTES
+    )
+    // The artifact calls are sent as the first pass left them.
+    expect(calls.slice(50)).toEqual(firstPass.slice(50))
+    expect(bounded.outputTruncated).toBe(false)
+  })
+
   it.each([65_536, 60_000, 2_000, 1_500, 1_025, 1_024, 500])(
     'does not halve the output below 1,024 characters (start length %i)',
     start => {
