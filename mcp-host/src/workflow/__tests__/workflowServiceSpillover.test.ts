@@ -183,9 +183,13 @@ describe('WorkflowService step spillover — default (enabled)', () => {
 
   it('keeps a 100 KiB result inline under the default 128 KiB threshold', async () => {
     const payload = big(100 * 1024)
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
+    const client = mockMcpClient([{ name: 'read' }, { name: 'dump' }], {
+      read: { content: payload },
+      dump: { content: big(300 * 1024) },
+    })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: null, tool_calls: [{ name: 'srv__dump', arguments: {} }] },
       { content: 'done', tool_calls: null },
     ])
 
@@ -196,10 +200,14 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     })
 
     expect(res.status).toBe('completed')
-    expect(toolResultMessages(llm)).toEqual([
-      `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`,
-    ])
+    const [first, second] = toolResultMessages(llm)
+    expect(first).toBe(
+      `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`
+    )
     expect(offeredTools(llm)[1]).not.toContain(READ_TOOL)
+    // Witness: spillover is on in this step, so the larger result is stored.
+    expect(second).toContain('[Result stored outside the prompt (')
+    expect(offeredTools(llm)[2]).toContain(READ_TOOL)
   })
 
   it('makes the read tool callable under an allowlist only after a spill', async () => {
