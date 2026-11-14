@@ -371,7 +371,7 @@ recovered="$(log_count_from "$final_logs" 'Recovered [0-9]+ CommunicationChannel
 failed="$(log_count_from "$final_logs" 'cache recovery failed;')"
 fleet_passes="$(
   log_count_from "$final_logs" \
-    'Completed Host reconciliation after (CommunicationChannel recovery|Host watch recovery convergence)$'
+    '"msg":"\[K8s\] Completed Host reconciliation after (CommunicationChannel recovery|Host watch recovery convergence)"'
 )"
 [ "$ended" = 2 ] && [ "$started" = 2 ] && [ "$recovered" = 2 ] && \
   [ "$failed" = "$TOTAL_RETRY_FAILURES" ] && [ "$failed" -le "$TOTAL_RETRY_FAILURE_LIMIT" ] ||

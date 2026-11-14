@@ -412,7 +412,7 @@ marker_bindings=(
   "$HCC_K8S_CLIENT" 'CommunicationChannel watch ended; preserving durable Host lifecycle state'
 
   "$WATCH_GATE" 'Starting CommunicationChannel watch'
-  "$HCC_K8S_CLIENT" '[K8s] Starting CommunicationChannel watch'
+  "$HCC_K8S_CLIENT" 'hccLogger.info(`[K8s] Starting CommunicationChannel watch`)'
 
   "$WATCH_GATE" 'Recovered [0-9]+ CommunicationChannel\(s\) into cache'
   "$HCC_K8S_CLIENT" 'Recovered ${snapshot.channels.length} CommunicationChannel(s) into cache'
@@ -426,8 +426,8 @@ marker_bindings=(
   "$WATCH_GATE" 'Listing all Hosts in namespace ${HOST_NS}'
   "$HCC_K8S_CLIENT" 'Listing all Hosts in namespace ${config.hostNamespace}'
 
-  "$WATCH_GATE" 'Completed Host reconciliation after (CommunicationChannel recovery|Host watch recovery convergence)$'
-  "$HCC_K8S_CLIENT" 'Completed Host reconciliation after ${reason}'
+  "$WATCH_GATE" '"msg":"\[K8s\] Completed Host reconciliation after (CommunicationChannel recovery|Host watch recovery convergence)"'
+  "$HCC_K8S_CLIENT" 'hccLogger.info(`[K8s] Completed Host reconciliation after ${reason}`)'
 
   "$WATCH_GATE" 'CommunicationChannel watch event: DELETED for ${FIXTURE_CHANNEL}'
   "$HCC_K8S_CLIENT" 'CommunicationChannel watch event: ${type} for ${cc.name}'
@@ -450,10 +450,10 @@ marker_bindings=(
   "$LOG_HELPER" 'Host(s) after Host watch recovery convergence'
   "$HCC_K8S_CLIENT" 'Reconciling ${hosts.length} Host(s) after ${reason}'
 
-  "$LOG_HELPER" 'Completed Host reconciliation after CommunicationChannel recovery$'
+  "$LOG_HELPER" '/"msg":"\[K8s\] Completed Host reconciliation after CommunicationChannel recovery"/'
   "$HCC_K8S_CLIENT" "requestHostFleetReconcile('CommunicationChannel recovery'"
 
-  "$LOG_HELPER" 'Completed Host reconciliation after Host watch recovery convergence$'
+  "$LOG_HELPER" '/"msg":"\[K8s\] Completed Host reconciliation after Host watch recovery convergence"/'
   "$HCC_K8S_CLIENT" "convergenceReason = 'Host watch recovery convergence'"
 
   "$LOG_HELPER" 'Periodic resync'
@@ -723,8 +723,8 @@ run_clean_window_negative_case() (
     injected)
       kctl() {
         printf '%s\n' \
-          '[K8s] Initial NetworkPolicy post-certification additive reconciliation failed: dns timeout' \
-          '[K8s] Scheduling initial NetworkPolicy background convergence retry 1 in 5000ms'
+          '{"ts":"2026-11-14T21:29:06.428Z","level":"error","svc":"host-context-controller","msg":"[K8s] Initial NetworkPolicy post-certification additive reconciliation failed:","err":{"name":"Error","message":"dns timeout"}}' \
+          '{"ts":"2026-11-14T21:29:06.428Z","level":"warn","svc":"host-context-controller","msg":"[K8s] Scheduling initial NetworkPolicy background convergence retry 1 in 5000ms"}'
       } ;;
     clean) kctl() { printf '%s\n' '[K8s] NetworkPolicy convergence certified'; } ;;
     api-error) kctl() { return 1; } ;;
@@ -1385,11 +1385,11 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
-  '[K8s] Listing all Hosts in namespace mcp-host' \
-  '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
-  '[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery' \
-  '[K8s] Completed Host reconciliation after CommunicationChannel recovery' >"$MOCK_LOG_FILE"
+  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   pass "fresh Host LIST before channel recovery is attributed to the same interruption"
 else
@@ -1397,11 +1397,11 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
-  '[K8s] Listing all Hosts in namespace mcp-host' \
-  '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
-  '[K8s] Reconciling 5 Host(s) after Host watch recovery convergence' \
-  '[K8s] Completed Host reconciliation after Host watch recovery convergence' >"$MOCK_LOG_FILE"
+  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) after Host watch recovery convergence"}' \
+  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after Host watch recovery convergence"}' >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   pass "a causally ordered Host-watch pass may cover the recovered CC and fresh Host inventories"
 else
@@ -1409,11 +1409,11 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
-  '[K8s] Listing all Hosts in namespace mcp-host' \
-  '[K8s] Reconciling 5 Host(s) after Host watch recovery convergence' \
-  '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
-  '[K8s] Completed Host reconciliation after Host watch recovery convergence' >"$MOCK_LOG_FILE"
+  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) after Host watch recovery convergence"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
+  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after Host watch recovery convergence"}' >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   fail "a Host-watch pass selected before CC recovery satisfied the covering assertion"
 else
@@ -1421,11 +1421,11 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] Listing all Hosts in namespace mcp-host' \
-  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
-  '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
-  '[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery' \
-  '[K8s] Completed Host reconciliation after CommunicationChannel recovery' >"$MOCK_LOG_FILE"
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
+  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   fail "a Host LIST from before the interruption satisfied the recovery assertion"
 else
@@ -1433,11 +1433,11 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
-  '[K8s] Listing all Hosts in namespace mcp-host' \
-  '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
-  '[K8s] Reconciling 4 Host(s) for lifecycle after CommunicationChannel recovery' \
-  '[K8s] Completed Host reconciliation after CommunicationChannel recovery' >"$MOCK_LOG_FILE"
+  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 4 Host(s) for lifecycle after CommunicationChannel recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   fail "a stale Host inventory count satisfied recovery"
 else
@@ -1445,16 +1445,16 @@ else
 fi
 
 printf '%s\n' \
-  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
-  '[K8s] Listing all Hosts in namespace mcp-host' \
-  '[K8s] Recovered 1 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
-  '[K8s] Reconciling 4 Host(s) for lifecycle after CommunicationChannel recovery' \
-  '[K8s] Completed Host reconciliation after CommunicationChannel recovery' \
-  '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery' \
-  '[K8s] Listing all Hosts in namespace mcp-host' \
-  '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
-  '[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery' \
-  '[K8s] Completed Host reconciliation after CommunicationChannel recovery' >"$MOCK_LOG_FILE"
+  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 1 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 4 Host(s) for lifecycle after CommunicationChannel recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
+  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery"}' \
+  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 2 5; then
   pass "recovery attribution selects the requested interruption cycle"
 else

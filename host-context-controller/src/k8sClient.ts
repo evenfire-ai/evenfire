@@ -443,7 +443,7 @@ async function listMcpServerSnapshot(): Promise<McpServerSnapshot> {
   }
 
   try {
-    console.log(`[K8s] Listing all McpServers in namespace ${config.namespace}`)
+    hccLogger.info(`[K8s] Listing all McpServers in namespace ${config.namespace}`)
 
     const response = await customObjectsApi.listNamespacedCustomObject({
       group: GROUP,
@@ -479,10 +479,10 @@ async function listMcpServerSnapshot(): Promise<McpServerSnapshot> {
       status: item.status,
     }))
 
-    console.log(`[K8s] Found ${servers.length} McpServer(s)`)
+    hccLogger.info(`[K8s] Found ${servers.length} McpServer(s)`)
     return { servers, resourceVersion: list.metadata?.resourceVersion }
   } catch (error) {
-    console.error('[K8s] Failed to list McpServers:', error)
+    hccLogger.error('[K8s] Failed to list McpServers:', { err: error })
     throw error
   }
 }
@@ -500,7 +500,7 @@ async function listContextSnapshot(): Promise<ContextSnapshot> {
   }
 
   try {
-    console.log(`[K8s] Listing all Contexts in namespace ${config.namespace}`)
+    hccLogger.info(`[K8s] Listing all Contexts in namespace ${config.namespace}`)
 
     const response = await customObjectsApi.listNamespacedCustomObject({
       group: GROUP,
@@ -530,10 +530,10 @@ async function listContextSnapshot(): Promise<ContextSnapshot> {
       spec: item.spec,
     }))
 
-    console.log(`[K8s] Found ${contexts.length} Context(s)`)
+    hccLogger.info(`[K8s] Found ${contexts.length} Context(s)`)
     return { contexts, resourceVersion: list.metadata?.resourceVersion }
   } catch (error) {
-    console.error('[K8s] Failed to list Contexts:', error)
+    hccLogger.error('[K8s] Failed to list Contexts:', { err: error })
     throw error
   }
 }
@@ -551,7 +551,7 @@ async function listHostSnapshot(): Promise<HostSnapshot> {
   }
 
   try {
-    console.log(`[K8s] Listing all Hosts in namespace ${config.hostNamespace}`)
+    hccLogger.info(`[K8s] Listing all Hosts in namespace ${config.hostNamespace}`)
 
     const response = await hostCustomObjectsApi.listNamespacedCustomObject({
       group: GROUP,
@@ -587,10 +587,10 @@ async function listHostSnapshot(): Promise<HostSnapshot> {
       status: item.status,
     }))
 
-    console.log(`[K8s] Found ${hosts.length} Host(s)`)
+    hccLogger.info(`[K8s] Found ${hosts.length} Host(s)`)
     return { hosts, resourceVersion: list.metadata?.resourceVersion }
   } catch (error) {
-    console.error('[K8s] Failed to list Hosts:', error)
+    hccLogger.error('[K8s] Failed to list Hosts:', { err: error })
     throw error
   }
 }
@@ -608,7 +608,7 @@ export async function listAllSharedFileSystems(): Promise<SharedFileSystemCRD[]>
     throw new Error('K8s client not initialized - are you in dev mode?')
   }
   try {
-    console.log(`[K8s] Listing all SharedFileSystems in namespace ${config.hostNamespace}`)
+    hccLogger.info(`[K8s] Listing all SharedFileSystems in namespace ${config.hostNamespace}`)
     // Deadline-bearing client, like listHostSnapshot: the cold-start Host fleet
     // pass waits on this inventory, so an apiserver that never answers would
     // otherwise strand the fleet behind an already-certified readiness — and
@@ -630,10 +630,10 @@ export async function listAllSharedFileSystems(): Promise<SharedFileSystemCRD[]>
       namespace: item.metadata.namespace || config.hostNamespace,
       spec: item.spec,
     }))
-    console.log(`[K8s] Found ${sfses.length} SharedFileSystem(s)`)
+    hccLogger.info(`[K8s] Found ${sfses.length} SharedFileSystem(s)`)
     return sfses
   } catch (error) {
-    console.error('[K8s] Failed to list SharedFileSystems:', error)
+    hccLogger.error('[K8s] Failed to list SharedFileSystems:', { err: error })
     throw error
   }
 }
@@ -668,7 +668,7 @@ export async function listAllGlobalFileSystems(): Promise<GlobalFileSystemCRD[]>
       status: item.status,
     }))
   } catch (error) {
-    console.error('[K8s] Failed to list GlobalFileSystems:', error)
+    hccLogger.error('[K8s] Failed to list GlobalFileSystems:', { err: error })
     throw error
   }
 }
@@ -695,7 +695,9 @@ async function listCommunicationChannelSnapshot(): Promise<CommunicationChannelS
     throw new Error('K8s client not initialized - are you in dev mode?')
   }
   try {
-    console.log(`[K8s] Listing all CommunicationChannels in namespace ${config.channelsNamespace}`)
+    hccLogger.info(
+      `[K8s] Listing all CommunicationChannels in namespace ${config.channelsNamespace}`
+    )
     const response = await customObjectsApi.listNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
@@ -719,10 +721,10 @@ async function listCommunicationChannelSnapshot(): Promise<CommunicationChannelS
           : {}),
       },
     }))
-    console.log(`[K8s] Found ${ccs.length} CommunicationChannel(s)`)
+    hccLogger.info(`[K8s] Found ${ccs.length} CommunicationChannel(s)`)
     return { channels: ccs, resourceVersion: list.metadata?.resourceVersion }
   } catch (error) {
-    console.error('[K8s] Failed to list CommunicationChannels:', error)
+    hccLogger.error('[K8s] Failed to list CommunicationChannels:', { err: error })
     throw error
   }
 }
@@ -735,7 +737,7 @@ export async function listAllLlmHooks(): Promise<LlmHookCRD[]> {
     throw new Error('K8s client not initialized - are you in dev mode?')
   }
   try {
-    console.log(`[K8s] Listing all LlmHooks in namespace ${config.llmHooksNamespace}`)
+    hccLogger.info(`[K8s] Listing all LlmHooks in namespace ${config.llmHooksNamespace}`)
     const response = await customObjectsApi.listNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
@@ -766,10 +768,10 @@ export async function listAllLlmHooks(): Promise<LlmHookCRD[]> {
       spec: item.spec,
       status: item.status,
     }))
-    console.log(`[K8s] Found ${hooks.length} LlmHook(s)`)
+    hccLogger.info(`[K8s] Found ${hooks.length} LlmHook(s)`)
     return hooks
   } catch (error) {
-    console.error('[K8s] Failed to list LlmHooks:', error)
+    hccLogger.error('[K8s] Failed to list LlmHooks:', { err: error })
     throw error
   }
 }
@@ -784,7 +786,7 @@ export async function getContext(contextId: string): Promise<ContextCRD | null> 
   }
 
   try {
-    console.log(`[K8s] Reading Context CRD: ${contextId}`)
+    hccLogger.info(`[K8s] Reading Context CRD: ${contextId}`)
 
     const response = await customObjectsApi.getNamespacedCustomObject({
       group: GROUP,
@@ -806,10 +808,10 @@ export async function getContext(contextId: string): Promise<ContextCRD | null> 
     }
   } catch (error) {
     if (getErrorCode(error) === 404) {
-      console.warn(`[K8s] Context CRD not found: ${contextId}`)
+      hccLogger.warn(`[K8s] Context CRD not found: ${contextId}`)
       return null
     }
-    console.error(`[K8s] Failed to read Context CRD:`, error)
+    hccLogger.error(`[K8s] Failed to read Context CRD:`, { err: error })
     throw error
   }
 }
@@ -1392,7 +1394,7 @@ export class McpServerWatcher implements McpServerProvider {
         watchGeneration
       )
       if (!authorized && !this.hasMcpServerInventoryAuthority(watchGeneration)) {
-        console.warn(
+        hccLogger.warn(
           `[K8s] McpServer inventory authority changed while deleting ${server.name}; ` +
             'full cleanup deferred until retry'
         )
@@ -1401,10 +1403,10 @@ export class McpServerWatcher implements McpServerProvider {
       }
       return authorized
     } catch (error) {
-      console.error(
+      hccLogger.error(
         `[K8s] Authoritative absence check failed for deleted McpServer ${server.name}; ` +
           'cleanup blocked until retry:',
-        error
+        { err: error }
       )
       this.scheduleExternalEgressRetry('DELETED', server)
       this.changeCallback?.()
@@ -1869,7 +1871,7 @@ export class McpServerWatcher implements McpServerProvider {
         }
         this.ccCacheSynced = true
         const lifecycleGeneration = this.beginCommunicationChannelLifecycleTransition()
-        console.log(
+        hccLogger.info(
           `[K8s] Recovered ${snapshot.channels.length} CommunicationChannel(s) into cache ` +
             '(ccCacheSynced=true)'
         )
@@ -2114,7 +2116,7 @@ export class McpServerWatcher implements McpServerProvider {
       if (!this.stopped) {
         this.hostWatchRecoveryFailures += 1
         this.hostWatchRecoveryRetryAfterMs = getRetryAfterMs(error)
-        console.error('[K8s] Host watch recovery failed:', error)
+        hccLogger.error('[K8s] Host watch recovery failed:', { err: error })
         this.scheduleHostCacheRecovery(request)
       }
       throw error
@@ -2161,7 +2163,7 @@ export class McpServerWatcher implements McpServerProvider {
     try {
       await this.hostReconciler.reconcile(host, 'urgent')
     } catch (error) {
-      console.error(`[K8s] Urgent Host reconcile failed for "${name}":`, error)
+      hccLogger.error(`[K8s] Urgent Host reconcile failed for "${name}":`, { err: error })
     }
   }
 
@@ -2212,9 +2214,9 @@ export class McpServerWatcher implements McpServerProvider {
       hostDeleteCleanupTotal.inc({ outcome: 'completed' })
     } catch (error) {
       hostDeleteCleanupTotal.inc({ outcome: 'retried' })
-      console.error(
+      hccLogger.error(
         `[K8s] Recovered Host delete cleanup failed for "${name}"; the safety-net sweep will retry:`,
-        error
+        { err: error }
       )
     }
   }
@@ -2324,7 +2326,7 @@ export class McpServerWatcher implements McpServerProvider {
     const attempt = (this.hostWatchRetryAttempts.get(host.name) ?? 0) + 1
     const retryDelay = HOST_WATCH_RECONCILE_RETRY_DELAYS_MS[attempt - 1]
     if (retryDelay === undefined) {
-      console.error(
+      hccLogger.error(
         `[K8s] Host watch reconciliation retry exhausted for ${host.name} after ${HOST_WATCH_RECONCILE_RETRY_DELAYS_MS.length} attempts`
       )
       this.completeHostWatchEvent(host.name, eventRevision)
@@ -2332,7 +2334,7 @@ export class McpServerWatcher implements McpServerProvider {
     }
 
     this.hostWatchRetryAttempts.set(host.name, attempt)
-    console.warn(
+    hccLogger.warn(
       `[K8s] Scheduling Host watch reconciliation retry ${attempt}/${HOST_WATCH_RECONCILE_RETRY_DELAYS_MS.length} ` +
         `for ${host.name} in ${retryDelay}ms`
     )
@@ -2358,7 +2360,9 @@ export class McpServerWatcher implements McpServerProvider {
       await this.reconcileHostWatchEvent(type, host, eventRevision, 'retry')
       this.completeHostWatchEvent(host.name, eventRevision)
     } catch (error) {
-      console.error(`[K8s] Host watch reconciliation retry failed for ${host.name}:`, error)
+      hccLogger.error(`[K8s] Host watch reconciliation retry failed for ${host.name}:`, {
+        err: error,
+      })
       this.scheduleHostWatchReconcileRetry(type, host, eventRevision)
     }
   }
@@ -2393,7 +2397,7 @@ export class McpServerWatcher implements McpServerProvider {
       // Failures); only fullReconcile runs the authority-gated orphan cleanup.
       const hosts = [...this.hosts.values()]
       if (mode === 'full') {
-        console.log(`[K8s] Reconciling ${hosts.length} Host(s) after ${reason}`)
+        hccLogger.info(`[K8s] Reconciling ${hosts.length} Host(s) after ${reason}`)
         await this.hostReconciler.fullReconcile(hosts)
       } else {
         if (
@@ -2403,18 +2407,18 @@ export class McpServerWatcher implements McpServerProvider {
         ) {
           return
         }
-        console.log(`[K8s] Reconciling ${hosts.length} Host(s) for lifecycle after ${reason}`)
+        hccLogger.info(`[K8s] Reconciling ${hosts.length} Host(s) for lifecycle after ${reason}`)
         await this.hostReconciler.reconcileHosts(hosts)
       }
       if (!this.stopped) {
         if (ccLifecycleGeneration !== undefined) {
           this.markCommunicationChannelLifecycleApplied(ccLifecycleGeneration)
         }
-        console.log(`[K8s] Completed Host reconciliation after ${reason}`)
+        hccLogger.info(`[K8s] Completed Host reconciliation after ${reason}`)
       }
     } catch (error) {
       hostFleetRequestsTotal.inc({ result: 'failed' })
-      console.error(`[K8s] Host reconciliation after ${reason} failed:`, error)
+      hccLogger.error(`[K8s] Host reconciliation after ${reason} failed:`, { err: error })
       if (!this.stopped && ccLifecycleGeneration !== undefined) {
         if (error instanceof HostFleetReconcileError && error.hostFailures.length === 0) {
           hostFleetLifecycleCatchTotal.inc({ decision: 'applied' })
@@ -2546,7 +2550,9 @@ export class McpServerWatcher implements McpServerProvider {
       try {
         await this.sharedFileSystemReconciler.reconcile(sfs)
       } catch (err) {
-        console.error(`[K8s] SFS re-reconcile after Context change failed for "${name}":`, err)
+        hccLogger.error(`[K8s] SFS re-reconcile after Context change failed for "${name}":`, {
+          err,
+        })
       }
     }
   }
@@ -2572,7 +2578,7 @@ export class McpServerWatcher implements McpServerProvider {
       try {
         await this.hostReconciler.reconcile(host)
       } catch (err) {
-        console.error(`[K8s] Host re-reconcile failed for "${host.name}":`, err)
+        hccLogger.error(`[K8s] Host re-reconcile failed for "${host.name}":`, { err })
       }
     }
   }
@@ -2616,7 +2622,9 @@ export class McpServerWatcher implements McpServerProvider {
       await this.hostReconciler.reconcile(host)
       return true
     } catch (err) {
-      console.error(`[K8s] Host re-reconcile after CC change failed for "${host.name}":`, err)
+      hccLogger.error(`[K8s] Host re-reconcile after CC change failed for "${host.name}":`, {
+        err,
+      })
       return false
     }
   }
@@ -2663,7 +2671,7 @@ export class McpServerWatcher implements McpServerProvider {
     for (const ref of refs) {
       const sfs = this.sharedFileSystems.get(ref.name)
       if (!sfs) {
-        console.warn(
+        hccLogger.warn(
           `[K8s] Context "${host.spec.contextRef}" references SharedFileSystem ` +
             `"${ref.name}" which is not yet known to HCC; skipping mount for now`
         )
@@ -2691,7 +2699,7 @@ export class McpServerWatcher implements McpServerProvider {
           name: sfs.name,
           namespace: sfs.namespace,
         }).phase
-        console.log(
+        hccLogger.info(
           `[K8s] SharedFileSystem "${ref.name}" PVC is not Bound yet (phase=${phase ?? 'unknown'}); ` +
             `deferring RO mount for Host "${host.name}" until the volume binds`
         )
@@ -2739,7 +2747,7 @@ export class McpServerWatcher implements McpServerProvider {
   async reconcileChannelReaderRevision(secretName: string, secretNamespace: string): Promise<void> {
     const convergenceReason = `CommunicationChannel Secret "${secretNamespace}/${secretName}" Host convergence`
     if (!this.ccCacheSynced) {
-      console.warn(
+      hccLogger.warn(
         `[K8s] Deferring ${convergenceReason}; CommunicationChannel cache is not authoritative`
       )
       return
@@ -3036,7 +3044,7 @@ export class McpServerWatcher implements McpServerProvider {
     for (const hook of this.llmHooks.values()) {
       if (hook.spec.target?.image?.envSecret !== secretName) continue
       try {
-        console.log(
+        hccLogger.info(
           `[K8s] Re-reconciling LlmHook "${hook.name}" after Secret "${secretName}" change`
         )
         // Pod key is unchanged by a contents-only rotation, so pass it as the
@@ -3044,7 +3052,9 @@ export class McpServerWatcher implements McpServerProvider {
         // credentials-revision and rolls the shared pod.
         await this.llmHookReconciler.reconcile(hook, computePodKey(hook))
       } catch (err) {
-        console.error(`[K8s] Secret-triggered LlmHook reconcile failed for "${hook.name}":`, err)
+        hccLogger.error(`[K8s] Secret-triggered LlmHook reconcile failed for "${hook.name}":`, {
+          err,
+        })
       }
     }
   }
@@ -3097,12 +3107,12 @@ export class McpServerWatcher implements McpServerProvider {
     const context = await getContext(contextRef)
 
     if (!context) {
-      console.warn(`[Provider] Context "${contextRef}" not found — returning no servers`)
+      hccLogger.warn(`[Provider] Context "${contextRef}" not found — returning no servers`)
       return []
     }
 
     const allowedNames = new Set(context.spec.mcpServers)
-    console.log(
+    hccLogger.info(
       `[Provider] Context "${contextRef}" allows servers: [${context.spec.mcpServers.join(', ')}]`
     )
 
@@ -3141,9 +3151,9 @@ export class McpServerWatcher implements McpServerProvider {
       await this.restartMcpServerWatch(initialServerSnapshot)
     } catch (error) {
       this.mcpServerCacheSynced = false
-      console.error(
+      hccLogger.error(
         '[K8s] Initial McpServer inventory is unavailable; HCC remains unready while in-process recovery continues:',
-        error
+        { err: error }
       )
     }
     if (!this.mcpServerCacheSynced) {
@@ -3155,9 +3165,9 @@ export class McpServerWatcher implements McpServerProvider {
       await this.restartContextWatch(initialContextSnapshot)
     } catch (error) {
       this.contextCacheSynced = false
-      console.error(
+      hccLogger.error(
         '[K8s] Initial Context inventory is unavailable; HCC remains unready while in-process recovery continues:',
-        error
+        { err: error }
       )
     }
     if (!this.contextCacheSynced) {
@@ -3181,10 +3191,10 @@ export class McpServerWatcher implements McpServerProvider {
       initialCCSnapshot = await listCommunicationChannelSnapshot()
       this.installCommunicationChannelSnapshot(initialCCSnapshot)
     } catch (error) {
-      console.error(
+      hccLogger.error(
         '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
           '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
-        error
+        { err: error }
       )
     }
     try {
@@ -3197,28 +3207,28 @@ export class McpServerWatcher implements McpServerProvider {
         this.ccWatchRequest !== null
       ) {
         this.ccCacheSynced = true
-        console.log(
+        hccLogger.info(
           `[K8s] Loaded ${initialCCSnapshot.channels.length} CommunicationChannel(s) into cache ` +
             '(ccCacheSynced=true)'
         )
       } else if (initialCCSnapshot) {
-        console.error(
+        hccLogger.error(
           '[K8s] CommunicationChannel snapshot could not be paired with an active watch; ' +
             'ccCacheSynced remains false'
         )
       }
     } catch (error) {
       this.ccCacheSynced = false
-      console.error(
+      hccLogger.error(
         '[K8s] CommunicationChannel watch failed to start; ccCacheSynced remains false:',
-        error
+        { err: error }
       )
     }
     if (!this.ccCacheSynced) {
       this.scheduleCommunicationChannelCacheRecovery()
     }
 
-    console.log(
+    hccLogger.info(
       `[K8s] Starting initial Host background convergence... (ccCacheSynced=${this.ccCacheSynced})`
     )
     const initialLifecycleGeneration =
@@ -3237,9 +3247,9 @@ export class McpServerWatcher implements McpServerProvider {
       // Continue startup with hostCacheSynced=false: the HTTP server stays live,
       // dynamic readiness remains 503, and recovery promotes readiness only
       // after a fresh LIST is paired with its continuing WATCH.
-      console.warn(
+      hccLogger.warn(
         '[K8s] Initial Host inventory is unavailable; HCC remains unready while in-process recovery continues:',
-        error
+        { err: error }
       )
     }
 
@@ -3254,13 +3264,12 @@ export class McpServerWatcher implements McpServerProvider {
       for (const hook of initialHooks) {
         this.llmHooks.set(hook.name, hook)
       }
-      console.log('[K8s] Running initial LlmHook reconciliation...')
+      hccLogger.info('[K8s] Running initial LlmHook reconciliation...')
       await this.llmHookReconciler.fullReconcile(initialHooks)
     } catch (error) {
-      console.error(
-        '[K8s] Skipping initial LlmHook reconciliation because discovery failed:',
-        error
-      )
+      hccLogger.error('[K8s] Skipping initial LlmHook reconciliation because discovery failed:', {
+        err: error,
+      })
     }
     await this.startLlmHookWatch()
 
@@ -3269,9 +3278,9 @@ export class McpServerWatcher implements McpServerProvider {
       this.resyncTimer = setInterval(() => {
         void this.runHostResync()
       }, resyncSec * 1000)
-      console.log(`[K8s] Host periodic resync enabled (every ${resyncSec}s)`)
+      hccLogger.info(`[K8s] Host periodic resync enabled (every ${resyncSec}s)`)
     } else {
-      console.warn(
+      hccLogger.warn(
         '[K8s] Host periodic resync disabled; runtime-auth degraded mcp-host pods will not self-heal through controller-driven rollout unless another Host event triggers reconciliation.'
       )
     }
@@ -3281,9 +3290,9 @@ export class McpServerWatcher implements McpServerProvider {
       this.sfsResyncTimer = setInterval(() => {
         void this.runSfsResync()
       }, sfsResyncSec * 1000)
-      console.log(`[K8s] SharedFileSystem periodic resync enabled (every ${sfsResyncSec}s)`)
+      hccLogger.info(`[K8s] SharedFileSystem periodic resync enabled (every ${sfsResyncSec}s)`)
     } else {
-      console.warn(
+      hccLogger.warn(
         '[K8s] SharedFileSystem periodic resync disabled; a SharedFileSystem stuck in Initializing/Degraded will not auto-recover to Ready until another SFS event triggers reconciliation (#592).'
       )
     }
@@ -3293,9 +3302,9 @@ export class McpServerWatcher implements McpServerProvider {
       this.llmHookResyncTimer = setInterval(() => {
         void this.runLlmHookResync()
       }, llmHookResyncSec * 1000)
-      console.log(`[K8s] LlmHook periodic resync enabled (every ${llmHookResyncSec}s)`)
+      hccLogger.info(`[K8s] LlmHook periodic resync enabled (every ${llmHookResyncSec}s)`)
     } else {
-      console.warn(
+      hccLogger.warn(
         '[K8s] LlmHook periodic resync disabled; label-orphaned hook workloads will not be swept until another LlmHook event triggers reconciliation.'
       )
     }
@@ -3305,9 +3314,9 @@ export class McpServerWatcher implements McpServerProvider {
       this.gfsResyncTimer = setInterval(() => {
         void this.runGfsResync()
       }, gfsResyncSec * 1000)
-      console.log(`[K8s] GlobalFileSystem periodic resync enabled (every ${gfsResyncSec}s)`)
+      hccLogger.info(`[K8s] GlobalFileSystem periodic resync enabled (every ${gfsResyncSec}s)`)
     } else {
-      console.warn(
+      hccLogger.warn(
         '[K8s] GlobalFileSystem periodic resync disabled; a GlobalFileSystem stuck in Initializing will not auto-recover to Ready (nor seed its root directories) until another gfs event triggers reconciliation.'
       )
     }
@@ -3351,7 +3360,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.netPolDefaultsResyncTimer = setInterval(() => {
         void this.runNetworkPolicyDefaultsOnly()
       }, netPolDefaultsResyncSec * 1000)
-      console.log(
+      hccLogger.info(
         `[K8s] NetworkPolicy defaults-only resync enabled (every ${netPolDefaultsResyncSec}s)`
       )
     }
@@ -3390,9 +3399,9 @@ export class McpServerWatcher implements McpServerProvider {
       inventoryComplete = true
       for (const sfs of initialSfses) this.sharedFileSystems.set(sfs.name, sfs)
     } catch (error) {
-      console.error(
+      hccLogger.error(
         '[K8s] Skipping initial SharedFileSystem background convergence because discovery failed:',
-        error
+        { err: error }
       )
     }
     // The cold-start Host fleet pass gates on this promise, so it must settle on
@@ -3402,7 +3411,7 @@ export class McpServerWatcher implements McpServerProvider {
     // re-strand the fleet behind an already-certified readiness, which is the
     // exact failure bounding the LIST was meant to close.
     void this.startSharedFileSystemWatch().catch(error => {
-      console.error('[K8s] SharedFileSystem background watch failed to start:', error)
+      hccLogger.error('[K8s] SharedFileSystem background watch failed to start:', { err: error })
       this.scheduleSharedFileSystemWatchRestart(5000)
     })
     if (inventoryComplete && !this.stopped) {
@@ -3418,15 +3427,15 @@ export class McpServerWatcher implements McpServerProvider {
       inventoryComplete = true
       for (const gfs of initialGfses) this.globalFileSystems.set(gfs.name, gfs)
     } catch (error) {
-      console.error(
+      hccLogger.error(
         '[K8s] Skipping initial GlobalFileSystem background convergence because discovery failed:',
-        error
+        { err: error }
       )
     }
     try {
       await this.startGlobalFileSystemWatch()
     } catch (error) {
-      console.error('[K8s] GlobalFileSystem background watch failed to start:', error)
+      hccLogger.error('[K8s] GlobalFileSystem background watch failed to start:', { err: error })
       this.scheduleGlobalFileSystemWatchRestart(5000)
     }
     if (inventoryComplete && !this.stopped) {
@@ -3683,7 +3692,7 @@ export class McpServerWatcher implements McpServerProvider {
         await this.netPolReconciler.ensureDefaultPolicies()
       } catch (error) {
         result = 'error'
-        console.error('[K8s] NetworkPolicy defaults-only tick failed:', error)
+        hccLogger.error('[K8s] NetworkPolicy defaults-only tick failed:', { err: error })
       } finally {
         const seconds = Math.max(0, (Date.now() - startedAtMs) / 1000)
         netPolDefaultsOnlyTicksTotal.inc({ result })
@@ -4105,7 +4114,7 @@ export class McpServerWatcher implements McpServerProvider {
       ]
     this.initialConvergenceRetryAttempts.set(lane, attempt)
     initialConvergenceRetriesTotal.inc({ lane })
-    console.warn(
+    hccLogger.warn(
       `[K8s] Scheduling initial ${lane} background convergence retry ${attempt} in ${delayMs}ms`
     )
 
@@ -4133,10 +4142,12 @@ export class McpServerWatcher implements McpServerProvider {
   private async runInitialSharedFileSystemConvergenceCore(): Promise<void> {
     try {
       const initialSfses = [...this.sharedFileSystems.values()]
-      console.log('[K8s] Running initial SharedFileSystem background reconciliation...')
+      hccLogger.info('[K8s] Running initial SharedFileSystem background reconciliation...')
       await this.sharedFileSystemReconciler.fullReconcile(initialSfses)
     } catch (error) {
-      console.error('[K8s] Initial SharedFileSystem background reconciliation failed:', error)
+      hccLogger.error('[K8s] Initial SharedFileSystem background reconciliation failed:', {
+        err: error,
+      })
     }
   }
 
@@ -4150,10 +4161,12 @@ export class McpServerWatcher implements McpServerProvider {
   private async runInitialGlobalFileSystemConvergenceCore(): Promise<void> {
     try {
       const initialGfses = [...this.globalFileSystems.values()]
-      console.log('[K8s] Running initial GlobalFileSystem background reconciliation...')
+      hccLogger.info('[K8s] Running initial GlobalFileSystem background reconciliation...')
       await this.gfsReconciler.fullReconcile(initialGfses)
     } catch (error) {
-      console.error('[K8s] Initial GlobalFileSystem background reconciliation failed:', error)
+      hccLogger.error('[K8s] Initial GlobalFileSystem background reconciliation failed:', {
+        err: error,
+      })
     }
   }
 
@@ -4162,7 +4175,7 @@ export class McpServerWatcher implements McpServerProvider {
    */
   private async startSharedFileSystemWatch(): Promise<void> {
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.hostNamespace}/${PLURAL_SHAREDFILESYSTEMS}`
-    console.log(`[K8s] Starting SharedFileSystem watch`)
+    hccLogger.info(`[K8s] Starting SharedFileSystem watch`)
 
     const watchCallback = async (
       type: string,
@@ -4175,7 +4188,7 @@ export class McpServerWatcher implements McpServerProvider {
         spec: apiObj.spec,
       }
 
-      console.log(`[K8s] SharedFileSystem watch event: ${type} for ${sfs.name}`)
+      hccLogger.info(`[K8s] SharedFileSystem watch event: ${type} for ${sfs.name}`)
 
       if (type === 'ADDED' || type === 'MODIFIED') {
         this.sharedFileSystems.set(sfs.name, sfs)
@@ -4192,7 +4205,9 @@ export class McpServerWatcher implements McpServerProvider {
             await this.sharedFileSystemReconciler.reconcileDelete(sfs.name, sfs.namespace, sfs.spec)
           }
         } catch (error) {
-          console.error(`[K8s] SharedFileSystem reconciliation failed for ${sfs.name}:`, error)
+          hccLogger.error(`[K8s] SharedFileSystem reconciliation failed for ${sfs.name}:`, {
+            err: error,
+          })
         }
 
         // Re-reconcile any Host whose Context references this SharedFileSystem.
@@ -4201,9 +4216,9 @@ export class McpServerWatcher implements McpServerProvider {
         try {
           await this.reconcileHostsReferencingSfs(sfs.name)
         } catch (error) {
-          console.error(
+          hccLogger.error(
             `[K8s] Failed to re-reconcile Hosts referencing SharedFileSystem ${sfs.name}:`,
-            error
+            { err: error }
           )
         }
       })
@@ -4213,9 +4228,9 @@ export class McpServerWatcher implements McpServerProvider {
       if (this.stopped) return
       this.sfsWatchRequest = null
       if (err) {
-        console.error('[K8s] SharedFileSystem watch error:', err)
+        hccLogger.error('[K8s] SharedFileSystem watch error:', { err })
       }
-      console.log('[K8s] SharedFileSystem watch ended, restarting...')
+      hccLogger.info('[K8s] SharedFileSystem watch ended, restarting...')
       this.scheduleSharedFileSystemWatchRestart(err ? 5000 : 1000)
     }
 
@@ -4228,7 +4243,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.sfsWatchRestartTimer = null
       if (this.stopped) return
       void this.startSharedFileSystemWatch().catch(error => {
-        console.error('[K8s] SharedFileSystem background watch restart failed:', error)
+        hccLogger.error('[K8s] SharedFileSystem background watch restart failed:', { err: error })
         this.scheduleSharedFileSystemWatchRestart(5000)
       })
     }, delayMs)
@@ -4243,7 +4258,7 @@ export class McpServerWatcher implements McpServerProvider {
   private async startGlobalFileSystemWatch(): Promise<void> {
     const namespace = gfsDefaultFactoryConfig().gfsNamespace
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${namespace}/${PLURAL_GLOBALFILESYSTEMS}`
-    console.log(`[K8s] Starting GlobalFileSystem watch`)
+    hccLogger.info(`[K8s] Starting GlobalFileSystem watch`)
 
     const watchCallback = async (
       type: string,
@@ -4260,7 +4275,7 @@ export class McpServerWatcher implements McpServerProvider {
         spec: apiObj.spec,
         status: apiObj.status,
       }
-      console.log(`[K8s] GlobalFileSystem watch event: ${type} for ${gfs.name}`)
+      hccLogger.info(`[K8s] GlobalFileSystem watch event: ${type} for ${gfs.name}`)
       if (type === 'ADDED' || type === 'MODIFIED') {
         this.globalFileSystems.set(gfs.name, gfs)
       } else if (type === 'DELETED') {
@@ -4275,7 +4290,9 @@ export class McpServerWatcher implements McpServerProvider {
             await this.gfsReconciler.reconcileDelete(gfs)
           }
         } catch (error) {
-          console.error(`[K8s] GlobalFileSystem reconciliation failed for ${gfs.name}:`, error)
+          hccLogger.error(`[K8s] GlobalFileSystem reconciliation failed for ${gfs.name}:`, {
+            err: error,
+          })
         }
       })
     }
@@ -4284,9 +4301,9 @@ export class McpServerWatcher implements McpServerProvider {
       if (this.stopped) return
       this.gfsWatchRequest = null
       if (err) {
-        console.error('[K8s] GlobalFileSystem watch error:', err)
+        hccLogger.error('[K8s] GlobalFileSystem watch error:', { err })
       }
-      console.log('[K8s] GlobalFileSystem watch ended, restarting...')
+      hccLogger.info('[K8s] GlobalFileSystem watch ended, restarting...')
       this.scheduleGlobalFileSystemWatchRestart(err ? 5000 : 1000)
     }
 
@@ -4299,7 +4316,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.gfsWatchRestartTimer = null
       if (this.stopped) return
       void this.startGlobalFileSystemWatch().catch(error => {
-        console.error('[K8s] GlobalFileSystem background watch restart failed:', error)
+        hccLogger.error('[K8s] GlobalFileSystem background watch restart failed:', { err: error })
         this.scheduleGlobalFileSystemWatchRestart(5000)
       })
     }, delayMs)
@@ -4330,7 +4347,7 @@ export class McpServerWatcher implements McpServerProvider {
         },
       }
 
-      console.log(`[K8s] CommunicationChannel watch event: ${type} for ${cc.name}`)
+      hccLogger.info(`[K8s] CommunicationChannel watch event: ${type} for ${cc.name}`)
 
       // Track the previous hostRef to handle MODIFIED-with-hostRef-change
       // (R5 in the spec): both old and new Hosts must be re-reconciled.
@@ -4376,9 +4393,9 @@ export class McpServerWatcher implements McpServerProvider {
         try {
           await this.hostReconciler.patchChannelReaderRevisionAnnotation(hostRef)
         } catch (err) {
-          console.error(
+          hccLogger.error(
             `[K8s] channel-reader revision patch after CC change failed for "${hostRef}":`,
-            err
+            { err }
           )
           needsFleetRetry = true
         }
@@ -4428,7 +4445,7 @@ export class McpServerWatcher implements McpServerProvider {
     watchGeneration: number
   ): Promise<void> {
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.channelsNamespace}/${PLURAL_COMMUNICATIONCHANNELS}`
-    console.log(`[K8s] Starting CommunicationChannel watch`)
+    hccLogger.info(`[K8s] Starting CommunicationChannel watch`)
 
     let watchEnded = false
     const applyWatchEvent = this.getCommunicationChannelWatchCallback()
@@ -4450,7 +4467,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.ccCacheSynced = false
       const lifecycleGeneration = this.beginCommunicationChannelLifecycleTransition()
       if (err) {
-        console.error('[K8s] CommunicationChannel watch error:', err)
+        hccLogger.error('[K8s] CommunicationChannel watch error:', { err })
       }
       hccLogger.info(
         '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery'
@@ -4539,7 +4556,7 @@ export class McpServerWatcher implements McpServerProvider {
         this.runGfsResyncCore(gfses, cacheRevisionAtListStart)
       )
     } catch (err) {
-      console.error(
+      hccLogger.error(
         `[K8s] GlobalFileSystem periodic resync failed: ${
           err instanceof Error ? err.message : String(err)
         }`
@@ -4565,7 +4582,7 @@ export class McpServerWatcher implements McpServerProvider {
       }
       await this.gfsReconciler.fullReconcile(reconcileInventory)
     } catch (err) {
-      console.error(
+      hccLogger.error(
         `[K8s] GlobalFileSystem periodic resync failed: ${
           err instanceof Error ? err.message : String(err)
         }`
@@ -4586,7 +4603,7 @@ export class McpServerWatcher implements McpServerProvider {
         this.runSfsResyncCore(sfses, cacheRevisionAtListStart)
       )
     } catch (error) {
-      console.error('[K8s] Periodic SharedFileSystem resync failed:', error)
+      hccLogger.error('[K8s] Periodic SharedFileSystem resync failed:', { err: error })
     }
   }
 
@@ -4635,7 +4652,7 @@ export class McpServerWatcher implements McpServerProvider {
         }
       }
     } catch (error) {
-      console.error('[K8s] Periodic SharedFileSystem resync failed:', error)
+      hccLogger.error('[K8s] Periodic SharedFileSystem resync failed:', { err: error })
     }
   }
 
@@ -4659,7 +4676,7 @@ export class McpServerWatcher implements McpServerProvider {
         status: apiObj.status,
       }
 
-      console.log(`[K8s] McpServer watch event: ${type} for ${server.name}`)
+      hccLogger.info(`[K8s] McpServer watch event: ${type} for ${server.name}`)
 
       const previous = this.servers.get(server.name)
 
@@ -4790,9 +4807,9 @@ export class McpServerWatcher implements McpServerProvider {
             (!retry || this.hasMcpServerInventoryAuthority(watchGeneration)),
         })
       } catch (error) {
-        console.error(
+        hccLogger.error(
           `[K8s] External egress reconciliation failed for ${server.name}; runtime reconciliation blocked:`,
-          error
+          { err: error }
         )
         this.scheduleExternalEgressRetry(type, server)
         this.changeCallback?.()
@@ -4810,9 +4827,9 @@ export class McpServerWatcher implements McpServerProvider {
             (!retry || this.hasMcpServerInventoryAuthority(watchGeneration)),
         })
       } catch (error) {
-        console.error(
+        hccLogger.error(
           `[K8s] External egress reconciliation failed for ${server.name}; runtime reconciliation blocked:`,
-          error
+          { err: error }
         )
         this.scheduleExternalEgressRetry(type, server)
         this.changeCallback?.()
@@ -4842,7 +4859,7 @@ export class McpServerWatcher implements McpServerProvider {
         await this.reconciler.reconcileDelete(server.name, server.namespace)
       }
     } catch (error) {
-      console.error(`[K8s] Reconciliation failed for ${server.name}:`, error)
+      hccLogger.error(`[K8s] Reconciliation failed for ${server.name}:`, { err: error })
       this.scheduleExternalEgressRetry(type, server)
       this.changeCallback?.()
       return
@@ -4882,7 +4899,9 @@ export class McpServerWatcher implements McpServerProvider {
         await this.bindingReconciler.cleanupBindings(recipeName, { deleteAllowed })
       }
     } catch (error) {
-      console.error(`[K8s] Binding/egress reconciliation failed for ${server.name}:`, error)
+      hccLogger.error(`[K8s] Binding/egress reconciliation failed for ${server.name}:`, {
+        err: error,
+      })
       this.scheduleExternalEgressRetry(type, server)
       this.changeCallback?.()
       return
@@ -4895,7 +4914,7 @@ export class McpServerWatcher implements McpServerProvider {
   private async startMcpServerWatch(resourceVersion: string): Promise<number> {
     this.requireInventoryResourceVersion('McpServer', resourceVersion)
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.namespace}/${PLURAL_MCPSERVERS}`
-    console.log(`[K8s] Starting McpServer watch`)
+    hccLogger.info(`[K8s] Starting McpServer watch`)
     const watchGeneration = ++this.mcpWatchGeneration
     if (this.mcpWatchRequest) {
       this.mcpWatchRequest.abort()
@@ -4911,9 +4930,9 @@ export class McpServerWatcher implements McpServerProvider {
       if (this.stopped || watchGeneration !== this.mcpWatchGeneration) return
       if (!this.retireMcpServerWatch(watchGeneration)) return
       if (err) {
-        console.error('[K8s] McpServer watch error:', err)
+        hccLogger.error('[K8s] McpServer watch error:', { err })
       }
-      console.log('[K8s] McpServer watch ended; recovering authoritative inventory...')
+      hccLogger.info('[K8s] McpServer watch ended; recovering authoritative inventory...')
       this.attemptMcpServerCacheRecovery()
     }
 
@@ -5007,7 +5026,7 @@ export class McpServerWatcher implements McpServerProvider {
         status: apiObj.status,
       }
 
-      console.log(`[K8s] LlmHook watch event: ${type} for ${hook.name}`)
+      hccLogger.info(`[K8s] LlmHook watch event: ${type} for ${hook.name}`)
 
       // Compute the pod key the CR had BEFORE this event so an image bump can
       // chain teardown of the old pod key with ensure of the new one (§4), and
@@ -5028,7 +5047,7 @@ export class McpServerWatcher implements McpServerProvider {
           await this.llmHookReconciler.reconcileDelete(hook.name, previousPodKey)
         }
       } catch (error) {
-        console.error(`[K8s] LlmHook reconciliation failed for ${hook.name}:`, error)
+        hccLogger.error(`[K8s] LlmHook reconciliation failed for ${hook.name}:`, { err: error })
       }
     }
   }
@@ -5038,16 +5057,16 @@ export class McpServerWatcher implements McpServerProvider {
    */
   private async startLlmHookWatch(): Promise<void> {
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.llmHooksNamespace}/${PLURAL_LLMHOOKS}`
-    console.log(`[K8s] Starting LlmHook watch`)
+    hccLogger.info(`[K8s] Starting LlmHook watch`)
 
     const watchCallback = this.getLlmHookWatchCallback()
 
     const doneCallback = (err: Error | null) => {
       if (this.stopped) return
       if (err) {
-        console.error('[K8s] LlmHook watch error:', err)
+        hccLogger.error('[K8s] LlmHook watch error:', { err })
       }
-      console.log('[K8s] LlmHook watch ended, restarting...')
+      hccLogger.info('[K8s] LlmHook watch ended, restarting...')
       setTimeout(() => this.startLlmHookWatch(), err ? 5000 : 1000)
     }
 
@@ -5060,7 +5079,7 @@ export class McpServerWatcher implements McpServerProvider {
     try {
       await this.llmHookReconciler.fullReconcile([...this.llmHooks.values()])
     } catch (error) {
-      console.error('[K8s] LlmHook periodic resync failed:', error)
+      hccLogger.error('[K8s] LlmHook periodic resync failed:', { err: error })
     }
   }
 
@@ -5070,7 +5089,7 @@ export class McpServerWatcher implements McpServerProvider {
   private async startContextWatch(resourceVersion: string): Promise<number> {
     this.requireInventoryResourceVersion('Context', resourceVersion)
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.namespace}/${PLURAL_CONTEXTS}`
-    console.log(`[K8s] Starting Context watch`)
+    hccLogger.info(`[K8s] Starting Context watch`)
     const watchGeneration = ++this.contextWatchGeneration
     if (this.ctxWatchRequest) {
       this.ctxWatchRequest.abort()
@@ -5100,7 +5119,7 @@ export class McpServerWatcher implements McpServerProvider {
         spec: apiObj.spec,
       }
 
-      console.log(`[K8s] Context watch event: ${type} for ${context.name}`)
+      hccLogger.info(`[K8s] Context watch event: ${type} for ${context.name}`)
 
       // Capture the previous spec before mutating the cache so we can
       // re-reconcile any SFS that *was* referenced but is no longer.
@@ -5244,7 +5263,7 @@ export class McpServerWatcher implements McpServerProvider {
               if (this.netPolReconciler.hasCertifiedSafetyInventory()) {
                 this.recordNetworkPolicySafetyCertificate(deltaSafetyCertificate)
               } else {
-                console.warn(
+                hccLogger.warn(
                   `[K8s] Not certifying the scoped delta for context "${context.spec.contextId}": the last authoritative safety pass ended without certifying its namespace-wide inventory`
                 )
               }
@@ -5279,9 +5298,9 @@ export class McpServerWatcher implements McpServerProvider {
         try {
           await this.reconcileHostsReferencingContext(context.name, contextInventoryAuthoritative)
         } catch (error) {
-          console.error(
+          hccLogger.error(
             `[K8s] Host re-reconcile after Context "${context.name}" change failed:`,
-            error
+            { err: error }
           )
         }
       })
@@ -5293,9 +5312,9 @@ export class McpServerWatcher implements McpServerProvider {
       if (this.stopped || watchGeneration !== this.contextWatchGeneration) return
       if (!this.retireContextWatch(watchGeneration)) return
       if (err) {
-        console.error('[K8s] Context watch error:', err)
+        hccLogger.error('[K8s] Context watch error:', { err })
       }
-      console.log('[K8s] Context watch ended; recovering authoritative inventory...')
+      hccLogger.info('[K8s] Context watch ended; recovering authoritative inventory...')
       this.attemptContextCacheRecovery()
     }
 
@@ -5326,7 +5345,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.hostWatchRequest.abort()
       this.hostWatchRequest = null
     }
-    console.log(`[K8s] Starting Host watch`)
+    hccLogger.info(`[K8s] Starting Host watch`)
     let watchEnded = false
 
     const watchCallback = async (
@@ -5356,7 +5375,7 @@ export class McpServerWatcher implements McpServerProvider {
         status: apiObj.status,
       }
 
-      console.log(`[K8s] Host watch event: ${type} for ${host.name}`)
+      hccLogger.info(`[K8s] Host watch event: ${type} for ${host.name}`)
 
       if (type !== 'ADDED' && type !== 'MODIFIED' && type !== 'DELETED') return
       const eventType: HostWatchEventType = type
@@ -5388,7 +5407,7 @@ export class McpServerWatcher implements McpServerProvider {
         await this.reconcileHostWatchEvent(eventType, host, eventRevision)
         this.completeHostWatchEvent(host.name, eventRevision)
       } catch (error) {
-        console.error(`[K8s] Host reconciliation failed for ${host.name}:`, error)
+        hccLogger.error(`[K8s] Host reconciliation failed for ${host.name}:`, { err: error })
         this.scheduleHostWatchReconcileRetry(eventType, host, eventRevision)
       }
 
@@ -5403,9 +5422,9 @@ export class McpServerWatcher implements McpServerProvider {
         try {
           await this.llmHookReconciler.reconcileNetworkPoliciesForHooks([...affectedHookIds])
         } catch (error) {
-          console.error(
+          hccLogger.error(
             `[K8s] LlmHook NetworkPolicy fan-out after Host "${host.name}" change failed:`,
-            error
+            { err: error }
           )
         }
       }
@@ -5418,7 +5437,9 @@ export class McpServerWatcher implements McpServerProvider {
         try {
           await this.llmHookReconciler.reconcileHostEgress(host)
         } catch (error) {
-          console.error(`[K8s] Host egress-to-hooks reconcile for "${host.name}" failed:`, error)
+          hccLogger.error(`[K8s] Host egress-to-hooks reconcile for "${host.name}" failed:`, {
+            err: error,
+          })
         }
       }
     }
@@ -5431,9 +5452,9 @@ export class McpServerWatcher implements McpServerProvider {
       this.hostWatchGeneration += 1
       this.clearAllHostWatchRetries()
       if (err) {
-        console.error('[K8s] Host watch error:', err)
+        hccLogger.error('[K8s] Host watch error:', { err })
       }
-      console.log('[K8s] Host watch ended; rebuilding the Host snapshot before watch recovery')
+      hccLogger.info('[K8s] Host watch ended; rebuilding the Host snapshot before watch recovery')
       this.attemptHostCacheRecovery()
     }
 
@@ -5525,37 +5546,37 @@ export class McpServerWatcher implements McpServerProvider {
     this.initialConvergenceRetryTimers.clear()
     this.initialConvergenceRetryAttempts.clear()
     if (this.mcpWatchRequest) {
-      console.log('[K8s] Stopping McpServer watch')
+      hccLogger.info('[K8s] Stopping McpServer watch')
       this.mcpWatchRequest.abort()
       this.mcpWatchRequest = null
     }
     if (this.ctxWatchRequest) {
-      console.log('[K8s] Stopping Context watch')
+      hccLogger.info('[K8s] Stopping Context watch')
       this.ctxWatchRequest.abort()
       this.ctxWatchRequest = null
     }
     if (this.hostWatchRequest) {
-      console.log('[K8s] Stopping Host watch')
+      hccLogger.info('[K8s] Stopping Host watch')
       this.hostWatchRequest.abort()
       this.hostWatchRequest = null
     }
     if (this.sfsWatchRequest) {
-      console.log('[K8s] Stopping SharedFileSystem watch')
+      hccLogger.info('[K8s] Stopping SharedFileSystem watch')
       this.sfsWatchRequest.abort()
       this.sfsWatchRequest = null
     }
     if (this.gfsWatchRequest) {
-      console.log('[K8s] Stopping GlobalFileSystem watch')
+      hccLogger.info('[K8s] Stopping GlobalFileSystem watch')
       this.gfsWatchRequest.abort()
       this.gfsWatchRequest = null
     }
     if (this.ccWatchRequest) {
-      console.log('[K8s] Stopping CommunicationChannel watch')
+      hccLogger.info('[K8s] Stopping CommunicationChannel watch')
       this.ccWatchRequest.abort()
       this.ccWatchRequest = null
     }
     if (this.llmHookWatchRequest) {
-      console.log('[K8s] Stopping LlmHook watch')
+      hccLogger.info('[K8s] Stopping LlmHook watch')
       this.llmHookWatchRequest.abort()
       this.llmHookWatchRequest = null
     }
@@ -5612,7 +5633,7 @@ export class DevMcpServerProvider implements McpServerProvider {
     if (context) {
       // Production-like behaviour: filter by the Context's mcpServers list
       const allowedNames = new Set(context.spec.mcpServers)
-      console.log(
+      hccLogger.info(
         `[Dev] Context "${contextRef}" allows servers: [${context.spec.mcpServers.join(', ')}]`
       )
 
@@ -5621,7 +5642,7 @@ export class DevMcpServerProvider implements McpServerProvider {
         .map(s => this.toServerInfo(s))
     }
 
-    console.warn(`[Dev] Context "${contextRef}" not found — returning no servers`)
+    hccLogger.warn(`[Dev] Context "${contextRef}" not found — returning no servers`)
     return []
   }
 
@@ -5631,7 +5652,7 @@ export class DevMcpServerProvider implements McpServerProvider {
 
   async start(): Promise<void> {
     // Load MCP servers
-    console.log(`[Dev] Loading MCP servers from CLERUM_MCP_SERVERS`)
+    hccLogger.info(`[Dev] Loading MCP servers from CLERUM_MCP_SERVERS`)
 
     for (const server of config.devMcpServers) {
       const serverWithNamespace: McpServerCRD = {
@@ -5639,28 +5660,28 @@ export class DevMcpServerProvider implements McpServerProvider {
         namespace: server.namespace || 'dev',
       }
       this.servers.set(server.name, serverWithNamespace)
-      console.log(`[Dev] Loaded server: ${server.name}`)
+      hccLogger.info(`[Dev] Loaded server: ${server.name}`)
     }
 
-    console.log(`[Dev] Loaded ${this.servers.size} MCP server(s)`)
+    hccLogger.info(`[Dev] Loaded ${this.servers.size} MCP server(s)`)
 
     // Load contexts
     if (config.devContexts.length > 0) {
-      console.log(`[Dev] Loading Contexts from CLERUM_CONTEXTS`)
+      hccLogger.info(`[Dev] Loading Contexts from CLERUM_CONTEXTS`)
       for (const ctx of config.devContexts) {
         this.contexts.set(ctx.spec.contextId, ctx)
-        console.log(
+        hccLogger.info(
           `[Dev] Loaded context: ${ctx.name} → mcpServers=[${ctx.spec.mcpServers.join(', ')}]`
         )
       }
-      console.log(`[Dev] Loaded ${this.contexts.size} Context(s)`)
+      hccLogger.info(`[Dev] Loaded ${this.contexts.size} Context(s)`)
     } else {
-      console.log(`[Dev] No CLERUM_CONTEXTS set — every context will resolve to no servers`)
+      hccLogger.info(`[Dev] No CLERUM_CONTEXTS set — every context will resolve to no servers`)
     }
   }
 
   async stop(): Promise<void> {
-    console.log('[Dev] Stopping dev provider')
+    hccLogger.info('[Dev] Stopping dev provider')
   }
 
   /** Add a server dynamically (useful for testing). */
@@ -5693,10 +5714,10 @@ export class DevMcpServerProvider implements McpServerProvider {
  */
 export function createMcpServerProvider(): McpServerProvider {
   if (config.devMode) {
-    console.log('[Provider] Creating dev mode provider')
+    hccLogger.info('[Provider] Creating dev mode provider')
     return new DevMcpServerProvider()
   } else {
-    console.log('[Provider] Creating K8s watcher provider (with reconciler)')
+    hccLogger.info('[Provider] Creating K8s watcher provider (with reconciler)')
     return new McpServerWatcher()
   }
 }

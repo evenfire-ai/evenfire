@@ -36,6 +36,22 @@ function deferred<T = void>(): {
   return { promise, resolve, reject }
 }
 
+type LoggedLine = {
+  level?: string
+  svc?: string
+  msg?: string
+  err?: { name?: string; message?: string }
+  [field: string]: unknown
+}
+
+/** Parse the structured hccLogger lines a console spy received (one JSON object per call). */
+function loggedLines(spy: { mock: { calls: unknown[][] } }): LoggedLine[] {
+  return spy.mock.calls
+    .map(call => call[0])
+    .filter((line): line is string => typeof line === 'string' && line.startsWith('{'))
+    .map(line => JSON.parse(line) as LoggedLine)
+}
+
 async function flushMicrotasks(turns = 8): Promise<void> {
   for (let turn = 0; turn < turns; turn += 1) {
     await Promise.resolve()
@@ -1273,8 +1289,11 @@ describe('McpServerWatcher startup', () => {
       expect(hostReconciler.reconcile).not.toHaveBeenCalled()
       expect(hostReconciler.patchChannelReaderRevisionAnnotation).not.toHaveBeenCalled()
       expect(hostReconciler.reconcileChannelReaderRevision).not.toHaveBeenCalled()
-      expect(warnSpy).toHaveBeenCalledWith(
-        '[K8s] Deferring CommunicationChannel Secret "channels/bootstrap-channel-secret" Host convergence; CommunicationChannel cache is not authoritative'
+      expect(loggedLines(warnSpy)).toContainEqual(
+        expect.objectContaining({
+          level: 'warn',
+          msg: '[K8s] Deferring CommunicationChannel Secret "channels/bootstrap-channel-secret" Host convergence; CommunicationChannel cache is not authoritative',
+        })
       )
       expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
     } finally {
@@ -1428,9 +1447,12 @@ describe('McpServerWatcher startup', () => {
       try {
         await expect(watcher.start()).resolves.toBeUndefined()
 
-        expect(errorSpy).toHaveBeenCalledWith(
-          `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
-          expect.objectContaining({ message: `${failingPlural} inventory unavailable` })
+        expect(loggedLines(errorSpy)).toContainEqual(
+          expect.objectContaining({
+            level: 'error',
+            msg: `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
+            err: { name: 'Error', message: `${failingPlural} inventory unavailable` },
+          })
         )
         expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
         expect((watcher as any)[recoveryTimerField]).not.toBeNull()
@@ -1466,9 +1488,12 @@ describe('McpServerWatcher startup', () => {
       try {
         await expect(watcher.start()).resolves.toBeUndefined()
 
-        expect(errorSpy).toHaveBeenCalledWith(
-          `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
-          expect.objectContaining({ message: `${kind} snapshot missing resourceVersion` })
+        expect(loggedLines(errorSpy)).toContainEqual(
+          expect.objectContaining({
+            level: 'error',
+            msg: `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
+            err: { name: 'Error', message: `${kind} snapshot missing resourceVersion` },
+          })
         )
         expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
         expect((watcher as any)[recoveryTimerField]).not.toBeNull()
@@ -6080,9 +6105,12 @@ describe('McpServerWatcher startup', () => {
       await expect(watcher.start()).resolves.toBeUndefined()
       await vi.advanceTimersByTimeAsync(0)
 
-      expect(errorSpy).toHaveBeenCalledWith(
-        `[K8s] ${kind} background watch failed to start:`,
-        failure
+      expect(loggedLines(errorSpy)).toContainEqual(
+        expect.objectContaining({
+          level: 'error',
+          msg: `[K8s] ${kind} background watch failed to start:`,
+          err: { name: 'Error', message: failure.message },
+        })
       )
       expect(rejectedWatch).toHaveBeenCalledOnce()
       expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
@@ -6290,6 +6318,51 @@ describe('McpServerWatcher startup', () => {
     watcher.stop()
     errorSpy.mockRestore()
     warnSpy.mockRestore()
+  })
+})
+
+describe('k8sClient.ts logs through the service logger (repository logging standard)', () => {
+  it('prints the Host inventory LIST and its failure as structured JSON lines', async () => {
+    const failure = Object.assign(new Error('hosts LIST rejected by the apiserver'), {
+      name: 'HostListRejected',
+    })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'hosts') throw failure
+      return { items: [] }
+    })
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      await expect(listAllHosts()).rejects.toBe(failure)
+
+      // Every line the call printed is one JSON object.
+      const printed = [...logSpy.mock.calls, ...errorSpy.mock.calls].map(call => call[0])
+      expect(printed.length).toBeGreaterThan(0)
+      for (const line of printed) {
+        expect(typeof line).toBe('string')
+        expect(() => JSON.parse(line as string)).not.toThrow()
+      }
+      expect(loggedLines(logSpy)).toContainEqual(
+        expect.objectContaining({
+          level: 'info',
+          svc: 'host-context-controller',
+          msg: '[K8s] Listing all Hosts in namespace mcp-host',
+        })
+      )
+      const failureLines = loggedLines(errorSpy).filter(
+        line => line.msg === '[K8s] Failed to list Hosts:'
+      )
+      expect(failureLines).toHaveLength(1)
+      expect(failureLines[0]).toMatchObject({ level: 'error', svc: 'host-context-controller' })
+      expect(failureLines[0].err).toEqual({
+        name: 'HostListRejected',
+        message: 'hosts LIST rejected by the apiserver',
+      })
+    } finally {
+      logSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
   })
 })
 
@@ -7596,10 +7669,14 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
     await expect(watcher.start()).resolves.toBeUndefined()
     expect(ccWatchSpy).toHaveBeenCalledTimes(1)
     expect(watcher.isCommunicationChannelCacheSynced()).toBe(false)
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
-        '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
-      expect.any(Error)
+    expect(loggedLines(errorSpy)).toContainEqual(
+      expect.objectContaining({
+        level: 'error',
+        msg:
+          '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
+          '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
+        err: { name: 'Error', message: 'CC list failed' },
+      })
     )
 
     errorSpy.mockRestore()
@@ -7828,9 +7905,12 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       await vi.advanceTimersByTimeAsync(1)
       expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2)
 
-      expect(errorSpy).toHaveBeenCalledWith(
-        '[K8s] Host reconciliation after CommunicationChannel watch interruption failed:',
-        fleetFailure
+      expect(loggedLines(errorSpy)).toContainEqual(
+        expect.objectContaining({
+          level: 'error',
+          msg: '[K8s] Host reconciliation after CommunicationChannel watch interruption failed:',
+          err: { name: 'Error', message: fleetFailure.message },
+        })
       )
       await vi.advanceTimersByTimeAsync(300000)
       expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2)
@@ -9775,9 +9855,12 @@ describe('McpServerWatcher Host watch generation', () => {
     expect(mocks.watch).not.toHaveBeenCalled()
     expect((watcher as any).hostCacheSynced).toBe(false)
     expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[K8s] Host reconciliation after Periodic resync failed:',
-      expect.objectContaining({ message: 'Host snapshot missing resourceVersion' })
+    expect(loggedLines(errorSpy)).toContainEqual(
+      expect.objectContaining({
+        level: 'error',
+        msg: '[K8s] Host reconciliation after Periodic resync failed:',
+        err: { name: 'Error', message: 'Host snapshot missing resourceVersion' },
+      })
     )
 
     errorSpy.mockRestore()

@@ -97,13 +97,17 @@ recovery_cycle_used_fresh_host_inventory() {
     inside && listed && recovered && index($0, host_inventory) > 0 {
       completion_mode = "host"
     }
+    # The HCC k8sClient prints these lines through hccLogger, one JSON object
+    # per line; the closing quote of the msg field pins the end of the message,
+    # as `$` did for the old plain-text line. (This comment is inside the
+    # single-quoted awk program: it must not contain a single quote.)
     inside && completion_mode == "channel" &&
-      /Completed Host reconciliation after CommunicationChannel recovery$/ {
+      /"msg":"\[K8s\] Completed Host reconciliation after CommunicationChannel recovery"/ {
       succeeded = 1
       exit
     }
     inside && completion_mode == "host" &&
-      /Completed Host reconciliation after Host watch recovery convergence$/ {
+      /"msg":"\[K8s\] Completed Host reconciliation after Host watch recovery convergence"/ {
       succeeded = 1
       exit
     }

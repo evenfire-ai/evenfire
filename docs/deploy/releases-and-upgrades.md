@@ -541,6 +541,10 @@ filter or report on the signals they name.
   `clerum_hcc_initial_convergence_swallowed_total{sink="inventory-changed"}`.
   Before, it was counted as `aborted-authority` / `authority-lost`, which now
   mean only that a watch cache lost authority.
+- **Structured HCC watcher and dev-mode configuration logs.** HCC's watcher and
+  dev-mode configuration lines are now structured JSON lines like the rest of
+  HCC's log; the old text is the `msg` field. Log filters anchored on the start
+  or end of those lines need updating.
 
 ### McpServer CRD: applied credentials record
 
