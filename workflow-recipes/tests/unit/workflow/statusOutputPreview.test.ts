@@ -53,14 +53,25 @@ describe('buildStatusOutputPreview with the length the client reported', () => {
     })
   })
 
-  it('honours a valid hint: truncated with a longer original length', () => {
+  it("records the stored preview length as the limit when the coordinator cut below WRC's limit", () => {
     expect(
       buildStatusOutputPreview('abc', 8, { outputTruncated: true, outputLength: 200_000 })
     ).toEqual({
       output: 'abc',
       outputTruncated: true,
       outputLength: 200_000,
-      outputPreviewMaxChars: 8,
+      outputPreviewMaxChars: 3,
+    })
+  })
+
+  it('keeps an output WRC cut marked as truncated when the hint is valid', () => {
+    expect(
+      buildStatusOutputPreview('abcdef', 3, { outputTruncated: true, outputLength: 6 })
+    ).toEqual({
+      output: 'abc',
+      outputTruncated: true,
+      outputLength: 6,
+      outputPreviewMaxChars: 3,
     })
   })
 

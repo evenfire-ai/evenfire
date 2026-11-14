@@ -29,11 +29,15 @@ export function buildStatusOutputPreview(
       ? reported.outputLength
       : undefined
 
+  const output = localTruncated ? serialized.slice(0, maxChars) : serialized
+  const outputTruncated =
+    localTruncated || (reportedLength !== undefined && reportedLength > localLength)
   return {
-    output: localTruncated ? serialized.slice(0, maxChars) : serialized,
-    outputTruncated:
-      localTruncated || (reportedLength !== undefined && reportedLength > localLength),
+    output,
+    outputTruncated,
     outputLength: reportedLength ?? localLength,
-    outputPreviewMaxChars: maxChars,
+    // The limit that produced this preview: WRC's, or the shorter length the
+    // coordinator already cut the output to.
+    outputPreviewMaxChars: outputTruncated ? output.length : maxChars,
   }
 }

@@ -4,6 +4,7 @@
 import * as k8s from '@kubernetes/client-node'
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import {
+  MAX_REPORTED_OUTPUT_ARTIFACTS,
   MAX_STATUS_TOOL_CALLS,
   extractOutputArtifactsForStatus,
   normalizeArtifactForStatus,
@@ -36,7 +37,6 @@ import { type AuthenticatedRequest, CONTROL_API_ISSUER } from './workflowAuth'
 import { workflowStatusMessage } from './workflowStatusMessage'
 
 const log = createLogger('wrc', 'restEndpoints')
-const MAX_CUSTOM_ARTIFACTS_PER_STEP = 20
 const ARTIFACT_READER_NOT_FOUND_RETRY_DELAYS_MS = [250, 750, 1500, 3000, 5000, 8000]
 const MODEL_INJECTION_REQUEST_SCOPE = 'model_injection_request'
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
@@ -161,17 +161,13 @@ function extractArtifactsFromStepStatus(body: StepStatusUpdate): ArtifactStatus[
 
   artifacts.push(...extractOutputArtifactsForStatus(body.output))
 
-  // A coordinator that cut the output sends the artifacts it declared, which
-  // WRC can no longer parse from the preview.
-  if (Array.isArray(body.outputArtifacts)) {
-    const paths = new Set(artifacts.map(artifact => artifact.path))
-    for (const item of body.outputArtifacts.slice(0, MAX_CUSTOM_ARTIFACTS_PER_STEP)) {
+  // A coordinator that cut the output sends the artifacts the whole output
+  // declared. They are handled like the ones WRC extracts from an uncut output.
+  if (body.outputTruncated === true && Array.isArray(body.outputArtifacts)) {
+    for (const item of body.outputArtifacts.slice(0, MAX_REPORTED_OUTPUT_ARTIFACTS)) {
       if (!isRecord(item)) continue
       const artifact = normalizeArtifactForStatus(item)
-      if (artifact && !paths.has(artifact.path)) {
-        paths.add(artifact.path)
-        artifacts.push(artifact)
-      }
+      if (artifact) artifacts.push(artifact)
     }
   }
   return artifacts
