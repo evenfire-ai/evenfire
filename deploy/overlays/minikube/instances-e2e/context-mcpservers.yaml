@@ -1,5 +1,5 @@
-# Applied only under SEED_PROFILE=e2e, after instances/context.yaml, to re-add
-# the demo MCP servers the E2E suites expect.
+# Initial Context selection under SEED_PROFILE=e2e. Existing Contexts keep their
+# user-managed selection, including any demo connectors the user has removed.
 apiVersion: clerum.io/v1alpha1
 kind: Context
 metadata:

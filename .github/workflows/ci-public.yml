@@ -384,7 +384,9 @@ jobs:
       - name: Collect Context connector persistence E2E without a cluster
         if: matrix.service == 'external-rest-api'
         working-directory: tests/e2e/playwright
-        run: node node_modules/@playwright/test/cli.js test --config=issue-628.config.ts --list --reporter=list
+        run: |
+          node node_modules/@playwright/test/cli.js test --config=issue-628.config.ts --list --reporter=list
+          ISSUE628_PROFILE_RESTART=true node node_modules/@playwright/test/cli.js test --config=issue-628.config.ts --list --reporter=list
 
       - name: Install Profile UI recovery Chromium
         if: matrix.service == 'external-rest-api'
@@ -1108,6 +1110,9 @@ jobs:
 
       - name: Test GFS provisioning preserves Context connectors
         run: bash scripts/tests/test-provision-gfs-runtime.sh
+
+      - name: Test isolated Context persistence restart guards
+        run: bash scripts/tests/test-issue-628-profile-restart.sh
 
       - name: Audit Context connector persistence E2E
         run: python3 -I -S tools/e2e_static_audit.py tests/e2e/playwright/issue-628/connector-persistence.spec.ts

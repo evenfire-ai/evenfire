@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=lib/bootstrap-instances.sh
+source "$ROOT/deploy/scripts/lib/bootstrap-instances.sh"
 
 usage() {
   cat <<'EOF'
@@ -163,69 +165,6 @@ wait_for_globalfilesystem_ready() {
   die "GlobalFileSystem/gfs did not become Ready before timeout"
 }
 
-apply_instances() {
-  local resources contexts others resource existing
-
-  command -v jq >/dev/null 2>&1 || die "jq is required to preserve existing Context configuration"
-
-  # Render first so Contexts are identified by kind, including multi-document
-  # manifests and Lists. The subsequent create/apply still performs validation.
-  if ! resources="$(kctl create --dry-run=client -f "$INSTANCES_DIR" -o json | jq -s -c '
-    [ .[] | if .kind == "List" then .items[] else . end ]
-    | if length == 0 then error("no instance resources") else . end
-  ')"; then
-    die "cannot render CRD instances from $INSTANCES_DIR"
-  fi
-
-  contexts="$(jq -c '.[] | select(.kind == "Context" and ((.apiVersion // "") | startswith("clerum.io/")))' <<<"$resources")"
-  others="$(jq -c '{apiVersion:"v1", kind:"List", items:[.[] | select((.kind == "Context" and ((.apiVersion // "") | startswith("clerum.io/"))) | not)]}' <<<"$resources")"
-
-  while IFS= read -r resource; do
-    [ -n "$resource" ] || continue
-    if ! existing="$(kctl get -f - --ignore-not-found -o json <<<"$resource")"; then
-      die "cannot inspect an existing Context before applying instances"
-    fi
-    if [ -z "$existing" ]; then
-      # Create is exclusive: an AlreadyExists race fails instead of replacing a
-      # Context that another writer has just configured.
-      kctl create --save-config -f - <<<"$resource"
-      continue
-    fi
-
-    # The bootstrap manifest is not authoritative for an existing Context.
-    # In particular, reapplying its empty mcpServers would erase access set in
-    # Control UI. If another declarative field changes, stop rather than
-    # silently ignoring a migration or overwriting user-managed state.
-    if ! printf '%s\n%s\n' "$existing" "$resource" | jq -s -e '
-      def managed:
-        {apiVersion, kind,
-         metadata: ((.metadata // {}) |
-                    {name, namespace: (.namespace // ""), labels: (.labels // {}),
-                     annotations: ((.annotations // {}) | del(.["kubectl.kubernetes.io/last-applied-configuration"]))}
-                    + (if has("ownerReferences") then {ownerReferences} else {} end)
-                    + (if has("finalizers") then {finalizers} else {} end)),
-         spec: ((.spec // {}) | del(.mcpServers))};
-      def contains_declared($live; $desired):
-        if ($desired | type) == "object" then
-          ($live | type) == "object" and
-          all($desired | keys[]; . as $key |
-            ($live | has($key)) and contains_declared($live[$key]; $desired[$key]))
-        else $live == $desired end;
-      .[0] as $live | .[1] as $desired
-      | ($live.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] // null) as $saved
-      | if $saved == null then contains_declared(($live | managed); ($desired | managed))
-        else (($saved | fromjson | managed) == ($desired | managed)) end
-    ' >/dev/null; then
-      die "existing Context manifest changed or its last-applied configuration is invalid; use an explicit Context migration"
-    fi
-    log "Preserving existing Context configuration"
-  done <<<"$contexts"
-
-  if [ "$(jq '.items | length' <<<"$others")" -gt 0 ]; then
-    kctl apply -f - <<<"$others"
-  fi
-}
-
 finalize_credentials_after_overlay() {
   local out
   if out="$(kctl -n gfs get globalfilesystem gfs -o name 2>&1)"; then
@@ -292,7 +231,7 @@ if [ "$SKIP_INSTANCES" = "1" ]; then
   log "Skipping CRD instances apply and GlobalFileSystem readiness wait (--skip-instances)"
 elif [ -d "$INSTANCES_DIR" ]; then
   log "Applying CRD instances from $INSTANCES_DIR"
-  apply_instances
+  apply_bootstrap_instances "$CONTEXT" "$INSTANCES_DIR"
 else
   log "No instances directory found at $INSTANCES_DIR"
 fi

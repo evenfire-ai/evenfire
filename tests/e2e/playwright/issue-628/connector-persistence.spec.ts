@@ -11,6 +11,7 @@ const root = realpathSync(path.resolve(__dirname, '../../../..'))
 const profile = process.env.MINIKUBE_PROFILE ?? ''
 const uiUrl = process.env.E2E_CONTROL_UI_URL ?? ''
 const connector = 'issue628-' + randomBytes(6).toString('hex')
+const profileRestart = process.env.ISSUE628_PROFILE_RESTART === 'true'
 
 // The browser credential is not passed to the profile commands. The lease
 // fields are required by the existing mutation wrapper and are never logged.
@@ -30,8 +31,10 @@ for (const key of [
   'T2_PORTS_ENV',
   'T2_LOCK_ROOT',
   'T2_LOCK_TOKEN',
+  'T2_GATE_ID',
   'T2_SKIP_LOCK',
   'T2_MUTATION_LOCK_WRAPPED',
+  'E2E_DISABLE_CANONICAL_DOTENV',
 ]) {
   if (process.env[key] !== undefined) clusterEnv[key] = process.env[key]
 }
@@ -47,11 +50,20 @@ async function run(command: string, args: string[], timeout = 60_000): Promise<s
     })
     return result.stdout
   } catch (error) {
-    const code =
-      (error as { code?: string | number; signal?: string }).code ??
-      (error as { signal?: string }).signal ??
-      'unknown'
-    throw new Error('Profile command failed: ' + String(code))
+    const result = error as {
+      code?: string | number
+      signal?: string
+      stdout?: string
+      stderr?: string
+    }
+    const code = result.code ?? result.signal ?? 'unknown'
+    const phases = (result.stdout ?? '')
+      .split('\n')
+      .filter(line => /^(NODE_IP_(BEFORE|AFTER)=[0-9a-fA-F.:]+|RESTART_PHASE=[a-z-]+)$/.test(line))
+    const reason = (result.stderr ?? '').match(/ISSUE628_RESTART_[A-Z_]+/)?.[0]
+    throw new Error(
+      ['Profile command failed: ' + String(code), reason, ...phases].filter(Boolean).join(' ')
+    )
   }
 }
 
@@ -75,6 +87,8 @@ async function verifyTarget(): Promise<void> {
     process.env.T2_CONTEXT !== profile ||
     process.env.T2_MUTATION_LOCK_WRAPPED !== 'true' ||
     process.env.T2_SKIP_LOCK !== 'true' ||
+    process.env.E2E_DISABLE_CANONICAL_DOTENV !== 'true' ||
+    (profileRestart && process.env.T2_GATE_ID !== 'issue628-profile-restart') ||
     !process.env.TEST_ADMIN_USERNAME ||
     !process.env.TEST_ADMIN_PASSWORD ||
     !process.env.T2_PROJECT_DIR ||
@@ -113,6 +127,14 @@ async function verifyTarget(): Promise<void> {
 
 type Snapshot = { uid: string; servers: string[] }
 type Policy = { namespace: string; name: string; uid: string; spec: unknown }
+type RestartIdentity = {
+  nodes: { name: string; uid: string }[]
+  namespaceUid: string
+  connectorUid: string
+  connectorSpec: unknown
+  marker: Record<string, string>
+  ports: string[]
+}
 
 async function snapshot(): Promise<Snapshot> {
   const context = JSON.parse(
@@ -143,6 +165,69 @@ async function policies(): Promise<Policy[]> {
     .sort((a: Policy, b: Policy) =>
       (a.namespace + '/' + a.name).localeCompare(b.namespace + '/' + b.name)
     )
+}
+
+async function restartIdentity(): Promise<RestartIdentity> {
+  const nodes = JSON.parse(await kube(['get', 'nodes', '-o', 'json']))
+  const namespace = JSON.parse(await kube(['get', 'namespace', 'kube-system', '-o', 'json']))
+  const server = JSON.parse(
+    await kube(['-n', 'mcp-server', 'get', 'mcpservers.clerum.io', connector, '-o', 'json'])
+  )
+  const marker = JSON.parse(
+    await kube([
+      '-n',
+      'control-plane',
+      'get',
+      'configmap',
+      process.env.T2_MARKER_NAME || 'clerum-pre-gate-sync-state',
+      '-o',
+      'json',
+    ])
+  )
+  const summary = await run('/usr/bin/make', [
+    '-f',
+    'scripts/minikube-profiles/branch.mk',
+    'branch-profile-info',
+  ])
+  const identity: RestartIdentity = {
+    nodes: nodes.items
+      .filter(
+        (node: { metadata: { labels?: Record<string, string> } }) =>
+          node.metadata.labels?.['minikube.k8s.io/name'] === profile
+      )
+      .map((node: { metadata: { name: string; uid: string } }) => ({
+        name: node.metadata.name,
+        uid: node.metadata.uid,
+      }))
+      .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name)),
+    namespaceUid: namespace.metadata.uid,
+    connectorUid: server.metadata.uid,
+    connectorSpec: server.spec,
+    marker: Object.fromEntries(
+      ['worktreeId', 'gitHead', 'clusterFingerprint', 'imagesGeneratedAt'].map(key => [
+        key,
+        marker.data?.[key] ?? '',
+      ])
+    ),
+    ports: summary
+      .split('\n')
+      .filter(line => /^  [a-z-]+:\s+\d+\s*$/.test(line))
+      .sort(),
+  }
+  if (
+    !identity.nodes.length ||
+    identity.nodes.some(node => !node.name || !node.uid) ||
+    !identity.namespaceUid ||
+    !identity.connectorUid ||
+    !identity.connectorSpec ||
+    Object.values(identity.marker).some(value => !value) ||
+    !identity.ports.some(line => /^  control-ui:/.test(line))
+  ) {
+    throw new Error('Profile restart identity is incomplete')
+  }
+  const head = (await run('git', ['rev-parse', 'HEAD'])).trim()
+  if (identity.marker.gitHead !== head) throw new Error('Profile marker does not match HEAD')
+  return identity
 }
 
 const probe = [
@@ -274,16 +359,18 @@ test('unauthenticated access does not expose the agent connector inventory', asy
   await expect(page.getByRole('columnheader', { name: 'Connector', exact: true })).toHaveCount(0)
 })
 
-test('Control UI connector survives provisioning and runtime restarts', async ({
-  page,
-  browser,
-}) => {
+const persistenceTestName = profileRestart
+  ? 'Control UI connector survives a full Minikube profile restart'
+  : 'Control UI connector survives provisioning and runtime restarts'
+
+test(persistenceTestName, async ({ page, browser }) => {
   test.setTimeout(3_600_000)
   const original = await snapshot()
   expect(original.uid).toBeTruthy()
   expect(original.servers).not.toContain(connector)
   let created = false
   let creationAttempted = false
+  let profileMayBeUnavailable = false
   let failure: unknown
   try {
     await page.goto('/')
@@ -325,7 +412,7 @@ test('Control UI connector survives provisioning and runtime restarts', async ({
     const assertContext = async () => {
       const current = await snapshot()
       expect(current.uid).toBe(original.uid)
-      expect(current.servers).toEqual(expect.arrayContaining([...original.servers, connector]))
+      expect([...current.servers].sort()).toEqual([...original.servers, connector].sort())
     }
     await assertContext()
     await expect
@@ -375,6 +462,33 @@ test('Control UI connector survives provisioning and runtime restarts', async ({
       await waitForBusinessResult()
     }
 
+    // Exercise the supported full deployment path as well as the GFS helper.
+    // The inherited profile lease and filtered GFS mode keep this scoped to
+    // the isolated profile while the connector remains configured in the UI.
+    await run(
+      'node',
+      [
+        'scripts/minikube/run-with-deadline.mjs',
+        '--timeout-seconds',
+        '1200',
+        '--label',
+        'issue628-deploy-all',
+        '--',
+        'bash',
+        'scripts/minikube/with-t2-mutation-lock.sh',
+        '--',
+        '/usr/bin/make',
+        'minikube-deploy-all',
+        'MINIKUBE_PROFILE=' + profile,
+        'MINIKUBE_REAPPLY_INSTANCES=true',
+        'MINIKUBE_GFS_MUTATION=false',
+      ],
+      1_230_000
+    )
+    await assertContext()
+    expect(await policies()).toEqual(baselinePolicies)
+    await waitForBusinessResult()
+
     for (const [namespace, deployment] of [
       ['control-plane', 'host-context-controller'],
       ['mcp-host', 'chatllm'],
@@ -389,6 +503,42 @@ test('Control UI connector survives provisioning and runtime restarts', async ({
     await assertContext()
     expect(await policies()).toEqual(baselinePolicies)
     await waitForBusinessResult()
+
+    if (profileRestart) {
+      const beforeRestart = await restartIdentity()
+      profileMayBeUnavailable = true
+      const restartLog = await run(
+        'node',
+        [
+          'scripts/minikube/run-with-deadline.mjs',
+          '--timeout-seconds',
+          '1500',
+          '--label',
+          'issue628-profile-restart',
+          '--',
+          'bash',
+          'scripts/e2e/issue-628-profile-restart.sh',
+        ],
+        1_530_000
+      )
+      profileMayBeUnavailable = false
+      test.info().annotations.push({
+        type: 'profile restart',
+        description: restartLog
+          .split('\n')
+          .filter(line => /^(NODE_IP_|RESTART_PHASE=)/.test(line))
+          .join('; '),
+      })
+      await kube(
+        ['wait', '--for=condition=Ready', 'nodes', '--all', '--timeout=300s'],
+        360_000,
+        '330s'
+      )
+      expect(await restartIdentity()).toEqual(beforeRestart)
+      await assertContext()
+      expect(await policies()).toEqual(baselinePolicies)
+      await waitForBusinessResult()
+    }
 
     await onProfile(
       '/usr/bin/make',
@@ -415,7 +565,13 @@ test('Control UI connector survives provisioning and runtime restarts', async ({
         description: 'Connector ' + connector + ' may need removal from the isolated profile',
       })
     }
-    if (created) {
+    if (created && profileMayBeUnavailable) {
+      test.info().annotations.push({
+        type: 'fixture cleanup deferred',
+        description: 'The isolated profile may be unavailable; inspect connector ' + connector,
+      })
+      if (!failure) failure = new Error('Profile availability is unknown after restart')
+    } else if (created) {
       try {
         await deleteFixture(page)
         await expect
@@ -452,8 +608,7 @@ test('Control UI connector survives provisioning and runtime restarts', async ({
           .toBe(true)
         const final = await snapshot()
         expect(final.uid).toBe(original.uid)
-        expect(final.servers).toEqual(expect.arrayContaining(original.servers))
-        expect(final.servers).not.toContain(connector)
+        expect([...final.servers].sort()).toEqual([...original.servers].sort())
       } catch (error) {
         test.info().annotations.push({
           type: 'fixture cleanup failed',

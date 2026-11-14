@@ -407,7 +407,11 @@ minikube-verify-gfs: ## Verify gfs permission-store wiring (Secret DSN populated
 
 .PHONY: minikube-deploy-instances
 minikube-deploy-instances: ## Apply CRD test instances (context, host, channel)
-	$(KC) apply -f deploy/overlays/minikube/instances/
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		bash -c '. deploy/scripts/lib/bootstrap-instances.sh; apply_bootstrap_instances "$$1" "$$2"' -- \
+		"$(MINIKUBE_PROFILE)" deploy/overlays/minikube/instances/
 
 .PHONY: minikube-detect-k8s-api-ip
 minikube-detect-k8s-api-ip: ## Patch overlays/minikube/patches/k8s-api-ip.yaml with current node IP
@@ -473,7 +477,8 @@ minikube-deploy-all-body:
 	@if [ "$(MINIKUBE_REAPPLY_INSTANCES)" = "false" ]; then \
 		echo "[minikube-deploy-all] Preserving existing instance configuration"; \
 	elif [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
-		$(KC) apply -f deploy/overlays/minikube/instances/; \
+		. deploy/scripts/lib/bootstrap-instances.sh; \
+		apply_bootstrap_instances "$(MINIKUBE_PROFILE)" deploy/overlays/minikube/instances/; \
 	else \
 		filtered_manifest="$$(mktemp "$${TMPDIR:-/tmp}/evenfire-gfs-instances-filter.XXXXXX")"; \
 		trap 'rm -f -- "$$filtered_manifest"' EXIT; \
@@ -481,7 +486,8 @@ minikube-deploy-all-body:
 			echo "[minikube-deploy-all] failed to filter the non-GFS instance resources" >&2; exit 1; \
 		fi; \
 		if [ -s "$$filtered_manifest" ]; then \
-			$(KC) apply -f "$$filtered_manifest"; \
+			. deploy/scripts/lib/bootstrap-instances.sh; \
+			apply_bootstrap_instances "$(MINIKUBE_PROFILE)" "$$filtered_manifest"; \
 		else \
 			echo "[minikube-deploy-all] filtered instances contain no non-GFS resources; skipping apply"; \
 		fi; \

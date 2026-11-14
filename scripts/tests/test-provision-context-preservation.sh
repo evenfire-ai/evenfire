@@ -486,3 +486,181 @@ for FAILURE in render read create apply; do
 done
 
 pass 'Context bootstrap preserves UI-owned connector state'
+
+# The same bootstrap policy must serve the Minikube deployment paths. The
+# optional seed replaces the initial Context declaration only when the Context
+# is absent; it must not restore connectors a user removed on an existing one.
+run_shared_bootstrap() {
+  TEST_STATE="$CASE_DIR/state.json" TEST_CALLS="$CASE_DIR/calls.log" \
+    TEST_MUTATIONS="$CASE_DIR/mutations.log" TEST_JQ="$JQ" \
+    TEST_RENDER=stream TEST_FAILURE=none TEST_RACE=none \
+    PATH="$TMP/bin:$PATH" \
+    /bin/bash -c '. "$1"; shift; apply_bootstrap_instances "$@"' -- \
+    "$ROOT/deploy/scripts/lib/bootstrap-instances.sh" "$TEST_CONTEXT" \
+    "$CASE_DIR/overlay/instances" "$@" >"$CASE_DIR/output.log" 2>&1
+}
+
+make_seed() {
+  mkdir -p "$CASE_DIR/seed"
+  "$JQ" '.spec.mcpServers = ["demo-one", "demo-two"]' \
+    "$CASE_DIR/overlay/instances/01-context.json" >"$CASE_DIR/seed/context.json"
+  cat >"$CASE_DIR/seed/server.json" <<'JSON'
+{"apiVersion":"clerum.io/v1alpha1","kind":"McpServer","metadata":{"name":"demo-one","namespace":"mcp-server"},"spec":{"enabled":true}}
+JSON
+}
+
+init_case shared-existing-seed
+make_seed
+if ! run_shared_bootstrap "$CASE_DIR/seed"; then
+  cat "$CASE_DIR/output.log" >&2
+  fail 'shared bootstrap failed with an existing Context and seed'
+fi
+assert_state
+"$JQ" -e 'any(.[]; .kind == "McpServer" and .metadata.name == "demo-one")' \
+  "$CASE_DIR/state.json" >/dev/null || fail 'seed non-Context resource was not applied'
+pass 'shared bootstrap preserves an existing Context while applying seed resources'
+
+init_case shared-new-seed
+make_seed
+"$JQ" 'map(select(.kind != "Context" or .metadata.name != "context1"))' \
+  "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+if ! run_shared_bootstrap "$CASE_DIR/seed"; then
+  cat "$CASE_DIR/output.log" >&2
+  fail 'shared bootstrap failed with a new Context and seed'
+fi
+"$JQ" -e 'any(.[]; .kind == "Context" and .metadata.name == "context1" and
+  .spec.mcpServers == ["demo-one", "demo-two"])' "$CASE_DIR/state.json" >/dev/null ||
+  fail 'new Context did not receive the seed connector selection'
+pass 'shared bootstrap selects seed connectors for a new Context'
+
+init_case shared-new-minimal
+"$JQ" 'map(select(.kind != "Context" or .metadata.name != "context1"))' \
+  "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+if ! run_shared_bootstrap; then
+  cat "$CASE_DIR/output.log" >&2
+  fail 'shared bootstrap failed with a new minimal Context'
+fi
+"$JQ" -e 'any(.[]; .kind == "Context" and .metadata.name == "context1" and
+  .spec.mcpServers == [])' "$CASE_DIR/state.json" >/dev/null ||
+  fail 'new minimal Context did not receive the empty bootstrap selection'
+pass 'shared bootstrap selects minimal connectors for a new Context'
+
+init_case shared-validate-before-create
+mv "$CASE_DIR/overlay/instances/01-context.json" "$CASE_DIR/overlay/instances/99-context.json"
+"$JQ" '.spec.description = "changed bootstrap description"' \
+  "$CASE_DIR/overlay/instances/99-context.json" >"$CASE_DIR/context.next"
+mv "$CASE_DIR/context.next" "$CASE_DIR/overlay/instances/99-context.json"
+cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
+if run_shared_bootstrap; then
+  fail 'shared bootstrap accepted declarative Context drift'
+fi
+cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" ||
+  fail 'shared bootstrap created a missing Context before validating existing Contexts'
+pass 'shared bootstrap validates existing Contexts before creating missing ones'
+
+init_case shared-ambiguous-seed
+make_seed
+cp "$CASE_DIR/seed/context.json" "$CASE_DIR/seed/duplicate.json"
+cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
+if run_shared_bootstrap "$CASE_DIR/seed"; then
+  fail 'shared bootstrap accepted ambiguous seed Contexts'
+fi
+cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" ||
+  fail 'ambiguous seed mutated instances before failing'
+pass 'shared bootstrap rejects ambiguous seed Contexts before mutation'
+
+init_case shared-ambiguous-base
+cp "$CASE_DIR/overlay/instances/01-context.json" "$CASE_DIR/overlay/instances/duplicate.json"
+cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
+if run_shared_bootstrap; then
+  fail 'shared bootstrap accepted ambiguous base Contexts'
+fi
+cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" ||
+  fail 'ambiguous base mutated instances before failing'
+pass 'shared bootstrap rejects ambiguous base Contexts before mutation'
+
+init_case shared-missing-jq
+if PATH="$TMP/bin" /bin/bash -c '. "$1"; apply_bootstrap_instances "$2" "$3"' -- \
+  "$ROOT/deploy/scripts/lib/bootstrap-instances.sh" "$TEST_CONTEXT" \
+  "$CASE_DIR/overlay/instances" >"$CASE_DIR/output.log" 2>&1; then
+  fail 'shared bootstrap accepted a missing jq'
+fi
+grep -Fq 'jq is required' "$CASE_DIR/output.log" || fail 'missing jq did not report the prerequisite'
+[[ ! -s "$CASE_DIR/calls.log" ]] || fail 'missing jq reached kubectl'
+pass 'shared bootstrap rejects a missing jq before any Kubernetes operation'
+
+init_case shared-classification-failure
+cat >"$TMP/bin/jq" <<'STUB'
+#!/bin/bash
+case "$*" in
+  *'.items | length'*) exit 1 ;;
+  *) exec "$TEST_JQ" "$@" ;;
+esac
+STUB
+chmod +x "$TMP/bin/jq"
+cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
+if run_shared_bootstrap; then
+  fail 'shared bootstrap accepted an instance classification failure'
+fi
+grep -Fq 'cannot classify instance declarations' "$CASE_DIR/output.log" ||
+  fail 'classification failure was not reported'
+cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" ||
+  fail 'classification failure mutated instances'
+rm -- "$TMP/bin/jq"
+pass 'shared bootstrap fails before mutation if instance classification fails'
+
+# Exercise the actual Make target with an isolated lease wrapper and kubectl
+# fixture. The wrapper verifies the target passes its identity to the lease;
+# the lease implementation itself is covered by the Minikube contract tests.
+run_make_instances() {
+  local repo="$CASE_DIR/repo"
+  mkdir -p "$repo/scripts/minikube" "$repo/deploy/scripts/lib" \
+    "$repo/deploy/overlays/minikube/instances"
+  cp "${CONTEXT_TEST_MAKEFILE:-$ROOT/Makefile}" "$repo/Makefile"
+  cp "$ROOT/deploy/scripts/lib/bootstrap-instances.sh" "$repo/deploy/scripts/lib/"
+  cp "$CASE_DIR/overlay/instances/"*.json "$repo/deploy/overlays/minikube/instances/"
+  cat >"$repo/scripts/minikube/with-t2-mutation-lock.sh" <<'STUB'
+#!/bin/bash
+set -euo pipefail
+[ "$T2_PROJECT_DIR" = "$PWD" ]
+[ "$T2_PROFILE" = "$TEST_CONTEXT" ]
+[ "$T2_CONTEXT" = "$TEST_CONTEXT" ]
+[ "$1" = -- ]
+shift
+exec "$@"
+STUB
+  TEST_STATE="$CASE_DIR/state.json" TEST_CALLS="$CASE_DIR/calls.log" \
+    TEST_MUTATIONS="$CASE_DIR/mutations.log" TEST_JQ="$JQ" \
+    TEST_RENDER=stream TEST_FAILURE=none TEST_RACE=none \
+    PATH="$TMP/bin:$PATH" /usr/bin/make --no-print-directory -C "$repo" \
+    MINIKUBE_PROFILE="$TEST_CONTEXT" minikube-deploy-instances >"$CASE_DIR/output.log" 2>&1
+}
+
+init_case make-instances
+if ! run_make_instances; then
+  cat "$CASE_DIR/output.log" >&2
+  fail 'Minikube instances target failed'
+fi
+assert_state
+"$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
+  .spec.mcpServers = ["ui-drive", "ui-added-later"] else . end)' \
+  "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+remember_existing_context
+if ! run_make_instances; then
+  cat "$CASE_DIR/output.log" >&2
+  fail 'Minikube instances target failed on redeploy'
+fi
+assert_state
+"$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
+  .spec.mcpServers = [] else . end)' "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+remember_existing_context
+if ! run_make_instances; then
+  cat "$CASE_DIR/output.log" >&2
+  fail 'Minikube instances target failed after all connectors were removed'
+fi
+assert_state
+pass 'Minikube instances target preserves user additions and removals on redeploy'

@@ -125,6 +125,16 @@ else
   MISSING=$((MISSING + 1))
 fi
 
+# ── jq ─────────────────────────────────────────────────────────────────
+# Instance bootstrap uses jq to preserve user-managed Contexts.
+if command -v jq >/dev/null 2>&1; then
+  ok "jq       available"
+else
+  err "jq       not found (required for Context bootstrap)"
+  hint "brew install jq" "sudo apt-get install -y jq"
+  MISSING=$((MISSING + 1))
+fi
+
 # ── ruby ───────────────────────────────────────────────────────────────
 # Renders the control-api DB migration overlay; ships with macOS.
 if command -v ruby >/dev/null 2>&1; then

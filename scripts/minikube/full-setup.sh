@@ -36,6 +36,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=deploy/scripts/lib/bootstrap-instances.sh
+source "${PROJECT_DIR}/deploy/scripts/lib/bootstrap-instances.sh"
 # shellcheck source=scripts/e2e/load-dotenv.sh
 source "${PROJECT_DIR}/scripts/e2e/load-dotenv.sh"
 # shellcheck source=scripts/e2e/admin-credentials.sh
@@ -789,6 +791,13 @@ if ! command -v kubectl &>/dev/null; then
   exit 1
 fi
 ok "kubectl is installed"
+
+# Context bootstrap needs jq before any deployment work begins.
+if ! command -v jq &>/dev/null; then
+  err "jq is not installed (required for Context bootstrap)."
+  exit 1
+fi
+ok "jq is available"
 
 # Check python3 is available (needed for JWT sync)
 if ! command -v python3 &>/dev/null; then
@@ -1940,16 +1949,11 @@ log "Aligning the Profile UI browser origin on profiles/external-rest-api..."
 bash "${SCRIPT_DIR}/sync-external-rest-api-cors-origin.sh" --context="${PROFILE}"
 ok "External REST browser origin aligned for the branch profile (no-op otherwise)"
 
-# 6e. Deploy CRD instances
-log "Applying CRD instances..."
-$KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances/"
-ok "CRD instances applied (Host, Context, CommunicationChannel, GFS, policy)"
-
-# instances-e2e/context-mcpservers.yaml must apply AFTER instances/context.yaml
-# so its non-empty mcpServers list wins over the empty default.
+# 6e. Deploy CRD instances. The seed selects the initial Context only; an
+# existing Context belongs to the user and is preserved on subsequent runs.
 if [ "$SEED_PROFILE" = "e2e" ]; then
   # airtable-server.yaml names the LOCAL ref clerum/airtable-mcp-server:test,
-  # and this directory is applied with `kubectl apply -f` -- outside kustomize,
+  # and this directory is rendered outside kustomize,
   # so the ghcr component never rewrites it -- while HCC forces
   # imagePullPolicy=IfNotPresent on minikube. That ref must therefore already
   # be in the daemon, and minikube setup no longer acquires it: the registry
@@ -1962,11 +1966,15 @@ if [ "$SEED_PROFILE" = "e2e" ]; then
     bash "${SCRIPT_DIR}/build-images.sh" --only=airtable-mcp-server
   ok "airtable-mcp-server built"
 
-  log "Applying E2E demo MCP server instances..."
-  $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances-e2e/"
-  ok "E2E instances applied (airtable, mongodb, mongodb-mcp-stack + context1 servers)"
+  log "Applying base and E2E demo CRD instances..."
+  apply_bootstrap_instances "$PROFILE" \
+    "${PROJECT_DIR}/deploy/overlays/minikube/instances/" \
+    "${PROJECT_DIR}/deploy/overlays/minikube/instances-e2e/"
+  ok "Base and E2E demo instances applied"
 else
-  log "Skipping demo MCP servers (SEED_PROFILE=minimal) — context1 starts empty."
+  log "Applying base CRD instances without demo MCP servers..."
+  apply_bootstrap_instances "$PROFILE" "${PROJECT_DIR}/deploy/overlays/minikube/instances/"
+  ok "Base CRD instances applied"
 fi
 
 # 6f. Apply Host model from .env/default E2E model
