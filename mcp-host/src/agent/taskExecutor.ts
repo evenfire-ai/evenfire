@@ -6,6 +6,7 @@
  * singleton on the AgentStateMachine.
  */
 import { randomUUID } from 'node:crypto'
+import * as path from 'node:path'
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
 import { BRIDGE_TOOL_NAMES } from '../capabilities/toolCatalogTools'
@@ -64,6 +65,7 @@ import {
 } from '../core/orchestration/toolUseLoopMessages'
 import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
+  type KeepOffer,
   type PreparedGfsFile,
   attachedFilesForTurnContext,
   attachedImagesForTurnContext,
@@ -74,10 +76,11 @@ import {
   CAPABILITY_CONTRACT_TEXT,
   DESKTOP_ENVIRONMENT_HINT,
   DefaultPromptBuilder,
-  GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
   MCP_SERVER_SELECTION_TEXT,
   MEMORY_GUIDANCE_TEXT,
   WORKFLOW_RECIPES_TEXT,
+  gfsGuidanceWriteTools,
+  gfsWorkspaceFileGuidanceText,
   toolDiscoveryText,
 } from '../core/reasoning/promptBuilder'
 import type { SystemPromptParts } from '../core/reasoning/systemPrompt'
@@ -109,8 +112,9 @@ import type {
 import { ApprovalExpiredError } from '../core/types'
 import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
-import { GFS_SAVE_ATTACHMENT_TOOL } from '../internalTools/gfs'
-import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
+import { GFS_SAVE_ATTACHMENT_TOOL, KEPT_FILES_DELETE_TOOL } from '../internalTools/gfs'
+import { type GfsDownloadStore, GfsDownloadStoreError } from '../internalTools/gfsDownloadStore'
+import { buildKeepOffer } from '../internalTools/keptFiles'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
 import type { ImageInputResolver } from '../llm/imageInput'
@@ -189,6 +193,39 @@ export function resolveTaskSessionKey(task: Task): string {
  */
 export function executionModeForSource(source: TaskSource): 'interactive' | 'unattended' {
   return source === 'channel' ? 'interactive' : 'unattended'
+}
+
+/**
+ * Whether every call of the kept-files delete will ask the user first:
+ * approval enabled, a channel task (never cron or internal, which run
+ * unattended), and no Host override turning its approval off.
+ */
+export function keptFilesDeleteAsks(input: {
+  approvalEnabled: boolean
+  taskSource: string
+  approvalTools: Record<string, boolean> | undefined
+}): boolean {
+  return (
+    input.approvalEnabled &&
+    input.taskSource === 'channel' &&
+    input.approvalTools?.[KEPT_FILES_DELETE_TOOL] !== false
+  )
+}
+
+/**
+ * The tools that ask the user on every call, whatever "approve all" or an
+ * earlier grant says: the download with its shell processing, and the
+ * kept-files delete, each under its own condition.
+ */
+export function liveApprovalTools(
+  downloadAsks: boolean,
+  deleteAsks: boolean
+): Set<string> | undefined {
+  const names = [
+    ...(downloadAsks ? ['clerum__gfs_download'] : []),
+    ...(deleteAsks ? [KEPT_FILES_DELETE_TOOL] : []),
+  ]
+  return names.length > 0 ? new Set(names) : undefined
 }
 
 /**
@@ -1263,7 +1300,11 @@ export class TaskExecutor {
     // appears exactly when the model can call the tool.
     const saveAvailable = loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
     if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences || saveAvailable) {
-      this.prependTurnContextBlock(messages, saveAvailable)
+      this.prependTurnContextBlock(
+        messages,
+        saveAvailable,
+        loopConfig.toolRegistry.get(KEPT_FILES_DELETE_TOOL) !== null
+      )
     }
     if (this.turnTiming) {
       // buildLoopConfig assembles the tool registry (MCP schemas) and the
@@ -1279,13 +1320,72 @@ export class TaskExecutor {
   }
 
   /**
+   * Whether every call of the kept-files delete will ask the user first:
+   * approval enabled, a channel task, and no Host override turning its
+   * approval off. The registry registers the delete only then (and only with
+   * the listing), and this task asks on every call of it.
+   */
+  /**
+   * The caller's outputs root with the room its kept files have in the
+   * download store, for every chat generation; undefined when the task has
+   * no caller root (the generators then refuse to write). The store keys a
+   * caller by the root's last segment. With no store the room rejects
+   * `workspace_unavailable`, so nothing is generated.
+   */
+  private callerOutputs(): { root: string; room: () => Promise<number> } | undefined {
+    const root = generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath)
+    if (!root) return undefined
+    const store = this.deps.gfsDownloadStore
+    return {
+      root,
+      room: () =>
+        store
+          ? store.keptRoom({ callerIdentity: path.basename(root) })
+          : Promise.reject(new GfsDownloadStoreError('workspace_unavailable')),
+    }
+  }
+
+  private keptFilesDeleteConfirmed(): boolean {
+    return keptFilesDeleteAsks({
+      approvalEnabled: appConfig.enableApproval,
+      taskSource: this.task.source,
+      approvalTools: this.deps.approvalConfig?.tools,
+    })
+  }
+
+  /**
+   * The no-room offer for this turn's refused keep: the caller's own files
+   * with an id, oldest first, from the uncut list. Only when the refusal says
+   * how many bytes are short and the delete exists in this turn.
+   */
+  private keepOffer(deleteAvailable: boolean): KeepOffer | undefined {
+    const refusal = this.task.sourceMessage?.keepRefusal
+    if (!refusal || refusal.neededBytes === undefined || !deleteAvailable) return undefined
+    const root = generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath)
+    if (!root) return undefined
+    try {
+      return buildKeepOffer(root, refusal.neededBytes, Date.now())
+    } catch (err) {
+      logger.warn(
+        { component: 'TaskExecutor', errorName: err instanceof Error ? err.name : typeof err },
+        'Kept files could not be listed for the no-room offer; the turn says only that nothing was kept'
+      )
+      return undefined
+    }
+  }
+
+  /**
    * T2.2 — prepend the `<turn-context>` block to the latest user message
    * (mutates in place). The block carries date/channel/sender/cron; an empty
    * cron source still produces a valid block. For cron-originated turns with
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[], saveAvailable: boolean): void {
+  private prependTurnContextBlock(
+    messages: ChatMessage[],
+    saveAvailable: boolean,
+    deleteAvailable = false
+  ): void {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
@@ -1309,6 +1409,15 @@ export class TaskExecutor {
           this.task.sourceMessage?.fileReferenceResolutions
         ),
         preparedGfsFiles: this.preparedGfsFiles,
+        keptFilesDeleteAvailable: deleteAvailable,
+        ...(this.task.sourceMessage?.keepRefusal
+          ? {
+              keepRefusal: {
+                code: this.task.sourceMessage.keepRefusal.code,
+                offer: this.keepOffer(deleteAvailable),
+              },
+            }
+          : {}),
       })
       const isCron = this.task.cronJobId !== undefined
       if (m.contentParts && m.contentParts.length > 0) {
@@ -2099,6 +2208,9 @@ export class TaskExecutor {
       tools.some(t => t.name.startsWith('desktop_') || t.name.startsWith('browser_')),
       tools.some(t => t.name.startsWith('workflow_')),
       tools.some(t => t.name === 'clerum__gfs_download'),
+      // The GFS guidance names the edit and save tools only when they exist.
+      tools.some(t => t.name === 'clerum__gfs_edit_text'),
+      tools.some(t => t.name === 'clerum__gfs_write'),
       tools.some(t => t.name.includes('__')),
       tools.some(t => t.name === 'clerum__tool_search'),
       // #1003 — the discovery guidance text depends on the native presentation.
@@ -2156,7 +2268,9 @@ export class TaskExecutor {
       platformHints,
       capabilities,
       workflowGuidance: hasWorkflowTools ? WORKFLOW_RECIPES_TEXT : '',
-      gfsWorkspaceGuidance: hasGfsDownloadTool ? GFS_WORKSPACE_FILE_GUIDANCE_TEXT : '',
+      gfsWorkspaceGuidance: hasGfsDownloadTool
+        ? gfsWorkspaceFileGuidanceText(gfsGuidanceWriteTools(tools))
+        : '',
       mcpServerGuidance: hasMcpTools ? MCP_SERVER_SELECTION_TEXT : '',
       toolDiscoveryGuidance: hasToolDiscovery
         ? toolDiscoveryText(appConfig.nativeToolPresentation)
@@ -2309,7 +2423,8 @@ export class TaskExecutor {
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
       gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined,
-      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath)
+      this.callerOutputs(),
+      this.keptFilesDeleteConfirmed()
     )
     await registerDesktopTools(nativeRegistry)
     // Eagerly open this caller's remote OAuth partitions before the catalog is
@@ -2372,12 +2487,15 @@ export class TaskExecutor {
       ? new ApprovalController(
           this.conversation!,
           approvalGate,
-          gfsWorkspace &&
-            appConfig.enableApproval &&
-            this.task.source === 'channel' &&
-            this.deps.approvalConfig?.tools?.shell_exec !== false
-            ? new Set(['clerum__gfs_download'])
-            : undefined,
+          liveApprovalTools(
+            Boolean(
+              gfsWorkspace &&
+              appConfig.enableApproval &&
+              this.task.source === 'channel' &&
+              this.deps.approvalConfig?.tools?.shell_exec !== false
+            ),
+            this.keptFilesDeleteConfirmed()
+          ),
           // The same gate's forced approvals (stateless cron create/enable) run
           // before any stored approval, so none of them can cover such a call.
           approvalGate

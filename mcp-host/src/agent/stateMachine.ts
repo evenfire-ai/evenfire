@@ -46,6 +46,10 @@ import type { PromptCache } from '../llm/promptCache'
 import { resolveContextWindow } from '../llm/registryCore'
 import { logger } from '../logger'
 import { McpManager } from '../mcp'
+import {
+  KEPT_FILES_DELETE_APPROVAL_TOOL,
+  keptFilesDeleteApprovalLines,
+} from '../progress/approvalInputPreview'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
 import type { TaskError } from '../queue/types'
@@ -1644,6 +1648,26 @@ export class AgentStateMachine extends EventEmitter {
         `Approval needed to run workflow ${workflowName}.`,
         'Please approve through the configured approval channel.',
       ].join(' ')
+    }
+
+    if (approval.tool_name === KEPT_FILES_DELETE_APPROVAL_TOOL) {
+      // The user approves a permanent delete by the names it lists, in full
+      // lines instead of the cut parameter summary, redacted like the preview.
+      const safety = new BasicSafety(this.secretEntriesProvider)
+      const projected = keptFilesDeleteApprovalLines(
+        approval.parameters,
+        text => safety.sanitizeOutput(approval.tool_name, text).content
+      )
+      if (projected) {
+        return [
+          ...projected.lines,
+          canApproveViaChannel
+            ? channelType === 'slack'
+              ? 'Use the approval controls to continue or cancel.'
+              : 'Reply /approve or /deny to this message.'
+            : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`,
+        ].join('\n')
+      }
     }
 
     if (approval.description === STATELESS_CRON_APPROVAL_PROMPT) {

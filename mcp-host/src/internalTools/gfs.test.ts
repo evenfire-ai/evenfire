@@ -44,7 +44,13 @@ function client(overrides?: Partial<GfscReadClient>): GfscReadClient {
 }
 
 function toolMap(c: GfscReadClient) {
-  return new Map(buildGfsReadTools(c, { referencedFiles: new Map() }).map(t => [t.name, t]))
+  return new Map(
+    buildGfsReadTools(c, {
+      writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
+      referencedFiles: new Map(),
+    }).map(t => [t.name, t])
+  )
 }
 
 // A tool run with no caller context passes no cancel signal and no deadline to
@@ -53,7 +59,11 @@ const NO_BOUNDS = { signal: undefined, deadlineMs: undefined }
 
 describe('buildGfsReadTools', () => {
   it('exposes the read tools plus accessible-resource discovery', () => {
-    const names = buildGfsReadTools(client(), { referencedFiles: new Map() })
+    const names = buildGfsReadTools(client(), {
+      writeTools: { editText: true, saveBySourcePath: true },
+      keptFilesDelete: false,
+      referencedFiles: new Map(),
+    })
       .map(t => t.name)
       .sort()
     expect(names).toEqual([
@@ -411,9 +421,11 @@ describe('buildGfsWriteTools (P4)', () => {
       expect((await t.execute({ ...target, attachmentId: 'unnamed' }, '')).error).toMatch(
         /^attachment_name_missing:/
       )
-      expect((await t.execute({ ...target, attachmentId: 'resumed' }, '')).error).toMatch(
-        /^bytes_unavailable_after_restart:/
-      )
+      const resumedError = (await t.execute({ ...target, attachmentId: 'resumed' }, '')).error
+      expect(resumedError).toMatch(/^bytes_unavailable_after_restart:/)
+      // The message's keep may have been refused: the text does not say it was kept.
+      expect(resumedError).toContain('If the Host kept this file, clerum__kept_files_list shows it')
+      expect(resumedError).not.toContain('Files attached earlier are kept')
       expect(c.createFileFromBytes).not.toHaveBeenCalled()
     })
 

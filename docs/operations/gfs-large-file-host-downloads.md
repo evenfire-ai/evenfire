@@ -47,12 +47,12 @@ without discarding the path, checksum, version or retained original.
 
 ## Effective limits
 
-| Environment variable                       |    Default |     Ceiling | Meaning                                                            |
-| ------------------------------------------ | ---------: | ----------: | ------------------------------------------------------------------ |
-| `MCP_HOST_GFS_MAX_FILE_BYTES`              | `16777216` | `209715200` | Largest GFS source admitted by MCP Host.                           |
-| `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT`    |       `70` |       `100` | Retained download budget, as a percentage of the workspace volume. |
-| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY` |        `1` |         `2` | Simultaneous active transfers per caller.                          |
-| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`          |      `168` |      `8760` | Retention period for a completed copy.                             |
+| Environment variable                       |    Default |     Ceiling | Meaning                                                                                                                     |
+| ------------------------------------------ | ---------: | ----------: | --------------------------------------------------------------------------------------------------------------------------- |
+| `MCP_HOST_GFS_MAX_FILE_BYTES`              | `16777216` | `209715200` | Largest GFS source admitted by MCP Host.                                                                                    |
+| `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT`    |       `70` |       `100` | Retained download budget, as a percentage of the workspace volume; it also counts the files the Host keeps for each caller. |
+| `MCP_HOST_GFS_CALLER_DOWNLOAD_CONCURRENCY` |        `1` |         `2` | Simultaneous active transfers per caller.                                                                                   |
+| `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS`          |      `168` |      `8760` | Retention period for a completed copy and for each kept file.                                                               |
 
 All values are parsed as positive decimal byte/percent/count/hour integers. Empty, zero, fractional, negative, exponent, padded, partial, non-integer, and above-ceiling values fail startup; the storage percent therefore accepts 1 to 100.
 
@@ -345,7 +345,12 @@ affected.
 
 The store has one retained-storage limit: Host bytes. Usage is the sum of
 complete copies, the reservations of active transfers and the duplicates a
-sweep could not remove, in every caller's directory. The budget is
+sweep could not remove, in every caller's directory, plus the files the Host
+keeps for each caller in `users/<key>/.clerum-outputs` (generated files, their
+save records, and chat attachments kept in `.uploads/` for a later save). Kept
+files are never evicted: each leaves once the
+retention period has passed since the later of its record's time and its own
+modification time. The budget is
 `floor(volume bytes × MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT / 100)`, where the
 volume bytes are `blocks × bsize` from the same `statfs` of the Host root that
 the free-space check reads at each admission, so a resized volume counts from
@@ -445,8 +450,8 @@ transfers at once, and a caller at most its configured concurrency; beyond that
 admission returns `download_busy`.
 
 If `MCP_HOST_GFS_DOWNLOAD_STORAGE_PERCENT` is lowered or the volume shrinks,
-existing copies remain charged and new admissions evict or are refused until
-usage falls below the new budget.
+existing copies and kept files remain charged and new admissions evict copies
+or are refused until usage falls below the new budget.
 Lowering `MCP_HOST_GFS_DOWNLOAD_TTL_HOURS` or `MCP_HOST_GFS_MAX_FILE_BYTES` is
 different: a `meta.json` is validated against the limits in force, so after the
 restart every copy whose size or retention exceeds the new value is incomplete
@@ -462,6 +467,53 @@ included. It never touches a directory that is an active transfer of this proces
 and it never replaces a published copy: another directory carrying the same ID
 is removed. A `.gfs-downloads` that is a symlink or not a directory is removed
 by the sweep without following it and recreated on the next admission.
+
+The same sweep walks each caller's kept folder, `users/*/.clerum-outputs`: its
+top level (generated files), `.save-ledger/` (their save records) and
+`.uploads/` (kept chat attachments, `<id>.bin` with its record `<id>.json`),
+and no other folder of the caller. A keep of a message's attachments is
+refused when one caller's kept bytes would pass half the budget or every
+caller's three quarters.
+
+A chat generation is checked against the same two bounds. Before the generator
+runs, the Host removes everything past the retention period (one sweep) and
+reads the room the bounds leave; a file larger than the room is refused before
+anything is written, so an earlier file of that name stays. Where the turn has
+`clerum__kept_files_delete`, the refusal offers the user's own kept files,
+oldest first, to delete after approval; otherwise it says why it cannot make
+room. While the download store is closed or not initialized, no file is
+generated. When the volume cannot be measured, the Host reads it once more and
+then generates without this check (the folder quota and the free-space floor
+still apply); the next sweep counts the file. The check is soft: two
+generations of one turn read the same room, and generations of several callers
+at the same moment can together pass the bound by their combined size until
+the next sweep counts them. Each generation result says after how many hours
+the Host deletes the file. A regular file there expires once the retention
+period has passed since the later of its record's `createdAt` and its own
+modification time, each taken as now when it is in the future; a file with no
+readable record (a record itself, a temporary file) ages by its modification
+time. An expired file is removed together with its record, only if it is still
+the file the sweep judged. A kept folder that is a symlink is not entered and
+is never removed; the count of removed kept files is logged as
+`removedKeptFiles`. Generated files that existed before this sweep, and are
+older than the retention period, are removed by the first sweep.
+
+A save from the Host volume (`generatedFile`, `sourcePath`, `uploadedFileId`)
+scans the bytes before they are sent and refuses a file in which it finds a
+protected value of this Host in clear. It reads text in UTF-8, UTF-16 or
+Latin-1, with or without control characters such as ANSI colours or form
+feeds, up to the GFS file limit (`MCP_HOST_GFS_MAX_FILE_BYTES`), and Office
+packages. Text above 4 MiB is read in overlapping windows of 256 Ki
+characters, with other tasks running between windows; there a value is found
+when its extent, markup that splits it included, is at most 64 Ki characters.
+The result says `scanned` only for a file the Host read as it was written. A
+file it cannot read as text (a PDF, an image, an archive, other binary data),
+a file above the GFS file limit and a file whose scan fails are saved with
+`secretScan: not_scanned`, and the model tells the user. A generated file with
+no save record (a dashboard, a file generated before records existed, a file
+whose record is missing) is saved by name and goes through the same scan;
+files the previous version withheld have no record and follow this rule until
+they expire.
 
 An admission replaces a caller's `.gfs-downloads`, deleting every copy in it
 (pinned ones included), only when the check answers about the directory itself:
@@ -616,10 +668,13 @@ user what happened and what they can do:
   what the user no longer needs with a `shell_exec` command the user approves.
   It never lists, reads or deletes another user's directory or anything
   outside the workspace.
-- `host_quota_exceeded`: the Host's cache of downloaded files is full. Space
-  frees as tasks finish and downloaded copies expire. The model tells the user,
-  who can finish or cancel their own running tasks to free space sooner and
-  then try again. It never acts on another user's tasks or files. The text
+- `host_quota_exceeded`: the Host's storage for downloaded and kept files is
+  full. Space frees as running tasks finish, as downloaded copies expire and as
+  kept files reach the retention period. The model tells the user, who can
+  finish or cancel their own running tasks to free space sooner and then try
+  again; where the turn has `clerum__kept_files_delete`, the text also says the
+  user can list their kept files and delete the ones they confirm. It never
+  acts on another user's tasks or files. The text
   offers no deletion of downloaded copies, because that cannot admit the
   download: the budget refusal comes when evicting every copy no running task
   protects would still not make room (the store then evicts nothing), or when a

@@ -11,8 +11,9 @@ import type { ToolOutput } from '../../core/types'
 import { GFS_FILE_LIMITS } from '../../internalTools/gfsFilePolicy'
 import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../../internalTools/gfsReadTypes'
 import {
-  GFS_CACHE_FULL_GUIDANCE,
   GFS_DISK_FULL_GUIDANCE,
+  GFS_STORE_FULL_DELETE_GUIDANCE,
+  GFS_STORE_FULL_GUIDANCE,
 } from '../../internalTools/gfsSpaceGuidance'
 import type { FileReferenceResolution } from '../fileReferenceResolver'
 import { prepareGfsFiles } from '../gfsFilePreparation'
@@ -82,7 +83,8 @@ function subject(
       duration_ms: 1,
       is_error: false,
     })
-  )
+  ),
+  otherTools: string[] = []
 ) {
   const tool: Tool = {
     name: () => 'clerum__gfs_download',
@@ -94,7 +96,7 @@ function subject(
   }
   const registry: ToolRegistry = {
     register: () => {},
-    get: name => (name === tool.name() ? tool : null),
+    get: name => (name === tool.name() || otherTools.includes(name) ? tool : null),
     listDefinitions: () => [],
   }
   const signal = new AbortController().signal
@@ -314,12 +316,12 @@ describe('GFS file preparation', () => {
     ],
     [
       'the host_quota_exceeded envelope with its guidance',
-      `${cacheFull}\n${GFS_CACHE_FULL_GUIDANCE}`,
+      `${cacheFull}\n${GFS_STORE_FULL_GUIDANCE}`,
       'quota_exceeded',
     ],
     [
       'the disk_full envelope with the cache guidance',
-      `${diskFull}\n${GFS_CACHE_FULL_GUIDANCE}`,
+      `${diskFull}\n${GFS_STORE_FULL_GUIDANCE}`,
       'download_failed',
     ],
     [
@@ -334,7 +336,7 @@ describe('GFS file preparation', () => {
     ],
     [
       'the host_quota_exceeded envelope with its guidance and a third line',
-      `${cacheFull}\n${GFS_CACHE_FULL_GUIDANCE}\nuntrusted detail`,
+      `${cacheFull}\n${GFS_STORE_FULL_GUIDANCE}\nuntrusted detail`,
       'download_failed',
     ],
     [
@@ -344,13 +346,13 @@ describe('GFS file preparation', () => {
     ],
     [
       'the store limit_exceeded envelope with the cache guidance',
-      `Error: GFS download store failed (limit_exceeded)\n${GFS_CACHE_FULL_GUIDANCE}`,
+      `Error: GFS download store failed (limit_exceeded)\n${GFS_STORE_FULL_GUIDANCE}`,
       'download_failed',
     ],
     ['the bare volume_unmeasurable envelope', volumeUnmeasurable, 'volume_unmeasurable'],
     [
       'the volume_unmeasurable envelope with the cache guidance',
-      `${volumeUnmeasurable}\n${GFS_CACHE_FULL_GUIDANCE}`,
+      `${volumeUnmeasurable}\n${GFS_STORE_FULL_GUIDANCE}`,
       'download_failed',
     ],
     [
@@ -373,10 +375,42 @@ describe('GFS file preparation', () => {
     expect(JSON.stringify(result)).not.toContain('untrusted detail')
   })
 
+  it('accepts the storage-full guidance that names the delete only where the turn has it', async () => {
+    const withDelete = (content: string) =>
+      prepareGfsFiles(
+        [resolution()],
+        subject(
+          vi.fn(async () => ({ content, duration_ms: 1, is_error: true })),
+          ['clerum__kept_files_delete']
+        ).context
+      )
+    const code = (result: Awaited<ReturnType<typeof prepareGfsFiles>>) =>
+      result[0]?.status === 'unavailable' ? result[0].code : result[0]?.status
+    expect(code(await withDelete(`${cacheFull}\n${GFS_STORE_FULL_DELETE_GUIDANCE}`))).toBe(
+      'quota_exceeded'
+    )
+    expect(code(await withDelete(`${cacheFull}\n${GFS_STORE_FULL_GUIDANCE}`))).toBe(
+      'download_failed'
+    )
+    // Witness: without the delete the other variant is the accepted one.
+    const without = await prepareGfsFiles(
+      [resolution()],
+      subject(
+        vi.fn(async () => ({
+          content: `${cacheFull}\n${GFS_STORE_FULL_DELETE_GUIDANCE}`,
+          duration_ms: 1,
+          is_error: true,
+        }))
+      ).context
+    )
+    expect(code(without)).toBe('download_failed')
+  })
+
   it('keeps every guided space envelope within the fixed error bound', () => {
     for (const content of [
       `${diskFull}\n${GFS_DISK_FULL_GUIDANCE}`,
-      `${cacheFull}\n${GFS_CACHE_FULL_GUIDANCE}`,
+      `${cacheFull}\n${GFS_STORE_FULL_GUIDANCE}`,
+      `${cacheFull}\n${GFS_STORE_FULL_DELETE_GUIDANCE}`,
     ])
       expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(GFS_FILE_LIMITS.errorBytes)
   })

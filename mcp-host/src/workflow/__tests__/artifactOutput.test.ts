@@ -9,7 +9,9 @@ import {
   capNotes,
   claimOutputFile,
   getDirectorySize,
+  keptBudgetRefusal,
   outputFilename,
+  parseKeptBudgetRefusal,
   replacedBytes,
   writeArtifact,
 } from '../artifactOutput'
@@ -220,25 +222,49 @@ describe('capNotes', () => {
   })
 })
 
+describe('enforceQuota with the kept-files room of a chat generation', () => {
+  it('refuses a file larger than the room with the exact bytes short, and admits one that fits', () => {
+    expect(() => enforceQuota(outputDir, 1000, 0, 999)).toThrow(keptBudgetRefusal(1))
+    expect(() => enforceQuota(outputDir, 1000, 0, 1000)).not.toThrow()
+    // A negative room: the bound is already passed by that much.
+    expect(() => enforceQuota(outputDir, 10, 0, -5)).toThrow(keptBudgetRefusal(15))
+  })
+
+  it('credits a replaced file of the same name', () => {
+    expect(() => enforceQuota(outputDir, 1000, 400, 600)).not.toThrow()
+    expect(() => enforceQuota(outputDir, 1000, 399, 600)).toThrow(keptBudgetRefusal(1))
+  })
+
+  it('checks nothing more without a room, as in the workflow runtime', () => {
+    expect(() => enforceQuota(outputDir, 1000)).not.toThrow()
+  })
+
+  it('reads back the bytes short from the refusal, and nothing from other text', () => {
+    expect(parseKeptBudgetRefusal(keptBudgetRefusal(12345))).toBe(12345)
+    expect(parseKeptBudgetRefusal('Output quota exceeded: needed_bytes=5')).toBeUndefined()
+    expect(parseKeptBudgetRefusal(undefined)).toBeUndefined()
+  })
+})
+
 describe('enforceQuota', () => {
   it('does not count a file the write replaces', () => {
-    const prev = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-    process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1'
+    const prev = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+    process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '1'
     try {
       fs.writeFileSync(path.join(outputDir, 'big.bin'), Buffer.alloc(700 * 1024))
       expect(() => enforceQuota(outputDir, 700 * 1024)).toThrow(/Output quota exceeded/)
       expect(() => enforceQuota(outputDir, 700 * 1024, 700 * 1024)).not.toThrow()
     } finally {
-      if (prev === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-      else process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = prev
+      if (prev === undefined) delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      else process.env.CLERUM_GENERATED_FILES_QUOTA_MB = prev
     }
   })
 
   it.each(['2GB', '1.5', '0', 'fifty'])(
     'reads %j as no quota of its own: the default applies, and that is logged once',
     value => {
-      const prev = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = value
+      const prev = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = value
       const warn = vi.spyOn(logger, 'warn')
       try {
         // Three megabytes: over the 2 or 1 a lenient read would take, under the 50 default.
@@ -246,16 +272,47 @@ describe('enforceQuota', () => {
         expect(() => enforceQuota(outputDir, 1024)).not.toThrow()
         expect(() => enforceQuota(outputDir, 1024)).not.toThrow()
         const reports = warn.mock.calls.filter(([, message]) =>
-          String(message).includes('CLERUM_WORKFLOW_OUTPUT_QUOTA_MB')
+          String(message).includes('CLERUM_GENERATED_FILES_QUOTA_MB')
         )
         expect(reports).toHaveLength(1)
       } finally {
         warn.mockRestore()
-        if (prev === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-        else process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = prev
+        if (prev === undefined) delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+        else process.env.CLERUM_GENERATED_FILES_QUOTA_MB = prev
       }
     }
   )
+
+  it('ignores the former quota variable, applies the new one, and warns about the former once', () => {
+    const FORMER = 'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB'
+    const prevFormer = process.env[FORMER]
+    const prev = process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+    delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+    process.env[FORMER] = '1'
+    const warn = vi.spyOn(logger, 'warn')
+    try {
+      fs.writeFileSync(path.join(outputDir, 'some.bin'), Buffer.alloc(3 * 1024 * 1024))
+      // The former value of 1 MB is not read: the 50 MB default applies.
+      expect(() => enforceQuota(outputDir, 1024)).not.toThrow()
+      expect(() => enforceQuota(outputDir, 1024)).not.toThrow()
+      // Witness: the new name's value applies, with the former still set.
+      process.env.CLERUM_GENERATED_FILES_QUOTA_MB = '2'
+      expect(() => enforceQuota(outputDir, 1024)).toThrow(/Output quota exceeded/)
+      const reports = warn.mock.calls.filter(
+        ([fields]) =>
+          (fields as { replacement?: unknown } | undefined)?.replacement ===
+          'CLERUM_GENERATED_FILES_QUOTA_MB'
+      )
+      expect(reports).toHaveLength(1)
+      expect(JSON.stringify(reports[0])).not.toContain('"1"')
+    } finally {
+      warn.mockRestore()
+      if (prevFormer === undefined) delete process.env[FORMER]
+      else process.env[FORMER] = prevFormer
+      if (prev === undefined) delete process.env.CLERUM_GENERATED_FILES_QUOTA_MB
+      else process.env.CLERUM_GENERATED_FILES_QUOTA_MB = prev
+    }
+  })
 })
 
 describe('generators through the shared output path', () => {

@@ -340,6 +340,7 @@ describe('handleMessageRoute — acceptedAttachmentIds through the real admissio
       applySessionModelSelection: vi.fn(),
       dispatch,
       fileReferenceGfs: () => ({ status: 'unsupported' }),
+      keepAttachments: async () => undefined,
       logger: { info: vi.fn(), warn: vi.fn() },
     })
     return { dispatch, handlers: makeHandlers({ messageHandler }) }
@@ -449,6 +450,7 @@ describe('handleMessageRoute — structured file references (#666)', () => {
       applySessionModelSelection: vi.fn(),
       dispatch,
       fileReferenceGfs: () => ({ status: 'unsupported' }),
+      keepAttachments: async () => undefined,
       logger: { info: vi.fn(), warn: vi.fn() },
     })
     return { dispatch, handlers: makeHandlers({ messageHandler }) }

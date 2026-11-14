@@ -39,7 +39,7 @@ import { htmlToPlainText } from './inlineMarkup'
 import { choose } from './ownEntry'
 import { normalizeTableRows } from './tableRows'
 import { documentEastAsianScript, eastAsianScript } from './textScript'
-import type { InternalToolResult } from './types'
+import type { InternalToolExecutionOptions, InternalToolResult } from './types'
 
 /**
  * Widest a DOCX image is drawn, in pixels at 96 dpi; the page leaves about 601
@@ -74,7 +74,8 @@ interface DocxTableArg {
 
 export async function runGenerateDocx(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  options?: InternalToolExecutionOptions
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'docx', 'output')
@@ -301,7 +302,7 @@ export async function runGenerateDocx(
     const buffer = await Packer.toBuffer(doc)
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
-    enforceQuota(outputDir, buffer.byteLength, replacedBytes(target))
+    enforceQuota(outputDir, buffer.byteLength, replacedBytes(target), options?.keptRoomBytes)
     writeArtifact(target, buffer)
 
     return artifactResult(target, 'docx', { warnings: [...new Set(warnings)] })

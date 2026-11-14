@@ -82,6 +82,35 @@ describe('imageCapabilityEvidence ledger rows', () => {
     ])
   })
 
+  it('keeps the step, tool, save arguments, verdict and outcome of generated-files rows', () => {
+    const request: Row = {
+      model: 'glm-5.3-flash',
+      imageSha256: null,
+      responseKind: 'gfs-files-tool-requested',
+      step: 'generate-and-save',
+      tool: 'clerum__gfs_create_file',
+      saveArgs: { drive: 'main', name: 'r.md', generatedFile: 'r.md', generatedFileId: 'a1' },
+    }
+    const answer: Row = {
+      model: 'glm-5.3-flash',
+      imageSha256: null,
+      responseKind: 'gfs-files-answer',
+      step: 'generate-and-save',
+      verdict: 'saved',
+      outcome: { saves: [{ name: 'r.md', ok: true }] },
+    }
+    expect(parse([request, answer]).attempts).toEqual([request, answer])
+    for (const [label, row, field] of [
+      ['answer without an outcome', { ...answer, outcome: undefined }, /verdict/],
+      ['request without a tool', { ...request, tool: '' }, /tool/],
+      ['request with a verdict', { ...request, verdict: 'saved' }, /verdict/],
+      ['answer naming a tool', { ...answer, tool: 'clerum__gfs_write' }, /names no tool/],
+      ['step on an image row', { ...rows.textOnly(), step: 'list' }, /generated-files row/],
+    ] as const) {
+      expect(() => parse([row]), label).toThrow(field)
+    }
+  })
+
   it('requires a closed-set reason on every rejected row and nowhere else', () => {
     // Witness: the well-formed rejected row parses.
     expect(parse([rows.rejected()]).attempts[0]?.reason).toBe('text-model-image-incompatible')

@@ -25,11 +25,28 @@ import {
 import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
 import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 import {
-  GFS_LOCAL_PROCESSING_GUIDANCE,
   type GfsFileContent,
+  type GfsGuidanceWriteTools,
   type GfsReadOptions,
+  gfsLocalProcessingGuidance,
 } from './gfsReadTypes'
 import { gfsStoreSpaceGuidance } from './gfsSpaceGuidance'
+import {
+  FILE_CONTAINS_SECRET,
+  KEPT_FILES_UNAVAILABLE,
+  type KeptFileDeletion,
+  type KeptFileEntry,
+  type KeptFileSources,
+  type KeptFileToDelete,
+  KeptFilesUnavailableError,
+  type ResolvedSourceFile,
+  deleteKeptFiles,
+  isSourceRefusal,
+  listKeptFiles,
+  resolveGeneratedFile,
+  resolveKeptUpload,
+  resolveSourcePath,
+} from './keptFiles'
 import { decodeTextContent } from './textContent'
 
 /**
@@ -96,10 +113,10 @@ function ok(content: unknown): InternalToolResult {
 // fixed guidance for its code as a second line; gfsFilePreparation accepts that
 // exact second line and nothing else. Every other store code, including
 // `volume_unmeasurable`, is the bare envelope.
-function fail(error: unknown): InternalToolResult {
+function fail(error: unknown, keptFilesDelete: boolean): InternalToolResult {
   if (error instanceof VisualInputError) return { success: false, error: error.message }
   if (error instanceof GfsDownloadStoreError) {
-    const guidance = gfsStoreSpaceGuidance(error.code)
+    const guidance = gfsStoreSpaceGuidance(error.code, { keptFilesDelete })
     return {
       success: false,
       error: guidance === undefined ? error.message : `${error.message}\n${guidance}`,
@@ -147,7 +164,16 @@ function invalidArgs(message: string): InternalToolResult {
   return { success: false, error: message }
 }
 
-function workspaceFileUsage(visualDelivery: 'included' | 'not_included', visualReason?: string) {
+/**
+ * How the model may use a downloaded file. The save fields and sentences
+ * appear only where the save tools are registered, so a Host that can only
+ * read is never told to save with a tool it does not have.
+ */
+function workspaceFileUsage(
+  writeTools: GfsGuidanceWriteTools,
+  visualDelivery: 'included' | 'not_included',
+  visualReason?: string
+) {
   return {
     pathSemantics: 'relative-to-caller-workspace',
     nextTool: 'shell_exec_when_local_processing_is_needed',
@@ -155,20 +181,30 @@ function workspaceFileUsage(visualDelivery: 'included' | 'not_included', visualR
     ...(visualReason === undefined ? {} : { visualReason }),
     approval: 'user-approval-required',
     writeOutputsTo: 'outputs/',
+    ...(writeTools.saveBySourcePath
+      ? {
+          saveChangedFileWith: 'clerum__gfs_write or clerum__gfs_create_file with sourcePath',
+          sourcePathMustBeOutside: '.gfs-downloads',
+        }
+      : {}),
     processLocally: true,
     boundedOutputOnly: true,
     wholeFileToContextAllowed: false,
-    processingInstructions: GFS_LOCAL_PROCESSING_GUIDANCE,
+    processingInstructions: gfsLocalProcessingGuidance(writeTools),
   }
 }
 
-function workspaceFileWithoutImage(receipt: GfsDownloadResult, reason: string): InternalToolResult {
+function workspaceFileWithoutImage(
+  writeTools: GfsGuidanceWriteTools,
+  receipt: GfsDownloadResult,
+  reason: string
+): InternalToolResult {
   return ok({
     delivery: 'workspace_file',
     ...receipt,
     visualDelivery: 'not_included',
     visualReason: reason,
-    usage: workspaceFileUsage('not_included', reason),
+    usage: workspaceFileUsage(writeTools, 'not_included', reason),
   })
 }
 
@@ -176,6 +212,7 @@ async function projectManagedImage(
   receipt: GfsDownloadResult,
   downloadStore: GfsDownloadStore,
   callerIdentity: string,
+  writeTools: GfsGuidanceWriteTools,
   options: InternalToolExecutionOptions | undefined,
   knownBytes?: Buffer
 ): Promise<InternalToolResult> {
@@ -189,22 +226,31 @@ async function projectManagedImage(
       prefix.length >= 3 &&
       ((prefix[0] === 0x89 && prefix[1] === 0x50 && prefix[2] === 0x4e) ||
         (prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff))
-    if (!hasImageMagic) return workspaceFileWithoutImage(receipt, 'not_image')
+    if (!hasImageMagic) return workspaceFileWithoutImage(writeTools, receipt, 'not_image')
     const visualInput = options?.visualInput
     if (!visualInput)
-      return workspaceFileWithoutImage(receipt, 'image_input_unavailable_in_this_execution')
+      return workspaceFileWithoutImage(
+        writeTools,
+        receipt,
+        'image_input_unavailable_in_this_execution'
+      )
     const capability = await visualInput.resolveCapability(options?.signal)
     if (options?.signal?.aborted) throw new VisualInputError('cancelled')
     if (capability.status !== 'supported')
-      return workspaceFileWithoutImage(receipt, `model_image_input_${capability.status}`)
+      return workspaceFileWithoutImage(
+        writeTools,
+        receipt,
+        `model_image_input_${capability.status}`
+      )
     const profile = capability.deliveryLimits
-    if (!profile) return workspaceFileWithoutImage(receipt, 'provider_visual_profile_unavailable')
+    if (!profile)
+      return workspaceFileWithoutImage(writeTools, receipt, 'provider_visual_profile_unavailable')
     if (
       (profile.maxImageBytes !== undefined && receipt.sizeBytes > profile.maxImageBytes) ||
       (profile.maxImageEncodedBytes !== undefined &&
         4 * Math.ceil(receipt.sizeBytes / 3) > profile.maxImageEncodedBytes)
     )
-      return workspaceFileWithoutImage(receipt, 'provider_visual_limit_exceeded')
+      return workspaceFileWithoutImage(writeTools, receipt, 'provider_visual_limit_exceeded')
     if (bytes === undefined) {
       if (receipt.sizeBytes > visualInput.budget.remainingReadBytes)
         throw new VisualInputError('limit_exceeded')
@@ -221,13 +267,13 @@ async function projectManagedImage(
       maxPixels: profile.maxPixels,
     }
     const image = inspectImage(bytes, limits)
-    if (!image) return workspaceFileWithoutImage(receipt, 'not_image')
+    if (!image) return workspaceFileWithoutImage(writeTools, receipt, 'not_image')
     if (
       (profile.maxDimension !== undefined &&
         (image.width > profile.maxDimension || image.height > profile.maxDimension)) ||
       (profile.maxPixels !== undefined && image.width * image.height > profile.maxPixels)
     )
-      return workspaceFileWithoutImage(receipt, 'provider_visual_limit_exceeded')
+      return workspaceFileWithoutImage(writeTools, receipt, 'provider_visual_limit_exceeded')
     await validateImage(bytes, image, {
       signal: options?.signal,
       budget: visualInput.budget,
@@ -241,13 +287,14 @@ async function projectManagedImage(
         delivery: 'workspace_file',
         ...receipt,
         visualDelivery: 'included',
-        usage: workspaceFileUsage('included'),
+        usage: workspaceFileUsage(writeTools, 'included'),
       }),
       images: [{ ...image, source: receipt.source, sizeBytes: receipt.sizeBytes, dataBase64 }],
     }
   } catch (error) {
     if (error instanceof VisualInputError && error.code !== 'cancelled')
       return workspaceFileWithoutImage(
+        writeTools,
         receipt,
         error.code === 'limit_exceeded' ? 'local_visual_resources_exceeded' : error.code
       )
@@ -363,6 +410,10 @@ export interface GfsReadToolOptions {
   callerWorkspacePath?: string
   /** Trusted task lifetime identity; never accepted from model arguments. */
   retentionOwnerId?: string
+  /** The write tools registered beside these, which download results may name. */
+  writeTools: GfsGuidanceWriteTools
+  /** Whether the kept-files delete is registered; a storage-full refusal names it only then. */
+  keptFilesDelete: boolean
 }
 
 /** The five read tools, bound to a gfsc client. */
@@ -374,6 +425,8 @@ export function buildGfsReadTools(
     callerIdentity,
     callerWorkspacePath,
     retentionOwnerId,
+    writeTools,
+    keptFilesDelete,
   }: GfsReadToolOptions
 ): InternalToolDefinition[] {
   const canDownload = Boolean(
@@ -422,7 +475,7 @@ export function buildGfsReadTools(
     return ok({
       delivery: 'workspace_file',
       ...receipt,
-      usage: workspaceFileUsage('not_included'),
+      usage: workspaceFileUsage(writeTools, 'not_included'),
     })
   }
   const tools: InternalToolDefinition[] = [
@@ -451,7 +504,7 @@ export function buildGfsReadTools(
             )
           )
         } catch (err) {
-          return fail(err)
+          return fail(err, keptFilesDelete)
         }
       },
     },
@@ -479,7 +532,7 @@ export function buildGfsReadTools(
             )
           )
         } catch (err) {
-          return fail(err)
+          return fail(err, keptFilesDelete)
         }
       },
     },
@@ -539,7 +592,13 @@ export function buildGfsReadTools(
                   metadata.source.version,
                   options
                 )
-                return await projectManagedImage(receipt, downloadStore!, callerIdentity!, options)
+                return await projectManagedImage(
+                  receipt,
+                  downloadStore!,
+                  callerIdentity!,
+                  writeTools,
+                  options
+                )
               } else {
                 recordGfsDownloadAdmission('workspace_unavailable')
                 expectedVersion ??= metadata.source.version
@@ -579,6 +638,7 @@ export function buildGfsReadTools(
                 receipt,
                 downloadStore!,
                 callerIdentity!,
+                writeTools,
                 options,
                 file.bytes
               )
@@ -657,7 +717,7 @@ export function buildGfsReadTools(
               resourceId: target.resourceId,
               expectedVersion,
             })
-          return fail(err)
+          return fail(err, keptFilesDelete)
         } finally {
           file?.reservation.release()
         }
@@ -677,7 +737,7 @@ export function buildGfsReadTools(
             await client.stat(args as { drive: string; resourceId: string }, callOptions(context))
           )
         } catch (err) {
-          return fail(err)
+          return fail(err, keptFilesDelete)
         }
       },
     },
@@ -697,7 +757,7 @@ export function buildGfsReadTools(
         try {
           return ok(await client.resolve(args as { uri: string }, callOptions(context)))
         } catch (err) {
-          return fail(err)
+          return fail(err, keptFilesDelete)
         }
       },
     },
@@ -780,7 +840,7 @@ export function buildGfsReadTools(
           )
           if (expectedVersion !== undefined && versionConflict(error))
             return ok({ availability: 'stale', ...target, expectedVersion })
-          return fail(error)
+          return fail(error, keptFilesDelete)
         }
       },
     })
@@ -795,6 +855,16 @@ export interface GfscWriteClient extends GfscReadClient {
       drive: string
       resourceId: string
       content: string
+      ifMatch: number
+    },
+    call?: GfscCallOptions
+  ): Promise<unknown>
+  /** Replaces a file's content with bytes, as the create route accepts them. */
+  writeBytes(
+    args: {
+      drive: string
+      resourceId: string
+      contentBase64: string
       ifMatch: number
     },
     call?: GfscCallOptions
@@ -884,26 +954,137 @@ function isValidIfMatch(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
 }
 
+/** The file sources a chat caller may save from, besides text the model wrote. */
+const FILE_SOURCE_FIELDS = ['generatedFile', 'sourcePath', 'uploadedFileId'] as const
+const SOURCE_FIELDS = ['content', ...FILE_SOURCE_FIELDS] as const
+const EXACTLY_ONE_SOURCE = 'give exactly one of content, generatedFile, sourcePath, uploadedFileId'
+
+const SOURCE_PROPERTIES = {
+  generatedFile: {
+    type: 'string',
+    description:
+      'Name of a file a document generator made in this chat, as its result or clerum__kept_files_list names it. Pass its Save id as generatedFileId; a listed file with no id is saved by generatedFile alone. Give every generated file its own descriptive file name; a file generated under an existing name replaces it.',
+  },
+  generatedFileId: {
+    type: 'string',
+    description:
+      'The Save id of the generatedFile, from the generator result or clerum__kept_files_list. Only together with generatedFile.',
+  },
+  sourcePath: {
+    type: 'string',
+    description:
+      'Relative path of a file in your workspace, such as outputs/report.csv; the Host uploads its bytes. Reserved folders and a path whose first part starts with a dot are refused. To save a changed copy of a download, write it outside .gfs-downloads and pass that path. Not for memory notes (MEMORY.md, daily/, the notes in memory/): use the memory tools.',
+  },
+  uploadedFileId: {
+    type: 'string',
+    description:
+      'The id of a file or image the user attached in chat, from clerum__kept_files_list (kind upload); it works in a later turn or conversation. Unlike clerum__gfs_save_attachment in the same turn, this save scans the file and refuses one that holds a protected value of this Host.',
+  },
+} as const
+
+const FILE_SOURCE_NOTICE =
+  ' Exactly one source: content (short text you wrote, never a whole file), generatedFile with generatedFileId, sourcePath, or uploadedFileId. The result has source and secretScan. When source is source_path or kept_upload, or generated_file with no Save id, and secretScan is not_scanned, tell the user the file was saved without a secret scan. A generated file with a Save id passed its check when it was generated and needs no such notice.'
+
+type ChosenSource =
+  | { kind: 'content'; content: string }
+  | { kind: 'generatedFile'; name: string; id?: string }
+  | { kind: 'sourcePath'; path: string }
+  | { kind: 'uploadedFileId'; id: string }
+
+/** The one source of a write call, or the argument error that refuses the call. */
+function chosenSource(args: Record<string, unknown>): ChosenSource | InternalToolResult {
+  const given = SOURCE_FIELDS.filter(field => args[field] !== undefined)
+  if (given.length !== 1) return invalidArgs(EXACTLY_ONE_SOURCE)
+  if (args.generatedFileId !== undefined && given[0] !== 'generatedFile') {
+    return invalidArgs(EXACTLY_ONE_SOURCE)
+  }
+  switch (given[0]) {
+    case 'content':
+      return typeof args.content === 'string'
+        ? { kind: 'content', content: args.content }
+        : invalidArgs('content must be a string')
+    case 'generatedFile':
+      if (typeof args.generatedFile !== 'string' || args.generatedFile === '') {
+        return invalidArgs('generatedFile must be a file name')
+      }
+      if (args.generatedFileId !== undefined && typeof args.generatedFileId !== 'string') {
+        return invalidArgs('generatedFileId must be a string')
+      }
+      return {
+        kind: 'generatedFile',
+        name: args.generatedFile,
+        ...(args.generatedFileId === undefined ? {} : { id: args.generatedFileId }),
+      }
+    case 'uploadedFileId':
+      return typeof args.uploadedFileId === 'string'
+        ? { kind: 'uploadedFileId', id: args.uploadedFileId }
+        : invalidArgs('uploadedFileId must be a string')
+    default:
+      return typeof args.sourcePath === 'string' && args.sourcePath !== ''
+        ? { kind: 'sourcePath', path: args.sourcePath }
+        : invalidArgs('sourcePath must be a relative path')
+  }
+}
+
+function isToolResult(value: unknown): value is InternalToolResult {
+  return typeof value === 'object' && value !== null && 'success' in value
+}
+
+/** Reads a file source of the caller; the refusal is a tool error, never an upload. */
+async function resolvedFileSource(
+  sources: KeptFileSources,
+  chosen: Exclude<ChosenSource, { kind: 'content' }>,
+  createName?: string
+): Promise<ResolvedSourceFile | InternalToolResult> {
+  const resolved =
+    chosen.kind === 'generatedFile'
+      ? await resolveGeneratedFile(sources, chosen.name, chosen.id, createName)
+      : chosen.kind === 'uploadedFileId'
+        ? await resolveKeptUpload(sources, chosen.id)
+        : await resolveSourcePath(sources, chosen.path)
+  if (isSourceRefusal(resolved)) {
+    return resolved.argument
+      ? invalidArgs(resolved.error)
+      : { success: false, error: resolved.error }
+  }
+  if (resolved.secretScan.state === 'secret_found')
+    return { success: false, error: FILE_CONTAINS_SECRET }
+  return resolved
+}
+
 /**
  * Agent gfs WRITE tool (plan P4-S04). clerum__gfs_write replaces a file and
  * REQUIRES If-Match (the resource version) — agent writes are writer-routed
  * conditional writes (P4-S01); the mutation is audited server-side. Destructive
  * bits (delete) stay default-denied for agents.
+ *
+ * With `sources` (the chat registry), the write and create tools also save a
+ * file of the caller's own folders: a generated file, a kept attachment, or a
+ * workspace file. The
+ * Host reads and scans the bytes; the model never carries them. Without it
+ * (the workflow runtime) only `content` exists, as before.
  */
-export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinition[] {
+export function buildGfsWriteTools(
+  client: GfscWriteClient,
+  sources?: KeptFileSources
+): InternalToolDefinition[] {
   return [
     {
       name: 'clerum__gfs_write',
       description:
-        'Conditionally replace the complete content of an existing gfs file. Requires If-Match (the current version).',
+        'Conditionally replace the complete content of an existing gfs file. Requires If-Match (the current version).' +
+        (sources ? FILE_SOURCE_NOTICE : ''),
       parameters: {
         type: 'object',
-        required: ['drive', 'resourceId', 'content', 'ifMatch'],
+        required: sources
+          ? ['drive', 'resourceId', 'ifMatch']
+          : ['drive', 'resourceId', 'content', 'ifMatch'],
         properties: {
           drive: { type: 'string', description: 'gfs drive name.' },
           resourceId: { type: 'string', description: 'Resource id (32-hex rid).' },
           content: { type: 'string', description: 'New file content.' },
           ifMatch: { type: 'number', description: 'The resource version being replaced.' },
+          ...(sources ? SOURCE_PROPERTIES : {}),
         },
       },
       execute: async (
@@ -913,6 +1094,33 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
       ): Promise<InternalToolResult> => {
         if (!isValidIfMatch(args.ifMatch)) {
           return invalidArgs('clerum__gfs_write requires a non-negative safe-integer If-Match')
+        }
+        if (sources) {
+          const chosen = chosenSource(args)
+          if (isToolResult(chosen)) return chosen
+          if (chosen.kind !== 'content') {
+            const file = await resolvedFileSource(sources, chosen)
+            if (isToolResult(file)) return file
+            try {
+              const resource = await client.writeBytes(
+                {
+                  drive: args.drive as string,
+                  resourceId: args.resourceId as string,
+                  contentBase64: file.bytes.toString('base64'),
+                  ifMatch: args.ifMatch,
+                },
+                callOptions(context)
+              )
+              return ok({
+                source: file.source,
+                bytes: file.bytes.byteLength,
+                secretScan: file.secretScan,
+                resource,
+              })
+            } catch (err) {
+              return mutationFail(err)
+            }
+          }
         }
         try {
           return ok(
@@ -928,10 +1136,13 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
     },
     {
       name: 'clerum__gfs_create_file',
-      description: 'Create one file under an existing gfs folder.',
+      description:
+        'Create one file under an existing gfs folder.' + (sources ? FILE_SOURCE_NOTICE : ''),
       parameters: {
         type: 'object',
-        required: ['drive', 'parentResourceId', 'name', 'content'],
+        required: sources
+          ? ['drive', 'parentResourceId', 'name']
+          : ['drive', 'parentResourceId', 'name', 'content'],
         properties: {
           drive: { type: 'string', description: 'gfs drive name.' },
           parentResourceId: { type: 'string', description: 'Destination folder resource id.' },
@@ -941,6 +1152,7 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
               'New file name including its file extension, e.g. "report.txt" or "notes.md". Always match the content format.',
           },
           content: { type: 'string', description: 'Initial file content.' },
+          ...(sources ? SOURCE_PROPERTIES : {}),
         },
       },
       execute: async (
@@ -948,6 +1160,33 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
         _outputDir: string,
         context?: InternalToolCallContext
       ): Promise<InternalToolResult> => {
+        if (sources) {
+          const chosen = chosenSource(args)
+          if (isToolResult(chosen)) return chosen
+          if (chosen.kind !== 'content') {
+            const file = await resolvedFileSource(sources, chosen, args.name as string)
+            if (isToolResult(file)) return file
+            try {
+              const resource = await client.createFileFromBytes(
+                {
+                  drive: args.drive as string,
+                  parentResourceId: args.parentResourceId as string,
+                  name: args.name as string,
+                  contentBase64: file.bytes.toString('base64'),
+                },
+                callOptions(context)
+              )
+              return ok({
+                source: file.source,
+                bytes: file.bytes.byteLength,
+                secretScan: file.secretScan,
+                resource,
+              })
+            } catch (err) {
+              return mutationFail(err)
+            }
+          }
+        }
         try {
           return ok(
             await client.createFile(
@@ -1079,7 +1318,8 @@ export function buildGfsAttachmentSaveTools(
         }
         if (typeof attachment.dataBase64 !== 'string') {
           return invalidArgs(
-            'bytes_unavailable_after_restart: ask the user to attach the file again in a new message'
+            'bytes_unavailable_after_restart: ask the user to attach the file again in a new message. ' +
+              `If the Host kept this file, clerum__kept_files_list shows it (kept files stay ${Math.round(GFS_FILE_LIMITS.retentionMs / 3_600_000)} hours)`
           )
         }
         const name = attachmentSaveName(attachment)
@@ -1104,6 +1344,407 @@ export function buildGfsAttachmentSaveTools(
       },
     },
   ]
+}
+
+/** The most entries the listing tool returns; the delete and the saves read the uncut list. */
+export const KEPT_FILES_LIST_LIMIT = 100
+
+/**
+ * `clerum__kept_files_list`: the caller's kept files, oldest first, at most
+ * 100, optionally only those whose name contains `nameContains`. Its output
+ * never goes to spillover storage, so no file name rests there.
+ */
+export function buildKeptFilesListTool(callerRoot: string | undefined): InternalToolDefinition {
+  const hours = Math.round(GFS_FILE_LIMITS.retentionMs / 3_600_000)
+  return {
+    name: 'clerum__kept_files_list',
+    description:
+      'List the files this Host keeps for this user: files the document generators made in chat, with their Save id, and files the user attached in chat (kind upload). ' +
+      'Save one with clerum__gfs_create_file or clerum__gfs_write: a generated file with generatedFile plus generatedFileId, an entry without id by generatedFile alone, an upload with uploadedFileId; canSave false means it cannot be saved, and reason says why. ' +
+      'reason no_record: a file with no save record, saved by generatedFile alone. ' +
+      'The list is oldest first, at most 100 entries; when truncated is true the newest files are not in the list. ' +
+      'When truncated is true and the user asks for a recent file, ask the user for part of its name and pass it as nameContains, or use the Save id of the generation. ' +
+      `Each file is deleted ${hours} hours after its createdAt; tell the user the date when they say they will save a file later. ` +
+      'Give every generated file its own descriptive file name; a file generated under an existing name replaces it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        nameContains: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 255,
+          description: 'Only files whose name contains this text, in any case.',
+        },
+      },
+    },
+    spilloverExempt: true,
+    execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      const filter = args.nameContains
+      if (
+        filter !== undefined &&
+        (typeof filter !== 'string' || filter.length < 1 || filter.length > 255)
+      ) {
+        return invalidArgs('nameContains must be 1 to 255 characters')
+      }
+      if (!callerRoot) return { success: false, error: KEPT_FILES_UNAVAILABLE }
+      let entries: KeptFileEntry[]
+      try {
+        entries = listKeptFiles(callerRoot)
+      } catch (err) {
+        if (err instanceof KeptFilesUnavailableError) {
+          return { success: false, error: KEPT_FILES_UNAVAILABLE }
+        }
+        throw err
+      }
+      const needle = typeof filter === 'string' ? filter.toLowerCase() : undefined
+      const matching = needle
+        ? entries.filter(entry => entry.name.toLowerCase().includes(needle))
+        : entries
+      return ok({
+        files: matching.slice(0, KEPT_FILES_LIST_LIMIT).map(entry => ({
+          kind: entry.kind,
+          name: entry.name,
+          ...(entry.id === undefined ? {} : { id: entry.id }),
+          format: entry.format,
+          createdAt: entry.createdAt,
+          sizeBytes: entry.sizeBytes,
+          canSave: entry.canSave,
+          ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+        })),
+        truncated: matching.length > KEPT_FILES_LIST_LIMIT,
+      })
+    },
+  }
+}
+
+/**
+ * Bounds of one partial edit. A call past the count or the text lengths is
+ * refused before anything is read; an edit that matches more than
+ * `maxMatchesPerEdit` times is refused as it is applied, before any text is
+ * built for it.
+ */
+const EDIT_LIMITS = {
+  maxEdits: 50,
+  maxOldTextBytes: 4096,
+  maxNewTextBytes: 65_536,
+  maxMatchesPerEdit: 10_000,
+}
+/** The largest diff returned; a longer one is cut and marked truncated. */
+const EDIT_DIFF_MAX_CHARS = 16_384
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf])
+
+export const EDIT_SCOPE_SENTENCE =
+  'for small changes; to rewrite or translate a whole file, write the new file with an approved shell command outside .gfs-downloads and save it with clerum__gfs_write and sourcePath'
+
+interface TextEdit {
+  oldText: string
+  newText: string
+  replaceAll?: boolean
+}
+
+/**
+ * Matches of `needle` in `text`, left to right and not overlapping, counted
+ * up to `stopAfter` without storing them; `first` is the index of the first
+ * match, -1 when there is none.
+ */
+function countMatches(
+  text: string,
+  needle: string,
+  stopAfter: number
+): { count: number; first: number } {
+  const first = text.indexOf(needle)
+  let count = 0
+  for (
+    let index = first;
+    index !== -1 && count < stopAfter;
+    index = text.indexOf(needle, index + needle.length)
+  )
+    count += 1
+  return { count, first }
+}
+
+/** The 1-based line of `offset`: the line feeds before it, counted without building a string. */
+function lineAt(text: string, offset: number): number {
+  let line = 1
+  for (
+    let index = text.indexOf('\n');
+    index !== -1 && index < offset;
+    index = text.indexOf('\n', index + 1)
+  )
+    line += 1
+  return line
+}
+
+/**
+ * `clerum__gfs_edit_text`: replaces parts of a text file in GFS and returns a
+ * diff built from the edits themselves. Edits apply in order, each to the
+ * result of the previous one; each must match exactly once (at least once
+ * with `replaceAll`) in that intermediate text, or nothing is written. A
+ * leading byte order mark is kept and line endings are untouched.
+ */
+export function buildGfsEditTools(client: GfscWriteClient): InternalToolDefinition[] {
+  return [
+    {
+      name: 'clerum__gfs_edit_text',
+      description:
+        `Replace parts of a text file in gfs and get a diff, ${EDIT_SCOPE_SENTENCE}. ` +
+        'A small change (a typo, a sentence, a paragraph) is one or more edits; for a file above 8 KiB take oldText from a bounded excerpt of the downloaded copy with an approved shell command, and pass the downloaded version as ifMatch. ' +
+        'Edits apply in order, each to the result of the previous one; each oldText must match exactly once unless replaceAll, and an edit that matches more than 10,000 times is refused. dryRun returns the diff without writing.',
+      parameters: {
+        type: 'object',
+        required: ['drive', 'resourceId', 'ifMatch', 'edits'],
+        properties: {
+          drive: { type: 'string', description: 'gfs drive name.' },
+          resourceId: { type: 'string', description: 'Resource id (32-hex rid).' },
+          ifMatch: { type: 'number', description: 'The version being edited.' },
+          edits: {
+            type: 'array',
+            description:
+              '1 to 50 edits; each oldText at most 4,096 bytes and matching at most 10,000 times.',
+            items: {
+              type: 'object',
+              required: ['oldText', 'newText'],
+              properties: {
+                oldText: { type: 'string', description: 'Exact text to replace.' },
+                newText: { type: 'string', description: 'Replacement text.' },
+                replaceAll: { type: 'boolean', description: 'Replace every match.' },
+              },
+            },
+          },
+          dryRun: { type: 'boolean', description: 'Return the diff only; write nothing.' },
+        },
+      },
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        options?: InternalToolExecutionOptions
+      ): Promise<InternalToolResult> => {
+        if (!isValidIfMatch(args.ifMatch)) {
+          return invalidArgs('clerum__gfs_edit_text requires a non-negative safe-integer ifMatch')
+        }
+        const edits = args.edits
+        const valid =
+          Array.isArray(edits) &&
+          edits.length >= 1 &&
+          edits.length <= EDIT_LIMITS.maxEdits &&
+          edits.every(
+            (edit): edit is TextEdit =>
+              typeof edit === 'object' &&
+              edit !== null &&
+              typeof (edit as TextEdit).oldText === 'string' &&
+              typeof (edit as TextEdit).newText === 'string' &&
+              ((edit as TextEdit).replaceAll === undefined ||
+                typeof (edit as TextEdit).replaceAll === 'boolean') &&
+              Buffer.byteLength((edit as TextEdit).oldText) >= 1 &&
+              Buffer.byteLength((edit as TextEdit).oldText) <= EDIT_LIMITS.maxOldTextBytes
+          ) &&
+          (edits as TextEdit[]).reduce((sum, edit) => sum + Buffer.byteLength(edit.newText), 0) <=
+            EDIT_LIMITS.maxNewTextBytes
+        if (!valid) {
+          return invalidArgs(
+            `edits must be 1 to 50, each oldText 1 to 4096 bytes and all newText at most 65536 bytes: this tool is ${EDIT_SCOPE_SENTENCE}`
+          )
+        }
+        const target = { drive: args.drive as string, resourceId: args.resourceId as string }
+        let file: GfsFileContent | undefined
+        try {
+          file = await client.read(target, {
+            ...callOptions(options),
+            timeoutMs: options?.timeoutMs,
+            budget: options?.readBudget ?? options?.visualInput?.budget,
+            expectedVersion: args.ifMatch,
+          })
+          const decoded = decodeTextContent(file.bytes)
+          if (decoded === null) {
+            return {
+              success: false,
+              error: 'not_a_text_file: this file is not text, so it cannot be edited in parts',
+            }
+          }
+          const bom = file.bytes.subarray(0, 3).equals(UTF8_BOM)
+          let text = decoded
+          // The size the text will have, so an edit that would make the file
+          // larger than a GFS file may be is refused before the text is built:
+          // a replaceAll can multiply the file many times over.
+          let bytes = (bom ? UTF8_BOM.byteLength : 0) + Buffer.byteLength(text)
+          const hunks: Array<{ edit: number; line: number; removed: string[]; added: string[] }> =
+            []
+          for (const [index, edit] of (edits as TextEdit[]).entries()) {
+            // Counting stops one past the bound, so a text with millions of
+            // matches costs no more than the bound to refuse.
+            const { count, first } = countMatches(
+              text,
+              edit.oldText,
+              EDIT_LIMITS.maxMatchesPerEdit + 1
+            )
+            if (count > EDIT_LIMITS.maxMatchesPerEdit) {
+              return {
+                success: false,
+                error: `edit ${index} matched more than ${EDIT_LIMITS.maxMatchesPerEdit} times; this tool is ${EDIT_SCOPE_SENTENCE}. Nothing was written`,
+              }
+            }
+            if (edit.replaceAll ? count < 1 : count !== 1) {
+              return {
+                success: false,
+                error: `edit ${index} matched ${count} times; it must match ${
+                  edit.replaceAll ? 'at least once' : 'exactly once'
+                }. Nothing was written`,
+              }
+            }
+            bytes += count * (Buffer.byteLength(edit.newText) - Buffer.byteLength(edit.oldText))
+            if (bytes > GFS_FILE_LIMITS.maxFileBytes) {
+              return {
+                success: false,
+                error: `edit ${index} would make the file ${bytes} bytes, above the ${GFS_FILE_LIMITS.maxFileBytes}-byte limit of a GFS file. Nothing was written`,
+              }
+            }
+            hunks.push({
+              edit: index,
+              line: lineAt(text, first),
+              removed: edit.oldText.split('\n'),
+              added: edit.newText.split('\n'),
+            })
+            text = edit.replaceAll
+              ? text.split(edit.oldText).join(edit.newText)
+              : text.slice(0, first) + edit.newText + text.slice(first + edit.oldText.length)
+          }
+          const content = (bom ? '﻿' : '') + text
+          let diff = hunks
+            .map(
+              hunk =>
+                `@@ edit ${hunk.edit} line ${hunk.line}\n` +
+                hunk.removed.map(line => `-${line}`).join('\n') +
+                '\n' +
+                hunk.added.map(line => `+${line}`).join('\n')
+            )
+            .join('\n')
+          const truncated = diff.length > EDIT_DIFF_MAX_CHARS
+          if (truncated) diff = diff.slice(0, EDIT_DIFF_MAX_CHARS)
+          const summary = {
+            bytesBefore: file.bytes.byteLength,
+            bytesAfter: Buffer.byteLength(content),
+            diff,
+            truncated,
+          }
+          if (args.dryRun === true) return ok({ dryRun: true, version: args.ifMatch, ...summary })
+          // gfsc answers `{ ok: true, data }`, where data is the resource view.
+          const written = (await client.write(
+            { ...target, content, ifMatch: args.ifMatch },
+            callOptions(options)
+          )) as { data?: { version?: unknown } } | undefined
+          return ok({ version: written?.data?.version, ...summary })
+        } catch (err) {
+          if (err instanceof GfscHttpError) return mutationFail(err)
+          return fail(err, false)
+        } finally {
+          file?.reservation.release()
+        }
+      },
+    },
+  ]
+}
+
+export const KEPT_FILES_DELETE_TOOL = 'clerum__kept_files_delete'
+
+/** The sentence a delete adds when this turn's attachments could not be kept. */
+export const ATTACH_AGAIN_SENTENCE =
+  'the attachments of this message were not kept; ask the user to attach them again'
+
+/**
+ * `clerum__kept_files_delete`: deletes files the Host keeps for this user,
+ * named by kind, id, name, creation date and size from the listing, after the
+ * user approves the call on a card that shows the name, size and date. It cannot name a GFS file, a download copy, a workspace file, a file
+ * with no record or another user's file: it has no path and no GFS client.
+ */
+export function buildKeptFilesDeleteTool(
+  callerRoot: string | undefined,
+  options: { keepRefused: boolean }
+): InternalToolDefinition {
+  return {
+    name: KEPT_FILES_DELETE_TOOL,
+    description:
+      'Delete files this Host keeps for this user, to make room. Name each file by kind, id, name, createdAt and sizeBytes exactly as clerum__kept_files_list gives them; only files with an id can be deleted. ' +
+      'Call it only with the files the user agreed to delete; the user approves the call itself on an approval card that shows each file name, size and creation date. Deleted files cannot be recovered.',
+    requiresApproval: true,
+    parameters: {
+      type: 'object',
+      required: ['files'],
+      properties: {
+        files: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: 'object',
+            required: ['kind', 'id', 'name', 'createdAt', 'sizeBytes'],
+            properties: {
+              kind: { type: 'string', enum: ['generated', 'upload'] },
+              id: { type: 'string', pattern: '^[0-9a-f]{12}$' },
+              name: { type: 'string', minLength: 1, maxLength: 255 },
+              createdAt: { type: 'string', description: 'As clerum__kept_files_list gives it.' },
+              sizeBytes: {
+                type: 'integer',
+                minimum: 0,
+                description: 'As clerum__kept_files_list gives it.',
+              },
+            },
+          },
+        },
+      },
+    },
+    execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      const files = args.files
+      if (
+        !Array.isArray(files) ||
+        files.length < 1 ||
+        files.length > 20 ||
+        !files.every(
+          (file): file is KeptFileToDelete =>
+            typeof file === 'object' &&
+            file !== null &&
+            ((file as KeptFileToDelete).kind === 'generated' ||
+              (file as KeptFileToDelete).kind === 'upload') &&
+            typeof (file as KeptFileToDelete).id === 'string' &&
+            /^[0-9a-f]{12}$/.test((file as KeptFileToDelete).id) &&
+            typeof (file as KeptFileToDelete).name === 'string' &&
+            typeof (file as KeptFileToDelete).createdAt === 'string' &&
+            Number.isSafeInteger((file as KeptFileToDelete).sizeBytes) &&
+            (file as KeptFileToDelete).sizeBytes >= 0
+        )
+      ) {
+        return invalidArgs(
+          'files must be 1 to 20 entries of kind, id, name, createdAt and sizeBytes from clerum__kept_files_list'
+        )
+      }
+      if (!callerRoot) return { success: false, error: KEPT_FILES_UNAVAILABLE }
+      let outcome: KeptFileDeletion
+      try {
+        outcome = deleteKeptFiles(callerRoot, files)
+      } catch (err) {
+        if (err instanceof KeptFilesUnavailableError) {
+          return { success: false, error: KEPT_FILES_UNAVAILABLE }
+        }
+        throw err
+      }
+      if (outcome.status === 'mismatch') {
+        return {
+          success: false,
+          error:
+            'kept_file_mismatch: a name, size or creation date does not match its id; nothing was deleted. Call clerum__kept_files_list and use its values',
+        }
+      }
+      return ok({
+        files: outcome.files.map(file => ({
+          kind: file.kind,
+          id: file.id,
+          name: file.name,
+          result: file.result,
+        })),
+        freedBytes: outcome.freedBytes,
+        ...(options.keepRefused ? { note: ATTACH_AGAIN_SENTENCE } : {}),
+      })
+    },
+  }
 }
 
 /** Recursive copy is advertised only when both read and write scopes exist. */

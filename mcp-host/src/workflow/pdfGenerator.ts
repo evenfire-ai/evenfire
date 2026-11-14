@@ -40,7 +40,7 @@ import { BODY_FONT_SIZE, MIN_BOTTOM_MARGIN, PORTRAIT, type UnitMeasure } from '.
 import { LINE_FILL, PdfTypesetter } from './pdfText'
 import { headerText, normalizeTableRows } from './tableRows'
 import { documentEastAsianScript } from './textScript'
-import { type InternalToolResult } from './types'
+import type { InternalToolExecutionOptions, InternalToolResult } from './types'
 
 const PdfPrinter = require('pdfmake')
 
@@ -99,7 +99,8 @@ function runningLine(text: string, width: number, measure: UnitMeasure): string 
 
 export async function runGeneratePdf(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  options?: InternalToolExecutionOptions
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'pdf', 'output')
@@ -443,7 +444,7 @@ export async function runGeneratePdf(
 
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
-    enforceQuota(outputDir, pdfBuffer.byteLength, replacedBytes(target))
+    enforceQuota(outputDir, pdfBuffer.byteLength, replacedBytes(target), options?.keptRoomBytes)
     writeArtifact(target, pdfBuffer)
 
     return artifactResult(target, 'pdf', { warnings: [...warnings, ...typesetter.warnings()] })

@@ -82,6 +82,32 @@ describe('ProgressStepper approval input preview', () => {
     expect(onDeny).not.toHaveBeenCalled()
   })
 
+  it('shows a delete card line with a whole long name, its size and date, as text', () => {
+    const name = `${'Board minutes '.repeat(15)}final <b>v2</b>.docx`
+    const text = [
+      'Delete these files permanently:',
+      `upload: "${name}" — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC`,
+      'Total files: 1',
+    ].join('\n')
+    render(
+      <ProgressStepper
+        progress={makeProgress({
+          status: 'suspended',
+          suspendedInfo: {
+            requestId: 'delete-request',
+            displayName: 'Delete kept files',
+            inputPreview: { text, truncated: false },
+          },
+        })}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+      />
+    )
+    const preview = screen.getByTestId('approval-input-preview')
+    expect(preview.textContent).toBe(text)
+    expect(preview.querySelector('b')).toBeNull()
+  })
+
   it('labels a shortened or redacted command as an incomplete preview', () => {
     render(
       <ProgressStepper

@@ -20,6 +20,8 @@ import {
 } from '../__tests__/fixtures/gfsStoreTestKit'
 import { bootstrapGfsRuntime } from '../gfsRuntime'
 import { GfsDownloadStore } from './gfsDownloadStore'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
+import { ledgerRecordFileName } from './keptFiles'
 
 // statfs is the only boundary replaced: the volume sized to its free space,
 // so the disk's occupancy never meets the store's free-space floor.
@@ -176,5 +178,61 @@ describe('GFS download store: a FIFO in the store tree never blocks', () => {
     expect(exists(path.dirname(source))).toBe(false)
     const next = await completedCopy(store, root, KEY, 5, 32)
     await expect(store.readManagedFile(next.receipt.path, KEY)).resolves.toEqual(next.bytes)
+  })
+
+  it('a kept-files sweep settles with a FIFO at the record path of a generated file and of a kept upload', async () => {
+    const store = await openStore()
+    const outputs = path.join(callerDirectory(hostRoot, KEY), '.clerum-outputs')
+    const ledger = path.join(outputs, '.save-ledger')
+    const uploads = path.join(outputs, '.uploads')
+    syncFs.mkdirSync(ledger, { recursive: true, mode: 0o700 })
+    syncFs.mkdirSync(uploads, { recursive: true, mode: 0o700 })
+    syncFs.writeFileSync(path.join(outputs, 'report.md'), 'report')
+    syncFs.writeFileSync(path.join(uploads, 'abcdefabcdef.bin'), 'upload')
+    const fifos = [
+      path.join(ledger, ledgerRecordFileName('report.md')),
+      path.join(uploads, 'abcdefabcdef.json'),
+    ]
+    for (const fifo of fifos) mkfifo(fifo)
+    // Witness: another caller's expired kept file goes in the same sweep.
+    const otherOutputs = path.join(callerDirectory(hostRoot, 'other-key'), '.clerum-outputs')
+    syncFs.mkdirSync(otherOutputs, { recursive: true, mode: 0o700 })
+    const expired = path.join(otherOutputs, 'old.md')
+    syncFs.writeFileSync(expired, 'old')
+    const longAgo = new Date(Date.now() - GFS_FILE_LIMITS.retentionMs - 3_600_000)
+    syncFs.utimesSync(expired, longAgo, longAgo)
+
+    const sweep = store.cleanupExpired()
+    const observed = sweep.then(
+      () => undefined,
+      () => undefined
+    )
+    const outcome = await Promise.race([
+      observed.then(() => 'settled' as const),
+      delay(BOUND_MS).then(() => 'blocked' as const),
+    ])
+    if (outcome === 'blocked') {
+      // Each FIFO the sweep blocks on is released by its own writer, opened
+      // and closed, so no worker thread stays blocked after the test.
+      for (let round = 0; round < 50; round++) {
+        for (const fifo of fifos) {
+          try {
+            syncFs.closeSync(
+              syncFs.openSync(fifo, syncFs.constants.O_WRONLY | syncFs.constants.O_NONBLOCK)
+            )
+          } catch {
+            // No reader is blocked on this FIFO yet.
+          }
+        }
+        const done = await Promise.race([observed.then(() => true), delay(100).then(() => false)])
+        if (done) break
+      }
+      await observed
+    }
+
+    expect(outcome).toBe('settled')
+    await expect(sweep).resolves.toBeDefined()
+    expect(exists(expired)).toBe(false)
+    expect(exists(path.join(outputs, 'report.md'))).toBe(true)
   })
 })

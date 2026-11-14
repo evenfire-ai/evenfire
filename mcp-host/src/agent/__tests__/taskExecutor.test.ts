@@ -1970,6 +1970,45 @@ describe('TaskExecutor Codex presentation wiring', () => {
       appConfig.promptCacheEnabled = previous
     }
   })
+
+  it('rebuilds the cached GFS guidance when the edit or save tool appears or goes', async () => {
+    const previous = appConfig.promptCacheEnabled
+    appConfig.promptCacheEnabled = true
+    try {
+      const { executor, deps } = makeExecutor('openai')
+      deps.promptCache = new PromptCache()
+      deps.workspaceService = {
+        readIdentityFiles: vi.fn(async () => ({ identity: '', soul: '', agents: '', user: '' })),
+        snapshotDailyLogs: vi.fn(async () => 'daily snapshot'),
+      } as any
+      executor.conversation.session_key = 'gfs-guidance-session'
+      const named = (name: string) => ({ name, description: name, parameters: {} })
+      const readOnly = [named('clerum__gfs_download')]
+      const save = [...readOnly, named('clerum__gfs_write'), named('clerum__gfs_create_file')]
+      const saveAndEdit = [...save, named('clerum__gfs_edit_text')]
+      const text = async (tools: unknown[]) =>
+        JSON.stringify(await executor.maybeGetOrBuildParts(tools))
+
+      const first = await text(readOnly)
+      // Witness: the GFS section is part of the cached parts.
+      expect(first).toContain('GFS WORKSPACE FILES')
+      expect(first).not.toContain('sourcePath')
+      expect(first).not.toContain('clerum__gfs_edit_text')
+      const second = await text(save)
+      expect(second).toContain('clerum__gfs_write with sourcePath')
+      expect(second).not.toContain('clerum__gfs_edit_text')
+      const parts = await executor.maybeGetOrBuildParts(saveAndEdit)
+      expect(JSON.stringify(parts)).toContain('use clerum__gfs_edit_text')
+      // Witness: the same tools reuse the cached parts.
+      expect(await executor.maybeGetOrBuildParts(saveAndEdit)).toBe(parts)
+      expect(deps.promptCache.get('gfs-guidance-session')?.parts).toBe(parts)
+      const back = await text(readOnly)
+      expect(back).not.toContain('sourcePath')
+      expect(back).not.toContain('clerum__gfs_edit_text')
+    } finally {
+      appConfig.promptCacheEnabled = previous
+    }
+  })
 })
 
 describe('TaskExecutor effective limits', () => {

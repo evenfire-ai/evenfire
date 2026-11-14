@@ -76,10 +76,17 @@ test('the Playwright lane defaults to the image journey and accepts only known l
     grep: 'attachment-gfs-save fixture: ',
     minimumExpected: 3,
   })
+  assert.deepEqual(playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'generated-gfs-save' }), {
+    lane: 'generated-gfs-save',
+    config: 'desktop-app/test/e2e-playwright/playwright.generated-gfs-save.config.ts',
+    label: 'generated-gfs-save-playwright',
+    grep: 'generated-gfs-save fixture: ',
+    minimumExpected: 8,
+  })
   for (const lane of ['', 'documents', '../evil.config.ts', '__proto__', 'toString']) {
     assert.throws(
       () => playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane }),
-      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save/,
+      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save, generated-gfs-save/,
       lane
     )
   }
@@ -109,7 +116,7 @@ test('run still resolves and validates the Playwright lane', () => {
   for (const lane of ['typo', '', '__proto__']) {
     assert.throws(
       () => selectFixtureAction('run', { IMAGE_CAPABILITIES_LANE: lane }),
-      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save/,
+      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save, generated-gfs-save/,
       lane
     )
   }
@@ -229,6 +236,26 @@ test('the attachment-gfs-save verdict requires its lane minimum of expected test
     () => playwrightVerdict(short, options),
     /below the attachment-gfs-save minimum of 3/,
     'two expected tests'
+  )
+})
+
+test('the generated-gfs-save verdict requires its eight journeys', () => {
+  const lane = 'generated-gfs-save'
+  const configFile = laneConfigFile(lane)
+  const options = { lane, configFile }
+  const reportFor = count => {
+    const titles = Array.from(
+      { length: count },
+      (_, index) => `generated-gfs-save fixture: journey ${index + 1}`
+    )
+    return { ...playwrightReport({ titles }), config: { configFile } }
+  }
+  // Witness: eight expected specs meet the lane minimum and are accepted.
+  assert.equal(playwrightVerdict(reportFor(8), options), 'PASS')
+  assert.throws(
+    () => playwrightVerdict(reportFor(7), options),
+    /below the generated-gfs-save minimum of 8/,
+    'seven expected tests'
   )
 })
 

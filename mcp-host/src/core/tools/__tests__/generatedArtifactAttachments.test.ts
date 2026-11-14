@@ -10,6 +10,7 @@ import type { ArtifactMetadata } from '../../../workflow/types'
 import { CALLER_OUTPUTS_DIR } from '../../../workspace/callerOutputs'
 import type { Attachment } from '../../types'
 import {
+  type GeneratedArtifactAttachmentResult,
   INTERNAL_GENERATED_ARTIFACT_LANE,
   buildGeneratedArtifactAttachment,
   isInternalGeneratedArtifactAttachment,
@@ -40,6 +41,12 @@ function metadata(
     sizeBytes: fs.statSync(filePath).size,
     createdAt: new Date().toISOString(),
   }
+}
+
+/** The attachment the check delivered; fails the test with the skip reason otherwise. */
+function delivered(result: GeneratedArtifactAttachmentResult): Attachment {
+  if (!('attachment' in result)) throw new Error(`attachment withheld: ${result.skipped}`)
+  return result.attachment
 }
 
 function decoded(attachment: Attachment): Buffer {
@@ -106,7 +113,7 @@ describe('generated internal artifact attachments', () => {
       undefined,
       undefined,
       undefined,
-      callerRoot
+      { root: callerRoot, room: async () => Number.MAX_SAFE_INTEGER }
     )
   }
 
@@ -133,12 +140,14 @@ describe('generated internal artifact attachments', () => {
     (sourceTool, filename, format, body) => {
       fs.writeFileSync(path.join(outputDir, filename), body)
 
-      const attachment = buildGeneratedArtifactAttachment({
-        sourceTool,
-        artifact: metadata(outputDir, filename, format),
-        outputDir,
-        maxBytes: 52_428_800,
-      })
+      const attachment = delivered(
+        buildGeneratedArtifactAttachment({
+          sourceTool,
+          artifact: metadata(outputDir, filename, format),
+          outputDir,
+          maxBytes: 52_428_800,
+        })
+      )
 
       expect(attachment).toMatchObject({
         kind: 'file',
@@ -158,13 +167,15 @@ describe('generated internal artifact attachments', () => {
   it('redacts text artifacts before attachment encoding', () => {
     fs.writeFileSync(path.join(outputDir, 'report.md'), 'value=probe-redaction-value\n')
 
-    const attachment = buildGeneratedArtifactAttachment({
-      sourceTool: 'clerum__generate_markdown',
-      artifact: metadata(outputDir, 'report.md', 'md'),
-      outputDir,
-      maxBytes: 52_428_800,
-      secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
-    })
+    const attachment = delivered(
+      buildGeneratedArtifactAttachment({
+        sourceTool: 'clerum__generate_markdown',
+        artifact: metadata(outputDir, 'report.md', 'md'),
+        outputDir,
+        maxBytes: 52_428_800,
+        secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
+      })
+    )
 
     expect(attachment?.redactionState).toBe('applied')
     expect(decoded(attachment!).toString('utf8')).toBe('value=[REDACTED:PROBE_VALUE]\n')
@@ -187,14 +198,16 @@ describe('generated internal artifact attachments', () => {
       const body = await make()
       fs.writeFileSync(path.join(outputDir, filename), body)
 
-      const attachment = buildGeneratedArtifactAttachment({
-        sourceTool,
-        artifact: metadata(outputDir, filename, format),
-        outputDir,
-        maxBytes: 52_428_800,
-        sourcePayload: { content: 'safe generated content' },
-        secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
-      })
+      const attachment = delivered(
+        buildGeneratedArtifactAttachment({
+          sourceTool,
+          artifact: metadata(outputDir, filename, format),
+          outputDir,
+          maxBytes: 52_428_800,
+          sourcePayload: { content: 'safe generated content' },
+          secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
+        })
+      )
 
       expect(attachment).toMatchObject({
         kind: 'file',
@@ -226,7 +239,7 @@ describe('generated internal artifact attachments', () => {
         secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
       })
 
-      expect(attachment).toBeNull()
+      expect(attachment).toEqual({ skipped: 'binary_source_payload_unavailable' })
     }
   )
 
@@ -250,7 +263,7 @@ describe('generated internal artifact attachments', () => {
         secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
       })
 
-      expect(attachment).toBeNull()
+      expect(attachment).toEqual({ skipped: 'binary_redaction_unavailable' })
     }
   )
 
@@ -272,7 +285,7 @@ describe('generated internal artifact attachments', () => {
         secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: '3141592653' }],
       })
 
-      expect(attachment).toBeNull()
+      expect(attachment).toEqual({ skipped: 'binary_redaction_unavailable' })
     }
   )
 
@@ -297,8 +310,11 @@ describe('generated internal artifact attachments', () => {
           ...params,
           secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
         })
-      ).toBeNull()
-      expect(buildGeneratedArtifactAttachment(params)).toMatchObject({ kind: 'file', filename })
+      ).toEqual({ skipped: 'office_package_unreadable' })
+      expect(delivered(buildGeneratedArtifactAttachment(params))).toMatchObject({
+        kind: 'file',
+        filename,
+      })
     }
   )
 
@@ -313,7 +329,7 @@ describe('generated internal artifact attachments', () => {
         outputDir,
         maxBytes: 52_428_800,
       })
-    ).toBeNull()
+    ).toEqual({ skipped: 'source_tool_not_allowed' })
     expect(
       buildGeneratedArtifactAttachment({
         sourceTool: 'clerum__generate_pdf',
@@ -321,7 +337,7 @@ describe('generated internal artifact attachments', () => {
         outputDir,
         maxBytes: 52_428_800,
       })
-    ).toBeNull()
+    ).toEqual({ skipped: 'format_does_not_match_source_tool' })
     expect(
       buildGeneratedArtifactAttachment({
         sourceTool: 'clerum__generate_pdf',
@@ -332,7 +348,7 @@ describe('generated internal artifact attachments', () => {
         outputDir,
         maxBytes: 52_428_800,
       })
-    ).toBeNull()
+    ).toEqual({ skipped: 'unsafe_filename' })
     expect(
       buildGeneratedArtifactAttachment({
         sourceTool: 'clerum__generate_pdf',
@@ -340,7 +356,7 @@ describe('generated internal artifact attachments', () => {
         outputDir,
         maxBytes: 3,
       })
-    ).toBeNull()
+    ).toEqual({ skipped: 'artifact_path_error_413' })
   })
 
   it('rejects spoofed internal attachment metadata', () => {
@@ -845,7 +861,7 @@ describe('generated internal artifact attachments', () => {
           outputDir,
           maxBytes: 1024,
         })
-        expect(attachment).toBeNull()
+        expect(attachment).toEqual({ skipped: 'artifact_path_error_500' })
         expect(warn).toHaveBeenCalledWith(
           expect.objectContaining({
             reason: 'artifact_path_error_500',

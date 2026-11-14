@@ -6,7 +6,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { FREE_SPACE_FLOOR_MIN_BYTES, freeSpaceFloor } from '../internalTools/gfsDownloadStore'
 import { logger } from '../logger'
-import { CALLER_OUTPUTS_DIR } from '../workspace/callerOutputs'
+import { CALLER_OUTPUTS_DIR, KEPT_UPLOADS_DIR } from '../workspace/callerOutputs'
 import type { ArtifactMetadata, InternalToolResult } from './types'
 
 const MAX_STEM_LENGTH = 120
@@ -285,8 +285,18 @@ export function ensureDir(dir: string): void {
 }
 
 // A dashboard with charts inlines the Chart.js UMD bundle (~210 KB) so the
-// HTML works offline: about 250 of them fit in the default quota.
-const DEFAULT_QUOTA_MB = 50
+// HTML works offline: about 250 of them fit in a workflow run's default
+// quota, and about 2,400 in a chat caller's.
+/** Default quota of a workflow run's output folder, whose volume is small and has no floor. */
+const WORKFLOW_DEFAULT_QUOTA_MB = 50
+/** Default quota of a chat caller's folder, which the Host volume's free-space floor also bounds. */
+const CALLER_DEFAULT_QUOTA_MB = 500
+
+/** The quota variable; one value overrides both defaults. */
+const QUOTA_VARIABLE = 'CLERUM_GENERATED_FILES_QUOTA_MB'
+/** The variable's former name, ignored and warned about once when still set. */
+const REMOVED_QUOTA_VARIABLE = 'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB'
+let reportedRemovedQuotaVariable = false
 
 /**
  * Recursively sum the size of all regular files under `dir`.
@@ -315,24 +325,35 @@ export function getDirectorySize(dir: string): number {
 let reportedQuotaSetting: string | undefined
 
 /**
- * CLERUM_WORKFLOW_OUTPUT_QUOTA_MB as a whole number of megabytes. Anything
- * else ("2GB", "1.5", "0") leaves the default, and is logged once: read
- * leniently, "2GB" became a quota of 2 MB.
+ * CLERUM_GENERATED_FILES_QUOTA_MB as a whole number of megabytes, or
+ * `defaultMB` (the default for the folder's kind). Anything else ("2GB",
+ * "1.5", "0") leaves that default, and is logged once: read leniently, "2GB"
+ * became a quota of 2 MB.
  */
-function outputQuotaMB(raw: string | undefined): number {
+function outputQuotaMB(raw: string | undefined, defaultMB: number): number {
   const text = raw?.trim() ?? ''
-  if (text === '') return DEFAULT_QUOTA_MB
+  if (text === '') return defaultMB
   if (/^\d+$/.test(text) && Number(text) > 0 && Number.isSafeInteger(Number(text))) {
     return Number(text)
   }
   if (reportedQuotaSetting !== raw) {
     reportedQuotaSetting = raw
     logger.warn(
-      { component: 'ArtifactOutput', value: text.slice(0, 32), defaultMB: DEFAULT_QUOTA_MB },
-      'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB is not a whole number of megabytes; the default applies'
+      { component: 'ArtifactOutput', value: text.slice(0, 32), defaultMB },
+      'CLERUM_GENERATED_FILES_QUOTA_MB is not a whole number of megabytes; the default applies'
     )
   }
-  return DEFAULT_QUOTA_MB
+  return defaultMB
+}
+
+/** The former quota variable is not read; when it is still set, that is logged once. */
+function reportRemovedQuotaVariable(): void {
+  if (reportedRemovedQuotaVariable || process.env[REMOVED_QUOTA_VARIABLE] === undefined) return
+  reportedRemovedQuotaVariable = true
+  logger.warn(
+    { component: 'ArtifactOutput', variable: REMOVED_QUOTA_VARIABLE, replacement: QUOTA_VARIABLE },
+    'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB is no longer read; set CLERUM_GENERATED_FILES_QUOTA_MB instead'
+  )
 }
 
 /**
@@ -340,25 +361,55 @@ function outputQuotaMB(raw: string | undefined): number {
  * run's output, or one chat caller's folder, so in chat each user has their
  * own. A caller's folder must also leave the Host volume its free-space floor.
  *
- * Reads the ceiling from `CLERUM_WORKFLOW_OUTPUT_QUOTA_MB` (default: 50 MB).
- * Throws if the current directory usage + `incomingBytes` would exceed the cap.
- * `replacingBytes` is the size of a file the write overwrites, which stops
- * counting once it is replaced.
+ * Reads the ceiling from `CLERUM_GENERATED_FILES_QUOTA_MB` (default: 500 MB
+ * for a chat caller's folder, 50 MB for a workflow run; a set value applies to
+ * both). Throws if the current directory usage + `incomingBytes` would exceed
+ * the cap. `replacingBytes` is the size of a file the write overwrites, which
+ * stops counting once it is replaced.
  *
  * Known limitation (race condition): When the LLM issues multiple tool calls
  * concurrently (e.g., generate_pdf + generate_xlsx in the same turn), both
  * calls read the directory size before either has written its file. Both see
  * the same "current" size and both pass the quota check, even though the
- * combined output would exceed the 50 MB cap. This is a best-effort soft
- * quota; the 1Gi PVC hard cap enforced by kubelet is the primary defense.
+ * combined output would exceed the cap. This is a best-effort soft quota. For
+ * a workflow run the hard cap is its output volume (256Mi by default, 1Gi for
+ * the legacy shared one), enforced by kubelet; for a chat caller's folder the
+ * volume is protected by the free-space floor (enforceFreeSpaceFloor), and the
+ * kept-files bounds of the download store by `keptRoomBytes`.
+ *
+ * `keptRoomBytes`, given only for a chat generation, is what the caller's
+ * kept files may still add (GfsDownloadStore.keptRoom, read before the
+ * generator ran); a file that needs more is refused with
+ * {@link keptBudgetRefusal} and nothing is written, so an earlier file of the
+ * same name stays. That check is soft too: two calls of one turn read the same
+ * room, and generations of several callers at the same moment each read the
+ * room before the others' files exist, so together they can pass the bound by
+ * their combined size; the next sweep counts them, and later generations and
+ * keeps are refused until the kept bytes are back under the bound.
  */
-export function enforceQuota(outputDir: string, incomingBytes: number, replacingBytes = 0): void {
-  const quotaMB = outputQuotaMB(process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB)
+export function enforceQuota(
+  outputDir: string,
+  incomingBytes: number,
+  replacingBytes = 0,
+  keptRoomBytes?: number
+): void {
+  const callerFolder = path.basename(outputDir) === CALLER_OUTPUTS_DIR
+  reportRemovedQuotaVariable()
+  const quotaMB = outputQuotaMB(
+    process.env[QUOTA_VARIABLE],
+    callerFolder ? CALLER_DEFAULT_QUOTA_MB : WORKFLOW_DEFAULT_QUOTA_MB
+  )
   const quotaBytes = quotaMB * 1024 * 1024
 
   let size: number
   try {
     size = getDirectorySize(outputDir)
+    // A chat caller's kept attachments live in the same folder but never
+    // limit a generation: they have their own bounds in the download store.
+    // Only a real subfolder is subtracted; a link was never counted above.
+    const uploads = path.join(outputDir, KEPT_UPLOADS_DIR)
+    if (callerFolder && fs.existsSync(uploads) && fs.lstatSync(uploads).isDirectory())
+      size -= getDirectorySize(uploads)
   } catch (err) {
     throw storageError(err, 'Could not measure the output folder')
   }
@@ -367,14 +418,30 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
   if (projected > quotaBytes) {
     const mb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1)
     throw new Error(
-      `Output quota exceeded: the output folder holds ${mb(current)} MB and this file needs ` +
+      `${OUTPUT_QUOTA_EXCEEDED_PREFIX}: the output folder holds ${mb(current)} MB and this file needs ` +
         `${mb(incomingBytes)} MB, over the ${quotaMB} MB limit. Make the file smaller, give ` +
         'it the name of an earlier generated file to replace that one, or ask an operator to ' +
-        'raise CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
+        'raise CLERUM_GENERATED_FILES_QUOTA_MB.'
     )
   }
-  if (path.basename(outputDir) === CALLER_OUTPUTS_DIR)
-    enforceFreeSpaceFloor(outputDir, incomingBytes)
+  if (keptRoomBytes !== undefined && incomingBytes - replacingBytes > keptRoomBytes)
+    throw new Error(keptBudgetRefusal(incomingBytes - replacingBytes - keptRoomBytes))
+  if (callerFolder) enforceFreeSpaceFloor(outputDir, incomingBytes)
+}
+
+/** How a generation refused by the kept-files bounds begins; the chat adapter matches it. */
+export const KEPT_BUDGET_REFUSAL_PREFIX = 'Host storage for kept files is full'
+
+/** The refusal of a generation the kept-files bounds have no room for, with the bytes short. */
+export function keptBudgetRefusal(neededBytes: number): string {
+  return `${KEPT_BUDGET_REFUSAL_PREFIX}: this file needs ${neededBytes} more bytes of room than this user's kept files have (needed_bytes=${neededBytes})`
+}
+
+/** The bytes short in a {@link keptBudgetRefusal}, or undefined for any other text. */
+export function parseKeptBudgetRefusal(message: string | undefined): number | undefined {
+  if (!message?.startsWith(KEPT_BUDGET_REFUSAL_PREFIX)) return undefined
+  const match = /\(needed_bytes=(\d+)\)$/.exec(message)
+  return match ? Number(match[1]) : undefined
 }
 
 /**
@@ -390,6 +457,10 @@ function sharesRootVolume(space: fs.BigIntStatsFs): boolean {
     return false
   }
 }
+
+/** How the two space refusals of a generation begin; the chat adapter matches them. */
+export const OUTPUT_QUOTA_EXCEEDED_PREFIX = 'Output quota exceeded'
+export const NOT_ENOUGH_FREE_SPACE_PREFIX = 'Not enough free space'
 
 let unmeasurableVolumeReported = false
 
@@ -432,7 +503,7 @@ function enforceFreeSpaceFloor(outputDir: string, incomingBytes: number): void {
   if (blocks * space.bsize + floor > space.bavail * space.bsize) {
     const mb = (bytes: bigint) => (Number(bytes) / (1024 * 1024)).toFixed(1)
     throw new Error(
-      `Not enough free space: the Host keeps ${mb(floor)} MB free and this file needs ` +
+      `${NOT_ENOUGH_FREE_SPACE_PREFIX}: the Host keeps ${mb(floor)} MB free and this file needs ` +
         `${mb(BigInt(incomingBytes))} MB. Make the file smaller, or ask an operator to free ` +
         'space on the Host.'
     )
