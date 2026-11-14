@@ -312,6 +312,7 @@ export function useFilePreviewResourceActions({
           id: 'resource-permissions',
           message: 'Checking file permissions…',
           pending: true,
+          rateLimited: false,
           retry: () =>
             retryPermissionCheck(
               desktopQueryKeys.gfsAffordances(
@@ -328,6 +329,7 @@ export function useFilePreviewResourceActions({
             id: 'resource-permissions',
             message: `Could not verify file permissions: ${describeGfsReadError(affordancesQuery.error).message}`,
             pending: false,
+            rateLimited: describeGfsReadError(affordancesQuery.error).code === 'rate_limited',
             retry: () =>
               retryPermissionCheck(
                 desktopQueryKeys.gfsAffordances(
@@ -346,6 +348,7 @@ export function useFilePreviewResourceActions({
             id: 'move-source-permissions',
             message: 'Checking move permissions…',
             pending: true,
+            rateLimited: false,
             retry: () =>
               retryPermissionCheck(
                 desktopQueryKeys.gfsAffordances(
@@ -362,6 +365,8 @@ export function useFilePreviewResourceActions({
               id: 'move-source-permissions',
               message: `Could not verify move permissions: ${describeGfsReadError(sourceParentAffordancesQuery.error).message}`,
               pending: false,
+              rateLimited:
+                describeGfsReadError(sourceParentAffordancesQuery.error).code === 'rate_limited',
               retry: () =>
                 retryPermissionCheck(
                   desktopQueryKeys.gfsAffordances(

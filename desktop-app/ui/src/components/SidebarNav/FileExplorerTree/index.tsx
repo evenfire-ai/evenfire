@@ -1292,7 +1292,9 @@ export function FileExplorerTree({
       {dropSessionLost ? (
         // Persistent (A11): the refusal outlives the dead gesture and the
         // revoked tree surface below — it is not a one-shot toast.
-        <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} compact />
+        <div role="alert">
+          <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} compact />
+        </div>
       ) : null}
       {ctrl.accessState === 'revoked' ? (
         // Mirror the Files page's revoked surface, adapted to the sidebar's
@@ -1316,7 +1318,12 @@ export function FileExplorerTree({
       ) : ctrl.accessibleNotice ? (
         <p className="da-file-explorer__message muted">{ctrl.accessibleNotice}</p>
       ) : ctrl.accessibleError ? (
-        <StatusBanner tone="error" text={ctrl.accessibleError} compact />
+        // A rate limit is a wait, not a failure: it takes the warning tone.
+        <StatusBanner
+          tone={ctrl.discoveryFailure?.kind === 'rate-limited' ? 'warn' : 'error'}
+          text={ctrl.accessibleError}
+          compact
+        />
       ) : ctrl.loadingAccessible && roots.length === 0 ? (
         <p className="da-file-explorer__message muted" role="status">
           Loading files…

@@ -427,6 +427,10 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     expect(screen.getByText('This folder or file is no longer available.')).toBeTruthy()
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    expect(within(browser).getByRole('alert').textContent).toContain(
+      'This folder or file is no longer available.'
+    )
   })
 
   it('resolves a seeded folder route to the exact resource in Files', async () => {
@@ -6470,6 +6474,15 @@ describe('FilesPage', () => {
     expect(sessionLostSurfaces.some(element => element.closest('.status-banner') !== null)).toBe(
       true
     )
+    // The persistent banner is announced: an alert inside the browser region.
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    expect(
+      within(browser)
+        .getAllByRole('alert')
+        .some(alert =>
+          alert.textContent?.includes('Your session ended. Sign in again to continue moving files.')
+        )
+    ).toBe(true)
     expect(pushToast).not.toHaveBeenCalled()
     expect(moveResource).not.toHaveBeenCalled()
   })
@@ -6515,6 +6528,11 @@ describe('FilesPage', () => {
       await screen.findByText('Your session ended. Sign in again to continue moving files.')
     ).toBeTruthy()
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    // The revoked surface's banner is announced as an alert inside the browser region.
+    expect(
+      within(screen.getByRole('region', { name: 'EvenDrive browser' })).getByRole('alert')
+        .textContent
+    ).toContain('Your session ended. Sign in again to continue moving files.')
     expect(pushToast).not.toHaveBeenCalled()
   })
 
@@ -7836,6 +7854,80 @@ describe('FilesPage', () => {
     expect(screen.getByRole('button', { name: 'Product' })).toBeTruthy()
     expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
     expect(screen.queryByRole('button', { name: /retry file listing/i })).toBeNull()
+  })
+
+  describe('persistent Files alerts', () => {
+    const productRow = {
+      resourceId: 'folder-1',
+      rid: 'folder-1',
+      gfsUri: 'gfs://main/folder-1',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Product',
+      kind: 'directory',
+      path: '/Product',
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: true,
+    }
+    const renderReadError = (rawMessage: string, kind: 'rate-limited' | 'failed') => {
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        hasMoreAccessible: true,
+        accessibleResources: [productRow],
+        accessibleError: rawMessage,
+        discoveryFailure: { kind, message: rawMessage, retryAvailableAt: null },
+      })
+      renderFilesPage()
+      // Witness: the row stays on screen, so the banner (not the card) reports the failure.
+      expect(screen.getByRole('button', { name: 'Product' })).toBeTruthy()
+      return within(screen.getByRole('region', { name: 'EvenDrive browser' })).getByRole('alert')
+    }
+
+    it('announces a read error shown beside loaded rows as an error alert', () => {
+      const alert = renderReadError(
+        "Error invoking remote method 'gfs:listAccessible': Error: 503 Service Unavailable: upstream_unreachable",
+        'failed'
+      )
+      expect(alert.textContent).toContain('503 Service Unavailable: upstream_unreachable')
+      expect(alert.querySelector('.status-banner')?.classList.contains('tone-error')).toBe(true)
+    })
+
+    it('gives a rate-limited read error beside loaded rows the warning tone', () => {
+      const alert = renderReadError(
+        "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+          'Too Many Requests retryAfterSeconds=7',
+        'rate-limited'
+      )
+      expect(alert.textContent).toContain('Too many file requests')
+      expect(alert.querySelector('.status-banner')?.classList.contains('tone-warn')).toBe(true)
+    })
+
+    it.each([
+      [429, 'tone-warn', 'Too many file requests. Wait before retrying permissions.'],
+      [403, 'tone-error', 'Could not verify permissions for Product'],
+    ])('gives the permission banner for a %s the %s class', (httpStatus, toneClass, text) => {
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        current: {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+        },
+        affordancesError: 'permission check failed',
+        affordancesHttpStatus: httpStatus,
+      })
+      renderFilesPage()
+      const alert = within(screen.getByRole('region', { name: 'EvenDrive browser' }))
+        .getAllByRole('alert')
+        .find(element => element.textContent?.includes(text))
+      expect(alert).toBeTruthy()
+      expect(alert?.querySelector('.status-banner')?.classList.contains(toneClass)).toBe(true)
+    })
   })
 
   it('shows the card for an empty listing once the authority gate has closed', () => {

@@ -3089,6 +3089,7 @@ export function FilesPage({
   // background query activity.
   const visibleLoading = loadingCurrentView
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
+  const visibleErrorPresentation = visibleError ? describeGfsReadError(visibleError) : null
   const unavailableLocation = !current && openError === GFS_UNAVAILABLE_LOCATION_MESSAGE
   // Scoped to the root view on purpose: `accessibleError` only reaches
   // `visibleError` when there is no `current`, so the card replaces exactly the
@@ -3522,7 +3523,9 @@ export function FilesPage({
           {dropSessionLost ? (
             // Persistent (A11): the refusal outlives the dead gesture and the
             // revoked surface below — it is not a one-shot toast.
-            <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+            <div className="da-gfs-alert" role="alert">
+              <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+            </div>
           ) : null}
           {zipJob ? (
             <div className="da-gfs-zip-progress" role="status" data-testid="gfs-zip-progress">
@@ -3544,9 +3547,13 @@ export function FilesPage({
             </div>
           ) : null}
 
-          {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
+          {accessibleNotice ? (
+            <div className="da-gfs-alert">
+              <StatusBanner tone="info" text={accessibleNotice} />
+            </div>
+          ) : null}
           {current && loadingAffordances ? (
-            <div role="status">
+            <div className="da-gfs-alert" role="status">
               <StatusBanner tone="info" text={`Checking permissions for ${current.name}…`} />
             </div>
           ) : null}
@@ -3555,9 +3562,9 @@ export function FilesPage({
           (ctrl.affordancesHttpStatus === 429 ||
             ctrl.affordancesHttpStatus === 403 ||
             ctrl.affordancesHttpStatus === 404) ? (
-            <div role="alert">
+            <div className="da-gfs-alert" role="alert">
               <StatusBanner
-                tone="error"
+                tone={ctrl.affordancesHttpStatus === 429 ? 'warn' : 'error'}
                 text={
                   ctrl.affordancesHttpStatus === 429
                     ? 'Too many file requests. Wait before retrying permissions.'
@@ -3568,10 +3575,11 @@ export function FilesPage({
               />
               {ctrl.affordancesHttpStatus === 429 ? (
                 <Button
-                  color="secondary"
                   onClick={() =>
                     void fetchRowAuthority(current.resourceId, current.name, ctrl.drive)
                   }
+                  size="sm"
+                  variant="outline"
                 >
                   Retry permission check
                 </Button>
@@ -3582,12 +3590,11 @@ export function FilesPage({
             if (!status.error || resourceId === current?.resourceId) return null
             const rateLimited = status.rateLimited && status.httpStatus === 429
             return (
-              <div key={resourceId} role="alert">
+              <div className="da-gfs-alert" key={resourceId} role="alert">
                 <StatusBanner tone={rateLimited ? 'warn' : 'error'}>
                   <span>Could not verify Move permissions: {status.error}</span>
                 </StatusBanner>
                 <Button
-                  color="secondary"
                   onClick={() =>
                     void fetchRowAuthority(
                       resourceId,
@@ -3596,6 +3603,8 @@ export function FilesPage({
                         ?.drive ?? ctrl.drive
                     )
                   }
+                  size="sm"
+                  variant="outline"
                 >
                   Retry permission check
                 </Button>
@@ -3603,11 +3612,10 @@ export function FilesPage({
             )
           })}
           {pendingGfsDeepLinkFailure ? (
-            <div role="alert">
+            <div className="da-gfs-alert" role="alert">
               <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
               {pendingGfsDeepLinkFailure.retryable ? (
                 <Button
-                  color="secondary"
                   onClick={() => {
                     setPendingGfsDeepLinkFailure(null)
                     setGfsDeepLinkRetry(current => ({
@@ -3625,15 +3633,23 @@ export function FilesPage({
             </div>
           ) : null}
           {unavailableLocation ? (
-            <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
+            <div className="da-gfs-alert" role="alert">
+              <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
+            </div>
           ) : null}
           {visibleError && !accessRevoked && !blockingFailure ? (
             // Presented, not raw. The banner is the non-blocking half of the
             // same read-plane failure the card shows, so it must not be the one
             // surface left leaking `Error invoking remote method '…'` at the
             // user — which is what it did for every failure the card declines
-            // to take over, a rate-limited `Load more` among them.
-            <StatusBanner tone="error" text={describeGfsReadError(visibleError).message} />
+            // to take over, a rate-limited `Load more` among them. A rate limit
+            // is a wait, not a failure: it takes the warning tone.
+            <div className="da-gfs-alert" role="alert">
+              <StatusBanner
+                tone={visibleErrorPresentation?.code === 'rate_limited' ? 'warn' : 'error'}
+                text={visibleErrorPresentation?.message}
+              />
+            </div>
           ) : null}
 
           {accessRevoked ? (
@@ -3641,7 +3657,9 @@ export function FilesPage({
               {/* The revoked surface owns the session-ended sentence (A11): it
                   outlives any gesture's ownership, so a drag whose probe died
                   stays explained even after the revocation invalidated it. */}
-              <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+              <div className="da-gfs-alert" role="alert">
+                <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+              </div>
               <EmptyState
                 title="File access is not authorized"
                 body="Your current Desktop session cannot access this location. Sign in again or contact an administrator."

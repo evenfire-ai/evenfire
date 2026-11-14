@@ -52,7 +52,12 @@ async function observeProgressOrCompletion(
 ): Promise<void> {
   const values = new Set<string>()
   const completed = page.getByText(completedText, { exact: true })
-  const errorToast = page.getByRole('alert').filter({ hasText: /file|gfs|upload/i })
+  // Upload rejections are error toasts; the Files page's persistent banners
+  // (also role="alert") are not upload outcomes.
+  const errorToast = page
+    .locator('aside.toast-stack')
+    .getByRole('alert')
+    .filter({ hasText: /file|gfs|upload/i })
   let outcome:
     | 'waiting'
     | 'progress'

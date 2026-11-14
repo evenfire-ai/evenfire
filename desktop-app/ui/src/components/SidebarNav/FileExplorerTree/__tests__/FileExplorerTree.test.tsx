@@ -251,6 +251,21 @@ describe('My home', () => {
     expect(first.onOpenFolder).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['tone-warn', 'a rate limit', '429 Too Many Requests retryAfterSeconds=30'],
+    ['tone-error', 'a server failure', '503 Service Unavailable'],
+  ])('gives the discovery error banner the %s class for %s', async (toneClass, _cause, message) => {
+    installClerum({
+      listAccessible: vi.fn(async () => {
+        throw new Error(message)
+      }),
+    })
+    renderTree()
+    const banner = (await screen.findByText(message)).closest('.status-banner')
+    expect(banner).toBeTruthy()
+    expect(banner?.classList.contains(toneClass)).toBe(true)
+  })
+
   it('announces each home state with its role inside the File destinations tree', async () => {
     installClerum({
       getHome: async () =>
@@ -2892,6 +2907,15 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     expect(sessionEnded.length).toBeGreaterThanOrEqual(2)
     expect(
       sessionEnded.some(element => element.closest('.da-file-explorer__revoked') !== null)
+    ).toBe(true)
+    // The refusal banner outside the revoked surface is announced on its own.
+    expect(
+      sessionEnded.some(
+        element =>
+          element.closest('.status-banner') !== null &&
+          element.closest('[role="alert"]') !== null &&
+          element.closest('.da-file-explorer__revoked') === null
+      )
     ).toBe(true)
     // The revoked surface stays visible alongside the refusal banner.
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()

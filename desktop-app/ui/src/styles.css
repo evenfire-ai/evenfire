@@ -15519,9 +15519,17 @@ pre {
   justify-content: flex-end;
 }
 
-.da-gfs-drive > .status-banner,
 .da-gfs-drive > .empty-state {
   margin: var(--space-3) var(--space-4);
+}
+
+/* One wrapper for every persistent Files banner: it carries the live role
+   and the card inset, and stacks a banner with its Retry button. */
+.da-gfs-alert {
+  margin: var(--space-3) var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
 }
 
 .da-gfs-loading {
