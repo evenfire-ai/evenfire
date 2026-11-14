@@ -28,6 +28,15 @@
 #   When a container of the selected pod restarted inside the window, its
 #   previous log is saved to EVIDENCE_DIR before returning 1.
 #
+#   A process that ran across the window is not enough: `kubectl logs` serves
+#   the container's current log file, so a kubelet rotation inside the window
+#   hides the earlier lines (#1489). Between the two fingerprints, each
+#   container's current log is read with --timestamps, and the window fails
+#   when its first line is later than the window start (the oldest-line file is
+#   kept in EVIDENCE_DIR). A container that has logged nothing cannot be
+#   missing a line. Residual: a rotation followed by silence cannot be told
+#   from a container that never logged.
+#
 # Contract (globals owned by the sourcing gate):
 #   HOST_NS       namespace of the Host runtimes
 #   EVIDENCE_DIR  directory for saved previous-container logs
@@ -54,6 +63,7 @@ read_host_log_window() {
   local deployment_json selector pods_json pod_count pod since_iso containers_json
   local late container restarts started_list lines covered_since
   local fingerprint_before pods_after fingerprint_after
+  local container_names oldest_file first_line first_epoch
 
   covered_since=$((since_epoch - HOST_LOG_CLOCK_MARGIN_SEC))
 
@@ -132,6 +142,39 @@ read_host_log_window() {
     echo "host-log-window: could not fingerprint the pod of ${host}" >&2
     return 1
   }
+  # #1489: each container's current log file must reach back to the window start.
+  if ! container_names="$(jq -er '.[].name' <<<"$containers_json")"; then
+    echo "host-log-window: could not list the containers of ${pod}" >&2
+    return 1
+  fi
+  while IFS= read -r container; do
+    oldest_file="${out}.${container}.oldest"
+    if ! kctl logs "pod/${pod}" -n "$HOST_NS" -c "$container" --timestamps >"$oldest_file"; then
+      rm -f "$oldest_file"
+      echo "host-log-window: could not read the log of container ${container} of ${pod} (${host})" >&2
+      return 1
+    fi
+    first_line="$(head -n 1 "$oldest_file")"
+    if [ -z "$first_line" ]; then
+      rm -f "$oldest_file"
+      continue
+    fi
+    if ! first_epoch="$(jq -Rer 'split(" ")[0] | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601' \
+        <<<"$first_line")"; then
+      cp "$oldest_file" "${EVIDENCE_DIR}/host-${host}-${container}-oldest.log"
+      rm -f "$oldest_file"
+      echo "host-log-window: the first log line of ${host} container ${container} has no parsable timestamp" >&2
+      return 1
+    fi
+    if [ "$first_epoch" -gt "$covered_since" ]; then
+      cp "$oldest_file" "${EVIDENCE_DIR}/host-${host}-${container}-oldest.log"
+      rm -f "$oldest_file"
+      echo "host-log-window: the current log file of ${host} container ${container} starts at $(epoch_to_utc "$first_epoch"), inside the window; earlier lines are not covered (log rotation; saved to ${EVIDENCE_DIR}/host-${host}-${container}-oldest.log)" >&2
+      return 1
+    fi
+    rm -f "$oldest_file"
+  done <<<"$container_names"
+
   if ! kctl logs "pod/${pod}" -n "$HOST_NS" --all-containers=true --since-time="$since_iso" >"$out"; then
     echo "host-log-window: could not read the log of ${pod} (${host})" >&2
     return 1
