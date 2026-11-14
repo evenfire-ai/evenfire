@@ -27,14 +27,54 @@ export interface CrashRecoveryResult {
   newAttempt?: number
 }
 
-export interface PodReadiness {
+/** The fields read from a pod that exists. */
+interface ObservedPodReadiness {
   phase?: string
+  /**
+   * Whether this pod can be waited on as the serving pod of its name: phase
+   * Running, condition Ready=True, and not being deleted.
+   */
   ready: boolean
   waitingReason?: string
   schedulingReason?: string
   /** Pod UID — changes on recreate, lets callers detect a restarted pod. */
   uid?: string
+  /** `metadata.creationTimestamp` (ISO 8601). A recreated pod carries a new value. */
+  createdAt?: string
 }
+
+/** GET 404: no pod has that name, so none of the fields of a pod is set. */
+export interface AbsentPodReadiness {
+  kind: 'absent'
+  ready: false
+  phase?: undefined
+  waitingReason?: undefined
+  schedulingReason?: undefined
+  uid?: undefined
+}
+
+/** The pod exists and is not being deleted. */
+export interface PresentPodReadiness extends ObservedPodReadiness {
+  kind: 'present'
+}
+
+/**
+ * The pod exists and is being deleted. It is never `ready`: a deletion is not
+ * undone, so this pod will not serve under its name again, even though it can
+ * keep condition Ready=True until its containers stop.
+ */
+export interface TerminatingPodReadiness extends ObservedPodReadiness {
+  kind: 'terminating'
+  ready: false
+  /**
+   * `metadata.deletionTimestamp` (ISO 8601): the deletion request time plus
+   * the pod's grace period.
+   */
+  deletingAt: string
+}
+
+/** What one GET of a pod name found. */
+export type PodReadiness = AbsentPodReadiness | PresentPodReadiness | TerminatingPodReadiness
 
 export function evaluateCompletedRuntimePodRecovery(
   currentExecution: WorkflowExecutionStatus | undefined,
@@ -207,12 +247,12 @@ export async function getPodReadiness(
     const pod = await coreApi.readNamespacedPod({ name, namespace })
     return inspectPodReadiness(pod)
   } catch (error: unknown) {
-    if (getErrorCode(error) === 404) return { ready: false }
+    if (getErrorCode(error) === 404) return { kind: 'absent', ready: false }
     throw error
   }
 }
 
-export function inspectPodReadiness(pod: k8s.V1Pod): PodReadiness {
+export function inspectPodReadiness(pod: k8s.V1Pod): PresentPodReadiness | TerminatingPodReadiness {
   const phase = pod.status?.phase
   const readyCondition = pod.status?.conditions?.find(condition => condition.type === 'Ready')
   const scheduledCondition = pod.status?.conditions?.find(
@@ -220,13 +260,25 @@ export function inspectPodReadiness(pod: k8s.V1Pod): PodReadiness {
   )
   const waitingReason = firstContainerWaitingReason(pod)
 
-  return {
+  const observed: ObservedPodReadiness = {
     phase,
     ready: phase === 'Running' && readyCondition?.status === 'True',
     ...(waitingReason && { waitingReason }),
     ...(scheduledCondition?.reason && { schedulingReason: scheduledCondition.reason }),
     ...(pod.metadata?.uid && { uid: pod.metadata.uid }),
+    ...(pod.metadata?.creationTimestamp && {
+      createdAt: new Date(pod.metadata.creationTimestamp).toISOString(),
+    }),
   }
+  if (pod.metadata?.deletionTimestamp) {
+    return {
+      ...observed,
+      ready: false,
+      kind: 'terminating',
+      deletingAt: new Date(pod.metadata.deletionTimestamp).toISOString(),
+    }
+  }
+  return { ...observed, kind: 'present' }
 }
 
 /**

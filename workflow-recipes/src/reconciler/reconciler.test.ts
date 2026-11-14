@@ -10184,8 +10184,8 @@ describe('WorkflowRecipeReconciler', () => {
 
   // §5: a `deploying` PROGRESS requeue must be a FIXED interval (no exponential
   // backoff) — requeueFixedInterval signals the watcher to skip backoff and reset
-  // attempts, else the poll cadence degrades toward the 60s cap and the 240s
-  // mcp-host readiness deadline can still be exceeded.
+  // attempts, else the poll cadence degrades toward the 60s cap and slows every
+  // deploying sub-phase of the run.
   it('marks a deploying workflow requeue as fixed-interval (no transient backoff)', async () => {
     const workflowReconcile = vi.fn().mockResolvedValue({
       phase: 'deploying',
@@ -10680,7 +10680,7 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   // The fixed interval exists for `deploying`, where the controller polls for a
-  // Pod it cannot watch and must beat the 240s mcp-host readiness deadline.
+  // Pod it cannot watch.
   // Plugin Workload SDK policy-pending waits for an operator grant instead, which
   // polling cannot advance, so it must requeue on the backoff path.
   it('requeues a workflow awaiting Plugin Workload SDK policy without a fixed interval', async () => {
@@ -14991,6 +14991,102 @@ describe('WorkflowRecipeReconciler', () => {
 
     const patch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body
     expect(patch.status.workflowExecution).toBeUndefined()
+  })
+
+  describe('patchStatus after the same pass counted a recovery attempt', () => {
+    const passStartExecution = {
+      phase: 'recovering',
+      startedAt: '2026-05-06T17:11:30.496Z',
+      attempt: 1,
+    }
+    const message =
+      'Workflow output prepare pod failed before runtime pod startup; recreating it (attempt 2/3)'
+
+    // RFC 7386, which is how the API server applies application/merge-patch+json.
+    function mergePatch(target: unknown, patch: unknown): unknown {
+      if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return patch
+      const merged: Record<string, unknown> =
+        target !== null && typeof target === 'object' && !Array.isArray(target)
+          ? { ...(target as Record<string, unknown>) }
+          : {}
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete merged[key]
+        else merged[key] = mergePatch(merged[key], value)
+      }
+      return merged
+    }
+
+    // `recipe` is the object the pass started from. `live` is the stored object
+    // after the workflow reconciler patched `attempt + 1` for the pod it is
+    // replacing, earlier in the same pass.
+    function passThatCountedARecovery() {
+      const recipe = makeRecipe({
+        spec: { steps: [{ id: 'calculate', run: snippetRun() }] },
+        status: { phase: 'deploying', workflowExecution: { ...passStartExecution } },
+      })
+      const live = {
+        metadata: { name: 'test-recipe', namespace: 'sandbox-recipes', uid: 'uid-123' },
+        spec: {},
+        status: mergePatch(recipe.status, {
+          workflowExecution: { ...passStartExecution, phase: 'recovering', attempt: 2, message },
+        }),
+      }
+      const storedExecution = () =>
+        (
+          mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.reduce(
+            (status, [request]) => mergePatch(status, request.body.status),
+            live.status
+          ) as { workflowExecution?: Record<string, unknown> }
+        ).workflowExecution
+      const result = {
+        phase: 'deploying' as const,
+        message,
+        workloadStatuses: [],
+        workflowPhase: 'recovering' as const,
+      }
+      return { recipe, live, storedExecution, result }
+    }
+
+    it('fails the pass when the live read fails and leaves the counted attempt stored', async () => {
+      const { recipe, storedExecution, result } = passThatCountedARecovery()
+      const readError = Object.assign(new Error('service unavailable'), { code: 503 })
+      mockCustomApi.getNamespacedCustomObject.mockRejectedValueOnce(readError)
+
+      const outcome = await reconciler.patchStatus(recipe, result).then(
+        () => 'patched',
+        (error: unknown) => error
+      )
+
+      // The read of this recipe was attempted, so the pass reached the point
+      // where it decides what to write.
+      expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+      expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledWith(
+        expect.objectContaining({ plural: 'workflowrecipes', name: 'test-recipe' })
+      )
+      expect(storedExecution()).toMatchObject({ phase: 'recovering', attempt: 2 })
+      expect(outcome).toBe(readError)
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+    })
+
+    it('builds the patch on the live execution when the read succeeds', async () => {
+      const { recipe, live, storedExecution, result } = passThatCountedARecovery()
+      mockCustomApi.getNamespacedCustomObject.mockResolvedValueOnce(live)
+
+      await reconciler.patchStatus(recipe, result)
+
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      const patch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body
+      expect(patch.status.workflowExecution).toMatchObject({
+        phase: 'recovering',
+        attempt: 2,
+        message,
+      })
+      expect(storedExecution()).toMatchObject({
+        phase: 'recovering',
+        attempt: 2,
+        startedAt: passStartExecution.startedAt,
+      })
+    })
   })
 
   it('patchStatus can mark workflow infrastructure active while execution is running', async () => {

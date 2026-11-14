@@ -2416,7 +2416,7 @@ describe('transient-result requeue (scheduleTransientRetry)', () => {
   // §5 (the regression this PR exists for): a `deploying` PROGRESS requeue uses a
   // FIXED interval and must NOT inherit the transient-ERROR exponential backoff.
   // If it did, repeated deploying sub-phase passes would grow the delay toward
-  // the 60s cap and the 240s mcp-host readiness deadline could STILL be exceeded.
+  // the 60s cap and slow every deploying sub-phase of the run.
   // Here we drive N consecutive fixed-interval requeues and assert each one fires
   // at exactly the base 5s (no growth), in direct contrast to the exponential
   // test above.

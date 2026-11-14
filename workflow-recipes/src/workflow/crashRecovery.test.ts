@@ -3,6 +3,7 @@ import {
   evaluateCompletedRuntimePodRecovery,
   evaluateCrashRecovery,
   getPodPresence,
+  getPodReadiness,
   inspectPodReadiness,
   waitForPodDeletion,
 } from './crashRecovery'
@@ -79,6 +80,7 @@ describe('crash recovery pod readiness classification', () => {
         },
       })
     ).toEqual({
+      kind: 'present',
       phase: 'Pending',
       ready: false,
       schedulingReason: 'Unschedulable',
@@ -94,6 +96,7 @@ describe('crash recovery pod readiness classification', () => {
         },
       })
     ).toEqual({
+      kind: 'present',
       phase: 'Running',
       ready: false,
     })
@@ -106,9 +109,110 @@ describe('crash recovery pod readiness classification', () => {
         },
       })
     ).toEqual({
+      kind: 'present',
       phase: 'Running',
       ready: true,
     })
+  })
+
+  it('reports when the pod was created and when its deletion is due', () => {
+    const status = { phase: 'Running', conditions: [{ type: 'Ready', status: 'False' }] }
+
+    expect(
+      inspectPodReadiness({
+        metadata: { uid: 'pod-uid-2', creationTimestamp: new Date('2026-11-13T10:00:00.000Z') },
+        status,
+      })
+    ).toEqual({
+      kind: 'present',
+      phase: 'Running',
+      ready: false,
+      uid: 'pod-uid-2',
+      createdAt: '2026-11-13T10:00:00.000Z',
+    })
+
+    expect(
+      inspectPodReadiness({
+        metadata: {
+          uid: 'pod-uid-2',
+          creationTimestamp: new Date('2026-11-13T10:00:00.000Z'),
+          deletionTimestamp: new Date('2026-11-13T10:05:30.000Z'),
+        },
+        status,
+      })
+    ).toEqual({
+      kind: 'terminating',
+      phase: 'Running',
+      ready: false,
+      uid: 'pod-uid-2',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      deletingAt: '2026-11-13T10:05:30.000Z',
+    })
+  })
+})
+
+describe('inspectPodReadiness on a pod that is being deleted', () => {
+  it('never reports a pod with a deletionTimestamp ready, even while its Ready condition is True', () => {
+    const status = { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] }
+    const metadata = { uid: 'pod-uid-4', creationTimestamp: new Date('2026-11-13T10:00:00.000Z') }
+
+    // Control: the same pod is ready while it is not being deleted.
+    expect(inspectPodReadiness({ metadata, status })).toEqual({
+      kind: 'present',
+      phase: 'Running',
+      ready: true,
+      uid: 'pod-uid-4',
+      createdAt: '2026-11-13T10:00:00.000Z',
+    })
+
+    expect(
+      inspectPodReadiness({
+        metadata: { ...metadata, deletionTimestamp: new Date('2026-11-13T10:05:30.000Z') },
+        status,
+      })
+    ).toEqual({
+      kind: 'terminating',
+      phase: 'Running',
+      ready: false,
+      uid: 'pod-uid-4',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      deletingAt: '2026-11-13T10:05:30.000Z',
+    })
+  })
+})
+
+describe('getPodReadiness', () => {
+  it('returns the absent state on GET 404 and the inspected pod on GET 200', async () => {
+    const readNamespacedPod = vi
+      .fn()
+      .mockRejectedValueOnce({ code: 404 })
+      .mockResolvedValueOnce({
+        metadata: { uid: 'pod-uid-3', creationTimestamp: new Date('2026-11-13T10:00:00.000Z') },
+        status: { phase: 'Pending' },
+      })
+    const coreApi = { readNamespacedPod } as unknown as Parameters<typeof getPodReadiness>[0]
+
+    await expect(getPodReadiness(coreApi, 'recipe-mcp-host', 'sandbox-recipes')).resolves.toEqual({
+      kind: 'absent',
+      ready: false,
+    })
+    await expect(getPodReadiness(coreApi, 'recipe-mcp-host', 'sandbox-recipes')).resolves.toEqual({
+      kind: 'present',
+      phase: 'Pending',
+      ready: false,
+      uid: 'pod-uid-3',
+      createdAt: '2026-11-13T10:00:00.000Z',
+    })
+    expect(readNamespacedPod).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([403, 500])('rethrows a GET %i instead of reporting the pod absent', async code => {
+    const readNamespacedPod = vi.fn().mockRejectedValueOnce({ code })
+    const coreApi = { readNamespacedPod } as unknown as Parameters<typeof getPodReadiness>[0]
+
+    await expect(
+      getPodReadiness(coreApi, 'recipe-mcp-host', 'sandbox-recipes')
+    ).rejects.toMatchObject({ code })
   })
 })
 

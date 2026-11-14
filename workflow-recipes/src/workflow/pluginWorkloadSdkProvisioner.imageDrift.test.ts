@@ -425,15 +425,14 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
   it('does not broker /configure into a terminating Ready pod already on the platform image (promptBridge)', async () => {
     // Safety property — credential into a dying pod: a promptBridge recipe whose
     // pod is terminating (deletionTimestamp set) must short-circuit to 'deploying'
-    // via the `deleting` guard BEFORE the configure path, so the provider key is
-    // never brokered into a pod about to be replaced.
+    // via the `deleting` guard before the drift rolls and the configure path, so
+    // the pod is not deleted a second time and the provider key is never brokered
+    // into a pod about to be replaced.
     //
-    // This case deliberately uses DESIRED_IMAGE + a Ready condition: the
-    // image-drift guard does NOT fire (image already matches) and readiness IS
-    // 'ready', so the ONLY thing standing between the reconcile and a
-    // signWrcConfigureToken/handle call is the `deleting` guard. Removing that
-    // guard makes this test fail (configure brokered into the terminating pod) —
-    // i.e. the negative assertions below are load-bearing, not incidental.
+    // Removing the `deleting` guard fails this test on the delete assertion: the
+    // fixture carries no runtime-contract-hash annotation, so the contract-drift
+    // roll deletes the pod. The configure path is covered by the next test, where
+    // the deletion lands after the drift-state read.
     const promptBridgeSpec = {
       agent: { provider: 'openai', model: 'gpt-4' },
       pluginWorkloadSdk: { promptBridge: {} },
@@ -487,6 +486,96 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
     expect(signWrcConfigureToken).not.toHaveBeenCalled()
     expect(handle).not.toHaveBeenCalled()
   })
+
+  it.each([
+    { state: 'live', deletedAfterDriftRead: false, configured: true },
+    { state: 'deleted after the drift read', deletedAfterDriftRead: true, configured: false },
+  ])(
+    'brokers /configure into a Ready pod only when it is not being deleted at the readiness read ($state)',
+    async row => {
+      const promptBridgeSpec = {
+        agent: { provider: 'openai', model: 'gpt-4' },
+        pluginWorkloadSdk: { promptBridge: {} },
+      } as unknown as WorkflowRecipeSpec
+      const expectedRuntimeContractHash = pluginWorkloadSdkRuntimeContractHash(
+        buildMcpHostPod(
+          RECIPE,
+          promptBridgeSpec.agent,
+          TEST_CONFIG,
+          RECIPE,
+          SANDBOX_NS,
+          undefined,
+          undefined,
+          undefined,
+          {
+            mountWorkflowOutput: false,
+            pluginWorkloadSdkCapabilities: ['promptBridge'],
+            pluginWorkloadSdkRuntimeMode: 'sdk-only',
+          }
+        )
+      )
+      // Reads 1 and 2 are the waiting-reason and drift-state reads, which find
+      // a live pod. Reads 3 and 4 are the phase and readiness reads.
+      let reads = 0
+      const readNamespacedPod = vi.fn().mockImplementation(async () => {
+        reads += 1
+        return {
+          metadata: {
+            uid: 'pod-uid-1',
+            ...(row.deletedAfterDriftRead && reads > 2
+              ? { deletionTimestamp: '2026-06-19T18:00:00Z' }
+              : {}),
+            annotations: {
+              'clerum.io/plugin-workload-sdk-runtime-contract-hash': expectedRuntimeContractHash,
+            },
+          },
+          spec: { containers: [{ name: 'mcp-host', image: DESIRED_IMAGE }] },
+          status: {
+            phase: 'Running',
+            conditions: [{ type: 'Ready', status: 'True' }],
+            containerStatuses: [],
+          },
+        }
+      })
+      const deleteNamespacedPod = vi.fn().mockResolvedValue({})
+      const createNamespacedPod = vi.fn().mockResolvedValue({})
+      const configurePluginWorkloadSdkBootstrap = vi.fn().mockResolvedValue({ status: 500 })
+      const signWrcConfigureToken = vi.fn().mockResolvedValue('configure-token')
+      const coreApi = { readNamespacedPod, deleteNamespacedPod, createNamespacedPod }
+      const deps = {
+        coreApi,
+        config: TEST_CONFIG,
+        tokenFactory: { signWrcConfigureToken },
+        modelConfigHandler: { configurePluginWorkloadSdkBootstrap },
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+        ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
+        applyWorkflowNetworkPolicies: vi
+          .fn()
+          .mockResolvedValue({ conflicts: [], retryPending: false }),
+        ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
+        createIfNotExists: vi.fn().mockResolvedValue(true),
+        safeDelete: vi.fn().mockResolvedValue(undefined),
+      } as unknown as PluginWorkloadSdkProvisionerDeps
+      const provisioner = new PluginWorkloadSdkProvisioner(deps)
+
+      const { status } = await provisioner.ensureEagerSdkMcpHost(
+        RECIPE,
+        'recipe-uid',
+        SANDBOX_NS,
+        RECIPE,
+        promptBridgeSpec,
+        RUNTIME,
+        { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
+      )
+
+      // Witness: the pass went past the drift-state guard to the readiness read.
+      expect(readNamespacedPod).toHaveBeenCalledTimes(4)
+      expect(deleteNamespacedPod).not.toHaveBeenCalled()
+      expect(status).toBe('deploying')
+      expect(signWrcConfigureToken).toHaveBeenCalledTimes(row.configured ? 1 : 0)
+      expect(configurePluginWorkloadSdkBootstrap).toHaveBeenCalledTimes(row.configured ? 1 : 0)
+    }
+  )
 
   it('resets the configure failure budget after an image-drift roll', async () => {
     // Explicit WRC rolls remain a broker-state boundary. Even if a unit-test
