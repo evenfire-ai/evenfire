@@ -534,6 +534,12 @@ filter or report on the signals they name.
   before it deletes the runtime. NetworkPolicy intent follows `SecretResolved`,
   so the server's allows are revoked from that write on, also when the
   Deployment delete then fails.
+- **NetworkPolicy pass outcomes.** A NetworkPolicy pass that ends because the
+  desired Context or McpServer inventory changed is now reported as
+  `clerum_hcc_initial_convergence_pass_results_total{result="aborted-bump"}` and
+  `clerum_hcc_initial_convergence_swallowed_total{sink="inventory-changed"}`.
+  Before, it was counted as `aborted-authority` / `authority-lost`, which now
+  mean only that a watch cache lost authority.
 
 ### McpServer CRD: applied credentials record
 

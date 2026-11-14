@@ -3990,12 +3990,19 @@ export class McpServerWatcher implements McpServerProvider {
         !contextInventoryAuthoritative() ||
         !serverInventoryAuthoritative()
       ) {
-        hccLogger.warn(
-          '[K8s] pass ended without certifying: inventory authority lost',
-          this.networkPolicyInventoryMovement(capturedSafetyCertificate)
-        )
-        initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'authority-lost' })
-        observePass('aborted-authority')
+        // #1494: classify as the exception path does. A moved desired inventory
+        // wins over an unsynced cache; only a pass with no movement lost
+        // authority.
+        const movement = this.networkPolicyInventoryMovement(capturedSafetyCertificate)
+        if (movement.contextMoved || movement.serverMoved) {
+          hccLogger.warn('[K8s] pass ended without certifying: desired inventory changed', movement)
+          initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'inventory-changed' })
+          observePass('aborted-bump')
+        } else {
+          hccLogger.warn('[K8s] pass ended without certifying: inventory authority lost', movement)
+          initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'authority-lost' })
+          observePass('aborted-authority')
+        }
         this.networkPolicyRepairPending = true
         this.scheduleInitialConvergenceRetry('NetworkPolicy')
         return
