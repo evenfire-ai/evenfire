@@ -351,7 +351,11 @@ runtime can execute) and the run fetched models.dev live; at most
 within a provider; the total is handed out in the fixed order of
 `PROVIDER_IDS`, so later providers wait for earlier ones), and a large catalog
 completes over several runs. It also loads the catalog price of each model it
-inserts. It never changes `enabled` on an existing row. Without egress
+inserts. Of the existing rows it only changes `enabled` on the ones it manages
+itself: it disables stale models nobody uses after a grace period
+(`LLM_CATALOG_PRUNE_STALE_GRACE_MS`, default 7 days) and enables them again if
+the catalog lists them later; an operator's decision is never overridden.
+Without egress
 (`vendored` runs) providers whose policy is ON get no discovered rows, and
 since nothing is seeded, a fresh installation without egress has no enabled
 model at all until an admin adds one (local minikube setup adds the Host's

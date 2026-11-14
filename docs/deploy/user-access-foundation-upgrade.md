@@ -92,8 +92,18 @@ and tells the user.
 ## Rollback residue
 
 Session revocations and password epochs written by the new control-api are
-ignored by the old one. The release installs no database triggers and no
-revision functions, so nothing keeps running against the old image.
+ignored by the old one. The release installs no revision functions.
+
+It does leave state on `llm_allowed_models` that a rollback keeps: the six
+columns of `0139_llm_catalog_prune_columns` (`enabled_managed_by`,
+`auto_disabled_at`, `stale_since`, `stale_episode`, `deprecated_episode`,
+`attention_ack`) and the `llm_allowed_models_track_episodes` trigger of
+`0140`. The old image tolerates them: it never names the columns, every one
+has a default or is nullable, and the trigger only maintains `stale_since` and
+the episode counters on the rows the old image writes. A model the new image
+pruned (disabled because the catalog dropped it and nobody used it) stays
+disabled under the old image, which has no re-enable: turn it on by hand if
+it returns to the catalog while the old image runs.
 
 Logout revokes only the token it receives. A V1 token issued before a team
 switch stays valid until its own expiry (at most 7 days, 604800 s), as on `dev`. A new
@@ -105,8 +115,13 @@ before this release.
 - The target database has no migration version and no object from an earlier
   head of this change; the migration Job stops otherwise (see
   [Databases that ran an earlier head of this change](#databases-that-ran-an-earlier-head-of-this-change)).
-  The release adds `0137_user_access_foundation` and
-  `0138_legacy_password_security_epoch_backfill`.
+  The release adds `0137_user_access_foundation`,
+  `0138_legacy_password_security_epoch_backfill`,
+  `0139_llm_catalog_prune_columns` and `0140_llm_catalog_prune_episodes`. A
+  database where an earlier head of the catalog prune applied both parts as a
+  single `0139` migration (branch profiles or local databases only) records
+  `0139_llm_catalog_prune_columns` under its legacy alias without running it,
+  and then runs `0140`.
 - PostgreSQL 14 or later on Linux, or 15 or later on macOS, illumos or BSD (not
   Windows). The migration session sets `client_connection_check_interval`,
   which the server rejects on other platforms, so that a killed Job pod does
@@ -157,6 +172,46 @@ before this release.
   `ALTER TABLE` forms. It must finish within the 15 s statement timeout.
   Measured at about 6 µs per row on one laptop, it reaches that timeout near
   2.4 million users and then fails without a partial write.
+- `0139_llm_catalog_prune_columns` is the one statement of the release that
+  takes an `AccessExclusiveLock` on a table the old images keep using:
+  `llm_allowed_models`, for one `ALTER TABLE` that adds six columns. It is
+  catalog-only (constant defaults, so no table rewrite; the `CHECK` is added
+  `NOT VALID`, so no scan) and holds the lock for milliseconds, but while it
+  waits for it every new reader of the table queues behind it. That wait is
+  bounded by a `lock_timeout` of 2 s of its own, lower than the Job's 10 s: a
+  reader transaction that stays open longer makes the attempt fail whole
+  (nothing is applied) and the Job retries it within its `backoffLimit`. The
+  readers that can queue for up to 2 s per attempt are control-api's admin
+  model routes, the Host spec validation, the plugin-workload grant gate and
+  the allowlist ConfigMap publisher, and the old image's catalog sync.
+  mcp-host does not: it reads the published ConfigMap, not the table.
+- `0140_llm_catalog_prune_episodes` never blocks a plain `SELECT` on
+  `llm_allowed_models`. It starts by taking `EXCLUSIVE` on the table and holds
+  it until it commits. Under that lock it validates the `CHECK`, backfills the
+  new columns, replaces the episode trigger with `CREATE OR REPLACE TRIGGER`
+  (it needs PostgreSQL 14, above) and creates `llm_catalog_prune_runs`.
+  - Who waits: every write (`INSERT`, `UPDATE`, `DELETE`) and every row-locking
+    read (`SELECT … FOR UPDATE` / `FOR SHARE`) waits for that whole transaction,
+    and while the migration waits to get the lock (up to the Job's 10 s) new
+    ones queue behind it too. Plain `SELECT`s never wait. In the old and new
+    control-api the only row-locking read of the table is the
+    `SELECT … FOR UPDATE` of `PUT /api/v1/admin/llm-models/:id` (the model
+    editor, the Discovery panel's enable and disable, and a rename), so that
+    route and every write (the catalog sync, model create and delete, the
+    subscription catalog rebuilds) pause for the migration; reads (the model
+    list, Host validation, the attention feed, the ConfigMap publisher) do not.
+  - Why the lock comes first: asked for after the backfill has locked rows, the
+    trigger's lock deadlocks with a write of the old image waiting on one of
+    those rows; and without it a write could turn a row stale before the trigger
+    exists, leaving it without `stale_since` or an episode.
+  - Why `EXCLUSIVE` and not `SHARE ROW EXCLUSIVE`, which would let row-locking
+    reads through: the old image's PUT locks its row with `FOR UPDATE` before its
+    `UPDATE`, and `SHARE ROW EXCLUSIVE` does not conflict with that first step,
+    so the migration would get the lock in the middle of the PUT and deadlock
+    with its `UPDATE`.
+  - Rows the old image inserts after the migration Job and until the rollout
+    completes keep `enabled_managed_by = 'operator'`: the catalog prune never
+    touches them, which is the safe side.
 - `0138` treats every V1 session issued at or before the second of a user's
   `password_set_at` as issued before that password event, and rejects it. The
   previous release kept existing sessions when a password was set or changed,

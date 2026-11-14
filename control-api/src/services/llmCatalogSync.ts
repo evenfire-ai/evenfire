@@ -14,18 +14,21 @@
  *     the catalog. (`ON CONFLICT DO NOTHING` only guards a concurrent manual
  *     insert race — it is DO NOTHING, never DO UPDATE, so it can never overwrite
  *     a manual row.) See "Enabled on insert" below for the value of `enabled`.
- *   - PRESENT with source='discovery' → UPDATE last_seen_at=now, stale=false,
- *     NULL-FILL ctx/display only (COALESCE keeps any operator-edited non-null)
- *     and, on a live run, refresh `catalog_status`. `enabled` is NEVER touched.
+ *   - PRESENT with source='discovery' → UPDATE last_seen_at=now, NULL-FILL
+ *     ctx/display only (COALESCE keeps any operator-edited non-null) and, on a
+ *     live run, refresh `catalog_status` and clear `stale`. `enabled` is never
+ *     assigned by this UPDATE; only the re-enable below changes it, and only on
+ *     a row the prune disabled.
  *   - PRESENT with source='manual' → INVISIBLE for everything an operator
  *     authored: `enabled`, `source`, `stale`, `last_seen_at`, `discovered_at`,
  *     ctx and display are never written. ONLY `image_input` is filled, under
  *     the same guard as a discovery row (NULL or not-newer discovery evidence),
  *     because a manual row the catalog lists is served like any other and
  *     should carry the same capability evidence (#654).
- *   - discovery rows absent from this run → UPDATE stale=true. NEVER deleted,
- *     NEVER auto-disabled (R3.7): an enabled model that vanished stays enabled +
- *     served, only flagged stale for an operator decision.
+ *   - discovery rows absent from this run → UPDATE stale=true. NEVER deleted
+ *     here. After the COMMIT, the prune (`llmCatalogPrune.ts`) disables the
+ *     catalog-managed ones that stayed stale past a grace period and that
+ *     nobody uses; everything else stays enabled + served, flagged stale.
  *
  * Enabled on insert. A new row starts enabled only when ALL of these hold: the
  * run is live and plausible, the provider's policy (read once, after the sync
@@ -39,7 +42,25 @@
  * enabled. It takes two admin operations on the same pair within the same
  * milliseconds. A tombstoned pair is still inserted, only disabled. Rows that
  * already exist never change `enabled` — whatever an operator decided stands,
- * and so does a model inserted disabled that models.dev later fixes.
+ * and so does a model inserted disabled that models.dev later fixes. The one
+ * exception is a row the prune disabled (it carries `auto_disabled_at`, see
+ * "Re-enable" below).
+ *
+ * `stale` belongs to live runs. A vendored run never writes it: the snapshot
+ * cannot say that a model still exists, and clearing the flag would restart the
+ * prune's grace and open a new attention episode. A live run clears it on every
+ * listed row except one the prune disabled, which keeps it until the re-enable
+ * statement decides that row: cleared without a decision, the row would show up
+ * in the Discovery queue as a new model.
+ *
+ * Re-enable. When a live, plausible run lists a row the prune disabled, a
+ * separate UPDATE (its WHERE re-evaluated on the row's newest version) decides
+ * it like an INSERT would: enabled again when the model passes the eligibility
+ * rules, the provider's policy is on, the pair is not dismissed and the
+ * auto-enable caps have room (it counts against them, and is audited
+ * `auto_enable`); left disabled and stripped of the token when the policy or
+ * the eligibility rejects it; untouched, token kept, when only the caps are
+ * full, so a later run decides it.
  *
  * A run that cannot decide (vendored, or a live catalog that fails the
  * plausibility floor) does NOT insert models of providers whose policy is on.
@@ -55,7 +76,9 @@
  * same reason as above, and a later run picks them up. Only rows actually
  * inserted enabled count, so a tombstoned candidate (inserted disabled) costs
  * nothing. The cap governs nothing else: stale-marking and the per-provider
- * floor still see the whole catalog.
+ * floor still see the whole catalog. Re-enabled pruned rows take the same caps,
+ * in catalog order and before any new insert, and are counted on their own
+ * (`reEnabled`, `reEnableDeferredByCap`), never as inserted rows.
  *
  * A row this run inserted also gets its catalog price, in the same transaction,
  * unless the pair already has ANY price row (enabled or not): an operator's
@@ -64,7 +87,9 @@
  *
  * Publication is decided by STATE, not by what the run changed (see
  * `syncDiscoveredModels`): after COMMIT the writer compares the ConfigMap hash
- * with what Postgres projects and writes only on a difference.
+ * with what Postgres projects and writes only on a difference. With a prune it
+ * publishes twice: right after the COMMIT, so this run's additions do not wait
+ * for the prune's LISTs, and after the prune.
  *
  * Known race: an admin write to `image_input` that commits while the sync's
  * UPDATE runs can make that row report no change, because `prev` reads the
@@ -86,10 +111,18 @@ import { config } from '../config.js'
 import { pool } from '../db.js'
 import { safeErrorLogMessage } from '../http/errorHandler.js'
 import { rootLogger } from '../observability/logger.js'
-import { llmAllowlistConfigMapWriteFailuresTotal } from '../observability/metrics.js'
-import { MAX_CONTEXT_WINDOW_TOKENS } from './llmAllowedModels.js'
+import {
+  llmAllowlistConfigMapWriteFailuresTotal,
+  llmCatalogPruneRunsTotal,
+} from '../observability/metrics.js'
+import { MAX_CONTEXT_WINDOW_TOKENS, writeCatalogSyncAudit } from './llmAllowedModels.js'
 import type { AllowedModelsConfigMapPublisher } from './llmAllowedModelsConfigMap.js'
 import { type AllowlistPublishRetry, llmAllowlistPublishRetry } from './llmAllowlistPublishRetry.js'
+import {
+  type CatalogPrune,
+  type CatalogPruneResult,
+  recordCatalogPruneRun,
+} from './llmCatalogPrune.js'
 import { acquireCatalogSyncLock } from './llmCatalogSyncLock.js'
 import {
   type CatalogPolicyProviderId,
@@ -193,6 +226,17 @@ export interface CatalogSyncResult {
    * fields above.
    */
   providerCounts?: CatalogSyncProviderCounts
+  /**
+   * Models the prune disabled after this run committed. Present only when the
+   * run had a prune (every production caller does). Optional for consumers.
+   */
+  pruned?: number
+  /** The prune stopped on a failed LIST or query; what it pruned stays pruned. */
+  pruneAborted?: boolean
+  /** Sum of `providerCounts[*].reEnabled`. Optional for consumers. */
+  reEnabled?: number
+  /** Sum of `providerCounts[*].reEnableDeferredByCap`. Optional for consumers. */
+  reEnableDeferredByCap?: number
 }
 
 /** What one run did with one provider's NEW models. */
@@ -218,6 +262,18 @@ export interface CatalogSyncProviderCount {
   dismissed: number
   /** Price rows inserted for rows this run inserted. */
   pricesLoaded: number
+  /**
+   * Rows the prune had disabled that this run, listing them again, turned back
+   * on. Not inserted, so not in `inserted` or `autoEnabled`; they take the same
+   * caps as the rows inserted enabled.
+   */
+  reEnabled: number
+  /**
+   * Rows the prune had disabled, listed again and eligible, left disabled
+   * because a cap was full; they keep the prune's token and a later run
+   * decides them.
+   */
+  reEnableDeferredByCap: number
 }
 
 export type CatalogSyncProviderCounts = Partial<Record<LlmProviderId, CatalogSyncProviderCount>>
@@ -310,12 +366,16 @@ function emptyProviderCount(): CatalogSyncProviderCount {
     ineligible: { no_text_output: 0, no_tool_call: 0, status: 0, not_runnable: 0 },
     dismissed: 0,
     pricesLoaded: 0,
+    reEnabled: 0,
+    reEnableDeferredByCap: 0,
   }
 }
 
 function isEmptyProviderCount(c: CatalogSyncProviderCount): boolean {
   return (
     c.inserted === 0 &&
+    c.reEnabled === 0 &&
+    c.reEnableDeferredByCap === 0 &&
     c.skippedUndecidable === 0 &&
     c.deferredByCap === 0 &&
     c.pricesLoaded === 0 &&
@@ -339,8 +399,10 @@ interface RunCounters {
   updated: number
   staled: number
   enabledImageInputChanged: number
-  /** Rows inserted enabled so far in this run, across providers (the per-run cap). */
+  /** Rows inserted enabled so far in this run, across providers. */
   autoEnabled: number
+  /** Pruned rows re-enabled so far in this run, across providers. */
+  reEnabled: number
   byProvider: CatalogSyncProviderCounts
 }
 
@@ -407,17 +469,19 @@ async function insertDiscoveredModel(
 ): Promise<InsertOutcome> {
   // ON CONFLICT DO NOTHING guards only a concurrent manual insert (never DO
   // UPDATE → never clobbers manual), and then RETURNING yields no row, so
-  // nothing below runs for a pair this run did not create.
+  // nothing below runs for a pair this run did not create. The row's
+  // `enabled` is the sync's decision, so it is 'catalog'-managed.
   const ins = await client.query(
     `INSERT INTO llm_allowed_models
        (provider, model, enabled, source, discovered_at, last_seen_at, stale,
-        context_window_tokens, display_name, image_input, catalog_status)
+        context_window_tokens, display_name, image_input, catalog_status,
+        enabled_managed_by)
      VALUES ($1, $2,
              $6::boolean AND NOT EXISTS (
                SELECT 1 FROM llm_catalog_dismissed d
                 WHERE d.provider = $1 AND d.model = $2
              ),
-             'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7)
+             'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7, 'catalog')
      ON CONFLICT (provider, model) DO NOTHING
      RETURNING enabled,
                EXISTS (
@@ -443,6 +507,74 @@ async function insertDiscoveredModel(
   if (inserted.dismissed === true) providerCount.dismissed += 1
   if (await insertCatalogPrice(client, provider, model)) providerCount.pricesLoaded += 1
   return enabled ? 'inserted_enabled' : 'inserted_disabled'
+}
+
+/**
+ * Whether the run or the provider already turned on as many rows as a cap
+ * allows. Rows inserted enabled and re-enabled pruned rows share both caps:
+ * either kind lands in the allowlist ConfigMap.
+ */
+function capReached(
+  providerCount: CatalogSyncProviderCount,
+  counters: RunCounters,
+  decision: InsertDecisionContext
+): boolean {
+  return (
+    providerCount.autoEnabled + providerCount.reEnabled >= decision.maxPerProvider ||
+    counters.autoEnabled + counters.reEnabled >= decision.maxPerRun
+  )
+}
+
+/**
+ * Decide a row the prune disabled that a live, plausible run lists again (see
+ * "Re-enable" in the module header). It only runs after the reconciliation
+ * UPDATE matched this id with this pair and source and took the row lock, so a
+ * rename cannot commit in between; a rename also drops the token. The pair and
+ * source are re-checked here anyway, so the decision can never land on another
+ * pair if that ordering ever changes.
+ */
+async function reenablePrunedRow(
+  client: SyncTxClient,
+  provider: LlmProviderId,
+  model: DiscoveredModel,
+  id: string,
+  policyOn: boolean,
+  decision: InsertDecisionContext,
+  counters: RunCounters,
+  providerCount: CatalogSyncProviderCount
+): Promise<void> {
+  const allowed = policyOn && autoEnableRejection(model) === null
+  if (allowed && capReached(providerCount, counters, decision)) {
+    providerCount.reEnableDeferredByCap += 1
+    log.info(
+      {
+        event: 'llm_catalog_sync_reenable_deferred',
+        provider,
+        model: model.model_id,
+        maxPerProvider: decision.maxPerProvider,
+        maxPerRun: decision.maxPerRun,
+      },
+      'auto-enable cap reached: a pruned model the catalog lists again stays disabled until a later run'
+    )
+    return
+  }
+  const res = await client.query(
+    `UPDATE llm_allowed_models AS t
+        SET enabled = $4::boolean, auto_disabled_at = NULL, stale = false
+      WHERE t.id = $1
+        AND t.source = 'discovery' AND t.provider = $2 AND t.model = $3
+        AND t.enabled_managed_by = 'catalog'
+        AND t.auto_disabled_at IS NOT NULL
+        AND NOT t.enabled
+        AND NOT EXISTS (SELECT 1 FROM llm_catalog_dismissed d
+                         WHERE d.provider = t.provider AND d.model = t.model)
+    RETURNING t.id`,
+    [id, provider, model.model_id, allowed]
+  )
+  if (res.rowCount !== 1 || !allowed) return
+  counters.reEnabled += 1
+  providerCount.reEnabled += 1
+  await writeCatalogSyncAudit(client, { action: 'auto_enable', provider, model: model.model_id })
 }
 
 async function reconcileProvider(
@@ -602,10 +734,20 @@ async function reconcileProviderRows(
     // Both UPDATEs here match the id AND the pair read by the SELECT above: an
     // operator rename committed in between leaves the id pointing at another
     // model, which must not inherit this entry's evidence or status.
+    //
+    // `stale` follows the module header: a vendored run leaves it, and a live
+    // run leaves it on a row the prune disabled (the re-enable below clears it
+    // when it decides the row). `has_token` reads the row's newest version,
+    // after this statement waited for its lock: a prune that committed while
+    // it waited is seen, and the lock now held keeps any other from landing.
     const upd = await client.query(
       `UPDATE llm_allowed_models AS t
           SET last_seen_at = NOW(),
-              stale = false,
+              stale = CASE
+                WHEN NOT $6::boolean THEN t.stale
+                WHEN t.auto_disabled_at IS NOT NULL THEN t.stale
+                ELSE false
+              END,
               context_window_tokens = CASE
                 WHEN t.enabled THEN t.context_window_tokens
                 ELSE COALESCE(t.context_window_tokens, $2)
@@ -625,7 +767,8 @@ async function reconcileProviderRows(
          FROM llm_allowed_models AS prev
         WHERE t.id = $1 AND prev.id = t.id AND t.source = 'discovery'
           AND t.provider = $8 AND t.model = $9
-    RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed`,
+    RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed,
+              (t.auto_disabled_at IS NOT NULL) AS has_token`,
       [
         existing.id,
         ctx,
@@ -640,14 +783,24 @@ async function reconcileProviderRows(
     )
     counters.updated += upd.rowCount ?? 0
     countEnabledEvidenceChange(upd.rows, counters)
+    const hasToken = (upd.rows[0] as { has_token?: unknown } | undefined)?.has_token === true
+    if (hasToken && decision.live && decision.canDecide) {
+      await reenablePrunedRow(
+        client,
+        provider,
+        model,
+        existing.id,
+        policyOn,
+        decision,
+        counters,
+        providerCount
+      )
+    }
   }
 
   candidates.sort((a, b) => compareCapOrder(a.model, b.model))
   for (const { model, imageInputJson } of candidates) {
-    if (
-      providerCount.autoEnabled >= decision.maxPerProvider ||
-      counters.autoEnabled >= decision.maxPerRun
-    ) {
+    if (capReached(providerCount, counters, decision)) {
       providerCount.deferredByCap += 1
       continue
     }
@@ -664,13 +817,16 @@ async function reconcileProviderRows(
     )
     if (outcome === 'inserted_enabled') counters.autoEnabled += 1
   }
-  if (providerCount.deferredByCap > 0) {
+  if (providerCount.deferredByCap > 0 || providerCount.reEnableDeferredByCap > 0) {
     log.warn(
       {
         event: 'llm_catalog_sync_auto_enable_deferred',
         provider,
         deferredByCap: providerCount.deferredByCap,
+        reEnableDeferredByCap: providerCount.reEnableDeferredByCap,
+        // The cap counts both, so the log needs both to explain why it was hit.
         autoEnabled: providerCount.autoEnabled,
+        reEnabled: providerCount.reEnabled,
         maxPerProvider: decision.maxPerProvider,
         maxPerRun: decision.maxPerRun,
         // The cron is off by default: without it, only a manual sync or a
@@ -678,7 +834,7 @@ async function reconcileProviderRows(
         cronEnabled: config.llmCatalogSyncCronEnabled,
         bootSyncEnabled: config.llmCatalogBootSyncEnabled,
       },
-      'auto-enable cap reached: the remaining new models of this provider are not inserted yet; a later sync run (the cron when enabled, a manual sync, or the boot sync on restart) inserts them, enabled if the provider is still ON; switching the provider to OFF before then inserts them disabled for good'
+      'auto-enable cap reached: the remaining new or pruned models of this provider are not enabled yet; a later sync run (the cron when enabled, a manual sync, or the boot sync on restart) inserts them, enabled if the provider is still ON; switching the provider to OFF before then inserts them disabled for good'
     )
   }
 
@@ -789,6 +945,12 @@ export async function syncDiscoveredModels(
     autoEnableMaxPerProviderPerRun?: number
     /** Most models one run may insert enabled across providers (default from config). */
     autoEnableMaxPerRun?: number
+    /**
+     * The prune phase, run after the COMMIT and the first publication, outside
+     * the sync lock. Every production caller passes it (`catalogPruneFromGateway`);
+     * without it nothing is pruned, which is the safe side.
+     */
+    prune?: CatalogPrune
   },
   connector: SyncConnector = pool
 ): Promise<CatalogSyncResult> {
@@ -861,28 +1023,48 @@ export async function syncDiscoveredModels(
   // after a failed publish or a publish from another writer that read before
   // this commit, because the next run changes nothing and would never publish.
   // `enabledImageInputChanged` stays as an observability counter only.
+  //
+  // With a prune, once before it (this run's additions and re-enables must not
+  // wait for its LISTs) and once after it. A failed first publication does not
+  // stop the prune: its retry is scheduled, and a successful second
+  // publication settles it. The run reports a publication failure only when
+  // the last one failed.
   const publishRetry = opts.publishRetry ?? llmAllowlistPublishRetry
-  const ticket = publishRetry.begin()
-  let materialized: boolean
-  try {
-    materialized = (await opts.materializer.materializeIfChanged()) === 'written'
-  } catch (err) {
-    llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'sync' })
-    log.error(
-      {
-        event: 'llm_catalog_sync_configmap_write_failed',
-        enabledImageInputChanged: counters.enabledImageInputChanged,
-        err: safeErrorLogMessage(err),
-      },
-      'llm allowed-models ConfigMap write failed after catalog sync commit; publish retry scheduled'
-    )
-    publishRetry.failed(ticket, opts.materializer)
+  const publish = async (): Promise<{ written: boolean; error?: unknown }> => {
+    const ticket = publishRetry.begin()
+    try {
+      const written = (await opts.materializer.materializeIfChanged()) === 'written'
+      publishRetry.succeeded(ticket)
+      return { written }
+    } catch (err) {
+      llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'sync' })
+      log.error(
+        {
+          event: 'llm_catalog_sync_configmap_write_failed',
+          enabledImageInputChanged: counters.enabledImageInputChanged,
+          err: safeErrorLogMessage(err),
+        },
+        'llm allowed-models ConfigMap write failed after catalog sync commit; publish retry scheduled'
+      )
+      publishRetry.failed(ticket, opts.materializer)
+      return { written: false, error: err }
+    }
+  }
+
+  let publication = await publish()
+  let materialized = publication.written
+  let prune: CatalogPruneResult | undefined
+  if (opts.prune) {
+    prune = await runPruneSafely(opts.prune, { decidable, syncRanAt: committed.ranAt }, connector)
+    publication = await publish()
+    materialized ||= publication.written
+  }
+  if (publication.error !== undefined) {
     // The rows are committed; only the publication failed, and the retry above
     // owns it. Callers that re-run syncs must be able to tell this apart from a
     // run that never committed.
-    throw new CatalogPublishAfterCommitError(err, decidable)
+    throw new CatalogPublishAfterCommitError(publication.error, decidable)
   }
-  publishRetry.succeeded(ticket)
 
   // `fetchedAt` is the catalog acquisition time (from the loader) — how fresh
   // the source data is; `ranAt` is the DB commit time of this run.
@@ -897,6 +1079,80 @@ export async function syncDiscoveredModels(
     materialized,
     providerCounts: counters.byProvider,
     decidable,
+    reEnabled: counters.reEnabled,
+    reEnableDeferredByCap: sumProviderCounts(counters.byProvider, 'reEnableDeferredByCap'),
+    ...(prune ? { pruned: prune.pruned, pruneAborted: prune.aborted } : {}),
+  }
+}
+
+function sumProviderCounts(
+  byProvider: CatalogSyncProviderCounts,
+  key: 'reEnableDeferredByCap'
+): number {
+  return Object.values(byProvider).reduce((n, c) => n + (c?.[key] ?? 0), 0)
+}
+
+/**
+ * The prune never throws by contract; this keeps that true for an injected one
+ * too, because an error escaping here would be read by the boot sync as "the
+ * run failed before committing" and reconcile again. The escape is recorded
+ * like any other abort (a `llm_catalog_prune_runs` row and the aborted
+ * outcome), with zero counts: whatever the prune did before throwing is not
+ * known here. Its disables, if any, are committed and audited on their own.
+ *
+ * Only a prune injected in place of the production one can get here, since
+ * the production prune catches everything itself. That is why two things are
+ * accepted rather than avoided: a prune that recorded its own row before
+ * throwing leaves two rows for one run, and two counts in the runs metric; and
+ * the escape is recorded even on a run that was not decidable, because once
+ * the prune threw there is no telling whether it got past that check.
+ */
+async function runPruneSafely(
+  prune: CatalogPrune,
+  run: Parameters<CatalogPrune>[0],
+  connector: SyncConnector
+): Promise<CatalogPruneResult> {
+  try {
+    return await prune(run)
+  } catch (err) {
+    log.error(
+      { event: 'llm_catalog_prune_escaped', err: safeErrorLogMessage(err) },
+      'llm catalog prune threw; treated as aborted'
+    )
+    const result: CatalogPruneResult = {
+      skipped: false,
+      candidates: 0,
+      prefiltered: 0,
+      examinedLocked: 0,
+      pruned: 0,
+      aborted: true,
+      abortReason: 'prune_threw',
+    }
+    await recordEscapedPrune(connector, run, result)
+    llmCatalogPruneRunsTotal.inc({ outcome: 'aborted' })
+    return result
+  }
+}
+
+async function recordEscapedPrune(
+  connector: SyncConnector,
+  run: Parameters<CatalogPrune>[0],
+  result: CatalogPruneResult
+): Promise<void> {
+  let client: SyncTxClient
+  try {
+    client = await connector.connect()
+  } catch (err) {
+    log.error(
+      { event: 'llm_catalog_prune_run_record_failed', err: safeErrorLogMessage(err) },
+      'llm catalog prune: could not record the escaped prune in llm_catalog_prune_runs'
+    )
+    return
+  }
+  try {
+    await recordCatalogPruneRun(client, run, result)
+  } finally {
+    client.release()
   }
 }
 
@@ -940,6 +1196,7 @@ async function reconcileCatalogInTransaction(
       staled: 0,
       enabledImageInputChanged: 0,
       autoEnabled: 0,
+      reEnabled: 0,
       byProvider: {},
     }
     for (const provider of PROVIDER_IDS) {
@@ -1018,11 +1275,18 @@ export async function getLastCatalogSyncRun(
   return run
 }
 
-/** A stored breakdown: runs recorded before the per-run cap carry no `deferredByCap`. */
+/**
+ * A stored breakdown: runs recorded before the per-run cap carry no
+ * `deferredByCap`, and runs recorded before the prune no re-enable counters.
+ */
 type StoredProviderCounts = Partial<
   Record<
     LlmProviderId,
-    Omit<CatalogSyncProviderCount, 'deferredByCap'> & { deferredByCap?: number }
+    Omit<CatalogSyncProviderCount, 'deferredByCap' | 'reEnabled' | 'reEnableDeferredByCap'> & {
+      deferredByCap?: number
+      reEnabled?: number
+      reEnableDeferredByCap?: number
+    }
   >
 >
 
@@ -1030,7 +1294,12 @@ function withDeferredByCap(stored: StoredProviderCounts): CatalogSyncProviderCou
   const out: CatalogSyncProviderCounts = {}
   for (const [provider, count] of Object.entries(stored)) {
     if (!count || typeof count !== 'object') continue
-    out[provider as LlmProviderId] = { ...count, deferredByCap: count.deferredByCap ?? 0 }
+    out[provider as LlmProviderId] = {
+      ...count,
+      deferredByCap: count.deferredByCap ?? 0,
+      reEnabled: count.reEnabled ?? 0,
+      reEnableDeferredByCap: count.reEnableDeferredByCap ?? 0,
+    }
   }
   return out
 }

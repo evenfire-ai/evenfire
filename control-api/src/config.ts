@@ -144,6 +144,15 @@ type Config = {
   // (the code default) a later run is only a manual sync or a boot sync.
   llmCatalogAutoEnableMaxPerProviderPerRun: number
   llmCatalogAutoEnableMaxPerRun: number
+  // The catalog prune disables an enabled 'catalog'-managed model that has been
+  // stale (gone from a live models.dev catalog) for longer than this grace and
+  // that nobody uses. Counted from the moment the row first became stale, not
+  // from its last sighting, so the grace does not depend on the sync cadence.
+  // Default 7 days; refused below 1 hour, which could not absorb an id that
+  // flickers out of the catalog for one run.
+  llmCatalogPruneStaleGraceMs: number
+  // Most models one prune run may disable. Models over it wait for the next run.
+  llmCatalogPruneMaxPerRun: number
   // Default OFF. Codex subscription management/admission stays dark until
   // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
   codexSubscriptionEnabled: boolean
@@ -544,6 +553,10 @@ const LLM_CATALOG_AUTO_ENABLE_MAX_CAP = 1000
 // came from. The floor is two sync intervals: anything shorter would expire the
 // evidence before the cron could possibly renew it.
 const LLM_CATALOG_IMAGE_EVIDENCE_MIN_TTL_MS = 2 * LLM_CATALOG_SYNC_MIN_INTERVAL_MS
+const LLM_CATALOG_PRUNE_MIN_GRACE_MS = 60 * 60 * 1000
+// Same ceiling as the auto-enable caps: one run never moves more than this many
+// entries of the allowlist ConfigMap.
+const LLM_CATALOG_PRUNE_MAX_CAP = 1000
 // Unlike the discovery sync (one call to models.dev per tick), a subscription
 // reconciliation tick calls each broker once PER CONNECTED GRANT and can rotate
 // a Grok refresh token on the way. Fifteen minutes is the floor below which the
@@ -975,6 +988,16 @@ export const config: Config = {
     'LLM_CATALOG_AUTO_ENABLE_MAX_PER_RUN',
     300,
     LLM_CATALOG_AUTO_ENABLE_MAX_CAP
+  ),
+  llmCatalogPruneStaleGraceMs: intervalMsFromEnv(
+    'LLM_CATALOG_PRUNE_STALE_GRACE_MS',
+    7 * 24 * 60 * 60 * 1000,
+    LLM_CATALOG_PRUNE_MIN_GRACE_MS
+  ),
+  llmCatalogPruneMaxPerRun: boundedIntegerFromEnv(
+    'LLM_CATALOG_PRUNE_MAX_PER_RUN',
+    50,
+    LLM_CATALOG_PRUNE_MAX_CAP
   ),
   // How often to re-assert the platform image-pull credential. This is a standing
   // invariant, not a fast path: a WorkflowRecipe created by `kubectl apply` or the WRC

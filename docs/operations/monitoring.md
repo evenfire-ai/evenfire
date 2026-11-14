@@ -172,6 +172,8 @@ your own NetworkPolicy that allows your Prometheus to reach those ports.
 | `clerum_llm_request_text_repaired_total`              | mcp-host    | Lone UTF-16 surrogates replaced with U+FFFD before an LLM call, by `provider`, `role`. Each repaired message, tool definition or system prompt also logs a `warn` with the role and, for tool results and tool definitions, the tool name. A request whose repair would make two keys of one object equal is refused with `LLM_REQUEST_TEXT_REJECTED` and adds nothing to this counter |
 | `mcp_host_runtime_auth_degraded`                      | mcp-host    | Gauge. Runtime auth is degraded; readiness returns `503` while it is set                                     |
 | `clerum_llm_allowlist_configmap_write_failures_total` | control-api | Failed writes of the `clerum-llm-allowed-models` ConfigMap, by `phase` (`mutation`, `boot`, `sync`)          |
+| `clerum_llm_catalog_prune_runs_total`                 | control-api | Catalog prune runs, by `outcome` (`completed`, `aborted` on a failed LIST/query or `prune_threw`, `skipped`) |
+| `clerum_llm_catalog_pruned_models_total`              | control-api | Stale catalog models nobody used that the catalog prune disabled                                             |
 
 For guardrail behaviour, see [Configure guardrails](../how-to/configure-guardrails.md).
 

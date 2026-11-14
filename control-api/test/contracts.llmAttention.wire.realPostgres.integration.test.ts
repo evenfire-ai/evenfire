@@ -1,9 +1,9 @@
 // Regenerate after an intended contract change (needs a real Postgres):
 // `CONTROL_API_REAL_PG_ADMIN_URL=postgres://… UPDATE_WIRE_GOLDENS=1 npx vitest run test/contracts.llmAttention.wire.realPostgres.integration.test.ts`,
-// then review the JSON diff.
+// then review the JSON diff of both files it writes.
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { Pool } from 'pg'
 import request from 'supertest'
 import type { LlmProviderId } from '@clerum/llm-providers'
@@ -31,10 +31,20 @@ import './realPostgres.requirement.ts'
  * Every byte comes from the real producers against real PostgreSQL: the catalog
  * sync writes the rows (from the captured live models.dev fixture — a later run
  * deprecates one model and drops two), the real route reads them with its own
- * SQL, and the Host reference comes from the real gateway producer. The only
+ * SQL, and the Hosts are created through the real admin Host route. The only
  * stand-ins are the admin session and the Kubernetes API (MockGateway, fake
  * ConfigMap). `generatedAt` is the one value pinned after the fact, because it
  * is the request instant.
+ *
+ * The same run then writes a second file, `llmAttention.reviewed.wire.json`,
+ * for the fields the first state never carries: a WorkflowRecipe is created
+ * through the real admin recipe route naming the dropped model `agent-a` uses,
+ * so that item gains `recipesAffected` and the recipe's key in `consumerKeys`;
+ * the deprecated item is acknowledged through the real ack route with the
+ * episode and keys the feed returned; and the feed is read with
+ * `includeAcknowledged=1`, the only read that returns it, as
+ * `acknowledged: true`. It is a separate file, captured after the first, so
+ * the first keeps describing a feed nobody has reviewed yet.
  *
  * Named `*.realPostgres.integration` so the real-Postgres CI lane runs it; the
  * ordinary matrix skips it without CONTROL_API_REAL_PG_ADMIN_URL.
@@ -76,6 +86,7 @@ const COOKIE = 'control_ui_admin_session=admin-token'
 const UPDATE = process.env.UPDATE_WIRE_GOLDENS === '1'
 const DIR = new URL('./fixtures/wire/', import.meta.url)
 const FILE = new URL('llmAttention.wire.json', DIR)
+const REVIEWED_FILE = new URL('llmAttention.reviewed.wire.json', DIR)
 const PINNED_GENERATED_AT = '2026-11-01T00:00:00.000Z'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -83,6 +94,30 @@ const describeRealPostgres = adminUrl ? describe : describe.skip
 
 const PROVIDER = 'claude' as const
 const HOST_NAMESPACE = 'mcp-host'
+const RECIPE_NAME = 'recipe-a'
+
+type AttentionWireItem = {
+  kind: string
+  provider: string
+  model: string
+  hostsAffected: Array<{ roles: string[] }>
+  episode: number
+  consumerKeys: string[]
+  recipesAffected?: Array<{ namespace: string; name: string }>
+  acknowledged?: true
+}
+type AttentionWireBody = { items: AttentionWireItem[]; generatedAt: string }
+
+function writeOrCompare(file: URL, actual: unknown): void {
+  if (UPDATE) {
+    mkdirSync(DIR, { recursive: true })
+    writeFileSync(file, `${JSON.stringify(actual, null, 2)}\n`)
+  }
+  // An assertion, not a read error, when the golden was never generated.
+  expect(existsSync(file), `${file.pathname} is committed`).toBe(true)
+  const committed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+  expect(actual).toEqual(committed)
+}
 
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
@@ -212,7 +247,7 @@ describeRealPostgres('attention wire contract (real PostgreSQL)', () => {
       .map(m => m.model_id)
       .sort()
     expect(eligible.length).toBeGreaterThanOrEqual(3)
-    const [deprecatedId, staleReferencedId, staleUnreferencedId] = eligible
+    const [deprecatedId, staleReferencedId, staleImplicitId] = eligible
     // The to-be-deprecated model's catalog name equals its id, so the wire carries
     // an item whose displayName === model. It goes in this run because the sync
     // freezes display_name on enabled rows: renaming it in the second run would
@@ -220,45 +255,111 @@ describeRealPostgres('attention wire contract (real PostgreSQL)', () => {
     await sync(patched(base, rawIdOf(base, deprecatedId), { name: deprecatedId }))
 
     // Second run: the catalog deprecates one model and drops two. The sync keeps
-    // all three enabled (it only informs); one of the dropped ones is still the
-    // primary model of a Host.
+    // all three enabled (it only informs).
     await sync(
       without(patched(base, rawIdOf(base, deprecatedId), { status: 'deprecated' }), [
         rawIdOf(base, staleReferencedId),
-        rawIdOf(base, staleUnreferencedId),
+        rawIdOf(base, staleImplicitId),
       ])
     )
+    // Only models somebody uses reach the feed. `agent-a` names one dropped
+    // model and, having no `allowedModels`, offers every enabled model of the
+    // provider: the other dropped model is an item only through that implicit
+    // offer (role `implicit`). `agent-b` names the deprecated model, which needs
+    // an explicit consumer to be an item.
     const gateway = new MockGateway(HOST_NAMESPACE)
-    await gateway.createResource(
-      'hosts',
+    const app = createApp(gateway as never)
+    const hosts = [
       {
         metadata: { name: 'agent-a' },
         spec: { model: { provider: PROVIDER, name: staleReferencedId } },
       },
-      HOST_NAMESPACE
-    )
+      {
+        metadata: { name: 'agent-b' },
+        spec: {
+          model: { provider: PROVIDER, name: deprecatedId },
+          allowedModels: [{ provider: PROVIDER, model: deprecatedId }],
+        },
+      },
+    ]
+    for (const host of hosts) {
+      await request(app).post('/api/v1/admin/hosts').set('Cookie', COOKIE).send(host).expect(201)
+    }
 
-    const res = await request(createApp(gateway as never))
-      .get('/api/v1/admin/attention')
-      .set('Cookie', COOKIE)
-      .expect(200)
-    const body = res.body as { items: Array<{ kind: string }>; generatedAt: string }
+    const res = await request(app).get('/api/v1/admin/attention').set('Cookie', COOKIE).expect(200)
+    const body = res.body as AttentionWireBody
     expect(Number.isNaN(Date.parse(body.generatedAt))).toBe(false)
-    // One item of each kind is what the consumer needs; the dropped referenced
-    // model also yields its stale-discovery item.
-    expect(body.items.map(i => i.kind).sort()).toEqual([
-      'deprecated_model_enabled',
-      'stale_discovery_enabled',
-      'stale_discovery_enabled',
-      'stale_model_referenced',
+    // Both kinds with an explicit consumer, plus one item carried only by the
+    // implicit offer; the retired stale_discovery_enabled kind never appears.
+    expect(body.items.map(i => `${i.kind}:${i.model}`).sort()).toEqual(
+      [
+        `deprecated_model_enabled:${deprecatedId}`,
+        `stale_model_referenced:${staleReferencedId}`,
+        `stale_model_referenced:${staleImplicitId}`,
+      ].sort()
+    )
+    expect(
+      body.items.find(i => i.model === staleImplicitId)?.hostsAffected.flatMap(h => h.roles)
+    ).toEqual(['implicit'])
+
+    writeOrCompare(FILE, { ...body, generatedAt: PINNED_GENERATED_AT })
+
+    // Reviewed state. The recipe names the model `agent-a` already names, so
+    // its item carries a Host and a recipe consumer at once.
+    const { config } = await import('../src/config.js')
+    await request(app)
+      .post('/api/v1/admin/recipes')
+      .set('Cookie', COOKIE)
+      .send({
+        metadata: { name: RECIPE_NAME },
+        spec: {
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          agent: { provider: PROVIDER, model: staleReferencedId },
+          steps: [{ id: 's1', instruction: 'go' }],
+        },
+      })
+      .expect(r => expect(r.status, JSON.stringify(r.body)).toBe(201))
+    const withRecipe = (
+      await request(app).get('/api/v1/admin/attention').set('Cookie', COOKIE).expect(200)
+    ).body as AttentionWireBody
+    const deprecatedItem = withRecipe.items.find(i => i.model === deprecatedId)
+    expect(deprecatedItem?.kind).toBe('deprecated_model_enabled')
+    await request(app)
+      .post('/api/v1/admin/attention/ack')
+      .set('Cookie', COOKIE)
+      .send({
+        provider: deprecatedItem!.provider,
+        model: deprecatedItem!.model,
+        kind: deprecatedItem!.kind,
+        episode: deprecatedItem!.episode,
+        consumerKeys: deprecatedItem!.consumerKeys,
+      })
+      .expect(200)
+    // The default read now omits the acknowledged item.
+    const unreviewed = (
+      await request(app).get('/api/v1/admin/attention').set('Cookie', COOKIE).expect(200)
+    ).body as AttentionWireBody
+    expect(unreviewed.items.map(i => i.model)).not.toContain(deprecatedId)
+
+    const reviewed = (
+      await request(app)
+        .get('/api/v1/admin/attention?includeAcknowledged=1')
+        .set('Cookie', COOKIE)
+        .expect(200)
+    ).body as AttentionWireBody
+    const recipeRef = { namespace: config.sandboxNamespace, name: RECIPE_NAME }
+    expect(reviewed.items.map(i => `${i.kind}:${i.model}`).sort()).toEqual(
+      body.items.map(i => `${i.kind}:${i.model}`).sort()
+    )
+    const recipeItem = reviewed.items.find(i => i.model === staleReferencedId)
+    expect(recipeItem?.recipesAffected).toEqual([recipeRef])
+    expect(recipeItem?.consumerKeys).toContain(`recipe:${recipeRef.namespace}/${recipeRef.name}`)
+    expect(recipeItem?.consumerKeys).toContain(`host:${HOST_NAMESPACE}/agent-a`)
+    expect(recipeItem?.acknowledged).toBeUndefined()
+    expect(reviewed.items.filter(i => i.acknowledged === true).map(i => i.model)).toEqual([
+      deprecatedId,
     ])
 
-    const actual = { ...body, generatedAt: PINNED_GENERATED_AT }
-    if (UPDATE) {
-      mkdirSync(DIR, { recursive: true })
-      writeFileSync(FILE, `${JSON.stringify(actual, null, 2)}\n`)
-    }
-    const committed = JSON.parse(readFileSync(FILE, 'utf8')) as unknown
-    expect(actual).toEqual(committed)
+    writeOrCompare(REVIEWED_FILE, { ...reviewed, generatedAt: PINNED_GENERATED_AT })
   }, 60_000)
 })

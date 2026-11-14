@@ -9,8 +9,10 @@ import { MockGateway } from './mockGateway.js'
 // impact), never an internal helper. Host references are produced by the REAL
 // gateway producer (`createResource` → per-namespace `listResource`, T1); grant
 // references flow through the REAL `mapGrantRow` inside `listGrantsReferencingModel`
-// (T1) — never hand-built DTOs. The stale set comes from the REAL `rowToModel`
-// mapper via `listStaleAllowedModels` (raw DB rows shaped to the migration).
+// (T1) — never hand-built DTOs. The candidate set comes from the REAL mapper of
+// `listAttentionCandidates` (raw DB rows shaped to the migration). The
+// acknowledgement, episode and recipe/prompt-target paths run against real
+// PostgreSQL in llmAttention.realPostgres.integration.test.ts.
 
 const mockPoolQuery = vi.fn()
 const mockVerifyAdminToken = vi.fn()
@@ -75,6 +77,10 @@ function makeModelRow(overrides: Record<string, unknown> = {}) {
     discovered_at: null,
     last_seen_at: null,
     stale: true,
+    deprecated: false,
+    stale_episode: 1,
+    deprecated_episode: 0,
+    attention_ack: null,
     created_at: new Date('2026-07-01T00:00:00Z'),
     updated_at: new Date('2026-07-01T00:00:00Z'),
     ...overrides,
@@ -123,19 +129,22 @@ function installPool(opts: {
   const grantRowsByModel = opts.grantRowsByModel ?? {}
   mockPoolQuery.mockImplementation(async (sql: string, params?: unknown[]) => {
     const text = String(sql)
+    if (/FROM plugin_workload_sdk_grants/.test(text) && /prompt_targets @>/.test(text)) {
+      return { rows: [], rowCount: 0 }
+    }
     if (/FROM plugin_workload_sdk_grants/.test(text)) {
       const model = String(params?.[0] ?? '')
       const rows = grantRowsByModel[model] ?? []
       return { rows, rowCount: rows.length }
     }
-    if (/FROM llm_allowed_models/.test(text) && /WHERE stale/.test(text)) {
+    if (/FROM llm_allowed_models/.test(text) && /WHERE enabled/.test(text)) {
       // No real Postgres in this suite, so emulate the query's OWN WHERE clause
       // instead of trusting the caller to pre-filter: when the SQL under test
-      // filters `AND enabled`, drop disabled rows exactly as Postgres would.
+      // filters `WHERE enabled`, drop disabled rows exactly as Postgres would.
       // Keying off the real SQL is what lets this stand in for the DB across the
       // fix — pre-fix (`WHERE stale`) the disabled row leaks through, post-fix it
       // is filtered. Rows keep the real `rowToModel` input shape (T1).
-      const filtersEnabled = /\bAND enabled\b/.test(text)
+      const filtersEnabled = /\bWHERE enabled\b/.test(text)
       const rows = filtersEnabled
         ? staleRows.filter(r => (r as { enabled?: unknown }).enabled === true)
         : staleRows
@@ -165,6 +174,12 @@ async function seedHost(
 }
 
 const primarySpec = (model = STALE_MODEL) => ({ model: { provider: PROVIDER, name: model } })
+// A Host that offers only its own model: not an all-models Host, so it is a
+// consumer of `model` alone.
+const subsetSpec = (model = STALE_MODEL) => ({
+  ...primarySpec(model),
+  allowedModels: [{ provider: PROVIDER, model }],
+})
 
 describe('GET /admin/attention', () => {
   beforeEach(() => {
@@ -201,6 +216,8 @@ describe('GET /admin/attention', () => {
         displayName: 'Claude Haiku',
         hostsAffected: [{ namespace: 'mcp-host', name: 'agent-a', roles: ['primary'] }],
         grantsAffected: [],
+        episode: 1,
+        consumerKeys: ['host:mcp-host/agent-a'],
       },
     ])
     expect(typeof res.body.generatedAt).toBe('string')
@@ -247,7 +264,7 @@ describe('GET /admin/attention', () => {
     // non-stale model — it must not generate an attention item.
     installPool({ staleRows: [makeModelRow()] })
     const gateway = new MockGateway('mcp-host')
-    await seedHost(gateway, 'agent-nonstale', primarySpec('claude-sonnet-current'))
+    await seedHost(gateway, 'agent-nonstale', subsetSpec('claude-sonnet-current'))
 
     const res = await authedGet(gateway).expect(200)
     expect(res.body.items).toEqual([])
@@ -271,11 +288,37 @@ describe('GET /admin/attention', () => {
     })
     const gateway = new MockGateway('mcp-host')
     // Only STALE_MODEL is referenced; OTHER_STALE_MODEL is stranded/unreferenced.
-    await seedHost(gateway, 'agent-a', primarySpec(STALE_MODEL))
+    await seedHost(gateway, 'agent-a', subsetSpec(STALE_MODEL))
 
     const res = await authedGet(gateway).expect(200)
     expect(res.body.items).toHaveLength(1)
     expect(res.body.items[0].model).toBe(STALE_MODEL)
+  })
+
+  it('an all-models Host makes every stale model of its provider an item, with role implicit', async () => {
+    installPool({
+      staleRows: [
+        makeModelRow({ id: '11111111-1111-4111-8111-111111111111', model: STALE_MODEL }),
+        makeModelRow({ id: '33333333-3333-4333-8333-333333333333', model: OTHER_STALE_MODEL }),
+      ],
+    })
+    const gateway = new MockGateway('mcp-host')
+    await seedHost(gateway, 'agent-a', primarySpec(STALE_MODEL))
+
+    const res = await authedGet(gateway).expect(200)
+    expect(res.body.items).toEqual([
+      expect.objectContaining({
+        model: STALE_MODEL,
+        hostsAffected: [{ namespace: 'mcp-host', name: 'agent-a', roles: ['primary'] }],
+        consumerKeys: ['host:mcp-host/agent-a'],
+      }),
+      expect.objectContaining({
+        model: OTHER_STALE_MODEL,
+        hostsAffected: [{ namespace: 'mcp-host', name: 'agent-a', roles: ['implicit'] }],
+        // An implicit offer is not part of the acknowledgement fingerprint.
+        consumerKeys: [],
+      }),
+    ])
   })
 
   it('preserves the stable stale-list order (provider, model) with ≥2 referenced items', async () => {

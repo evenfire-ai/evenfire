@@ -6,6 +6,11 @@
  * It APPLIES the statements, so tests assert table state (T4) rather than SQL
  * strings.
  *
+ * It also models the catalog prune's statements (candidate query, conditional
+ * disable, run log) and the row trigger that keeps `stale_since` and the
+ * episode counters, so the prune and the sync's re-enable can be compared
+ * against Postgres too.
+ *
  * STRICT: a statement is recognized only when its whitespace-normalized text
  * equals one the fake models (the dynamic admin UPDATE is parsed column by
  * column). Anything else throws. A loose match would keep modelling the old
@@ -47,6 +52,9 @@
  *
  * What it does not model: `idle_in_transaction_session_timeout` (ignored), the
  * subscription tables (the materializer's readiness reads return no grants),
+ * the plugin-workload grants table (the prune's consumer queries return no
+ * grants), `NOW()` as wall-clock time (it is a clock that advances on each
+ * commit, so a grace compares against it),
  * text collation (rows come back in `localeCompare` order, which is not
  * Postgres' `en_US.utf8`), and the statement snapshot of `prev` in the sync's
  * UPDATE … FROM (the target row is read once, after its lock).
@@ -76,6 +84,12 @@ export interface FakeRow {
   vendor: string | null
   image_input: ImageInputCapability | null
   catalog_status: string | null
+  enabled_managed_by: 'catalog' | 'operator'
+  auto_disabled_at: string | null
+  stale_since: string | null
+  stale_episode: number
+  deprecated_episode: number
+  attention_ack: unknown
   discovered_at: string | null
   last_seen_at: string | null
   created_at: string
@@ -109,6 +123,16 @@ export interface FakeSettingsRow {
   updated_at: string
 }
 
+export interface FakePruneRunRow {
+  sync_ran_at: string
+  candidates: number
+  prefiltered: number
+  examined_locked: number
+  pruned: number
+  aborted: boolean
+  abort_reason: string | null
+}
+
 export interface FakeRunRow {
   id: string
   source: string
@@ -130,6 +154,11 @@ export interface SeedRow {
   vendor?: string | null
   image_input?: ImageInputCapability | null
   catalog_status?: string | null
+  enabled_managed_by?: 'catalog' | 'operator'
+  auto_disabled_at?: string | Date | null
+  stale_since?: string | Date | null
+  stale_episode?: number
+  deprecated_episode?: number
 }
 
 export interface FakeDbSeed {
@@ -191,6 +220,8 @@ export interface FakeDb {
   settings: FakeSettingsRow[]
   /** Committed `llm_catalog_sync_runs`, in insertion order. */
   runs: FakeRunRow[]
+  /** Committed `llm_catalog_prune_runs`, in insertion order. */
+  pruneRuns: FakePruneRunRow[]
   /** Committed `llm_allowed_models_audit` rows. */
   audit: Array<Record<string, unknown>>
   /** Row lookup by (provider, model), for terse assertions. */
@@ -232,7 +263,7 @@ function sqlError(code: string, message: string): Error {
 const norm = (sql: string) => sql.replace(/\s+/g, ' ').trim()
 
 const MODEL_COLUMNS =
-  'id, provider, model, vendor, display_name, context_window_tokens, enabled, source, discovered_at, last_seen_at, stale, image_input, created_at, updated_at'
+  'id, provider, model, vendor, display_name, context_window_tokens, enabled, source, discovered_at, last_seen_at, stale, auto_disabled_at, image_input, created_at, updated_at'
 const PRICE_COLUMNS =
   'id, provider, model, input_token_price, output_token_price, cache_read_token_price, cache_write_token_price, currency, effective_from, enabled, created_at, updated_at'
 const SETTINGS_COLUMNS = 'provider, auto_enable, updated_at, updated_by'
@@ -254,9 +285,21 @@ const SQL = {
   materializerRead:
     "SELECT provider, model, vendor, display_name, context_window_tokens, image_input FROM llm_allowed_models WHERE enabled AND NOT (provider = 'codex-subscription' AND stale) ORDER BY provider ASC, model ASC",
   syncInsert:
-    "INSERT INTO llm_allowed_models (provider, model, enabled, source, discovered_at, last_seen_at, stale, context_window_tokens, display_name, image_input, catalog_status) VALUES ($1, $2, $6::boolean AND NOT EXISTS ( SELECT 1 FROM llm_catalog_dismissed d WHERE d.provider = $1 AND d.model = $2 ), 'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7) ON CONFLICT (provider, model) DO NOTHING RETURNING enabled, EXISTS ( SELECT 1 FROM llm_catalog_dismissed d WHERE d.provider = $1 AND d.model = $2 ) AS dismissed",
+    "INSERT INTO llm_allowed_models (provider, model, enabled, source, discovered_at, last_seen_at, stale, context_window_tokens, display_name, image_input, catalog_status, enabled_managed_by) VALUES ($1, $2, $6::boolean AND NOT EXISTS ( SELECT 1 FROM llm_catalog_dismissed d WHERE d.provider = $1 AND d.model = $2 ), 'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb, $7, 'catalog') ON CONFLICT (provider, model) DO NOTHING RETURNING enabled, EXISTS ( SELECT 1 FROM llm_catalog_dismissed d WHERE d.provider = $1 AND d.model = $2 ) AS dismissed",
   syncManualUpdate: `UPDATE llm_allowed_models AS t SET image_input = ${guard(2, 3)} FROM llm_allowed_models AS prev WHERE t.id = $1 AND prev.id = t.id AND t.source = 'manual' AND t.provider = $4 AND t.model = $5 RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed`,
-  syncDiscoveryUpdate: `UPDATE llm_allowed_models AS t SET last_seen_at = NOW(), stale = false, context_window_tokens = CASE WHEN t.enabled THEN t.context_window_tokens ELSE COALESCE(t.context_window_tokens, $2) END, display_name = CASE WHEN t.enabled THEN t.display_name ELSE COALESCE(t.display_name, $3) END, image_input = ${guard(4, 5)}, catalog_status = CASE WHEN $6::boolean THEN $7::text ELSE t.catalog_status END FROM llm_allowed_models AS prev WHERE t.id = $1 AND prev.id = t.id AND t.source = 'discovery' AND t.provider = $8 AND t.model = $9 RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed`,
+  syncDiscoveryUpdate: `UPDATE llm_allowed_models AS t SET last_seen_at = NOW(), stale = CASE WHEN NOT $6::boolean THEN t.stale WHEN t.auto_disabled_at IS NOT NULL THEN t.stale ELSE false END, context_window_tokens = CASE WHEN t.enabled THEN t.context_window_tokens ELSE COALESCE(t.context_window_tokens, $2) END, display_name = CASE WHEN t.enabled THEN t.display_name ELSE COALESCE(t.display_name, $3) END, image_input = ${guard(4, 5)}, catalog_status = CASE WHEN $6::boolean THEN $7::text ELSE t.catalog_status END FROM llm_allowed_models AS prev WHERE t.id = $1 AND prev.id = t.id AND t.source = 'discovery' AND t.provider = $8 AND t.model = $9 RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed, (t.auto_disabled_at IS NOT NULL) AS has_token`,
+  syncReenable:
+    "UPDATE llm_allowed_models AS t SET enabled = $4::boolean, auto_disabled_at = NULL, stale = false WHERE t.id = $1 AND t.source = 'discovery' AND t.provider = $2 AND t.model = $3 AND t.enabled_managed_by = 'catalog' AND t.auto_disabled_at IS NOT NULL AND NOT t.enabled AND NOT EXISTS (SELECT 1 FROM llm_catalog_dismissed d WHERE d.provider = t.provider AND d.model = t.model) RETURNING t.id",
+  pruneCandidates:
+    "SELECT id, provider, model FROM llm_allowed_models WHERE enabled AND source = 'discovery' AND enabled_managed_by = 'catalog' AND stale AND provider = ANY($1::text[]) AND stale_since < NOW() - ($2::double precision * INTERVAL '1 millisecond') ORDER BY stale_since ASC, id ASC",
+  pruneDisable:
+    "UPDATE llm_allowed_models SET enabled = false, auto_disabled_at = NOW() WHERE id = $1 AND provider = $2 AND model = $3 AND source = 'discovery' AND enabled AND enabled_managed_by = 'catalog' AND stale AND stale_since < NOW() - ($4::double precision * INTERVAL '1 millisecond')",
+  pruneRunInsert:
+    'INSERT INTO llm_catalog_prune_runs (sync_ran_at, candidates, prefiltered, examined_locked, pruned, aborted, abort_reason) VALUES ($1::timestamptz, $2, $3, $4, $5, $6, $7)',
+  grantsByAllowedModel:
+    'SELECT * FROM plugin_workload_sdk_grants WHERE allowed_models @> to_jsonb($1::text) ORDER BY recipe_namespace, recipe_name, capability_family',
+  grantsByPromptTarget:
+    "SELECT * FROM plugin_workload_sdk_grants WHERE prompt_targets @> jsonb_build_array( jsonb_build_object('provider', $1::text, 'model', $2::text)) ORDER BY recipe_namespace, recipe_name, capability_family",
   syncStale:
     "UPDATE llm_allowed_models SET stale = true WHERE provider = $1 AND source = 'discovery' AND stale = false AND model <> ALL($2::text[])",
   syncPrice:
@@ -409,7 +452,11 @@ class LockTable {
   }
 }
 
-type TableName = HistoryEvent['table'] | 'llm_catalog_sync_runs' | 'llm_allowed_models_audit'
+type TableName =
+  | HistoryEvent['table']
+  | 'llm_catalog_sync_runs'
+  | 'llm_catalog_prune_runs'
+  | 'llm_allowed_models_audit'
 
 class Tx {
   readonly overlays = new Map<TableName, Map<string, Record<string, unknown> | null>>()
@@ -452,6 +499,7 @@ export function makeFakeDb(
         'llm_catalog_dismissed',
         'llm_provider_catalog_settings',
         'llm_catalog_sync_runs',
+        'llm_catalog_prune_runs',
         'llm_allowed_models_audit',
       ] as const
     ).map(t => [t, new Map()])
@@ -462,6 +510,8 @@ export function makeFakeDb(
   const calls: FakeDb['calls'] = []
   const pairKey = (provider: unknown, model: unknown) => `${String(provider)}/${String(model)}`
 
+  const isoOrNull = (value: string | Date | null | undefined) =>
+    value === null || value === undefined ? null : new Date(value).toISOString()
   for (const s of seed) {
     const id = nextId('seed')
     tables.get('llm_allowed_models')!.set(id, {
@@ -476,6 +526,12 @@ export function makeFakeDb(
       vendor: s.vendor ?? null,
       image_input: s.image_input ?? null,
       catalog_status: s.catalog_status ?? null,
+      enabled_managed_by: s.enabled_managed_by ?? 'operator',
+      auto_disabled_at: isoOrNull(s.auto_disabled_at),
+      stale_since: isoOrNull(s.stale_since),
+      stale_episode: s.stale_episode ?? 0,
+      deprecated_episode: s.deprecated_episode ?? 0,
+      attention_ack: null,
       discovered_at: null,
       last_seen_at: null,
       created_at: now(),
@@ -525,8 +581,42 @@ export function makeFakeDb(
     return tables.get(table)!.get(key)
   }
   const write = (tx: Tx, table: TableName, key: string, row: Record<string, unknown> | null) => {
+    if (table === 'llm_allowed_models' && row !== null) {
+      row = trackEpisodes(visibleByKey(tx, table, key), row)
+    }
     tx.overlay(table).set(key, row)
   }
+
+  // The `BEFORE INSERT OR UPDATE` trigger of llm_allowed_models: an episode
+  // opens when a row ENTERS `stale` or `deprecated` (NULL counts as outside),
+  // `stale_since` is cleared off a non-stale row, and nothing else is touched.
+  const trackEpisodes = (
+    old: Record<string, unknown> | undefined,
+    row: Record<string, unknown>
+  ): Record<string, unknown> => {
+    const next = {
+      stale_since: null,
+      stale_episode: 0,
+      deprecated_episode: 0,
+      ...row,
+    } as Record<string, unknown>
+    if (next.stale === true && (!old || old.stale !== true)) {
+      next.stale_since = now()
+      next.stale_episode = old ? Number(old.stale_episode) + 1 : 1
+    } else if (next.stale !== true) {
+      next.stale_since = null
+    }
+    if (next.catalog_status === 'deprecated' && (!old || old.catalog_status !== 'deprecated')) {
+      next.deprecated_episode = old ? Number(old.deprecated_episode) + 1 : 1
+    }
+    return next
+  }
+
+  // `stale_since < NOW() - grace`, on this fake's clock.
+  const staleOutOfGrace = (row: Record<string, unknown>, graceMs: unknown) =>
+    row.stale_since !== null &&
+    row.stale_since !== undefined &&
+    Date.parse(String(row.stale_since)) < Date.parse(now()) - Number(graceMs)
 
   // A key another open transaction wrote makes a writer of the same key wait
   // for it to end; the waiter holds the key only once it writes under it.
@@ -679,6 +769,9 @@ export function makeFakeDb(
           vendor: null,
           image_input: parseJsonb(imageInput),
           catalog_status: status ?? null,
+          enabled_managed_by: 'catalog',
+          auto_disabled_at: null,
+          attention_ack: null,
           discovered_at: now(),
           last_seen_at: now(),
           created_at: now(),
@@ -708,7 +801,12 @@ export function makeFakeDb(
           r => r.source === 'discovery' && r.provider === provider && r.model === model
         )
         if (!row) return { rows: [], rowCount: 0 }
-        const next: Record<string, unknown> = { ...row, last_seen_at: now(), stale: false }
+        const hasToken = row.auto_disabled_at !== null && row.auto_disabled_at !== undefined
+        const next: Record<string, unknown> = {
+          ...row,
+          last_seen_at: now(),
+          stale: live === true && !hasToken ? false : row.stale,
+        }
         if (row.enabled !== true) {
           next.context_window_tokens = row.context_window_tokens ?? ctx ?? null
           next.display_name = row.display_name ?? display ?? null
@@ -717,8 +815,96 @@ export function makeFakeDb(
         if (live === true) next.catalog_status = status ?? null
         write(tx, 'llm_allowed_models', String(id), next)
         const changed = JSON.stringify(row.image_input) !== JSON.stringify(next.image_input)
-        return { rows: [{ enabled: row.enabled, image_input_changed: changed }], rowCount: 1 }
+        return {
+          rows: [{ enabled: row.enabled, image_input_changed: changed, has_token: hasToken }],
+          rowCount: 1,
+        }
       }
+      case SQL.syncReenable: {
+        const [id, provider, model, enable] = p
+        // NOT EXISTS reads the statement snapshot, taken before any wait.
+        const dismissed =
+          visibleByKey(tx, 'llm_catalog_dismissed', pairKey(provider, model)) !== undefined
+        if (dismissed) return { rows: [], rowCount: 0 }
+        const row = await lockedModel(
+          tx,
+          String(id),
+          r =>
+            r.source === 'discovery' &&
+            r.provider === provider &&
+            r.model === model &&
+            r.enabled_managed_by === 'catalog' &&
+            r.auto_disabled_at !== null &&
+            r.auto_disabled_at !== undefined &&
+            r.enabled !== true
+        )
+        if (!row) return { rows: [], rowCount: 0 }
+        write(tx, 'llm_allowed_models', String(id), {
+          ...row,
+          enabled: enable === true,
+          auto_disabled_at: null,
+          stale: false,
+        })
+        return { rows: [{ id }], rowCount: 1 }
+      }
+      case SQL.pruneCandidates: {
+        const providers = new Set((p[0] as string[]) ?? [])
+        const out = visible(tx, 'llm_allowed_models')
+          .filter(
+            r =>
+              r.enabled === true &&
+              r.source === 'discovery' &&
+              r.enabled_managed_by === 'catalog' &&
+              r.stale === true &&
+              providers.has(String(r.provider)) &&
+              staleOutOfGrace(r, p[1])
+          )
+          .sort(
+            (a, b) =>
+              Date.parse(String(a.stale_since)) - Date.parse(String(b.stale_since)) ||
+              (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0)
+          )
+          .map(r => ({ id: r.id, provider: r.provider, model: r.model }))
+        return { rows: out, rowCount: out.length }
+      }
+      case SQL.pruneDisable: {
+        const [id, provider, model, graceMs] = p
+        const row = await lockedModel(
+          tx,
+          String(id),
+          r =>
+            r.provider === provider &&
+            r.model === model &&
+            r.source === 'discovery' &&
+            r.enabled === true &&
+            r.enabled_managed_by === 'catalog' &&
+            r.stale === true &&
+            staleOutOfGrace(r, graceMs)
+        )
+        if (!row) return { rows: [], rowCount: 0 }
+        write(tx, 'llm_allowed_models', String(id), {
+          ...row,
+          enabled: false,
+          auto_disabled_at: now(),
+        })
+        return { rows: [], rowCount: 1 }
+      }
+      case SQL.pruneRunInsert: {
+        const id = nextId('prune-run')
+        write(tx, 'llm_catalog_prune_runs', id, {
+          sync_ran_at: new Date(String(p[0])).toISOString(),
+          candidates: Number(p[1]),
+          prefiltered: Number(p[2]),
+          examined_locked: Number(p[3]),
+          pruned: Number(p[4]),
+          aborted: p[5] === true,
+          abort_reason: p[6] ?? null,
+        })
+        return { rows: [], rowCount: 1 }
+      }
+      case SQL.grantsByAllowedModel:
+      case SQL.grantsByPromptTarget:
+        return { rows: [], rowCount: 0 }
       case SQL.syncStale: {
         const provider = p[0]
         const present = new Set((p[1] as string[]) ?? [])
@@ -813,6 +999,9 @@ export function makeFakeDb(
           source: 'manual',
           stale: false,
           catalog_status: null,
+          enabled_managed_by: 'operator',
+          auto_disabled_at: null,
+          attention_ack: null,
           discovered_at: null,
           last_seen_at: null,
           created_at: now(),
@@ -999,6 +1188,9 @@ export function makeFakeDb(
       else if (item === "source = 'manual'") next.source = 'manual'
       else if (item === 'stale = false') next.stale = false
       else if (item === 'last_seen_at = NULL') next.last_seen_at = null
+      else if (item === "enabled_managed_by = 'operator'") next.enabled_managed_by = 'operator'
+      else if (item === 'auto_disabled_at = NULL') next.auto_disabled_at = null
+      else if (item === 'attention_ack = NULL') next.attention_ack = null
       else if (item === 'updated_at = NOW()') next.updated_at = now()
       else throw new Error(`llmCatalogSyncFakeDb: unrecognized SET item in admin UPDATE: ${item}`)
     }
@@ -1108,6 +1300,9 @@ export function makeFakeDb(
     },
     get runs() {
       return committed('llm_catalog_sync_runs') as unknown as FakeRunRow[]
+    },
+    get pruneRuns() {
+      return committed('llm_catalog_prune_runs') as unknown as FakePruneRunRow[]
     },
     get audit() {
       return committed('llm_allowed_models_audit')

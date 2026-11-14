@@ -5,10 +5,12 @@
  * file control-api generates against real PostgreSQL with the real catalog sync,
  * route and Host reference producer:
  * control-api/test/contracts.llmAttention.wire.realPostgres.integration.test.ts →
- * control-api/test/fixtures/wire/llmAttention.wire.json. It holds one item of each
- * kind (`stale_model_referenced`, `deprecated_model_enabled`, and two
- * `stale_discovery_enabled`, one of them for the referenced model). Never build
- * an item by hand: a state the file lacks is added to the generator.
+ * control-api/test/fixtures/wire/llmAttention.wire.json. Only models somebody uses
+ * are flagged: it holds two `stale_model_referenced` items (one named by a Host,
+ * one offered only through an all-models Host, role `implicit`) and one
+ * `deprecated_model_enabled` with its references. Every item carries `episode`
+ * and `consumerKeys`. Never build an item by hand: a state the file lacks is
+ * added to the generator.
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
