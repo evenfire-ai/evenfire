@@ -14,6 +14,7 @@ import { z } from 'zod/v3'
 import { loadConfig } from '../config'
 import { WorkflowRecipeProvider } from '../k8sClient'
 import { registry } from '../metrics'
+import { createLogger } from '../observability/logger'
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
 import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
@@ -35,11 +36,15 @@ import {
   handleValidateRecipe,
 } from './handlers'
 
+const log = createLogger('wrc', 'mcpServer')
 const MAX_SESSIONS = 100
 // Status reports can include full step output (research steps produce 50-200KB).
-// Previous 64KB limit caused `req.destroy()` → coordinator received `socket hang up`
-// instead of a proper 413 response, triggering false step retries.
-const MAX_BODY_BYTES = 512 * 1024 // 512KB
+export const MAX_BODY_BYTES = 512 * 1024 // 512KB
+// Past MAX_BODY_BYTES the rest of the body is drained and discarded so the 413
+// reaches the client on a healthy socket; destroying the request mid-upload
+// surfaces to the coordinator as an opaque `fetch failed` (ECONNRESET). Bodies
+// past MAX_DRAIN_BYTES are not worth draining and still drop the connection.
+export const MAX_DRAIN_BYTES = 4 * MAX_BODY_BYTES
 const CONTROL_API_BASE_URL =
   process.env.CONTROL_API_BASE_URL || 'http://control-api.control-plane.svc.cluster.local:8090'
 
@@ -122,31 +127,70 @@ export async function revalidatePluginSdkCredentialTicket(input: {
   }
 }
 
+/**
+ * Log an oversized request body by route and size only: never the body, and
+ * never the request URL, whose suffix is caller-controlled.
+ */
+function logOversizedBody(
+  req: http.IncomingMessage,
+  route: 'workflow' | 'plugin-workload-sdk-credentials',
+  recipeName: string,
+  bytesRead: number
+): void {
+  const contentLength = Number(req.headers['content-length'])
+  log.warn('Rejected oversized request body', {
+    method: req.method,
+    route,
+    recipeName,
+    bytesRead,
+    contentLength: Number.isFinite(contentLength) ? contentLength : undefined,
+    limitBytes: MAX_BODY_BYTES,
+  })
+}
+
 type ParseResult =
   | { ok: true; body: Record<string, unknown> }
-  | { ok: false; reason: 'too_large' | 'invalid_json' | 'stream_error' }
+  | { ok: false; reason: 'too_large'; bytesRead: number }
+  | { ok: false; reason: 'invalid_json' | 'stream_error' }
 
 export function parseJsonBody(req: http.IncomingMessage): Promise<ParseResult> {
   return new Promise(resolve => {
-    let data = ''
+    const chunks: Buffer[] = []
     let size = 0
+    let overflowed = false
     let settled = false
+    const rejectTooLarge = () => {
+      settled = true
+      resolve({ ok: false, reason: 'too_large', bytesRead: size })
+    }
+    if (Number(req.headers?.['content-length']) > MAX_DRAIN_BYTES) {
+      rejectTooLarge()
+      req.destroy()
+      return
+    }
     req.on('data', (chunk: Buffer) => {
       if (settled) return
       size += chunk.length
-      if (size > MAX_BODY_BYTES) {
-        settled = true
-        resolve({ ok: false, reason: 'too_large' })
+      if (size > MAX_DRAIN_BYTES) {
+        rejectTooLarge()
         req.destroy()
         return
       }
-      data += chunk.toString()
+      if (size > MAX_BODY_BYTES) {
+        overflowed = true
+        chunks.length = 0
+      }
+      if (!overflowed) chunks.push(chunk)
     })
     req.on('end', () => {
       if (settled) return
+      if (overflowed) {
+        rejectTooLarge()
+        return
+      }
       settled = true
       try {
-        const parsed: unknown = JSON.parse(data)
+        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
         if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
           resolve({ ok: false, reason: 'invalid_json' })
           return
@@ -364,7 +408,7 @@ export class ClerumMcpServer {
       // Do not reflect the request URL or parser error in logs: both can carry
       // attacker-controlled control characters or format tokens. The stable
       // event is sufficient for auth telemetry and avoids log/format injection.
-      console.error('[WRC-AUTH] Token verification failed')
+      log.error('WRC auth token verification failed')
       res.writeHead(401, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Unauthorized' }))
       return
@@ -443,6 +487,9 @@ export class ClerumMcpServer {
     if (req.method === 'POST') {
       const parseResult = await parseJsonBody(req)
       if (!parseResult.ok) {
+        if (parseResult.reason === 'too_large') {
+          logOversizedBody(req, 'workflow', recipeName, parseResult.bytesRead)
+        }
         const status = parseResult.reason === 'too_large' ? 413 : 400
         const error =
           parseResult.reason === 'too_large' ? 'Request body too large' : 'Invalid JSON body'
@@ -542,10 +589,16 @@ export class ClerumMcpServer {
               sessionMcp.close().catch(() => {
                 /* best-effort cleanup */
               })
-              console.log(`[MCP-Server] Session ${newSessionId} closed (${sessions.size} active)`)
+              log.info('MCP session closed', {
+                sessionId: newSessionId,
+                activeSessions: sessions.size,
+              })
             }
 
-            console.log(`[MCP-Server] New session ${newSessionId} (${sessions.size} active)`)
+            log.info('MCP session opened', {
+              sessionId: newSessionId,
+              activeSessions: sessions.size,
+            })
           }
         }
         return
@@ -618,6 +671,14 @@ export class ClerumMcpServer {
 
     const parseResult = await parseJsonBody(req)
     if (!parseResult.ok) {
+      if (parseResult.reason === 'too_large') {
+        logOversizedBody(
+          req,
+          'plugin-workload-sdk-credentials',
+          boundRecipeName,
+          parseResult.bytesRead
+        )
+      }
       res.writeHead(parseResult.reason === 'too_large' ? 413 : 400, {
         'Content-Type': 'application/json',
       })
@@ -738,7 +799,9 @@ export class ClerumMcpServer {
   async start(): Promise<void> {
     this.httpServer = http.createServer((req, res) => {
       this.handleHttpRequest(req, res).catch((error: unknown) => {
-        console.error('[MCP-Server] Unhandled error in request handler:', error)
+        // Pass the Error itself: the logger redacts ApiException bodies,
+        // headers and URLs only inside native errors.
+        log.error('Unhandled error in request handler', { error })
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'Internal server error' }))
@@ -748,9 +811,11 @@ export class ClerumMcpServer {
 
     return new Promise<void>(resolve => {
       this.httpServer!.listen(this.port, () => {
-        console.log(`[MCP-Server] Listening on :${this.port}`)
-        console.log(`[MCP-Server] MCP endpoint: POST /mcp/v1`)
-        console.log(`[MCP-Server] Health endpoint: GET /health`)
+        log.info('MCP server listening', {
+          port: this.port,
+          mcpEndpoint: 'POST /mcp/v1',
+          healthEndpoint: 'GET /health',
+        })
         resolve()
       })
     })
@@ -769,7 +834,7 @@ export class ClerumMcpServer {
     return new Promise<void>(resolve => {
       if (this.httpServer) {
         this.httpServer.close(() => {
-          console.log('[MCP-Server] HTTP server closed')
+          log.info('MCP server HTTP server closed')
           resolve()
         })
       } else {
