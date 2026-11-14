@@ -502,7 +502,7 @@ describe('saving a generated file', () => {
     expect(calls(client)).toBe(1)
   })
 
-  it('scans a file with no record: a secret refuses it, an image uploads unscanned', async () => {
+  it('scans a file with no record: a secret refuses it, an image uploads as not scanned', async () => {
     const root = rootOf('user-a')
     const out = outputsOf(root)
     fs.mkdirSync(out, { mode: 0o700 })
@@ -716,15 +716,14 @@ describe('saving a workspace file', () => {
     const root = rootOf('user-a')
     seed(root, 'text.docx', `k ${SYNTHETIC}\n`)
     seed(root, 'clean-text.docx', 'k none\n')
-    seed(
-      root,
-      'zip.txt',
-      await (async () => {
-        const z = new JSZip()
-        z.file('a.txt', SYNTHETIC)
-        return z.generateAsync({ type: 'nodebuffer' })
-      })()
-    )
+    const zipped = (compression: 'STORE' | 'DEFLATE') => {
+      const z = new JSZip()
+      z.file('a.txt', SYNTHETIC)
+      return z.generateAsync({ type: 'nodebuffer', compression })
+    }
+    // JSZip stores by default: the value stands in clear in the bytes.
+    seed(root, 'zip.txt', await zipped('STORE'))
+    seed(root, 'deflated-zip.txt', await zipped('DEFLATE'))
     seed(root, 'doc.png', await docx(`k ${SYNTHETIC}`))
     seed(root, 'clean-doc.png', await docx('k none'))
     const client = recordingClient()
@@ -741,17 +740,24 @@ describe('saving a workspace file', () => {
     expect(
       payload(await create(tools, { name: 'x', sourcePath: 'clean-doc.png' })).secretScan
     ).toEqual({ state: 'scanned' })
-    expect(payload(await create(tools, { name: 'x', sourcePath: 'zip.txt' })).secretScan).toEqual({
+    expect((await create(tools, { name: 'x', sourcePath: 'zip.txt' })).error).toBe(
+      FILE_CONTAINS_SECRET
+    )
+    expect(
+      payload(await create(tools, { name: 'x', sourcePath: 'deflated-zip.txt' })).secretScan
+    ).toEqual({
       state: 'not_scanned',
       reason: 'binary_format',
     })
   })
 
-  it('scans text of exactly 4 MiB in one pass and one byte more in windows', async () => {
+  it('matches text of exactly 4 MiB in one pass and one byte more in windows', async () => {
     const root = rootOf('user-a')
-    const tail = ` ${SYNTHETIC}\n`
+    // Split by markdown emphasis: only the text matcher can find it.
+    const tail = ` ${SYNTHETIC.slice(0, 10)}**${SYNTHETIC.slice(10, 15)}**${SYNTHETIC.slice(15)}\n`
     const exact = Buffer.alloc(SCAN_TEXT_MAX_BYTES, 0x61)
     exact.write(tail, SCAN_TEXT_MAX_BYTES - tail.length)
+    expect(exact.includes(Buffer.from(SYNTHETIC))).toBe(false)
     seed(root, 'exact.txt', exact)
     seed(root, 'over.txt', Buffer.concat([Buffer.from('a'), exact]))
     const client = recordingClient()

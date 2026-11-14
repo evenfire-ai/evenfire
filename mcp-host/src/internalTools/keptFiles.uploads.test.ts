@@ -326,12 +326,13 @@ describe('saving a kept attachment', () => {
     expect(clientCalls(client)).toBe(2)
   })
 
-  it('scans an upload: a secret refuses it, an image and a pdf upload unscanned', async () => {
+  it('scans an upload: a secret refuses it, a pdf that holds the value is refused, an image and a clean pdf upload as not scanned', async () => {
     const root = rootOf('user-a')
     const entries = await keep(root, [
       file('secret.txt', `token ${SYNTHETIC}`),
       image(),
-      file('doc.pdf', `%PDF-1.7\n${SYNTHETIC}`),
+      file('doc.pdf', '%PDF-1.7\nnothing to find\n'),
+      file('secret.pdf', `%PDF-1.7\n${SYNTHETIC}`),
     ])
     const byName = new Map(entries.map(entry => [entry.name, entry.id as string]))
     const client = recordingClient()
@@ -340,6 +341,8 @@ describe('saving a kept attachment', () => {
         .get('clerum__gfs_create_file')!
         .execute({ drive: 'main', parentResourceId: 'f', name: 'x', uploadedFileId: id }, '')
     expect((await save(byName.get('secret.txt')!)).error).toBe(FILE_CONTAINS_SECRET)
+    expect((await save(byName.get('secret.pdf')!)).error).toBe(FILE_CONTAINS_SECRET)
+    expect(clientCalls(client)).toBe(0)
     expect(payload(await save(byName.get('photo.png')!)).secretScan).toEqual({
       state: 'not_scanned',
       reason: 'binary_format',

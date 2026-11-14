@@ -983,7 +983,7 @@ const SOURCE_PROPERTIES = {
 } as const
 
 const FILE_SOURCE_NOTICE =
-  ' Exactly one source: content (short text you wrote, never a whole file), generatedFile with generatedFileId, sourcePath, or uploadedFileId. The result has source and secretScan. When source is source_path or kept_upload, or generated_file with no Save id, and secretScan is not_scanned, tell the user the file was saved without a secret scan. A generated file with a Save id passed its check when it was generated and needs no such notice.'
+  ' Exactly one source: content (short text you wrote, never a whole file), generatedFile with generatedFileId, sourcePath, or uploadedFileId. The result has source and secretScan. When source is source_path or kept_upload, or generated_file with no Save id, and secretScan is not_scanned, tell the user the file was saved without a full secret scan. A generated file with a Save id passed its check when it was generated and needs no such notice.'
 
 type ChosenSource =
   | { kind: 'content'; content: string }
