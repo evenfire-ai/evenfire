@@ -1320,12 +1320,6 @@ export class TaskExecutor {
   }
 
   /**
-   * Whether every call of the kept-files delete will ask the user first:
-   * approval enabled, a channel task, and no Host override turning its
-   * approval off. The registry registers the delete only then (and only with
-   * the listing), and this task asks on every call of it.
-   */
-  /**
    * The caller's outputs root with the room its kept files have in the
    * download store, for every chat generation; undefined when the task has
    * no caller root (the generators then refuse to write). The store keys a
@@ -1345,6 +1339,12 @@ export class TaskExecutor {
     }
   }
 
+  /**
+   * Whether every call of the kept-files delete will ask the user first:
+   * approval enabled, a channel task, and no Host override turning its
+   * approval off. The registry registers the delete only then (and only with
+   * the listing), and this task asks on every call of it.
+   */
   private keptFilesDeleteConfirmed(): boolean {
     return keptFilesDeleteAsks({
       approvalEnabled: appConfig.enableApproval,
