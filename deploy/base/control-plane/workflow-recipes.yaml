@@ -142,6 +142,10 @@ spec:
           value: "50"
         - name: CLERUM_WORKFLOW_STEP_MCP_SERVERS_MAX_ITEMS
           value: "20"
+        # Size of WRC-managed output PVCs whose recipe omits spec.output.storageSize.
+        # Applies when WRC creates the PVC; WRC never resizes an existing one.
+        - name: CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE
+          value: "1Gi"
         - name: CLERUM_NETWORK_POLICY_ENFORCEMENT_MODE
           value: required
         - name: CLERUM_NETWORK_POLICY_ENFORCEMENT_CONFIRMED

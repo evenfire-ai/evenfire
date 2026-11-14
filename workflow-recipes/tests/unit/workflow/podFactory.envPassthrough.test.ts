@@ -31,6 +31,7 @@ const config: WorkflowConfig = {
   workflowStatefulSetMaxReplicas: 20,
   workflowStatefulSetMaxVolumeClaimTemplates: 4,
   workflowStatefulSetMaxPvcPreflightChecks: 80,
+  workflowOutputStorageSize: '1Gi',
 }
 const agent: AgentSpec = { provider: 'zai', model: 'glm-4.7' }
 
@@ -80,6 +81,13 @@ describe('buildPropagatedEnv', () => {
       'CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD',
       'CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES',
       'CLERUM_WORKFLOW_STEP_ENGINE',
+      'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB',
+    ])
+  })
+
+  it('forwards the workflow output quota to mcp-host pods', () => {
+    expect(buildPropagatedEnv({ CLERUM_WORKFLOW_OUTPUT_QUOTA_MB: '200' })).toEqual([
+      { name: 'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB', value: '200' },
     ])
   })
 
@@ -167,6 +175,51 @@ describe('buildMcpHostPod env passthrough', () => {
       )
       const env = pod.spec!.containers![0].env!
       expect(env.find(e => e.name === 'MCP_HOST_WORKFLOW_MAX_OUTPUT_TOKENS')?.value).toBe('4096')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('includes the workflow output quota when configured on WRC', () => {
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_QUOTA_MB', '200')
+    try {
+      const pod = buildMcpHostPod(
+        'r',
+        agent,
+        config,
+        'r',
+        'sandbox-recipes',
+        'r-workflow-output',
+        undefined,
+        undefined,
+        { mountWorkflowOutput: false }
+      )
+      const env = pod.spec!.containers![0].env!
+      expect(env.find(e => e.name === 'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB')?.value).toBe('200')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('omits the workflow output quota when the WRC env has it unset', () => {
+    vi.stubEnv('CLERUM_WORKFLOW_OUTPUT_QUOTA_MB', '')
+    vi.stubEnv('CLERUM_MAX_STEP_TIMEOUT_SECONDS', '10800')
+    try {
+      const pod = buildMcpHostPod(
+        'r',
+        agent,
+        config,
+        'r',
+        'sandbox-recipes',
+        'r-workflow-output',
+        undefined,
+        undefined,
+        { mountWorkflowOutput: false }
+      )
+      const env = pod.spec!.containers![0].env!
+      // Witness: the passthrough ran and forwarded a sibling var.
+      expect(env.find(e => e.name === 'CLERUM_MAX_STEP_TIMEOUT_SECONDS')?.value).toBe('10800')
+      expect(env.find(e => e.name === 'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB')).toBeUndefined()
     } finally {
       vi.unstubAllEnvs()
     }

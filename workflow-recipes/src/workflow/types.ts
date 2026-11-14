@@ -228,6 +228,8 @@ export interface WorkflowConfig {
   workflowStatefulSetMaxReplicas: number
   workflowStatefulSetMaxVolumeClaimTemplates: number
   workflowStatefulSetMaxPvcPreflightChecks: number
+  /** Size of a managed output PVC whose recipe omits spec.output.storageSize. */
+  workflowOutputStorageSize: string
 }
 
 // ─── Recipe Classification ──────────────────────────────────────────────

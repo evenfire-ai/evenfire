@@ -104,6 +104,12 @@ export interface OperatorConfig {
   workflowStatefulSetMaxReplicas: number
   workflowStatefulSetMaxVolumeClaimTemplates: number
   workflowStatefulSetMaxPvcPreflightChecks: number
+  /**
+   * Size of a WRC-managed output PVC whose recipe omits `spec.output.storageSize`
+   * (`CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE`). Applies when WRC creates the PVC; WRC
+   * never resizes an existing one.
+   */
+  workflowOutputStorageSize: string
   // Optional only for unit tests that exercise pure reconciler logic without
   // a live Postgres pool. Production and E2E use the DB-backed run pipeline.
   db?: DbConfig
@@ -143,6 +149,23 @@ export const MIN_EXTERNAL_EGRESS_MAX_ENTRIES = 8
 // (MAX_ANNOTATION_BYTES in network-policy-core), which trims long-FQDN sets well
 // before 1300. Kept equal to HCC's ceiling so the two controllers can't drift.
 export const MAX_EXTERNAL_EGRESS_MAX_ENTRIES = 1300
+
+export const DEFAULT_WORKFLOW_OUTPUT_STORAGE_SIZE = '1Gi'
+// Stricter than the CRD field pattern (^[0-9]+(Mi|Gi)$): this value sizes every new
+// managed PVC, so a zero size must stop WRC at startup instead of failing each PVC create.
+const WORKFLOW_OUTPUT_STORAGE_SIZE_PATTERN = /^[1-9][0-9]*(Mi|Gi)$/
+
+function getWorkflowOutputStorageSize(): string {
+  const key = 'CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE'
+  const value = process.env[key]
+  if (!value) return DEFAULT_WORKFLOW_OUTPUT_STORAGE_SIZE
+  if (!WORKFLOW_OUTPUT_STORAGE_SIZE_PATTERN.test(value)) {
+    throw new Error(
+      `Invalid value for ${key}: "${value}" (must be a positive whole number of Mi or Gi, matching ^[1-9][0-9]*(Mi|Gi)$)`
+    )
+  }
+  return value
+}
 
 function getEnvBool(key: string, defaultValue: boolean): boolean {
   const value = process.env[key]
@@ -374,6 +397,7 @@ export function loadConfig(): OperatorConfig {
     workflowStatefulSetMaxReplicas,
     workflowStatefulSetMaxVolumeClaimTemplates,
     workflowStatefulSetMaxPvcPreflightChecks,
+    workflowOutputStorageSize: getWorkflowOutputStorageSize(),
     allowedCoordinatorImagePrefixes: getEnvList('WRC_ALLOWED_COORDINATOR_IMAGE_PREFIXES'),
     requireCoordinatorImageDigest: getEnvBool('WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST', true),
     enableDeterministicMode: getEnvBool('WRC_ENABLE_DETERMINISTIC', true),

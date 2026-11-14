@@ -202,6 +202,7 @@ function createHarness() {
       maxWorkflowSteps: 100,
       runtimeTokenTtlSeconds: 3600,
       runtimeTokenRefreshBeforeSeconds: 300,
+      workflowOutputStorageSize: '1Gi',
       pluginWorkloadSdkEnabled: true,
     },
     tokenFactory: {

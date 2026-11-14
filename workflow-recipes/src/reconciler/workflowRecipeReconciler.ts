@@ -1080,6 +1080,7 @@ export class WorkflowRecipeReconciler {
           this.config.workflowStatefulSetMaxVolumeClaimTemplates,
         workflowStatefulSetMaxPvcPreflightChecks:
           this.config.workflowStatefulSetMaxPvcPreflightChecks,
+        workflowOutputStorageSize: this.config.workflowOutputStorageSize,
       },
       tokenFactory,
       // WRC-side Secret Broker for the Plugin Workload SDK eager mcp-host
