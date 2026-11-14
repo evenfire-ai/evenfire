@@ -2307,18 +2307,38 @@ describe('postStepStatus — output bounded by the coordinator', () => {
   it('ignores outputArtifacts when the report does not say the output was cut', async () => {
     const api = makeEmitApi()
     const h = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
-
-    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+    const report = {
       stepId: 'emit',
       phase: 'completed',
       executor: 'custom',
       output: { artifact: customArtifact(0) },
       outputArtifacts: [customArtifact(5), customArtifact(6)],
-    } as Parameters<typeof h.postStepStatus>[2])
+    }
+
+    const result = await h.postStepStatus(
+      'my-recipe',
+      makeClaims(),
+      report as Parameters<typeof h.postStepStatus>[2]
+    )
 
     // Witness: the report was stored with the artifact of its uncut output.
     expect(result.status).toBe(200)
     expect(storedArtifacts(api)).toEqual([customArtifact(0)])
+
+    // Liveness witness: the same entries are stored when the report says the output was cut.
+    const cutApi = makeEmitApi()
+    const cutHandlers = createWorkflowEndpointHandlers(cutApi, 'sandbox-recipes')
+    const cutResult = await cutHandlers.postStepStatus('my-recipe', makeClaims(), {
+      ...report,
+      outputTruncated: true,
+      outputLength: 1_000,
+    } as Parameters<typeof h.postStepStatus>[2])
+    expect(cutResult.status).toBe(200)
+    expect(storedArtifacts(cutApi)).toEqual([
+      customArtifact(0),
+      customArtifact(5),
+      customArtifact(6),
+    ])
   })
 
   it('stores the original length of an output the coordinator cut', async () => {
@@ -2511,9 +2531,37 @@ describe('postStepStatus — output bounded by the coordinator', () => {
 
         expect(fromRaw.status).toBe(200)
         expect(fromRaw.artifacts).toHaveLength(expectedArtifacts)
+        // Witness that this limit is the one in use: WRC records it for a raw report.
+        expect(fromRaw.step.outputPreviewMaxChars).toBe(limit)
         expect(fromBounded).toEqual(fromRaw)
       }
     )
+  })
+
+  it.each([
+    ['the number 1', 1],
+    ['the string "true"', 'true'],
+    ['an object', {}],
+  ])('ignores outputArtifacts when outputTruncated is %s', async (_label, flag) => {
+    const report = {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      output: 'r'.repeat(1_000),
+      outputLength: 200_000,
+      outputArtifacts: [customArtifact(5)],
+    }
+
+    const withFlag = await stored({ ...report, outputTruncated: flag })
+    const withTrue = await stored({ ...report, outputTruncated: true })
+
+    expect(withFlag.status).toBe(200)
+    expect(withFlag.artifacts).toEqual([])
+    expect(withFlag.step.outputTruncated).toBe(false)
+    // Liveness witness: the same report with the boolean true stores the artifact.
+    expect(withTrue.status).toBe(200)
+    expect(withTrue.artifacts).toEqual([customArtifact(5)])
+    expect(withTrue.step.outputTruncated).toBe(true)
   })
 
   it('stores the artifacts of every generated body as for the raw report', async () => {
@@ -2697,6 +2745,50 @@ describe('postStepStatus — output bounded by the coordinator', () => {
         expect(result).toEqual({ success: true, artifact: expect.any(Object) })
       }
     })
+  })
+
+  it('stores the artifacts and the shorter preview of a report the coordinator halved', async () => {
+    const output = JSON.stringify({
+      report: '中'.repeat(60_000),
+      artifact: customArtifact(0),
+      artifacts: [customArtifact(1)],
+    })
+    const raw = {
+      stepId: 'emit',
+      phase: 'failed',
+      executor: 'custom',
+      output,
+      error: '\u0001'.repeat(20_000),
+      failureReason: '\u0001'.repeat(20_000),
+    }
+    const bounded = boundStepStatusBody(raw)
+    const halved = bounded.output as string
+
+    // Witnesses: WRC accepts the raw body whole, the output was under the
+    // character cap, and the reporter halved it below WRC's limit and declared
+    // its artifacts.
+    const rawBytes = Buffer.byteLength(JSON.stringify(raw))
+    expect(rawBytes).toBeGreaterThan(256 * 1024)
+    expect(rawBytes).toBeLessThan(512 * 1024)
+    expect(output.length).toBeLessThan(65_536)
+    expect(halved.length).toBeLessThan(32_768)
+    expect(output.startsWith(halved)).toBe(true)
+    expect(bounded.outputTruncated).toBe(true)
+    expect(bounded.outputArtifacts).toEqual([customArtifact(0), customArtifact(1)])
+
+    const fromRaw = await stored(raw)
+    const fromBounded = await stored(bounded)
+    expect(fromRaw.status).toBe(200)
+    expect(fromBounded.status).toBe(200)
+    expect(fromRaw.artifacts).toEqual([customArtifact(0), customArtifact(1)])
+    expect(fromBounded.artifacts).toEqual(fromRaw.artifacts)
+    expect(fromBounded.step.outputLength).toBe(output.length)
+    expect(fromRaw.step.outputLength).toBe(output.length)
+    expect(fromBounded.step.outputTruncated).toBe(true)
+    // WRC stores the halved preview and records its length as the limit used.
+    expect(fromBounded.step.output).toBe(halved)
+    expect(fromBounded.step.outputPreviewMaxChars).toBe(halved.length)
+    expect(fromRaw.step.outputPreviewMaxChars).toBe(32_768)
   })
 })
 
