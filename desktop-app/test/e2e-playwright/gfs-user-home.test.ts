@@ -45,6 +45,7 @@ import {
 } from '../../../tests/e2e/gfsResourceFixtures'
 import { DEV_ISOLATION_ENV, devIsolationPaths } from '../../src/devIsolation'
 import { expect, test } from './fixtures'
+import { stubSaveDialog } from './helpers/electronDialogs'
 import {
   RESPONSE_TIMEOUT_MS,
   assertNoInfraFailureShape,
@@ -346,7 +347,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
   })
 
   test('J1 home appears without interaction and the owner shares it with an own agent', async ({}, testInfo) => {
-    test.setTimeout(6 * RESPONSE_TIMEOUT_MS + 15 * 60_000)
+    test.setTimeout(6 * RESPONSE_TIMEOUT_MS + 25 * 60_000)
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const [agent] = discoverManagedGfsAgents()
     const owner = fx.createUser('j1-owner')
@@ -354,10 +355,16 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     const folder = `j1-folder-${fx.runTag}`
     const file = `j1-file-${fx.runTag}.txt`
     const sentinel = `J1 home sentinel ${fx.runTag}`
+    // Enough entries that the export is still preparing when Stop is pressed.
+    const zipFolder = `j1-zip-${fx.runTag}`
+    const zipNames = Array.from(
+      { length: 24 },
+      (_, index) => `j1-z${String(index + 1).padStart(2, '0')}-${fx.runTag}.txt`
+    )
     let session: DesktopSession | null = null
     try {
       session = await launchDesktopAs(testInfo, owner)
-      const { page } = session
+      const { page, app } = session
       await test.step('My home is ready, bound and owned', async () => {
         const home = await fx.waitForHomeState(owner.id, 'ready')
         expect(home.drive).toBeTruthy()
@@ -381,6 +388,38 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await enterFolder(page, folder)
         await view.uploadFile(file, Buffer.from(sentinel))
         fx.childId(fx.childId(home.resourceId!, folder), file)
+      })
+      await test.step('J1-Z Stop cancels a folder ZIP across the isolated bridge; the next export completes', async () => {
+        const view = new DesktopResourceView(page)
+        await openHomeFolder(page, home)
+        await view.createFolder(zipFolder)
+        await enterFolder(page, zipFolder)
+        for (const [index, name] of zipNames.entries()) {
+          await view.uploadFile(name, Buffer.from(`J1 z${index + 1} ${fx.runTag}`))
+        }
+        // Precondition: every entry exists server-side before the export starts.
+        const zipFolderId = fx.childId(home.resourceId!, zipFolder)
+        for (const name of zipNames) fx.childId(zipFolderId, name)
+        await openHomeFolder(page, home)
+        const zipPath = testInfo.outputPath('j1.zip')
+        await stubSaveDialog(app, zipPath)
+        await view.downloadZip(zipFolder)
+        // Liveness: the export really started before Stop is pressed.
+        await expect(page.getByTestId('gfs-zip-progress')).toBeVisible()
+        await page.getByRole('button', { name: 'Stop preparing zip' }).click()
+        await expect(page.getByTestId('gfs-zip-progress')).toHaveCount(0)
+        expect(fs.existsSync(zipPath)).toBe(false)
+        await view.downloadZip(zipFolder)
+        await expect(page.getByText(/^Downloaded .*\(24 files\)$/)).toBeVisible({
+          timeout: 120_000,
+        })
+        // Liveness: the same folder exports in full, so the cancelled run was
+        // stopped by Stop, not by an export that could never succeed.
+        await expect
+          .poll(() => fs.existsSync(zipPath) && fs.statSync(zipPath).size > 0, {
+            timeout: 60_000,
+          })
+          .toBe(true)
       })
       const folderId = fx.childId(home.resourceId!, folder)
       const fileUri = `gfs://${home.drive}/${ridOf(fx.childId(folderId, file))}`

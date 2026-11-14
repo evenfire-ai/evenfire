@@ -93,6 +93,16 @@ export class DesktopResourceView {
     await humanRecordedPause([600, 1200])
   }
 
+  /** Start a folder ZIP export through the row's visible menu entry. */
+  async downloadZip(name: string): Promise<void> {
+    await this.page.getByRole('button', { name: `Options for ${name}` }).click()
+    await this.page
+      .getByRole('menu', { name: `Actions for ${name}` })
+      .getByRole('menuitem', { name: 'Download as zip' })
+      .click()
+    await humanRecordedPause([600, 1200])
+  }
+
   /** The open folder accepts writes: its header offers New folder only with write access. */
   async expectWritable(): Promise<void> {
     await this.currentFolderMenuTrigger().click()
