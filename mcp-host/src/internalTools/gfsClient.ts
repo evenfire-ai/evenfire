@@ -134,12 +134,6 @@ export interface GfscClientOptions {
    * the same second would otherwise all retry in the same instant.
    */
   random?: () => number
-  /**
-   * The Desktop chat run this task executes, sent on the content calls so gfsc
-   * can record the activity for the user the run is bound to (D9, D16). Absent
-   * for a channel or workflow task, whose activity is not recorded.
-   */
-  attributionRunId?: string
 }
 
 // gfsc's agent limiter answers with these scopes (serve.ts). Its other 429s,
@@ -169,18 +163,12 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return withAbort(wait, signal).finally(() => clearTimeout(timer))
 }
 
-const ATTRIBUTION_HEADER = 'x-gfs-attribution-run'
-const ATTRIBUTION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
 export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions): GfscWriteClient {
-  const { maxRetryWaitMs, random = Math.random, attributionRunId } = options
+  const { maxRetryWaitMs, random = Math.random } = options
   if (!Number.isFinite(maxRetryWaitMs) || maxRetryWaitMs < 0) {
     throw new Error(
       `gfsc client maxRetryWaitMs must be a non-negative number, got ${maxRetryWaitMs}`
     )
-  }
-  if (attributionRunId !== undefined && !ATTRIBUTION_UUID.test(attributionRunId)) {
-    throw new Error(`gfsc client attributionRunId must be a UUID, got ${attributionRunId}`)
   }
   const fetchFn = env.fetch ?? fetch
   const readerBase = envValue(env, 'MCP_HOST_GFSC_BASE_URL', DEFAULT_GFSC_BASE_URL).replace(
@@ -201,22 +189,6 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
     const value = (await readFileFn(filePath)).trim()
     if (!value) throw new Error(`${FILE_KEY} is empty`)
     return value
-  }
-
-  /** Adds the run attribute to a header set, when there is one. */
-  function attributionHeaders(base: Record<string, string> = {}): Record<string, string> {
-    return attributionRunId === undefined
-      ? base
-      : { ...base, [ATTRIBUTION_HEADER]: attributionRunId }
-  }
-
-  /** Adds the run attribute to a content call's init, when there is one. */
-  function withAttribution(init: RequestInit = {}): RequestInit {
-    if (attributionRunId === undefined) return init
-    return {
-      ...init,
-      headers: attributionHeaders((init.headers as Record<string, string> | undefined) ?? {}),
-    }
   }
 
   async function send(baseUrl: string, path: string, init: RequestInit = {}): Promise<Response> {
@@ -318,7 +290,7 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
           responseWithRetry(
             readerBase,
             path,
-            withAttribution(init),
+            init,
             { signal: init.signal as AbortSignal, deadlineMs },
             true
           ),
@@ -331,7 +303,7 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
           responseWithRetry(
             readerBase,
             path,
-            withAttribution(init),
+            init,
             { signal: init.signal as AbortSignal, deadlineMs },
             true
           ),
@@ -344,7 +316,7 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
           responseWithRetry(
             readerBase,
             path,
-            withAttribution(init),
+            init,
             { signal: init.signal as AbortSignal, deadlineMs },
             true
           ),
@@ -366,7 +338,7 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
         `/v1/resources/${encodeURIComponent(resourceId)}/content?drive=${encodeURIComponent(drive)}`,
         {
           method: 'PUT',
-          headers: attributionHeaders({ 'content-type': 'application/json' }),
+          headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ content, ifMatch }),
         },
         call
@@ -377,7 +349,7 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
         `/v1/resources/${encodeURIComponent(parentResourceId)}/children?drive=${encodeURIComponent(drive)}`,
         {
           method: 'POST',
-          headers: attributionHeaders({ 'content-type': 'application/json' }),
+          headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ name, kind: 'file', content }),
         },
         call
@@ -410,7 +382,7 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
         '/v1/copy',
         {
           method: 'POST',
-          headers: attributionHeaders({ 'content-type': 'application/json' }),
+          headers: { 'content-type': 'application/json' },
           body: JSON.stringify(args),
         },
         call
