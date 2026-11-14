@@ -255,3 +255,56 @@ describe('assertRequestTimeoutsBelowPassHardLimit', () => {
     }
   })
 })
+
+// #1493: the same plain-digit rule for three older numeric settings. Unset or
+// "" means the default; everything else Number() used to read now refuses.
+describe.each([
+  {
+    name: 'HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS',
+    read: (c: Record<string, unknown>) => c.externalEgressDnsResolveTimeoutMs,
+    defaultValue: 5_000,
+    valid: ['5000', 5_000] as const,
+    spellings: ['5000'],
+  },
+  {
+    name: 'CONTEXT_MAPPER_HEARTBEAT_POLL_MS',
+    read: (c: Record<string, unknown>) => c.heartbeatPollMs,
+    defaultValue: 10_000,
+    valid: ['5000', 5_000] as const,
+    spellings: ['5000'],
+  },
+  {
+    name: 'HCC_HOST_FULL_RECONCILE_CONCURRENCY',
+    read: (c: Record<string, unknown>) => c.hostFullReconcileConcurrency,
+    defaultValue: 2,
+    valid: ['4', 4] as const,
+    spellings: ['4'],
+  },
+])('#1493: plain digits only for $name', ({ name, read, defaultValue, valid }) => {
+  it.each([undefined, ''])('means the default for %s', async raw => {
+    const { config } = await loadConfigWith({ [name]: raw })
+    expect(read(config as unknown as Record<string, unknown>)).toBe(defaultValue)
+  })
+
+  it('accepts plain digits in range', async () => {
+    const { config } = await loadConfigWith({ [name]: valid[0] })
+    expect(read(config as unknown as Record<string, unknown>)).toBe(valid[1])
+  })
+
+  const value = valid[0]
+  it.each([
+    '   ',
+    ` ${value} `,
+    `+${value}`,
+    `0${value}`,
+    `${value}.0`,
+    `${value}e0`,
+    `0x${Number(value).toString(16)}`,
+    `${value}abc`,
+    '0',
+    '-1',
+    'abc',
+  ])("refuses '%s' and names the variable", async raw => {
+    await expect(loadConfigWith({ [name]: raw })).rejects.toThrow(name)
+  })
+})

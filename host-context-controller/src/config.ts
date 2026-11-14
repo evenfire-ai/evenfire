@@ -335,11 +335,10 @@ function requireCanonicalNonNegativeEnvInt(key: string, defaultValue: number): n
 }
 
 export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return 5_000
-  const parsed = Number(raw)
+  const parsed = plainPositiveIntegerOrDefault(raw, 5_000)
   if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 2_147_483_647) {
     throw new Error(
-      `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS must be a positive integer no greater than 2147483647, got '${raw}'`
+      `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS must be a positive integer no greater than 2147483647, in plain digits, got '${raw}'`
     )
   }
   return parsed
@@ -367,15 +366,15 @@ function getExternalEgressEnvInt(key: string, defaultValue: number): number {
 
 /**
  * CONTEXT_MAPPER_HEARTBEAT_POLL_MS — cadence of HCC's control-api heartbeat
- * poll. Fails config load loudly on a non-positive-integer value: a silent
- * default over garbage would hide a typo'd cadence in production.
+ * poll. Unset or "" means the default; anything else must be plain digits.
+ * Fails config load loudly on any other value: a silent default over garbage
+ * would hide a typo'd cadence in production.
  */
 export function parseHeartbeatPollMs(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return 10_000
-  const parsed = Number(raw)
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  const parsed = plainPositiveIntegerOrDefault(raw, 10_000)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(
-      `CONTEXT_MAPPER_HEARTBEAT_POLL_MS must be a positive integer (milliseconds), got '${raw}'`
+      `CONTEXT_MAPPER_HEARTBEAT_POLL_MS must be a positive integer (milliseconds) in plain digits, got '${raw}'`
     )
   }
   return parsed
@@ -451,16 +450,16 @@ export function assertRequestTimeoutsBelowPassHardLimit(
  * HCC_HOST_FULL_RECONCILE_CONCURRENCY — bounded cross-Host concurrency for a
  * full/lifecycle Host fleet pass. Urgent per-Host events are admitted OUTSIDE
  * this budget, so a low default optimizes for Kubernetes API stability rather
- * than convergence speed. Integer 1..8 (1 = diagnostic serial mode), default 2.
+ * than convergence speed. Integer 1..8 (1 = diagnostic serial mode), default 2;
+ * unset or "" means the default, anything else must be plain digits.
  * Fails config load loudly on garbage: a silent default over a typo'd value
  * would mask an operator's intended concurrency in production.
  */
 export function parseHostFullReconcileConcurrency(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return 2
-  const parsed = Number(raw)
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 8) {
+  const parsed = plainPositiveIntegerOrDefault(raw, 2)
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 8) {
     throw new Error(
-      `HCC_HOST_FULL_RECONCILE_CONCURRENCY must be an integer from 1 through 8, got '${raw}'`
+      `HCC_HOST_FULL_RECONCILE_CONCURRENCY must be an integer from 1 through 8 in plain digits, got '${raw}'`
     )
   }
   return parsed

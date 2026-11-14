@@ -514,8 +514,9 @@ back: the `CONTEXT_MAPPER_NETPOL_*` and
 `HCC_HOST_K8S_REQUEST_TIMEOUT_MS`, `HCC_K8S_REQUEST_TIMEOUT_MS`,
 `HCC_NETPOL_PASS_HARD_LIMIT_MS` and `CONTEXT_MAPPER_HEARTBEAT_POLL_MS`. They
 treat an empty string as unset. `HCC_HOST_K8S_REQUEST_TIMEOUT_MS`,
-`HCC_K8S_REQUEST_TIMEOUT_MS` and `HCC_NETPOL_PASS_HARD_LIMIT_MS` accept plain
-decimal digits only: unset or `""` means the default, and any other spelling
+`HCC_K8S_REQUEST_TIMEOUT_MS`, `HCC_NETPOL_PASS_HARD_LIMIT_MS`,
+`HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS`, `CONTEXT_MAPPER_HEARTBEAT_POLL_MS` and
+`HCC_HOST_FULL_RECONCILE_CONCURRENCY` accept plain decimal digits only: unset or `""` means the default, and any other spelling
 fails startup, including the ones JavaScript `Number()` would read as a number
 (`3e4`, `0x7530`, `+30000`, `030000`, `30000.0`, or a value with surrounding
 white space).
@@ -558,7 +559,7 @@ Hosts are always kept active.
 | `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_MEMORY`   | `128Mi`                             | stdio-bridge sidecar memory limit.                                                                                                                                                                                                         |
 | `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_CPU`      | `200m`                              | stdio-bridge sidecar CPU limit.                                                                                                                                                                                                            |
 | `HCC_EXTERNAL_EGRESS_RESYNC_SEC`             | `60`                                | Periodic external-egress DNS resync interval (seconds). `0` disables periodic refresh; watch events still reconcile. When enabled it must be at least the refresh floor and at most half the overlap; max `3600`. Startup fails otherwise. |
-| `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS`         | `5000`                              | Per-hostname DNS lookup deadline in milliseconds.                                                                                                                                                                                          |
+| `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS`         | `5000`                              | Per-hostname DNS lookup deadline in milliseconds. Plain digits; unset or `""` means the default, anything else fails startup.                                                                                                              |
 | `HCC_EXTERNAL_EGRESS_OVERLAP_SEC`            | `3600`                              | How long a resolved `/32` stays allowed after its DNS TTL, so a provider that rotates A records keeps working. 1–3600.                                                                                                                     |
 | `HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC`      | `5`                                 | Minimum resync interval; guards against a hot loop. 1–3600.                                                                                                                                                                                |
 | `HCC_EXTERNAL_EGRESS_MAX_ENTRIES`            | `128`                               | Accumulated IPs kept per hostname. On overflow the least recently seen IP is evicted. 1–1300.                                                                                                                                              |
@@ -583,21 +584,21 @@ Hosts are always kept active.
 | `CONTEXT_MAPPER_HOST_RESYNC_SEC`                    | `300`                           | Periodic Host `fullReconcile` (seconds); guards against dropped watch events and drives auth-degraded self-heal. `0` disables.                                                                                |
 | `HCC_MCP_HOST_RUNTIME_BOOTSTRAP_REFRESH_BEFORE_SEC` | `900`                           | How long before expiry HCC refreshes the mcp-host bootstrap credential Secret.                                                                                                                                |
 | `CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S`      | `86400` (24 h)                  | Rotate the bootstrap runtime-token Secret when the refresh token's real `exp` is closer than this. Capped at half the token's lifetime so short-lived tokens do not rotate on every reconcile.                |
-| `HCC_HOST_FULL_RECONCILE_CONCURRENCY`               | `2`                             | Hosts reconciled in parallel during a full or lifecycle fleet pass. Integer 1–8; `1` is serial (diagnostic). Per-Host events are not counted against it.                                                      |
+| `HCC_HOST_FULL_RECONCILE_CONCURRENCY`               | `2`                             | Hosts reconciled in parallel during a full or lifecycle fleet pass. Integer 1–8 in plain digits; `1` is serial (diagnostic). Per-Host events are not counted against it.                                      |
 | `HCC_HOST_K8S_REQUEST_TIMEOUT_MS`                   | `30000`                         | Deadline for each finite Kubernetes request on the Host convergence path. Watches are not affected. Positive integer below `HCC_NETPOL_PASS_HARD_LIMIT_MS`, in plain digits; unset or `""` means the default. |
 
 ### Stateless Hosts (Host CRD `spec.lifecycle.stateless`)
 
 Only used for Hosts with `spec.lifecycle.stateless: true`. See [Stateless lifecycle](#stateless-lifecycle). `deploy/base` sets the first four to their code defaults.
 
-| Variable                                      | Default    | Description                                                                                                                              |
-| --------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `CONTEXT_MAPPER_STATELESS_IDLE_MINUTES`       | `30`       | Idle time before a Host may drain.                                                                                                       |
-| `CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES` | `15`       | Platform floor. The effective idle window is `max(idle, floor)`.                                                                         |
-| `CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS`     | `60000`    | After a drain verdict, how long HCC waits for a `drained` report before suspending anyway (only if the pod acknowledged or went silent). |
-| `CONTEXT_MAPPER_HEARTBEAT_POLL_MS`            | `10000`    | How often HCC polls control-api for heartbeats. Positive integer; anything else fails startup.                                           |
-| `CONTEXT_MAPPER_STATELESS_MAX_UPTIME_HOURS`   | `72`       | A pod older than this drains regardless of activity.                                                                                     |
-| `CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY`  | `` (empty) | Pull policy for stateless pods. Empty inherits `CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY`.                                                  |
+| Variable                                      | Default    | Description                                                                                                                                     |
+| --------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_STATELESS_IDLE_MINUTES`       | `30`       | Idle time before a Host may drain.                                                                                                              |
+| `CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES` | `15`       | Platform floor. The effective idle window is `max(idle, floor)`.                                                                                |
+| `CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS`     | `60000`    | After a drain verdict, how long HCC waits for a `drained` report before suspending anyway (only if the pod acknowledged or went silent).        |
+| `CONTEXT_MAPPER_HEARTBEAT_POLL_MS`            | `10000`    | How often HCC polls control-api for heartbeats. Positive integer in plain digits; unset or `""` means the default, anything else fails startup. |
+| `CONTEXT_MAPPER_STATELESS_MAX_UPTIME_HOURS`   | `72`       | A pod older than this drains regardless of activity.                                                                                            |
+| `CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY`  | `` (empty) | Pull policy for stateless pods. Empty inherits `CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY`.                                                         |
 
 ### LlmHook
 
