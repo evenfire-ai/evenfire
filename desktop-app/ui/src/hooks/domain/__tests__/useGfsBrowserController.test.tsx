@@ -327,6 +327,15 @@ function DriveMutationProbe() {
       <button type="button" onClick={() => swallow(ctrl.moveResource('f1', 'dest-1'))}>
         move row with default drive
       </button>
+      <button type="button" onClick={() => swallow(ctrl.createFile('f1', 'a.txt', 'YQ=='))}>
+        create file
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.replaceFile('f1', 'YQ==', 1))}>
+        replace file
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.replaceFileFromPath('f1', '/tmp/a', 1))}>
+        replace file from path
+      </button>
     </>
   )
 }
@@ -632,6 +641,44 @@ describe('useGfsBrowserController', () => {
     )
     await waitFor(() =>
       expect(moveResource).toHaveBeenCalledWith('f1', 'dest-1', 'main', undefined, undefined, 1)
+    )
+  })
+
+  it('omits the drive on create and replace while no home drive is known', async () => {
+    // With no open folder and no home drive, the controller's drive is ''.
+    // A blank drive is refused by the IPC, so these calls must omit it and let
+    // the main process apply the default drive.
+    const createFile = vi.fn(async () => ({ resourceId: 'f2', version: 1 }))
+    const replaceFile = vi.fn(async () => ({ resourceId: 'f1', version: 2 }))
+    const replaceFileFromPath = vi.fn(async () => ({ resourceId: 'f1', resultVersion: 2 }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
+        gfs: {
+          getHome: vi.fn(async () =>
+            homeView({ state: 'pending', drive: null, path: null, resourceId: null })
+          ),
+          listAccessible: vi.fn(async () => listAccessiblePage([])),
+          createFile,
+          replaceFile,
+          replaceFileFromPath,
+        },
+      },
+    })
+    render(<DriveMutationProbe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('home-state').textContent).toBe('pending'))
+    expect(screen.getByTestId('drive').textContent).toBe('')
+
+    await act(async () => screen.getByRole('button', { name: 'create file' }).click())
+    await act(async () => screen.getByRole('button', { name: 'replace file' }).click())
+    await act(async () => screen.getByRole('button', { name: 'replace file from path' }).click())
+
+    await waitFor(() => expect(createFile).toHaveBeenCalledWith('f1', 'a.txt', 'YQ==', undefined))
+    await waitFor(() => expect(replaceFile).toHaveBeenCalledWith('f1', 'YQ==', undefined, 1))
+    await waitFor(() =>
+      expect(replaceFileFromPath).toHaveBeenCalledWith('f1', '/tmp/a', undefined, 1)
     )
   })
 

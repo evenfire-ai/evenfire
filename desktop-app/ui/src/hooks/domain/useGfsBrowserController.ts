@@ -942,7 +942,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   })
   const createFileMutation = useMutation({
     mutationFn: (input: { parentResourceId: string; name: string; encodedData: string }) =>
-      window.clerum.gfs.createFile(input.parentResourceId, input.name, input.encodedData, DRIVE),
+      window.clerum.gfs.createFile(
+        input.parentResourceId,
+        input.name,
+        input.encodedData,
+        DRIVE || undefined
+      ),
     onSuccess: refreshGfs,
     onError: failClosedOnMutationError,
   })
@@ -959,7 +964,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   })
   const replaceFileMutation = useMutation({
     mutationFn: (input: { resourceId: string; encodedData: string; ifMatch?: number }) =>
-      window.clerum.gfs.replaceFile(input.resourceId, input.encodedData, DRIVE, input.ifMatch),
+      window.clerum.gfs.replaceFile(
+        input.resourceId,
+        input.encodedData,
+        DRIVE || undefined,
+        input.ifMatch
+      ),
     onSuccess: async resource => {
       setCrumbs(prev =>
         prev.map(crumb =>
@@ -974,7 +984,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   })
   const replaceFileFromPathMutation = useMutation({
     mutationFn: (input: { resourceId: string; filePath: string; ifMatch?: number }) =>
-      window.clerum.gfs.replaceFileFromPath(input.resourceId, input.filePath, DRIVE, input.ifMatch),
+      window.clerum.gfs.replaceFileFromPath(
+        input.resourceId,
+        input.filePath,
+        DRIVE || undefined,
+        input.ifMatch
+      ),
     onSuccess: async (receipt, input) => {
       if (receipt.resultVersion !== undefined) {
         setCrumbs(prev =>
