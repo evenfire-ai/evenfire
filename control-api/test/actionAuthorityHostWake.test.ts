@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { createMessageRetryHostWakeRequest } from '@clerum/action-context-contracts'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
+import { hostWakeV2Answers } from './fixtures/hostWakeV2Answers.js'
 
 const checkpoint = vi.hoisted(() => ({
   parseActionAuthorityCheckpointRequest: vi.fn(),
@@ -312,6 +313,31 @@ describe('v2 host wake adapter', () => {
     expect(checkpoint.checkpointActionAuthority.mock.invocationCallOrder[0]).toBeLessThan(
       wake.executeHostWake.mock.invocationCallOrder[0]
     )
+  })
+
+  it.each([
+    { kind: 'unknown' as const, answer: hostWakeV2Answers.unknown },
+    { kind: 'not-stateless' as const, answer: hostWakeV2Answers.notStateless },
+  ])('answers the wake result $kind with its status and body', async ({ kind, answer }) => {
+    checkpoint.parseActionAuthorityCheckpointRequest.mockReturnValue(parsed('host.wake'))
+    checkpoint.checkpointActionAuthority.mockResolvedValue({
+      version: 2,
+      status: 'allowed',
+      destination: {
+        kind: 'host',
+        ref: 'mcp-host/chatllm',
+        url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+      },
+    })
+    wake.executeHostWake.mockResolvedValue({ kind })
+
+    const response = await request(app())
+      .post('/internal/action-authority/hosts/chatllm/wake')
+      .send({ binding: {}, wakeReason: 'explicit' })
+
+    expect(wake.executeHostWake).toHaveBeenCalledOnce()
+    expect(response.status).toBe(answer.status)
+    expect(response.body).toEqual(answer.body)
   })
 
   it('fails closed on stale authority without touching the wake mutation', async () => {

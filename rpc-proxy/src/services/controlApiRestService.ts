@@ -293,6 +293,9 @@ export async function fetchHostConnectionFromControlApi(
  *   409 {status:'not-stateless'}             lifecycle kill-switch off
  *   429 {error, retryAfterSeconds}           per-host wake rate limit
  *   401/403                                  rpc access token rejected
+ * V2: 404/409 carry either an authority answer
+ * (`{status: 'not_found'|'access_path_stale', code}`) or the wake answer
+ * (`{status: 'unknown'|'not-stateless'}`); the body decides.
  */
 export type HostWakeApiResponse =
   | { kind: 'active'; wakeGeneration: number | null }
@@ -378,6 +381,12 @@ export async function requestHostWakeFromControlApi(
       throw new Error('Control API v2 host wake returned an invalid authority response')
     }
     const value = parsed as { status?: unknown; code?: unknown }
+    // The wake answers after the authority check passed share these statuses
+    // with authority refusals; each is accepted only on its own status.
+    if (response.status === 404 && value.status === 'unknown') return { kind: 'unknown' }
+    if (response.status === 409 && value.status === 'not-stateless') {
+      return { kind: 'not-stateless' }
+    }
     if (
       ![
         'invalid_binding',
