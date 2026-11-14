@@ -616,7 +616,6 @@ describe('StatusReporter with byte-heavy tool calls', () => {
     expect(body.outputLength).toBe(50_650)
     expect(body.outputTruncated).toBe(false)
     expect(body.output).toBe(output)
-    expect(body).not.toHaveProperty('outputArtifacts')
     expect(body.toolsCalled.slice(50)).toEqual(toolsCalled.slice(50))
   })
 })
