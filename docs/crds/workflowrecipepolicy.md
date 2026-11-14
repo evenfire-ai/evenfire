@@ -101,9 +101,11 @@ These fields are in the schema, but no component reads them in this release.
 
 ## Example
 
-The only policy the repository ships is the minikube dev policy, applied by
-`make minikube-deploy-instances`. Production overlays do not ship it, so shared
-Context access for agentic recipes stays off until an operator opts in:
+The only policy the repository ships is the minikube dev policy. Apply it on
+an initialized branch-owned profile with
+`MINIKUBE_PROFILE=<profile> make minikube-deploy-instances`; the target acquires
+or validates the profile's mutation lock. Production overlays do not ship it,
+so shared Context access for agentic recipes stays off until an operator opts in:
 
 ```yaml
 apiVersion: clerum.io/v1alpha1

@@ -384,7 +384,9 @@ jobs:
       - name: Test Context persistence command cleanup on Playwright timeout
         if: matrix.service == 'external-rest-api'
         timeout-minutes: 3
-        run: node scripts/tests/test-issue-628-command-drain.mjs
+        run: |
+          node --test scripts/tests/test-issue-628-diagnostics.test.mjs
+          node scripts/tests/test-issue-628-command-drain.mjs
 
       - name: Collect Context connector persistence E2E without a cluster
         if: matrix.service == 'external-rest-api'

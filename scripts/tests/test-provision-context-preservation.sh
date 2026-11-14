@@ -19,7 +19,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$*"; }
 
 # JSON is valid Kubernetes manifest input. The kubectl stub owns decoding and
-# API state; the provisioner still has to handle both real dry-run JSON shapes.
+# API state; the extra List and object shapes exercise compatibility handling.
 cat >"$TMP/overlay/instances/01-context.json" <<'JSON'
 {"apiVersion":"clerum.io/v1alpha1","kind":"Context","metadata":{"name":"context1","namespace":"mcp-server","labels":{"managed-by":"bootstrap"}},"spec":{"contextId":"context1","description":"declarative description","mcpServers":[]}}
 JSON
@@ -85,7 +85,7 @@ manifests() {
     cat "$file"/*.json
   else
     cat "$file"
-  fi | "$TEST_JQ" -cs '[.[] | if .kind == "List" then .items[] else . end]'
+  fi | sed '/^---$/d' | "$TEST_JQ" -cs '[.[] | if .kind == "List" then .items[] else . end]'
 }
 
 kind_for() {
@@ -1054,3 +1054,155 @@ if ! run_make_instances; then
 fi
 assert_state
 pass 'Minikube instances target preserves user additions and removals on redeploy'
+
+# Execute only the real deploy-all instances recipe. The surrounding target
+# owns deployment and credentials, which this hermetic fixture does not run.
+DEPLOY_ALL_INSTANCES_MAKEFILE="$TMP/deploy-all-instances.mk"
+if ! {
+  printf 'SHELL := %s\n\n.PHONY: minikube-deploy-all-body\nminikube-deploy-all-body:\n' "$TEST_BASH"
+  awk '
+    /^minikube-deploy-all-body:/ { in_target = 1; next }
+    in_target && /^\t@if \[ "\$\(MINIKUBE_REAPPLY_INSTANCES\)" = "false" \]; then/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\tfi$/ { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "${CONTEXT_TEST_MAKEFILE:-$ROOT/Makefile}"
+} >"$DEPLOY_ALL_INSTANCES_MAKEFILE"; then
+  fail 'could not find the deploy-all instances recipe'
+fi
+
+init_deploy_all_case() {
+  init_case "$1"
+  "$JQ" --slurpfile other "$CASE_DIR/overlay/instances/02-context.json" '
+    . + [($other[0] | .spec.description = "obsolete" | .spec.mcpServers = ["ui-other-tools"])]' \
+    "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+  mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+  "$JQ" -S '.[] | select(.kind == "GlobalFileSystem")' \
+    "$CASE_DIR/state.json" >"$CASE_DIR/expected-gfs.json"
+}
+
+run_make_deploy_all_instances() {
+  local gfs_mutation="$1" makefile="$2" repo="$CASE_DIR/repo" manifest
+  local instances="$repo/deploy/overlays/minikube/instances"
+  mkdir -p "$repo/deploy/scripts/lib" "$repo/scripts/minikube" "$instances"
+  cp "$makefile" "$repo/Makefile"
+  cp "$ROOT/deploy/scripts/lib/bootstrap-instances.sh" "$repo/deploy/scripts/lib/"
+  cp "$ROOT/scripts/minikube/filter-gfs-resources.py" "$repo/scripts/minikube/"
+  if [ "$gfs_mutation" = true ]; then
+    cp "$CASE_DIR/overlay/instances/"*.json "$instances/"
+  else
+    # JSON is valid YAML and remains parseable by the existing API fixture.
+    # Use actual YAML for GFS so the real structural filter must remove it.
+    for manifest in "$CASE_DIR/overlay/instances/"*.json; do
+      [ "$(basename "$manifest")" != 05-gfs.json ] || continue
+      cp "$manifest" "$instances/$(basename "$manifest" .json).yaml"
+    done
+    cat >"$instances/05-gfs.yaml" <<'YAML'
+apiVersion: clerum.io/v1alpha1
+kind: GlobalFileSystem
+metadata:
+  name: fixture-gfs
+  namespace: gfs
+spec:
+  storage:
+    size: 1Gi
+YAML
+  fi
+  TEST_STATE="$CASE_DIR/state.json" TEST_CALLS="$CASE_DIR/calls.log" \
+    TEST_MUTATIONS="$CASE_DIR/mutations.log" TEST_JQ="$JQ" \
+    TEST_RENDER=stream TEST_FAILURE=none TEST_RACE=none TEST_GET_RESPONSE=list \
+    PATH="$TMP/bin:$PATH" /usr/bin/make --no-print-directory -C "$repo" \
+    MINIKUBE_PROFILE="$TEST_CONTEXT" MINIKUBE_REAPPLY_INSTANCES=true \
+    MINIKUBE_GFS_MUTATION="$gfs_mutation" minikube-deploy-all-body \
+    >"$CASE_DIR/output.log" 2>&1
+}
+
+assert_deploy_all_context1() {
+  "$JQ" -e --slurpfile expected "$CASE_DIR/expected-context.json" '
+    map(select(.kind == "Context" and .metadata.namespace == "mcp-server" and .metadata.name == "context1"))[0] |
+    .spec.mcpServers == $expected[0].spec.mcpServers' "$CASE_DIR/state.json" >/dev/null ||
+    fail 'full-deploy context1 connector selection changed'
+  "$JQ" -e --slurpfile expected "$CASE_DIR/expected-context.json" '
+    map(select(.kind == "Context" and .metadata.namespace == "mcp-server" and .metadata.name == "context1"))[0] |
+    .metadata.uid == $expected[0].metadata.uid and
+    .metadata.labels["ui-label"] == $expected[0].metadata.labels["ui-label"] and
+    .status == $expected[0].status and .spec.description == "declarative description"' \
+    "$CASE_DIR/state.json" >/dev/null || fail 'full-deploy changed unrelated context1 state or skipped its declared fields'
+}
+
+assert_deploy_all_other_instances() {
+  local gfs_mutation="$1" desired
+  for desired in "$TMP/overlay/instances/02-context.json" "$TMP/overlay/instances/03-host.json" "$TMP/overlay/instances/04-channel.json"; do
+    "$JQ" -e --slurpfile desired "$desired" '
+      map(select(.kind == $desired[0].kind and .metadata.namespace == $desired[0].metadata.namespace and .metadata.name == $desired[0].metadata.name))[0] |
+      del(.metadata.uid, .metadata.resourceVersion, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]) |
+      (if .metadata.annotations == {} then del(.metadata.annotations) else . end) == $desired[0]' \
+      "$CASE_DIR/state.json" >/dev/null || fail 'full-deploy did not apply another declared instance normally'
+  done
+  grep -Fq "$(printf 'apply\tContext\tanother-team\tcontext2')" "$CASE_DIR/mutations.log" ||
+    fail 'full-deploy did not apply the neighboring Context'
+  if [ "$gfs_mutation" = true ]; then
+    "$JQ" -e --slurpfile desired "$TMP/overlay/instances/05-gfs.json" '
+      any(.[]; .kind == "GlobalFileSystem" and .metadata.name == "fixture-gfs" and .spec == $desired[0].spec)' \
+      "$CASE_DIR/state.json" >/dev/null || fail 'GFS-enabled full-deploy did not apply GFS'
+    grep -Fq "$(printf 'apply\tGlobalFileSystem\tgfs\tfixture-gfs')" "$CASE_DIR/mutations.log" ||
+      fail 'GFS-enabled full-deploy did not reach the GFS apply'
+  else
+    "$JQ" -S '.[] | select(.kind == "GlobalFileSystem")' \
+      "$CASE_DIR/state.json" >"$CASE_DIR/actual-gfs.json"
+    cmp -s "$CASE_DIR/expected-gfs.json" "$CASE_DIR/actual-gfs.json" ||
+      fail 'non-GFS full-deploy changed GFS state'
+    if grep -Fq "$(printf 'apply\tGlobalFileSystem\tgfs\tfixture-gfs')" "$CASE_DIR/mutations.log"; then
+      fail 'non-GFS full-deploy reached a GFS apply'
+    fi
+  fi
+}
+
+for gfs_mutation in true false; do
+  init_deploy_all_case "make-deploy-all-instances-$gfs_mutation"
+  for connectors in '["ui-calendar","ui-drive"]' '["ui-calendar","ui-drive","ui-added-later"]' '["ui-drive","ui-added-later"]' '[]'; do
+    "$JQ" --argjson connectors "$connectors" '
+      map(if .kind == "Context" and .metadata.namespace == "mcp-server" and .metadata.name == "context1"
+        then .spec.mcpServers = $connectors else . end)' "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+    mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+    remember_existing_context
+    if ! run_make_deploy_all_instances "$gfs_mutation" "$DEPLOY_ALL_INSTANCES_MAKEFILE"; then
+      cat "$CASE_DIR/output.log" >&2
+      fail "full-deploy instances recipe failed with GFS mutation $gfs_mutation"
+    fi
+    assert_deploy_all_context1
+    assert_deploy_all_other_instances "$gfs_mutation"
+  done
+  pass "full-deploy GFS mutation $gfs_mutation preserves additions, removals and empty selections"
+
+  # Replace each helper independently. A mutant must finish applying resources
+  # and fail the connector assertion, rather than fail while setting up input.
+  mutant_makefile="$TMP/deploy-all-direct-$gfs_mutation.mk"
+  if ! awk -v mutation="$gfs_mutation" '
+    /apply_bootstrap_instances/ &&
+      ((mutation == "true" && /deploy\/overlays\/minikube\/instances\//) ||
+       (mutation == "false" && /\$\$filtered_manifest/)) {
+      sub(/apply_bootstrap_instances "\$\(MINIKUBE_PROFILE\)"/,
+          "kubectl --context=$(MINIKUBE_PROFILE) apply -f")
+      replaced++
+    }
+    { print }
+    END { if (replaced != 1) exit 1 }
+  ' "$DEPLOY_ALL_INSTANCES_MAKEFILE" >"$mutant_makefile"; then
+    fail "could not replace exactly one full-deploy helper for GFS mutation $gfs_mutation"
+  fi
+  init_deploy_all_case "make-deploy-all-direct-$gfs_mutation"
+  if ! run_make_deploy_all_instances "$gfs_mutation" "$mutant_makefile"; then
+    cat "$CASE_DIR/output.log" >&2
+    fail "direct-apply mutant failed before the connector assertion for GFS mutation $gfs_mutation"
+  fi
+  assert_deploy_all_other_instances "$gfs_mutation"
+  grep -Fq "$(printf 'apply\tContext\tmcp-server\tcontext1')" "$CASE_DIR/mutations.log" ||
+    fail 'direct-apply mutant did not apply context1'
+  if (assert_deploy_all_context1) >"$CASE_DIR/assertion.log" 2>&1; then
+    fail "full-deploy connector assertion accepted direct apply for GFS mutation $gfs_mutation"
+  fi
+  grep -Fxq 'FAIL: full-deploy context1 connector selection changed' "$CASE_DIR/assertion.log" ||
+    fail 'direct-apply mutant failed for a reason other than connector loss'
+  pass "full-deploy GFS mutation $gfs_mutation rejects its direct-apply mutant after connector loss"
+done

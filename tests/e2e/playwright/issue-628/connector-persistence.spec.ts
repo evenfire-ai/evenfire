@@ -5,6 +5,7 @@ import { realpathSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { loginControlUiVisible } from '../helpers/visible-login'
+import { commandFailureReason } from './command-diagnostics'
 import { CommandDrain } from './command-drain'
 
 const execFileAsync = promisify(execFile)
@@ -71,11 +72,26 @@ async function run(
       stdout?: string
       stderr?: string
     }
-    const code = result.code ?? result.signal ?? 'unknown'
+    const knownErrors = [
+      'ENOENT',
+      'EACCES',
+      'EPERM',
+      'ETIMEDOUT',
+      'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+    ]
+    const knownSignals = ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGQUIT']
+    const code =
+      typeof result.code === 'number'
+        ? result.code
+        : result.code && knownErrors.includes(result.code)
+          ? result.code
+          : result.signal && knownSignals.includes(result.signal)
+            ? result.signal
+            : 'unknown'
     const phases = (result.stdout ?? '')
       .split('\n')
       .filter(line => /^(NODE_IP_(BEFORE|AFTER)=[0-9a-fA-F.:]+|RESTART_PHASE=[a-z-]+)$/.test(line))
-    const reason = (result.stderr ?? '').match(/ISSUE628_RESTART_[A-Z_]+/)?.[0]
+    const reason = commandFailureReason(result.stderr ?? '')
     throw new Error(
       ['Profile command ' + operation + ' failed: ' + String(code), reason, ...phases]
         .filter(Boolean)
@@ -318,7 +334,9 @@ async function waitForBusinessResult(): Promise<void> {
       .poll(
         async () => {
           try {
-            return await invokeConnector()
+            const result = await invokeConnector()
+            lastFailure = ''
+            return result
           } catch (error) {
             lastFailure =
               error instanceof Error && error.message.startsWith('Profile command ')
@@ -332,6 +350,37 @@ async function waitForBusinessResult(): Promise<void> {
       .toBe('42')
   } catch {
     throw new Error('Connector probe did not return 42' + (lastFailure ? ': ' + lastFailure : ''))
+  }
+}
+
+async function expectEventually(
+  label: string,
+  expected: boolean,
+  observe: () => Promise<boolean>
+): Promise<void> {
+  let lastFailure = ''
+  try {
+    await expect
+      .poll(
+        async () => {
+          try {
+            const result = await observe()
+            lastFailure = ''
+            return result
+          } catch (error) {
+            lastFailure =
+              error instanceof Error && error.message.startsWith('Profile command ')
+                ? error.message
+                : 'profile observation failed'
+            return !expected
+          }
+        },
+        { timeout: 180_000, intervals: [2_000, 5_000] }
+      )
+      .toBe(expected)
+  } catch (error) {
+    if (lastFailure) throw new Error(label + ': ' + lastFailure)
+    throw error
   }
 }
 
@@ -495,24 +544,18 @@ test(persistenceTestName, async ({ page, browser }) => {
       expect([...current.servers].sort()).toEqual([...original.servers, connector].sort())
     }
     await assertContext()
-    await expect
-      .poll(
-        async () => {
-          try {
-            const current = await policies()
-            return (
-              current.length >= 3 &&
-              current.some(policy => policy.name === 'ctx-context1-' + connector)
-            )
-          } catch {
-            return false
-          }
-        },
-        { timeout: 180_000, intervals: [2_000, 5_000] }
+    const expectedPolicies = [
+      'mcp-server/ctx-context1-' + connector,
+      'mcp-host/ctx-context1-' + connector + '-egress',
+      'rpc-proxy/rpc-egress-context1-' + connector,
+    ]
+    await expectEventually('Connector policies did not converge', true, async () => {
+      const current = await policies()
+      return expectedPolicies.every(identity =>
+        current.some(policy => policy.namespace + '/' + policy.name === identity)
       )
-      .toBe(true)
+    })
     const baselinePolicies = await policies()
-    expect(baselinePolicies.length).toBeGreaterThanOrEqual(3)
     await waitForBusinessResult()
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -546,6 +589,19 @@ test(persistenceTestName, async ({ page, browser }) => {
       1_230_000,
       'deploy-all'
     )
+    // The full deploy restarts these consumers without waiting for rollout.
+    // Wait before a later forward can bind to a Pod that is being replaced.
+    for (const [namespace, deployment] of [
+      ['control-plane', 'control-api'],
+      ['profiles', 'external-rest-api'],
+      ['rpc-proxy', 'rpc-proxy'],
+    ]) {
+      await kube(
+        ['-n', namespace, 'rollout', 'status', 'deployment/' + deployment, '--timeout=300s'],
+        360_000,
+        '330s'
+      )
+    }
     await assertContext()
     expect(await policies()).toEqual(baselinePolicies)
     await waitForBusinessResult()
@@ -646,18 +702,11 @@ test(persistenceTestName, async ({ page, browser }) => {
       const afterRemovalDeploy = await snapshot()
       expect(afterRemovalDeploy.uid).toBe(original.uid)
       expect([...afterRemovalDeploy.servers].sort()).toEqual([...original.servers].sort())
-      await expect
-        .poll(
-          async () => {
-            try {
-              return (await policies()).some(policy => policy.name === 'ctx-context1-' + connector)
-            } catch {
-              return true
-            }
-          },
-          { timeout: 180_000, intervals: [2_000, 5_000] }
+      await expectEventually('Connector policy removal did not converge', false, async () =>
+        (await policies()).some(policy =>
+          expectedPolicies.includes(policy.namespace + '/' + policy.name)
         )
-        .toBe(false)
+      )
       await refreshProfileForwards()
 
       const afterRemovalBrowser = await browser.newContext({ baseURL: uiUrl })
@@ -706,38 +755,29 @@ test(persistenceTestName, async ({ page, browser }) => {
     } else if (created) {
       try {
         await deleteFixture(page)
-        await expect
-          .poll(
-            async () => {
-              try {
-                const server = await kube([
-                  '-n',
-                  'mcp-server',
-                  'get',
-                  'mcpservers.clerum.io',
-                  connector,
-                  '--ignore-not-found',
-                  '-o',
-                  'name',
-                ])
-                const resources = await kube([
-                  'get',
-                  'deployments,services,pods,replicasets,networkpolicies',
-                  '-A',
-                  '-l',
-                  'clerum.io/mcpserver=' + connector,
-                  '-o',
-                  'name',
-                ])
-                const current = await snapshot()
-                return !server.trim() && !resources.trim() && !current.servers.includes(connector)
-              } catch {
-                return false
-              }
-            },
-            { timeout: 180_000, intervals: [2_000, 5_000] }
-          )
-          .toBe(true)
+        await expectEventually('Connector cleanup did not converge', true, async () => {
+          const server = await kube([
+            '-n',
+            'mcp-server',
+            'get',
+            'mcpservers.clerum.io',
+            connector,
+            '--ignore-not-found',
+            '-o',
+            'name',
+          ])
+          const resources = await kube([
+            'get',
+            'deployments,services,pods,replicasets,networkpolicies',
+            '-A',
+            '-l',
+            'clerum.io/mcpserver=' + connector,
+            '-o',
+            'name',
+          ])
+          const current = await snapshot()
+          return !server.trim() && !resources.trim() && !current.servers.includes(connector)
+        })
         const final = await snapshot()
         expect(final.uid).toBe(original.uid)
         expect([...final.servers].sort()).toEqual([...original.servers].sort())

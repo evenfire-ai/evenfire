@@ -406,7 +406,7 @@ minikube-verify-gfs: ## Verify gfs permission-store wiring (Secret DSN populated
 # only applied ConfigMaps, not actual deployments, and were misleading.
 
 .PHONY: minikube-deploy-instances
-minikube-deploy-instances: ## Apply CRD test instances (context, host, channel)
+minikube-deploy-instances: ## Apply CRD test instances on an initialized branch-owned profile
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- \

@@ -68,6 +68,15 @@ make minikube-status   # Confirm all services after setup
 The script is idempotent — safe to run again if interrupted or if something fails.
 It needs `ADMIN_PASSWORD` in `.env` for the default seed profile.
 
+The connector associations of `mcp-server/context1` are managed through Control
+UI. Removing an entry from the bootstrap overlay does not remove that association;
+remove it in Control UI or through an explicit administrative update instead.
+
+If `deploy/scripts/provision-gfs-runtime.sh` fails while applying instances, it
+stops before finalizing GFS credentials, but earlier steps may already have
+changed resources. Correct the reported cause before retrying; an invalid
+last-applied annotation does not repair itself.
+
 ### Setup options
 
 `make minikube-setup` passes Make variables to `scripts/minikube/full-setup.sh`

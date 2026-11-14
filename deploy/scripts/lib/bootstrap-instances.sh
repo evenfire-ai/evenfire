@@ -14,8 +14,8 @@ read_bootstrap_context() (
   fi
   [ -n "$response" ] || return 0
 
-  # A manifest-based kubectl get returns a v1 List, even for one object.
-  # Accept the previously supported single-object form too, but never treat
+  # kubectl get -f - returns a v1 List, even for one object. Accept the
+  # previously supported single-object form too, but never treat
   # an invalid, ambiguous, or differently identified response as absence.
   if ! printf '%s\n%s\n' "$response" "$resource" | jq -s -e -c '
     if length != 2 then error("unexpected Context response count")
