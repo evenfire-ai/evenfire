@@ -5,6 +5,7 @@ import { realpathSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { loginControlUiVisible } from '../helpers/visible-login'
+import { CommandDrain } from './command-drain'
 
 const execFileAsync = promisify(execFile)
 const root = realpathSync(path.resolve(__dirname, '../../../..'))
@@ -12,6 +13,11 @@ const profile = process.env.MINIKUBE_PROFILE ?? ''
 const uiUrl = process.env.E2E_CONTROL_UI_URL ?? ''
 const connector = 'issue628-' + randomBytes(6).toString('hex')
 const profileRestart = process.env.ISSUE628_PROFILE_RESTART === 'true'
+const commands = new CommandDrain()
+
+function testIsStopping(): boolean {
+  return commands.isClosing() || ['timedOut', 'interrupted'].includes(test.info().status ?? '')
+}
 
 // The browser credential is not passed to the profile commands. The lease
 // fields are required by the existing mutation wrapper and are never logged.
@@ -46,13 +52,17 @@ async function run(
   timeout = 60_000,
   operation = path.basename(command)
 ): Promise<string> {
+  if (testIsStopping()) throw new Error('Profile commands are unavailable after test timeout')
   try {
-    const result = await execFileAsync(command, args, {
-      cwd: root,
-      env: clusterEnv,
-      timeout,
-      maxBuffer: 2 * 1024 * 1024,
-    })
+    const result = await commands.run(() =>
+      execFileAsync(command, args, {
+        cwd: root,
+        env: clusterEnv,
+        timeout,
+        maxBuffer: 2 * 1024 * 1024,
+      })
+    )
+    if (testIsStopping()) throw new Error('Profile command finished after test timeout')
     return result.stdout
   } catch (error) {
     const result = error as {
@@ -403,8 +413,13 @@ async function deleteFixture(page: Page): Promise<void> {
   await expect(row).toHaveCount(0)
 }
 
-test.beforeAll(async () => {
+test.beforeEach(async () => {
+  commands.open()
   await verifyTarget()
+})
+
+test.afterEach(async () => {
+  await commands.close()
 })
 
 test('unauthenticated access does not expose the agent connector inventory', async ({ page }) => {
@@ -681,12 +696,13 @@ test(persistenceTestName, async ({ page, browser }) => {
         description: 'Connector ' + connector + ' may need removal from the isolated profile',
       })
     }
-    if (created && profileMayBeUnavailable) {
+    if (created && (profileMayBeUnavailable || testIsStopping())) {
       test.info().annotations.push({
         type: 'fixture cleanup deferred',
-        description: 'The isolated profile may be unavailable; inspect connector ' + connector,
+        description:
+          'The profile may be unavailable or the test stopped; inspect connector ' + connector,
       })
-      if (!failure) failure = new Error('Profile availability is unknown after restart')
+      if (!failure) failure = new Error('Fixture cleanup was deferred')
     } else if (created) {
       try {
         await deleteFixture(page)

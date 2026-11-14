@@ -47,6 +47,7 @@ Ready before E2E results are interpreted.
 - **Docker Desktop** installed and running (**≥10 GB RAM / 6 CPUs**)
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl** (`brew install kubectl`)
+- **jq** (`brew install jq`)
 - **python3** (for JWT key sync)
 - **Node.js** 24.22.1 or later (Node 24 is required for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration overlay)

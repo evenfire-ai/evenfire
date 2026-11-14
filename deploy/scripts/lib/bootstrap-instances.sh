@@ -45,7 +45,7 @@ apply_bootstrap_instances() (
   local context="${1:?Kubernetes context is required}"
   local instances="${2:?instances manifest or directory is required}"
   local seed="${3:-}"
-  local resources seed_resources='[]' plan resource existing target_apply initial migration
+  local resources seed_resources='[]' plan resource existing initial migration
   local base_apply seed_apply base_count seed_count
 
   if ! command -v jq >/dev/null 2>&1; then
@@ -105,20 +105,14 @@ apply_bootstrap_instances() (
   # Keep the rest of the previous apply baseline so normal field updates and
   # removals continue to work.
   if [ -n "$resource" ]; then
-    if ! target_apply="$(jq -c '.spec = ((.spec // {}) | del(.mcpServers))' <<<"$resource")"; then
-      printf '[bootstrap-instances] ERROR: cannot prepare context1 declaration\n' >&2
-      return 1
-    fi
     if ! existing="$(read_bootstrap_context "$context" "$resource")"; then
       return 1
     fi
     if [ -z "$existing" ]; then
-      # Store the initial selection without claiming it in last-applied.
+      # A preexisting last-applied annotation is rewritten by kubectl create,
+      # claiming the initial connectors. Let the first apply establish it instead.
       # Exclusive create fails if another writer wins the existence race.
-      if ! initial="$(printf '%s\n%s\n' "$resource" "$target_apply" | jq -s -c '
-        (.[1] | del(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]) | tojson) as $baseline
-        | .[0] | .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = $baseline
-      ')"; then
+      if ! initial="$(jq -c 'del(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])' <<<"$resource")"; then
         printf '[bootstrap-instances] ERROR: cannot prepare initial context1\n' >&2
         return 1
       fi

@@ -140,6 +140,16 @@ if run_case wrong-lease-context env T2_CONTEXT=clerum-other-1234abcd; then fail 
 grep -q '^ISSUE628_RESTART_SCOPE_REQUIRED' "$TMP/wrong-lease-context.out" || fail 'wrong lease context lacked the scope reason'
 printf 'PASS: restart rejects a mismatched lease context\n'
 
+if run_case wrong-lease-profile env T2_PROFILE=clerum-other-1234abcd; then fail 'wrong lease profile accepted'; fi
+[[ ! -e "$TMP/wrong-lease-profile.calls" ]] || fail 'wrong lease profile reached profile commands'
+grep -q '^ISSUE628_RESTART_SCOPE_REQUIRED' "$TMP/wrong-lease-profile.out" || fail 'wrong lease profile lacked the scope reason'
+printf 'PASS: restart rejects a mismatched lease profile\n'
+
+if run_case lease-not-inherited env T2_SKIP_LOCK=false; then fail 'non-inherited lease accepted'; fi
+[[ ! -e "$TMP/lease-not-inherited.calls" ]] || fail 'non-inherited lease reached profile commands'
+grep -q '^ISSUE628_RESTART_SCOPE_REQUIRED' "$TMP/lease-not-inherited.out" || fail 'non-inherited lease lacked the scope reason'
+printf 'PASS: restart requires the inherited lease\n'
+
 if run_case wrong-gate env T2_GATE_ID=minikube-t2; then fail 'T2 gate accepted the separate restart mode'; fi
 [[ ! -e "$TMP/wrong-gate.calls" ]] || fail 'wrong gate reached profile commands'
 grep -q '^ISSUE628_RESTART_SCOPE_REQUIRED' "$TMP/wrong-gate.out" || fail 'wrong gate lacked the scope reason'

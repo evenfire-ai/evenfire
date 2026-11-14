@@ -14,6 +14,7 @@ named `chatllm` you can message immediately.
   (the cluster is started with `--memory=10240 --cpus=6` and Calico CNI)
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl**
+- **jq**
 - **python3** (used by the JWT key sync)
 - **Node.js 24.22.1 or later** (use the Node 24 version pinned in `.nvmrc` for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration

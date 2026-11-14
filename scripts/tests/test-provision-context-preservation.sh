@@ -351,8 +351,19 @@ if [ "$verb" = create ] || [ "$verb" = apply ]; then
         (.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] // "{}" | fromjson) as $old |
         apply3($old; $desired; .)')"
     fi
-    if [ "$verb" = apply ] || $save_config; then
+    # kubectl create rewrites an existing last-applied annotation even without
+    # --save-config. Its recorded object excludes that annotation itself.
+    if [ "$verb" = create ] && { $save_config || printf '%s\n' "$desired" | "$TEST_JQ" -e '(.metadata.annotations // {}) | has("kubectl.kubernetes.io/last-applied-configuration")' >/dev/null; }; then
+      config="$(printf '%s\n' "$desired" | "$TEST_JQ" -c 'del(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])')"
+      updated="$(printf '%s\n' "$updated" | "$TEST_JQ" -c --arg config "$config" '.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = $config')"
+    elif [ "$verb" = apply ]; then
       updated="$(printf '%s\n' "$updated" | "$TEST_JQ" -c --arg config "$desired" '.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = $config')"
+    fi
+    # The API validates the merged object, not the partial apply document.
+    if [ "$kind/$ns/$name" = Context/mcp-server/context1 ] &&
+       ! printf '%s\n' "$updated" | "$TEST_JQ" -e '.spec.mcpServers | type == "array"' >/dev/null; then
+      printf 'fixture: Context spec.mcpServers is required\n' >&2
+      exit 1
     fi
     updated="$(printf '%s\n' "$updated" | advance_version)"
     save_object "$updated"
@@ -892,6 +903,9 @@ pass 'context1 applies base then seed while preserving connectors'
 
 init_case shared-new-seed
 make_seed
+"$JQ" '.metadata.annotations["example.test/seed"] = "retained"' \
+  "$CASE_DIR/seed/context.json" >"$CASE_DIR/context.next"
+mv "$CASE_DIR/context.next" "$CASE_DIR/seed/context.json"
 "$JQ" 'map(select(.kind != "Context" or .metadata.name != "context1"))' \
   "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
 mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
@@ -901,6 +915,7 @@ if ! run_shared_bootstrap "$CASE_DIR/seed"; then
 fi
 "$JQ" -e 'any(.[]; .kind == "Context" and .metadata.name == "context1" and
   .spec.mcpServers == ["demo-one", "demo-two"] and
+  .metadata.annotations["example.test/seed"] == "retained" and
   ((.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] | fromjson | .spec | has("mcpServers")) | not))' "$CASE_DIR/state.json" >/dev/null ||
   fail 'new Context did not receive the seed connector selection'
 pass 'shared bootstrap selects seed connectors for a new Context'
