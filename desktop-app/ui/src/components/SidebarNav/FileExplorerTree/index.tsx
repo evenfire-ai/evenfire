@@ -4,6 +4,8 @@ import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
+  GFS_RECENT_FILES_LABEL,
+  GFS_RECENT_FILES_LOCATION,
   GFS_RESOURCE_DRAG_TYPE,
   GFS_SHARED_WITH_ME_LABEL,
   GFS_SHARED_WITH_ME_LOCATION,
@@ -502,6 +504,7 @@ function FileExplorerNode({
  * move dispatch as the Files page.
  */
 export function FileExplorerTree({
+  activeLocation,
   onOpenFolder,
   onOpenPreview,
   pushToast,
@@ -1204,6 +1207,9 @@ export function FileExplorerTree({
         try {
           // The raw name is the real on-disk filename; the toast shows the cleaned one.
           await saveGfsFileToDisk(node.gfsUri, node.name)
+          // The overview's recent card can be on screen while this tree saves:
+          // refresh it instead of waiting for the Files tab to remount.
+          ctrl.refreshRecentFiles()
           pushToast(`Downloaded ${displayName(node.name)}`, 'success')
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
@@ -1214,13 +1220,31 @@ export function FileExplorerTree({
         }
       })()
     },
-    [authorityFailure, onOpenPreview, pushToast]
+    [authorityFailure, ctrl, onOpenPreview, pushToast]
   )
+
+  const recentSelected = activeLocation === GFS_RECENT_FILES_LOCATION
+  const sharedSelected = activeLocation === GFS_SHARED_WITH_ME_LOCATION
+  const selectedResourceId = recentSelected || sharedSelected ? null : selectedId
 
   return (
     <div className="da-file-explorer">
       {ctrl.accessState === 'active' ? (
         <div role="tree" aria-label="File destinations">
+          <Button
+            align="start"
+            block
+            className={`da-file-explorer__label${recentSelected ? ' is-selected' : ''}`}
+            color="neutral"
+            role="treeitem"
+            aria-selected={recentSelected}
+            size="sm"
+            type="button"
+            variant="text"
+            onClick={() => onOpenFolder(GFS_RECENT_FILES_LOCATION)}
+          >
+            {GFS_RECENT_FILES_LABEL}
+          </Button>
           {homeRoot ? (
             <FileExplorerNode
               accessActive={ctrl.accessState === 'active'}
@@ -1247,7 +1271,7 @@ export function FileExplorerTree({
               onToggle={handleToggle}
               scope={ctrl.sessionScope ?? 'anonymous'}
               sessionGeneration={ctrl.sessionGeneration}
-              selectedId={selectedId}
+              selectedId={selectedResourceId}
             />
           ) : ctrl.home?.state !== 'retired' ? (
             <Button
@@ -1275,9 +1299,10 @@ export function FileExplorerTree({
           <Button
             align="start"
             block
-            className="da-file-explorer__label"
+            className={`da-file-explorer__label${sharedSelected ? ' is-selected' : ''}`}
             color="neutral"
             role="treeitem"
+            aria-selected={sharedSelected}
             size="sm"
             type="button"
             variant="text"
@@ -1358,7 +1383,7 @@ export function FileExplorerTree({
               onToggle={handleToggle}
               scope={ctrl.sessionScope ?? 'anonymous'}
               sessionGeneration={ctrl.sessionGeneration}
-              selectedId={selectedId}
+              selectedId={selectedResourceId}
             />
           ))}
           {ctrl.hasMoreAccessible ? (

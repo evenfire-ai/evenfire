@@ -2300,7 +2300,11 @@ export class TaskExecutor {
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
       gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined,
-      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath)
+      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath),
+      // A Desktop chat run is bound to its user, so GFS content calls carry the
+      // run id and gfsc records the activity for that user. Channel runs are
+      // never recorded (D19), so they send nothing.
+      this.task.traceContext?.origin === 'direct_chat' ? this.task.traceContext.runId : undefined
     )
     await registerDesktopTools(nativeRegistry)
     // Eagerly open this caller's remote OAuth partitions before the catalog is

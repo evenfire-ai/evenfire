@@ -337,6 +337,20 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
     }
   })
 
+  // The caller's own EvenDrive activity, newest first. The whole list (at most
+  // 100 rows) comes back in one response; the card pages client-side.
+  router.get('/me/gfs/recent', async (req: AuthedRequest, res, next) => {
+    try {
+      const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/recent', {
+        userSessionToken: extractAuthToken(req),
+        query: { drive: typeof req.query.drive === 'string' ? req.query.drive : undefined },
+      })
+      res.status(200).json(data)
+    } catch (error) {
+      forwardControlApiError(error, res, next)
+    }
+  })
+
   router.get('/me/gfs/resolve', async (req: AuthedRequest, res, next) => {
     try {
       const data = await gfsControlApiRequest(req, 'GET', '/external/gfs/resolve', {
@@ -482,7 +496,13 @@ export function createGfsRouter(options: GfsRouterOptions = {}): Router {
         `/external/gfs/proxy/${encodeURIComponent(req.params.rid)}`,
         withGfsRequestId(req, {
           userSessionToken: extractAuthToken(req),
-          query: { drive: typeof req.query.drive === 'string' ? req.query.drive : undefined },
+          query: {
+            drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
+            // The only record path a Desktop client controls: control-api
+            // records an open on `intent=open` and refuses any other value. An
+            // absent intent stays absent so an ordinary read forwards no key.
+            ...(typeof req.query.intent === 'string' ? { intent: req.query.intent } : {}),
+          },
         })
       )
       res.status(upstream.status)

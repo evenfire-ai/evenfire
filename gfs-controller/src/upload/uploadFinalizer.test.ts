@@ -170,3 +170,121 @@ describe('production GFS upload finalizer seam', () => {
     }
   })
 })
+
+describe('upload finalization records the Desktop user activity', () => {
+  const USER_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+
+  async function userHarness() {
+    const root = await mkdtemp(join(tmpdir(), 'gfs-upload-finalizer-user-'))
+    await mkdir(join(root, '.uploads', UPLOAD_ID, 'parts'), { recursive: true })
+    await writeFile(join(root, '.uploads', UPLOAD_ID, 'parts', '0.part'), BODY)
+    const calls: Array<{ sql: string; values: unknown[] }> = []
+    const client = {
+      query: vi.fn(async (sql: string, values: unknown[] = []) => {
+        calls.push({ sql, values })
+        return { rows: [{}] }
+      }),
+    }
+    const resource = {
+      resourceId: UPLOAD_ID,
+      rid: UPLOAD_ID.replaceAll('-', ''),
+      drive: 'main',
+      parentResourceId: PARENT_ID,
+      name: 'payload.bin',
+      kind: 'file' as const,
+      bytes: BODY.length,
+      version: 0,
+      blobKey: 'generation/payload',
+      contentSha256: SHA256,
+      deletedAt: null,
+      path: '/payload.bin',
+      updatedAt: new Date().toISOString(),
+    }
+    const writeService = {
+      create: vi.fn(async (input: { onPublished: (c: unknown, r: unknown) => Promise<void> }) => {
+        for await (const _chunk of (input as unknown as { content: { stream: AsyncIterable<Buffer> } }).content.stream) {
+          /* consume */
+        }
+        await input.onPublished(client, resource)
+        return resource
+      }),
+      replace: vi.fn(async (input: { onPublished: (c: unknown, r: unknown) => Promise<void> }) => {
+        for await (const _chunk of (input as unknown as { content: { stream: AsyncIterable<Buffer> } }).content.stream) {
+          /* consume */
+        }
+        await input.onPublished(client, resource)
+        return resource
+      }),
+    }
+    // resolveAuthzContext for a user: an active user row and no teams.
+    const pool = {
+      query: vi.fn(async (sql: string) =>
+        sql.includes('FROM users')
+          ? { rows: [{ id: USER_ID, lifecycle_state: 'active', lifecycle_version: 1 }] }
+          : { rows: [] }
+      ),
+    }
+    const finalizer = createGfsUploadFinalizer({
+      pool: pool as never,
+      storageMountPath: root,
+      permissions: {
+        permissionEpoch: () => ({ generation: 1, bypassed: false }),
+        authorize: vi.fn().mockResolvedValue({ allowed: true }),
+      } as unknown as PermissionClient,
+      writeService: writeService as never,
+      audit: {} as DbAuditSink,
+    })
+    return { root, finalizer, client, calls, writeService }
+  }
+
+  function userSession() {
+    return {
+      ...session(),
+      ownerSubject: USER_ID,
+      primarySubject: USER_ID,
+    }
+  }
+
+  it('records the published file for the Desktop user, after the session completion UPDATE', async () => {
+    const harness = await userHarness()
+    try {
+      await harness.finalizer(userSession(), [part(harness.root)], undefined, undefined, {
+        drive: 'main',
+        ownerSubject: USER_ID,
+        primarySubject: USER_ID,
+        authGeneration: 1,
+      })
+
+      const activity = harness.calls.filter(call =>
+        call.sql.includes('gfs_record_user_file_activity')
+      )
+      expect(activity).toHaveLength(1)
+      expect(activity[0]!.values).toEqual([USER_ID, [UPLOAD_ID]])
+      // Ordering: the session completion runs first, then the activity row.
+      const completed = harness.calls.findIndex(call =>
+        call.sql.includes("SET state = 'completed'")
+      )
+      const recorded = harness.calls.findIndex(call =>
+        call.sql.includes('gfs_record_user_file_activity')
+      )
+      expect(completed).toBeGreaterThanOrEqual(0)
+      expect(recorded).toBeGreaterThan(completed)
+    } finally {
+      await rm(harness.root, { recursive: true, force: true })
+    }
+  })
+
+  it('records nothing for a Host upload session', async () => {
+    const harness = await userHarness()
+    try {
+      await harness.finalizer(session(), [part(harness.root)])
+      expect(
+        harness.calls.filter(call => call.sql.includes('gfs_record_user_file_activity'))
+      ).toEqual([])
+      // Witness: the completion UPDATE ran, so the hook was reached.
+      expect(harness.calls.some(call => call.sql.includes("SET state = 'completed'"))).toBe(true)
+    } finally {
+      await rm(harness.root, { recursive: true, force: true })
+    }
+  })
+})

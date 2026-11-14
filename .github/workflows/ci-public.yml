@@ -564,6 +564,7 @@ jobs:
             pluginWorkloadSdkSteplessQuota.realPostgres.integration.test.ts \
             entityChangeFeed.realPostgres.integration.test.ts \
             gfs.governedRoots.realPostgres.integration.test.ts \
+            gfs.recentFiles.realPostgres.integration.test.ts \
             gfs.userHomeAcl.realPostgres.integration.test.ts \
             gfs.userHomeBackfill.realPostgres.integration.test.ts \
             gfs.userHomeProvisioning.realPostgres.integration.test.ts \

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { accessibleResource, listAccessiblePage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FilesPage } from '../FilesPage'
@@ -64,7 +65,9 @@ describe('FilesPage shared-root permission announcements', () => {
     })
 
     const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
-    render(<FilesPage />, { wrapper: providers(client) })
+    render(<FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />, {
+      wrapper: providers(client),
+    })
     await screen.findByRole('button', { name: 'Open Shared 0' })
     await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
     expect(checkingAnnouncements()).toHaveLength(0)

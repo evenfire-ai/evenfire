@@ -8,6 +8,7 @@ import {
   onlineManager,
 } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -126,7 +127,7 @@ async function createPage(
   const view = render(
     <AuthContext.Provider value={authValue}>
       <QueryClientProvider client={queryClient}>
-        <FilesPage pushToast={pushToast} />
+        <FilesPage pushToast={pushToast} pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
       </QueryClientProvider>
     </AuthContext.Provider>
   )

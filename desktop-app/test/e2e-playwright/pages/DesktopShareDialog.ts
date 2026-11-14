@@ -12,6 +12,12 @@ export class DesktopShareDialog {
       .filter({ has: this.page.getByText(subjectLabel, { exact: true }) })
   }
 
+  async close(): Promise<void> {
+    const dialog = this.page.getByRole('dialog', { name: /^Share (folder|file) / })
+    await dialog.getByRole('button', { name: 'Close share dialog', exact: true }).click()
+    await expect(dialog).toBeHidden()
+  }
+
   async grant(
     subjectLabel: string,
     role: 'Read' | 'Editor',

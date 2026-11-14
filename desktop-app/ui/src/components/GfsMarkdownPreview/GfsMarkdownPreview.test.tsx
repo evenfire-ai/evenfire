@@ -33,6 +33,7 @@ describe('GfsMarkdownPreview public barrel', () => {
 
     render(
       <GfsMarkdownPreviewBody
+        recordOpen={false}
         byteLength={new TextEncoder().encode(markdown).byteLength}
         fileName="inventory.md"
         gfsUri="gfs://main/inventory"
@@ -48,6 +49,6 @@ describe('GfsMarkdownPreview public barrel', () => {
     )
     expect(within(table).getByRole('cell', { name: 'GFS files' })).toBeTruthy()
     expect(within(article).queryByRole('link', { name: 'Unsafe link' })).toBeNull()
-    expect(downloadPreview).toHaveBeenCalledWith('gfs://main/inventory', expect.any(Number))
+    expect(downloadPreview).toHaveBeenCalledWith('gfs://main/inventory', expect.any(Number), false)
   })
 })

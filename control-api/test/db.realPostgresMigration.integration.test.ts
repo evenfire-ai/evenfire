@@ -1694,6 +1694,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const directBinding = {
       runId: directRunId,
       hostRef: 'sandbox-recipes/runtime-boundary-test',
+      hostNamespace: null,
       sessionId: 'session-real-pg',
       origin: 'direct_chat' as const,
       identityIssuer: 'https://issuer.example.test',
@@ -4149,6 +4150,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     await bindingService.bind({
       runId,
       hostRef,
+      hostNamespace: null,
       sessionId,
       origin: 'direct_chat',
       identityIssuer: 'https://issuer.example.test',
@@ -4317,6 +4319,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     await bindingService.bind({
       runId: conflictingRunId,
       hostRef,
+      hostNamespace: null,
       sessionId: 'bound-session',
       origin: 'direct_chat',
       identityIssuer: 'https://issuer.example.test',

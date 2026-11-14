@@ -93,7 +93,22 @@ export class DesktopResourceView {
     await humanRecordedPause([600, 1200])
   }
 
-  /** Start a folder ZIP export through the row's visible menu entry. */
+  /** Delete a row through its own menu and the confirmation dialog. */
+  async deleteResource(name: string): Promise<void> {
+    await this.page.getByRole('button', { name: `Options for ${name}` }).click()
+    await this.page
+      .getByRole('menu', { name: `Actions for ${name}` })
+      .getByRole('menuitem', { name: 'Delete', exact: true })
+      .click()
+    const confirmation = this.page.getByRole('dialog', { name: `Delete ${name}?` })
+    await expect(confirmation).toBeVisible()
+    await confirmation.getByRole('button', { name: 'Delete', exact: true }).click()
+    await expect(confirmation).toBeHidden()
+    await expect(this.page.getByRole('button', { name: `Open ${name}` })).toHaveCount(0)
+    await humanRecordedPause([600, 1200])
+  }
+
+  /** Folder ZIP export through the row's own menu entry (`Download as zip`). */
   async downloadZip(name: string): Promise<void> {
     await this.page.getByRole('button', { name: `Options for ${name}` }).click()
     await this.page

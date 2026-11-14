@@ -24,6 +24,7 @@ import {
   setAppTabSavedRoutePath,
   setAppTabTitle,
   setFilesTabPath,
+  setFilesTabRecentVisibleCount,
 } from '../workspaceTabs'
 import type {
   ActiveChat,
@@ -334,6 +335,23 @@ describe('workspaceTabs — files multi-instance by path (mini-spec 06 §3)', ()
     const rooted = state.tabs.find(t => t.id === 'f-1')
     expect(rooted?.files?.path).toBeNull()
     expect(rooted?.title).toBe('Files')
+  })
+
+  it('keeps the recent-files expansion only for its owning tab', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openFilesTab(state, { id: 'recent', path: 'evendrive:recent-files' })
+    state = setFilesTabRecentVisibleCount(state, 'recent', 15)
+    state = openFilesTab(state, { id: 'other', path: null })
+    state = selectWorkspaceTab(state, 'recent')
+    state = setFilesTabPath(state, 'recent', 'evendrive:recent-files', 'Recent files')
+    expect(activeWorkspaceTab(state)?.files?.recentVisibleCount).toBe(15)
+    expect(state.tabs.find(tab => tab.id === 'other')?.files?.recentVisibleCount).toBeUndefined()
+    expect(setFilesTabRecentVisibleCount(state, 'recent', 0)).toBe(state)
+    expect(setFilesTabRecentVisibleCount(state, 'missing', 10)).toBe(state)
+
+    state = closeWorkspaceTab(state, 'recent')
+    state = openFilesTab(state, { id: 'recent-again', path: 'evendrive:recent-files' })
+    expect(activeWorkspaceTab(state)?.files?.recentVisibleCount).toBeUndefined()
   })
 
   it('sanitizes an externally-controlled folder name at the files store border', () => {

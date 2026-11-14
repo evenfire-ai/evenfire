@@ -813,8 +813,16 @@ export function useFilePreviewResourceActions({
                 moveContextRef.current.sessionScope,
                 moveContextRef.current.sessionGeneration
               )
-            )
+            ) {
+              void queryClient.invalidateQueries({
+                queryKey: desktopQueryKeys.gfsRoot,
+                predicate: query =>
+                  query.queryKey[2] === captured.sessionScope &&
+                  query.queryKey[3] === 'recent' &&
+                  hasGfsSessionGeneration(query.queryKey, captured.sessionGeneration),
+              })
               pushToast?.(`Downloaded ${resource.name}`, 'success')
+            }
           })
           .catch(error => {
             if (

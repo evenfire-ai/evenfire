@@ -8,6 +8,12 @@ export type DirectRunBindingOrigin = 'direct_chat' | 'channel_event' | 'api'
 export type VerifiedDirectRunBindingInput = {
   runId: string
   hostRef: string
+  /**
+   * The namespace control-api verified the Host in, or null for a binding whose
+   * writer does not verify one (channel runs). Stored so agent file activity can
+   * be attributed only to a run bound for exactly `<namespace>/<hostRef>` (D14).
+   */
+  hostNamespace: string | null
   sessionId: string
   origin: DirectRunBindingOrigin
   identityIssuer: string
@@ -33,6 +39,16 @@ export class DirectRunBindingConflictError extends Error {
   }
 }
 
+/**
+ * The digest that makes a re-bind idempotent. `hostNamespace` is deliberately
+ * NOT part of it: rpc-proxy reuses a run id on a client retry, so during a
+ * rolling deploy a first bind by an old pod and the retry on a new pod would
+ * compute different digests and the retry would fail the user's message with
+ * `direct_run_binding_conflict`. Two binds of one run id with different
+ * namespaces require two control-api deployments with different
+ * `CONTROL_API_HOSTS_NAMESPACE` on one database, which is not a supported
+ * topology.
+ */
 function bindingSha256(input: VerifiedDirectRunBindingInput): string {
   return createHash('sha256')
     .update(
@@ -64,14 +80,15 @@ export class DirectRunAttributionBindingService {
         await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [runId])
         const inserted = await db.query(
           `INSERT INTO governed_run_attribution_bindings
-           (run_id, host_ref, session_id, origin, identity_issuer, actor_human_sub,
+           (run_id, host_ref, host_namespace, session_id, origin, identity_issuer, actor_human_sub,
             user_id, team_id, binding_sha256)
-         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::uuid, $8::uuid, $9)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::uuid, $9::uuid, $10)
          ON CONFLICT (run_id) DO NOTHING
          RETURNING created_at`,
           [
             runId,
             input.hostRef,
+            input.hostNamespace,
             input.sessionId,
             input.origin,
             input.identityIssuer,

@@ -8,7 +8,7 @@ export class DesktopFilesNav {
 
   async openFiles(): Promise<void> {
     await openResourcesNavItem(this.page, 'nav-files')
-    await expect(this.page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
+    await expect(this.page.getByRole('heading', { name: 'Files', level: 2 })).toBeVisible()
     await humanRecordedPause([600, 1200])
   }
 
@@ -92,6 +92,61 @@ export class DesktopFilesNav {
         .getByRole('treeitem', { name: homeFolderName, exact: true })
     ).toHaveCount(0)
     await humanRecordedPause([600, 1200])
+  }
+
+  /** The EvenDrive overview: the files tab with no folder selected. */
+  async openEvenDriveOverview(): Promise<void> {
+    await this.openFiles()
+    await expect(this.page.getByRole('region', { name: 'My home' })).toBeVisible()
+    await expect(this.recentFiles()).toBeVisible()
+    await humanRecordedPause([600, 1200])
+  }
+
+  recentFiles(): ReturnType<Page['getByRole']> {
+    return this.page.getByRole('region', { name: 'Recent files' })
+  }
+
+  /** The card's rows: `aria-label="Open <name>"`, never its inner name button. */
+  recentRows(): ReturnType<Page['getByRole']> {
+    return this.recentFiles().getByRole('button', { name: /^Open / })
+  }
+
+  /** The overview shows at most ten recent names, subject to available space. */
+  async expectRecentFiles(names: string[]): Promise<void> {
+    await this.openEvenDriveOverview()
+    await expect(this.recentFiles()).toHaveAttribute('aria-busy', 'false')
+    await expect(this.recentRows()).toHaveCount(names.length)
+    await expect
+      .poll(() =>
+        this.recentRows().evaluateAll(rows => rows.map(row => row.getAttribute('aria-label')))
+      )
+      .toEqual(names.map(name => `Open ${name}`))
+    await humanRecordedPause([400, 800])
+  }
+
+  async expectNoRecentFiles(): Promise<void> {
+    await this.openEvenDriveOverview()
+    await expect(this.recentFiles()).toHaveAttribute('aria-busy', 'false')
+    await expect(this.recentFiles().getByText('No recent files', { exact: true })).toBeVisible()
+    await expect(this.recentRows()).toHaveCount(0)
+    await humanRecordedPause([400, 800])
+  }
+
+  async openRecentFile(name: string): Promise<void> {
+    await this.recentFiles()
+      .getByRole('button', { name: `Open ${name}`, exact: true })
+      .click()
+    await humanRecordedPause([600, 1200])
+  }
+
+  /**
+   * The card is overview-only. The Shared with me view is asserted through its
+   * own active crumb, so a card rendered there would be caught.
+   */
+  async expectNoRecentCardInSharedWithMe(): Promise<void> {
+    await this.openSharedWithMe()
+    await expect(this.recentFiles()).toHaveCount(0)
+    await humanRecordedPause([400, 800])
   }
 
   async openSharedWithMe(): Promise<void> {

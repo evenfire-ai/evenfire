@@ -48,6 +48,7 @@ export function SidebarNav({
   onSettingsMenuOpenChange,
   onSelect,
   onOpenFilesSection,
+  activeFilesLocation,
   onOpenPreviewSection,
   pushToast,
   toggleRequestId = 0,
@@ -623,6 +624,7 @@ export function SidebarNav({
               <div className="nav-file-explorer">
                 <FileExplorerTree
                   onOpenFolder={onOpenFilesSection}
+                  activeLocation={activeFilesLocation}
                   onOpenPreview={onOpenPreviewSection}
                   pushToast={pushToast}
                 />

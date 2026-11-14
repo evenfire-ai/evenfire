@@ -726,6 +726,74 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     )
   })
 
+  it('relays the open intent on the proxy and forwards no intent key when absent', async () => {
+    // A fresh Response per call: a Response body can only be read once.
+    clientMock.controlApiStreamRequest.mockImplementation(
+      async () => new Response('hello', { status: 200, headers: { 'content-type': 'text/plain' } })
+    )
+    await request(buildApp())
+      .get('/me/gfs/proxy/abc?drive=main&intent=open')
+      .set('authorization', 'Bearer sess-xyz')
+      .expect(200)
+    expect(clientMock.controlApiStreamRequest).toHaveBeenLastCalledWith(
+      'GET',
+      '/external/gfs/proxy/abc',
+      expect.objectContaining({ query: { drive: 'main', intent: 'open' } })
+    )
+
+    // Witness: the next call still carries `drive`, so an absent intent is the
+    // only difference and the relay is not simply dropping the whole query.
+    await request(buildApp())
+      .get('/me/gfs/proxy/abc?drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+      .expect(200)
+    const lastOptions = clientMock.controlApiStreamRequest.mock.calls.at(-1)?.[2] as {
+      query: Record<string, unknown>
+    }
+    expect(lastOptions.query).toEqual({ drive: 'main' })
+    expect(Object.hasOwn(lastOptions.query, 'intent')).toBe(false)
+  })
+
+  it('relays the recent files list with the session token and drive', async () => {
+    const body = {
+      ok: true,
+      data: { items: [{ resourceId: REQUEST_ID, name: 'a.txt', lastActivityAt: 'x' }] },
+    }
+    clientMock.controlApiRequest.mockResolvedValue(body)
+
+    const res = await request(buildApp())
+      .get('/me/gfs/recent?drive=archive')
+      .set('authorization', 'Bearer sess-xyz')
+      .expect(200)
+
+    expect(res.body).toEqual(body)
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/gfs/recent',
+      expect.objectContaining({ userSessionToken: 'sess-xyz', query: { drive: 'archive' } })
+    )
+  })
+
+  it('forwards the control-api rate limit on the recent files relay', async () => {
+    clientMock.controlApiRequest.mockRejectedValue(
+      new ControlApiError(
+        'too many requests',
+        429,
+        { error: 'Too Many Requests', retryAfterSeconds: 12 },
+        new Headers({ 'retry-after': '12', 'x-ratelimit-limit': '120' })
+      )
+    )
+
+    const res = await request(buildApp())
+      .get('/me/gfs/recent')
+      .set('authorization', 'Bearer sess-xyz')
+
+    expect(res.status).toBe(429)
+    expect(res.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 12 })
+    expect(res.headers['retry-after']).toBe('12')
+    expect(res.headers['x-ratelimit-limit']).toBe('120')
+  })
+
   it('forwards user resource mutations to control-api on the session plane', async () => {
     clientMock.controlApiRequest.mockResolvedValue({ ok: true, data: { resourceId: 'abc' } })
     await request(buildApp())

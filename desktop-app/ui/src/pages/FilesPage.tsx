@@ -21,6 +21,7 @@ import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
+import { GfsRecentFilesCard } from '@components/GfsRecentFilesCard'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import {
@@ -37,6 +38,8 @@ import {
 import {
   GFS_DEFAULT_DISCOVERY_DRIVE,
   GFS_MY_HOME_LABEL,
+  GFS_RECENT_FILES_LABEL,
+  GFS_RECENT_FILES_LOCATION,
   GFS_RESOURCE_DRAG_TYPE,
   GFS_SHARED_WITH_ME_LABEL,
   GFS_SHARED_WITH_ME_LOCATION,
@@ -53,6 +56,7 @@ import {
   type GfsUriOpenFailure,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
+import { useRecentOverviewLimit } from '@hooks/useRecentOverviewLimit'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
 import {
   GFS_AUTHORITY_STALE_TIME_MS,
@@ -75,6 +79,7 @@ import {
   parseHttpStatus,
   parseRetryAfterSeconds,
 } from '@lib/gfsGrantErrors'
+import { GFS_LISTING_GRID_COLUMNS } from '@lib/gfsListingGrid'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
@@ -364,12 +369,15 @@ export function FilesPage({
   onPendingGfsUriHandled,
   pendingGfsDeepLink,
   workspaceTabId,
+  recentVisibleCount,
+  onRecentVisibleCountChange,
   pendingGfsDeepLinkOwnerTabId,
   isPendingGfsDeepLinkCurrent,
   onExplicitNavigationIntent,
   onPendingGfsDeepLinkOutcome,
   remoteGfsChangeEpoch,
   onLocationChange,
+  onOpenFilesSection,
   onOpenPreview,
   onOpenPendingGfsPreview,
   routeDialogRequestId = 0,
@@ -400,11 +408,12 @@ export function FilesPage({
   const [renameTarget, setRenameTarget] = useState<GfsActionTarget | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
-  // What the root shows: the EvenDrive overview (the caller's home and what
-  // others share) or only what others share. Seeded from the tab location.
-  const [rootView, setRootView] = useState<'overview' | 'shared'>(() =>
-    pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION ? 'shared' : 'overview'
-  )
+  // Client-only views are seeded from the tab location, never resolved as GFS URIs.
+  const [rootView, setRootView] = useState<'overview' | 'shared' | 'recent'>(() => {
+    if (pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION) return 'shared'
+    if (pendingGfsUri === GFS_RECENT_FILES_LOCATION) return 'recent'
+    return 'overview'
+  })
   const [pendingGfsDeepLinkFailure, setPendingGfsDeepLinkFailure] = useState<{
     id: number
     message: string
@@ -508,7 +517,10 @@ export function FilesPage({
   const createFolderDescriptionId = useId()
   const createFolderInputId = useId()
   const queryClient = useQueryClient()
-  const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  // Only the overview renders the recent card, but the option is stable for the
+  // page's lifetime: the card mounts and unmounts with the view, the query does
+  // not re-subscribe on every view change.
+  const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen, recentFilesEnabled: true })
   const seedPendingRef = useRef(false)
   const beginExplicitFilesNavigation = useCallback(() => {
     seedPendingRef.current = false
@@ -1574,6 +1586,9 @@ export function FilesPage({
   const handleDownload = async (uri: string, name: string) => {
     try {
       await saveGfsFileToDisk(uri, name)
+      // A save is the user's activity, and the card may be on screen behind the
+      // tab that saved: refresh it rather than waiting for a remount.
+      ctrl.refreshRecentFiles()
       pushToast?.(`Downloaded ${name}`, 'success')
     } catch (downloadError) {
       if (failClosedOnAuthorizationError(downloadError)) return
@@ -1751,7 +1766,10 @@ export function FilesPage({
     if (!pendingGfsUri) return
     // A view id, not a resource: nothing to resolve. The page is keyed by its
     // tab, so this seed only arrives on mount, where `rootView` already took it.
-    if (pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION) {
+    if (
+      pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION ||
+      pendingGfsUri === GFS_RECENT_FILES_LOCATION
+    ) {
       onPendingGfsUriHandled?.()
       return
     }
@@ -1873,6 +1891,10 @@ export function FilesPage({
     }
     if (currentGfsUri === null && rootView === 'shared') {
       onLocationChange?.(GFS_SHARED_WITH_ME_LOCATION, GFS_SHARED_WITH_ME_LABEL)
+      return
+    }
+    if (currentGfsUri === null && rootView === 'recent') {
+      onLocationChange?.(GFS_RECENT_FILES_LOCATION, GFS_RECENT_FILES_LABEL)
       return
     }
     onLocationChange?.(currentGfsUri, currentName)
@@ -3039,17 +3061,42 @@ export function FilesPage({
     if (current) {
       return currentIsFolder ? sortDriveResources(items) : []
     }
+    if (rootView === 'overview') return []
     // Root view ("Shared with me"): only what others share with the caller.
     // The caller's own home is not shared with them; it has its own entry.
     return sortDriveResources(
       accessibleResources.filter(resource => !isCallerHomeRoot(ctrl.home, resource))
     )
-  }, [accessibleResources, ctrl.home, current, currentIsFolder, items])
+  }, [accessibleResources, ctrl.home, current, currentIsFolder, items, rootView])
   const myHome = useMemo(
     () =>
-      current || rootView === 'shared' ? null : callerHomeRootNode(ctrl.home, accessibleResources),
+      current || rootView !== 'overview'
+        ? null
+        : callerHomeRootNode(ctrl.home, accessibleResources),
     [accessibleResources, ctrl.home, current, rootView]
   )
+  const openingResourceSeed =
+    !current &&
+    Boolean(
+      (pendingGfsUri &&
+        pendingGfsUri !== GFS_SHARED_WITH_ME_LOCATION &&
+        pendingGfsUri !== GFS_RECENT_FILES_LOCATION) ||
+      (seedPendingRef.current && resolving)
+    )
+  const showHomeSection =
+    !current &&
+    rootView === 'overview' &&
+    !openingResourceSeed &&
+    !accessRevoked &&
+    ctrl.home?.state !== 'retired' &&
+    Boolean(
+      myHome ||
+      ctrl.authorityPending ||
+      ctrl.loadingHome ||
+      ctrl.homeError ||
+      ctrl.home?.state === 'pending' ||
+      ctrl.home?.state === 'conflict'
+    )
   // The controller owns current-view loading semantics, including the
   // page-wide authority gate and the distinction between initial and
   // background query activity.
@@ -3228,6 +3275,57 @@ export function FilesPage({
     void handleDownload(resource.gfsUri, resource.name)
   }
 
+  const recentOnly = !current && rootView === 'recent' && !openingResourceSeed
+  const overviewOnly = !current && rootView === 'overview' && !openingResourceSeed
+  const showRecentFiles =
+    !current &&
+    !openingResourceSeed &&
+    rootView !== 'shared' &&
+    !accessRevoked &&
+    !(rootView === 'overview' && ctrl.authorityPending && ctrl.discoveryFailure)
+  const recentAuthorityFailure = recentOnly && ctrl.authorityPending ? ctrl.discoveryFailure : null
+  const recentFailure =
+    recentAuthorityFailure ?? (ctrl.authorityPending ? null : ctrl.recentFilesFailure)
+  const recentLoading =
+    (ctrl.authorityPending && !recentAuthorityFailure) || ctrl.loadingRecentFiles
+  const overviewLayoutRef = useRef<HTMLDivElement | null>(null)
+  const overviewContentKey = JSON.stringify({
+    files: ctrl.recentFiles
+      .slice(0, 10)
+      .map(file => [file.resourceId, file.name, file.lastActivityAt]),
+    showHomeSection,
+    homeState: ctrl.home?.state,
+    homeError: ctrl.homeError,
+    loadingHome: ctrl.loadingHome,
+    authorityPending: ctrl.authorityPending,
+    discoveryFailure: ctrl.discoveryFailure,
+    accessibleNotice,
+    visibleError: visibleError ? describeGfsReadError(visibleError).message : null,
+    pendingGfsDeepLinkFailure,
+    unavailableLocation,
+  })
+  const overviewLimit = useRecentOverviewLimit(
+    overviewLayoutRef,
+    overviewOnly && showRecentFiles,
+    ctrl.recentFiles.length,
+    overviewContentKey
+  )
+  const refreshBlockedUntil = Math.max(
+    !current && ctrl.discoveryFailure?.kind === 'rate-limited'
+      ? (ctrl.discoveryFailure.retryAvailableAt ?? 0)
+      : 0,
+    showRecentFiles && ctrl.recentFilesFailure?.kind === 'rate-limited'
+      ? (ctrl.recentFilesFailure.retryAvailableAt ?? 0)
+      : 0
+  )
+  const [refreshClock, setRefreshClock] = useState(() => Date.now())
+  useEffect(() => {
+    const now = Date.now()
+    setRefreshClock(now)
+    if (refreshBlockedUntil <= now) return
+    const timer = setTimeout(() => setRefreshClock(Date.now()), refreshBlockedUntil - now)
+    return () => clearTimeout(timer)
+  }, [refreshBlockedUntil])
   const resourceMenuActionsFor = (resource: GfsDriveResource) => {
     const isDirectory = resource.kind === 'directory'
     const canPreview =
@@ -3287,8 +3385,27 @@ export function FilesPage({
     <section className="page da-gfs-page">
       <GfsResourceTitlebarActions
         target={titlebarLeadingTarget}
-        onRefresh={current ? () => void handleRefreshCurrent() : () => void ctrl.retryDiscovery()}
-        refreshing={current ? refreshingCurrent : visibleLoading}
+        onRefresh={
+          recentOnly
+            ? () => {
+                void ctrl.retryDiscovery()
+                ctrl.refreshRecentFiles()
+              }
+            : current
+              ? () => void handleRefreshCurrent()
+              : () => {
+                  void ctrl.retryDiscovery()
+                  if (rootView === 'overview') ctrl.refreshRecentFiles()
+                }
+        }
+        refreshing={
+          recentOnly
+            ? ctrl.fetchingRecentFiles
+            : current
+              ? refreshingCurrent
+              : visibleLoading || (rootView === 'overview' && ctrl.fetchingRecentFiles)
+        }
+        refreshDisabled={refreshBlockedUntil > refreshClock}
         onCopyLink={current ? () => void handleCopyLink(current.gfsUri) : undefined}
         onOpenLink={() => setOpenLinkOpen(true)}
       />
@@ -3300,27 +3417,127 @@ export function FilesPage({
       </p>
       <div className="page-header">
         <h2>Files</h2>
-        <p className="muted">Browse and manage everything shared with you in one place.</p>
+        <p className="muted">Browse your files and resources shared with you.</p>
       </div>
 
-      <div className="page-layout da-gfs-layout">
-        {myHome ? (
+      <div className="page-layout da-gfs-layout" ref={overviewLayoutRef}>
+        {pendingGfsDeepLinkFailure ? (
+          <div role="alert">
+            <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
+            {pendingGfsDeepLinkFailure.retryable ? (
+              <Button
+                color="secondary"
+                onClick={() => {
+                  setPendingGfsDeepLinkFailure(null)
+                  setGfsDeepLinkRetry(current => ({
+                    id: pendingGfsDeepLinkFailure.id,
+                    request: current?.id === pendingGfsDeepLinkFailure.id ? current.request + 1 : 1,
+                  }))
+                }}
+                size="sm"
+                variant="outline"
+              >
+                Retry opening link
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        {unavailableLocation ? (
+          <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
+        ) : null}
+        {showRecentFiles ? (
+          <GfsRecentFilesCard
+            expandable={recentOnly}
+            overviewLimit={overviewLimit}
+            visibleCount={recentOnly ? recentVisibleCount : undefined}
+            onVisibleCountChange={recentOnly ? onRecentVisibleCountChange : undefined}
+            failure={recentFailure}
+            fetching={ctrl.fetchingRecentFiles}
+            files={ctrl.recentFiles}
+            loading={recentLoading}
+            onOpen={file => {
+              if (openFilePreview(file)) return
+              void handleDownload(file.gfsUri, file.name)
+            }}
+            onRetry={
+              recentAuthorityFailure ? () => void ctrl.retryDiscovery() : ctrl.retryRecentFiles
+            }
+          />
+        ) : null}
+        {showHomeSection ? (
           <section className="page-card da-gfs-my-home" aria-label="My home">
             <Button
-              align="start"
-              className="da-gfs-my-home__open"
+              align="between"
+              block
+              className="da-gfs-overview-destination"
+              data-gfs-overview-destination="home"
               color="neutral"
-              onClick={() => ctrl.openResource(myHome)}
-              variant="text"
+              disabled={!myHome || !onOpenFilesSection}
+              onClick={event => myHome && onOpenFilesSection?.(myHome.gfsUri, event.detail === 0)}
+              variant="ghost"
             >
-              <IconContexts aria-hidden="true" width={16} height={16} />
-              {myHome.name}
+              <span>My home</span>
+              <IconChevronRight aria-hidden="true" width={16} height={16} />
             </Button>
+            {!myHome && ctrl.homeError ? (
+              <div role="alert">
+                <EmptyState title="Could not load My home" body={ctrl.homeError} />
+              </div>
+            ) : !myHome && ctrl.home?.state === 'conflict' ? (
+              <div role="alert">
+                <EmptyState
+                  title="Your home folder needs attention"
+                  body="Contact an administrator to resolve the conflict."
+                />
+              </div>
+            ) : !myHome && ctrl.home?.state === 'pending' ? (
+              <div role="status">
+                <EmptyState
+                  title="Your home folder is being prepared"
+                  body="Your folder will appear here when it is ready."
+                />
+              </div>
+            ) : !myHome &&
+              (ctrl.loadingHome || (ctrl.authorityPending && !ctrl.discoveryFailure)) ? (
+              <div className="da-gfs-loading" role="status">
+                Loading My home…
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+        {overviewOnly && !accessRevoked ? (
+          <section className="page-card da-gfs-overview-section" aria-label="Shared with me">
+            <Button
+              align="between"
+              block
+              className="da-gfs-overview-destination"
+              data-gfs-overview-destination="shared"
+              color="neutral"
+              disabled={!onOpenFilesSection}
+              onClick={event =>
+                onOpenFilesSection?.(GFS_SHARED_WITH_ME_LOCATION, event.detail === 0)
+              }
+              variant="ghost"
+            >
+              <span>{GFS_SHARED_WITH_ME_LABEL}</span>
+              <IconChevronRight aria-hidden="true" width={16} height={16} />
+            </Button>
+            {blockingDiscoveryFailure ? (
+              <GfsReadFailureCard
+                failure={blockingDiscoveryFailure}
+                onRetry={() => void ctrl.retryDiscovery()}
+              />
+            ) : accessibleNotice ? (
+              <StatusBanner tone="info" text={accessibleNotice} />
+            ) : visibleError ? (
+              <StatusBanner tone="error" text={describeGfsReadError(visibleError).message} />
+            ) : null}
           </section>
         ) : null}
         <section
-          className="page-card da-gfs-drive"
+          className={`page-card da-gfs-drive${!current && rootView === 'overview' ? ' da-gfs-drive--overview' : ''}`}
           aria-label="EvenDrive browser"
+          hidden={(recentOnly || overviewOnly) && !accessRevoked}
           aria-busy={driveBusy}
           onDragEnter={handleGfsDragEnter}
           onDragLeave={handleGfsDragLeave}
@@ -3332,7 +3549,7 @@ export function FilesPage({
               <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
                 {homeTrail ? null : (
                   <Button
-                    className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
+                    className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root da-gfs-section-title"
                     color="neutral"
                     // In the Shared with me view this is the active crumb: inert,
                     // and styled as a view root like "My home" at the home root.
@@ -3370,7 +3587,9 @@ export function FilesPage({
                     ) : (
                       <Button
                         className={`da-gfs-drive__breadcrumb${
-                          homeTrail && index === 0 ? ' da-gfs-drive__breadcrumb--view-root' : ''
+                          homeTrail && index === 0
+                            ? ' da-gfs-drive__breadcrumb--view-root da-gfs-section-title'
+                            : ''
                         }${
                           dragOverFolderId === crumb.resourceId
                             ? ' da-gfs-drive__breadcrumb--allowed'
@@ -3553,31 +3772,6 @@ export function FilesPage({
               </div>
             )
           })}
-          {pendingGfsDeepLinkFailure ? (
-            <div role="alert">
-              <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
-              {pendingGfsDeepLinkFailure.retryable ? (
-                <Button
-                  color="secondary"
-                  onClick={() => {
-                    setPendingGfsDeepLinkFailure(null)
-                    setGfsDeepLinkRetry(current => ({
-                      id: pendingGfsDeepLinkFailure.id,
-                      request:
-                        current?.id === pendingGfsDeepLinkFailure.id ? current.request + 1 : 1,
-                    }))
-                  }}
-                  size="sm"
-                  variant="outline"
-                >
-                  Retry opening link
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-          {unavailableLocation ? (
-            <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
-          ) : null}
           {visibleError && !accessRevoked && !blockingFailure ? (
             // Presented, not raw. The banner is the non-blocking half of the
             // same read-plane failure the card shows, so it must not be the one
@@ -3685,10 +3879,7 @@ export function FilesPage({
           ) : (
             <div
               className="da-grid da-gfs-drive__grid"
-              style={{
-                '--da-grid-cols':
-                  'calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) minmax(4.5rem, auto) 9.5rem',
-              }}
+              style={{ '--da-grid-cols': GFS_LISTING_GRID_COLUMNS }}
             >
               <div className="da-grid__head">
                 <span className="da-grid__col-header" aria-hidden="true" />

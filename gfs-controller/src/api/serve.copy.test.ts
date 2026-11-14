@@ -93,6 +93,7 @@ function fixture(options: { child?: boolean; snapshotCount?: number; omitLastPar
       reads: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
       writes: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
     },
+    agentActivity: { recordRead: async () => "recorded" as const },
   };
   const handler = new GfsServingHandler(deps);
   // The scripted times are for the request path. They are armed after the
@@ -337,5 +338,179 @@ describe("POST /v1/copy", () => {
     expect(res.statusCode).toBe(413);
     expect(fixture1001.copy).not.toHaveBeenCalled();
     expect(fixture1001.audits).toHaveLength(1);
+  });
+});
+
+describe("copy attribution (D16)", () => {
+  const RUN = "11111111-1111-4111-8111-111111111111";
+  const HOST = "host:1st:mcp-host/chatllm";
+  const AGENT_ACTIVITY_SQL =
+    "SELECT public.gfs_record_agent_file_activity($1, $2::uuid, $3::uuid[])";
+
+  function hostedRun(body: Record<string, unknown>) {
+    const stream = Readable.from([Buffer.from(JSON.stringify(body))]) as Readable & {
+      method: string; url: string; headers: Record<string, string>;
+    };
+    stream.method = "POST";
+    stream.url = "/v1/copy";
+    stream.headers = {
+      authorization: "Bearer local",
+      "content-type": "application/json",
+      "x-request-id": REQUEST,
+      "x-gfs-attribution-run": RUN,
+    };
+    return stream as unknown as IncomingMessage;
+  }
+
+  const body = { drive: "main", sourceResourceId: SOURCE, destinationParentId: DEST, newName: "copy", ifMatch: 2 };
+
+  it("hands the copy hook to the writer, which records every copied file in its transaction", async () => {
+    const f = fixture();
+    const reads: Array<{ hostSubject: string; runId: string; ids: string[] }> = [];
+    const calls: Array<{ sql: string; values: unknown[] }> = [];
+    f.deps.agentActivity = {
+      recordRead: async (hostSubject, runId, ids) => {
+        reads.push({ hostSubject, runId, ids });
+        return "recorded";
+      },
+    };
+    f.deps.verifyToken = () => ({
+      ...claims,
+      sub: HOST,
+      scopes: ["gfs.read", "gfs.write"],
+    });
+    f.deps.resolveContext = async (_claims, requestId) => ({
+      ...context,
+      primarySubject: HOST,
+      subjects: [HOST],
+      requestId,
+    });
+    f.deps.writeService = {
+      copy: async (input: { onPublished?: (client: unknown, ids: string[]) => Promise<void> }) => {
+        expect(input.onPublished).toBeTypeOf("function");
+        const client = {
+          query: async (sql: string, values: unknown[] = []) => {
+            calls.push({ sql, values });
+            return { rows: [{ gfs_record_agent_file_activity: "recorded" }] };
+          },
+        };
+        await input.onPublished?.(client, [
+          "10000000-0000-4000-8000-000000000001",
+          "10000000-0000-4000-8000-000000000002",
+        ]);
+        return {
+          root: {
+            resourceId: "10000000-0000-4000-8000-000000000001", drive: "main", parentResourceId: DEST,
+            name: "copy", kind: "directory" as const, pathCache: "/archive/copy", version: 0,
+            bytes: 0, blobKey: null, contentSha256: null, deletedAt: null,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          requestId: REQUEST, objectCount: 3, fileCount: 2, folderCount: 1, totalBytes: 10n,
+        };
+      },
+    } as unknown as ServingDeps["writeService"];
+    const handler = new GfsServingHandler(f.deps);
+    const res = new Response();
+
+    await handler.tryHandle(hostedRun(body) as never, res as never);
+
+    expect(res.statusCode).toBe(201);
+    // One agent call, on the client the writer handed the hook, with exactly
+    // the file ids the copy created.
+    expect(calls).toEqual([
+      {
+        sql: AGENT_ACTIVITY_SQL,
+        values: [HOST, RUN, [
+          "10000000-0000-4000-8000-000000000001",
+          "10000000-0000-4000-8000-000000000002",
+        ]],
+      },
+    ]);
+    // The pool-bound read dependency is not part of a write path.
+    expect(reads).toEqual([]);
+  });
+
+  it("refuses the copy with 403 when the run belongs to another Host", async () => {
+    const f = fixture();
+    const reads: Array<{ hostSubject: string; runId: string; ids: string[] }> = [];
+    const calls: Array<{ sql: string; values: unknown[] }> = [];
+    const transactions: string[] = [];
+    f.deps.agentActivity = {
+      recordRead: async (hostSubject, runId, ids) => {
+        reads.push({ hostSubject, runId, ids });
+        return "recorded";
+      },
+    };
+    f.deps.verifyToken = () => ({ ...claims, sub: HOST, scopes: ["gfs.read", "gfs.write"] });
+    f.deps.resolveContext = async (_claims, requestId) => ({
+      ...context,
+      primarySubject: HOST,
+      subjects: [HOST],
+      requestId,
+    });
+    f.deps.writeService = {
+      copy: async (input: { onPublished?: (client: unknown, ids: string[]) => Promise<void> }) => {
+        const client = {
+          query: async (sql: string, values: unknown[] = []) => {
+            calls.push({ sql, values });
+            return { rows: [{ gfs_record_agent_file_activity: "host_mismatch" }] };
+          },
+        };
+        transactions.push("BEGIN");
+        try {
+          await input.onPublished?.(client, [
+            "10000000-0000-4000-8000-000000000001",
+          ]);
+        } catch (error) {
+          transactions.push("ROLLBACK");
+          throw error;
+        }
+        transactions.push("COMMIT");
+        throw new Error("unreachable: the hook must throw first");
+      },
+    } as unknown as ServingDeps["writeService"];
+    const handler = new GfsServingHandler(f.deps);
+    const res = new Response();
+
+    await handler.tryHandle(hostedRun(body) as never, res as never);
+
+    // The client answered host_mismatch: the 403 is that verdict, the hook
+    // recorded on the transaction client, and the copy rolled back.
+    expect(res.statusCode).toBe(403);
+    expect(res.body).not.toContain("unreachable");
+    expect(transactions).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(calls).toEqual([
+      {
+        sql: AGENT_ACTIVITY_SQL,
+        values: [HOST, RUN, ["10000000-0000-4000-8000-000000000001"]],
+      },
+    ]);
+    expect(reads).toEqual([]);
+  });
+
+  it("copies without a hook when the request carries no run header", async () => {
+    const f = fixture();
+    let sawHook: unknown = "unset";
+    f.deps.writeService = {
+      copy: async (input: { onPublished?: unknown }) => {
+        sawHook = input.onPublished;
+        return {
+          root: {
+            resourceId: "10000000-0000-4000-8000-000000000001", drive: "main", parentResourceId: DEST,
+            name: "copy", kind: "directory" as const, pathCache: "/archive/copy", version: 0,
+            bytes: 0, blobKey: null, contentSha256: null, deletedAt: null,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          requestId: REQUEST, objectCount: 3, fileCount: 2, folderCount: 1, totalBytes: 10n,
+        };
+      },
+    } as unknown as ServingDeps["writeService"];
+    const handler = new GfsServingHandler(f.deps);
+    const res = new Response();
+
+    await handler.tryHandle(request(body) as never, res as never);
+
+    expect(res.statusCode).toBe(201);
+    expect(sawHook).toBeUndefined();
   });
 });

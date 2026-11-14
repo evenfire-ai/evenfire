@@ -8,6 +8,7 @@ import {
   onlineManager,
 } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -77,7 +78,7 @@ function installGfsBridge(gfs: Partial<typeof window.clerum.gfs>) {
   })
 }
 
-function renderFilesPage(queryClient: QueryClient, pendingGfsUri?: string) {
+function renderFilesPage(queryClient: QueryClient, pendingGfsUri = GFS_SHARED_WITH_ME_LOCATION) {
   if (!testQueryClients.includes(queryClient)) testQueryClients.push(queryClient)
   return render(
     <AuthContext.Provider value={authValue}>
@@ -173,6 +174,7 @@ describe('FilesPage authority-gated loading presentation', () => {
 
     renderFilesPage(queryClient, 'gfs://main/folder-b')
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    expect(screen.queryByRole('region', { name: 'Recent files' })).toBeNull()
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(2)
       expect(queryClient.getQueryState(ACCESSIBLE_KEY)?.fetchStatus).toBe('fetching')
@@ -276,6 +278,7 @@ describe('FilesPage authority-gated loading presentation', () => {
     await waitFor(() => expect(Date.now()).toBeGreaterThan(cachedChildrenUpdatedAt ?? 0))
     const view = renderFilesPage(queryClient, 'gfs://main/folder-b')
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    expect(screen.queryByRole('region', { name: 'Recent files' })).toBeNull()
     await waitFor(() => {
       expect(listAccessible).toHaveBeenCalledTimes(2)
       expect(queryClient.getQueryState(ACCESSIBLE_KEY)?.fetchStatus).toBe('fetching')

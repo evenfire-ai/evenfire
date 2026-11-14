@@ -11,6 +11,8 @@ export type GfsVideoPreviewBodyProps = {
   gfsUri: string
   mimeType: string
   onDownloadError?: (error: unknown) => void
+  /** True only when this fetch is the user opening the file. */
+  recordOpen: boolean
   titleId?: string
   titleActions?: ReactNode
   headerActions?: ReactNode

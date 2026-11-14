@@ -292,7 +292,13 @@ export class NativeToolRegistry implements ToolRegistry {
     // generators write under its reserved outputs directory; without it they
     // refuse to write, never falling back to a folder shared by the Host.
     // Trailing optional; only taskExecutor passes it.
-    callerOutputRoot?: string
+    callerOutputRoot?: string,
+    /**
+     * The Desktop chat run this task executes. Set only for a `direct_chat`
+     * task, so gfsc records GFS content activity for the user the run is bound
+     * to; channel and workflow tasks attribute nothing (D9, D19).
+     */
+    gfsAttributionRunId?: string
   ) {
     // A Host-owned GFS store establishes a trusted caller binding even when
     // memory is disabled. In that mode file tools never fall back to the shared
@@ -350,7 +356,10 @@ export class NativeToolRegistry implements ToolRegistry {
     }
     const gfsScopes = getGfsToolScopes(gfsEnv)
     if (gfsScopes && gfsScopes.size > 0) {
-      const gfsClient = createGfscClient(gfsEnv, { maxRetryWaitMs: config.toolTimeout })
+      const gfsClient = createGfscClient(gfsEnv, {
+        maxRetryWaitMs: config.toolTimeout,
+        ...(gfsAttributionRunId === undefined ? {} : { attributionRunId: gfsAttributionRunId }),
+      })
       const gfsTools = [
         ...(gfsScopes.has('gfs.read')
           ? buildGfsReadTools(gfsClient, {
