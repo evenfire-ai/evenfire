@@ -41,6 +41,17 @@ vi.mock('../src/auth/gfsToken.js', () => ({
   GFS_SCOPES: ['gfs.read', 'gfs.write', 'gfs.delete', 'gfs.manage_acl', 'gfs.share'],
   signGfsToken: mocks.sign,
 }))
+// User tokens are minted through dev's session-bound signer, which re-reads the
+// current session; this suite mocks the session middleware, so the signer is
+// mocked the same way routes.externalGfs.test.ts does it.
+vi.mock('../src/gfs/externalAuthority.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../src/gfs/externalAuthority.js')>()
+  return {
+    ...original,
+    signCurrentExternalGfsUserToken: async (_authentication: unknown, input: object) =>
+      mocks.sign({ ...input, principalType: 'user' }),
+  }
+})
 vi.mock('../src/services/gfsDesktopOperatorLinkService.js', () => ({
   gfsDesktopOperatorLinkService: {
     resolveActiveLink: mocks.link,
