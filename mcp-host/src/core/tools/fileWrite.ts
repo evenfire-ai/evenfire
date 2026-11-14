@@ -91,19 +91,21 @@ export class FileWriteTool implements Tool {
       }
     }
 
-    const normalized = normalizeRel(filePath)
-    if (this.reservedFolders.has(normalized)) {
+    const validation = validatePath(filePath, this.workspacePath)
+    if (!validation.valid) {
       return {
-        content: new MemoryFolderPathError(normalized).message,
+        content: `Error: ${validation.error}`,
         duration_ms: Date.now() - startTime,
         is_error: true,
       }
     }
 
-    const validation = validatePath(filePath, this.workspacePath)
-    if (!validation.valid) {
+    // After `validatePath`, so a path refused by its text (absolute, `..`)
+    // keeps that refusal even when it normalizes to a reserved name.
+    const normalized = normalizeRel(filePath)
+    if (this.reservedFolders.has(normalized)) {
       return {
-        content: `Error: ${validation.error}`,
+        content: new MemoryFolderPathError(normalized).message,
         duration_ms: Date.now() - startTime,
         is_error: true,
       }

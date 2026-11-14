@@ -86,8 +86,16 @@ const HOST_MEMORY_FOLDERS: ReadonlySet<string> = new Set(['memories'])
  * The memory folder that `relativePath` names exactly, or null. `caller` is a
  * person's folder (`memory`, `daily`); `host` is the Host root (`memories`).
  * Case-sensitive, like the locked names.
+ *
+ * Null for a path the workspace refuses by its text (a NUL byte, an absolute
+ * path, `..`; the same checks as `WorkspaceService`'s path resolution), so
+ * such a path keeps the workspace's own refusal even when it normalizes to a
+ * folder name (`/memories`, `a/../memory`).
  */
 export function memoryFolderAt(relativePath: string, location: 'caller' | 'host'): string | null {
+  if (relativePath.includes('\0') || path.isAbsolute(relativePath) || relativePath.includes('..')) {
+    return null
+  }
   const n = normalizeRel(relativePath)
   const folders = location === 'caller' ? CALLER_MEMORY_FOLDERS : HOST_MEMORY_FOLDERS
   return folders.has(n) ? n : null

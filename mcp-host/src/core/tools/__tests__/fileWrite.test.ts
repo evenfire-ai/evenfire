@@ -75,6 +75,29 @@ describe('FileWriteTool — reserved memory folder names', () => {
     expect(await fs.readdir(workspaceDir)).toEqual([])
   })
 
+  it.each([
+    ['/memory', 'Error: Absolute paths not allowed'],
+    ['//memory', 'Error: Absolute paths not allowed'],
+    ['/daily', 'Error: Absolute paths not allowed'],
+    ['a/../memory', 'Error: Directory traversal (..) not allowed'],
+    ['memory/../daily', 'Error: Directory traversal (..) not allowed'],
+  ])(
+    'with {memory, daily} reserved, %s keeps its refusal by text (%s), nothing is created',
+    async (p, message) => {
+      const reserved = new FileWriteTool(workspaceDir, new Set(['memory', 'daily']))
+      const res = await reserved.execute({ path: p, content: 'x' })
+      expect(res.is_error).toBe(true)
+      expect(res.content).toBe(message)
+      // The same answer as with nothing reserved: the reservation adds nothing here.
+      const plain = await new FileWriteTool(workspaceDir, new Set()).execute({
+        path: p,
+        content: 'x',
+      })
+      expect(plain.content).toBe(message)
+      expect(await fs.readdir(workspaceDir)).toEqual([])
+    }
+  )
+
   it('with {memory, daily} reserved, memories and memory/x.md are written', async () => {
     const tool = new FileWriteTool(workspaceDir, new Set(['memory', 'daily']))
     for (const p of ['memories', 'memory/x.md']) {

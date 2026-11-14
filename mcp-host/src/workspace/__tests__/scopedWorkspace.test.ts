@@ -347,6 +347,47 @@ describe('memoryFolderAt — exact memory folder paths by location', () => {
     expect(memoryFolderAt(p, 'caller')).toBeNull()
     expect(memoryFolderAt(p, 'host')).toBeNull()
   })
+
+  it.each([
+    '/memory',
+    '/daily',
+    '/memories',
+    '//memories',
+    'a/../memory',
+    'a/../daily',
+    'x/../memories',
+    'memory\0',
+  ])('%s is refused by its text, so it names no memory folder', p => {
+    expect(memoryFolderAt(p, 'caller')).toBeNull()
+    expect(memoryFolderAt(p, 'host')).toBeNull()
+  })
+})
+
+describe('ScopedWorkspace.write/append — paths refused by their text keep that refusal', () => {
+  it.each([
+    ['/memory', 'Absolute paths not allowed'],
+    ['/daily', 'Absolute paths not allowed'],
+    ['/memories', 'Absolute paths not allowed'],
+    ['//memories', 'Absolute paths not allowed'],
+    ['a/../memory', 'Directory traversal (..) not allowed'],
+    ['a/../daily', 'Directory traversal (..) not allowed'],
+    ['x/../memories', 'Directory traversal (..) not allowed'],
+  ])('%s: %s, nothing created', async (p, message) => {
+    const ws = provider.forUser('alice')
+    for (const op of ['write', 'append'] as const) {
+      const err = await ws[op](p, 'x').then(
+        () => null,
+        (e: unknown) => e
+      )
+      expect(err).toBeInstanceOf(Error)
+      expect(err).not.toBeInstanceOf(MemoryFolderPathError)
+      expect((err as Error).message).toBe(message)
+    }
+    for (const name of ['memory', 'daily', 'memories']) {
+      await expect(fs.stat(path.join(baseRoot, name))).rejects.toThrow(/ENOENT/)
+      await expect(fs.stat(path.join(baseRoot, 'users', 'alice', name))).rejects.toThrow(/ENOENT/)
+    }
+  })
 })
 
 describe('ScopedWorkspace.write/append — memory folder paths are reserved', () => {

@@ -342,6 +342,31 @@ describe('memory tools — named notes live in the caller memory/ folder', () =>
     }
   )
 
+  it.each([
+    ['/memory', 'Absolute paths not allowed'],
+    ['/daily', 'Absolute paths not allowed'],
+    ['/memories', 'Absolute paths not allowed'],
+    ['/memories/', 'Absolute paths not allowed'],
+    ['a/../memory', 'Directory traversal (..) not allowed'],
+    ['x/../memories', 'Directory traversal (..) not allowed'],
+  ])(
+    'refused by its text: memory_write to %s still throws %s, and nothing is recorded',
+    async (target, message) => {
+      const log = new CapturingLog()
+      const write = new PersistentMemoryWriteTool(
+        new ScopedWorkspaceProvider(baseRoot).forUser('alice'),
+        { log, userKey: 'alice' }
+      )
+      await expect(write.execute({ content: 'zztext', target })).rejects.toThrow(message)
+      expect(log.entries).toHaveLength(0)
+      expect(await exists(path.join(baseRoot, 'memories'))).toBe(false)
+      // Witness: the same tool writes a note, so the refusal comes from the path.
+      const ok = await write.execute({ content: 'zzok', target: 'notes' })
+      expect(ok.content).toBe('Written to memory/notes.md (append)')
+      expect(log.entries).toHaveLength(1)
+    }
+  )
+
   it('blocked: a file at users/alice/memory makes write, read and tree answer with an error result', async () => {
     const log = new CapturingLog()
     const ws = new ScopedWorkspaceProvider(baseRoot).forUser('alice')
@@ -834,7 +859,7 @@ describe('memory_write with a record log records each successful write', () => {
       'PERSIST_SYNC_TIMEOUT',
     ],
     [
-      "the persist queue's stored async failure naming another session",
+      "an async failure whose message names another session's key (the queue's message before its key was removed)",
       coded(
         'async write failed (sessionKey=bob@example.com:desktop:chan-1:thread-1): disk full',
         'PERSIST_ASYNC_WRITE_FAILED'
