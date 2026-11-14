@@ -1272,9 +1272,11 @@ export function createWorkflowEndpointHandlers(
           // `attempt` and `startedAt` always come from the recipe status. The
           // built-in runtime uses this phase only in the authorization pause
           // wait: `running` makes it re-send its `running` report, which the
-          // durable boundary re-gates (423 while paused, 503
-          // `workflow_run_state_unavailable` while the run store is
-          // unreachable), so a stale phase here cannot authorize an effect.
+          // durable boundary re-gates for a child carrying the run-authority
+          // label (423 while paused, 503 `workflow_run_state_unavailable` while
+          // the run store is unreachable), so a stale phase here cannot
+          // authorize an effect. workflow-recipes labels every child of a run
+          // with an authority binding; an unlabelled child is not re-gated.
           // `readCurrentStatus` does not use the phase (#1413). Custom
           // coordinators read the same answer; what they do with it is their
           // code. The error message is not logged: a connection error carries
