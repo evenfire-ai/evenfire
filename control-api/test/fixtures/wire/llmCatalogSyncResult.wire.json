@@ -282,6 +282,104 @@
       "decidable": false,
       "reEnabled": 0,
       "reEnableDeferredByCap": 0
+    },
+    "prune_disabled": {
+      "source": "live",
+      "fetchedAt": "2026-08-12T00:00:00.000Z",
+      "ranAt": "2026-08-12T00:00:05.000Z",
+      "added": 0,
+      "updated": 69,
+      "staled": 3,
+      "enabledImageInputChanged": 0,
+      "materialized": true,
+      "providerCounts": {},
+      "decidable": true,
+      "reEnabled": 0,
+      "reEnableDeferredByCap": 0,
+      "pruned": 3,
+      "pruneAborted": false
+    },
+    "prune_aborted": {
+      "source": "live",
+      "fetchedAt": "2026-08-12T00:00:00.000Z",
+      "ranAt": "2026-08-12T00:00:05.000Z",
+      "added": 0,
+      "updated": 69,
+      "staled": 3,
+      "enabledImageInputChanged": 0,
+      "materialized": false,
+      "providerCounts": {},
+      "decidable": true,
+      "reEnabled": 0,
+      "reEnableDeferredByCap": 0,
+      "pruned": 0,
+      "pruneAborted": true
+    },
+    "prune_re_enabled": {
+      "source": "live",
+      "fetchedAt": "2026-08-12T00:00:00.000Z",
+      "ranAt": "2026-08-12T00:00:05.000Z",
+      "added": 0,
+      "updated": 72,
+      "staled": 0,
+      "enabledImageInputChanged": 0,
+      "materialized": true,
+      "providerCounts": {
+        "claude": {
+          "inserted": 0,
+          "autoEnabled": 0,
+          "skippedUndecidable": 0,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 0,
+          "reEnabled": 3,
+          "reEnableDeferredByCap": 0
+        }
+      },
+      "decidable": true,
+      "reEnabled": 3,
+      "reEnableDeferredByCap": 0,
+      "pruned": 0,
+      "pruneAborted": false
+    },
+    "prune_re_enable_capped": {
+      "source": "live",
+      "fetchedAt": "2026-08-12T00:00:00.000Z",
+      "ranAt": "2026-08-12T00:00:05.000Z",
+      "added": 0,
+      "updated": 72,
+      "staled": 0,
+      "enabledImageInputChanged": 0,
+      "materialized": true,
+      "providerCounts": {
+        "claude": {
+          "inserted": 0,
+          "autoEnabled": 0,
+          "skippedUndecidable": 0,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 0,
+          "reEnabled": 1,
+          "reEnableDeferredByCap": 2
+        }
+      },
+      "decidable": true,
+      "reEnabled": 1,
+      "reEnableDeferredByCap": 2,
+      "pruned": 0,
+      "pruneAborted": false
     }
   }
 }
