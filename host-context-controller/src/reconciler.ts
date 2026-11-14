@@ -2975,6 +2975,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * undischarged Secret-change evidence. Not-ready verdicts, first deploys and new generations
    * are published as today. A ready verdict has no maximum age while reads keep
    * failing: this process only knows of Secret changes it observed or read.
+   * When a resource sync that attempted a write or read another Secret revision
+   * fails, the reconcile also stops a live readiness poll, so the not-ready
+   * verdict stands until the next completed reconcile publishes one.
    */
   private keepReadyVerdictOverTransientFailure(
     server: McpServerCRD,
@@ -3293,6 +3296,16 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         })
       ) {
         return false
+      }
+      // R1-H1 V3: this reconcile attempted a write that did not complete, or read
+      // another Secret revision, so a rollout read alone no longer proves the
+      // desired runtime. Stop a live readiness window, as the fail-closed branch
+      // does, so its tick cannot republish ready; the not-ready verdict below is
+      // then the record, and the next completed reconcile publishes. An
+      // exhausted window holds the terminal verdict and is left alone.
+      const poll = this.readinessPolls.get(server.name)
+      if (runtimeDiffers && poll !== undefined && (poll.timer !== undefined || poll.ticking)) {
+        this.retireReadinessWindow(server.name)
       }
       this.setStatus(server.name, {
         deployed: false,

@@ -4077,6 +4077,141 @@ describe('#1488: a fail-closed Secret verdict is persisted before the retract', 
   })
 })
 
+describe('R1-H1 V3: a reconcile that failed with the runtime known to differ stops the readiness poll', () => {
+  let logs: ReturnType<typeof captureH3Logs>
+  beforeEach(() => {
+    logs = captureH3Logs()
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    logs.restore()
+    vi.useRealTimers()
+  })
+
+  const livePolls = (f: ReturnType<typeof h3Cluster>) =>
+    [...(f.reconciler as any).readinessPolls.values()].filter(
+      (poll: any) => poll.timer !== undefined || poll.ticking
+    ).length
+
+  const rotateSecret = (f: ReturnType<typeof h3Cluster>) =>
+    f.coreApi.readNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => ({
+      metadata: { name, resourceVersion: '2' },
+      data: { password: storedSecret('fixture-input-value-2') },
+    }))
+
+  /** A live window, then a reconcile whose Deployment replace times out. */
+  async function failedWriteWithLiveWindow(drift: 'spec' | 'secret') {
+    const f = h3Cluster({ rolloutReady: false })
+    const server = h3Server()
+    await f.reconciler.reconcile(server)
+    expect(livePolls(f)).toBe(1)
+    if (drift === 'spec') {
+      f.deployments.get('h3-server').spec.template.spec.containers[0].image = 'drifted/image:manual'
+    } else {
+      rotateSecret(f)
+    }
+    f.appsApi.replaceNamespacedDeployment.mockRejectedValueOnce(
+      h3Timeout('replaceNamespacedDeployment')
+    )
+    await f.reconciler.reconcile(server)
+    expect(f.appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(livePolls(f)).toBe(0)
+    f.setRolloutReady(true)
+    await vi.advanceTimersByTimeAsync(5000)
+    return { f, server }
+  }
+
+  it('T3.1 a failed Deployment replace stops the window, so the tick cannot publish ready', async () => {
+    const { f, server } = await failedWriteWithLiveWindow('spec')
+
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
+    expect(f.reconciler.getStatus(server).message).toMatch(/^Resource sync failed/)
+    expect(f.condition('Ready')?.status).not.toBe('True')
+  })
+
+  it('T3.2 then a retry whose Service read times out publishes not-ready', async () => {
+    const { f, server } = await failedWriteWithLiveWindow('spec')
+    const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+
+    await f.reconciler.reconcile(server)
+
+    expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
+  })
+
+  it('T3.3 then a retry whose Secret read times out keeps the not-ready verdict', async () => {
+    const { f, server } = await failedWriteWithLiveWindow('spec')
+    const before = await reconcileCallFailures('secret_read', 'verdict_kept')
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
+
+    await f.reconciler.reconcile(server)
+
+    expect(await reconcileCallFailures('secret_read', 'verdict_kept')).toBe(before + 1)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
+  })
+
+  it('T3.4 (control) a failed sync that attempted no write leaves the window, and the tick publishes ready', async () => {
+    const f = h3Cluster({ rolloutReady: false })
+    const server = h3Server()
+    await f.reconciler.reconcile(server)
+    expect(livePolls(f)).toBe(1)
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    await f.reconciler.reconcile(server)
+    expect(livePolls(f)).toBe(1)
+    f.setRolloutReady(true)
+
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+    expect(f.condition('Ready')?.status).toBe('True')
+  })
+
+  it('T3.5 then a retry that succeeds applies the desired Deployment and publishes ready', async () => {
+    const { f, server } = await failedWriteWithLiveWindow('spec')
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(2)
+    expect(f.deployments.get('h3-server').spec.template.spec.containers[0].image).not.toBe(
+      'drifted/image:manual'
+    )
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+  })
+
+  it('T3.6 an exhausted window survives a failed Service replace and keeps its terminal verdict', async () => {
+    const f = h3Cluster({ rolloutReady: false })
+    const server = h3Server()
+    await f.reconciler.reconcile(server)
+    await vi.advanceTimersByTimeAsync(24 * 5000)
+    expect(f.condition('DeploymentReady')?.reason).toBe('RolloutIncomplete')
+    const exhausted = (f.reconciler as any).readinessPolls.get('h3-server')
+    expect(exhausted?.exhausted).toBe(true)
+    f.services.get('h3-server').spec.ports[0].port = 1
+    f.coreApi.replaceNamespacedService.mockRejectedValueOnce(h3Timeout('replaceNamespacedService'))
+    await f.reconciler.reconcile(server)
+    // Witness: the failed reconcile attempted the Service write.
+    expect(f.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(1)
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(2)
+    expect(f.condition('DeploymentReady')?.reason).toBe('RolloutIncomplete')
+    expect((f.reconciler as any).readinessPolls.get('h3-server')?.exhausted).toBe(true)
+    expect((f.reconciler as any).verdictsAwaitingExternalChange.get('h3-server')).toBe(
+      'RolloutIncomplete'
+    )
+  })
+
+  it('T3.7 a Secret changed without an event, with a failed replace, is not published ready by the tick', async () => {
+    const { f, server } = await failedWriteWithLiveWindow('secret')
+
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
+    expect(f.condition('Ready')?.status).not.toBe('True')
+  })
+})
+
 describe('#1338: out-of-pass obligations reach the incomplete-reconciliation listener', () => {
   let logs: ReturnType<typeof captureH3Logs>
   beforeEach(() => {
