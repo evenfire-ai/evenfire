@@ -2,8 +2,9 @@
  * Where the memory tools (`memory_write`, `memory_read`) put a path.
  *
  * A named note of a person lives in their `memory/` folder: a free relative
- * path `p` becomes `memory/<p>`, and every note is Markdown (`.md` is appended
- * unless the last path segment already ends in `.md`). Paths that are refused
+ * path `p` becomes `memory/<p>`, and every note is Markdown (trailing dots of
+ * the last path segment are removed, then `.md` is appended unless that segment
+ * already ends in `.md`; `notes.` and `notes` are the same note). Paths that are refused
  * today, collective paths and `daily/...` are returned unchanged, so they keep
  * today's routing and today's refusal messages.
  *
@@ -24,16 +25,19 @@ const DAILY_DIR = 'daily'
 const USERS_DIR = 'users'
 
 /**
- * Notes are only Markdown: append `.md` unless the last path segment already
- * ends in `.md`. Case-sensitive, like the `.md` test `memory_search` uses to
- * pick files, so every note the tool writes is searched.
+ * Notes are only Markdown: remove every trailing `.` of the last path segment,
+ * then append `.md` unless that segment already ends in `.md`. So `notes.` and
+ * `notes` name the same note. Case-sensitive, like the `.md` test
+ * `memory_search` uses to pick files, so every note the tool writes is searched.
  */
 function withMarkdownExtension(relativePath: string): string {
-  const lastSegment = relativePath.slice(relativePath.lastIndexOf('/') + 1)
-  return lastSegment.endsWith('.md') ? relativePath : `${relativePath}.md`
+  const segmentStart = relativePath.lastIndexOf('/') + 1
+  const lastSegment = relativePath.slice(segmentStart).replace(/\.+$/, '')
+  const stripped = relativePath.slice(0, segmentStart) + lastSegment
+  return lastSegment.endsWith('.md') ? stripped : `${stripped}.md`
 }
 
-/** Path the memory tools use for `raw`. Unchanged when `raw` is refused today or exempt; else `memory/<normalized>`. */
+/** Path the memory tools use for `raw`. Unchanged when `raw` is refused by its text or exempt; else `memory/<normalized>` as a Markdown note. */
 export function memoryNotePath(raw: string): string {
   // Refused by WorkspaceService.resolvePath with today's error.
   if (raw.includes('\0') || path.isAbsolute(raw) || raw.includes('..')) return raw

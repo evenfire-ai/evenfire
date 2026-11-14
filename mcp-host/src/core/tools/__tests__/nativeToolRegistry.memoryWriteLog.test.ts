@@ -94,3 +94,25 @@ describe('NativeToolRegistry — memory write record', () => {
     await expect(fs.readFile(file, 'utf-8')).resolves.toBe('zznolog')
   })
 })
+
+describe('NativeToolRegistry — file_write reserves the memory folders when memory is enabled', () => {
+  it('with a ScopedWorkspace, file_write to daily is refused and a file inside it is written', async () => {
+    const tools = registry(source, undefined)
+    const userRoot = path.join(baseRoot, 'users', deriveUserKeyFromSource(source))
+    const refused = await tools.get('file_write')!.execute({ path: 'daily', content: 'x' })
+    expect(refused.is_error).toBe(true)
+    expect(refused.content).toBe(
+      "'daily' is a memory folder, not a file. Write inside it: daily/<file>.md."
+    )
+    const ok = await tools.get('file_write')!.execute({ path: 'daily/x.md', content: 'inside' })
+    expect(ok.is_error).toBe(false)
+    await expect(fs.readFile(path.join(userRoot, 'daily', 'x.md'), 'utf-8')).resolves.toBe('inside')
+  })
+
+  it('with no workspace (memory disabled), file_write to memory writes the file', async () => {
+    const tools = new NativeToolRegistry(config(), 'conversation-1', undefined, source, undefined)
+    const out = await tools.get('file_write')!.execute({ path: 'memory', content: 'plain' })
+    expect(out.is_error).toBe(false)
+    expect((await fs.stat(path.join(baseRoot, 'memory'))).isFile()).toBe(true)
+  })
+})

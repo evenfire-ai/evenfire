@@ -76,6 +76,31 @@ export function isCollectivePath(relativePath: string): boolean {
   return false
 }
 
+/** Memory folders of a caller's folder: named notes and the daily log. */
+export const CALLER_MEMORY_FOLDERS: ReadonlySet<string> = new Set(['memory', 'daily'])
+
+/** Memory folder at the Host root: shared notes. */
+const HOST_MEMORY_FOLDERS: ReadonlySet<string> = new Set(['memories'])
+
+/**
+ * The memory folder that `relativePath` names exactly, or null. `caller` is a
+ * person's folder (`memory`, `daily`); `host` is the Host root (`memories`).
+ * Case-sensitive, like the locked names.
+ */
+export function memoryFolderAt(relativePath: string, location: 'caller' | 'host'): string | null {
+  const n = normalizeRel(relativePath)
+  const folders = location === 'caller' ? CALLER_MEMORY_FOLDERS : HOST_MEMORY_FOLDERS
+  return folders.has(n) ? n : null
+}
+
+/** Thrown when a write names a memory folder itself: the path is reserved for the folder. */
+export class MemoryFolderPathError extends Error {
+  constructor(folder: string) {
+    super(`'${folder}' is a memory folder, not a file. Write inside it: ${folder}/<file>.md.`)
+    this.name = 'MemoryFolderPathError'
+  }
+}
+
 /**
  * Thrown when a scoped view is asked to address the `users/` namespace directly
  * (e.g. `users/<other>/...`). A per-user view addresses its own files relative
@@ -107,6 +132,20 @@ export class ScopedWorkspace implements Workspace {
   }
 
   /**
+   * `route()` for a write: the exact path of a memory folder is reserved, so a
+   * write never creates a file where the folder must be. `memories` is
+   * reserved at the Host root. The user-side reservation (`memory`, `daily`)
+   * has no production caller today, because `memory_write` maps both names to
+   * notes first; it is kept by the owner's L4 decision.
+   */
+  private routeWrite(relativePath: string): WorkspaceService {
+    const target = this.route(relativePath)
+    const folder = memoryFolderAt(relativePath, target === this.collective ? 'host' : 'caller')
+    if (folder !== null) throw new MemoryFolderPathError(folder)
+    return target
+  }
+
+  /**
    * Absolute per-user root, used to scope the raw file tools (`file_read`/
    * `file_write`) which operate on a path string rather than this interface.
    * Not on the `Workspace` interface — it is ScopedWorkspace-specific.
@@ -122,10 +161,10 @@ export class ScopedWorkspace implements Workspace {
     return this.route(relativePath).read(relativePath)
   }
   async write(relativePath: string, content: string): Promise<string> {
-    return this.route(relativePath).write(relativePath, content)
+    return this.routeWrite(relativePath).write(relativePath, content)
   }
   async append(relativePath: string, content: string): Promise<string> {
-    return this.route(relativePath).append(relativePath, content)
+    return this.routeWrite(relativePath).append(relativePath, content)
   }
   async delete(relativePath: string): Promise<void> {
     return this.route(relativePath).delete(relativePath)

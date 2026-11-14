@@ -137,11 +137,48 @@ describe('memoryNotePath — named notes go to memory/ and are Markdown', () => 
     expect(memoryNotePath(raw)).toBe(expected)
   })
 
-  it('extension rule (D104): notes. → memory/notes..md, refused by a real write with the traversal error', async () => {
-    expect(memoryNotePath('notes.')).toBe('memory/notes..md')
-    await expect(provider.forUser('alice').write(memoryNotePath('notes.'), 'x')).rejects.toThrow(
-      'Directory traversal (..) not allowed'
-    )
+  it.each([
+    ['notes.', 'memory/notes.md'],
+    ['v2.', 'memory/v2.md'],
+    ['memory/notes.', 'memory/notes.md'],
+    ['a/b.', 'memory/a/b.md'],
+    ['MEMORY.md.', 'memory/MEMORY.md'],
+    ['x.md.', 'memory/x.md'],
+    ['notes./', 'memory/notes.md'],
+    ['a./b', 'memory/a./b.md'],
+    ['IDENTITY.md.', 'memory/IDENTITY.md'],
+    ['HEARTBEAT.md.', 'memory/HEARTBEAT.md'],
+    ['users.', 'memory/users.md'],
+    ['daily.', 'memory/daily.md'],
+    ['memory.', 'memory/memory.md'],
+    ['memories.', 'memory/memories.md'],
+    ['.gfs-downloads.', 'memory/.gfs-downloads.md'],
+  ])(
+    'trailing dots of the last segment are removed before the extension rule: %s → %s',
+    (raw, expected) => {
+      expect(memoryNotePath(raw)).toBe(expected)
+    }
+  )
+
+  it.each(['state.db.', 'daily/x.', 'memories/x.'])(
+    '%s keeps its class and is returned unchanged',
+    raw => {
+      expect(memoryNotePath(raw)).toBe(raw)
+    }
+  )
+
+  it('notes. is written as memory/notes.md, while names holding .. keep the traversal refusal', async () => {
+    const alice = provider.forUser('alice')
+    await alice.write(memoryNotePath('notes.'), 'dotted')
+    await expect(
+      fs.readFile(path.join(baseRoot, 'users', 'alice', 'memory', 'notes.md'), 'utf-8')
+    ).resolves.toBe('dotted')
+    for (const raw of ['notes..', '...', 'a/..']) {
+      expect(memoryNotePath(raw)).toBe(raw)
+      await expect(alice.write(memoryNotePath(raw), 'x')).rejects.toThrow(
+        'Directory traversal (..) not allowed'
+      )
+    }
   })
 
   it('a named note lands in the caller folder under memory/ through a real ScopedWorkspace', async () => {

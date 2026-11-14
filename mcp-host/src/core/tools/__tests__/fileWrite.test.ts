@@ -10,7 +10,7 @@ describe('FileWriteTool — admin-managed file gate', () => {
 
   beforeEach(async () => {
     workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fwgate-'))
-    tool = new FileWriteTool(workspaceDir)
+    tool = new FileWriteTool(workspaceDir, new Set())
   })
 
   for (const name of ['IDENTITY.md', 'SOUL.md', 'AGENTS.md', 'USER.md']) {
@@ -50,5 +50,46 @@ describe('FileWriteTool — admin-managed file gate', () => {
   it('allows writes to subdirectory paths even when basename matches', async () => {
     const res = await tool.execute({ path: 'daily/AGENTS.md', content: 'subdir ok' })
     expect(res.is_error).toBe(false)
+  })
+})
+
+describe('FileWriteTool — reserved memory folder names', () => {
+  let workspaceDir: string
+
+  beforeEach(async () => {
+    workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fwreserved-'))
+  })
+
+  it.each([
+    ['memory', 'memory'],
+    ['memory/', 'memory'],
+    ['./memory', 'memory'],
+    ['daily', 'daily'],
+  ])('with {memory, daily} reserved, %s is refused and nothing is created', async (p, name) => {
+    const tool = new FileWriteTool(workspaceDir, new Set(['memory', 'daily']))
+    const res = await tool.execute({ path: p, content: 'x' })
+    expect(res.is_error).toBe(true)
+    expect(res.content).toBe(
+      `'${name}' is a memory folder, not a file. Write inside it: ${name}/<file>.md.`
+    )
+    expect(await fs.readdir(workspaceDir)).toEqual([])
+  })
+
+  it('with {memory, daily} reserved, memories and memory/x.md are written', async () => {
+    const tool = new FileWriteTool(workspaceDir, new Set(['memory', 'daily']))
+    for (const p of ['memories', 'memory/x.md']) {
+      const res = await tool.execute({ path: p, content: `body ${p}` })
+      expect(res.is_error).toBe(false)
+      await expect(fs.readFile(path.join(workspaceDir, p), 'utf-8')).resolves.toBe(`body ${p}`)
+    }
+  })
+
+  it('with nothing reserved, memory and daily are written as files', async () => {
+    const tool = new FileWriteTool(workspaceDir, new Set())
+    for (const p of ['memory', 'daily']) {
+      const res = await tool.execute({ path: p, content: `body ${p}` })
+      expect(res.is_error).toBe(false)
+      expect((await fs.stat(path.join(workspaceDir, p))).isFile()).toBe(true)
+    }
   })
 })

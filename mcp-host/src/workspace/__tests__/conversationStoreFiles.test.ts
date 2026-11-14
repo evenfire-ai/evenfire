@@ -119,7 +119,7 @@ describe('conversation-store files are not agent-accessible', () => {
 
   it('file_read and file_write deny them, directly and through a symlink', async () => {
     const reader = new FileReadTool(root)
-    const writer = new FileWriteTool(root)
+    const writer = new FileWriteTool(root, new Set())
     for (const p of PROTECTED) {
       const read = await reader.execute({ path: p })
       expect(read.is_error, `file_read ${p}`).toBe(true)

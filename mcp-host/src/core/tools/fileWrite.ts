@@ -4,6 +4,7 @@ import {
   isProtectedWorkspacePath,
   protectedWorkspacePathMessage,
 } from '../../workspace/protectedPaths'
+import { MemoryFolderPathError, normalizeRel } from '../../workspace/scopedWorkspace'
 import { adminManagedIdentityFileMessage, isLockedPath } from '../../workspace/service'
 import { Tool } from '../interfaces'
 import { ToolOutput } from '../types'
@@ -12,7 +13,15 @@ import { validatePath } from './pathValidation'
 const MAX_WRITE_SIZE = 5 * 1024 * 1024 // 5MB
 
 export class FileWriteTool implements Tool {
-  constructor(private readonly workspacePath: string) {}
+  /**
+   * `reservedFolders`: names that must stay folders at the root of
+   * `workspacePath` (the memory folders of a caller's folder when memory is
+   * enabled; empty otherwise). A write to one of them is refused.
+   */
+  constructor(
+    private readonly workspacePath: string,
+    private readonly reservedFolders: ReadonlySet<string>
+  ) {}
 
   name() {
     return 'file_write'
@@ -77,6 +86,15 @@ export class FileWriteTool implements Tool {
     if (isProtectedWorkspacePath(filePath)) {
       return {
         content: protectedWorkspacePathMessage(filePath),
+        duration_ms: Date.now() - startTime,
+        is_error: true,
+      }
+    }
+
+    const normalized = normalizeRel(filePath)
+    if (this.reservedFolders.has(normalized)) {
+      return {
+        content: new MemoryFolderPathError(normalized).message,
         duration_ms: Date.now() - startTime,
         is_error: true,
       }

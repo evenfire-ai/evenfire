@@ -49,7 +49,7 @@ describe('identity-files lockdown — agent write surfaces', () => {
   beforeEach(async () => {
     workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lockdown-'))
     workspace = new WorkspaceService(workspaceDir)
-    fileWrite = new FileWriteTool(workspaceDir)
+    fileWrite = new FileWriteTool(workspaceDir, new Set())
     memoryWrite = new PersistentMemoryWriteTool(workspace)
 
     // Privileged seed of the four locked files. After this each file is 0o444.

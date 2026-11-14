@@ -132,7 +132,7 @@ describe('protected workspace paths', () => {
     expect(aliased.is_error).toBe(true)
     expect(aliased.content).toContain('Reserved workspace path')
 
-    const write = new FileWriteTool(root)
+    const write = new FileWriteTool(root, new Set())
     const blockedWrite = await write.execute({
       path: 'alias.md',
       content: 'replacement',

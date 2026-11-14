@@ -32,7 +32,7 @@ import {
   resolveCallerOutputDir,
 } from '../../workspace/callerOutputs'
 import type { MemoryWriteLog } from '../../workspace/memoryWriteLog'
-import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
+import { CALLER_MEMORY_FOLDERS, ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
 import { deriveUserKeyFromSource } from '../../workspace/userKey'
 import type { AttachmentReadLedger } from '../attachments/attachmentReadBudget'
@@ -321,7 +321,18 @@ export class NativeToolRegistry implements ToolRegistry {
     // radius is self-injection of the user's own daily snapshot (low). Closing
     // it (route memory/daily-class file_write through WorkspaceService) is future
     // hardening, independent of F5.
-    if (fileToolsRoot !== undefined) this.register(new FileWriteTool(fileToolsRoot))
+    // With memory enabled the file tools run in the caller's folder, whose
+    // `memory` and `daily` paths must stay folders; file_write refuses them.
+    // With a GFS store that root is under CLERUM_WORKSPACE_PATH, which equals
+    // the memory root on the deployed Hosts.
+    if (fileToolsRoot !== undefined) {
+      this.register(
+        new FileWriteTool(
+          fileToolsRoot,
+          workspace instanceof ScopedWorkspace ? CALLER_MEMORY_FOLDERS : new Set<string>()
+        )
+      )
+    }
     // A Host-owned GFS store binds the shell to the verified caller root. The
     // shell never calls the store itself (#1019): it only re-verifies that the
     // caller root is still canonical before each command.

@@ -8,9 +8,17 @@ import {
   isProtectedWorkspacePath,
   protectedWorkspacePathMessage,
 } from '../../workspace/protectedPaths'
-import { isCollectivePath, normalizeRel } from '../../workspace/scopedWorkspace'
+import {
+  MemoryFolderPathError,
+  isCollectivePath,
+  normalizeRel,
+} from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
-import { adminManagedIdentityFileMessage, isLockedPath } from '../../workspace/service'
+import {
+  WorkspacePathBlockedError,
+  adminManagedIdentityFileMessage,
+  isLockedPath,
+} from '../../workspace/service'
 import { Tool } from '../interfaces'
 import { ToolOutput } from '../types'
 
@@ -24,9 +32,25 @@ function todayDate(): string {
   return new Date().toISOString().slice(0, 10) // YYYY-MM-DD
 }
 
+const MEMORY_FOLDER_NAMES: ReadonlySet<string> = new Set(['memory', 'daily', 'memories'])
+
+/** Text for a path below a regular file; names the blocking file by its relative path. */
+function blockedPathMessage(err: WorkspacePathBlockedError): string {
+  if (MEMORY_FOLDER_NAMES.has(err.blocker)) {
+    return (
+      `The memory folder '${err.blocker}' is blocked: a file named '${err.blocker}' exists ` +
+      'where the folder must be. Rename or remove that file, then try again.'
+    )
+  }
+  return `'${err.blocker}' is a file where a folder is needed. Rename or remove that file, then try again.`
+}
+
 function protectedPathOutput(err: unknown, startTime: number): ToolOutput | null {
   if (err instanceof ProtectedWorkspacePathError) {
     return { content: err.message, duration_ms: Date.now() - startTime, is_error: true }
+  }
+  if (err instanceof WorkspacePathBlockedError) {
+    return { content: blockedPathMessage(err), duration_ms: Date.now() - startTime, is_error: true }
   }
   return null
 }
@@ -164,9 +188,17 @@ export class PersistentMemoryWriteTool implements Tool {
       (err.name === 'LockedFileError' ||
         err instanceof ProtectedWorkspacePathError ||
         err.name === 'MemoryScanRejectionError' ||
-        err.name === 'CrossUserAccessError')
+        err.name === 'CrossUserAccessError' ||
+        err instanceof MemoryFolderPathError)
     ) {
       return { content: err.message, duration_ms: Date.now() - startTime, is_error: true }
+    }
+    if (err instanceof WorkspacePathBlockedError) {
+      return {
+        content: blockedPathMessage(err),
+        duration_ms: Date.now() - startTime,
+        is_error: true,
+      }
     }
     return null
   }

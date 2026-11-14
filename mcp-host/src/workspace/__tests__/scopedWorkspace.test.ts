@@ -4,7 +4,13 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 import { NativeToolRegistry } from '../../core/tools/nativeToolRegistry'
-import { CrossUserAccessError, ScopedWorkspaceProvider, isCollectivePath } from '../scopedWorkspace'
+import {
+  CrossUserAccessError,
+  MemoryFolderPathError,
+  ScopedWorkspaceProvider,
+  isCollectivePath,
+  memoryFolderAt,
+} from '../scopedWorkspace'
 import { WorkspaceService } from '../service'
 import { SYSTEM_USER_KEY } from '../userKey'
 
@@ -304,4 +310,99 @@ describe('private memory (F5)', () => {
     expect(res.is_error).toBe(true)
     expect(res.content).toContain('rejected')
   })
+})
+
+describe('memoryFolderAt — exact memory folder paths by location', () => {
+  it.each(['memories', 'memories/', 'memories/.', './memories', 'memories//'])(
+    '%s names the Host folder memories only',
+    p => {
+      expect(memoryFolderAt(p, 'host')).toBe('memories')
+      expect(memoryFolderAt(p, 'caller')).toBeNull()
+    }
+  )
+
+  it.each([
+    ['memory', 'memory'],
+    ['memory/', 'memory'],
+    ['memory/./', 'memory'],
+    ['memory//', 'memory'],
+    ['./memory', 'memory'],
+    ['daily', 'daily'],
+    ['daily/', 'daily'],
+  ])('%s names the caller folder %s only', (p, name) => {
+    expect(memoryFolderAt(p, 'caller')).toBe(name)
+    expect(memoryFolderAt(p, 'host')).toBeNull()
+  })
+
+  it.each([
+    'memory/x.md',
+    'memories/x.md',
+    'daily/2026-01-02.md',
+    'memory.md',
+    'mymemory',
+    'a/memory',
+    'Memory',
+    'Daily',
+  ])('%s is not a memory folder path', p => {
+    expect(memoryFolderAt(p, 'caller')).toBeNull()
+    expect(memoryFolderAt(p, 'host')).toBeNull()
+  })
+})
+
+describe('ScopedWorkspace.write/append — memory folder paths are reserved', () => {
+  type State = 'absent' | 'folder' | 'file'
+  async function place(abs: string, state: State): Promise<void> {
+    if (state === 'folder') await fs.mkdir(abs, { recursive: true })
+    if (state === 'file') {
+      await fs.mkdir(path.dirname(abs), { recursive: true })
+      await fs.writeFile(abs, 'pre-existing', 'utf-8')
+    }
+  }
+  async function kind(abs: string): Promise<State> {
+    try {
+      return (await fs.stat(abs)).isDirectory() ? 'folder' : 'file'
+    } catch {
+      return 'absent'
+    }
+  }
+  const states: State[] = ['absent', 'folder', 'file']
+
+  for (const state of states) {
+    for (const p of ['memories', 'memories/.']) {
+      it(`write and append of ${p} with the Host folder ${state}: MemoryFolderPathError, nothing changed`, async () => {
+        const abs = path.join(baseRoot, 'memories')
+        await place(abs, state)
+        const ws = provider.forUser('alice')
+        await expect(ws.write(p, 'x')).rejects.toBeInstanceOf(MemoryFolderPathError)
+        await expect(ws.append(p, 'x')).rejects.toThrow(
+          "'memories' is a memory folder, not a file. Write inside it: memories/<file>.md."
+        )
+        expect(await kind(abs)).toBe(state)
+        if (state === 'file') {
+          await expect(fs.readFile(abs, 'utf-8')).resolves.toBe('pre-existing')
+        } else {
+          // Witness: the workspace writes inside the folder in the same state.
+          await ws.write('memories/x.md', 'inside')
+          await expect(fs.readFile(path.join(abs, 'x.md'), 'utf-8')).resolves.toBe('inside')
+        }
+      })
+    }
+
+    for (const p of ['memory', 'daily']) {
+      it(`write and append of ${p} in the caller folder with the folder ${state}: MemoryFolderPathError, nothing changed`, async () => {
+        const abs = path.join(baseRoot, 'users', 'alice', p)
+        await place(abs, state)
+        const ws = provider.forUser('alice')
+        await expect(ws.write(p, 'x')).rejects.toBeInstanceOf(MemoryFolderPathError)
+        await expect(ws.append(`${p}/`, 'x')).rejects.toBeInstanceOf(MemoryFolderPathError)
+        expect(await kind(abs)).toBe(state)
+        if (state === 'file') {
+          await expect(fs.readFile(abs, 'utf-8')).resolves.toBe('pre-existing')
+        } else {
+          await ws.write(`${p}/x.md`, 'inside')
+          await expect(fs.readFile(path.join(abs, 'x.md'), 'utf-8')).resolves.toBe('inside')
+        }
+      })
+    }
+  }
 })

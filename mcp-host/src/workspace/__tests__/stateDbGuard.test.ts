@@ -80,7 +80,7 @@ describe('state-db guard enforcement', () => {
 
   describe('file_write tool', () => {
     it('rejects a write to state.db loudly; db untouched', async () => {
-      const tool = new FileWriteTool(workspace)
+      const tool = new FileWriteTool(workspace, new Set())
       const out = await tool.execute({ path: 'state.db', content: 'overwrite' })
       expect(out.is_error).toBe(true)
       expect(out.content).toContain('session state database')
@@ -88,7 +88,7 @@ describe('state-db guard enforcement', () => {
     })
 
     it('rejects the WAL laterals and .clerum-state', async () => {
-      const tool = new FileWriteTool(workspace)
+      const tool = new FileWriteTool(workspace, new Set())
       for (const p of ['state.db-wal', 'state.db-shm', '.clerum-state/x']) {
         const out = await tool.execute({ path: p, content: 'x' })
         expect(out.is_error).toBe(true)

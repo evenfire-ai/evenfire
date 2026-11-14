@@ -285,13 +285,118 @@ describe('memory tools — named notes live in the caller memory/ folder', () =>
     )
   })
 
-  it('row 13e: notes. is refused with the traversal error and nothing is written', async () => {
-    const ok = await alice.write.execute({ content: 'before', target: 'first.md' })
-    expect(ok.content).toBe('Written to memory/first.md (append)')
-    await expect(alice.write.execute({ content: 'x', target: 'notes.' })).rejects.toThrow(
-      'Directory traversal (..) not allowed'
+  it('row 13e: notes. is the note memory/notes.md for write, read and the record', async () => {
+    const log = new CapturingLog()
+    const ws = new ScopedWorkspaceProvider(baseRoot).forUser('alice')
+    const write = new PersistentMemoryWriteTool(ws, { log, userKey: 'alice' })
+    const out = await write.execute({ content: 'zzdotted', target: 'notes.' })
+    expect(out.is_error).toBe(false)
+    expect(out.content).toBe('Written to memory/notes.md (append)')
+    await expect(fs.readFile(userFile('alice', 'memory/notes.md'), 'utf-8')).resolves.toBe(
+      'zzdotted'
     )
-    expect(await fs.readdir(userFile('alice', 'memory'))).toEqual(['first.md'])
+    expect(await exists(userFile('alice', 'memory/notes..md'))).toBe(false)
+    expect(await exists(userFile('alice', 'notes.'))).toBe(false)
+    for (const p of ['notes.', 'notes']) {
+      const read = await alice.read.execute({ path: p })
+      expect(read.is_error).toBe(false)
+      expect(readJson(read.content)).toMatchObject({ path: 'memory/notes.md', content: 'zzdotted' })
+    }
+    expect(log.entries).toHaveLength(1)
+    expect(log.entries[0].relativePath).toBe('memory/notes.md')
+    await write.execute({ content: 'zzplain', target: 'notes' })
+    await expect(fs.readFile(userFile('alice', 'memory/notes.md'), 'utf-8')).resolves.toContain(
+      'zzplain'
+    )
+    expect(await fs.readdir(userFile('alice', 'memory'))).toEqual(['notes.md'])
+  })
+
+  it.each(['memories', 'memories/', 'memories/.'])(
+    'reserved: memory_write to %s is refused with the folder absent or present, and nothing is recorded',
+    async target => {
+      const log = new CapturingLog()
+      const write = new PersistentMemoryWriteTool(
+        new ScopedWorkspaceProvider(baseRoot).forUser('alice'),
+        {
+          log,
+          userKey: 'alice',
+        }
+      )
+      const hostFolder = path.join(baseRoot, 'memories')
+      for (const present of [false, true]) {
+        if (present) await fs.mkdir(hostFolder, { recursive: true })
+        const out = await write.execute({ content: 'zzreserved', target })
+        expect(out.is_error).toBe(true)
+        expect(out.content).toBe(
+          "'memories' is a memory folder, not a file. Write inside it: memories/<file>.md."
+        )
+        expect(await exists(hostFolder)).toBe(present)
+      }
+      expect(log.entries).toHaveLength(0)
+      // Witness and P1 regression: the shared folder works for another user.
+      const ok = await bob.write.execute({ content: 'zzteam', target: 'memories/team.md' })
+      expect(ok.content).toBe('Written to memories/team.md (append)')
+      expect(readJson((await bob.read.execute({ path: 'memories/team.md' })).content).content).toBe(
+        'zzteam'
+      )
+    }
+  )
+
+  it('blocked: a file at users/alice/memory makes write, read and tree answer with an error result', async () => {
+    const log = new CapturingLog()
+    const ws = new ScopedWorkspaceProvider(baseRoot).forUser('alice')
+    const write = new PersistentMemoryWriteTool(ws, { log, userKey: 'alice' })
+    const tree = new MemoryTreeTool(ws)
+    await fs.mkdir(userFile('alice', ''), { recursive: true })
+    await fs.writeFile(userFile('alice', 'memory'), 'a file', 'utf-8')
+    expect((await fs.stat(userFile('alice', 'memory'))).isFile()).toBe(true)
+    const blocked =
+      "The memory folder 'memory' is blocked: a file named 'memory' exists where the folder must be. " +
+      'Rename or remove that file, then try again.'
+    const outs = [
+      await write.execute({ content: 'zzblocked', target: 'notes' }),
+      await alice.read.execute({ path: 'notes' }),
+      await tree.execute({ path: 'memory/a' }),
+    ]
+    for (const out of outs) {
+      expect(out.is_error).toBe(true)
+      expect(out.content).toBe(blocked)
+      expect(out.content).not.toContain(baseRoot)
+      expect(out.content).not.toContain('users/alice')
+    }
+    // The exact folder path lists as empty, as before the change.
+    const exact = await tree.execute({ path: 'memory' })
+    expect(exact.is_error).toBe(false)
+    expect(JSON.parse(exact.content)).toEqual([])
+    expect(log.entries).toHaveLength(0)
+    await expect(fs.readFile(userFile('alice', 'memory'), 'utf-8')).resolves.toBe('a file')
+    await fs.rm(userFile('alice', 'memory'))
+    const ok = await write.execute({ content: 'zzblocked', target: 'notes' })
+    expect(ok.content).toBe('Written to memory/notes.md (append)')
+  })
+
+  it('blocked: a file at the Host root memories and at users/alice/daily', async () => {
+    await fs.writeFile(path.join(baseRoot, 'memories'), 'a file', 'utf-8')
+    const shared = await alice.write.execute({ content: 'zz', target: 'memories/team.md' })
+    expect(shared.is_error).toBe(true)
+    expect(shared.content).toBe(
+      "The memory folder 'memories' is blocked: a file named 'memories' exists where the folder must be. " +
+        'Rename or remove that file, then try again.'
+    )
+    const sharedRead = await alice.read.execute({ path: 'memories/team.md' })
+    expect(sharedRead.content).toBe(shared.content)
+    await fs.mkdir(userFile('alice', ''), { recursive: true })
+    await fs.writeFile(userFile('alice', 'daily'), 'a file', 'utf-8')
+    const daily = await alice.write.execute({ content: 'zz', target: 'daily_log' })
+    expect(daily.is_error).toBe(true)
+    expect(daily.content).toBe(
+      "The memory folder 'daily' is blocked: a file named 'daily' exists where the folder must be. " +
+        'Rename or remove that file, then try again.'
+    )
+    expect(daily.content).not.toContain(baseRoot)
+    // Witness: a note in the same folder still works.
+    const note = await alice.write.execute({ content: 'zznote', target: 'notes' })
+    expect(note.content).toBe('Written to memory/notes.md (append)')
   })
 
   it('rows 29, 30: daily/ and ./memory become notes and do not block the daily log', async () => {
