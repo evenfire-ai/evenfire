@@ -254,7 +254,7 @@ async function upgradeFromProducerReceipts(
 ): Promise<{ pending: string[] }> {
   const headVersions = CONTROL_API_MIGRATIONS.map(migration => migration.version)
   const pending = headVersions.filter(version => !producerReceipts.includes(version))
-  // Witness: the derived delta ends in the versions this change owns.
+  // Witness: the derived delta ends in the versions the runner owns.
   expect(pending.slice(-PR1_MIGRATION_VERSIONS.length)).toEqual([...PR1_MIGRATION_VERSIONS])
   const upgrade = await withMigrationApplyObserver(new Set(headVersions), async () =>
     initDb({ connect: () => pool.connect() })
@@ -913,7 +913,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     })
   })
 
-  it('upgrades a database from the latest DEV producer with only this change and accepts its migrator', async () => {
+  it('upgrades a database from the latest DEV producer with only the runner-owned versions and accepts its migrator', async () => {
     const databaseName = `r61_latest_dev_${randomBytes(6).toString('hex')}`
     const isolatedUrl = databaseUrl(adminUrl!, databaseName)
     await adminPool.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`)

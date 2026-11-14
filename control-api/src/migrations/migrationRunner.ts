@@ -11,7 +11,8 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
 
 // The one bound between initDb's single dev batch and this runner: every migration
 // up to and including this version runs in the dev batch (db.ts imports it), and
-// this runner owns only the PR1 versions that follow it. Until this change merges,
+// this runner owns every version that follows it: the PR1 versions and the
+// migrations added after them (`0139_gfs_user_homes`, #1168). Until this change merges,
 // a dev merge that brings new migrations moves this bound to dev's last version and
 // renumbers PR1_MIGRATION_VERSIONS above it, and every dev merge moves the latestDev
 // producer in tests/contracts/certification-inputs.json to dev's tip. After it merges
@@ -108,8 +109,10 @@ async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): P
  * Remove it sooner, in
  * the same commit, if a migration creates a function or table this probe
  * matches: the guard runs on every initDb and would stop every later Job.
- * If PR1_MIGRATION_VERSIONS are renumbered after a shared database recorded
- * them, keep the old versions as legacyVersions, or this guard rejects it.
+ * If a PR1 version is renumbered after a shared database recorded it, keep the
+ * old version in legacyVersions, or this guard rejects it. The guard knows only
+ * the names in EARLIER_PR1_MIGRATION_NAMES: a later migration in the list
+ * (`0139_gfs_user_homes`) renumbered without an alias fails in its own DDL instead.
  */
 async function assertNoEarlierPr1Head(
   db: DbClient,
