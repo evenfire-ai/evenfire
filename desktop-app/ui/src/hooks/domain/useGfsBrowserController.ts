@@ -1912,7 +1912,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     drive: DRIVE,
     home,
     homeError: homeQuery.error ? toPresentedMessage(homeQuery.error) : null,
-    loadingHome: homeQuery.isPending || homeQuery.isFetching,
     /** Cache-owner scope without team identity, used only to fence captured Move convergence. */
     principalScope,
     /** Cache-scope key (env + user + team) so the move dialog's queries share
