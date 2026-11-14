@@ -34,6 +34,8 @@ const harness = vi.hoisted(() => {
     sessionPreclearTimeout: null as null | ((notice: any) => void),
     sessionPreclearCancelled: null as null | ((notice: any) => void),
     sessionPreclearRecoveryRequired: null as null | ((notice: any, state: any) => void),
+    sessionPreclearAwaitingReceipt: null as null | ((notice: any, state: any) => void),
+    sessionPreclearReceiptCommitted: null as null | ((notice: any) => void),
     sessionPreclearRetired: null as null | ((notice: any) => void),
     parseSandboxUiDeepLink: vi.fn(() => null),
     registeredLogout: null as null | (() => Promise<unknown>),
@@ -153,6 +155,8 @@ vi.mock('../appService.js', async importOriginal => {
         harness.sessionPreclearCancelled = options?.onSessionPreclearCancelled ?? null
         harness.sessionPreclearRecoveryRequired = options?.onSessionPreclearRecoveryRequired ?? null
         harness.sessionPreclearRetired = options?.onSessionPreclearRetired ?? null
+        harness.sessionPreclearAwaitingReceipt = options?.onSessionPreclearAwaitingReceipt ?? null
+        harness.sessionPreclearReceiptCommitted = options?.onSessionPreclearReceiptCommitted ?? null
       }
     },
   }
@@ -398,5 +402,32 @@ describe('main.ts GFS navigation-generation composition', () => {
     const accepted = await commitView(ipcEvent(ownContents), receipt)
     expect(accepted).toBe(false)
     expect(mainWindow.show).not.toHaveBeenCalled()
+  })
+
+  it('cancels the active recovery dialog before accepting a committed renderer receipt', async () => {
+    const notice = { transitionId: 9001, sessionGeneration: 9, reason: 'effective-rpc-change' }
+    const awaitingReceipt = harness.sessionPreclearAwaitingReceipt
+    const receiptCommitted = harness.sessionPreclearReceiptCommitted
+    if (!awaitingReceipt || !receiptCommitted) {
+      throw new Error('main.ts did not register the session receipt callbacks')
+    }
+    let observedSignal: AbortSignal | undefined
+    harness.appQuit.mockClear()
+    harness.showMessageBox.mockClear()
+    harness.showMessageBox.mockImplementationOnce(
+      options =>
+        new Promise(resolve => {
+          observedSignal = options?.signal as AbortSignal | undefined
+          observedSignal?.addEventListener('abort', () => resolve({ response: 0 }), { once: true })
+        }) as never
+    )
+
+    awaitingReceipt(notice, { attemptsRemaining: 0, retryAvailable: false })
+    await vi.waitFor(() => expect(harness.showMessageBox).toHaveBeenCalledOnce())
+    expect(observedSignal?.aborted).toBe(false)
+
+    receiptCommitted(notice)
+    await vi.waitFor(() => expect(observedSignal?.aborted).toBe(true))
+    await vi.waitFor(() => expect(harness.appQuit).not.toHaveBeenCalled())
   })
 })

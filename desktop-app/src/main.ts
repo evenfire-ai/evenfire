@@ -110,6 +110,7 @@ const activeSessionRecoveryDialogs = new Map<
     state: SessionRecoveryDialogState | null
     wake: ((state: SessionRecoveryDialogState | null) => void) | null
     terminal: boolean
+    dialogAbortController: AbortController | null
   }
 >()
 function finishSessionRecoveryDialog(notice: Pick<SessionPreclearNotice, 'transitionId'>): void {
@@ -118,6 +119,8 @@ function finishSessionRecoveryDialog(notice: Pick<SessionPreclearNotice, 'transi
   current.terminal = true
   current.wake?.(null)
   current.wake = null
+  current.dialogAbortController?.abort()
+  current.dialogAbortController = null
 }
 function showSessionRecoveryDialog(
   notice: SessionPreclearNotice,
@@ -134,13 +137,16 @@ function showSessionRecoveryDialog(
     state: SessionRecoveryDialogState | null
     wake: ((state: SessionRecoveryDialogState | null) => void) | null
     terminal: boolean
-  } = { state, wake: null, terminal: false }
+    dialogAbortController: AbortController | null
+  } = { state, wake: null, terminal: false, dialogAbortController: null }
   activeSessionRecoveryDialogs.set(notice.transitionId, recovery)
   void (async () => {
     try {
       while (!recovery.terminal) {
         const canRetry = recovery.state?.retryAvailable === true
         const displayedActions = canRetry ? (['Retry', 'Exit'] as const) : (['Exit'] as const)
+        const dialogAbortController = new AbortController()
+        recovery.dialogAbortController = dialogAbortController
         const result = await dialog.showMessageBox({
           type: 'warning',
           title: 'Session could not be verified',
@@ -153,7 +159,11 @@ function showSessionRecoveryDialog(
           defaultId: canRetry ? 0 : 0,
           cancelId: canRetry ? 1 : 0,
           noLink: true,
+          signal: dialogAbortController.signal,
         })
+        if (recovery.dialogAbortController === dialogAbortController) {
+          recovery.dialogAbortController = null
+        }
         if (recovery.terminal) break
         const selectedAction = displayedActions[result.response] ?? 'Exit'
         if (selectedAction === 'Exit') {
