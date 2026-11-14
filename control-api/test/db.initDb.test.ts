@@ -68,9 +68,10 @@ describe('db.initDb', () => {
     expect(sqls.some(sql => sql.includes('DROP TABLE IF EXISTS workflow_run_outputs'))).toBe(false)
     expect(sqls).not.toContain('ROLLBACK')
     // The committed password-admission rollout fence, one dev batch through
-    // 0136_llm_catalog_dismissed_backfill (as in dev), then two PR1 versions.
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(4)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(4)
+    // 0136_llm_catalog_dismissed_backfill (as in dev), then one transaction per
+    // runner version: the two PR1 versions and 0139_gfs_user_homes.
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(5)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(5)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)
@@ -96,6 +97,9 @@ describe('db.initDb', () => {
       expect(index, version).toBeLessThan(devBatchCommit)
     }
     expect(receiptIndex('0137_user_access_foundation')).toBeGreaterThan(devBatchCommit)
+    expect(receiptIndex('0139_gfs_user_homes')).toBeGreaterThan(
+      receiptIndex('0138_legacy_password_security_epoch_backfill')
+    )
   })
 
   it('applies the triggered_at audit index migration on top of an already-migrated baseline', async () => {

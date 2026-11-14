@@ -2845,7 +2845,11 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
       },
     ]
     for (const callerId of [U1, U2]) {
-      mockVerifyExternalSessionToken.mockReturnValue({ ...SESSION, userId: callerId })
+      mockVerifyExternalSessionToken.mockResolvedValue({
+        status: 'authenticated',
+        contract: 'v1',
+        claims: { ...SESSION, userId: callerId },
+      })
       const response = await request(app)
         .get('/external/gfs/grants')
         .query({ drive: 'main', resourceId: R })
@@ -2861,7 +2865,7 @@ describe('per-agent delegation surface (guard + list + rate limit)', () => {
 
     const folderGrant = { ...ownerGrant, resource_id: R2, home_owner: false }
     dbReturning([folderGrant], { grantListRows: [folderGrant] })
-    mockVerifyExternalSessionToken.mockReturnValue(SESSION)
+    auth()
     const folder = await request(app)
       .get('/external/gfs/grants')
       .query({ drive: 'main', resourceId: R2 })
