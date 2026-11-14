@@ -3,8 +3,8 @@ import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-
 import { buildGfsResourceDeepLink } from '../gfsDeepLinks.js'
 
 type MainEvent = {
-  senderFrame: { url: string }
-  sender: unknown
+  senderFrame: { url: string; send?: (...args: unknown[]) => void }
+  sender: { mainFrame?: MainEvent['senderFrame']; id?: number }
   returnValue?: unknown
 }
 type SyncHandler = (event: MainEvent) => void
@@ -18,9 +18,22 @@ const harness = vi.hoisted(() => {
     readyResolver: null as null | (() => void),
     initialize: vi.fn().mockResolvedValue(undefined),
     logout: vi.fn(async () => 7),
+    exitRecovery: vi.fn(() => true),
+    retryRecovery: vi.fn(() => true),
+    showMessageBox: vi.fn().mockResolvedValue({ response: 1 }),
+    appQuit: vi.fn(),
     sessionGeneration: 0,
     invalidateSandboxUiSession: null as null | (() => void),
     sessionCleared: null as null | (() => void),
+    sessionPreclear: null as null | ((notice: any) => boolean | void),
+    sessionPreclearTimeout: null as null | ((notice: any) => void),
+    sessionPreclearCancelled: null as null | ((notice: any) => void),
+    sessionPreclearRecoveryRequired: null as null | ((notice: any, state: any) => void),
+    sessionPreclearAuthorityChanging: null as null | ((notice: any) => void),
+    sessionPreclearAuthorityChanged: null as null | ((notice: any) => void),
+    sessionPreclearAwaitingReceipt: null as null | ((notice: any, state: any) => void),
+    sessionPreclearReceiptCommitted: null as null | ((notice: any) => void),
+    sessionPreclearRetired: null as null | ((notice: any) => void),
     parseSandboxUiDeepLink: vi.fn(() => null),
     registeredLogout: null as null | (() => Promise<unknown>),
     createWindow: null as null | ((options?: Record<string, unknown>) => Record<string, any>),
@@ -30,9 +43,15 @@ const harness = vi.hoisted(() => {
       options,
       webContents: {
         id: 41,
-        on: vi.fn(),
+        listeners: new Map<string, (...args: unknown[]) => void>(),
+        on: vi.fn(function (this: any, event: string, listener: (...args: unknown[]) => void) {
+          this.listeners.set(event, listener)
+        }),
         once: vi.fn(),
         send: vi.fn(),
+        mainFrame: { url: 'file:///app/index.html', send: vi.fn() },
+        isLoading: vi.fn(() => false),
+        isDestroyed: vi.fn(() => false),
         reload: vi.fn(),
         setWindowOpenHandler: vi.fn(),
         loadFile: vi.fn().mockResolvedValue(undefined),
@@ -90,7 +109,7 @@ vi.mock('electron', () => ({
     on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
       harness.appListeners.set(event, listener)
     }),
-    quit: vi.fn(),
+    quit: harness.appQuit,
     exit: vi.fn(),
   },
   ipcMain: {
@@ -106,7 +125,7 @@ vi.mock('electron', () => ({
   powerMonitor: { on: vi.fn() },
   Notification: vi.fn(),
   clipboard: { writeText: vi.fn() },
-  dialog: { showSaveDialog: vi.fn() },
+  dialog: { showSaveDialog: vi.fn(), showMessageBox: harness.showMessageBox },
 }))
 
 vi.mock('../appService.js', () => ({
@@ -114,13 +133,48 @@ vi.mock('../appService.js', () => ({
     constructor(options?: {
       onSandboxUiSessionInvalidated?: () => void
       onSessionCleared?: () => void
+      onSessionPreclear?: (notice: any) => boolean | void
+      onSessionPreclearTimeout?: (notice: any) => void
+      onSessionPreclearCancelled?: (notice: any) => void
+      onSessionPreclearRecoveryRequired?: (notice: any, state: any) => void
+      onSessionPreclearAuthorityChanging?: (notice: any) => void
+      onSessionPreclearAuthorityChanged?: (notice: any) => void
+      onSessionPreclearAwaitingReceipt?: (notice: any, state: any) => void
+      onSessionPreclearReceiptCommitted?: (notice: any) => void
+      onSessionPreclearRetired?: (notice: any) => void
     }) {
       harness.invalidateSandboxUiSession = options?.onSandboxUiSessionInvalidated ?? null
       harness.sessionCleared = options?.onSessionCleared ?? null
+      harness.sessionPreclear = options?.onSessionPreclear ?? null
+      harness.sessionPreclearTimeout = options?.onSessionPreclearTimeout ?? null
+      harness.sessionPreclearCancelled = options?.onSessionPreclearCancelled ?? null
+      harness.sessionPreclearRecoveryRequired = options?.onSessionPreclearRecoveryRequired ?? null
+      harness.sessionPreclearAuthorityChanging = options?.onSessionPreclearAuthorityChanging ?? null
+      harness.sessionPreclearAuthorityChanged = options?.onSessionPreclearAuthorityChanged ?? null
+      harness.sessionPreclearAwaitingReceipt = options?.onSessionPreclearAwaitingReceipt ?? null
+      harness.sessionPreclearReceiptCommitted = options?.onSessionPreclearReceiptCommitted ?? null
+      harness.sessionPreclearRetired = options?.onSessionPreclearRetired ?? null
     }
     initialize = harness.initialize
     logout = harness.logout
     getSessionGeneration = () => harness.sessionGeneration
+    beginMarkdownTabCloseDocument = () => true
+    retireMarkdownTabCloseDocument = vi.fn()
+    isSessionAuthorityBindingCurrent = () => true
+    completeSessionPreclearRendererReceipt = () => true
+    waitForSessionPreclearRendererReceipt = async () => true
+    retrySessionPreclearRecovery = harness.retryRecovery
+    exitSessionPreclearRecovery = harness.exitRecovery
+    getSessionState = async () => ({
+      authenticated: false,
+      sessionGeneration: harness.sessionGeneration,
+      me: null,
+      authorityBinding: {
+        environmentKey: 'test',
+        restBaseUrl: 'https://rest.example.test',
+        rpcBaseUrl: 'https://rpc.example.test',
+      },
+    })
   },
 }))
 vi.mock('../config.js', () => ({
@@ -174,8 +228,12 @@ vi.mock('../clerumDeepLink.js', () => ({
   routeClerumOauthCompleted: vi.fn(() => ({ kind: 'ignore' })),
 }))
 
-function ipcEvent(sender: unknown, url = 'file:///app/index.html'): MainEvent {
-  return { senderFrame: { url }, sender }
+function ipcEvent(sender: MainEvent['sender'], url = 'file:///app/index.html'): MainEvent {
+  const mainFrame = sender.mainFrame
+  return {
+    senderFrame: mainFrame?.url === url ? mainFrame : { url },
+    sender,
+  }
 }
 
 function registeredHandler<T extends (...args: never[]) => unknown>(

@@ -75,6 +75,7 @@ import {
   RpcAllowedServersResult,
   RpcConnectorsResult,
   RpcScope,
+  SessionAuthorityBinding,
   SessionMe,
   SessionMessagesQuery,
   SessionMessagesResult,
@@ -890,6 +891,13 @@ export interface AppServiceOptions {
     notice: SessionPreclearNotice,
     state: { attemptsRemaining: number; retryAvailable: boolean }
   ) => void
+  onSessionPreclearAuthorityChanging?: (notice: SessionPreclearNotice) => void
+  onSessionPreclearAuthorityChanged?: (notice: SessionPreclearNotice) => void
+  onSessionPreclearAwaitingReceipt?: (
+    notice: SessionPreclearNotice,
+    state: { attemptsRemaining: number; retryAvailable: false }
+  ) => void
+  onSessionPreclearReceiptCommitted?: (notice: SessionPreclearNotice) => void
   onSessionPreclearRetired?: (notice: SessionPreclearNotice) => void
 }
 
@@ -933,6 +941,12 @@ interface PendingSessionPreclear {
   principalId: string
   teamId: string
   environmentKey: string
+  authorityBinding: SessionAuthorityBinding
+  recoveryAttemptBinding: SessionAuthorityBinding | null
+  authorityChangeInProgress: boolean
+  requiresCurrentDocumentReceipt: boolean
+  awaitingCurrentDocumentReceipt: boolean
+  rendererReceiptWaiter: { promise: Promise<boolean>; resolve: (ready: boolean) => void } | null
   promise: Promise<boolean>
   resolve: (acknowledged: boolean) => void
   settled: boolean
@@ -968,6 +982,10 @@ export class AppService {
   private readonly onSessionPreclearTimeout?: (notice: SessionPreclearNotice) => void
   private readonly onSessionPreclearCancelled?: (notice: SessionPreclearNotice) => void
   private readonly onSessionPreclearRecoveryRequired?: AppServiceOptions['onSessionPreclearRecoveryRequired']
+  private readonly onSessionPreclearAuthorityChanging?: AppServiceOptions['onSessionPreclearAuthorityChanging']
+  private readonly onSessionPreclearAuthorityChanged?: AppServiceOptions['onSessionPreclearAuthorityChanged']
+  private readonly onSessionPreclearAwaitingReceipt?: AppServiceOptions['onSessionPreclearAwaitingReceipt']
+  private readonly onSessionPreclearReceiptCommitted?: AppServiceOptions['onSessionPreclearReceiptCommitted']
   private readonly onSessionPreclearRetired?: AppServiceOptions['onSessionPreclearRetired']
   private readonly unresolvedSessionPreclearReads = new Set<symbol>()
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -1087,6 +1105,10 @@ export class AppService {
     this.onSessionPreclearTimeout = options.onSessionPreclearTimeout
     this.onSessionPreclearCancelled = options.onSessionPreclearCancelled
     this.onSessionPreclearRecoveryRequired = options.onSessionPreclearRecoveryRequired
+    this.onSessionPreclearAuthorityChanging = options.onSessionPreclearAuthorityChanging
+    this.onSessionPreclearAuthorityChanged = options.onSessionPreclearAuthorityChanged
+    this.onSessionPreclearAwaitingReceipt = options.onSessionPreclearAwaitingReceipt
+    this.onSessionPreclearReceiptCommitted = options.onSessionPreclearReceiptCommitted
     this.onSessionPreclearRetired = options.onSessionPreclearRetired
   }
 
@@ -1211,6 +1233,33 @@ export class AppService {
     }
   }
 
+  private captureSessionAuthorityBinding(): SessionAuthorityBinding {
+    return {
+      environmentKey: getActiveEnvKey(),
+      restBaseUrl: canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl),
+      rpcBaseUrl: this.getEffectiveRpcProxyBaseUrl().trim().replace(/\/+$/, ''),
+    }
+  }
+
+  getSessionAuthorityBinding(): SessionAuthorityBinding {
+    return this.captureSessionAuthorityBinding()
+  }
+
+  isSessionAuthorityBindingCurrent(binding: SessionAuthorityBinding): boolean {
+    return this.sameSessionAuthorityBinding(binding, this.captureSessionAuthorityBinding())
+  }
+
+  private sameSessionAuthorityBinding(
+    left: SessionAuthorityBinding,
+    right: SessionAuthorityBinding
+  ): boolean {
+    return (
+      left.environmentKey === right.environmentKey &&
+      sameDesktopRestEndpoint(left.restBaseUrl, right.restBaseUrl) &&
+      left.rpcBaseUrl === right.rpcBaseUrl
+    )
+  }
+
   private assertAuthEnvironmentBinding(binding: {
     environmentKey: string
     profileId: string | null
@@ -1244,8 +1293,31 @@ export class AppService {
   /** Caller must hold the native auth/environment commit owner. */
   private setEffectiveRuntimeRpcEndpoint(discovery: RuntimeConfigDiscovery): void {
     const previousEndpoint = this.getEffectiveRpcProxyBaseUrl()
+    if (
+      previousEndpoint.trim().replace(/\/+$/, '') ===
+      discovery.rpcProxyBaseUrl.trim().replace(/\/+$/, '')
+    ) {
+      this.effectiveRuntimeRpcEndpoint = discovery
+      return
+    }
+    let pending: PendingSessionPreclear | null = null
+    if (this.sessionToken && this.me) {
+      pending = this.reserveSessionPreclear('environment-change')
+      if (pending) {
+        pending.authorityChangeInProgress = true
+        pending.requiresCurrentDocumentReceipt = true
+        pending.awaitingCurrentDocumentReceipt = false
+        this.onSessionPreclearAuthorityChanging?.(pending.notice)
+      }
+    }
     this.effectiveRuntimeRpcEndpoint = discovery
     if (previousEndpoint !== discovery.rpcProxyBaseUrl) this.rpcTokenManager.clear()
+    if (pending) {
+      pending.authorityBinding = this.captureSessionAuthorityBinding()
+      pending.authorityChangeInProgress = false
+      this.onSessionPreclearAuthorityChanged?.(pending.notice)
+      this.publishSessionPreclearRecoveryRequired(pending)
+    }
   }
 
   /** Caller must hold the native auth/environment commit owner. */
@@ -1683,6 +1755,8 @@ export class AppService {
   }
 
   private clearAuthenticatedSessionState(): void {
+    const pendingPreclear = this.pendingSessionPreclear
+    if (pendingPreclear) this.resolveSessionPreclearRendererReceiptWaiter(pendingPreclear, false)
     this.sessionGeneration += 1
     this.markdownTabCloseDocuments.clear()
     this.updateEntityChangeSessionToken(null)
@@ -1734,6 +1808,12 @@ export class AppService {
       principalId: this.me.id,
       teamId: String(this.me.teamId || ''),
       environmentKey: getActiveEnvKey(),
+      authorityBinding: this.captureSessionAuthorityBinding(),
+      recoveryAttemptBinding: null,
+      authorityChangeInProgress: false,
+      requiresCurrentDocumentReceipt: false,
+      awaitingCurrentDocumentReceipt: false,
+      rendererReceiptWaiter: null,
       promise,
       resolve,
       settled: false,
@@ -1820,6 +1900,56 @@ export class AppService {
     this.beginSessionPreclearRecovery(pending)
   }
 
+  completeSessionPreclearRendererReceipt(binding: SessionAuthorityBinding): boolean {
+    const pending = this.pendingSessionPreclear
+    if (!pending) return true
+    const currentToken = this.sessionToken
+    if (
+      !pending.awaitingCurrentDocumentReceipt ||
+      pending.authorityChangeInProgress ||
+      !this.sameSessionAuthorityBinding(binding, this.captureSessionAuthorityBinding()) ||
+      !this.sameSessionAuthorityBinding(binding, pending.authorityBinding) ||
+      !currentToken ||
+      createHash('sha256').update(currentToken).digest('hex') !== pending.sessionTokenFingerprint ||
+      this.me?.id !== pending.principalId ||
+      String(this.me.teamId || '') !== pending.teamId ||
+      this.sessionGeneration !== pending.notice.sessionGeneration
+    )
+      return false
+    const notice = pending.notice
+    pending.recoveryTerminal = true
+    pending.awaitingCurrentDocumentReceipt = false
+    this.pendingSessionPreclear = null
+    pending.settled = true
+    pending.resolve(false)
+    this.onSessionPreclearReceiptCommitted?.(notice)
+    return true
+  }
+
+  /** Keep the existing main receipt request pending until this P may accept D2. */
+  waitForSessionPreclearRendererReceipt(): Promise<boolean> {
+    const pending = this.pendingSessionPreclear
+    if (!pending) return Promise.resolve(true)
+    if (pending.awaitingCurrentDocumentReceipt) return Promise.resolve(true)
+    if (pending.recoveryTerminal || pending.recoveryExited) return Promise.resolve(false)
+    if (pending.rendererReceiptWaiter) return pending.rendererReceiptWaiter.promise
+    let resolve!: (ready: boolean) => void
+    const promise = new Promise<boolean>(done => {
+      resolve = done
+    })
+    pending.rendererReceiptWaiter = { promise, resolve }
+    return promise
+  }
+
+  private resolveSessionPreclearRendererReceiptWaiter(
+    pending: PendingSessionPreclear,
+    ready: boolean
+  ): void {
+    const waiter = pending.rendererReceiptWaiter
+    pending.rendererReceiptWaiter = null
+    waiter?.resolve(ready)
+  }
+
   /** Retry the server-backed authority check after an unreadable preclear recovery. */
   retrySessionPreclearRecovery(notice: SessionPreclearNotice): boolean {
     const pending = this.pendingSessionPreclear
@@ -1830,6 +1960,8 @@ export class AppService {
       pending.recoveryTerminal ||
       pending.recoveryExited ||
       pending.recoveryChecking ||
+      pending.authorityChangeInProgress ||
+      pending.awaitingCurrentDocumentReceipt ||
       pending.recoveryAttempts >= SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS ||
       this.unresolvedSessionPreclearReads.size >= SESSION_PRECLEAR_MAX_UNRESOLVED_READS
     )
@@ -1850,6 +1982,7 @@ export class AppService {
       return false
     pending.recoveryExited = true
     pending.recoveryTerminal = true
+    this.resolveSessionPreclearRendererReceiptWaiter(pending, false)
     this.pendingSessionPreclear = null
     pending.settled = true
     pending.resolve(false)
@@ -1861,7 +1994,9 @@ export class AppService {
       this.pendingSessionPreclear !== pending ||
       pending.recoveryTerminal ||
       pending.recoveryExited ||
-      pending.recoveryChecking
+      pending.recoveryChecking ||
+      pending.authorityChangeInProgress ||
+      pending.awaitingCurrentDocumentReceipt
     )
       return
     if (
@@ -1878,6 +2013,8 @@ export class AppService {
     const attemptId = ++pending.recoveryAttemptId
     pending.recoveryAttempts += 1
     pending.recoveryChecking = true
+    const attemptBinding = this.captureSessionAuthorityBinding()
+    pending.recoveryAttemptBinding = attemptBinding
     const readId = Symbol('session-preclear-authority-read')
     this.unresolvedSessionPreclearReads.add(readId)
     const controller = new AbortController()
@@ -1892,7 +2029,12 @@ export class AppService {
       settled = true
       this.unresolvedSessionPreclearReads.delete(readId)
       const recovery = this.pendingSessionPreclear
-      if (timedOut && recovery && !recovery.recoveryTerminal && !recovery.recoveryExited) {
+      if (
+        recovery &&
+        !recovery.recoveryTerminal &&
+        !recovery.recoveryExited &&
+        (recovery !== pending || recovery.recoveryAttemptId !== attemptId || timedOut)
+      ) {
         this.publishSessionPreclearRecoveryRequired(recovery)
       }
     })
@@ -1912,6 +2054,10 @@ export class AppService {
         pending.recoveryAttemptId !== attemptId
       )
         return
+      if (pending.authorityChangeInProgress) {
+        pending.recoveryChecking = false
+        return
+      }
       if (result.kind === 'timeout') {
         timedOut = true
         pending.recoveryChecking = false
@@ -1921,6 +2067,15 @@ export class AppService {
       }
       if (!settled) {
         // The wrapped request settles before this continuation; this is defensive.
+        return
+      }
+      if (
+        !this.sameSessionAuthorityBinding(attemptBinding, this.captureSessionAuthorityBinding()) ||
+        !this.sameSessionAuthorityBinding(attemptBinding, pending.authorityBinding)
+      ) {
+        pending.recoveryChecking = false
+        pending.authorityBinding = this.captureSessionAuthorityBinding()
+        this.publishSessionPreclearRecoveryRequired(pending)
         return
       }
       if (result.kind === 'error') {
@@ -1933,30 +2088,52 @@ export class AppService {
         return
       }
       pending.recoveryChecking = false
-      this.resolveSessionPreclearAuthority(pending, result.me)
+      if (
+        !this.sameSessionAuthorityBinding(attemptBinding, this.captureSessionAuthorityBinding())
+      ) {
+        pending.authorityBinding = this.captureSessionAuthorityBinding()
+        this.publishSessionPreclearRecoveryRequired(pending)
+        return
+      }
+      this.resolveSessionPreclearAuthority(pending, attemptBinding, result.me)
     })
   }
 
   private publishSessionPreclearRecoveryRequired(pending: PendingSessionPreclear): void {
+    if (
+      this.pendingSessionPreclear !== pending ||
+      pending.recoveryTerminal ||
+      pending.recoveryExited ||
+      pending.authorityChangeInProgress ||
+      pending.awaitingCurrentDocumentReceipt
+    )
+      return
     this.onSessionPreclearRecoveryRequired?.(pending.notice, {
       attemptsRemaining: SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS - pending.recoveryAttempts,
       retryAvailable:
         !pending.recoveryChecking &&
+        !pending.authorityChangeInProgress &&
+        !pending.awaitingCurrentDocumentReceipt &&
         pending.recoveryAttempts < SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS &&
         this.unresolvedSessionPreclearReads.size < SESSION_PRECLEAR_MAX_UNRESOLVED_READS,
     })
   }
 
-  private resolveSessionPreclearAuthority(pending: PendingSessionPreclear, me: SessionMe): void {
+  private resolveSessionPreclearAuthority(
+    pending: PendingSessionPreclear,
+    attemptBinding: SessionAuthorityBinding,
+    me: SessionMe
+  ): void {
     const currentMe = this.me
     const currentToken = this.sessionToken
-    const currentEnvironmentKey = getActiveEnvKey()
+    const currentBinding = this.captureSessionAuthorityBinding()
     const currentMatchesCaptured =
       currentToken !== null &&
       createHash('sha256').update(currentToken).digest('hex') === pending.sessionTokenFingerprint &&
       currentMe?.id === pending.principalId &&
       String(currentMe.teamId || '') === pending.teamId &&
-      currentEnvironmentKey === pending.environmentKey
+      this.sameSessionAuthorityBinding(currentBinding, pending.authorityBinding) &&
+      this.sameSessionAuthorityBinding(attemptBinding, pending.authorityBinding)
     if (!me?.id || me.teamId === undefined) {
       this.publishSessionPreclearRecoveryRequired(pending)
       return
@@ -1966,11 +2143,21 @@ export class AppService {
       me.id === pending.principalId &&
       String(me.teamId || '') === pending.teamId
     ) {
+      if (pending.requiresCurrentDocumentReceipt) {
+        pending.awaitingCurrentDocumentReceipt = true
+        this.resolveSessionPreclearRendererReceiptWaiter(pending, true)
+        this.onSessionPreclearAwaitingReceipt?.(pending.notice, {
+          attemptsRemaining: SESSION_PRECLEAR_RECOVERY_MAX_ATTEMPTS - pending.recoveryAttempts,
+          retryAvailable: false,
+        })
+        return
+      }
       this.finishSessionPreclearUnchanged(pending)
       return
     }
     if (currentMatchesCaptured) {
       pending.recoveryTerminal = true
+      this.resolveSessionPreclearRendererReceiptWaiter(pending, false)
       pending.settled = true
       pending.resolve(false)
       this.clearAuthenticatedSessionState()
@@ -1993,6 +2180,7 @@ export class AppService {
       currentMe?.id === pending.principalId &&
       String(currentMe.teamId || '') === pending.teamId
     pending.recoveryTerminal = true
+    this.resolveSessionPreclearRendererReceiptWaiter(pending, false)
     if (stillCaptured) {
       pending.settled = true
       pending.resolve(false)
@@ -4527,7 +4715,11 @@ export class AppService {
     if (!this.sessionToken || !this.me) {
       if (this.restoreSavedSessionInFlight) {
         const restored = await this.restoreSavedSession()
-        return { ...restored, sessionGeneration: this.sessionGeneration }
+        return {
+          ...restored,
+          sessionGeneration: this.sessionGeneration,
+          authorityBinding: this.captureSessionAuthorityBinding(),
+        }
       }
       // createWindow() already performs the saved-token restore before showing
       // the renderer. Do not immediately repeat a failed 60-second network
@@ -4537,12 +4729,26 @@ export class AppService {
         this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey() &&
         Date.now() - this.savedSessionRestoreAttemptedAtMs < SAVED_SESSION_RESTORE_RETRY_DELAY_MS
       ) {
-        return { authenticated: false, me: null, sessionGeneration: this.sessionGeneration }
+        return {
+          authenticated: false,
+          me: null,
+          sessionGeneration: this.sessionGeneration,
+          authorityBinding: this.captureSessionAuthorityBinding(),
+        }
       }
       const restored = await this.restoreSavedSession()
-      return { ...restored, sessionGeneration: this.sessionGeneration }
+      return {
+        ...restored,
+        sessionGeneration: this.sessionGeneration,
+        authorityBinding: this.captureSessionAuthorityBinding(),
+      }
     }
-    return { authenticated: true, me: this.me, sessionGeneration: this.sessionGeneration }
+    return {
+      authenticated: true,
+      me: this.me,
+      sessionGeneration: this.sessionGeneration,
+      authorityBinding: this.captureSessionAuthorityBinding(),
+    }
   }
 
   /**

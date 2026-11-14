@@ -713,7 +713,15 @@ export type SessionState = {
   me: SessionMe | null
   /** Main-process authentication epoch captured with this identity snapshot. */
   sessionGeneration?: number
+  /** Current configured REST plus discovered effective RPC authority. */
+  authorityBinding?: SessionAuthorityBinding
 }
+
+export type SessionAuthorityBinding = Readonly<{
+  environmentKey: string
+  restBaseUrl: string
+  rpcBaseUrl: string
+}>
 
 export type PasswordLoginResult = SessionState
 

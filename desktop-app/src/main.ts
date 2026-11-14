@@ -57,6 +57,7 @@ import { notifySandboxUiHostResumed } from './sandboxUiSessionRefresh.js'
 import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 import { TokenStore } from './tokenStore.js'
+import type { SessionAuthorityBinding } from './types.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
 const EVENFIRE_APP_ID = 'ai.evenfire.desktop'
@@ -98,6 +99,7 @@ let currentRendererSessionViewReceipt: {
   authenticated: boolean
   userId: string | null
   teamId: string | null
+  authorityBinding: SessionAuthorityBinding
 } | null = null
 const sessionPreclearRendererLost = new Set<number>()
 const activeSessionPreclearTransitions = new Set<number>()
@@ -242,6 +244,29 @@ const appService = new AppService({
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
     showSessionRecoveryDialog(notice, state)
   },
+  onSessionPreclearAuthorityChanging: () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.hide()
+      currentRendererSessionViewReceipt = null
+    }
+  },
+  onSessionPreclearAuthorityChanged: notice => {
+    const window = mainWindow
+    if (!window || window.isDestroyed()) return
+    window.hide()
+    activeSessionPreclearTransitions.add(notice.transitionId)
+    retireCurrentMarkdownRendererDocument()
+    forceFreshRendererAfterSessionClear = true
+    reloadHiddenRendererAfterSessionTransition()
+  },
+  onSessionPreclearAwaitingReceipt: (notice, state) => {
+    showSessionRecoveryDialog(notice, state)
+  },
+  onSessionPreclearReceiptCommitted: notice => {
+    finishSessionRecoveryDialog(notice)
+    activeSessionPreclearTransitions.delete(notice.transitionId)
+    sessionPreclearRendererLost.delete(notice.transitionId)
+  },
   onSessionPreclearCancelled: notice => {
     finishSessionRecoveryDialog(notice)
     activeSessionPreclearTransitions.delete(notice.transitionId)
@@ -342,6 +367,17 @@ function isAppFocused(): boolean {
 
 function windowState(win: BrowserWindow | null): { visible: boolean; focused: boolean } {
   return { visible: isWindowVisible(win), focused: isAppFocused() }
+}
+
+function sameSessionAuthorityBinding(
+  left: SessionAuthorityBinding,
+  right: SessionAuthorityBinding
+): boolean {
+  return (
+    left.environmentKey === right.environmentKey &&
+    left.restBaseUrl === right.restBaseUrl &&
+    left.rpcBaseUrl === right.rpcBaseUrl
+  )
 }
 
 type WindowControlsState = { maximized: boolean; fullscreen: boolean }
@@ -501,11 +537,22 @@ ipcMain.handle('auth:getRendererSessionView', async event => {
     !documentEpoch
   )
     return null
+  const preclearReceiptReady = await appService.waitForSessionPreclearRendererReceipt()
+  if (!preclearReceiptReady) return null
+  if (
+    mainWindow !== window ||
+    currentRendererDocumentEpoch !== documentEpoch ||
+    event.senderFrame !== event.sender.mainFrame ||
+    !mainWindowRendererReady
+  )
+    return null
   const state = await appService.getSessionState()
   if (
     mainWindow !== window ||
     currentRendererDocumentEpoch !== documentEpoch ||
-    event.senderFrame !== event.sender.mainFrame
+    event.senderFrame !== event.sender.mainFrame ||
+    !state.authorityBinding ||
+    !appService.isSessionAuthorityBindingCurrent(state.authorityBinding)
   )
     return null
   const receiptId = randomUUID()
@@ -516,6 +563,7 @@ ipcMain.handle('auth:getRendererSessionView', async event => {
     authenticated: state.authenticated,
     userId: state.me?.id ?? null,
     teamId: state.me?.teamId ?? null,
+    authorityBinding: state.authorityBinding,
   }
   return { documentEpoch, receiptId, state }
 })
@@ -546,9 +594,13 @@ ipcMain.handle('auth:commitRendererSessionView', async (event, payload: unknown)
     state.sessionGeneration !== receipt.sessionGeneration ||
     state.authenticated !== receipt.authenticated ||
     (state.me?.id ?? null) !== receipt.userId ||
-    (state.me?.teamId ?? null) !== receipt.teamId
+    (state.me?.teamId ?? null) !== receipt.teamId ||
+    !state.authorityBinding ||
+    !appService.isSessionAuthorityBindingCurrent(state.authorityBinding) ||
+    !sameSessionAuthorityBinding(state.authorityBinding, receipt.authorityBinding)
   )
     return false
+  if (!appService.completeSessionPreclearRendererReceipt(state.authorityBinding)) return false
   currentRendererSessionViewReceipt = null
   if (sessionTransitionRevealPending && !forceFreshRendererAfterSessionClear) {
     sessionTransitionRevealPending = false
