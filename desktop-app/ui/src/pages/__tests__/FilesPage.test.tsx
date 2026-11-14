@@ -542,7 +542,7 @@ describe('FilesPage', () => {
         loadingCurrentView: true,
       },
     ],
-  ])('shows a subtle borderless loader during %s', (_scenario, state) => {
+  ])('shows the shared EmptyState loader during %s', (_scenario, state) => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       ...state,
@@ -551,10 +551,11 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     const loader = screen.getByRole('status', { name: 'Loading files' })
-    expect(loader.classList.contains('da-gfs-loading')).toBe(true)
-    expect(loader.querySelectorAll('.da-gfs-loading__dot')).toHaveLength(3)
+    const emptyState = loader.querySelector('.empty-state')
+    expect(emptyState).toBeTruthy()
+    expect(emptyState?.textContent).toContain('Loading files…')
+    expect(loader.querySelector('.da-gfs-loading__dot')).toBeNull()
     expect(screen.queryByText('Fetching your Global File System resources…')).toBeNull()
-    expect(loader.closest('.empty-state')).toBeNull()
   })
 
   it('opens a shared folder from the single browser workspace', async () => {

@@ -15519,7 +15519,8 @@ pre {
   justify-content: flex-end;
 }
 
-.da-gfs-drive > .empty-state {
+.da-gfs-drive > .empty-state,
+.da-gfs-drive > [role='status'] > .empty-state {
   margin: var(--space-3) var(--space-4);
 }
 
@@ -15530,16 +15531,6 @@ pre {
   display: grid;
   gap: var(--space-2);
   justify-items: start;
-}
-
-.da-gfs-loading {
-  min-height: 11rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
 }
 
 /* BUG-175 — folder-zip assembly progress strip. */
@@ -15602,28 +15593,6 @@ pre {
   animation: da-gfs-loading-dot 1.2s ease-in-out infinite;
 }
 
-.da-gfs-loading__dots {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.da-gfs-loading__dot {
-  width: var(--space-1);
-  height: var(--space-1);
-  border-radius: 999px;
-  background: var(--accent);
-  animation: da-gfs-loading-dot 1.2s ease-in-out infinite;
-}
-
-.da-gfs-loading__dot:nth-child(2) {
-  animation-delay: 0.16s;
-}
-
-.da-gfs-loading__dot:nth-child(3) {
-  animation-delay: 0.32s;
-}
-
 @keyframes da-gfs-loading-dot {
   0%,
   70%,
@@ -15633,13 +15602,6 @@ pre {
 
   35% {
     opacity: 0.9;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .da-gfs-loading__dot {
-    animation: none;
-    opacity: 0.62;
   }
 }
 

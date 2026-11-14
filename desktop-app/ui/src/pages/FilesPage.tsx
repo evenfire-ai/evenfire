@@ -3678,18 +3678,8 @@ export function FilesPage({
               }}
             />
           ) : visibleLoading ? (
-            <div
-              className="da-gfs-loading"
-              role="status"
-              aria-label="Loading files"
-              aria-live="polite"
-            >
-              <span className="da-gfs-loading__dots" aria-hidden="true">
-                <span className="da-gfs-loading__dot" />
-                <span className="da-gfs-loading__dot" />
-                <span className="da-gfs-loading__dot" />
-              </span>
-              <span>Loading files…</span>
+            <div role="status" aria-label="Loading files" aria-live="polite">
+              <EmptyState title="Loading" body="Loading files…" />
             </div>
           ) : currentIsFile ? (
             <div className="da-gfs-current-file">
