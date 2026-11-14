@@ -12,8 +12,10 @@ import * as http from 'node:http'
 import { BindingPolicyReconciler } from './bindingPolicyReconciler'
 import { K8S_REQUEST_TIMEOUT_CODE } from './k8s/k8sRequestDeadline'
 import { createWatcherK8sClients } from './k8s/watcherK8sClients'
+import { registry } from './metrics'
 import { NetworkPolicyReconciler } from './networkPolicyReconciler'
 import { McpServerReconciler } from './reconciler'
+import type { McpServerCRD } from './types'
 
 const DEADLINE_MS = 200
 
@@ -215,5 +217,122 @@ describe('#1338 request deadlines on the NetworkPolicy pass path', () => {
     }
     // Witness: both LISTs reached the API server.
     expect(seenPaths.filter(path => path.includes('/networkpolicies'))).toHaveLength(2)
+  })
+})
+
+/**
+ * #1492: the transient classification of a failed Secret read, fed by the errors
+ * the real `@kubernetes/client-node` produces for each transport class, instead
+ * of hand-built fixtures.
+ */
+type SecretAnswer = 'status-500' | 'status-429' | 'reset' | 'status-400'
+
+async function secretApiServer(answer: SecretAnswer): Promise<k8s.KubeConfig> {
+  const server = http.createServer((req, res) => {
+    seenPaths.push(req.url ?? '')
+    if (!(req.url ?? '').includes('/secrets/')) {
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end('{"kind":"Status","code":404}')
+      return
+    }
+    if (answer === 'reset') {
+      req.socket.destroy()
+      return
+    }
+    const code = Number(answer.slice('status-'.length))
+    res.writeHead(code, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ kind: 'Status', apiVersion: 'v1', status: 'Failure', code }))
+  })
+  servers.push(server)
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('no TCP address')
+  const kc = new k8s.KubeConfig()
+  kc.loadFromOptions({
+    clusters: [
+      { name: 'answering', server: `http://127.0.0.1:${address.port}`, skipTLSVerify: true },
+    ],
+    users: [{ name: 'tester' }],
+    contexts: [{ name: 'answering', cluster: 'answering', user: 'tester' }],
+    currentContext: 'answering',
+  })
+  return kc
+}
+
+async function secretReadFailures(outcome: 'verdict_kept' | 'not_ready_published') {
+  const metric = registry.getSingleMetric('clerum_hcc_mcpserver_reconcile_call_failures_total')
+  if (!metric)
+    throw new Error('clerum_hcc_mcpserver_reconcile_call_failures_total is not registered')
+  const snapshot = await metric.get()
+  return (
+    snapshot.values.find(
+      entry => entry.labels.site === 'secret_read' && entry.labels.outcome === outcome
+    )?.value ?? 0
+  )
+}
+
+/** A managed server whose persisted Ready=True matches its generation. */
+function persistedReadyServer(): McpServerCRD {
+  return {
+    name: 'real-client-server',
+    namespace: 'mcp-server',
+    uid: 'uid-real-client',
+    generation: 4,
+    spec: {
+      image: 'ghcr.io/palmeradao/real-client:1',
+      transport: { type: 'streamableHttp', port: 8080 },
+      envSecret: { name: 'real-client-input', keys: [{ secretKey: 'value', envVar: 'VALUE' }] },
+    },
+    status: {
+      conditions: [
+        {
+          type: 'Ready',
+          status: 'True',
+          reason: 'ReconcileSuccess',
+          message: 'Deployment ready',
+          lastTransitionTime: '2026-01-01T00:00:00.000Z',
+          observedGeneration: 4,
+        },
+      ],
+    },
+  } as McpServerCRD
+}
+
+describe('#1492 transient classification of real client errors on the Secret read', () => {
+  it.each([
+    ['T10.1 an apiserver 500', 'status-500'],
+    ['T10.2 an apiserver 429', 'status-429'],
+    ['T10.3 a connection reset', 'reset'],
+  ] as const)('%s keeps the persisted ready verdict', async (_label, answer) => {
+    const reconciler = new McpServerReconciler(await secretApiServer(answer), {
+      assumeInventoryAuthorityWhenUnconfigured: true,
+    })
+    const server = persistedReadyServer()
+    expect(reconciler.getStatus(server)).toMatchObject({ ready: true })
+    const kept = await secretReadFailures('verdict_kept')
+
+    await reconciler.reconcile(server)
+
+    // Witness: the request reached the API server.
+    expect(seenPaths.some(path => path.includes('/secrets/real-client-input'))).toBe(true)
+    expect(await secretReadFailures('verdict_kept')).toBe(kept + 1)
+    expect(reconciler.getStatus(server)).toMatchObject({ ready: true })
+  })
+
+  it('T10.4 (control row) an apiserver 400 publishes not-ready', async () => {
+    const reconciler = new McpServerReconciler(await secretApiServer('status-400'), {
+      assumeInventoryAuthorityWhenUnconfigured: true,
+    })
+    const server = persistedReadyServer()
+    const published = await secretReadFailures('not_ready_published')
+
+    await reconciler.reconcile(server)
+
+    expect(seenPaths.some(path => path.includes('/secrets/real-client-input'))).toBe(true)
+    expect(await secretReadFailures('not_ready_published')).toBe(published + 1)
+    expect(reconciler.getStatus(server)).toMatchObject({ ready: false })
   })
 })
