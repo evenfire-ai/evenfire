@@ -48,6 +48,8 @@ import {
   TRANSPORT_NETWORK_CONDITION_TYPE,
   WorkflowRecipeReconciler,
   hasPendingTransportNetworkReadiness,
+  hasTerminalRunTeardownRecord,
+  isWorkflowLatchedByTransientError,
 } from './reconciler/workflowRecipeReconciler'
 import {
   type StatusCondition,
@@ -478,10 +480,17 @@ export function workflowNeedsInfrastructureReconcile(recipe: WorkflowRecipeCRD):
 }
 
 export function workflowNeedsTerminalRunTeardown(recipe: WorkflowRecipeCRD): boolean {
-  const isWorkflow = (recipe.spec.steps ?? []).length > 0
-  if (!isWorkflow || recipe.metadata.deletionTimestamp) return false
-  if (!recipe.metadata.labels?.['clerum.io/workflow-run-id']?.trim()) return false
+  if (!isTerminalRunChild(recipe)) return false
+  // Issue #1349 — once the terminal teardown is recorded, a status-only event
+  // (including the record's own patch) only needs the DB sync. A latched child
+  // falls through to the deploy path, as at the base, and is still forced.
+  return !hasTerminalRunTeardownRecord(recipe) || isWorkflowLatchedByTransientError(recipe)
+}
 
+/** A run-scoped workflow child whose execution phase is terminal and that is not being deleted. */
+function isTerminalRunChild(recipe: WorkflowRecipeCRD): boolean {
+  if ((recipe.spec.steps ?? []).length === 0 || recipe.metadata.deletionTimestamp) return false
+  if (!recipe.metadata.labels?.['clerum.io/workflow-run-id']?.trim()) return false
   const workflowPhase = recipe.status?.workflowExecution?.phase
   return (
     workflowPhase === 'completed' || workflowPhase === 'failed' || workflowPhase === 'cancelled'

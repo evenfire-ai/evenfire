@@ -101,6 +101,43 @@ const mockCoreApi = {
   deleteNamespacedConfigMap: vi.fn().mockResolvedValue({}),
 }
 
+async function echoPatchedStatus({
+  body,
+}: {
+  body?: { status?: Record<string, unknown> }
+}): Promise<{ status: Record<string, unknown> }> {
+  return { status: { ...(body?.status ?? {}) } }
+}
+
+/**
+ * Status merge of the CR-store fakes: top-level keys replace, as before; the
+ * issue #1349 run records merge by key as a JSON merge patch does, and a null
+ * (top-level or per key) deletes.
+ */
+function mergeStatusPatch(
+  previous: WorkflowRecipeCRD['status'],
+  patch: Record<string, unknown> | undefined
+): WorkflowRecipeCRD['status'] {
+  const previousStatus = (previous ?? {}) as Record<string, unknown>
+  const nextStatus: Record<string, unknown> = { ...previousStatus, ...patch }
+  for (const recordKey of ['terminalRunTeardown', 'secretOwnershipRevocations']) {
+    const patched = patch?.[recordKey]
+    if (patched === undefined || patched === null) continue
+    const merged: Record<string, unknown> = {
+      ...((previousStatus[recordKey] as Record<string, unknown> | undefined) ?? {}),
+    }
+    for (const [key, value] of Object.entries(patched as Record<string, unknown>)) {
+      if (value === null) delete merged[key]
+      else merged[key] = value
+    }
+    nextStatus[recordKey] = merged
+  }
+  for (const [key, value] of Object.entries(nextStatus)) {
+    if (value === null) delete nextStatus[key]
+  }
+  return nextStatus as unknown as WorkflowRecipeCRD['status']
+}
+
 const mockCustomApi = {
   createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
   getNamespacedCustomObject: vi.fn().mockResolvedValue({
@@ -117,7 +154,9 @@ const mockCustomApi = {
   listNamespacedCustomObject: vi.fn().mockResolvedValue({ items: [] }),
   replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
   patchNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-  patchNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({}),
+  // Issue #1349 — the apiserver returns the stored object; echo the patched status
+  // so the reconciler's stored-record check sees what a CRD with the fields stores.
+  patchNamespacedCustomObjectStatus: vi.fn().mockImplementation(echoPatchedStatus),
   deleteNamespacedCustomObject: vi.fn().mockResolvedValue({}),
   deleteCollectionNamespacedCustomObject: vi.fn().mockResolvedValue({}),
 }
@@ -10354,6 +10393,8 @@ describe('WorkflowRecipeReconciler', () => {
           .fn()
           .mockResolvedValue({ conflicts: [], retryPending: false }),
         retryRunLaneNetworkPolicies,
+        // A terminal run's teardown that cannot free its pods is retried (#1349).
+        teardownComputePodsForTerminalRun: vi.fn().mockResolvedValue(undefined),
         validateWorkflowSpec: () => undefined,
       }
       ;(reconciler as unknown as { workflowReconciler: typeof stub }).workflowReconciler = stub
@@ -10393,10 +10434,12 @@ describe('WorkflowRecipeReconciler', () => {
       })
     }
 
+    // The terminal teardown record (#1349) is its own status patch; it is not a
+    // conditions patch, so it is left out here.
     function conditionPatches() {
-      return mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.map(
-        call => call[0] as { name: string; body: { status: Record<string, unknown> } }
-      )
+      return mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls
+        .map(call => call[0] as { name: string; body: { status: Record<string, unknown> } })
+        .filter(patch => Object.keys(patch.body.status ?? {}).join() !== 'terminalRunTeardown')
     }
 
     it('reapplies from the active short-circuit and removes the marker with a conditions-only patch once converged', async () => {
@@ -11904,14 +11947,48 @@ describe('WorkflowRecipeReconciler', () => {
   describe('terminal-run compute teardown (CPU-starvation fix)', () => {
     type TeardownStub = {
       ensureMcpHostRuntimeCredentials: ReturnType<typeof vi.fn>
+      ensureCoordinatorRuntimeCredentials: ReturnType<typeof vi.fn>
       teardownComputePodsForTerminalRun: ReturnType<typeof vi.fn>
       reconcile: ReturnType<typeof vi.fn>
       validateWorkflowSpec: () => undefined
     }
 
+    afterEach(() => {
+      mockCustomApi.patchNamespacedCustomObjectStatus
+        .mockReset()
+        .mockImplementation(echoPatchedStatus)
+    })
+
+    /**
+     * Issue #1349 — a one-recipe CR store: the status patch merges into it and
+     * GET answers from it, so pass 2 of a test reads what pass 1 stored. `prune`
+     * drops status keys as an API server with an older CRD does.
+     */
+    function installRecipeStore(recipe: WorkflowRecipeCRD, options: { prune?: string[] } = {}) {
+      const live = structuredClone(recipe)
+      live.metadata.resourceVersion ??= '1'
+      const previousGet = mockCustomApi.getNamespacedCustomObject.getMockImplementation()!
+      mockCustomApi.getNamespacedCustomObject.mockImplementation(async args => {
+        if (args.plural !== 'workflowrecipes' || args.name !== live.metadata.name) {
+          return previousGet(args)
+        }
+        return structuredClone(live)
+      })
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }) => {
+        if (body.metadata?.uid && body.metadata.uid !== live.metadata.uid) throw { code: 409 }
+        const patch = { ...(body.status ?? {}) }
+        for (const key of options.prune ?? []) delete patch[key]
+        live.status = mergeStatusPatch(live.status, patch)
+        live.metadata.resourceVersion = String(Number(live.metadata.resourceVersion) + 1)
+        return structuredClone(live)
+      })
+      return { current: () => structuredClone(live) }
+    }
+
     function stubWorkflowReconciler(): TeardownStub {
       const stub: TeardownStub = {
         ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        ensureCoordinatorRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
         teardownComputePodsForTerminalRun: vi.fn().mockResolvedValue(undefined),
         // Long-lived (non-run-scoped) recipes fall through to the inner
         // reconcile; stub it so the fall-through path does not crash.
@@ -12069,6 +12146,15 @@ describe('WorkflowRecipeReconciler', () => {
           namespace: 'mcp-server',
         })
       )
+      // Issue #1349 — the compute pods were not deleted, so nothing is recorded
+      // and the pass asks for a retry.
+      expect(result.requeueAfterMs).toBe(5_000)
+      expect(
+        mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
+          ([arg]) => arg.body?.status?.terminalRunTeardown !== undefined
+        )
+      ).toHaveLength(0)
+      expect(recipe.status?.terminalRunTeardown).toBeUndefined()
     })
 
     it('over-delete guard: a stateful transport workload is NEVER deleted (no StatefulSet, no PVC delete)', async () => {
@@ -12101,9 +12187,22 @@ describe('WorkflowRecipeReconciler', () => {
         runScoped: false,
       })
 
-      await reconciler.reconcile(recipe)
+      // A snippet-only workflow needs no mcp-host, so a long-lived one does not
+      // await a triggered run and reaches the terminal branch.
+      recipe.spec.steps = [{ id: 'render', run: snippetRun() }]
 
+      const result = await reconciler.reconcile(recipe)
+
+      // Witness: the terminal result was returned.
+      expect(result).toMatchObject({ phase: 'active', message: 'Workflow completed' })
+      expect(stub.reconcile).not.toHaveBeenCalled()
       expect(stub.teardownComputePodsForTerminalRun).not.toHaveBeenCalled()
+      expect(
+        mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
+          ([arg]) => arg.body?.status?.terminalRunTeardown !== undefined
+        )
+      ).toHaveLength(0)
+      expect(recipe.status?.terminalRunTeardown).toBeUndefined()
     })
 
     it('is best-effort: a teardown failure does not block the terminal status result', async () => {
@@ -12118,17 +12217,136 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.phase).toBe('active')
     })
 
-    it('re-running a terminal reconcile stays idempotent (teardown invoked again, never recreates)', async () => {
+    it('re-running a terminal reconcile stays idempotent (teardown recorded once, never recreates)', async () => {
       const stub = stubWorkflowReconciler()
-      const recipe = makeTerminalRunRecipe({ name: 'wf-run-idem', phase: 'completed' })
+      const store = installRecipeStore(
+        makeTerminalRunRecipe({ name: 'wf-run-idem', phase: 'completed', transport: true })
+      )
+      const mcpServerDeletes = () =>
+        mockCustomApi.deleteNamespacedCustomObject.mock.calls.filter(
+          ([arg]) => arg.plural === 'mcpservers'
+        ).length
 
-      await reconciler.reconcile(recipe)
-      await reconciler.reconcile(recipe)
+      await reconciler.reconcile(store.current())
 
-      // Inner reconcile (which creates/recreates pods) is never invoked on the
-      // terminal path; only the idempotent teardown runs, each pass.
-      expect(stub.teardownComputePodsForTerminalRun).toHaveBeenCalledTimes(2)
+      expect(stub.teardownComputePodsForTerminalRun).toHaveBeenCalledTimes(1)
+      expect(mcpServerDeletes()).toBeGreaterThan(0)
+      expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'wf-run-idem-web-search-run', namespace: 'mcp-server' })
+      )
+      expect(store.current().status?.terminalRunTeardown?.completedAt).toEqual(expect.any(String))
+      const afterPass1 = {
+        delegation: mcpServerDeletes(),
+        deployments: mockAppsApi.deleteNamespacedDeployment.mock.calls.length,
+      }
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness: pass 2 ran the terminal block (credentials refreshed again).
+      expect(stub.ensureCoordinatorRuntimeCredentials).toHaveBeenCalledTimes(2)
+      expect(result.requeueAfterMs).toBeUndefined()
+      expect(stub.teardownComputePodsForTerminalRun).toHaveBeenCalledTimes(1)
+      expect(mcpServerDeletes()).toBe(afterPass1.delegation)
+      expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalledTimes(afterPass1.deployments)
+      // Inner reconcile (which creates/recreates pods) is never invoked on the terminal path.
       expect(stub.reconcile).not.toHaveBeenCalled()
+    })
+
+    it('a failed teardown step records nothing, requeues, and the next pass repeats it', async () => {
+      const stub = stubWorkflowReconciler()
+      stub.teardownComputePodsForTerminalRun.mockRejectedValueOnce(new Error('K8s API blip'))
+      mockAppsApi.deleteNamespacedDeployment.mockRejectedValueOnce({ code: 500, message: 'boom' })
+      const store = installRecipeStore(
+        makeTerminalRunRecipe({ name: 'wf-run-retry', phase: 'completed', transport: true })
+      )
+
+      const first = await reconciler.reconcile(store.current())
+
+      expect(stub.teardownComputePodsForTerminalRun).toHaveBeenCalledTimes(1)
+      expect(first.phase).toBe('active')
+      expect(first.requeueAfterMs).toBe(5_000)
+      expect(store.current().status?.terminalRunTeardown).toBeUndefined()
+
+      const second = await reconciler.reconcile(store.current())
+
+      expect(stub.teardownComputePodsForTerminalRun).toHaveBeenCalledTimes(2)
+      expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalledTimes(2)
+      expect(store.current().status?.terminalRunTeardown?.completedAt).toEqual(expect.any(String))
+      expect(second.requeueAfterMs).toBeUndefined()
+    })
+
+    it('a record the API server pruned (older CRD) is not reported as stored', async () => {
+      const stub = stubWorkflowReconciler()
+      const store = installRecipeStore(
+        makeTerminalRunRecipe({ name: 'wf-run-pruned', phase: 'completed' }),
+        { prune: ['terminalRunTeardown'] }
+      )
+      const errorLog = captureLogger('error')
+      const recipe = store.current()
+
+      const result = await reconciler.reconcile(recipe)
+      errorLog.mockRestore()
+
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: { status: { terminalRunTeardown: { completedAt: expect.any(String) } } },
+        }),
+        expect.anything()
+      )
+      const notStored = errorLog.mock.calls.find(
+        ([message]) => message === 'Run status record was not stored; requeueing'
+      )
+      expect(notStored).toBeDefined()
+      expect(String((notStored![1] as { err: Error }).err.message)).toContain(
+        'workflowrecipes.clerum.io'
+      )
+      expect(recipe.status?.terminalRunTeardown).toBeUndefined()
+      expect(result.requeueAfterMs).toBe(5_000)
+
+      await reconciler.reconcile(store.current())
+
+      expect(stub.teardownComputePodsForTerminalRun).toHaveBeenCalledTimes(2)
+    })
+
+    it('clears the record (and its fact) before a latched run is deployed again', async () => {
+      const stub = stubWorkflowReconciler()
+      const latched = makeTerminalRunRecipe({ name: 'wf-run-latched', phase: 'failed' })
+      latched.status = {
+        ...latched.status,
+        phase: 'failed',
+        message: 'Workflow failed',
+        workflowExecution: {
+          phase: 'failed',
+          message:
+            'FetchError: request to https://10.96.0.1/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 10.96.0.1:443',
+        },
+        terminalRunTeardown: {
+          completedAt: '2026-11-12T10:00:00.000Z',
+          noSecretBearingWorkloads: true,
+        },
+      } as WorkflowRecipeCRD['status']
+      const store = installRecipeStore(latched)
+      let storedAtInnerReconcile: unknown = 'not-called'
+      stub.reconcile.mockImplementation(async () => {
+        storedAtInnerReconcile = store.current().status?.terminalRunTeardown
+        return {
+          phase: 'deploying',
+          message: 'Workflow infrastructure recreated',
+          workflowPhase: 'recovering',
+        }
+      })
+      const recipe = store.current()
+
+      await reconciler.reconcile(recipe)
+
+      expect(stub.reconcile).toHaveBeenCalledTimes(1)
+      expect(storedAtInnerReconcile).toBeUndefined()
+      expect(recipe.status?.terminalRunTeardown).toBeUndefined()
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ body: { status: { terminalRunTeardown: null } } }),
+        expect.anything()
+      )
+      expect(stub.teardownComputePodsForTerminalRun).not.toHaveBeenCalled()
     })
   })
 
@@ -17254,7 +17472,9 @@ describe('WorkflowRecipeReconciler', () => {
 
     afterEach(() => {
       vi.useRealTimers()
-      mockCustomApi.patchNamespacedCustomObjectStatus.mockReset().mockResolvedValue({})
+      mockCustomApi.patchNamespacedCustomObjectStatus
+        .mockReset()
+        .mockImplementation(echoPatchedStatus)
     })
 
     function runScopedRecipe(status: Record<string, unknown>): WorkflowRecipeCRD {
@@ -17498,7 +17718,10 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.requeueFixedInterval).toBe(true)
     })
 
-    function realWatcherBridge(recipe: WorkflowRecipeCRD) {
+    function realWatcherBridge(
+      recipe: WorkflowRecipeCRD,
+      options: { dbRunProcessor?: { syncFromRecipeExecution: ReturnType<typeof vi.fn> } } = {}
+    ) {
       // The surrounding ledger-only cases fake Date; this bridge drives real timers too.
       vi.useRealTimers()
       vi.useFakeTimers()
@@ -17519,7 +17742,7 @@ describe('WorkflowRecipeReconciler', () => {
         ) {
           throw { code: 409 }
         }
-        live.status = { ...live.status, ...body.status }
+        live.status = mergeStatusPatch(live.status, body.status)
         live.metadata.resourceVersion = String(Number(live.metadata.resourceVersion) + 1)
         return structuredClone(live)
       })
@@ -17538,7 +17761,7 @@ describe('WorkflowRecipeReconciler', () => {
         transientRetries: new Map(),
         stopped: false,
         traceReporter: null,
-        dbRunProcessor: null,
+        dbRunProcessor: options.dbRunProcessor ?? null,
         reconciler,
         customApi: mockCustomApi,
       })
@@ -17665,45 +17888,97 @@ describe('WorkflowRecipeReconciler', () => {
       expect(vi.getTimerCount()).toBe(0)
 
       // Deliver the actual accepted PATCH response through the ordinary watch
-      // path. Its unchanged generation makes this a status-only MODIFIED, whose
-      // terminal cleanup remains required by the existing recovery contract.
+      // path. Its unchanged generation makes this a status-only MODIFIED. The
+      // terminal teardown of the ADDED pass is recorded on the run (issue #1349;
+      // that record write is resourceVersion 2), so the event only syncs the DB:
+      // no second full reconcile, and the teardown deletes are not repeated.
       expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
       const recoveryWatchObject = (await mockCustomApi.patchNamespacedCustomObjectStatus.mock
         .results[0].value) as WorkflowRecipeCRD
       expect(recoveryWatchObject).toEqual(bridge.current())
-      expect(recoveryWatchObject.metadata.resourceVersion).toBe('2')
+      expect(recoveryWatchObject.metadata.resourceVersion).toBe('3')
       expect(recoveryWatchObject.metadata.generation).toBe(1)
+      expect(recoveryWatchObject.status?.terminalRunTeardown?.completedAt).toEqual(
+        expect.any(String)
+      )
       await bridge.queue.enqueue(RECIPE, () =>
         bridge.watcher.handleRecipeEvent('MODIFIED', recoveryWatchObject)
       )
       await bridge.drain()
-      expect(fullReconcile).toHaveBeenCalledTimes(2)
-      expect(teardown).toHaveBeenCalledTimes(2)
-      expect(mockCoreApi.deleteNamespacedPod).toHaveBeenCalledTimes(initialEffects.pods * 2)
+      expect(fullReconcile).toHaveBeenCalledTimes(1)
+      expect(teardown).toHaveBeenCalledTimes(1)
+      expect(mockCoreApi.deleteNamespacedPod).toHaveBeenCalledTimes(initialEffects.pods)
       expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalledTimes(
-        initialEffects.deployments * 2
+        initialEffects.deployments
       )
       expect(
         mockCustomApi.deleteNamespacedCustomObject.mock.calls.filter(
           ([arg]) => arg.plural === 'mcpservers'
         )
-      ).toHaveLength(initialEffects.transport * 2)
+      ).toHaveLength(initialEffects.transport)
       expect(
         mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(([arg]) =>
           arg.name.endsWith('-coordinator-to-gfs')
         )
-      ).toHaveLength(initialEffects.gfs * 2)
+      ).toHaveLength(initialEffects.gfs)
       expect(legacyDeletes()).toBe(5)
-      // That ordinary pass publishes nothing, so it cannot drive another watch
-      // event. No legacy timer or continuing status-write loop remains either.
+      // The event publishes nothing, so it cannot drive another watch event.
+      // No legacy timer or continuing status-write loop remains either.
       expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
       expect(vi.getTimerCount()).toBe(0)
       await vi.advanceTimersByTimeAsync(3_600_000)
       await bridge.drain()
-      expect(fullReconcile).toHaveBeenCalledTimes(2)
-      expect(teardown).toHaveBeenCalledTimes(2)
+      expect(fullReconcile).toHaveBeenCalledTimes(1)
+      expect(teardown).toHaveBeenCalledTimes(1)
       expect(legacyDeletes()).toBe(5)
       expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      expect(bridge.queueFailures).not.toHaveBeenCalled()
+      bridge.watcher.clearTransientRetry(RECIPE)
+    })
+
+    it('the watch events of a recorded terminal teardown only sync the DB (issue #1349)', async () => {
+      const inner = installRealInner()
+      vi.spyOn(inner, 'ensureMcpHostRuntimeCredentials').mockResolvedValue()
+      const teardown = vi.spyOn(inner, 'teardownComputePodsForTerminalRun')
+      const fullReconcile = vi.spyOn(reconciler, 'reconcile')
+      legacyDeleteAnswers({ code: 404, message: 'not found' })
+      const dbRunProcessor = { syncFromRecipeExecution: vi.fn().mockResolvedValue(undefined) }
+      const bridge = realWatcherBridge(terminalRetryRecipe(), { dbRunProcessor })
+
+      await bridge.queue.enqueue(RECIPE, () =>
+        bridge.watcher.handleRecipeEvent('ADDED', bridge.current()!)
+      )
+      await bridge.drain()
+
+      expect(fullReconcile).toHaveBeenCalledTimes(1)
+      expect(teardown).toHaveBeenCalledTimes(1)
+      // The ADDED event synced the DB before its reconcile; count only what follows.
+      dbRunProcessor.syncFromRecipeExecution.mockClear()
+      // Every status patch the pass sent, as the watch delivers them: the record
+      // patch first, then any later patch of the same pass.
+      const watchObjects = await Promise.all(
+        mockCustomApi.patchNamespacedCustomObjectStatus.mock.results.map(
+          r => r.value as Promise<WorkflowRecipeCRD>
+        )
+      )
+      const recordIndex = watchObjects.findIndex(
+        o => o.status?.terminalRunTeardown?.completedAt !== undefined
+      )
+      expect(recordIndex).toBeGreaterThanOrEqual(0)
+      const delivered = watchObjects.slice(recordIndex)
+      for (const object of delivered) {
+        await bridge.queue.enqueue(RECIPE, () =>
+          bridge.watcher.handleRecipeEvent('MODIFIED', object)
+        )
+      }
+      await bridge.drain()
+
+      expect(dbRunProcessor.syncFromRecipeExecution).toHaveBeenCalledTimes(delivered.length)
+      expect(fullReconcile).toHaveBeenCalledTimes(1)
+      expect(teardown).toHaveBeenCalledTimes(1)
+      expect(bridge.watcher.recipes.get(RECIPE)?.status?.terminalRunTeardown?.completedAt).toEqual(
+        expect.any(String)
+      )
       expect(bridge.queueFailures).not.toHaveBeenCalled()
       bridge.watcher.clearTransientRetry(RECIPE)
     })
@@ -17817,9 +18092,10 @@ describe('WorkflowRecipeReconciler', () => {
           new Date().toISOString()
         )
         mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementationOnce(async ({ body }) => {
-          expect(body.metadata).toEqual({ uid: 'uid-lg', resourceVersion: '1' })
+          // resourceVersion 2 is the terminal teardown record of the ADDED pass (#1349).
+          expect(body.metadata).toEqual({ uid: 'uid-lg', resourceVersion: '2' })
           const next = structuredClone(bridge.current()!)
-          next.metadata.resourceVersion = '2'
+          next.metadata.resourceVersion = '3'
           if (change === 'recreated') next.metadata.uid = 'uid-new'
           else next.status!.conditions = newerFacts
           bridge.replace(next)
@@ -17844,7 +18120,7 @@ describe('WorkflowRecipeReconciler', () => {
           expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(2)
           expect(
             mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[1][0].body.metadata
-          ).toEqual({ uid: 'uid-lg', resourceVersion: '2' })
+          ).toEqual({ uid: 'uid-lg', resourceVersion: '3' })
           expect(ofType(bridge.current()!.status?.conditions, LEGACY_TYPE)).toEqual([])
           expect(ofType(bridge.current()!.status?.conditions, MARKER_TYPE)).toEqual(
             ofType(newerFacts, MARKER_TYPE)

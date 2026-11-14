@@ -1988,6 +1988,43 @@ describe('workflowNeedsTerminalRunTeardown', () => {
       )
     ).toBe(false)
   })
+
+  // Issue #1349 — a recorded teardown is not repeated; a latched child still is.
+  it('does not select a run whose terminal teardown is recorded, unless it is latched', () => {
+    const recorded = (status: Partial<NonNullable<WorkflowRecipeCRD['status']>>) =>
+      makeWorkflowRecipe({
+        metadata: {
+          name: 'recorded',
+          namespace: 'sandbox-recipes',
+          labels: { 'clerum.io/workflow-run-id': 'run-recorded' },
+        },
+        status: {
+          phase: 'active',
+          workflowExecution: { phase: 'completed' },
+          ...status,
+        } as WorkflowRecipeCRD['status'],
+      })
+
+    expect(workflowNeedsTerminalRunTeardown(recorded({}))).toBe(true)
+    expect(
+      workflowNeedsTerminalRunTeardown(
+        recorded({ terminalRunTeardown: { completedAt: '2026-11-12T10:00:00.000Z' } })
+      )
+    ).toBe(false)
+    expect(
+      workflowNeedsTerminalRunTeardown(
+        recorded({
+          phase: 'failed',
+          message: 'Workflow failed',
+          workflowExecution: {
+            phase: 'failed',
+            message: 'FetchError: request failed, reason: connect ETIMEDOUT 10.96.0.1:443',
+          },
+          terminalRunTeardown: { completedAt: '2026-11-12T10:00:00.000Z' },
+        })
+      )
+    ).toBe(true)
+  })
 })
 
 describe('status-only events drive DB sync (terminal + heartbeat)', () => {
@@ -2114,6 +2151,31 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
       expect(reconcile).toHaveBeenCalledWith(completed)
       // Cache is updated.
       expect(internal.recipes.get(completed.metadata.name)).toBe(completed)
+    }
+  )
+
+  it.each(['completed', 'failed', 'cancelled'] as const)(
+    'only syncs a %s run-scoped status-only event whose terminal teardown is recorded',
+    async phase => {
+      const cached = makeRunChild({
+        status: { phase: 'active', workflowExecution: { phase } },
+      })
+      const recorded = makeRunChild({
+        metadata: { resourceVersion: 'next' },
+        status: {
+          phase: 'active',
+          workflowExecution: { phase },
+          terminalRunTeardown: { completedAt: '2026-11-12T10:00:00.000Z' },
+        },
+      })
+      const { internal, reconcile, sync } = makeInternal(cached)
+
+      await internal.handleRecipeEvent('MODIFIED', recorded)
+
+      expect(sync).toHaveBeenCalledTimes(1)
+      expect(sync).toHaveBeenCalledWith(recorded)
+      expect(reconcile).not.toHaveBeenCalled()
+      expect(internal.recipes.get(recorded.metadata.name)).toBe(recorded)
     }
   )
 

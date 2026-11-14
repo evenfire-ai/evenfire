@@ -194,6 +194,47 @@ export function hasPendingTransportNetworkReadiness(recipe: WorkflowRecipeCRD): 
   )
 }
 
+/**
+ * Issue #1349 — true when the run's terminal compute teardown has been recorded
+ * on the run CR (`status.terminalRunTeardown.completedAt`). The record is removed
+ * before the run is deployed again, so it describes the current terminal entry.
+ */
+export function hasTerminalRunTeardownRecord(recipe: WorkflowRecipeCRD): boolean {
+  return typeof recipe.status?.terminalRunTeardown?.completedAt === 'string'
+}
+
+/**
+ * A workflow latched `failed` by a transient infra error skips the terminal
+ * block and is handed to the inner reconciler as `recovering`. Policy failures
+ * never self-heal: their message embeds operator-controlled workload fields.
+ * For a workflow the real error is on `workflowExecution.message` (the top-level
+ * message is just "Workflow failed"), so both messages are checked.
+ */
+export function isWorkflowLatchedByTransientError(recipe: WorkflowRecipeCRD): boolean {
+  const currentPhase = recipe.status?.phase ?? 'candidate'
+  return (
+    currentPhase === 'failed' &&
+    !recipe.status?.message?.startsWith('Policy violation:') &&
+    (isRetryableInfraError(recipe.status?.message) ||
+      isRetryableInfraError(recipe.status?.workflowExecution?.message))
+  )
+}
+
+/**
+ * Issue #1349 — a patch response that lacks a status field the controller just
+ * sent means the cluster's WorkflowRecipe CRD is older than the controller and
+ * the apiserver pruned the field.
+ */
+export class StatusRecordPrunedError extends Error {
+  constructor(field: string) {
+    super(
+      `The WorkflowRecipe CRD on this cluster does not declare status.${field}; ` +
+        'apply the CRDs of this release (workflowrecipes.clerum.io) before this controller image'
+    )
+    this.name = 'StatusRecordPrunedError'
+  }
+}
+
 function pendingTransportNetworkConditions(
   recipe: WorkflowRecipeCRD,
   message: string
@@ -2085,11 +2126,7 @@ export class WorkflowRecipeReconciler {
     // workload. Policy failures stay terminal until the spec is fixed (which
     // re-arms enforcement). The classifier is also anchored to transport-error
     // shapes (see isRetryableInfraError) so an embedded token can't match.
-    const latchedByTransientError =
-      currentPhase === 'failed' &&
-      !recipe.status?.message?.startsWith('Policy violation:') &&
-      (isRetryableInfraError(recipe.status?.message) ||
-        isRetryableInfraError(recipe.status?.workflowExecution?.message))
+    const latchedByTransientError = isWorkflowLatchedByTransientError(recipe)
 
     // ─── Workflow Detection — must come BEFORE non-deployable guard ────
     // Workflow recipes have their own lifecycle managed by the coordinator Pod.
@@ -2232,30 +2269,41 @@ export class WorkflowRecipeReconciler {
         // PRESERVE the artifact-reader pod, the workflow-output PVC, the
         // run-scoped CR, and the DB run history so /output artifacts stay
         // downloadable until the archive-cron deletes the CR.
-        await this.teardownTerminalRunComputeIfRunScoped(recipe)
+        // Issue #1349 — runs once per terminal entry: a completed teardown is
+        // recorded on the run CR and later passes skip it. A failed step (or a
+        // record that was not stored) is retried through a requeue.
+        const terminalTeardownSettled = await this.teardownTerminalRunComputeIfRunScoped(recipe)
+        const withTeardownRetry = (result: ReconcileResult): ReconcileResult =>
+          terminalTeardownSettled || result.requeueAfterMs !== undefined
+            ? result
+            : { ...result, requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS }
         // Issue #637 — a terminal (completed/failed/cancelled) workflow that is NOT
         // run-scoped keeps its steady envSecret/imagePullSecrets workloads. Enforce
         // revocation on a mid-life re-label here too (run-scoped compute is already
         // torn down above; this teardown is idempotent/404-tolerant).
         const terminalOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, derivedPhase)
-        if (terminalOwnership) return terminalOwnership
+        if (terminalOwnership) return withTeardownRetry(terminalOwnership)
         await this.settleNetworkPolicyMarkerForTerminalRun(recipe)
         // The recipe phase may remain active across running -> completed. Still
         // patch once if the top-level message is stale so UIs do not show a
         // completed execution as still running.
         if (currentPhase === derivedPhase) {
-          return {
+          return withTeardownRetry({
             phase: derivedPhase,
             message: derivedMessage,
             workloadStatuses: [],
             skipStatusPatch: recipe.status?.message === derivedMessage,
-          }
+          })
         }
         createLogger('wrc', recipe.metadata.name).info(
           'Transitioning recipe phase from workflow execution state',
           { name, wfExecPhase, currentPhase, derivedPhase }
         )
-        return { phase: derivedPhase, message: derivedMessage, workloadStatuses: [] }
+        return withTeardownRetry({
+          phase: derivedPhase,
+          message: derivedMessage,
+          workloadStatuses: [],
+        })
       }
 
       if (!this.workflowReconciler) {
@@ -2492,6 +2540,9 @@ export class WorkflowRecipeReconciler {
       let workflowWorkloadConditions: StatusCondition[] | undefined
       let workflowTransportNetworkConditions: StatusCondition[] | undefined =
         workflowWorkloads.length === 0 ? [] : undefined
+      // Issue #1349 (D4) — both creation sites (workflow workloads below and the
+      // inner reconcile) follow; the record must be gone before either runs.
+      await this.clearTerminalRunTeardownRecordBeforeDeploy(recipe)
       if (workflowWorkloads.length > 0) {
         createLogger('wrc', recipe.metadata.name).info('Deploying workflow workloads', {
           length: workflowWorkloads.length,
@@ -4233,16 +4284,21 @@ export class WorkflowRecipeReconciler {
    * NEVER deletes the artifact-reader, the PVC, the CR, or the DB run row — the
    * CR's finalizer cascade (reconcileDelete) at archive-cron TTL owns those.
    */
-  private async teardownTerminalRunComputeIfRunScoped(recipe: WorkflowRecipeCRD): Promise<void> {
+  private async teardownTerminalRunComputeIfRunScoped(recipe: WorkflowRecipeCRD): Promise<boolean> {
     const name = recipe.metadata.name
     const runId = recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()
-    if (!runId) return // not a run-scoped recipe — leave long-lived infra alone
+    if (!runId) return true // not a run-scoped recipe — leave long-lived infra alone
+    // Issue #1349 — this terminal entry's teardown already completed and is
+    // recorded on the run CR. The record is removed before any re-deploy, so
+    // nothing was created since; repeating the deletes would only re-send 404s.
+    if (hasTerminalRunTeardownRecord(recipe)) return true
 
     // Each step is independently best-effort: an error in one MUST NOT skip the
     // others (thermo-nuclear/sec-context-depth finding — a shared try would let
-    // a blip in step 1 leak the transport Deployment). All failures are logged
-    // and swallowed so the terminal status patch still lands; the archive-cron
-    // finalizer cascade is the backstop for anything left behind.
+    // a blip in step 1 leak the transport Deployment). Failures are logged, the
+    // terminal status patch still lands, and no record is written, so the caller
+    // requeues and the next pass repeats all three steps. The archive-cron
+    // finalizer cascade remains the backstop for anything left behind.
     const completed: string[] = []
     const failures: string[] = []
     const workflowReconciler = this.workflowReconciler
@@ -4261,6 +4317,10 @@ export class WorkflowRecipeReconciler {
           err: error,
         })
       }
+    } else {
+      // Without the workflow subsystem the compute pods were not deleted, so the
+      // teardown is not complete and must not be recorded as such.
+      failures.push('compute-pods(workflow subsystem not initialized)')
     }
 
     // 2. Cross-namespace transport runtime in mcp-server (e.g. web-search).
@@ -4305,8 +4365,134 @@ export class WorkflowRecipeReconciler {
         name,
         runId,
         value3: completed.join('; ') || 'nothing',
-        value4: failures.length ? `; failed (left for archive-cron) [${failures.join(', ')}]` : '',
+        value4: failures.length ? `; failed (retried on requeue) [${failures.join(', ')}]` : '',
       }
+    )
+    if (failures.length > 0) return false
+
+    return this.publishStatusRecord(recipe, {
+      terminalRunTeardown: { completedAt: new Date().toISOString() },
+    })
+  }
+
+  /**
+   * Issue #1349 — write a record fragment (`terminalRunTeardown` and/or
+   * `secretOwnershipRevocations`) with a merge patch that names only that
+   * fragment, so no other status writer can strip it and it strips nothing.
+   *
+   * The apiserver answers with the stored object. When a key that was sent is
+   * missing from the answer, the cluster's CRD predates these fields and the
+   * apiserver pruned them: that is reported as an error naming the CRD.
+   *
+   * Returns `true` only when the fragment is stored; the in-memory status is
+   * updated only then. A failure is logged here and never thrown: every caller
+   * asks for a requeue instead, so the pass keeps its result and its status patch.
+   */
+  private async publishStatusRecord(
+    recipe: WorkflowRecipeCRD,
+    fragment: {
+      terminalRunTeardown?: Partial<NonNullable<WorkflowRecipeStatus['terminalRunTeardown']>>
+      secretOwnershipRevocations?: Record<string, string>
+    }
+  ): Promise<boolean> {
+    try {
+      const stored = (await this.customApi.patchNamespacedCustomObjectStatus(
+        {
+          group: CRD_GROUP,
+          version: CRD_VERSION,
+          namespace: recipe.metadata.namespace,
+          plural: WORKFLOWRECIPE_PLURAL,
+          name: recipe.metadata.name,
+          body: { status: fragment },
+        },
+        { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+      )) as WorkflowRecipeCRD | undefined
+      const storedStatus = stored?.status
+      // Presence and type, not equality: the API server may normalize the
+      // date-time string, and the readers only need the field to be there.
+      for (const [key, value] of Object.entries(fragment.terminalRunTeardown ?? {})) {
+        const storedValue = (
+          storedStatus?.terminalRunTeardown as Record<string, unknown> | undefined
+        )?.[key]
+        if (typeof storedValue !== typeof value) {
+          throw new StatusRecordPrunedError(`terminalRunTeardown.${key}`)
+        }
+      }
+      for (const [key, value] of Object.entries(fragment.secretOwnershipRevocations ?? {})) {
+        if (storedStatus?.secretOwnershipRevocations?.[key] !== value) {
+          throw new StatusRecordPrunedError('secretOwnershipRevocations')
+        }
+      }
+    } catch (error) {
+      createLogger('wrc', recipe.metadata.name).error(
+        'Run status record was not stored; requeueing',
+        { name: recipe.metadata.name, value2: Object.keys(fragment).join(','), err: error }
+      )
+      return false
+    }
+
+    const status = (recipe.status ?? {}) as WorkflowRecipeStatus
+    if (fragment.terminalRunTeardown) {
+      status.terminalRunTeardown = {
+        ...status.terminalRunTeardown,
+        ...fragment.terminalRunTeardown,
+      } as WorkflowRecipeStatus['terminalRunTeardown']
+    }
+    if (fragment.secretOwnershipRevocations) {
+      status.secretOwnershipRevocations = {
+        ...status.secretOwnershipRevocations,
+        ...fragment.secretOwnershipRevocations,
+      }
+    }
+    recipe.status = status as typeof recipe.status
+    return true
+  }
+
+  /**
+   * Issue #1349 (D4) — remove the terminal teardown record before a run-scoped
+   * recipe can be deployed again (latched retry, coordinator `recovering`,
+   * admin retry), so the next terminal entry tears down what this pass creates.
+   *
+   * Reads the LIVE object: a pass can run on an object captured before the run
+   * turned terminal, and its in-memory status would not show the record. A failed
+   * read or patch propagates, so the pass stops before anything is created and
+   * the watcher retries it.
+   */
+  private async clearTerminalRunTeardownRecordBeforeDeploy(
+    recipe: WorkflowRecipeCRD
+  ): Promise<void> {
+    if (!recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()) return
+    let live: WorkflowRecipeCRD
+    try {
+      live = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+      })) as WorkflowRecipeCRD
+    } catch (error) {
+      if (getErrorCode(error) === 404) return
+      throw error
+    }
+    if (live.metadata?.uid !== recipe.metadata.uid || live.metadata?.deletionTimestamp) return
+    if (!live.status?.terminalRunTeardown) return
+
+    await this.customApi.patchNamespacedCustomObjectStatus(
+      {
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+        body: { status: { terminalRunTeardown: null } },
+      },
+      { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+    )
+    if (recipe.status) delete recipe.status.terminalRunTeardown
+    createLogger('wrc', recipe.metadata.name).info(
+      'Cleared terminal run teardown record before re-deploy',
+      { name: recipe.metadata.name }
     )
   }
 
@@ -4324,14 +4510,17 @@ export class WorkflowRecipeReconciler {
    *   cannot reach a sibling run's or the parent recipe's workloads.
    * - The namespace is `resolveWorkloadNamespace(workload)` which, for transport
    *   workloads, is the mcp-server namespace.
-   * - `deleteWorkload`→`safeDelete` swallows 404, so this is idempotent and a
-   *   no-op once the Deployment is gone.
+   * - A 404 is success, so this is idempotent and a no-op once the Deployment
+   *   is gone.
    *
    * Returns the list of resolved Deployment names targeted (for logs). A
-   * non-404 delete error is logged by safeDelete and left for archive-cron.
+   * non-404 delete error does not stop the other workloads' deletes; after the
+   * loop the first such error is thrown, so the caller records no completed
+   * teardown and the next pass retries (issue #1349).
    */
   private async deleteTransportRuntimeWorkloads(recipe: WorkflowRecipeCRD): Promise<string[]> {
     const targeted: string[] = []
+    const errors: unknown[] = []
     for (const workload of recipe.spec.workloads ?? []) {
       if (!workload.transport) continue
       // Defense in depth: never delete a stateful/PVC-backed workload here.
@@ -4340,9 +4529,14 @@ export class WorkflowRecipeReconciler {
 
       const ns = this.resolveWorkloadNamespace(workload, recipe.spec.ui?.workloadRef)
       const resourceName = rb.resolveWorkloadRuntimeResourceName(recipe, workload)
-      await this.deleteWorkload(workload.type, resourceName, ns)
-      targeted.push(resourceName)
+      try {
+        await this.deleteWorkload(workload.type, resourceName, ns, { throwOnError: true })
+        targeted.push(resourceName)
+      } catch (error) {
+        errors.push(error)
+      }
     }
+    if (errors.length > 0) throw errors[0]
     return targeted
   }
 

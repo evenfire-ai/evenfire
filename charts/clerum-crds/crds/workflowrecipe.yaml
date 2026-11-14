@@ -2211,6 +2211,28 @@ spec:
                     persisted for lifecycle consistency, mirroring workloadInstances.
                     Prevents cross-recipe collisions on generic resource ids such as
                     "data" or "credentials". Example: { "data": "my-recipe-data-a1b2c3d4" }
+                terminalRunTeardown:
+                  type: object
+                  description: >-
+                    Written by the controller when a run-scoped recipe's terminal
+                    compute teardown completed. Removed before the run is deployed
+                    again.
+                  properties:
+                    completedAt:
+                      type: string
+                      format: date-time
+                    noSecretBearingWorkloads:
+                      type: boolean
+                      description: >-
+                        True when, at the terminal pass, no workload that
+                        references a named Secret remained deployed with it.
+                secretOwnershipRevocations:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: >-
+                    Workload id to the digest of the denied Secret versions for
+                    which the workload was torn down.
                 pluginWorkloadSdk:
                   type: object
                   description: >-
