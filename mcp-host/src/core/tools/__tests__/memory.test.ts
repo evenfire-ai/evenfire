@@ -757,6 +757,57 @@ describe('memory_write records every successful write', () => {
     ])
   })
 
+  it('writtenAt: the entry time is in seconds, between the times before and after the write', async () => {
+    const before = Date.now()
+    await write.execute({ content: 'timed', target: 'notes.md' })
+    const after = Date.now()
+    expect(log.entries).toHaveLength(1)
+    expect(log.entries[0].writtenAt).toBeGreaterThanOrEqual(before / 1000)
+    expect(log.entries[0].writtenAt).toBeLessThanOrEqual(after / 1000)
+  })
+
+  it('hash: private MEMORY.md records the sha256 of the whole file after each write', async () => {
+    await write.execute({ content: 'first', target: 'memory_private' })
+    await write.execute({ content: 'second', target: 'memory_private' })
+    expect(log.entries).toHaveLength(2)
+    const afterAppend = await fs.readFile(userFile('MEMORY.md'), 'utf-8')
+    expect(afterAppend).toContain('first')
+    expect(afterAppend).toContain('second')
+    // Witness: the whole file and the fragment hash differently.
+    expect(sha256(afterAppend)).not.toBe(sha256('second'))
+    expect(log.entries[1].contentSha256).toBe(sha256(afterAppend))
+
+    await write.execute({ content: 'third', target: 'memory_private', append: false })
+    const afterReplace = await fs.readFile(userFile('MEMORY.md'), 'utf-8')
+    expect(log.entries).toHaveLength(3)
+    expect(log.entries[2]).toMatchObject({
+      scope: 'user',
+      relativePath: 'MEMORY.md',
+      mode: 'replace',
+      contentSha256: sha256(afterReplace),
+    })
+  })
+
+  const spellings: Array<[string, 'collective' | 'user', string, () => string]> = [
+    ['./MEMORY.md', 'collective', 'MEMORY.md', () => path.join(baseRoot, 'MEMORY.md')],
+    ['MEMORY.md/', 'collective', 'MEMORY.md', () => path.join(baseRoot, 'MEMORY.md')],
+    ['./memories/x.md', 'collective', 'memories/x.md', () => path.join(baseRoot, 'memories/x.md')],
+    ['memories//y.md', 'collective', 'memories/y.md', () => path.join(baseRoot, 'memories/y.md')],
+    ['./daily/2026-01-02.md', 'user', 'daily/2026-01-02.md', () => userFile('daily/2026-01-02.md')],
+    ['./notes.md', 'user', 'memory/notes.md', () => userFile('memory/notes.md')],
+  ]
+  for (const [target, scope, recorded, file] of spellings) {
+    it(`path: target ${target} is recorded as ${scope} ${recorded}`, async () => {
+      const content = `zzspelling ${target}`
+      const out = await write.execute({ content, target })
+      expect(out.is_error).toBe(false)
+      // Witness: the write landed at the canonical place.
+      await expect(fs.readFile(file(), 'utf-8')).resolves.toContain(content)
+      expect(log.entries).toHaveLength(1)
+      expect(log.entries[0]).toMatchObject({ scope, relativePath: recorded })
+    })
+  }
+
   it('rows 6 to 8, 10, 23: refused writes add no entry', async () => {
     await write.execute({ content: 'witness', target: 'witness.md' })
     expect(log.entries).toHaveLength(1)

@@ -38,12 +38,35 @@ function entry(relativePath: string): MemoryWriteEntry {
   }
 }
 
-function rows(dbPath: string): Array<{ relative_path: string; content_sha256: string }> {
+interface MemoryWriteRowRead {
+  user_key: string
+  scope: string
+  relative_path: string
+  mode: string
+  content_sha256: string
+  written_at: number
+}
+
+/** The row `entry(relativePath)` must leave: every column the adapter maps. */
+function rowOf(relativePath: string): MemoryWriteRowRead {
+  return {
+    user_key: 'a1b2c3d4e5f60718',
+    scope: 'user',
+    relative_path: relativePath,
+    mode: 'append',
+    content_sha256: 'c'.repeat(64),
+    written_at: 1_700_000_000.25,
+  }
+}
+
+function rows(dbPath: string): MemoryWriteRowRead[] {
   const reader = new Database(dbPath, { readonly: true })
   try {
     return reader
-      .prepare('SELECT relative_path, content_sha256 FROM memory_writes ORDER BY id')
-      .all() as Array<{ relative_path: string; content_sha256: string }>
+      .prepare(
+        'SELECT user_key, scope, relative_path, mode, content_sha256, written_at FROM memory_writes ORDER BY id'
+      )
+      .all() as MemoryWriteRowRead[]
   } finally {
     reader.close()
   }
@@ -113,15 +136,11 @@ describe('SqliteMemoryWriteLog on the real DB worker', () => {
     const log = new SqliteMemoryWriteLog(queue)
 
     await expect(log.record(entry('memory/first.md'))).resolves.toBeUndefined()
-    expect(rows(dbPath)).toEqual([
-      { relative_path: 'memory/first.md', content_sha256: 'c'.repeat(64) },
-    ])
+    expect(rows(dbPath)).toEqual([rowOf('memory/first.md')])
 
     await worker.terminate()
     await expect(log.record(entry('memory/second.md'))).rejects.toThrow()
-    expect(rows(dbPath)).toEqual([
-      { relative_path: 'memory/first.md', content_sha256: 'c'.repeat(64) },
-    ])
+    expect(rows(dbPath)).toEqual([rowOf('memory/first.md')])
   }, 60_000)
 
   it('rejects on the sync timeout although the row lands', async () => {
@@ -149,9 +168,7 @@ describe('SqliteMemoryWriteLog on the real DB worker', () => {
       expect(holding.heldCount()).toBe(1)
 
       holding.release()
-      expect(rows(dbPath)).toEqual([
-        { relative_path: 'memory/late.md', content_sha256: 'c'.repeat(64) },
-      ])
+      expect(rows(dbPath)).toEqual([rowOf('memory/late.md')])
       expect(failures).toEqual([])
     } finally {
       await queue.close()
