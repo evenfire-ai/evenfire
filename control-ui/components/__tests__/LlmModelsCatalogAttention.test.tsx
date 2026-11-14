@@ -252,8 +252,9 @@ describe('catalog attention banner — catalog-flagged kinds', () => {
     expect(cells[0]).toHaveTextContent(providerLabel)
     expect(cells[1]).toHaveTextContent(label)
     expect(cells[1]).toHaveTextContent(item.model)
-    // No reference column for a kind without references.
-    expect(within(dialog).queryByRole('columnheader', { name: 'Used by' })).not.toBeInTheDocument()
+    // The producer flags a deprecated model only when somebody uses it, so its
+    // references are listed.
+    expect(within(dialog).getByRole('columnheader', { name: 'Used by' })).toBeInTheDocument()
   })
 
   it('renders both kinds from the full feed, each stale item with its Hosts and a link', async () => {
@@ -629,7 +630,7 @@ describe('catalog attention banner — one line plus review dialog', () => {
     }
   })
 
-  it('T-5: only the referenced group has a Used by column, listing its Hosts', async () => {
+  it('T-5: both groups have a Used by column, listing their Hosts', async () => {
     const body = attentionWireBody()
     vi.mocked(getLlmModels).mockResolvedValue({ rows: rowsFor(body) })
     vi.mocked(getAdminAttention).mockResolvedValue(parseAdminAttentionReport(body))
@@ -648,11 +649,10 @@ describe('catalog attention banner — one line plus review dialog', () => {
       .closest('tr')!
     expect(within(row).getByText(`${hosts[0].namespace}/${hosts[0].name}`)).toBeInTheDocument()
     expect(within(row).getByText('1 Host')).toBeInTheDocument()
-    // The deprecated item carries references on the wire too; this group does
-    // not render them yet.
+    // The deprecated item carries references too, and its group lists them.
     expect(
-      within(deprecatedTable).queryByRole('columnheader', { name: 'Used by' })
-    ).not.toBeInTheDocument()
+      within(deprecatedTable).getByRole('columnheader', { name: 'Used by' })
+    ).toBeInTheDocument()
   })
 
   it('T-6: shows the id under the name only when they differ', async () => {

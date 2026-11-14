@@ -138,12 +138,10 @@ describe('edit page disable impact gate (409 model_in_use → force)', () => {
       expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(2)
     })
     // First attempt without force, retry with { force: true }.
-    expect(vi.mocked(updateLlmModel).mock.calls[0]).toEqual(['model-1', SUBMIT_INPUT, {}])
-    expect(vi.mocked(updateLlmModel).mock.calls[1]).toEqual([
-      'model-1',
-      SUBMIT_INPUT,
-      { force: true },
-    ])
+    // Turning an enabled model off pins it, on the first try and the forced retry.
+    const pinned = { ...SUBMIT_INPUT, pinEnabled: true }
+    expect(vi.mocked(updateLlmModel).mock.calls[0]).toEqual(['model-1', pinned, {}])
+    expect(vi.mocked(updateLlmModel).mock.calls[1]).toEqual(['model-1', pinned, { force: true }])
     await waitFor(() => expect(mockPush).toHaveBeenCalled())
   })
 
@@ -197,5 +195,70 @@ describe('edit page disable impact gate (409 model_in_use → force)', () => {
     })
     expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(1)
     expect(mockPush).not.toHaveBeenCalled()
+  })
+})
+
+// `pinEnabled` hands the authority over `enabled` to the operator. Only turning
+// the model off is that decision; a save that leaves `enabled` as it loaded
+// must not take the row away from the catalog sync.
+describe('edit page authority over enabled (pinEnabled)', () => {
+  beforeEach(() => {
+    mockPush.mockClear()
+    mockShowToast.mockClear()
+    vi.mocked(updateLlmModel).mockReset()
+    vi.mocked(updateLlmModel).mockResolvedValue(model)
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  async function submit(loaded: LlmAllowedModel, input: CreateLlmModelInput) {
+    vi.mocked(getLlmModel).mockResolvedValue(loaded)
+    mockSubmitInput = input
+    render(<EditLlmModelPage />)
+    fireEvent.click(await screen.findByRole('button', { name: SUBMIT_LABEL }))
+    await waitFor(() => expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mockPush).toHaveBeenCalled())
+    return vi.mocked(updateLlmModel).mock.calls[0][1]
+  }
+
+  it('pins a model the operator turns off', async () => {
+    const sent = await submit(model, {
+      provider: 'claude',
+      model: 'claude-haiku-4-5',
+      enabled: false,
+    })
+    expect(sent).toEqual({
+      provider: 'claude',
+      model: 'claude-haiku-4-5',
+      enabled: false,
+      pinEnabled: true,
+    })
+  })
+
+  it('does not pin when only the display name changes on an enabled model', async () => {
+    const input = {
+      provider: 'claude',
+      model: 'claude-haiku-4-5',
+      display_name: 'Haiku (renamed label)',
+      enabled: true,
+    }
+    const sent = await submit(model, input)
+    expect(sent).toEqual(input)
+    expect(sent).not.toHaveProperty('pinEnabled')
+  })
+
+  it('does not pin a display-name edit on a row the catalog sync turned off', async () => {
+    const pruned = { ...model, enabled: false, auto_disabled_at: '2026-11-01T00:00:00.000Z' }
+    const input = {
+      provider: 'claude',
+      model: 'claude-haiku-4-5',
+      display_name: 'Haiku (renamed label)',
+      enabled: false,
+    }
+    const sent = await submit(pruned, input)
+    expect(sent).not.toHaveProperty('pinEnabled')
   })
 })

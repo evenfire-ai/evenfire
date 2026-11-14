@@ -16,6 +16,7 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateLlmModelInput,
   type LlmAllowedModel,
+  type UpdateLlmModelInput,
   getLlmModel,
   getModelInUseImpact,
   isLlmModelConfigMapDeferred,
@@ -60,8 +61,14 @@ export default function EditLlmModelPage() {
     }
   }, [id])
 
+  // Turning a model off is the operator's decision, so it is pinned: without
+  // `pinEnabled` a disable that lands on a row the catalog sync already turned
+  // off changes nothing and leaves the row to the sync, which can turn it back
+  // on. Any other save leaves `enabled` as the form loaded it and must not take
+  // the row away from the catalog, so it goes without the pin.
   async function handleSubmit(input: CreateLlmModelInput) {
-    await saveWithImpactGate(input, false)
+    const disabling = model?.enabled === true && input.enabled === false
+    await saveWithImpactGate(disabling ? { ...input, pinEnabled: true } : input, false)
   }
 
   // A write that pulls a still-referenced pair out of the runtime allowlist is
@@ -71,7 +78,10 @@ export default function EditLlmModelPage() {
   // OLD identity, whose references `impact.provider/impact.model` names. Show the
   // impact and let the operator confirm a forced retry — never force automatically
   // (spec Fase 3/5).
-  async function saveWithImpactGate(input: CreateLlmModelInput, force: boolean) {
+  async function saveWithImpactGate(
+    input: CreateLlmModelInput & Pick<UpdateLlmModelInput, 'pinEnabled'>,
+    force: boolean
+  ) {
     setSaving(true)
     setSaveError('')
     let impact: ReturnType<typeof getModelInUseImpact> = null

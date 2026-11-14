@@ -17,6 +17,8 @@ type CatalogSyncProviderCountWire = {
   autoEnabled: number
   skippedUndecidable: number
   deferredByCap: number
+  reEnabled: number
+  reEnableDeferredByCap: number
 }
 
 type CatalogSyncResultWire = {
@@ -28,6 +30,8 @@ type CatalogSyncResultWire = {
   staled: number
   decidable?: boolean
   providerCounts?: Record<string, CatalogSyncProviderCountWire>
+  reEnabled?: number
+  reEnableDeferredByCap?: number
 }
 
 const WIRE = JSON.parse(
@@ -67,4 +71,26 @@ export function sumProviderCounts(
   field: keyof CatalogSyncProviderCountWire
 ): number {
   return Object.values(body.providerCounts ?? {}).reduce((n, count) => n + count[field], 0)
+}
+
+/**
+ * A generated body for a run that also decided rows its prune had turned off.
+ * The generator has no pruned rows yet, so every case reports zero; this sets
+ * one provider's two re-enable counters and the top-level sums the producer
+ * derives from them (`reEnabled` / `reEnableDeferredByCap` in llmCatalogSync.ts),
+ * leaving every other field as generated. Extend the generator to replace it.
+ */
+export function syncResultWithReEnable(
+  key: string,
+  provider: string,
+  counts: { reEnabled: number; reEnableDeferredByCap: number }
+): CatalogSyncResultWire {
+  const entry = syncResultCase(key)
+  const providerCount = entry.providerCounts?.[provider]
+  if (!providerCount) throw new Error(`case "${key}" has no provider "${provider}"`)
+  providerCount.reEnabled = counts.reEnabled
+  providerCount.reEnableDeferredByCap = counts.reEnableDeferredByCap
+  entry.reEnabled = sumProviderCounts(entry, 'reEnabled')
+  entry.reEnableDeferredByCap = sumProviderCounts(entry, 'reEnableDeferredByCap')
+  return entry
 }

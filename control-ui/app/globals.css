@@ -4905,6 +4905,39 @@ td.cu-registry-description {
   margin-top: var(--cu-space-4);
 }
 
+.cu-model-attention__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--cu-space-2);
+}
+
+.cu-model-attention__error {
+  margin: var(--cu-space-1) 0 0;
+  color: var(--cu-danger);
+  font-size: var(--cu-font-size-xs);
+  text-align: right;
+}
+
+.cu-model-attention__reviewed summary:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 2px;
+  border-radius: var(--cu-radius-xs);
+}
+
+.cu-model-attention__reviewed > .cu-model-attention__lede {
+  margin-top: var(--cu-space-2);
+}
+
+/* Catalog row the sync turned off for having no consumers. */
+.cu-llm-model-row__auto-off {
+  display: block;
+  margin-top: var(--cu-space-05);
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-xs);
+}
+
 /* Shared Host/grant reference list (attention dialog + 409 impact confirm). */
 .cu-model-refs {
   display: flex;
@@ -11784,6 +11817,11 @@ td.cu-registry-description {
 
 .cu-llm-models-banner {
   flex: 0 0 auto;
+}
+
+/* Only reviewed attention items left: informational, not a warning. */
+.cu-llm-models-banner--quiet {
+  color: var(--cu-text-soft);
 }
 
 .cu-agent-create-panel__header > .cu-tabs {

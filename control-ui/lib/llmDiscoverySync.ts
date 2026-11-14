@@ -21,10 +21,15 @@ function wereNot(count: number): string {
  */
 export function describeDiscoverySync(result: LlmDiscoverySyncResult): DiscoverySyncDescription {
   const { source, added, updated, staled, decidable, outcome } = result
-  const autoEnabled = decidable === true && outcome ? outcome.autoEnabled : 0
+  const decided = decidable === true && outcome ? outcome : null
+  const autoEnabled = decided ? decided.autoEnabled : 0
+  // Re-enabled rows already existed, so they stay out of "+N new": that count is
+  // inserted rows, and the auto-enabled ones are a subset of it.
+  const reEnabled = decided ? decided.reEnabled : 0
   const enabledClause = autoEnabled > 0 ? ` (${autoEnabled} enabled automatically)` : ''
-  const catalogHint = autoEnabled > 0 ? ' Enabled models are in the Catalog tab.' : ''
-  const toast = `Synced from ${source}: +${added} new${enabledClause}, ${updated} updated, ${staled} marked stale.${catalogHint}`
+  const reEnabledClause = reEnabled > 0 ? `, ${reEnabled} turned back on` : ''
+  const catalogHint = autoEnabled + reEnabled > 0 ? ' Enabled models are in the Catalog tab.' : ''
+  const toast = `Synced from ${source}: +${added} new${enabledClause}, ${updated} updated, ${staled} marked stale${reEnabledClause}.${catalogHint}`
 
   let notice: DiscoverySyncNotice | null = null
   if (decidable === false && outcome && outcome.heldUndecidable > 0) {
@@ -39,11 +44,20 @@ export function describeDiscoverySync(result: LlmDiscoverySyncResult): Discovery
       tone: 'warn',
       message: `Auto-enable could not decide this run (${reason}): ${held} new ${models(held)} from providers with auto-enable on ${wereNot(held)} added; ${remedy}.`,
     }
-  } else if (decidable === true && outcome && outcome.deferredByCap > 0) {
-    const deferred = outcome.deferredByCap
+  } else if (decided && (decided.deferredByCap > 0 || decided.reEnableDeferredByCap > 0)) {
+    const deferred = decided.deferredByCap
+    const reDeferred = decided.reEnableDeferredByCap
+    const parts = [
+      deferred > 0
+        ? `${deferred} more new ${models(deferred)} ${wereNot(deferred)} added yet`
+        : null,
+      reDeferred > 0
+        ? `${reDeferred} ${models(reDeferred)} the catalog lists again ${wereNot(reDeferred)} turned back on yet`
+        : null,
+    ].filter((part): part is string => part !== null)
     notice = {
       tone: 'info',
-      message: `${deferred} more new ${models(deferred)} ${wereNot(deferred)} added yet (auto-enable limit for this run reached); run the sync again to add them.`,
+      message: `${parts.join(' and ')} (auto-enable limit for this run reached); run the sync again to ${reDeferred > 0 ? 'finish' : 'add them'}.`,
     }
   }
   return { toast, notice }
