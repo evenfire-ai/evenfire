@@ -201,6 +201,7 @@ import {
 import { type McpHostRuntimeAuth, refreshWithRecovery } from './workflow/userApprovalRequester'
 import { countSharedOutputs, resolveRpcCallerOutputDir } from './workspace/callerOutputs'
 import { resolveCallerRootBinding } from './workspace/callerRootBinding'
+import { SqliteMemoryWriteLog } from './workspace/memoryWriteLog'
 import { ScopedWorkspaceProvider } from './workspace/scopedWorkspace'
 
 // Global state
@@ -1935,6 +1936,16 @@ async function initializeAgent(): Promise<void> {
   // there) AND the feature flag. In `memory` mode there is no `persistQueue`
   // so the tool/endpoint simply stay unregistered.
   const persistQueue = conversationStoreHandle?.persistQueue
+
+  // Record of successful memory_write calls (migration 018). Without a session
+  // database there is nowhere to record them; the tool then writes without a
+  // record (no path or content in this line).
+  if (persistQueue) {
+    agent.setMemoryWriteLog(new SqliteMemoryWriteLog(persistQueue))
+  } else {
+    logger.info({ component: 'MemoryWrite' }, 'memory write record disabled: no session database')
+  }
+
   if (config.sessionSearchEnabled && persistQueue) {
     sessionSearchService = new SessionSearchService({ persistQueue })
     agent.setSessionSearchService(sessionSearchService)

@@ -172,6 +172,11 @@ export const FIXTURE_REJECTION_REASONS = Object.freeze([
   'save-folder-not-unique',
   'save-tool-output-malformed',
   'save-write-tools-missing',
+  'memory-directive-malformed',
+  'memory-tools-missing',
+  'memory-tool-output-malformed',
+  'memory-tool-result-count',
+  'memory-recall-prompt-leak',
 ])
 
 /** A refusal with a stable machine-readable reason code for the evidence tally. */
@@ -666,6 +671,105 @@ function parseAttachmentSaveResult(payload) {
   return { ok: true, result }
 }
 
+// ─── Memory notes journey ─────────────────────────────────────────────────────
+
+const MEMORY_WRITE_TOOL = 'memory_write'
+const MEMORY_SEARCH_TOOL = 'memory_search'
+const MEMORY_READ_TOOL = 'memory_read'
+
+/** Prefix of the fixture's memory-notes answers, without underscores so Markdown keeps it whole. */
+export const MEMORY_NOTES_ANSWER_MARKER = 'MEMORY-ANSWER'
+
+/**
+ * The directive at the end of the last user message, on its own line or after a
+ * space: the journey, the run token every saved text carries, and the note name
+ * for `note` and `recall`.
+ * It stands in for the model's reading of a natural-language request.
+ */
+const MEMORY_NOTES_DIRECTIVE =
+  /(?:^|[ \t])MEMORY_NOTES (remember|note|recall) run=([a-f0-9]{12})(?: name=([a-z0-9][a-z0-9-]{0,39}))?$/m
+
+/** Nonces the saved texts carry. The recall answer repeats only nonces a tool returned. */
+const MEMORY_NONCE = /memnonce[a-f0-9]{12}/g
+
+/** Results `memory_write` returns for the two writes of the journey (mcp-host core/tools/memory.ts). */
+const PRIVATE_MEMORY_WRITE_RESULT = 'Written to private memory (append)'
+const noteWriteResult = name => `Written to memory/${name}.md (append)`
+
+class FixtureMemoryNotesError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'FixtureMemoryNotesError'
+    this.code = code
+  }
+}
+
+const memoryMalformed = message =>
+  new FixtureMemoryNotesError('memory-tool-output-malformed', message)
+
+/**
+ * The memory-notes directive of the last user message, or null when absent.
+ * `content` is what the user typed before the directive line: the text to save.
+ */
+function memoryNotesDirective(messages) {
+  const userIndex = lastUserIndex(messages)
+  if (userIndex < 0) return null
+  const text = messageText(messages[userIndex].content)
+  const match = MEMORY_NOTES_DIRECTIVE.exec(text)
+  if (!match) return null
+  const [, journey, run, name] = match
+  if ((journey === 'remember') === (name !== undefined))
+    throw new FixtureMemoryNotesError(
+      'memory-directive-malformed',
+      `the ${journey} directive ${journey === 'remember' ? 'takes no' : 'needs a'} name`
+    )
+  // The Host prefixes the user's text with its <turn-context> block; the text to
+  // save is what the user typed, between that block and the directive line.
+  const beforeDirective = text.slice(0, match.index)
+  const contextEnd = beforeDirective.lastIndexOf('</turn-context>')
+  const content = (
+    contextEnd >= 0 ? beforeDirective.slice(contextEnd + '</turn-context>'.length) : beforeDirective
+  ).trim()
+  if (journey !== 'recall' && !content.includes(`memnote${run}`))
+    throw new FixtureMemoryNotesError(
+      'memory-directive-malformed',
+      'the text to save does not carry the run token'
+    )
+  return { journey, run, name: name ?? null, content }
+}
+
+/** The JSON `memory_search` returns (mcp-host MemorySearchTool); memory tools do not sanitize. */
+function parseMemorySearchResult(content) {
+  let data
+  try {
+    data = JSON.parse(content)
+  } catch {
+    throw memoryMalformed('the memory_search result is not JSON')
+  }
+  if (
+    !data ||
+    !Array.isArray(data.results) ||
+    data.results.some(
+      result => !result || typeof result.path !== 'string' || typeof result.content !== 'string'
+    )
+  )
+    throw memoryMalformed('the memory_search result has no results list of { path, content }')
+  return data.results
+}
+
+/** The JSON `memory_read` returns for a found file; a "File not found" text is not JSON. */
+function parseMemoryReadResult(content) {
+  let data
+  try {
+    data = JSON.parse(content)
+  } catch {
+    throw memoryMalformed('the memory_read result is not JSON')
+  }
+  if (!data || typeof data.path !== 'string' || typeof data.content !== 'string')
+    throw memoryMalformed('the memory_read result has no { path, content }')
+  return data
+}
+
 const INTERNAL_HOST_SUFFIXES = [
   '.svc.cluster.local',
   '.svc',
@@ -942,13 +1046,14 @@ export function createImageFixtureFetch(
     model,
     content,
     responseKind,
-    { imageSha256 = null, document, saveOutcome, stream = false } = {}
+    { imageSha256 = null, document, saveOutcome, memory, stream = false } = {}
   ) => {
     sequence += 1
     const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
     recordCall(model, imageSha256, responseKind, {
       ...document,
       ...(saveOutcome === undefined ? {} : { saveOutcome }),
+      ...memory,
     })
     publish()
     return stream
@@ -1045,6 +1150,122 @@ export function createImageFixtureFetch(
     )
   }
 
+  /**
+   * One stateless memory-notes turn, staged like the save turn by the number of
+   * tool results after the last user message. The ledger keeps fixed strings,
+   * booleans and counts only: never the saved text.
+   */
+  const memoryNotesTurn = (body, directive, model, stream) => {
+    const tools = Array.isArray(body.tools) ? body.tools : []
+    const offered = name => tools.some(tool => tool?.function?.name === name)
+    const userIndex = lastUserIndex(body.messages)
+    const afterUser = body.messages.slice(userIndex + 1)
+    const toolMessages = afterUser.filter(
+      message => message?.role === 'tool' && typeof message.content === 'string'
+    )
+    const callNames = new Map()
+    for (const message of afterUser) {
+      if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls)) continue
+      for (const call of message.tool_calls) callNames.set(call?.id, call?.function?.name)
+    }
+    const resultOf = (message, toolName) => {
+      if (callNames.get(message.tool_call_id) !== toolName)
+        throw memoryMalformed(`the tool result does not answer a ${toolName} call`)
+      return message.content
+    }
+    // A new conversation carries exactly one user message.
+    const userMessages = body.messages.filter(message => message?.role === 'user').length
+    const toolCallResponse = (toolName, args, responseKind, fields) => {
+      sequence += 1
+      const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
+      recordCall(model, null, responseKind, fields)
+      publish()
+      return jsonResponse(toolCallCompletionBody(completionId, model, toolName, args))
+    }
+    const { journey, run, name } = directive
+
+    if (journey === 'remember' || journey === 'note') {
+      if (!offered(MEMORY_WRITE_TOOL))
+        throw new FixtureMemoryNotesError('memory-tools-missing', 'memory_write was not offered')
+      if (toolMessages.length === 0)
+        return toolCallResponse(
+          MEMORY_WRITE_TOOL,
+          { target: journey === 'remember' ? 'memory_private' : name, content: directive.content },
+          'memory-write-requested',
+          { memoryJourney: journey }
+        )
+      if (toolMessages.length === 1) {
+        const result = resultOf(toolMessages[0], MEMORY_WRITE_TOOL)
+        const expected =
+          journey === 'remember' ? PRIVATE_MEMORY_WRITE_RESULT : noteWriteResult(name)
+        // A closed set: any other result text is malformed, so the ledger never holds free text.
+        if (result !== expected) throw memoryMalformed('unexpected memory_write result')
+        return answer(model, `${MEMORY_NOTES_ANSWER_MARKER} saved`, 'memory-write-answer', {
+          memory: { memoryJourney: journey, memoryToolResult: result },
+          stream,
+        })
+      }
+      throw new FixtureMemoryNotesError(
+        'memory-tool-result-count',
+        `a ${journey} turn takes one tool result, received ${toolMessages.length}`
+      )
+    }
+
+    if (!offered(MEMORY_SEARCH_TOOL) || !offered(MEMORY_READ_TOOL))
+      throw new FixtureMemoryNotesError(
+        'memory-tools-missing',
+        'memory_search and memory_read were not both offered'
+      )
+    const notePath = `memory/${name}.md`
+    if (toolMessages.length === 0)
+      return toolCallResponse(
+        MEMORY_SEARCH_TOOL,
+        { query: `memnote${run}`, limit: 10 },
+        'memory-search-requested',
+        { memoryJourney: 'recall', userMessages }
+      )
+    const searchResults = parseMemorySearchResult(resultOf(toolMessages[0], MEMORY_SEARCH_TOOL))
+    if (toolMessages.length === 1)
+      return toolCallResponse(MEMORY_READ_TOOL, { path: name }, 'memory-read-requested', {
+        memoryJourney: 'recall',
+        userMessages,
+        searchHitNotePath: searchResults.some(result => result.path === notePath),
+      })
+    if (toolMessages.length === 2) {
+      const read = parseMemoryReadResult(resultOf(toolMessages[1], MEMORY_READ_TOOL))
+      const returned = [...searchResults.map(result => result.content), read.content].join('\n')
+      const nonces = [...new Set(returned.match(MEMORY_NONCE) ?? [])].sort()
+      if (nonces.length === 0) throw memoryMalformed('the memory tools returned no saved text')
+      // A recalled nonce must reach the model through the Host's memory tools only.
+      for (const message of body.messages) {
+        if (message?.role === 'tool') continue
+        const text = messageText(message?.content)
+        if (nonces.some(nonce => text.includes(nonce)))
+          throw new FixtureMemoryNotesError(
+            'memory-recall-prompt-leak',
+            'a recalled nonce appears outside the tool results'
+          )
+      }
+      return answer(
+        model,
+        `${MEMORY_NOTES_ANSWER_MARKER} recall ${nonces.join(' ')}`,
+        'memory-recall-answer',
+        {
+          memory: {
+            memoryJourney: 'recall',
+            userMessages,
+            readFoundNote: read.path === notePath,
+          },
+          stream,
+        }
+      )
+    }
+    throw new FixtureMemoryNotesError(
+      'memory-tool-result-count',
+      `a recall turn takes at most two tool results, received ${toolMessages.length}`
+    )
+  }
+
   const handleProviderRequest = (input, init, target) => {
     state.counters.totalAttempts += 1
 
@@ -1094,6 +1315,26 @@ export function createImageFixtureFetch(
         return attachmentSaveTurn(body, saveDirective, model, stream)
       } catch (error) {
         if (!(error instanceof FixtureAttachmentSaveError)) throw error
+        return refuse(model, error.code, { code: error.code })
+      }
+    }
+
+    // The memory-notes directive, like the save directive, is checked before the
+    // image scanner and the document classifier.
+    let memoryDirective
+    try {
+      memoryDirective = memoryNotesDirective(body.messages)
+    } catch (error) {
+      if (!(error instanceof FixtureMemoryNotesError)) throw error
+      return refuse(model, error.code, { code: error.code })
+    }
+    if (memoryDirective) {
+      if (model !== UNSUPPORTED_MODEL && model !== SUPPORTED_MODEL)
+        return refuse(model, 'unsupported-model', { code: 'unsupported_model' })
+      try {
+        return memoryNotesTurn(body, memoryDirective, model, stream)
+      } catch (error) {
+        if (!(error instanceof FixtureMemoryNotesError)) throw error
         return refuse(model, error.code, { code: error.code })
       }
     }

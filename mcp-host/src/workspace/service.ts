@@ -81,17 +81,19 @@ export {
  */
 export interface Workspace {
   read(relativePath: string): Promise<string | null>
-  write(relativePath: string, content: string): Promise<void>
-  append(relativePath: string, content: string): Promise<void>
+  /** Resolves with the full content now in the file. */
+  write(relativePath: string, content: string): Promise<string>
+  /** Resolves with the full content now in the file (existing + separator + new). */
+  append(relativePath: string, content: string): Promise<string>
   delete(relativePath: string): Promise<void>
   exists(relativePath: string): Promise<boolean>
   list(directory?: string): Promise<WorkspaceEntry[]>
   search(query: string, limit?: number): Promise<SearchResult[]>
   readMemory(): Promise<string>
-  appendMemory(entry: string): Promise<void>
+  appendMemory(entry: string): Promise<string>
   readPrivateMemory(): Promise<string>
-  appendPrivateMemory(entry: string): Promise<void>
-  writePrivateMemory(content: string): Promise<void>
+  appendPrivateMemory(entry: string): Promise<string>
+  writePrivateMemory(content: string): Promise<string>
   readTodayLog(): Promise<string>
   appendDailyLog(entry: string): Promise<void>
   readHeartbeatChecklist(): Promise<string | null>
@@ -198,7 +200,7 @@ export class WorkspaceService implements Workspace {
     }
   }
 
-  async write(relativePath: string, content: string): Promise<void> {
+  async write(relativePath: string, content: string): Promise<string> {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
     }
@@ -207,6 +209,7 @@ export class WorkspaceService implements Workspace {
     await this.mutexFor(resolved).runExclusive(async () => {
       await this._atomicWrite(resolved, content)
     })
+    return content
   }
 
   /**
@@ -218,12 +221,14 @@ export class WorkspaceService implements Workspace {
    * archives. Deliberate agent writes to `daily/*` (memory_write) use the
    * default-scanned path.
    */
-  async append(relativePath: string, content: string, opts?: { scan?: boolean }): Promise<void> {
+  async append(relativePath: string, content: string, opts?: { scan?: boolean }): Promise<string> {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
     }
     const resolved = await this.resolveAccessiblePath(relativePath)
-    await this.mutexFor(resolved).runExclusive(async () => {
+    // The resulting content is built under the per-file mutex and returned, so
+    // a caller can hash exactly what this append left in the file.
+    return this.mutexFor(resolved).runExclusive(async () => {
       let existing: string | null
       try {
         existing = await fs.readFile(resolved, 'utf-8')
@@ -236,6 +241,7 @@ export class WorkspaceService implements Workspace {
         scanWriteContent(relativePath, next, Buffer.byteLength(next, 'utf-8'))
       }
       await this._atomicWrite(resolved, next)
+      return next
     })
   }
 
@@ -386,8 +392,8 @@ export class WorkspaceService implements Workspace {
     return (await this.read('MEMORY.md')) ?? ''
   }
 
-  async appendMemory(entry: string): Promise<void> {
-    await this.append('MEMORY.md', entry)
+  async appendMemory(entry: string): Promise<string> {
+    return this.append('MEMORY.md', entry)
   }
 
   // ── Private (per-user) memory (F5) ──────────────────────────────────────────
@@ -400,12 +406,12 @@ export class WorkspaceService implements Workspace {
     return this.readMemory()
   }
 
-  async appendPrivateMemory(entry: string): Promise<void> {
-    await this.appendMemory(entry)
+  async appendPrivateMemory(entry: string): Promise<string> {
+    return this.appendMemory(entry)
   }
 
-  async writePrivateMemory(content: string): Promise<void> {
-    await this.write('MEMORY.md', content)
+  async writePrivateMemory(content: string): Promise<string> {
+    return this.write('MEMORY.md', content)
   }
 
   async readTodayLog(): Promise<string> {

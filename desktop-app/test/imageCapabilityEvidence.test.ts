@@ -136,6 +136,110 @@ describe('appendedAttempts', () => {
       expect(() => appendedAttempts(before, parse([...changed])), label).toThrow(/append-only/)
     }
   })
+
+  it('refuses a memory row whose fields changed between reads', () => {
+    const before = parse([memoryRows.writeAnswer(), memoryRows.read()])
+    // Witness: an unchanged prefix yields the appended row.
+    expect(
+      appendedAttempts(
+        before,
+        parse([memoryRows.writeAnswer(), memoryRows.read(), rows.textOnly()])
+      )
+    ).toEqual([rows.textOnly()])
+    for (const [label, changed] of [
+      [
+        'memoryToolResult',
+        [
+          { ...memoryRows.writeAnswer(), memoryToolResult: 'Written to memory/other.md (append)' },
+          memoryRows.read(),
+        ],
+      ],
+      [
+        'searchHitNotePath',
+        [memoryRows.writeAnswer(), { ...memoryRows.read(), searchHitNotePath: false }],
+      ],
+      ['userMessages', [memoryRows.writeAnswer(), { ...memoryRows.read(), userMessages: 2 }]],
+    ] as const) {
+      expect(() => appendedAttempts(before, parse([...changed])), label).toThrow(/append-only/)
+    }
+  })
+})
+
+const memoryRows = {
+  writeRequested: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'memory-write-requested',
+    memoryJourney: 'remember',
+  }),
+  writeAnswer: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'memory-write-answer',
+    memoryJourney: 'note',
+    memoryToolResult: 'Written to memory/release-checklist.md (append)',
+  }),
+  search: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'memory-search-requested',
+    memoryJourney: 'recall',
+    userMessages: 1,
+  }),
+  read: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'memory-read-requested',
+    memoryJourney: 'recall',
+    userMessages: 1,
+    searchHitNotePath: true,
+  }),
+  recall: (): Row => ({
+    model: 'glm-5.3-flash',
+    imageSha256: null,
+    responseKind: 'memory-recall-answer',
+    memoryJourney: 'recall',
+    userMessages: 1,
+    readFoundNote: true,
+  }),
+}
+
+describe('imageCapabilityEvidence memory-notes rows', () => {
+  it('keeps each memory field on the row that carries it', () => {
+    const all = [
+      memoryRows.writeRequested(),
+      memoryRows.writeAnswer(),
+      memoryRows.search(),
+      memoryRows.read(),
+      memoryRows.recall(),
+    ]
+    expect(parse(all).attempts).toEqual(all)
+  })
+
+  it('refuses a memory field that is missing, malformed or on another row kind', () => {
+    // Witness: the private-memory result parses.
+    expect(
+      parse([
+        { ...memoryRows.writeAnswer(), memoryToolResult: 'Written to private memory (append)' },
+      ]).attempts[0]?.memoryToolResult
+    ).toBe('Written to private memory (append)')
+    const { memoryJourney: _journey, ...withoutJourney } = memoryRows.writeRequested()
+    for (const [label, row] of [
+      ['missing journey', withoutJourney],
+      ['unknown journey', { ...memoryRows.writeRequested(), memoryJourney: 'forget' }],
+      [
+        'free-text write result',
+        { ...memoryRows.writeAnswer(), memoryToolResult: 'Written to notes the user typed' },
+      ],
+      ['zero user messages', { ...memoryRows.search(), userMessages: 0 }],
+      ['string hit flag', { ...memoryRows.read(), searchHitNotePath: 'yes' }],
+      ['journey on a text row', { ...rows.textOnly(), memoryJourney: 'recall' }],
+      ['read flag on a search row', { ...memoryRows.search(), readFoundNote: true }],
+      ['write result on a request row', { ...memoryRows.writeRequested(), memoryToolResult: 'x' }],
+    ] as const) {
+      expect(() => parse([row]), label).toThrow(/attempts\[0\]\./)
+    }
+  })
 })
 
 describe('rejection reason parity', () => {

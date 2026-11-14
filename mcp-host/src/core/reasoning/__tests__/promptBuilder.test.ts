@@ -37,6 +37,33 @@ describe('DefaultPromptBuilder — memory guidance (P.4)', () => {
     const occurrences = msg.content.split(MEMORY_GUIDANCE_TEXT).length - 1
     expect(occurrences).toBe(1)
   })
+
+  it('places named notes under memory/ and team knowledge in the collective memory (D77, D79, D92)', () => {
+    expect(MEMORY_GUIDANCE_TEXT).toContain('must live under memory/')
+    expect(MEMORY_GUIDANCE_TEXT).toContain('memory/preferences.md')
+    expect(MEMORY_GUIDANCE_TEXT).toContain('goes to the collective memory')
+    expect(MEMORY_GUIDANCE_TEXT).toContain('are not memory')
+    expect(MEMORY_GUIDANCE_TEXT).toContain('size cap (8 KB)')
+    expect(MEMORY_GUIDANCE_TEXT).not.toContain('team-conventions')
+    expect(MEMORY_GUIDANCE_TEXT).not.toContain('ledger.md')
+    expect(MEMORY_GUIDANCE_TEXT).not.toMatch(/keep[^.]*ledger/i)
+  })
+
+  it('says memory is in one place and is read only through the memory tools (D83, D91)', () => {
+    expect(MEMORY_GUIDANCE_TEXT).toContain('Memory is in one place')
+    expect(MEMORY_GUIDANCE_TEXT).toContain(
+      'never by browsing other workspace files with file_read or the shell'
+    )
+    expect(MEMORY_GUIDANCE_TEXT).toContain('a workspace file is not memory')
+    for (const place of ['MEMORY.md', 'memories/', 'daily/', 'memory/']) {
+      expect(MEMORY_GUIDANCE_TEXT).toContain(place)
+    }
+  })
+
+  it('tells how a private MEMORY.md and a shared note name a kept file (V2-L7)', () => {
+    expect(MEMORY_GUIDANCE_TEXT).toContain('their private MEMORY.md names a file to keep')
+    expect(MEMORY_GUIDANCE_TEXT).toContain('A shared note names no memory/ path')
+  })
 })
 
 describe('DefaultPromptBuilder — governed GFS workspace files', () => {

@@ -64,6 +64,14 @@ export const FIXTURE_RESPONSE_KIND = {
   attachmentSaveRequested: 'attachment-save-requested',
   attachmentSaveAnswer: 'attachment-save-answer',
   attachmentSaveToolAbsent: 'attachment-save-tool-absent',
+  // Memory notes: a write asks for `memory_write` and its answer records the
+  // Host's fixed result text; a recall asks for `memory_search`, then
+  // `memory_read`, then answers with what the two results returned.
+  memoryWriteRequested: 'memory-write-requested',
+  memoryWriteAnswer: 'memory-write-answer',
+  memorySearchRequested: 'memory-search-requested',
+  memoryReadRequested: 'memory-read-requested',
+  memoryRecallAnswer: 'memory-recall-answer',
 } as const
 
 /**
@@ -97,6 +105,11 @@ export const FIXTURE_REJECTION_REASONS: readonly string[] = Object.freeze([
   'save-folder-beyond-first-page',
   'save-attachment-line-missing',
   'save-write-tools-missing',
+  'memory-directive-malformed',
+  'memory-tools-missing',
+  'memory-tool-output-malformed',
+  'memory-tool-result-count',
+  'memory-recall-prompt-leak',
 ])
 
 /** The fixture's text-only answer. It names no image and no color. */
@@ -327,6 +340,16 @@ export interface FixtureProviderAttempt {
    * mutation failure the Host returned. Present only on the save-answer row.
    */
   saveOutcome?: string
+  /** The memory-notes journey of a memory row: `remember`, `note` or `recall`. */
+  memoryJourney?: string
+  /** The Host's fixed `memory_write` result text. Present only on a memory-write answer row. */
+  memoryToolResult?: string
+  /** User messages in the request. Present on the three recall rows. */
+  userMessages?: number
+  /** Whether the search result held the note's `memory/` path. Read-request row only. */
+  searchHitNotePath?: boolean
+  /** Whether `memory_read` answered with the note's `memory/` path. Recall-answer row only. */
+  readFoundNote?: boolean
   /** One of {@link FIXTURE_REJECTION_REASONS}. Present only on rejected rows. */
   reason?: string
 }
@@ -468,6 +491,8 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
     )
   }
 
+  requireMemoryFields(value, row, index, source)
+
   // Present only on document rows; an image row must not grow the field.
   if ('documentSha256' in value) {
     const documentSha256 = value.documentSha256
@@ -505,6 +530,75 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
   }
 
   return row
+}
+
+const MEMORY_ROW_KINDS: readonly string[] = [
+  FIXTURE_RESPONSE_KIND.memoryWriteRequested,
+  FIXTURE_RESPONSE_KIND.memoryWriteAnswer,
+  FIXTURE_RESPONSE_KIND.memorySearchRequested,
+  FIXTURE_RESPONSE_KIND.memoryReadRequested,
+  FIXTURE_RESPONSE_KIND.memoryRecallAnswer,
+]
+const MEMORY_JOURNEYS: readonly string[] = ['remember', 'note', 'recall']
+const RECALL_ROW_KINDS: readonly string[] = [
+  FIXTURE_RESPONSE_KIND.memorySearchRequested,
+  FIXTURE_RESPONSE_KIND.memoryReadRequested,
+  FIXTURE_RESPONSE_KIND.memoryRecallAnswer,
+]
+/** The only `memory_write` results the fixture accepts (mcp-host core/tools/memory.ts). */
+const MEMORY_WRITE_RESULT =
+  /^Written to (?:private memory|memory\/[a-z0-9][a-z0-9-]{0,39}\.md) \(append\)$/
+
+/**
+ * Each memory field is present on exactly the rows that carry it, and nowhere
+ * else, so a field that drifts onto another row kind fails the read.
+ */
+function requireMemoryFields(
+  value: Record<string, unknown>,
+  row: FixtureProviderAttempt,
+  index: number,
+  source: string
+): void {
+  const kind = row.responseKind
+  const field = (name: string, carried: boolean, valid: (raw: unknown) => boolean): void => {
+    if (!carried) {
+      if (name in value)
+        throw new Error(`${source}: attempts[${index}].${name} is not valid on a ${kind} row`)
+      return
+    }
+    const raw = value[name]
+    if (!valid(raw))
+      throw new Error(
+        `${source}: attempts[${index}].${name} is invalid on a ${kind} row (received ` +
+          `${JSON.stringify(raw)})`
+      )
+    ;(row as unknown as Record<string, unknown>)[name] = raw
+  }
+  field(
+    'memoryJourney',
+    MEMORY_ROW_KINDS.includes(kind),
+    raw => typeof raw === 'string' && MEMORY_JOURNEYS.includes(raw)
+  )
+  field(
+    'memoryToolResult',
+    kind === FIXTURE_RESPONSE_KIND.memoryWriteAnswer,
+    raw => typeof raw === 'string' && MEMORY_WRITE_RESULT.test(raw)
+  )
+  field(
+    'userMessages',
+    RECALL_ROW_KINDS.includes(kind),
+    raw => typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0
+  )
+  field(
+    'searchHitNotePath',
+    kind === FIXTURE_RESPONSE_KIND.memoryReadRequested,
+    raw => typeof raw === 'boolean'
+  )
+  field(
+    'readFoundNote',
+    kind === FIXTURE_RESPONSE_KIND.memoryRecallAnswer,
+    raw => typeof raw === 'boolean'
+  )
 }
 
 function isByteCount(value: unknown): value is number {
@@ -658,7 +752,12 @@ export function appendedAttempts(
       current.byteRange?.offset !== row.byteRange?.offset ||
       current.byteRange?.length !== row.byteRange?.length ||
       current.truncated !== row.truncated ||
-      current.saveOutcome !== row.saveOutcome
+      current.saveOutcome !== row.saveOutcome ||
+      current.memoryJourney !== row.memoryJourney ||
+      current.memoryToolResult !== row.memoryToolResult ||
+      current.userMessages !== row.userMessages ||
+      current.searchHitNotePath !== row.searchHitNotePath ||
+      current.readFoundNote !== row.readFoundNote
     ) {
       throw new Error(
         `[image-capabilities] ledger row ${index} changed between reads; the ledger must be append-only.`

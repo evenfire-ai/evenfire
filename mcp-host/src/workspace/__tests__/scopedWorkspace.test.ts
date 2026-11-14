@@ -259,6 +259,20 @@ describe('private memory (F5)', () => {
     expect(await provider.forUser('bob').search('zzprivatemarker', 10)).toHaveLength(0)
   })
 
+  it('write, append and the private memory methods resolve with the content in the routed file', async () => {
+    const alice = provider.forUser('alice')
+    await expect(alice.write('memory/a.md', 'first')).resolves.toBe('first')
+    await expect(alice.append('memory/a.md', 'second')).resolves.toBe('first\nsecond')
+    await expect(alice.appendMemory('team')).resolves.toBe('team')
+    await expect(alice.appendPrivateMemory('mine')).resolves.toBe('mine')
+    await expect(alice.appendPrivateMemory('again')).resolves.toBe('mine\nagain')
+    await expect(alice.writePrivateMemory('replaced')).resolves.toBe('replaced')
+    await expect(
+      fs.readFile(path.join(baseRoot, 'users', 'alice', 'MEMORY.md'), 'utf-8')
+    ).resolves.toBe('replaced')
+    await expect(fs.readFile(path.join(baseRoot, 'MEMORY.md'), 'utf-8')).resolves.toBe('team')
+  })
+
   it('memory_write target:memory_private + memory_read scope:private via the registry', async () => {
     const config = makeNativeConfig(baseRoot)
     const reg = new NativeToolRegistry(config, 'c', undefined, undefined, provider.forUser('alice'))
@@ -274,6 +288,10 @@ describe('private memory (F5)', () => {
     // The collective memory_read by path does NOT see the private entry.
     await provider.forUser('alice').appendMemory('collective note')
     const rc = await reg.get('memory_read')!.execute({ path: 'MEMORY.md' })
+    // Positive witness: the read found the collective file, so the negative
+    // assertion below cannot pass on a read that found nothing.
+    expect(rc.is_error).toBe(false)
+    expect(rc.content).toContain('collective note')
     expect(rc.content).not.toContain('alice is the PM')
   })
 

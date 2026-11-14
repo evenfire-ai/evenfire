@@ -23,15 +23,29 @@ export const MEMORY_GUIDANCE_TEXT =
   'conversing with this Host. **Private** memory (memory_write ' +
   "target:'memory_private') is about the specific person you're talking to — their " +
   'preferences, their details — and is never shared with other users. ' +
+  'A longer note about this person or their work is saved as a named note (memory_write ' +
+  'with a file path as target, for example preferences.md, saved as ' +
+  'memory/preferences.md); it is private to them and kept in their memory/ folder. ' +
+  'Knowledge for the whole team (conventions, decisions, facts for everyone) goes to the ' +
+  "collective memory instead: target 'memory', or a shared note under memories/. Any file " +
+  "this person's memory depends on (a reference document, their rules) must live under " +
+  'memory/, not elsewhere in the workspace, and when their private MEMORY.md names a file ' +
+  'to keep, name its memory/ path. A shared note names no memory/ path: memory/ is private ' +
+  "to one person. Work files of a task (a review's ledger, a checkout, a draft) are not " +
+  'memory and stay in the workspace. ' +
   'When in doubt, prefer private: putting a personal fact in collective memory leaks ' +
   'it to everyone, while a collective fact stored privately is merely suboptimal. ' +
   'Do not store ephemeral task progress, PR numbers, commit SHAs, or time-bounded ' +
-  'state in either scope — use the conversation for that. Recall memory with ' +
-  'memory_search (it covers both scopes) or memory_read.\n\n' +
+  'state in either scope — use the conversation for that. Memory is in one place: ' +
+  'MEMORY.md (shared and private), the shared memories/ folder, your daily/ log and your ' +
+  'memory/ folder. Recall it only with memory_search (it covers both scopes) or ' +
+  'memory_read, never by browsing other workspace files with file_read or the shell: a ' +
+  'workspace file is not memory, even when memory_search returns a line from it.\n\n' +
   'Memory writes are scanned and may be rejected. If a write is rejected, paraphrase ' +
   'the content without raw paths to secrets, exfiltration command shapes, invisible ' +
   'Unicode, or system-prompt markers, then try again. Consolidate existing entries when ' +
-  'a memory file approaches its size cap (8 KB) instead of appending unbounded.'
+  'MEMORY.md approaches its size cap (8 KB) instead of appending unbounded; a shared note ' +
+  'under memories/ has the same cap, and named notes in memory/ have none.'
 
 /**
  * Capability discovery contract. Emitted into the prompt whenever

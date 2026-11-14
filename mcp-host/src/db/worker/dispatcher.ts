@@ -903,6 +903,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         return tx.immediate()
       })
 
+    case 'insert_memory_write':
+      // A CHECK violation throws and reaches the caller.
+      return withBusyRetry(() => {
+        s.insertMemoryWrite.run(op.payload)
+        return { ok: true }
+      })
+
     case 'integrity_check': {
       const row = s.integrityCheck.get() as { integrity_check?: string } | undefined
       return { ok: row?.integrity_check === 'ok', detail: row?.integrity_check ?? 'unknown' }

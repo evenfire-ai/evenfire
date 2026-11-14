@@ -76,10 +76,17 @@ test('the Playwright lane defaults to the image journey and accepts only known l
     grep: 'attachment-gfs-save fixture: ',
     minimumExpected: 3,
   })
+  assert.deepEqual(playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'memory-notes' }), {
+    lane: 'memory-notes',
+    config: 'desktop-app/test/e2e-playwright/playwright.memory-notes.config.ts',
+    label: 'memory-notes-playwright',
+    grep: 'memory-notes fixture: ',
+    minimumExpected: 3,
+  })
   for (const lane of ['', 'documents', '../evil.config.ts', '__proto__', 'toString']) {
     assert.throws(
       () => playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane }),
-      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save/,
+      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save, memory-notes/,
       lane
     )
   }
@@ -109,7 +116,7 @@ test('run still resolves and validates the Playwright lane', () => {
   for (const lane of ['typo', '', '__proto__']) {
     assert.throws(
       () => selectFixtureAction('run', { IMAGE_CAPABILITIES_LANE: lane }),
-      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save/,
+      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload, attachment-gfs-save, memory-notes/,
       lane
     )
   }
@@ -228,6 +235,28 @@ test('the attachment-gfs-save verdict requires its lane minimum of expected test
   assert.throws(
     () => playwrightVerdict(short, options),
     /below the attachment-gfs-save minimum of 3/,
+    'two expected tests'
+  )
+})
+
+test('the memory-notes verdict requires its lane minimum of expected tests', () => {
+  const lane = 'memory-notes'
+  const configFile = laneConfigFile(lane)
+  const options = { lane, configFile }
+  const reportFor = count => {
+    const titles = Array.from(
+      { length: count },
+      (_, index) => `memory-notes fixture: journey ${index + 1}`
+    )
+    return { ...playwrightReport({ titles }), config: { configFile } }
+  }
+  // Witness: three expected specs meet the lane minimum and are accepted.
+  assert.equal(playwrightVerdict(reportFor(3), options), 'PASS')
+  const short = reportFor(2)
+  assert.equal(short.stats.expected, 2)
+  assert.throws(
+    () => playwrightVerdict(short, options),
+    /below the memory-notes minimum of 3/,
     'two expected tests'
   )
 })

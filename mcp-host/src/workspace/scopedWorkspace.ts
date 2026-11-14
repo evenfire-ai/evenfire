@@ -55,7 +55,8 @@ function isSurfacedCollective(relativePath: string): boolean {
   return n === 'MEMORY.md' || n === 'memories' || n.startsWith('memories/')
 }
 
-function normalizeRel(relativePath: string): string {
+/** Canonical relative form: posix-normalized, without leading `./` or `/` and trailing `/`. */
+export function normalizeRel(relativePath: string): string {
   let n = path.posix.normalize(relativePath || '')
   if (n.startsWith('./')) n = n.slice(2)
   if (n.startsWith('/')) n = n.slice(1)
@@ -120,10 +121,10 @@ export class ScopedWorkspace implements Workspace {
   async read(relativePath: string): Promise<string | null> {
     return this.route(relativePath).read(relativePath)
   }
-  async write(relativePath: string, content: string): Promise<void> {
+  async write(relativePath: string, content: string): Promise<string> {
     return this.route(relativePath).write(relativePath, content)
   }
-  async append(relativePath: string, content: string): Promise<void> {
+  async append(relativePath: string, content: string): Promise<string> {
     return this.route(relativePath).append(relativePath, content)
   }
   async delete(relativePath: string): Promise<void> {
@@ -137,7 +138,7 @@ export class ScopedWorkspace implements Workspace {
   readMemory(): Promise<string> {
     return this.collective.readMemory()
   }
-  appendMemory(entry: string): Promise<void> {
+  appendMemory(entry: string): Promise<string> {
     return this.collective.appendMemory(entry)
   }
   // Private memory (F5) → the per-user instance's MEMORY.md. Bypasses route()
@@ -148,10 +149,10 @@ export class ScopedWorkspace implements Workspace {
   readPrivateMemory(): Promise<string> {
     return this.user.readMemory()
   }
-  appendPrivateMemory(entry: string): Promise<void> {
+  appendPrivateMemory(entry: string): Promise<string> {
     return this.user.appendMemory(entry)
   }
-  writePrivateMemory(content: string): Promise<void> {
+  writePrivateMemory(content: string): Promise<string> {
     return this.user.write('MEMORY.md', content)
   }
   readHeartbeatChecklist(): Promise<string | null> {

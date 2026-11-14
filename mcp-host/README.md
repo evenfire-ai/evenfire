@@ -230,6 +230,8 @@ env.
 | `CLERUM_PERSONALIZATION_ENABLED` | `false`                                  | CM `false` | Seed identity files from `CLERUM_IDENTITY_SEED` at startup when the Host has no `spec.personalization`. Requires memory to be enabled.   |
 | `CLERUM_IDENTITY_SEED`           | unset                                    | -          | JSON seed with optional `identity`, `soul`, `agents` and `user` strings (contents for `IDENTITY.md`, `SOUL.md`, `AGENTS.md`, `USER.md`). |
 
+With memory enabled, `memory_write` saves a named note (a relative path that is not `MEMORY.md`, `HEARTBEAT.md`, `memories/...`, `daily/...` or a refused path such as an identity file) as Markdown in the caller's `users/<key>/memory/` folder, `memory_read` reads it back with the same path, and every successful write is recorded in the `memory_writes` table of `state.db`.
+
 #### Guardrails
 
 | Variable                     | Default     | Source | Description                                                                                                                                                                     |

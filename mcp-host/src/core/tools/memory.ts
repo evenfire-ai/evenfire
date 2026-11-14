@@ -1,8 +1,14 @@
+import { createHash } from 'crypto'
+import { logger } from '../../logger'
+import { memoryNotePath } from '../../workspace/memoryNotePath'
+import type { MemoryWriteEntry, MemoryWriteLog } from '../../workspace/memoryWriteLog'
+import { memoryWriteRecordFailuresTotal } from '../../workspace/memoryWriteLog'
 import {
   ProtectedWorkspacePathError,
   isProtectedWorkspacePath,
   protectedWorkspacePathMessage,
 } from '../../workspace/protectedPaths'
+import { isCollectivePath, normalizeRel } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
 import { adminManagedIdentityFileMessage, isLockedPath } from '../../workspace/service'
 import { Tool } from '../interfaces'
@@ -33,8 +39,13 @@ export class MemorySearchTool implements Tool {
   }
   description() {
     return (
-      'Search past memories, decisions, and context in the persistent workspace. ' +
-      'Call this before answering questions about prior work or decisions.'
+      'Search memory: MEMORY.md (shared and private), the shared memories/ folder, your ' +
+      'daily/ log and the notes in your memory/ folder. Call this before answering ' +
+      'questions about prior work or decisions. It also returns lines from other .md files ' +
+      'of your folder: those are workspace files, not memory, and memory_read does not ' +
+      'open them. A result whose path is MEMORY.md may come from your private memory: read ' +
+      "it with scope 'private'. Recall memory with this tool and memory_read, not by " +
+      'browsing workspace files with file_read or the shell.'
     )
   }
   parametersSchema() {
@@ -81,13 +92,25 @@ export class MemorySearchTool implements Tool {
 }
 
 export class PersistentMemoryWriteTool implements Tool {
-  constructor(private readonly workspace: Workspace) {}
+  /**
+   * `record`: where successful writes are recorded, and for which user key.
+   * Absent when the Host has no session database (D76): writes are not recorded.
+   */
+  constructor(
+    private readonly workspace: Workspace,
+    private readonly record?: { log: MemoryWriteLog; userKey: string }
+  ) {}
 
   name() {
     return 'memory_write'
   }
   description() {
-    return 'Write to persistent workspace memory. Content persists across conversations.'
+    return (
+      'Save to persistent memory. Everything written here is kept across conversations ' +
+      'and is never expired by the Host. Memory is in one place: MEMORY.md (shared and ' +
+      'private), the shared memories/ folder, your daily/ log and your memory/ folder; ' +
+      'other workspace files are not memory.'
+    )
   }
   parametersSchema() {
     return {
@@ -98,10 +121,26 @@ export class PersistentMemoryWriteTool implements Tool {
           type: 'string',
           default: 'daily_log',
           description:
-            "Target: 'memory' (collective/team MEMORY.md), 'memory_private' " +
-            "(facts about the specific person you're talking to — never shared " +
-            "with other users), 'daily_log' (today's log), 'heartbeat' " +
-            '(HEARTBEAT.md), or any relative file path',
+            "Where to save. 'memory': the team's shared MEMORY.md, read by everyone who " +
+            "talks to this agent. 'memory_private': the private MEMORY.md of the person you " +
+            "are talking to, never shared. 'daily_log' (default): today's log of this " +
+            "person, daily/<date>.md. 'heartbeat': the shared HEARTBEAT.md. The paths " +
+            "'MEMORY.md', 'HEARTBEAT.md', 'memories/<name>.md' and 'daily/<date>.md' are " +
+            'written where they are, and the identity files (IDENTITY.md, SOUL.md, ' +
+            'AGENTS.md, USER.md) are refused. Any other relative path is a named note of ' +
+            'this person, private to them and saved as Markdown in their memory/ folder ' +
+            "(for example 'preferences.md' is saved as memory/preferences.md). Knowledge for " +
+            'the whole team (conventions, decisions, facts for everyone) goes to the shared ' +
+            "memory instead: target 'memory', or a shared note 'memories/<name>.md'. Every " +
+            "file this person's memory depends on (a reference document, their rules) " +
+            'belongs in memory/: a file elsewhere in the workspace is not memory and may be ' +
+            "deleted. Work files of a task (a review's ledger, a checkout, a draft) are not " +
+            'memory: keep them in the workspace. Notes are Markdown only: .md is added to a ' +
+            "note in memory/ whose path does not already end in .md ('data.json' is saved as " +
+            'memory/data.json.md); nothing is added to MEMORY.md, HEARTBEAT.md, memories/ or ' +
+            'daily/ paths, so give a shared note under memories/ a name that ends in .md ' +
+            '(memory_search reads .md files only). Read a note back with memory_read and the ' +
+            'same path.',
         },
         append: {
           type: 'boolean',
@@ -141,14 +180,16 @@ export class PersistentMemoryWriteTool implements Tool {
     // Private (per-user) memory (F5): dedicated methods, not a path — 'MEMORY.md'
     // routes to the collective and 'users/...' is denied by the workspace guard.
     if (target === 'memory_private') {
+      let resulting: string
       try {
-        if (append) await this.workspace.appendPrivateMemory(content)
-        else await this.workspace.writePrivateMemory(content)
+        if (append) resulting = await this.workspace.appendPrivateMemory(content)
+        else resulting = await this.workspace.writePrivateMemory(content)
       } catch (err) {
         const out = this.rejectionOutput(err, startTime)
         if (out) return out
         throw err
       }
+      await this.recordWrite('user', 'MEMORY.md', append, resulting)
       return {
         content: `Written to private memory (${append ? 'append' : 'replace'})`,
         duration_ms: Date.now() - startTime,
@@ -168,7 +209,8 @@ export class PersistentMemoryWriteTool implements Tool {
         filePath = 'HEARTBEAT.md'
         break
       default:
-        filePath = target
+        // A free path is a named note in the caller's memory/ folder.
+        filePath = memoryNotePath(target)
         break
     }
 
@@ -189,24 +231,72 @@ export class PersistentMemoryWriteTool implements Tool {
       }
     }
 
+    let resulting: string
     try {
       if (target === 'daily_log' && append) {
-        await this.workspace.append(filePath, `[${nowTime()}] ${content}`)
+        resulting = await this.workspace.append(filePath, `[${nowTime()}] ${content}`)
       } else if (append) {
-        await this.workspace.append(filePath, content)
+        resulting = await this.workspace.append(filePath, content)
       } else {
-        await this.workspace.write(filePath, content)
+        resulting = await this.workspace.write(filePath, content)
       }
     } catch (err) {
       const out = this.rejectionOutput(err, startTime)
       if (out) return out
       throw err
     }
+    await this.recordWrite(
+      isCollectivePath(filePath) ? 'collective' : 'user',
+      normalizeRel(filePath),
+      append,
+      resulting
+    )
 
     return {
       content: `Written to ${filePath} (${append ? 'append' : 'replace'})`,
       duration_ms: Date.now() - startTime,
       is_error: false,
+    }
+  }
+
+  /**
+   * Record a write that succeeded (the only write point of `memory_writes`).
+   * The entry, hash included, is built before the `try`: an error building it
+   * is a defect and is thrown like any other tool error. A rejection of
+   * `record` (worker error, worker exit, sync timeout) never fails the write
+   * (D93): it is logged once and counted, and the tool returns its normal
+   * success result. The log line carries no path, content or user key.
+   */
+  private async recordWrite(
+    scope: MemoryWriteEntry['scope'],
+    relativePath: string,
+    append: boolean,
+    resulting: string
+  ): Promise<void> {
+    if (!this.record) return
+    const entry: MemoryWriteEntry = {
+      userKey: this.record.userKey,
+      scope,
+      relativePath,
+      mode: append ? 'append' : 'replace',
+      contentSha256: createHash('sha256').update(resulting, 'utf8').digest('hex'),
+      writtenAt: Date.now() / 1000,
+    }
+    try {
+      await this.record.log.record(entry)
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err))
+      logger.error(
+        {
+          component: 'MemoryWrite',
+          scope,
+          mode: entry.mode,
+          errorName: error.name,
+          errorMessage: error.message,
+        },
+        'memory write record failed'
+      )
+      memoryWriteRecordFailuresTotal.inc({ scope })
     }
   }
 }
@@ -218,7 +308,12 @@ export class PersistentMemoryReadTool implements Tool {
     return 'memory_read'
   }
   description() {
-    return 'Read a file from persistent workspace memory.'
+    return (
+      "Read from persistent memory: MEMORY.md (shared, or private with scope 'private'), " +
+      'a shared note in memories/, your daily/ log or a note in your memory/ folder. This ' +
+      'is the only way to read memory. It does not read other workspace files, and a ' +
+      'workspace file is not memory.'
+    )
   }
   parametersSchema() {
     return {
@@ -226,7 +321,14 @@ export class PersistentMemoryReadTool implements Tool {
       properties: {
         path: {
           type: 'string',
-          description: "File path to read (e.g. 'MEMORY.md', 'daily/2026-02-25.md')",
+          description:
+            "Memory path: 'MEMORY.md' (shared), 'memories/<name>.md' (shared note), " +
+            "'daily/2026-02-25.md', or a note path as given to memory_write " +
+            "('projects/acme.md' or 'memory/projects/acme.md'; .md is added as in " +
+            "memory_write). 'MEMORY.md', 'HEARTBEAT.md', the identity files (IDENTITY.md, " +
+            "SOUL.md, AGENTS.md, USER.md), 'daily/...' and 'memories/...' are read where " +
+            'they are. Any other path is a note: it is looked up in memory/ and answers ' +
+            "'File not found' when the note is not there.",
         },
         scope: {
           type: 'string',
@@ -271,9 +373,11 @@ export class PersistentMemoryReadTool implements Tool {
         is_error: true,
       }
     }
+    // Resolved like memory_write, so a note is read back with the path it was written with.
+    const resolved = memoryNotePath(path)
     let content: string | null
     try {
-      content = await this.workspace.read(path)
+      content = await this.workspace.read(resolved)
     } catch (err) {
       const out = protectedPathOutput(err, startTime)
       if (out) return out
@@ -281,14 +385,14 @@ export class PersistentMemoryReadTool implements Tool {
     }
     if (content === null) {
       return {
-        content: `File not found: ${path}`,
+        content: `File not found: ${resolved}`,
         duration_ms: Date.now() - startTime,
         is_error: true,
       }
     }
     const wordCount = content.split(/\s+/).filter(Boolean).length
     return {
-      content: JSON.stringify({ path, content, word_count: wordCount }),
+      content: JSON.stringify({ path: resolved, content, word_count: wordCount }),
       duration_ms: Date.now() - startTime,
       is_error: false,
     }
@@ -302,7 +406,12 @@ export class MemoryTreeTool implements Tool {
     return 'memory_tree'
   }
   description() {
-    return 'View workspace memory structure as a directory tree.'
+    return (
+      'List your folder and the shared memory as a directory tree. Only MEMORY.md, ' +
+      'memories/, daily/ and memory/ are memory; read those with memory_read. The root can ' +
+      'list MEMORY.md twice: the shared one, and your private one, which is read with ' +
+      "scope 'private'."
+    )
   }
   parametersSchema() {
     return {

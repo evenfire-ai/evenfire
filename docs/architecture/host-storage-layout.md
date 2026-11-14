@@ -55,6 +55,22 @@ with the agent's files; neither prefix check sees it. Stateful Hosts had this ex
 because their database moves from the separate `state/` mount to the root.
 Isolating the database from the agent tree is a follow-up.
 
+Memory files. The collective memory sits at `<workspacePath>`: `MEMORY.md`,
+the `memories/` folder, the identity files (`IDENTITY.md`, `SOUL.md`,
+`AGENTS.md`, `USER.md`) and `HEARTBEAT.md`. Each person's memory sits in their
+folder `<workspacePath>/users/<key>/`: a private `MEMORY.md`, the `daily/` log
+and the `memory/` folder of named notes. A `memory_write` with any other
+relative path that it does not refuse writes a Markdown note under
+`users/<key>/memory/` (`.md` is
+appended unless the name already ends in `.md`), and `memory_read` resolves a
+path the same way (`mcp-host/src/workspace/memoryNotePath.ts`). Every
+successful `memory_write` adds one row to the `memory_writes` table of
+`state.db` (migration `018-memory-writes`): user key, scope (`collective` or
+`user`), path relative to that scope's root, mode, sha256 of the content the
+write left in the file, and time. A failed record does not fail the write; it
+is logged (`memory write record failed`) and counted
+(`clerum_memory_write_record_failures_total`).
+
 ## The previous split layout
 
 Before #825, stateless Hosts mounted `PVC/workspace` at `/workspace` and
