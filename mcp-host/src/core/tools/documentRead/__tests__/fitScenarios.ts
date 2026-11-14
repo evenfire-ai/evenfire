@@ -288,10 +288,38 @@ export interface ScenarioRun {
   digest: string
 }
 
+/**
+ * One call over the same first sheet, alone and followed by three sheets of
+ * rows too wide for a page. The page ends inside the first sheet, so no later
+ * sheet can be emitted and none should cost a row probe.
+ */
+export function laterSheetScenarios(): Scenario[] {
+  const xlsx = async () =>
+    admittedFile('xlsx-file', await valuesWorkbook('fit-scenarios'), XLSX_MIME)
+  const first = { rows: Array.from({ length: 40 }, (_, row) => cells(row + 1, 2, 300)) }
+  const wide = { rows: Array.from({ length: 100 }, (_, row) => cells(row + 1, 5, 2_000)) }
+  const sheetNames = ['First', 'Wide 1', 'Wide 2', 'Wide 3']
+  const models: Array<[string, WorkbookModel]> = [
+    ['first sheet alone', { sheetNames, sheets: [first] }],
+    ['first sheet before wide sheets', { sheetNames, sheets: [first, wide, wide, wide] }],
+  ]
+  return models.map(([name, model]) => ({
+    name,
+    file: xlsx,
+    runJob: workbookRunner(model, 400),
+    windowTokens: 20_000,
+    ledger: 'turn' as const,
+    maxCalls: 1,
+  }))
+}
+
 /** Runs every scenario with `Tool`; the digest covers every emitted result. */
-export async function runFitScenarios(Tool: ToolClass): Promise<ScenarioRun[]> {
+export async function runFitScenarios(
+  Tool: ToolClass,
+  list: Scenario[] = scenarios()
+): Promise<ScenarioRun[]> {
   const runs: ScenarioRun[] = []
-  for (const scenario of scenarios()) {
+  for (const scenario of list) {
     const file = await scenario.file()
     const binding = encodeCursor({ format: 'pdf', page: 1, charOffset: 0 }, file.fileReference!.id)
       .split('.')

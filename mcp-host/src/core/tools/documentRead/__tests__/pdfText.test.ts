@@ -108,6 +108,37 @@ describe('PDF textless-window inspection', () => {
   })
 })
 
+describe('PDF text cuts', () => {
+  it('backs a cut off a surrogate pair, so the continuation starts on a whole code point', async () => {
+    // 'ab😀cd' is a, b, the two halves of the emoji, c, d in UTF-16 units. A
+    // 3-unit budget ends between the halves; a cursor there would make the
+    // next call fail as invalid_range, and the read could not continue.
+    const page = {
+      getTextContent: async () => ({ items: [{ str: 'ab😀cd', hasEOL: false }] }),
+      cleanup: () => undefined,
+    }
+    vi.spyOn(pdfLoad, 'withPdfDocument').mockImplementation(async (_job, read) =>
+      read({ numPages: 1, getPage: async () => page } as never)
+    )
+    const first = await parsePdfText(
+      pdfTextJob(Buffer.alloc(0), { limits: documentLimits({ maxExtractedChars: 3 }) })
+    )
+    expect(first).toMatchObject({
+      ok: true,
+      pages: [{ page: 1, from: 0, to: 2 }],
+      next: { page: 1, charOffset: 2 },
+      stoppedBy: 'max_extracted_chars',
+    })
+    const second = await parsePdfText(
+      pdfTextJob(Buffer.alloc(0), {
+        start: { page: 1, charOffset: 2 },
+        limits: documentLimits({ maxExtractedChars: 10 }),
+      })
+    )
+    expect(second).toMatchObject({ ok: true, pages: [{ page: 1, from: 2, to: 6 }] })
+  })
+})
+
 describe('PDF text through the real worker', () => {
   it('extracts the body-only random code and records a low-text page', async () => {
     const code = witnessCode()

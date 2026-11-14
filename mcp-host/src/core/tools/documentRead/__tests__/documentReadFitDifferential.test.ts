@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DocumentReadTool } from '../index'
-import { runFitScenarios } from './fitScenarios'
+import { laterSheetScenarios, runFitScenarios } from './fitScenarios'
 
 /**
  * Independent review M2 cut the measures of the XLSX row probes and of the
@@ -50,5 +50,16 @@ describe('document read results are unchanged by the M2 measure cuts', () => {
     const measures = Object.fromEntries(runs.map(run => [run.name, run.measures]))
     expect(measures['xlsx long sheet list, all rows too wide (turn)']).toBeLessThanOrEqual(750)
     expect(measures['xlsx long sheet list, all rows too wide (fresh)']).toBeLessThanOrEqual(750)
+  }, 60_000)
+
+  it('probes no sheet after the one where the page ends', async () => {
+    // The page ends inside the first sheet, so the three later sheets cannot
+    // be emitted: the result is the same with or without them. Their 300 rows
+    // are each too wide for a page, so probing them would cost about one
+    // measure each (352 in all, against 26 without probing them).
+    const [alone, before] = await runFitScenarios(DocumentReadTool, laterSheetScenarios())
+    expect(before!.digest).toBe(alone!.digest)
+    expect(alone!.measures).toBeLessThanOrEqual(60)
+    expect(before!.measures).toBeLessThanOrEqual(60)
   }, 60_000)
 })
