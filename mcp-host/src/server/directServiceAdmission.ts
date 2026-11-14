@@ -6,9 +6,13 @@ export type DirectServiceAdmissionResult =
   | { allowed: false; retryAfterSeconds: number }
 
 /**
- * Temporary pre-PR3 ceiling for accepted direct trusted service-plane traffic.
- * This is deliberately one bucket per MCP Host runtime instance: neither the
- * caller marker nor route/request data can select another bucket.
+ * Temporary pre-PR3 ceiling for direct trusted service-plane requests. It
+ * charges every direct trusted service-plane route except the timer-driven
+ * reads and their acknowledgements (cron results and cron result ack,
+ * notification claim and its ack/fail, task result) and the progress stream of
+ * an accepted task. One bucket per MCP Host runtime instance: neither the
+ * caller marker nor request data can select another bucket. Which routes are
+ * charged is fixed in server/routes.ts.
  */
 export class DirectServiceAdmission {
   private windowStart = -1

@@ -87,9 +87,15 @@ export type RouteHandlers = {
 }
 
 /**
- * Charges only direct trusted service-plane callers. Authenticated RPC Proxy
- * ingress remains under its existing Spec 62 / 65 / 48 admission boundaries.
- * The outer runtimeEdgeGuard has already authenticated/accepted this caller.
+ * Charges every direct trusted service-plane route except the timer-driven
+ * reads and their acknowledgements (cron results and cron result ack,
+ * notification claim and its ack/fail, task result) and the progress stream of
+ * an accepted task. The charged callers are `channel-reader` and
+ * `workflow-approval-request-reader`. RPC Proxy ingress is not charged here;
+ * Control API's Host-message and Host-RPC admission are charged only in its V2
+ * action checkpoint route, so with V2 off they do not apply to RPC Proxy
+ * ingress either. The outer runtimeEdgeGuard has already authenticated/accepted
+ * this caller.
  */
 function admitDirectServiceRequest(req: Request, res: Response, handlers: RouteHandlers): boolean {
   const caller = getRuntimeCallerContext(req)?.caller
@@ -1285,7 +1291,6 @@ export async function handleWorkflowApprovalNotificationClaimRoute(
     }
     const limit = Number(body.limit ?? 10)
     const claimLimit = Number.isFinite(limit) ? Math.max(1, Math.min(50, Math.floor(limit))) : 10
-    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.workflowApprovalNotificationClaimHandler({
       medium,
       providerChannelIds,
@@ -1339,7 +1344,6 @@ export async function handleWorkflowApprovalNotificationTerminalRoute(
       json(res, 403, { error: 'Runtime edge source mismatch' })
       return
     }
-    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.workflowApprovalNotificationTerminalHandler(id, action, {
       medium,
       providerUserId,
@@ -1492,7 +1496,6 @@ export async function handleTaskResultRoute(
       json(res, 501, { success: false, error: 'Task result handler not configured' })
       return
     }
-    if (!admitDirectServiceRequest(req, res, handlers)) return
 
     const result = await handlers.taskResultHandler(taskId, getRuntimeCallerContext(req))
     if (result === null) {
@@ -1514,7 +1517,6 @@ export function handleCronResultsRoute(req: Request, res: Response, handlers: Ro
     json(res, 501, { results: [] })
     return
   }
-  if (!admitDirectServiceRequest(req, res, handlers)) return
 
   const results = handlers.cronResultsHandler(getRuntimeCallerContext(req))
   json(res, 200, { results })
@@ -1530,7 +1532,6 @@ export function handleCronResultAckRoute(
     json(res, 501, { success: false, error: 'Handler not configured' })
     return
   }
-  if (!admitDirectServiceRequest(req, res, handlers)) return
 
   const deleted = handlers.cronResultAckHandler(taskId, getRuntimeCallerContext(req))
   json(res, 200, { success: deleted })
@@ -1982,7 +1983,6 @@ export async function handleProgressStreamRoute(
     json(res, 501, { error: 'Progress stream unavailable' })
     return
   }
-  if (!admitDirectServiceRequest(req, res, handlers)) return
 
   // SSE headers FIRST (before subscription to avoid race)
   res.setHeader('Content-Type', 'text/event-stream')
