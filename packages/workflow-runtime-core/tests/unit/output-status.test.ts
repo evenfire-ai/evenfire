@@ -147,6 +147,18 @@ describe('boundStepStatusBody', () => {
     expect(bounded).toEqual({ stepId: 's1', phase: 'running' })
   })
 
+  it('leaves a null output as it is, without output fields', () => {
+    const body = { stepId: 's1', phase: 'completed', output: null }
+    expect(boundStepStatusBody(body)).toEqual(body)
+    // Witness: an output that is falsy but not null does get the output fields.
+    expect(boundStepStatusBody({ ...body, output: 0 })).toEqual({
+      ...body,
+      output: '0',
+      outputLength: 1,
+      outputTruncated: false,
+    })
+  })
+
   it('is idempotent on a body that needed no cut', () => {
     const body = { stepId: 's1', phase: 'completed', output: 'done', toolsCalled: [] }
     const once = boundStepStatusBody(body)
@@ -373,6 +385,113 @@ describe('boundStepStatusBody', () => {
     // The artifact calls are sent as the first pass left them.
     expect(calls.slice(50)).toEqual(firstPass.slice(50))
     expect(bounded.outputTruncated).toBe(false)
+  })
+
+  it('keeps only the artifact metadata WRC accepts when it removes the previews of a call', () => {
+    const body = {
+      stepId: 's1',
+      phase: 'completed',
+      output: '中'.repeat(STATUS_OUTPUT_MAX_CHARS),
+      toolsCalled: [
+        ...Array.from({ length: 30 }, (_, i) => ({
+          serverName: 'git',
+          toolName: `read-${i}`,
+          args: { blob: '中'.repeat(1000) },
+          result: '中'.repeat(1000),
+        })),
+        // Last, because previews are removed from the last call backwards.
+        {
+          serverName: 'custom',
+          toolName: 'write_file',
+          args: { title: 'rejected' },
+          result: { success: true, artifact: artifact(1, '/etc/passwd'), content: 'x' },
+        },
+        {
+          serverName: 'custom',
+          toolName: 'write_file',
+          args: { title: 'untrimmed' },
+          result: {
+            success: true,
+            artifact: { ...artifact(2), name: '  report-2.md  ', extra: 'y'.repeat(300) },
+            content: 'x',
+          },
+        },
+      ],
+    }
+    const firstPass = boundToolsCalledForStatus(body.toolsCalled)
+    // Witnesses: the first pass sends both results as they are, and the body
+    // is over the ceiling.
+    expect(firstPass[30]).toEqual(body.toolsCalled[30])
+    expect(firstPass[31]).toEqual(body.toolsCalled[31])
+    expect(bodyBytes({ ...body, toolsCalled: firstPass })).toBeGreaterThan(STATUS_REPORT_MAX_BYTES)
+
+    const calls = boundStepStatusBody(body).toolsCalled as Array<Record<string, unknown>>
+    // WRC rejects a path outside /output, so nothing of that result is kept.
+    expect(calls[30]).toEqual({ serverName: 'custom', toolName: 'write_file' })
+    // The accepted artifact is sent as WRC would store it: trimmed, known fields only.
+    expect(calls[31]).toEqual({
+      serverName: 'custom',
+      toolName: 'write_file',
+      result: { success: true, artifact: artifact(2) },
+    })
+  })
+
+  it('sends no outputArtifacts for an uncut output when cutting the error is enough', () => {
+    const output = JSON.stringify({ artifact: artifact(0), pad: 'x'.repeat(2_000) })
+    const body = { stepId: 's1', phase: 'failed', output, failureReason: '\u0001'.repeat(60_000) }
+    // Witnesses: the body is over the ceiling, and the output is longer than
+    // the 1,024-character halving floor and declares an artifact.
+    expect(bodyBytes(body)).toBeGreaterThan(STATUS_REPORT_MAX_BYTES)
+    expect(output.length).toBeGreaterThan(1024)
+    expect(extractOutputArtifactsForStatus(output)).toEqual([artifact(0)])
+
+    // The cut failureReason is the witness that the error step ran.
+    expect(boundStepStatusBody(body)).toEqual({
+      stepId: 's1',
+      phase: 'failed',
+      output,
+      outputLength: output.length,
+      outputTruncated: false,
+      failureReason: '\u0001'.repeat(STATUS_ERROR_MAX_CHARS),
+    })
+  })
+
+  it('sends no outputArtifacts for an uncut output when removing previews is enough', () => {
+    const output = JSON.stringify({ artifact: artifact(0), pad: '中'.repeat(60_000) })
+    const body = {
+      stepId: 's1',
+      phase: 'completed',
+      output,
+      toolsCalled: Array.from({ length: 30 }, (_, i) => ({
+        serverName: 'git',
+        toolName: `read-${i}`,
+        args: { blob: '中'.repeat(1000) },
+        result: '中'.repeat(1000),
+      })),
+    }
+    const firstPass = boundToolsCalledForStatus(body.toolsCalled)
+    // Witnesses: the output is under the character cap and declares an
+    // artifact, and after the first pass the body is over the ceiling.
+    expect(output.length).toBeLessThan(STATUS_OUTPUT_MAX_CHARS)
+    expect(extractOutputArtifactsForStatus(output)).toEqual([artifact(0)])
+    expect(bodyBytes({ ...body, toolsCalled: firstPass })).toBeGreaterThan(STATUS_REPORT_MAX_BYTES)
+
+    const bounded = boundStepStatusBody(body)
+    const calls = bounded.toolsCalled as Array<Record<string, unknown>>
+    // Witness: the preview removal ran and made the body fit.
+    expect(calls.some(call => !('args' in call))).toBe(true)
+    expect(bodyBytes(bounded)).toBeLessThanOrEqual(STATUS_REPORT_MAX_BYTES)
+    expect(bounded.output).toBe(output)
+    expect(bounded.outputLength).toBe(output.length)
+    expect(bounded.outputTruncated).toBe(false)
+    expect(Object.keys(bounded).sort()).toEqual([
+      'output',
+      'outputLength',
+      'outputTruncated',
+      'phase',
+      'stepId',
+      'toolsCalled',
+    ])
   })
 
   it.each([65_536, 60_000, 2_000, 1_500, 1_025, 1_024, 500])(
