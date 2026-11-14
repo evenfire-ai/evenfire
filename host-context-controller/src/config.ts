@@ -4,6 +4,7 @@
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
 import { NETPOL_PASS_OVERRUN_WARN_MS } from './constants'
 import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
+import { hccLogger } from './logger'
 import { ContextCRD, McpServerCRD } from './types'
 
 export const DEFAULT_EGRESS_PROXY_IMAGE = 'clerum/nginx-egress-proxy:0.1.0'
@@ -508,13 +509,19 @@ function parseDevMcpServers(): McpServerCRD[] {
 
   try {
     const parsed = JSON.parse(serversJson) as McpServerCRD[]
-    console.log(`[Config] Parsed ${parsed.length} dev MCP server(s) from CLERUM_MCP_SERVERS`)
+    hccLogger.info(`[Config] Parsed ${parsed.length} dev MCP server(s) from CLERUM_MCP_SERVERS`)
     for (const server of parsed) {
-      console.log(`[Config]   - ${server.name}: ${server.spec.transport?.url || 'no url'}`)
+      // The URL itself is not logged (repository logging standard).
+      hccLogger.info(`[Config]   - ${server.name}`, {
+        hasUrl: Boolean(server.spec.transport?.url),
+      })
     }
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_MCP_SERVERS:', error)
+    // A JSON.parse message can quote the input, so only the error's name is logged.
+    hccLogger.error('[Config] Failed to parse CLERUM_MCP_SERVERS:', {
+      errorName: error instanceof Error ? error.name : typeof error,
+    })
     return []
   }
 }
@@ -531,13 +538,16 @@ function parseDevContexts(): ContextCRD[] {
 
   try {
     const parsed = JSON.parse(contextsJson) as ContextCRD[]
-    console.log(`[Config] Parsed ${parsed.length} dev Context(s) from CLERUM_CONTEXTS`)
+    hccLogger.info(`[Config] Parsed ${parsed.length} dev Context(s) from CLERUM_CONTEXTS`)
     for (const ctx of parsed) {
-      console.log(`[Config]   - ${ctx.name}: mcpServers=[${ctx.spec.mcpServers.join(', ')}]`)
+      hccLogger.info(`[Config]   - ${ctx.name}: mcpServers=[${ctx.spec.mcpServers.join(', ')}]`)
     }
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_CONTEXTS:', error)
+    // A JSON.parse message can quote the input, so only the error's name is logged.
+    hccLogger.error('[Config] Failed to parse CLERUM_CONTEXTS:', {
+      errorName: error instanceof Error ? error.name : typeof error,
+    })
     return []
   }
 }
@@ -557,11 +567,15 @@ function parseDevAuthTokens(): Map<string, string> {
     const tokens = new Map<string, string>()
     for (const [name, token] of Object.entries(parsed)) {
       tokens.set(name, token)
-      console.log(`[Config]   - Auth token configured for: ${name}`)
+      hccLogger.info(`[Config]   - Auth token configured for: ${name}`)
     }
     return tokens
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_MCP_AUTH:', error)
+    // A JSON.parse message can quote the input, which holds tokens: only the
+    // error's name is logged.
+    hccLogger.error('[Config] Failed to parse CLERUM_MCP_AUTH:', {
+      errorName: error instanceof Error ? error.name : typeof error,
+    })
     return new Map()
   }
 }
