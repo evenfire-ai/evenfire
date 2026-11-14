@@ -858,4 +858,82 @@ describe('direct trusted service admission: charged and exempt routes', () => {
       await host.server.stop()
     }
   }, 60_000)
+
+  it('gives the workflow approval reader the Host wait when the bucket is full', async () => {
+    const host = await bootHostWithEveryDirectRoute()
+    const { submitMcpHostDecision } = (await import(
+      resolve(process.cwd(), '../workflow-approval-request-reader/src/mcpHostClient.ts')
+    )) as {
+      submitMcpHostDecision: (
+        config: WorkflowReaderConfig,
+        command: {
+          approvalRequestId: string
+          mcpHostRef: string
+          medium: 'slack'
+          providerUserId: string
+          providerWorkspaceId: string
+          providerChannelId: string
+          providerEventId: string
+          decision: 'approve'
+        }
+      ) => Promise<{ ok: boolean; status?: number; error?: string; retryAfterSeconds?: number }>
+    }
+    const readerConfig: WorkflowReaderConfig = {
+      port: 0,
+      mcpHostBaseUrl: host.baseUrl,
+      mcpHostRef: 'chatllm',
+      mcpHostTargets: [{ hostRef: 'chatllm', baseUrl: host.baseUrl }],
+      enabledMedia: new Set(['slack']),
+      mcpHostTimeoutMs: 5_000,
+      mcpHostMessageTimeoutMs: 5_000,
+      rateLimitWindowMs: 60_000,
+      rateLimitMaxRequests: 120,
+      controlApiBaseUrl: '',
+      controlApiToken: '',
+      controlApiTimeoutMs: 5_000,
+      channelReaderUrlTemplate: '',
+      channelReaderHandoffToken: '',
+      channelReaderHandoffTimeoutMs: 5_000,
+    }
+    const command = {
+      approvalRequestId: APPROVAL_REQUEST_ID,
+      mcpHostRef: 'chatllm',
+      medium: 'slack' as const,
+      providerUserId: 'U123',
+      providerWorkspaceId: 'T123',
+      providerChannelId: 'C123',
+      providerEventId: 'event-limited',
+      decision: 'approve' as const,
+    }
+    const admissionClock = vi.spyOn(Date, 'now').mockReturnValue(120_001)
+    const quiet = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const quietError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await fillDirectServiceBucket(host.client)
+
+      const limited = await submitMcpHostDecision(readerConfig, command)
+      expect(limited).toEqual({
+        ok: false,
+        status: 429,
+        error: 'runtime_service_admission_limited',
+        retryAfterSeconds: expect.any(Number),
+      })
+      expect(limited.retryAfterSeconds).toBeGreaterThanOrEqual(1)
+      expect(limited.retryAfterSeconds).toBeLessThanOrEqual(60)
+      expect(host.handlers.decision).not.toHaveBeenCalled()
+
+      // Witness: the same command reaches the handler once the window rolls over.
+      admissionClock.mockReturnValue(180_000)
+      await expect(submitMcpHostDecision(readerConfig, command)).resolves.toEqual({
+        ok: true,
+        duplicate: false,
+      })
+      expect(host.handlers.decision).toHaveBeenCalledOnce()
+    } finally {
+      admissionClock.mockRestore()
+      quiet.mockRestore()
+      quietError.mockRestore()
+      await host.server.stop()
+    }
+  }, 60_000)
 })

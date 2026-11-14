@@ -1402,4 +1402,385 @@ describe('workflow approval request reader server', () => {
       )
     })
   })
+
+  describe('background decision retry after a Host admission limit', () => {
+    const admissionLimited = (retryAfterSeconds: number) => ({
+      ok: false,
+      status: 429,
+      error: 'runtime_service_admission_limited',
+      retryAfterSeconds,
+    })
+
+    function slackAction(options: {
+      decision?: 'approve' | 'deny'
+      user?: string
+      eventId: string
+      feedback?: boolean
+      approvalId?: string
+    }): string {
+      return JSON.stringify({
+        type: 'block_actions',
+        actions: [
+          { value: `${options.decision ?? 'approve'}:${options.approvalId ?? APPROVAL_ID}` },
+        ],
+        user: { id: options.user ?? 'U123' },
+        team: { id: 'T123' },
+        channel: { id: 'C123' },
+        ...(options.feedback === false ? {} : { container: { message_ts: '1710000000.000001' } }),
+        trigger_id: options.eventId,
+      })
+    }
+
+    async function postSlack(body: string): Promise<{ status: number; body: unknown }> {
+      return postWebhook(
+        baseConfig,
+        'slack',
+        body,
+        {
+          'x-slack-request-timestamp': `${Math.floor(Date.now() / 1000)}`,
+          'x-slack-signature': 'v0=signature',
+        },
+        SLACK_TARGET_ID
+      )
+    }
+
+    function teamsAction(eventId: string): string {
+      return JSON.stringify({
+        type: 'message',
+        id: eventId,
+        text: 'Approve',
+        value: {
+          action:
+            `approve:${APPROVAL_ID}:sandbox-recipes/research-summary-workflow:` +
+            '0123456789abcdef',
+        },
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        from: { id: 'teams-user-1' },
+        conversation: {
+          id: '19:channel-1@thread.tacv2;messageid=root-post-1',
+          conversationType: 'channel',
+          tenantId: 'tenant-1',
+        },
+        channelData: {
+          tenant: { id: 'tenant-1' },
+          channel: { id: '19:channel-1@thread.tacv2' },
+        },
+      })
+    }
+
+    /** Lets the background promise chains settle without moving fake time. */
+    async function settle(): Promise<void> {
+      for (let round = 0; round < 3; round += 1) {
+        await new Promise(resolve => setImmediate(resolve))
+      }
+    }
+
+    function threadTexts(): string[] {
+      return vi
+        .mocked(sendSlackTargetMessage)
+        .mock.calls.map(call => (call[1] as { text: string }).text)
+    }
+
+    function slackUpdateTexts(): string[] {
+      return vi
+        .mocked(updateSlackTargetMessage)
+        .mock.calls.map(call => (call[1] as { text: string }).text)
+    }
+
+    function teamsUpdateTexts(): string[] {
+      return vi
+        .mocked(updateTeamsTargetMessage)
+        .mock.calls.map(call => (call[1] as { text: string }).text)
+    }
+
+    let decisionAdmissionRetries: typeof import('../src/decisionAdmissionRetry.js').decisionAdmissionRetries
+
+    beforeAll(async () => {
+      ;({ decisionAdmissionRetries } = await import('../src/decisionAdmissionRetry.js'))
+    })
+
+    beforeEach(() => {
+      // Each scenario queues its own Host answers; none leaks into the next.
+      vi.mocked(submitMcpHostDecision).mockReset().mockResolvedValue({ ok: true })
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    })
+
+    afterEach(() => {
+      decisionAdmissionRetries.cancelAll()
+      vi.useRealTimers()
+    })
+
+    it('answers the webhook while fake timers are installed', async () => {
+      const response = await postSlack(slackAction({ eventId: 'slack-fake-timer-probe' }))
+
+      expect(response).toEqual({ status: 200, body: { ok: true } })
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+    })
+
+    it('sends a Slack decision again once after the wait and records it', async () => {
+      vi.mocked(submitMcpHostDecision)
+        .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce({ ok: true })
+
+      const response = await postSlack(slackAction({ eventId: 'slack-retry-ok' }))
+      await settle()
+
+      expect(response).toEqual({ status: 200, body: { ok: true } })
+      expect(threadTexts()).toEqual([
+        '<@U123> The assistant is busy. Your decision will be sent again in 7 seconds. If the approval message has not changed a minute from now, choose again.',
+      ])
+      expect(updateSlackTargetMessage).not.toHaveBeenCalled()
+      expect(decisionAdmissionRetries.size).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(6_999)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+      const [first, retry] = vi.mocked(submitMcpHostDecision).mock.calls
+      expect(retry?.[1]).toEqual(first?.[1])
+      expect((retry?.[1] as { providerEventId: string }).providerEventId).toBe(
+        'slack:T123:C123:slack-retry-ok'
+      )
+      expect(slackUpdateTexts()).toEqual(['Approved. Workflow approval recorded.'])
+      expect(decisionAdmissionRetries.size).toBe(0)
+
+      await vi.advanceTimersByTimeAsync(120_000)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+    })
+
+    it('reports the second wait when the retry is refused again and arms nothing more', async () => {
+      vi.mocked(submitMcpHostDecision)
+        .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce(admissionLimited(9))
+
+      await postSlack(slackAction({ eventId: 'slack-retry-refused' }))
+      await settle()
+      await vi.advanceTimersByTimeAsync(7_000)
+      await settle()
+
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+      expect(threadTexts()).toEqual([
+        '<@U123> The assistant is busy. Your decision will be sent again in 7 seconds. If the approval message has not changed a minute from now, choose again.',
+        '<@U123> The assistant is busy. Try again in 9 seconds.',
+      ])
+      expect(decisionAdmissionRetries.size).toBe(0)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+    })
+
+    it('marks the approval stale when the retry finds it no longer pending', async () => {
+      vi.mocked(submitMcpHostDecision)
+        .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce({ ok: false, status: 409, error: 'approval_not_pending' })
+
+      await postSlack(slackAction({ eventId: 'slack-retry-stale' }))
+      await settle()
+      await vi.advanceTimersByTimeAsync(7_000)
+      await settle()
+
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+      expect(slackUpdateTexts()).toEqual([
+        'This workflow approval is no longer pending. Trigger the workflow again to request approval.',
+      ])
+    })
+
+    it('does not submit the same click again while its retry is armed', async () => {
+      vi.mocked(submitMcpHostDecision)
+        .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce({ ok: true })
+
+      await postSlack(slackAction({ eventId: 'slack-held-same' }))
+      await settle()
+      const response = await postSlack(slackAction({ eventId: 'slack-held-same' }))
+      await settle()
+
+      expect(response).toEqual({ status: 200, body: { ok: true } })
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(1)
+      expect(threadTexts()).toHaveLength(1)
+      expect(decisionAdmissionRetries.size).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(7_000)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+    })
+
+    it('holds another user decision while a retry is armed and sends the first one', async () => {
+      vi.mocked(submitMcpHostDecision)
+        .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce({ ok: true })
+
+      await postSlack(slackAction({ eventId: 'slack-held-first' }))
+      await settle()
+      await postSlack(slackAction({ eventId: 'slack-held-other', user: 'U999', decision: 'deny' }))
+      await settle()
+
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(1)
+      expect(threadTexts()[1]).toBe(
+        '<@U999> Another decision for this workflow approval is waiting to be sent. Its result will appear on the approval message.'
+      )
+
+      await vi.advanceTimersByTimeAsync(7_000)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(submitMcpHostDecision).mock.calls[1]?.[1]).toMatchObject({
+        providerUserId: 'U123',
+        decision: 'approve',
+      })
+    })
+
+    it('arms one retry when two first attempts are refused', async () => {
+      const pending: Array<(value: unknown) => void> = []
+      vi.mocked(submitMcpHostDecision)
+        .mockImplementationOnce(() => new Promise(resolve => pending.push(resolve)) as never)
+        .mockImplementationOnce(() => new Promise(resolve => pending.push(resolve)) as never)
+        .mockResolvedValueOnce({ ok: true })
+
+      await postSlack(slackAction({ eventId: 'slack-race-1' }))
+      await postSlack(slackAction({ eventId: 'slack-race-2' }))
+      await settle()
+      expect(pending).toHaveLength(2)
+      pending[0]?.(admissionLimited(7))
+      pending[1]?.(admissionLimited(7))
+      await settle()
+
+      expect(decisionAdmissionRetries.size).toBe(1)
+      await vi.advanceTimersByTimeAsync(7_000)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(3)
+    })
+
+    it('reports the wait without arming when 64 retries are already pending', async () => {
+      const runners = Array.from({ length: 64 }, () => vi.fn())
+      runners.forEach((run, index) => {
+        const id = `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`
+        expect(
+          decisionAdmissionRetries.schedule(
+            id,
+            { providerUserId: 'U000', decision: 'approve' },
+            30,
+            run
+          )
+        ).toBe('scheduled')
+      })
+      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
+
+      await postSlack(slackAction({ eventId: 'slack-full' }))
+      await settle()
+
+      expect(threadTexts()).toEqual(['<@U123> The assistant is busy. Try again in 7 seconds.'])
+      expect(decisionAdmissionRetries.size).toBe(64)
+      expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await settle()
+      for (const run of runners) expect(run).toHaveBeenCalledOnce()
+      expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+    })
+
+    it('sends a Teams decision again once after the wait and records it', async () => {
+      vi.mocked(submitMcpHostDecision)
+        .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce({ ok: true })
+
+      const response = await postWebhook(
+        { ...baseConfig, enabledMedia: new Set(['teams']) },
+        'teams',
+        teamsAction('teams-retry-ok'),
+        { authorization: 'Bearer teams-token' },
+        TEAMS_TARGET_ID
+      )
+      await settle()
+
+      expect(response).toEqual({ status: 200, body: { ok: true } })
+      expect(teamsUpdateTexts()).toEqual([
+        'The assistant is busy. Your decision will be sent again in 7 seconds. If the approval message has not changed a minute from now, choose again.',
+      ])
+
+      await vi.advanceTimersByTimeAsync(7_000)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+      expect(teamsUpdateTexts()).toEqual([
+        'The assistant is busy. Your decision will be sent again in 7 seconds. If the approval message has not changed a minute from now, choose again.',
+        'Approved. Workflow approval recorded.',
+      ])
+    })
+
+    it('retries a Slack decision without feedback context and sends no message', async () => {
+      vi.mocked(submitMcpHostDecision)
+        .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce({ ok: true })
+
+      await postSlack(slackAction({ eventId: 'slack-no-feedback', feedback: false }))
+      await settle()
+      await vi.advanceTimersByTimeAsync(7_000)
+      await settle()
+
+      // Witness: the retry ran.
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+      expect(sendSlackTargetMessage).not.toHaveBeenCalled()
+      expect(updateSlackTargetMessage).not.toHaveBeenCalled()
+    })
+
+    it('answers a synchronous decision with 429 and Retry-After and does not retry it', async () => {
+      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
+      const server = createServer({ ...baseConfig, telegramWebhookSecret: 'telegram-secret' })
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+      const { port } = server.address() as AddressInfo
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/webhooks/telegram`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-telegram-bot-api-secret-token': 'telegram-secret',
+          },
+          body: JSON.stringify({
+            callback_query: {
+              id: 'tg-limited',
+              data: `approve:${APPROVAL_ID}`,
+              from: { id: 123 },
+              message: { chat: { id: 456 } },
+            },
+          }),
+        })
+
+        expect(response.status).toBe(429)
+        expect(response.headers.get('retry-after')).toBe('7')
+        expect(await response.json()).toEqual({
+          ok: false,
+          error: 'runtime_service_admission_limited',
+        })
+      } finally {
+        await new Promise<void>(resolve => server.close(() => resolve()))
+      }
+      expect(decisionAdmissionRetries.size).toBe(0)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+    })
+
+    it('reports a 429 without a usable wait with the generic text and no retry', async () => {
+      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        error: 'runtime_service_admission_limited',
+      })
+
+      await postSlack(slackAction({ eventId: 'slack-malformed' }))
+      await settle()
+
+      expect(threadTexts()).toEqual([
+        '<@U123> I could not approve this workflow approval. Try again in a moment.',
+      ])
+      expect(decisionAdmissionRetries.size).toBe(0)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+    })
+  })
 })
