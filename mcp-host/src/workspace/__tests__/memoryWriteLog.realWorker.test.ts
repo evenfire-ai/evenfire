@@ -145,6 +145,7 @@ describe('SqliteMemoryWriteLog on the real DB worker', () => {
       })
       // The rejection is observed before the row is read.
       expect(rejection?.message).toBe('db worker timeout (200ms) for op=insert_memory_write')
+      expect((rejection as Error & { code?: string }).code).toBe('PERSIST_SYNC_TIMEOUT')
       expect(holding.heldCount()).toBe(1)
 
       holding.release()

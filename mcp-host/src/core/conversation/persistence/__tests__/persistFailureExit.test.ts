@@ -224,7 +224,7 @@ describe('storeShutdownExitCode', () => {
     await expect(storeShutdownExitCode(async () => undefined)).resolves.toBe(0)
     await expect(
       storeShutdownExitCode(async () => {
-        throw new Error('async write failed (sessionKey=s1): disk I/O error')
+        throw new Error('async write failed: disk I/O error')
       })
     ).resolves.toBe(1)
   })

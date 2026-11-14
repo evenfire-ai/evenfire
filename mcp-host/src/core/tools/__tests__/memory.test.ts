@@ -772,12 +772,26 @@ describe('memory_write records every successful write', () => {
     expect(log.entries).toHaveLength(1)
   })
 
-  const failures: Array<[string, Error]> = [
-    ['a plain Error', new Error('SQLITE_IOERR: disk I/O error')],
+  const coded = (message: string, code: unknown): Error =>
+    Object.assign(new Error(message), { code })
+  // [label, rejection, errorCode the log line must carry (undefined: no key)]
+  const failures: Array<[string, Error, string | undefined]> = [
+    ['a plain Error', new Error('SQLITE_IOERR: disk I/O error'), undefined],
     [
       "the persist queue's timeout error",
-      new Error('db worker timeout (2000ms) for op=insert_memory_write'),
+      coded('db worker timeout (2000ms) for op=insert_memory_write', 'PERSIST_SYNC_TIMEOUT'),
+      'PERSIST_SYNC_TIMEOUT',
     ],
+    [
+      "the persist queue's stored async failure naming another session",
+      coded(
+        'async write failed (sessionKey=bob@example.com:desktop:chan-1:thread-1): disk full',
+        'PERSIST_ASYNC_WRITE_FAILED'
+      ),
+      'PERSIST_ASYNC_WRITE_FAILED',
+    ],
+    ['an error whose code is not a string', coded('bob@example.com boom', 42), undefined],
+    ['an error with a malformed code', coded('bob@example.com boom', 'bad code!'), undefined],
   ]
   const targets: Array<[string, Record<string, unknown>, 'collective' | 'user', string, string]> = [
     [
@@ -795,7 +809,7 @@ describe('memory_write records every successful write', () => {
       'MEMORY.md',
     ],
   ]
-  for (const [failureLabel, error] of failures) {
+  for (const [failureLabel, error, errorCode] of failures) {
     for (const [targetLabel, params, scope, successText, relativePath] of targets) {
       it(`D93: a record that rejects with ${failureLabel} keeps the write's success (${targetLabel})`, async () => {
         const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
@@ -815,14 +829,17 @@ describe('memory_write records every successful write', () => {
         expect(errorSpy).toHaveBeenCalledTimes(1)
         const [fields, message] = errorSpy.mock.calls[0]
         expect(message).toBe('memory write record failed')
-        expect(fields).toMatchObject({
+        expect(fields).toEqual({
           component: 'MemoryWrite',
           scope,
           mode: 'append',
           errorName: 'Error',
-          errorMessage: error.message,
+          ...(errorCode ? { errorCode } : {}),
         })
         const payload = JSON.stringify(fields)
+        expect(payload).not.toContain(error.message)
+        expect(payload).not.toContain('bob@example.com')
+        expect(payload).not.toContain('sessionKey')
         expect(payload).not.toContain(relativePath)
         expect(payload).not.toContain('notes')
         expect(payload).not.toContain(content)

@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { logger } from '../../logger'
+import { logger, redactUnknown } from '../../logger'
 import { memoryNotePath } from '../../workspace/memoryNotePath'
 import type { MemoryWriteEntry, MemoryWriteLog } from '../../workspace/memoryWriteLog'
 import { memoryWriteRecordFailuresTotal } from '../../workspace/memoryWriteLog'
@@ -295,9 +295,11 @@ export class PersistentMemoryWriteTool implements Tool {
    * Record a write that succeeded (the only write point of `memory_writes`).
    * The entry, hash included, is built before the `try`: an error building it
    * is a defect and is thrown like any other tool error. A rejection of
-   * `record` (worker error, worker exit, sync timeout) never fails the write
-   * (D93): it is logged once and counted, and the tool returns its normal
-   * success result. The log line carries no path, content or user key.
+   * `record` (a persist queue error or a worker error) never fails the write:
+   * it is logged once and counted, and the tool returns its normal success
+   * result. The log line carries the scope, the mode, the error's name and, when
+   * the error has a well-formed one, its code; never the error message, a path,
+   * the content or a user key.
    */
   private async recordWrite(
     scope: MemoryWriteEntry['scope'],
@@ -317,14 +319,20 @@ export class PersistentMemoryWriteTool implements Tool {
     try {
       await this.record.log.record(entry)
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err))
+      // The logger's own reduction keeps an error's name and a well-formed code,
+      // never its message (a queue failure message can carry another session's
+      // text).
+      const summary = redactUnknown(err instanceof Error ? err : new Error(String(err))) as {
+        name: string
+        code?: string
+      }
       logger.error(
         {
           component: 'MemoryWrite',
           scope,
           mode: entry.mode,
-          errorName: error.name,
-          errorMessage: error.message,
+          errorName: summary.name,
+          ...(summary.code !== undefined ? { errorCode: summary.code } : {}),
         },
         'memory write record failed'
       )

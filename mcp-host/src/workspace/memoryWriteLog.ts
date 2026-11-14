@@ -29,8 +29,10 @@ export interface MemoryWriteLog {
 }
 
 /**
- * Memory writes that succeeded but whose record failed (the persist queue
- * rejected: worker error, worker exit or sync timeout). Served by the existing
+ * Memory writes that succeeded but whose record failed. The persist queue
+ * rejected with one of its own codes (`PERSIST_WORKER_EXIT`,
+ * `PERSIST_ASYNC_WRITE_FAILED`, `PERSIST_QUEUE_CLOSED`, `PERSIST_WORKER_STALLED`,
+ * `PERSIST_SYNC_TIMEOUT`) or with a worker error. Served by the existing
  * /metrics endpoint through the prom-client global register.
  */
 export const memoryWriteRecordFailuresTotal = new Counter({

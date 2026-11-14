@@ -238,6 +238,36 @@ describe('SessionSearchTool — security (bloqueantes)', () => {
   })
 })
 
+describe('SessionSearchTool — after a failed async write of another session', () => {
+  it("returns the persist failure without the other session's key", async () => {
+    const h = makeHarness()
+    const bobKey = 'bob@example.com:desktop:chan-1:thread-1'
+    // The CHECK on content_sha256 makes the worker reject this async write.
+    h.persistQueue.enqueueAsync(bobKey, {
+      kind: 'insert_memory_write',
+      payload: {
+        user_key: 'bob',
+        scope: 'user',
+        relative_path: 'MEMORY.md',
+        mode: 'append',
+        content_sha256: 'short',
+        written_at: 1,
+      },
+    })
+    await h.persistQueue.drainSessionKey(bobKey)
+
+    const tool = new SessionSearchTool(h.service, makeMessage({ sender: 'alice@example.com' }))
+    const out = await tool.execute({ query: 'pineapples' })
+    // Witness: the search failed on the stored persist failure.
+    expect(out.is_error).toBe(true)
+    expect(out.content.startsWith('Search failed: async write failed')).toBe(true)
+    expect(out.content).not.toContain('bob@example.com')
+    expect(out.content).not.toContain('sessionKey')
+
+    await expect(h.shutdown()).rejects.toThrow(/async write failed/)
+  })
+})
+
 describe('SessionSearchService — FTS5 functional', () => {
   let h: Harness
 
