@@ -1263,7 +1263,7 @@ export function createWorkflowEndpointHandlers(
       const runId = labelRunId ?? claims.runId?.trim()
       let workflowPhase = execution?.phase ?? 'pending'
       let durable: Awaited<ReturnType<DbRunProcessor['getRunStatus']>> = null
-      if (dbRunProcessor && runId) {
+      if (dbRunProcessor && runId && recipeCarriesRunAuthority(recipe)) {
         try {
           durable = await dbRunProcessor.getRunStatus(runId, claims.recipeNamespace, recipeName)
           if (durable?.hasAuthority) workflowPhase = workflowPhaseFromRunPhase(durable.phase)
@@ -1275,9 +1275,10 @@ export function createWorkflowEndpointHandlers(
           // durable boundary re-gates for a child carrying the run-authority
           // label (423 while paused, 503 `workflow_run_state_unavailable` while
           // the run store is unreachable), so a stale phase here cannot
-          // authorize an effect. workflow-recipes labels every child of a run
-          // with an authority binding; an unlabelled child is not re-gated.
-          // `readCurrentStatus` does not use the phase (#1413). Custom
+          // authorize an effect. The run store is read only for a child
+          // carrying the run-authority label, as at the running boundary; an
+          // unlabelled child (every V1 run) is answered from the recipe status
+          // without reading it. `readCurrentStatus` does not use the phase (#1413). Custom
           // coordinators read the same answer; what they do with it is their
           // code. The error message is not logged: a connection error carries
           // the database address.

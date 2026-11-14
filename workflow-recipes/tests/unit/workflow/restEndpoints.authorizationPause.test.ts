@@ -450,7 +450,7 @@ describe('status GET: pause projection re-publish (D1)', () => {
     expect(api.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
 
-  it('T-D1f: serves the overlay but writes nothing when the run id comes from the claims only', async () => {
+  it('T-D1f: does not read the run store for a recipe without labels, whatever the claims', async () => {
     const api = makeApi(childRecipe(execution('running'), { label: false }))
     const processor = makeProcessor()
     processor.getRunStatus.mockResolvedValue(pausedRow())
@@ -460,12 +460,18 @@ describe('status GET: pause projection re-publish (D1)', () => {
       claims({ runId: CLAIMS_RUN_ID })
     )
 
-    expect(processor.getRunStatus).toHaveBeenCalledWith(
-      CLAIMS_RUN_ID,
-      'sandbox-recipes',
-      'my-recipe'
-    )
-    expect(result).toMatchObject({ status: 200, body: { workflowPhase: 'authorization_paused' } })
+    // Witness: the handler read the recipe and answered from its status.
+    expect(api.getNamespacedCustomObject).toHaveBeenCalledOnce()
+    expect(result).toEqual({
+      status: 200,
+      body: {
+        workflowPhase: 'running',
+        steps: [{ id: 's1', phase: 'completed' }],
+        attempt: 1,
+        startedAt: STARTED_AT,
+      },
+    })
+    expect(processor.getRunStatus).not.toHaveBeenCalled()
     expect(api.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
 
@@ -551,6 +557,30 @@ describe('status GET: durable read failure (catch B)', () => {
     expect(fields).not.toContain(String(address.address))
     expect(fields).not.toContain(String(address.port))
     expect(fields).not.toContain(refused.message)
+    expect(api.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+  })
+
+  it('status GET does not read the run store for a child without the run authority label', async () => {
+    const refused = await captureConnectionRefused()
+    const api = makeApi(childRecipe(execution('running'), { authority: false }))
+    const processor = makeProcessor()
+    processor.getRunStatus.mockRejectedValue(refused)
+
+    const result = await handlersFor(api, processor).getWorkflowStatus('my-recipe', claims())
+
+    // Witness: the handler read the recipe and answered from its status.
+    expect(api.getNamespacedCustomObject).toHaveBeenCalledOnce()
+    expect(result).toEqual({
+      status: 200,
+      body: {
+        workflowPhase: 'running',
+        steps: [{ id: 's1', phase: 'completed' }],
+        attempt: 1,
+        startedAt: STARTED_AT,
+      },
+    })
+    expect(processor.getRunStatus).not.toHaveBeenCalled()
+    expect(logCalls('error', CATCH_B)).toEqual([])
     expect(api.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
 

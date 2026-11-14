@@ -117,6 +117,8 @@ type WireRun = {
   responses: Array<{ report: string; status: number; code?: unknown }>
   order: string[]
   connect: ReturnType<typeof vi.fn>
+  poolQuery: ReturnType<typeof vi.fn>
+  statusReads: number[]
   checkpointAuthority: ReturnType<typeof vi.fn>
   statusPatches: unknown[]
   waitLines: string[]
@@ -208,6 +210,8 @@ async function runWire(
   })
   const pool = {
     query: vi.fn(async (sql: string) => {
+      // A V1 run's store is unreachable for the unlocked read as well.
+      if (!options.bound) throw refused
       if (/AS has_authority/.test(sql)) {
         return {
           rows: [{ phase: 'Running', failure_reason: null, has_authority: options.bound }],
@@ -241,6 +245,7 @@ async function runWire(
   }
 
   const order: string[] = []
+  const statusReads: number[] = []
   const responses: Array<{ report: string; status: number; code?: unknown }> = []
   const statusPath = `/api/v1/workflow/${RECIPE}/status`
   const server = http.createServer((req, res) => {
@@ -252,6 +257,7 @@ async function runWire(
       }
       if (req.method === 'GET') {
         const result = await handlers.getWorkflowStatus(RECIPE, claims)
+        statusReads.push(result.status)
         res.writeHead(result.status, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result.body))
         return
@@ -335,6 +341,8 @@ async function runWire(
     responses,
     order,
     connect,
+    poolQuery: pool.query,
+    statusReads,
     checkpointAuthority,
     statusPatches,
     waitLines,
@@ -400,5 +408,10 @@ describe('running boundary over the wire: run store unavailable', () => {
     expect(run.checkpointAuthority).not.toHaveBeenCalled()
     expect(run.waitLines).toHaveLength(0)
     expect(run.snippetRuns).toBe(1)
+    // The status GET answers from the recipe status and never reads the
+    // store either. Witness: the runtime did read its status.
+    expect(run.statusReads.length).toBeGreaterThan(0)
+    expect(run.statusReads.every(status => status === 200)).toBe(true)
+    expect(run.poolQuery).not.toHaveBeenCalled()
   })
 })
