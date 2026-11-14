@@ -877,9 +877,12 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     }
     // A run with no authority binding (no continuation and no initiating
     // binding: `COALESCE(continuation, initiating)` is null) is a legacy V1
-    // run. It keeps dev's lifecycle without the V2 continuation checkpoint:
-    // its phase does not decide here, the recipe status does, so a latched
-    // `Failed` run can still recover and finish as at dev.
+    // run. The status endpoints no longer route V1 children here: they call
+    // this boundary only for a child carrying the run authority label, which
+    // the child creator stamps only for a bound run (restEndpoints.ts,
+    // dbRunChildRecipeCreator.ts). A labelled child whose run has no binding
+    // still gets dev's lifecycle without the V2 continuation checkpoint: its
+    // phase does not decide here, the recipe status does.
     if (!observed.authority_binding) return { outcome: 'allowed' }
     const observedPhaseOutcome = boundaryPhaseOutcome(observed)
     if (observedPhaseOutcome) return observedPhaseOutcome

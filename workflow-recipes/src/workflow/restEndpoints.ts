@@ -15,7 +15,13 @@ import type {
   WorkflowInfrastructureTelemetryProjection,
 } from '../governedTraceReporter'
 import { createLogger } from '../observability/logger'
-import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
+import {
+  CRD_GROUP,
+  CRD_VERSION,
+  RUN_AUTHORITY_BOUND,
+  RUN_AUTHORITY_LABEL,
+  WORKFLOWRECIPE_PLURAL,
+} from '../reconciler/crdConstants'
 import type { DbRunProcessor, WorkflowRunPhase } from '../reconciler/dbRunProcessor'
 import { getErrorCode } from '../reconciler/k8sErrors'
 import { classifyWorkflowRunStoreError } from '../reconciler/workflowRunStoreErrors'
@@ -301,6 +307,17 @@ function workflowRunIdFromRecipe(recipe: unknown): string | undefined {
   }
   const runId = recipe.metadata.labels[WORKFLOW_RUN_ID_LABEL]
   return typeof runId === 'string' && runId.trim() ? runId : undefined
+}
+
+// True only for a child whose run carries an authority binding: the DB-run
+// child creator stamps the label from the run row (dbRunChildRecipeCreator.ts).
+// Any other value, or no label, is a V1 run, whose `running` reports are
+// decided by recipe status without reading the run store, as on dev.
+function recipeCarriesRunAuthority(recipe: unknown): boolean {
+  if (!isRecord(recipe) || !isRecord(recipe.metadata) || !isRecord(recipe.metadata.labels)) {
+    return false
+  }
+  return recipe.metadata.labels[RUN_AUTHORITY_LABEL] === RUN_AUTHORITY_BOUND
 }
 
 function validateRunIdClaim(
@@ -688,6 +705,7 @@ export function createWorkflowEndpointHandlers(
     if (!dbRunProcessor) return null
     const runId = workflowRunIdFromRecipe(recipe)
     if (!runId) return null
+    if (!recipeCarriesRunAuthority(recipe)) return null
     const boundary = await dbRunProcessor.checkpointRunningBoundary(runId)
     switch (boundary.outcome) {
       case 'allowed':
@@ -979,11 +997,13 @@ export function createWorkflowEndpointHandlers(
           if (boundary) return boundary
         }
         // True only when the durable boundary ran and answered `allowed`: the
-        // boundary also returns null with no run processor or no run-id label.
+        // boundary also returns null with no run processor, no run-id label or
+        // no run authority label.
         const durablyAllowedRunning =
           body.phase === 'running' &&
           dbRunProcessor !== null &&
-          workflowRunIdFromRecipe(recipe) !== undefined
+          workflowRunIdFromRecipe(recipe) !== undefined &&
+          recipeCarriesRunAuthority(recipe)
 
         // Normalize failureReason → error (statusReporter.ts sends failureReason)
         const resolvedError = body.error ?? body.failureReason

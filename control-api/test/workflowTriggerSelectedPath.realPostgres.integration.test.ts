@@ -6,6 +6,10 @@ import type { Server } from 'node:http'
 import { Pool } from 'pg'
 import type { ActionAuthorityCheckpointRequestV2 } from '@clerum/action-context-contracts'
 import { StepCoordinator, WorkflowAuthorizationPausedError } from '@clerum/workflow-runtime-core'
+import {
+  RUN_AUTHORITY_BOUND,
+  RUN_AUTHORITY_LABEL,
+} from '../../workflow-recipes/src/reconciler/crdConstants.js'
 import { createDbRunProcessor } from '../../workflow-recipes/src/reconciler/dbRunProcessor.js'
 import { createWorkflowRunAuthorityCheckpointer } from '../../workflow-recipes/src/reconciler/workflowActionCheckpointClient.js'
 import { createWorkflowEndpointHandlers } from '../../workflow-recipes/src/workflow/restEndpoints.js'
@@ -513,7 +517,13 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       metadata: {
         name: childName,
         namespace: config.sandboxNamespace,
-        labels: { 'clerum.io/workflow-run-id': result.row.run_id },
+        // The run is bound, so the child carries the run authority label the
+        // DB-run child creator stamps; the status endpoints run the durable
+        // running boundary only for such a child.
+        labels: {
+          'clerum.io/workflow-run-id': result.row.run_id,
+          [RUN_AUTHORITY_LABEL]: RUN_AUTHORITY_BOUND,
+        },
       },
       spec: {
         steps: [

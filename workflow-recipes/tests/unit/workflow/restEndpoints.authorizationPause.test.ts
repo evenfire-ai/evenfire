@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import net from 'node:net'
 import { Pool } from 'pg'
+import { RUN_AUTHORITY_BOUND, RUN_AUTHORITY_LABEL } from '../../../src/reconciler/crdConstants'
 import { type DbRunProcessor, createDbRunProcessor } from '../../../src/reconciler/dbRunProcessor'
 import {
   type AuthenticatedRequest,
@@ -69,15 +70,35 @@ function execution(phase: string, extra: Record<string, unknown> = {}): Record<s
   return { phase, attempt: 1, startedAt: STARTED_AT, ...extra }
 }
 
+/**
+ * A child recipe. By default it carries the run-id label and the run authority
+ * label that the DB-run child creator stamps for a bound run, so the durable
+ * boundary runs. `label: false` drops both labels; `authority: false` keeps
+ * the run-id label and drops the authority label (a V1 child).
+ */
 function childRecipe(
   workflowExecution: Record<string, unknown> | undefined,
-  options: { label?: boolean; specSteps?: string[]; statusSteps?: unknown[] } = {}
+  options: {
+    label?: boolean
+    authority?: boolean
+    specSteps?: string[]
+    statusSteps?: unknown[]
+  } = {}
 ): Record<string, unknown> {
   return {
     metadata: {
       name: 'my-recipe',
       resourceVersion: '7',
-      ...(options.label === false ? {} : { labels: { 'clerum.io/workflow-run-id': RUN_ID } }),
+      ...(options.label === false
+        ? {}
+        : {
+            labels: {
+              'clerum.io/workflow-run-id': RUN_ID,
+              ...(options.authority === false
+                ? {}
+                : { [RUN_AUTHORITY_LABEL]: RUN_AUTHORITY_BOUND }),
+            },
+          }),
     },
     spec: { steps: (options.specSteps ?? ['s1', 's2']).map(id => ({ id })) },
     status: {
@@ -676,6 +697,22 @@ describe('step running report: pause projection clear (§10)', () => {
     expect(patchCall(api).body).toEqual([stepOp])
   })
 
+  it('never clears the pause for a child without the run authority label', async () => {
+    const api = makeApi(childRecipe(pausedExecution(), { authority: false }))
+    const processor = allowedProcessor()
+
+    const result = await handlersFor(api, processor).postStepStatus('my-recipe', claims(), {
+      stepId: 's2',
+      phase: 'running',
+    })
+
+    expect(result).toEqual({ status: 200, body: { accepted: true } })
+    // Liveness witness: the step op reached the recipe-status patch.
+    expect(api.patchNamespacedCustomObjectStatus).toHaveBeenCalledOnce()
+    expect(patchCall(api).body).toEqual([stepOp])
+    expect(processor.checkpointRunningBoundary).not.toHaveBeenCalled()
+  })
+
   it('T-Q2d: re-evaluates the clear on the fresh read after a conflict', async () => {
     const api = makeApi(childRecipe(pausedExecution()), childRecipe(execution('running')))
     api.patchNamespacedCustomObjectStatus
@@ -746,15 +783,16 @@ describe('step running report through the real run processor (A13 A-1)', () => {
       on: vi.fn(),
     }
     const checkpointAuthority = vi.fn()
+    const connect = vi.fn(async () => client)
     const processor = createDbRunProcessor({
       instanceId: 'wrc-test',
-      pool: { connect: vi.fn(async () => client) } as unknown as Pool,
+      pool: { connect } as unknown as Pool,
       runPollMs: 30_000,
       checkpointAuthority,
       createChildRecipe: vi.fn(),
       logger: { ...logSpies, withStep: () => logSpies } as never,
     })
-    return { processor, calls, checkpointAuthority }
+    return { processor, calls, checkpointAuthority, connect }
   }
 
   function runRow(phase: string, bound: boolean): Record<string, unknown> {
@@ -767,8 +805,8 @@ describe('step running report through the real run processor (A13 A-1)', () => {
     }
   }
 
-  async function stepRunning(processor: DbRunProcessor) {
-    const api = makeApi(childRecipe(execution('running')))
+  async function stepRunning(processor: DbRunProcessor, options: { authority?: boolean } = {}) {
+    const api = makeApi(childRecipe(execution('running'), { authority: options.authority }))
     const result = await createWorkflowEndpointHandlers(
       api as unknown as k8s.CustomObjectsApi,
       'sandbox-recipes',
@@ -778,16 +816,22 @@ describe('step running report through the real run processor (A13 A-1)', () => {
     return { api, result }
   }
 
-  it('accepts a step report for a legacy Failed run with no authority binding, as at dev', async () => {
-    const { processor, calls, checkpointAuthority } = processorOver(runRow('Failed', false))
+  it('accepts a step report for a V1 child of a Failed run without reading the run store, as at dev', async () => {
+    const { processor, calls, checkpointAuthority, connect } = processorOver(
+      runRow('Failed', false)
+    )
 
-    const { api, result } = await stepRunning(processor)
+    const { api, result } = await stepRunning(processor, { authority: false })
 
     expect(result).toEqual({ status: 200, body: { accepted: true } })
-    // Liveness witness: the route reached the real boundary, which read the run once.
-    expect(calls.filter(sql => RUN_READ_SQL.test(sql))).toHaveLength(1)
-    expect(checkpointAuthority).not.toHaveBeenCalled()
+    // Liveness witness: the report reached the recipe-status patch.
     expect(api.patchNamespacedCustomObjectStatus).toHaveBeenCalledOnce()
+    expect(patchCall(api).body).toEqual([
+      { op: 'add', path: '/status/steps/-', value: { id: 's2', phase: 'running' } },
+    ])
+    expect(connect).not.toHaveBeenCalled()
+    expect(calls).toEqual([])
+    expect(checkpointAuthority).not.toHaveBeenCalled()
   })
 
   it('still answers 409 for a bound Failed run', async () => {
@@ -800,7 +844,7 @@ describe('step running report through the real run processor (A13 A-1)', () => {
     expect(api.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
 
-  it('still answers 409 for a run with no row', async () => {
+  it('still answers 409 for a labelled child whose run has no row', async () => {
     const { processor, calls } = processorOver(null)
 
     const { api, result } = await stepRunning(processor)
@@ -809,4 +853,40 @@ describe('step running report through the real run processor (A13 A-1)', () => {
     expect(calls.filter(sql => RUN_READ_SQL.test(sql))).toHaveLength(1)
     expect(api.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
+
+  it('accepts a step report for an unlabelled child whose run has no row, as at dev', async () => {
+    const { processor, calls, connect } = processorOver(null)
+
+    const { api, result } = await stepRunning(processor, { authority: false })
+
+    expect(result).toEqual({ status: 200, body: { accepted: true } })
+    // Liveness witness: the report reached the recipe-status patch.
+    expect(api.patchNamespacedCustomObjectStatus).toHaveBeenCalledOnce()
+    expect(connect).not.toHaveBeenCalled()
+    expect(calls).toEqual([])
+  })
+
+  it.each([
+    ['another value', 'yes'],
+    ['an empty value', ''],
+  ])(
+    'accepts a step report without reading the run store when the authority label has %s',
+    async (_description, value) => {
+      const { processor, connect } = processorOver(null)
+      const recipe = childRecipe(execution('running'))
+      ;(recipe.metadata as { labels: Record<string, string> }).labels[RUN_AUTHORITY_LABEL] = value
+      const api = makeApi(recipe)
+
+      const result = await createWorkflowEndpointHandlers(
+        api as unknown as k8s.CustomObjectsApi,
+        'sandbox-recipes',
+        undefined,
+        { dbRunProcessor: processor }
+      ).postStepStatus('my-recipe', claims(), { stepId: 's2', phase: 'running' })
+
+      expect(result).toEqual({ status: 200, body: { accepted: true } })
+      expect(api.patchNamespacedCustomObjectStatus).toHaveBeenCalledOnce()
+      expect(connect).not.toHaveBeenCalled()
+    }
+  )
 })
