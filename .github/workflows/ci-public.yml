@@ -381,6 +381,11 @@ jobs:
         working-directory: tests/e2e/playwright
         run: npm ci
 
+      - name: Collect Context connector persistence E2E without a cluster
+        if: matrix.service == 'external-rest-api'
+        working-directory: tests/e2e/playwright
+        run: node node_modules/@playwright/test/cli.js test --config=issue-628.config.ts --list --reporter=list
+
       - name: Install Profile UI recovery Chromium
         if: matrix.service == 'external-rest-api'
         working-directory: tests/e2e/playwright
@@ -1088,6 +1093,12 @@ jobs:
 
       - name: Test GFS grant WorkflowRecipe seed rendering
         run: bash scripts/tests/test-seed-gfs-grant-workflow.sh
+
+      - name: Test GFS provisioning preserves Context connectors
+        run: bash scripts/tests/test-provision-gfs-runtime.sh
+
+      - name: Audit Context connector persistence E2E
+        run: python3 -I -S tools/e2e_static_audit.py tests/e2e/playwright/issue-628/connector-persistence.spec.ts
 
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh

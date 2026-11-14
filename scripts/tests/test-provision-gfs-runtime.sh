@@ -14,6 +14,10 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/overlay/instances"
 
+cat >"$TMP/overlay/instances/host.json" <<'JSON'
+{"apiVersion":"clerum.io/v1alpha1","kind":"Host","metadata":{"name":"fixture","namespace":"mcp-host"},"spec":{"host":"fixture","contextRef":"fixture-context"}}
+JSON
+
 cat >"$TMP/bin/bash" <<'MOCK'
 #!/bin/bash
 printf 'bash %s\n' "$*" >>"$CALL_LOG"
@@ -24,6 +28,7 @@ cat >"$TMP/bin/kubectl" <<'MOCK'
 set -euo pipefail
 printf 'kubectl %s\n' "$*" >>"$CALL_LOG"
 case " $* " in
+  *' create --dry-run=client '*) cat "$INSTANCE_FIXTURE" ;;
   *' get globalfilesystem gfs -o name '*) printf 'globalfilesystem.clerum.io/gfs\n' ;;
   *' get globalfilesystem gfs -o jsonpath={.status.phase} '*) printf 'Ready' ;;
   *' get deployment gfsc-writer '*) printf 'gfs-controller-db\n' ;;
@@ -34,6 +39,7 @@ MOCK
 chmod +x "$TMP/bin/bash" "$TMP/bin/kubectl"
 
 export CALL_LOG="$TMP/calls.log"
+export INSTANCE_FIXTURE="$TMP/overlay/instances/host.json"
 # clerum-dev-test is not one of the generic built-in dev patterns
 # (*example-dev*, minikube, clerum-test, clerum-codex-*, ...), so authorize it
 # through the ALLOWED_CONTEXTS override — the same mechanism a self-hosted dev
@@ -116,5 +122,7 @@ done
   echo 'FAIL: runtime finalization introduced credential rotation' >&2
   exit 1
 }
+
+/bin/bash "$ROOT/scripts/tests/test-provision-context-preservation.sh"
 
 echo 'PASS: post-overlay GFS runtime reconciliation is ordered and rerunnable'
