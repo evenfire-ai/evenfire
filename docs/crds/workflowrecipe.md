@@ -505,8 +505,13 @@ unless `output.claimName` is set. Runtime pods still see `/output`, and WRC
 keeps run isolation with subdirectories under `workflow-output/<parent>` and
 `workflow-output/<parent>/<runId>` for triggered child runs. If
 `output.claimName` is omitted, WRC creates a parent-scoped PVC sized by
-`output.storageSize` (default `256Mi`) and deletes that PVC when the parent
-WorkflowRecipe is deleted. If `output.claimName` is set, it must name an
+`output.storageSize`, else by `CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE` on the WRC
+Deployment, else `1Gi`, and deletes that PVC when the parent WorkflowRecipe is
+deleted. The size applies when WRC creates the PVC; WRC never resizes an
+existing one. The quota on files that mcp-host's generation tools write to a
+run's output directory is `CLERUM_WORKFLOW_OUTPUT_QUOTA_MB` (default 50 MB) on
+the WRC Deployment, forwarded to recipe mcp-host pods. If `output.claimName` is
+set, it must name an
 existing PVC in `sandbox-recipes` that is explicitly labeled for this workflow
 output scope:
 
@@ -1120,14 +1125,14 @@ spec:
 
 Where a workflow's results land. `destination: pvc` is the artifact path — the runtime mounts `/output`, the coordinator writes files there, and WRC records each in `status.artifacts[]`.
 
-| Field         | Type   | Required | Description                                                                                        |
-| ------------- | ------ | -------- | -------------------------------------------------------------------------------------------------- |
-| `destination` | string | No       | Enum: `configmap`, `secret`, `stdout`, `pvc`.                                                      |
-| `name`        | string | No       | Target object name (for `configmap` / `secret`).                                                   |
-| `namespace`   | string | No       | Target namespace.                                                                                  |
-| `claimName`   | string | No       | Existing output PVC in `sandbox-recipes`. WRC mounts it but never creates, resizes, or deletes it. |
-| `format`      | string | No       | Enum: `pdf`, `xlsx`, `json`, `text`, `html`, `multi`.                                              |
-| `storageSize` | string | No       | Pattern `^[0-9]+(Mi\|Gi)$`. No schema default; the runtime uses `256Mi`.                           |
+| Field         | Type   | Required | Description                                                                                                                         |
+| ------------- | ------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `destination` | string | No       | Enum: `configmap`, `secret`, `stdout`, `pvc`.                                                                                       |
+| `name`        | string | No       | Target object name (for `configmap` / `secret`).                                                                                    |
+| `namespace`   | string | No       | Target namespace.                                                                                                                   |
+| `claimName`   | string | No       | Existing output PVC in `sandbox-recipes`. WRC mounts it but never creates, resizes, or deletes it.                                  |
+| `format`      | string | No       | Enum: `pdf`, `xlsx`, `json`, `text`, `html`, `multi`.                                                                               |
+| `storageSize` | string | No       | Pattern `^[0-9]+(Mi\|Gi)$`. No schema default; WRC uses `CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE`, else `1Gi`, when it creates the PVC. |
 
 ```yaml
 spec:

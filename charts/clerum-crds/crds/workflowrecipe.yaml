@@ -702,7 +702,7 @@ spec:
                       enum: [pdf, xlsx, json, text, html, multi]
                     storageSize:
                       type: string
-                      description: PVC storage size (e.g. "256Mi", "1Gi"). Default 256Mi.
+                      description: Size of the output PVC that WRC creates when claimName is unset (e.g. "512Mi", "2Gi"). When omitted, WRC uses CLERUM_WORKFLOW_OUTPUT_STORAGE_SIZE from its Deployment, or 1Gi. WRC never resizes an existing PVC; ignored when claimName is set.
                       pattern: "^[0-9]+(Mi|Gi)$"
                   x-kubernetes-validations:
                     - rule: "!has(self.claimName) || (has(self.destination) && self.destination == 'pvc')"
