@@ -27,6 +27,7 @@ import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
+import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import {
@@ -56,6 +57,8 @@ import { embedFailureMessage, embedViewState } from '@lib/embedOwnershipView'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import {
   type PersistedConversationActivationOrigin,
+  clearLatestGfsConversationContext,
+  getLatestGfsConversationContext,
   prefillNewConversationWithGfsResource,
 } from '@lib/gfsConversationPrefill'
 import {
@@ -64,6 +67,7 @@ import {
   markPluginGfsPreviewUnavailable,
   shouldRevalidateGfsQuery,
 } from '@lib/gfsEntityChangeState'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
@@ -409,6 +413,8 @@ export function App() {
   const sandboxUiConversationOriginRef = React.useRef<SandboxUiConversationOrigin | null>(null)
   sandboxUiConversationOriginRef.current = sandboxUiConversationOrigin
   const [composerFocusRequestId, setComposerFocusRequestId] = React.useState(0)
+  const [composerVisibilityEventId, setComposerVisibilityEventId] = React.useState(0)
+  const previousComposerInputVisibleRef = React.useRef(false)
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
   const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
   const [sidebarToggleRequestId, setSidebarToggleRequestId] = React.useState(0)
@@ -805,7 +811,18 @@ export function App() {
     (id: string) => {
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
       if (!tab) return
-      vm.beginUserNavigationIntent()
+      const intentSequence = vm.beginUserNavigationIntent()
+      const authorityScope = vm.authorityScope
+      const activeResource = getLatestGfsConversationContext(authorityScope)
+      const previewNeedsResolution =
+        tab.kind === 'preview' &&
+        Boolean(
+          tab.preview &&
+          !tab.preview.unavailable &&
+          (!activeResource ||
+            activeResource.sourceTabId !== tab.id ||
+            activeResource.uri !== normalizeGfsResourceUri(tab.preview.gfsUri))
+        )
       // Re-clicking the active app tab relaunches it only when its view is gone;
       // a live view is left as it is (Refresh is the explicit reload).
       activateAndLaunch(
@@ -819,8 +836,38 @@ export function App() {
           ),
         ACTIVE_TAB_LAUNCH
       )
+      if (previewNeedsResolution && tab.kind === 'preview' && tab.preview) {
+        const previewUri = normalizeGfsResourceUri(tab.preview.gfsUri)
+        if (!previewUri) return
+        void window.clerum.gfs
+          .resolve(previewUri)
+          .then(resolved => {
+            const activeTab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
+            if (
+              !vm.isNavigationIntentCurrent(intentSequence) ||
+              vm.authorityScope !== authorityScope ||
+              workspaceTabsRef.current.activeTabId !== id ||
+              activeTab?.kind !== 'preview' ||
+              !activeTab.preview ||
+              activeTab.preview?.unavailable ||
+              normalizeGfsResourceUri(activeTab.preview.gfsUri) !== previewUri ||
+              normalizeGfsResourceUri(resolved.gfsUri) !== previewUri
+            ) {
+              return
+            }
+            vm.setWorkspaceTabs(state => state, { resourceOwnerPublication: true })
+          })
+          .catch(() => undefined)
+      }
     },
-    [activateAndLaunch, revealWorkspaceTab, vm.beginUserNavigationIntent]
+    [
+      activateAndLaunch,
+      revealWorkspaceTab,
+      vm.authorityScope,
+      vm.beginUserNavigationIntent,
+      vm.isNavigationIntentCurrent,
+      vm.setWorkspaceTabs,
+    ]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -840,7 +887,8 @@ export function App() {
 
   const handleCloseWorkspaceTab = React.useCallback(
     (id: string) => {
-      const current = workspaceTabsRef.current
+      const current =
+        typeof vm.getWorkspaceTabs === 'function' ? vm.getWorkspaceTabs() : workspaceTabsRef.current
       const wasActive = current.activeTabId === id
       const projected = closeWorkspaceTab(current, id)
       if (projected === current) return
@@ -858,7 +906,7 @@ export function App() {
         ACTIVATED_TAB_LAUNCH
       )
     },
-    [activateAndLaunch, revealWorkspaceTab, vm.beginUserNavigationIntent]
+    [activateAndLaunch, revealWorkspaceTab, vm.beginUserNavigationIntent, vm.getWorkspaceTabs]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -1270,10 +1318,28 @@ export function App() {
 
   React.useEffect(() => {
     const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
-      // One detection rule for "previewable, and as what" (spec 18 §3.B.2), the
-      // same one Files uses. Only a file can be previewable; a folder always
-      // opens in the browser.
-      const preview =
+      const sessionAuthorityAtEvent = livePreviewAuthorityRef.current
+      const authorityScopeAtEvent = vm.authorityScope
+      if (
+        !vm.isAuthenticated ||
+        !authorityScopeAtEvent ||
+        !sessionAuthorityAtEvent.scope ||
+        sessionAuthorityAtEvent.generation === null
+      )
+        return
+      const navigationIntentSequence = vm.beginUserNavigationIntent()
+      const isCurrent = () =>
+        (typeof vm.isNavigationIntentCurrent !== 'function' ||
+          vm.isNavigationIntentCurrent(navigationIntentSequence)) &&
+        vm.authorityScope === authorityScopeAtEvent &&
+        isGfsSessionAuthorityCurrent(
+          sessionAuthorityAtEvent.scope,
+          sessionAuthorityAtEvent.generation,
+          livePreviewAuthorityRef.current.scope,
+          livePreviewAuthorityRef.current.generation
+        )
+
+      const payloadPreview =
         resource.kind === 'file'
           ? resolveGfsPreview({
               gfsUri: resource.gfsUri,
@@ -1282,38 +1348,200 @@ export function App() {
               version: resource.version,
             })
           : null
-      if (preview?.kind === 'image') {
-        // An image opens as an overlay OVER the plugin, keeping the user in the
-        // plugin's context (the intended modal). The embed's WebContentsView
-        // paints above renderer DOM, so it has to be hidden for the overlay to
-        // be visible at all.
-        void window.clerum.sandboxUi.setVisible(false).catch(() => undefined)
-        setPluginGfsPreview({
-          gfsUri: preview.gfsUri,
-          name: preview.name,
-          bytes: preview.bytes,
-          mimeType: preview.mimeType,
-          ...(preview.version !== undefined ? { version: preview.version } : {}),
-          reloadVersion: 0,
-        })
-        return
+      let ownerTabId: string | null = null
+      let ownerTabCreatedByEvent = false
+      if (payloadPreview?.kind === 'image') {
+        // Keep image overlays behind current-authority resolution; they do not
+        // need a provisional workspace tab.
+      } else if (payloadPreview) {
+        const existingTabIds = new Set(vm.workspaceTabs.tabs.map(tab => tab.id))
+        ownerTabId = vm.openPreviewSection(
+          payloadPreview,
+          { resourceOwnerPublication: false },
+          true
+        )
+        ownerTabCreatedByEvent = Boolean(ownerTabId && !existingTabIds.has(ownerTabId))
+      } else {
+        const existingTabIds = new Set(vm.workspaceTabs.tabs.map(tab => tab.id))
+        ownerTabId = vm.openFilesSection(resource.gfsUri, { resourceOwnerPublication: false }, true)
+        ownerTabCreatedByEvent = Boolean(ownerTabId && !existingTabIds.has(ownerTabId))
       }
-      if (preview) {
-        // Other previewable kinds (markdown, video, …) open directly as a
-        // workspace preview tab. Routing them through openFilesSection would seed
-        // a files tab that immediately re-previews and unmounts, leaving a tab
-        // that jumps back to the preview whenever it is selected (R1-H3).
-        vm.openPreviewSection(preview)
-        return
+      const isCurrentOwner = () =>
+        isCurrent() && (ownerTabId === null || workspaceTabsRef.current.activeTabId === ownerTabId)
+      const retireUnverifiedTab = () => {
+        if (!ownerTabCreatedByEvent || !ownerTabId) return
+        const publishedOwner = getLatestGfsConversationContext(authorityScopeAtEvent)
+        const liveAuthority = livePreviewAuthorityRef.current
+        const publishedOwnerTab = publishedOwner
+          ? workspaceTabsRef.current.tabs.find(tab => tab.id === publishedOwner.sourceTabId)
+          : undefined
+        const adoptedByCurrentSelection =
+          publishedOwner !== null &&
+          normalizeGfsResourceUri(publishedOwner.uri) ===
+            normalizeGfsResourceUri(resource.gfsUri) &&
+          publishedOwner.authorityScope === authorityScopeAtEvent &&
+          publishedOwner.sourceTabId === workspaceTabsRef.current.activeTabId &&
+          publishedOwner.sourceTabId === ownerTabId &&
+          ((publishedOwnerTab?.kind === 'preview' &&
+            normalizeGfsResourceUri(publishedOwnerTab.preview?.gfsUri ?? '') ===
+              normalizeGfsResourceUri(publishedOwner.uri)) ||
+            (publishedOwnerTab?.kind === 'files' &&
+              normalizeGfsResourceUri(publishedOwnerTab.files?.path ?? '') ===
+                normalizeGfsResourceUri(publishedOwner.uri))) &&
+          isGfsSessionAuthorityCurrent(
+            sessionAuthorityAtEvent.scope,
+            sessionAuthorityAtEvent.generation,
+            liveAuthority.scope,
+            liveAuthority.generation
+          )
+        if (adoptedByCurrentSelection) {
+          // A newer explicit selection may have independently resolved and
+          // authorized this same provisional tab while this older plugin
+          // result was pending. Preview tabs dedupe by URI, so a current-scope
+          // Preview owner for this exact URI is the user-adopted provisional
+          // tab. Its publication supersedes stale cleanup; do not close it.
+          ownerTabCreatedByEvent = false
+          return
+        }
+        handleCloseWorkspaceTab(ownerTabId)
+        ownerTabCreatedByEvent = false
       }
-      // Folders and non-previewable files belong in the full browser, where the
-      // user gets breadcrumbs, download, and sharing. Open (or focus) a files tab
-      // AT this gfsUri — dedupe by path focuses the tab already showing it, or
-      // spawns a new instance (mini-spec 06 §3).
-      vm.openFilesSection(resource.gfsUri)
+
+      // The main-process result may have been resolved with a previous team's
+      // token. Treat its URI as a hint and resolve it again through current authority.
+      // A provisional route preserves the user's handoff while withholding
+      // resource-owner publication until current authorization succeeds.
+      void (async () => {
+        let currentResource: Awaited<ReturnType<typeof window.clerum.gfs.resolve>>
+        try {
+          currentResource = await window.clerum.gfs.resolve(resource.gfsUri)
+        } catch (error) {
+          if (isCurrentOwner()) vm.pushToast(describeGfsReadError(error).message, 'error')
+          retireUnverifiedTab()
+          return
+        }
+        if (!isCurrentOwner()) {
+          retireUnverifiedTab()
+          return
+        }
+        if (
+          normalizeGfsResourceUri(currentResource.gfsUri) !==
+          normalizeGfsResourceUri(resource.gfsUri)
+        ) {
+          retireUnverifiedTab()
+          return
+        }
+
+        if (currentResource.kind === 'directory') {
+          try {
+            await window.clerum.gfs.listChildren(currentResource.resourceId, GFS_DRIVE_MAIN)
+          } catch (error) {
+            if (isCurrentOwner()) vm.pushToast(describeGfsReadError(error).message, 'error')
+            retireUnverifiedTab()
+            return
+          }
+          if (!isCurrentOwner()) {
+            retireUnverifiedTab()
+            return
+          }
+        }
+
+        // One detection rule for "previewable, and as what" (spec 18 §3.B.2), the
+        // same one Files uses. Only a file can be previewable; a folder always
+        // opens in the browser. Use metadata resolved in this scope.
+        const preview =
+          currentResource.kind === 'file'
+            ? resolveGfsPreview({
+                gfsUri: currentResource.gfsUri,
+                name: currentResource.name,
+                bytes: currentResource.bytes ?? 0,
+                version: currentResource.version,
+              })
+            : null
+        if (preview?.kind === 'image') {
+          // An image opens as an overlay OVER the plugin, keeping the user in the
+          // plugin's context (the intended modal). The embed's WebContentsView
+          // paints above renderer DOM, so it has to be hidden for the overlay to
+          // be visible at all.
+          void window.clerum.sandboxUi.setVisible(false).catch(() => undefined)
+          setPluginGfsPreview({
+            gfsUri: preview.gfsUri,
+            name: preview.name,
+            bytes: preview.bytes,
+            mimeType: preview.mimeType,
+            ...(preview.version !== undefined ? { version: preview.version } : {}),
+            reloadVersion: 0,
+          })
+          if (ownerTabCreatedByEvent && ownerTabId) {
+            const provisionalTabId = ownerTabId
+            ownerTabCreatedByEvent = false
+            ownerTabId = null
+            handleCloseWorkspaceTab(provisionalTabId)
+          }
+          return
+        }
+        if (preview) {
+          // Other previewable kinds (markdown, video, …) open directly as a
+          // workspace preview tab. Routing them through openFilesSection would seed
+          // a files tab that immediately re-previews and unmounts, leaving a tab
+          // that jumps back to the preview whenever it is selected (R1-H3).
+          const provisionalTabId = ownerTabCreatedByEvent ? ownerTabId : null
+          const existingTabIds = new Set(vm.workspaceTabs.tabs.map(tab => tab.id))
+          const resolvedPreviewTabId = vm.openPreviewSection(
+            preview,
+            { resourceOwnerPublication: false },
+            true
+          )
+          if (provisionalTabId && provisionalTabId !== resolvedPreviewTabId) {
+            handleCloseWorkspaceTab(provisionalTabId)
+          }
+          ownerTabId = resolvedPreviewTabId
+          ownerTabCreatedByEvent = Boolean(
+            ownerTabId && (ownerTabId === provisionalTabId || !existingTabIds.has(ownerTabId))
+          )
+          if (isCurrentOwner()) {
+            vm.setWorkspaceTabs(state => state, { resourceOwnerPublication: true })
+          }
+          return
+        }
+        // Folders and non-previewable files belong in the full browser, where the
+        // user gets breadcrumbs, download, and sharing. Open (or focus) a files tab
+        // at the current authorized URI — dedupe by path focuses the tab already
+        // spawns a new instance (mini-spec 06 §3).
+        const provisionalTabId = ownerTabCreatedByEvent ? ownerTabId : null
+        if (!ownerTabId || payloadPreview) {
+          const existingTabIds = new Set(vm.workspaceTabs.tabs.map(tab => tab.id))
+          const resolvedFilesTabId = vm.openFilesSection(
+            currentResource.gfsUri,
+            { resourceOwnerPublication: false },
+            true
+          )
+          if (provisionalTabId && provisionalTabId !== resolvedFilesTabId) {
+            handleCloseWorkspaceTab(provisionalTabId)
+          }
+          ownerTabId = resolvedFilesTabId
+          ownerTabCreatedByEvent = Boolean(
+            ownerTabId && (ownerTabId === provisionalTabId || !existingTabIds.has(ownerTabId))
+          )
+        }
+        if (isCurrentOwner()) {
+          vm.setWorkspaceTabs(state => state, { resourceOwnerPublication: true })
+        }
+      })()
     })
     return () => off?.()
-  }, [vm.openFilesSection, vm.openPreviewSection])
+  }, [
+    vm.beginUserNavigationIntent,
+    vm.authorityScope,
+    vm.isAuthenticated,
+    vm.isNavigationIntentCurrent,
+    vm.openFilesSection,
+    vm.openPreviewSection,
+    vm.pushToast,
+    vm.setWorkspaceTabs,
+    vm.workspaceTabs,
+    handleCloseWorkspaceTab,
+  ])
 
   // Files tab render seam (mini-spec 06 §3). Only the ACTIVE files tab mounts a
   // FilesPage; it is keyed by that tab's id so switching files tabs remounts and
@@ -1341,32 +1569,239 @@ export function App() {
   // them; a delayed resolver from a canceled link cannot retarget another tab.
   const handleFilesLocationChange = React.useCallback(
     (ownerTabId: string, intentSequence: number, gfsUri: string | null, name: string | null) => {
-      if (!vm.isNavigationIntentCurrent(intentSequence)) return
-      if (workspaceTabsRef.current.activeTabId !== ownerTabId) return
-      setWorkspaceTabs(state => {
-        if (!vm.isNavigationIntentCurrent(intentSequence) || state.activeTabId !== ownerTabId) {
-          return state
-        }
-        return setFilesTabPath(state, ownerTabId, gfsUri, name ?? undefined)
-      })
+      const authorityScope = vm.authorityScope
+      const authorityAtRequest = livePreviewAuthorityRef.current
+      const isCurrent = () =>
+        vm.isAuthenticated &&
+        Boolean(authorityScope) &&
+        authorityAtRequest.generation !== null &&
+        vm.isNavigationIntentCurrent(intentSequence) &&
+        vm.authorityScope === authorityScope &&
+        workspaceTabsRef.current.activeTabId === ownerTabId &&
+        isGfsSessionAuthorityCurrent(
+          authorityAtRequest.scope,
+          authorityAtRequest.generation,
+          livePreviewAuthorityRef.current.scope,
+          livePreviewAuthorityRef.current.generation
+        )
+      const publishLocation = (authorizedUri: string | null, authorizedName: string | null) => {
+        if (!isCurrent()) return
+        setWorkspaceTabs(
+          state => {
+            if (!isCurrent() || state.activeTabId !== ownerTabId) return state
+            return setFilesTabPath(state, ownerTabId, authorizedUri, authorizedName ?? undefined)
+          },
+          { resourceOwnerPublication: true }
+        )
+      }
+
+      if (!gfsUri) {
+        if (
+          !vm.isNavigationIntentCurrent(intentSequence) ||
+          workspaceTabsRef.current.activeTabId !== ownerTabId
+        )
+          return
+        setWorkspaceTabs(
+          state => {
+            if (!vm.isNavigationIntentCurrent(intentSequence) || state.activeTabId !== ownerTabId) {
+              return state
+            }
+            return setFilesTabPath(state, ownerTabId, null, name ?? undefined)
+          },
+          { resourceOwnerPublication: true }
+        )
+        return
+      }
+      if (!isCurrent()) return
+
+      const requestedUri = normalizeGfsResourceUri(gfsUri)
+      if (!requestedUri) return
+      setWorkspaceTabs(
+        state => {
+          if (!isCurrent() || state.activeTabId !== ownerTabId) return state
+          return setFilesTabPath(state, ownerTabId, gfsUri, name ?? undefined)
+        },
+        { resourceOwnerPublication: false }
+      )
+      void window.clerum.gfs
+        .resolve(requestedUri)
+        .then(async resource => {
+          if (!isCurrent() || normalizeGfsResourceUri(resource.gfsUri) !== requestedUri) return
+          if (resource.kind === 'directory') {
+            await window.clerum.gfs.listChildren(resource.resourceId, GFS_DRIVE_MAIN)
+            if (!isCurrent()) return
+          }
+          publishLocation(resource.gfsUri, resource.name ?? name)
+        })
+        .catch(error => {
+          if (isCurrent()) vm.pushToast(describeGfsReadError(error).message, 'error')
+        })
     },
-    [setWorkspaceTabs, vm.isNavigationIntentCurrent]
+    [
+      setWorkspaceTabs,
+      vm.authorityScope,
+      vm.isAuthenticated,
+      vm.isNavigationIntentCurrent,
+      vm.pushToast,
+    ]
   )
   const handleActiveFilesLocationChange = React.useCallback(
     (gfsUri: string | null, name: string | null) => {
       const ownerTabId = activeFilesTabIdRef.current
       if (!ownerTabId) return
-      handleFilesLocationChange(
-        ownerTabId,
-        activeGfsDeepLinkForFiles?.intentSequence ?? vm.navigationIntentSequence,
-        gfsUri,
-        name
-      )
+      const activeGfsDeepLink = activeGfsDeepLinkRef.current
+      const navigationIntentSequence =
+        activeGfsDeepLink?.ownerTabId === ownerTabId &&
+        vm.isGfsResourceNavigationCurrent(activeGfsDeepLink, gfsDeepLinkGenerationRef.current)
+          ? activeGfsDeepLink.intentSequence
+          : navigationIntentSequenceRef.current
+      handleFilesLocationChange(ownerTabId, navigationIntentSequence, gfsUri, name)
+    },
+    [handleFilesLocationChange, vm.isGfsResourceNavigationCurrent]
+  )
+  const openPreviewFromSidebarOwner = React.useCallback(
+    (preview: GfsPreviewResource) => {
+      const intentSequence = vm.beginUserNavigationIntent()
+      const authorityScope = vm.authorityScope
+      const authorityAtRequest = livePreviewAuthorityRef.current
+      const requestedUri = normalizeGfsResourceUri(preview.gfsUri)
+      const isCurrent = () =>
+        vm.isAuthenticated &&
+        Boolean(authorityScope) &&
+        authorityAtRequest.generation !== null &&
+        vm.isNavigationIntentCurrent(intentSequence) &&
+        vm.authorityScope === authorityScope &&
+        isGfsSessionAuthorityCurrent(
+          authorityAtRequest.scope,
+          authorityAtRequest.generation,
+          livePreviewAuthorityRef.current.scope,
+          livePreviewAuthorityRef.current.generation
+        )
+      if (
+        !requestedUri ||
+        !vm.isAuthenticated ||
+        !authorityScope ||
+        !authorityAtRequest.scope ||
+        authorityAtRequest.generation === null
+      ) {
+        return
+      }
+
+      // Sidebar rows can remain actionable from cached metadata while a
+      // permission refetch is in flight. Resolve the clicked resource through
+      // the current GFS authority before publishing it as the active owner.
+      void window.clerum.gfs
+        .resolve(requestedUri)
+        .then(resource => {
+          const authorityNow = livePreviewAuthorityRef.current
+          if (
+            !isCurrent() ||
+            !isGfsSessionAuthorityCurrent(
+              authorityAtRequest.scope,
+              authorityAtRequest.generation,
+              authorityNow.scope,
+              authorityNow.generation
+            ) ||
+            normalizeGfsResourceUri(resource.gfsUri) !== requestedUri
+          ) {
+            return
+          }
+          const authorizedPreview =
+            resource.kind === 'file'
+              ? resolveGfsPreview({
+                  gfsUri: resource.gfsUri,
+                  name: resource.name,
+                  bytes: resource.bytes ?? 0,
+                  version: resource.version,
+                })
+              : null
+          if (!authorizedPreview) {
+            // Cached Sidebar metadata can still call this handler after a file
+            // changes kind. Preserve the current authorized Files fallback
+            // instead of leaving the click with no outcome.
+            vm.openFilesSection(resource.gfsUri)
+            return
+          }
+          vm.openPreviewSection(authorizedPreview, { resourceOwnerPublication: true })
+        })
+        .catch(error => {
+          if (isCurrent()) vm.pushToast(describeGfsReadError(error).message, 'error')
+        })
     },
     [
-      activeGfsDeepLinkForFiles?.intentSequence,
-      handleFilesLocationChange,
-      vm.navigationIntentSequence,
+      vm.authorityScope,
+      vm.beginUserNavigationIntent,
+      vm.isAuthenticated,
+      vm.isNavigationIntentCurrent,
+      vm.openPreviewSection,
+      vm.pushToast,
+    ]
+  )
+  // A live FilesPage query can retain actionable cached rows during a soft
+  // authorization refetch. Resolve the clicked URI under current authority
+  // before publishing it as the resource owner, and bind completion to the
+  // same Files tab and explicit navigation intent that produced the click.
+  const beginFilesPageNavigationIntent = React.useCallback(() => {
+    const intentSequence = vm.beginUserNavigationIntent()
+    navigationIntentSequenceRef.current = intentSequence
+    return intentSequence
+  }, [vm.beginUserNavigationIntent])
+  const openPreviewFromFilesPage = React.useCallback(
+    (preview: GfsPreviewResource, intentSequence?: number) => {
+      const activeIntentSequence = intentSequence ?? navigationIntentSequenceRef.current
+      const ownerTabId = activeFilesTabIdRef.current
+      const authorityScope = vm.authorityScope
+      const authorityAtRequest = livePreviewAuthorityRef.current
+      const requestedUri = normalizeGfsResourceUri(preview.gfsUri)
+      const isCurrent = () =>
+        ownerTabId !== null &&
+        vm.isAuthenticated &&
+        Boolean(authorityScope) &&
+        authorityAtRequest.generation !== null &&
+        vm.isNavigationIntentCurrent(activeIntentSequence) &&
+        vm.authorityScope === authorityScope &&
+        activeFilesTabIdRef.current === ownerTabId &&
+        workspaceTabsRef.current.activeTabId === ownerTabId &&
+        isGfsSessionAuthorityCurrent(
+          authorityAtRequest.scope,
+          authorityAtRequest.generation,
+          livePreviewAuthorityRef.current.scope,
+          livePreviewAuthorityRef.current.generation
+        )
+
+      if (!requestedUri || !isCurrent()) return true
+
+      void window.clerum.gfs
+        .resolve(requestedUri)
+        .then(resource => {
+          if (!isCurrent() || normalizeGfsResourceUri(resource.gfsUri) !== requestedUri) return
+          const authorizedPreview =
+            resource.kind === 'file'
+              ? resolveGfsPreview({
+                  gfsUri: resource.gfsUri,
+                  name: resource.name,
+                  bytes: resource.bytes ?? 0,
+                  version: resource.version,
+                })
+              : null
+          if (authorizedPreview) {
+            vm.openPreviewSection(authorizedPreview, { resourceOwnerPublication: true })
+          } else {
+            vm.openFilesSection(resource.gfsUri)
+          }
+        })
+        .catch(error => {
+          if (isCurrent()) vm.pushToast(describeGfsReadError(error).message, 'error')
+        })
+      return true
+    },
+    [
+      vm.authorityScope,
+      vm.isAuthenticated,
+      vm.isNavigationIntentCurrent,
+      vm.openFilesSection,
+      vm.openPreviewSection,
+      vm.pushToast,
     ]
   )
   const isActiveGfsDeepLinkCurrent = React.useCallback(() => {
@@ -1421,6 +1856,40 @@ export function App() {
           livePreviewAuthorityRef.current.generation
         )
       if (!ownsAuthority()) return
+      const authorityScopeAtRequestStart = vm.authorityScope
+      const contextAtRequestStart = getLatestGfsConversationContext(authorityScopeAtRequestStart)
+      const retainedPreviewContext =
+        contextAtRequestStart &&
+        normalizeGfsResourceUri(contextAtRequestStart.uri) === normalizeGfsResourceUri(gfsUri)
+          ? contextAtRequestStart
+          : null
+      const sameRetainedPreviewContextIsCurrent = () => {
+        if (!retainedPreviewContext) return false
+        const currentContext = getLatestGfsConversationContext(authorityScopeAtRequestStart)
+        return Boolean(
+          currentContext &&
+          currentContext.activationId === retainedPreviewContext.activationId &&
+          currentContext.authorityScope === retainedPreviewContext.authorityScope &&
+          currentContext.sourceTabId === retainedPreviewContext.sourceTabId &&
+          normalizeGfsResourceUri(currentContext.uri) ===
+            normalizeGfsResourceUri(retainedPreviewContext.uri)
+        )
+      }
+      const retainedPreviewSourceStillExists = () => {
+        if (!retainedPreviewContext) return false
+        const currentWorkspaceTabs =
+          typeof vm.getWorkspaceTabs === 'function'
+            ? vm.getWorkspaceTabs()
+            : workspaceTabsRef.current
+        return currentWorkspaceTabs.tabs.some(tab => tab.id === retainedPreviewContext.sourceTabId)
+      }
+      const retireDeniedClosedPreviewContext = () => {
+        if (sameRetainedPreviewContextIsCurrent() && !retainedPreviewSourceStillExists()) {
+          clearLatestGfsConversationContext()
+          return true
+        }
+        return false
+      }
       const queryFilter = {
         queryKey: desktopQueryKeys.gfsRoot,
         predicate: (query: { queryKey: readonly unknown[] }) =>
@@ -1471,7 +1940,18 @@ export function App() {
           isCurrentGeneration,
           ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
         }
-        setWorkspaceTabs(state => refreshPreviewTab(state, gfsUri, refreshed))
+        // The background pass also resolves inactive Previews. Bind publication
+        // to the exact active owner; the navigation owner rechecks this identity.
+        const activeTab = activeWorkspaceTab(workspaceTabsRef.current)
+        const resourceOwnerPublication =
+          activeTab?.kind === 'preview' &&
+          normalizeGfsResourceUri(activeTab.preview?.gfsUri ?? '') ===
+            normalizeGfsResourceUri(gfsUri)
+            ? { sourceTabId: activeTab.id, gfsUri }
+            : undefined
+        setWorkspaceTabs(state => refreshPreviewTab(state, gfsUri, refreshed), {
+          resourceOwnerPublication,
+        })
         setPluginGfsPreview(current => {
           if (!isCurrentGeneration()) return current
           if (current?.gfsUri !== gfsUri) return current
@@ -1506,7 +1986,23 @@ export function App() {
         previewRetryTimersRef.current.delete(gfsUri)
         previewRetryAttemptRef.current.delete(gfsUri)
       } catch (error) {
-        if (!isCurrentGeneration()) return
+        if (!isCurrentGeneration()) {
+          const status = authoritativeGfsStatus(error)
+          const closedOwnerRetiredGeneration =
+            previewRefreshGenerationRef.current.get(gfsUri) === generation + 1
+          if (
+            ownsAuthority() &&
+            (status === 403 || status === 404) &&
+            closedOwnerRetiredGeneration
+          ) {
+            // Closing a Preview deliberately retires its request generation.
+            // Preserve that cancellation for UI updates, but still consume a
+            // denial from the exact request if it is the sole close increment
+            // and the same retained context has no source owner anymore.
+            retireDeniedClosedPreviewContext()
+          }
+          return
+        }
         const status = authoritativeGfsStatus(error)
         const message = error instanceof Error ? error.message : String(error ?? '')
         if (status === 401 || isGfsSessionAuthorityFailure(message, 'operation')) {
@@ -1531,6 +2027,11 @@ export function App() {
           return
         }
         if (status === 403 || status === 404) {
+          // Navigation deliberately retains a closed Preview's resource for its
+          // Chat destination. A current denial that settles after that source
+          // closes invalidates only the exact retained context this request read;
+          // a newer owner or a still-open Preview remains independently governed.
+          retireDeniedClosedPreviewContext()
           setWorkspaceTabs(state =>
             refreshPreviewTab(state, gfsUri, {
               status: 'unavailable',
@@ -1558,7 +2059,14 @@ export function App() {
         }
       }
     },
-    [queryClient, setWorkspaceTabs, previewSessionScope, previewSessionGeneration]
+    [
+      queryClient,
+      setWorkspaceTabs,
+      previewSessionScope,
+      previewSessionGeneration,
+      vm.authorityScope,
+      vm.getWorkspaceTabs,
+    ]
   )
 
   React.useEffect(() => {
@@ -4005,6 +4513,12 @@ export function App() {
   }, [])
 
   const activeWorkspaceTabForComposer = activeWorkspaceTab(workspaceTabs)
+  const composerInputVisible = Boolean(chatDrawerVisible || vm.navItem === 'chat')
+  React.useEffect(() => {
+    if (previousComposerInputVisibleRef.current === composerInputVisible) return
+    previousComposerInputVisibleRef.current = composerInputVisible
+    if (composerInputVisible) setComposerVisibilityEventId(value => value + 1)
+  }, [composerInputVisible])
   const composerWorkspaceChatTabId = chatDrawerVisible
     ? (workspaceTabs.tabs.find(
         tab =>
@@ -4015,13 +4529,20 @@ export function App() {
     : activeWorkspaceTabForComposer?.kind === 'chat'
       ? activeWorkspaceTabForComposer.id
       : null
+  const resourceActivationId =
+    getLatestGfsConversationContext(vm.authorityScope)?.activationId ?? null
   const chatComposerStateValue = React.useMemo(
     () => ({
       activeChatId: vm.activeChatId,
       workspaceChatTabId: composerWorkspaceChatTabId,
       persistedConversationPrefillReceipt: vm.persistedConversationPrefillReceipt,
       authorityScope: vm.authorityScope,
+      composerInputVisible,
+      composerVisibilityEventId,
+      pendingDeletionRevision: vm.pendingDeleteRevision,
+      resourceActivationId,
       onPersistedConversationPrefillAttempt: vm.consumePersistedConversationPrefillReceipt,
+      onComposerPrefillEvent: vm.handleComposerPrefillEvent,
       composerImageAttachments: vm.composerImageAttachments,
       composerFileAttachments: vm.composerFileAttachments,
       composerFileRefusals: vm.composerFileRefusals,
@@ -4038,6 +4559,14 @@ export function App() {
       composerWorkspaceChatTabId,
       vm.persistedConversationPrefillReceipt,
       vm.authorityScope,
+      chatDrawerVisible,
+      vm.navItem,
+      composerInputVisible,
+      composerVisibilityEventId,
+      vm.pendingDeleteRevision,
+      resourceActivationId,
+      vm.workspaceTabs,
+      vm.handleComposerPrefillEvent,
       vm.consumePersistedConversationPrefillReceipt,
       vm.composerImageAttachments,
       vm.composerFileAttachments,
@@ -4297,7 +4826,7 @@ export function App() {
                                 onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                                 onSelect={handleSidebarNavSelect}
                                 onOpenFilesSection={vm.openFilesSection}
-                                onOpenPreviewSection={vm.openPreviewSection}
+                                onOpenPreviewSection={openPreviewFromSidebarOwner}
                                 pushToast={vm.pushToast}
                                 toggleRequestId={sidebarToggleRequestId}
                               />
@@ -4462,11 +4991,13 @@ export function App() {
                                         activeGfsDeepLinkForFiles?.ownerTabId
                                       }
                                       isPendingGfsDeepLinkCurrent={isActiveGfsDeepLinkCurrent}
-                                      onExplicitNavigationIntent={vm.beginUserNavigationIntent}
+                                      onExplicitNavigationIntent={beginFilesPageNavigationIntent}
+                                      navigationIntentSequence={vm.navigationIntentSequence}
+                                      isNavigationIntentCurrent={vm.isNavigationIntentCurrent}
                                       onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
                                       remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                       onLocationChange={handleActiveFilesLocationChange}
-                                      onOpenPreview={vm.openPreviewSection}
+                                      onOpenPreview={openPreviewFromFilesPage}
                                       onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
                                       routeDialogRequestId={gfsRouteDialogRequestId}
                                       onRouteDialogRequestHandled={

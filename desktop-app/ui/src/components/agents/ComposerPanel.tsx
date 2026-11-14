@@ -37,10 +37,7 @@ import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
 import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { formatFileSize } from '@lib/composerFileAdmission'
-import {
-  getLatestGfsConversationContext,
-  prefillEmptyConversationWithGfsResource,
-} from '@lib/gfsConversationPrefill'
+import { getLatestGfsConversationContext } from '@lib/gfsConversationPrefill'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type {
@@ -155,7 +152,7 @@ function getComposerFileNotice(file: ComposerFileAttachment): string | null {
 
 export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelProps) {
   const { selectedAgent } = useNavigationContext()
-  const { me } = useAuthContext()
+  const { me, busy } = useAuthContext()
   const {
     composerImageAttachments,
     composerFileAttachments,
@@ -168,7 +165,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     workspaceChatTabId,
     persistedConversationPrefillReceipt,
     authorityScope,
+    composerInputVisible,
+    composerVisibilityEventId,
+    resourceActivationId,
+    pendingDeletionRevision,
     onPersistedConversationPrefillAttempt,
+    onComposerPrefillEvent,
     activeMessageCount,
     composerFocusRequestId,
   } = useChatComposerStateContext()
@@ -222,6 +224,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     workspaceChatTabId
   )
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const suppressAutoFocusEventRef = useRef(false)
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerMenuRef = useRef<HTMLSpanElement | null>(null)
@@ -399,7 +402,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   useEffect(() => {
     if (!activeChatId || activeMessageCount > 0 || agentSending) return
     window.requestAnimationFrame(() => {
-      composerInputRef.current?.focus()
+      const textarea = composerInputRef.current
+      if (!textarea || textarea.disabled || document.activeElement === textarea) return
+      suppressAutoFocusEventRef.current = true
+      textarea.focus()
+      // HTMLElement.focus dispatches synchronously. Clear the marker when focus
+      // was already retained by another platform-specific focus owner.
+      if (suppressAutoFocusEventRef.current) suppressAutoFocusEventRef.current = false
     })
   }, [activeChatId, activeMessageCount, agentSending])
 
@@ -422,32 +431,96 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     ) {
       return
     }
-    const currentResource = getLatestGfsConversationContext()
+    const currentResource = getLatestGfsConversationContext(authorityScope)
     if (
       currentResource?.uri !== receipt.resource.uri ||
       currentResource.sourceTabId !== receipt.resource.sourceTabId
     ) {
       return
     }
-    prefillEmptyConversationWithGfsResource(receipt.chatId, receipt.agentRef, receipt.resource)
-    onPersistedConversationPrefillAttempt?.(receipt.id)
+    onPersistedConversationPrefillAttempt?.(receipt.id, composerInputRef.current?.value ?? draft)
   }, [
     activeChatId,
     authorityScope,
     onPersistedConversationPrefillAttempt,
+    draft,
     persistedConversationPrefillReceipt,
     selectedAgent,
+    workspaceChatTabId,
+    pendingDeletionRevision,
+  ])
+
+  const previousVisibilityEventIdRef = useRef(composerVisibilityEventId ?? 0)
+  useEffect(() => {
+    const visible = composerInputVisible ?? true
+    const eventId = composerVisibilityEventId ?? 0
+    if (eventId === previousVisibilityEventIdRef.current) return
+    previousVisibilityEventIdRef.current = eventId
+    if (!visible) return
+    onComposerPrefillEvent?.(
+      'visible',
+      composerInputRef.current?.value ?? draft,
+      workspaceChatTabId,
+      true,
+      eventId
+    )
+  }, [
+    composerInputVisible,
+    composerVisibilityEventId,
+    draft,
+    onComposerPrefillEvent,
+    workspaceChatTabId,
+  ])
+
+  const previousResourceActivationIdRef = useRef(resourceActivationId ?? null)
+  useEffect(() => {
+    const activationId = resourceActivationId ?? null
+    const previousActivationId = previousResourceActivationIdRef.current
+    previousResourceActivationIdRef.current = activationId
+    if (
+      activationId === null ||
+      activationId === previousActivationId ||
+      !(composerInputVisible ?? true)
+    ) {
+      return
+    }
+    onComposerPrefillEvent?.(
+      'resource-activation',
+      composerInputRef.current?.value ?? draft,
+      workspaceChatTabId,
+      true,
+      activationId
+    )
+  }, [
+    composerInputVisible,
+    draft,
+    onComposerPrefillEvent,
+    resourceActivationId,
     workspaceChatTabId,
   ])
 
   const handleDraftChange = useCallback(
     (value: string) => {
       const result = setDraft(value)
+      if (result.accepted) {
+        onComposerPrefillEvent?.(
+          'input-edit',
+          value,
+          workspaceChatTabId,
+          composerInputVisible ?? true
+        )
+      }
       // Clear any pending send error as the user resumes typing. No re-render up-tree
       // unless an error is actually present.
       if (result.accepted) clearComposerSendError()
     },
-    [clearComposerSendError, setDraft]
+    [
+      clearComposerSendError,
+      composerInputVisible,
+      onComposerPrefillEvent,
+      setDraft,
+      workspaceChatTabId,
+    ]
   )
 
   // The controller clears the draft store only when the send is actually accepted
@@ -487,12 +560,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     selectedAgentCatalogState !== 'ready' && selectedAgentCatalogState !== 'available'
   const agentCatalogNoticeId = useId()
   const handleSend = useCallback(() => {
-    if (imagesBlockedForSend || filesBlockedForSend || selectedAgentSendBlocked) {
+    if (busy || imagesBlockedForSend || filesBlockedForSend || selectedAgentSendBlocked) {
       return
     }
     if (workspaceChatTabId) void onSend(draft, workspaceChatTabId)
     else void onSend(draft)
   }, [
+    busy,
     onSend,
     draft,
     imagesBlockedForSend,
@@ -984,10 +1058,22 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               handleDraftChange(event.target.value)
               resizeComposerInput()
             }}
+            onFocus={event => {
+              if (suppressAutoFocusEventRef.current) {
+                suppressAutoFocusEventRef.current = false
+                return
+              }
+              onComposerPrefillEvent?.(
+                'focus',
+                event.currentTarget.value,
+                workspaceChatTabId,
+                composerInputVisible ?? true
+              )
+            }}
             onPaste={handleComposerPaste}
             onKeyDown={handleComposerKeyDown}
             rows={3}
-            disabled={isDegraded}
+            disabled={isDegraded || busy}
             placeholder={
               isDegraded
                 ? 'Agent degraded — fix the LLM Secret to resume.'
@@ -1297,6 +1383,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               className="composer-send-button composer-send-button-compact composer-send-icon-btn"
               onClick={handleSend}
               disabled={
+                busy ||
                 isDegraded ||
                 agentSending ||
                 imagesBlockedForSend ||

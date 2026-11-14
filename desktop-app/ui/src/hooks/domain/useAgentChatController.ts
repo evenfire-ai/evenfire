@@ -23,9 +23,11 @@ import { truncateTitle } from '@lib/chatTitle'
 import {
   clearAllComposerDrafts,
   clearComposerDraft,
+  clearDeletedChatComposerDraft,
   getComposerDraft,
   getComposerDraftRevision,
   setComposerDraft,
+  setComposerDraftForDestination,
 } from '@lib/composerDraftStore'
 import {
   composerFileBase64Bytes,
@@ -412,6 +414,8 @@ interface UseAgentChatControllerParams {
    * same value AppService's `getChatDeletionFenceAuthority` uses.
    */
   chatAuthorityTeamId: string
+  composerAuthorityScope?: string
+  onConfirmedChatDeletion?: (agentRef: string, chatId: string) => void
 }
 
 export function useAgentChatController({
@@ -437,6 +441,8 @@ export function useAgentChatController({
   getHostAuthorityEpoch,
   hostAuthorityRevision,
   chatAuthorityTeamId,
+  composerAuthorityScope,
+  onConfirmedChatDeletion,
 }: UseAgentChatControllerParams) {
   const chatStore = useChatStore()
   const userScopeKey = currentUserId ?? 'unknown-user'
@@ -1577,6 +1583,11 @@ export function useAgentChatController({
     captureChatDeleteFence,
     handleDeleteChat,
     handleDeleteChatForAgent,
+    isChatDeletionPending,
+    pendingDeleteRevision,
+    resolvePendingDeletionStatus,
+    resolveCrossScopeDeletionStatus,
+    ensureDeletionStatusCheck,
   } = chatListCtl
   useEffect(() => {
     chatListHostRef.current = {
@@ -1587,7 +1598,9 @@ export function useAgentChatController({
       clearActiveChat,
       scrollChatToBottom,
       dispatchSession,
-      clearComposerDraft,
+      clearDeletedChatDraft: (chatId, agentRef) =>
+        clearDeletedChatComposerDraft(chatId, agentRef, composerAuthorityScope ?? ''),
+      onConfirmedChatDeletion: (agentRef, chatId) => onConfirmedChatDeletion?.(agentRef, chatId),
       getActiveChatId: () => activeChatVisibilityRef.current.activeChatId,
       getChatSwitchInFlight: () => {
         const view = activeChatVisibilityRef.current
@@ -3315,7 +3328,8 @@ export function useAgentChatController({
       const originalDraftRevision = getComposerDraftRevision(
         originalDraftChat,
         originalDraftAgent ?? undefined,
-        originWorkspaceTabId
+        originWorkspaceTabId,
+        composerAuthorityScope
       )
       const originalAttachmentRevision = composerAttachmentRevisionRef.current
       const trimmedContent = content.trim()
@@ -3652,12 +3666,18 @@ export function useAgentChatController({
         getComposerDraftRevision(
           originalDraftChat,
           originalDraftAgent ?? undefined,
-          originWorkspaceTabId
+          originWorkspaceTabId,
+          composerAuthorityScope
         ) === originalDraftRevision
       const shouldResetAttachments =
         canConsumeComposer && composerAttachmentRevisionRef.current === originalAttachmentRevision
       if (shouldClearOriginDraft) {
-        clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined, originWorkspaceTabId)
+        clearComposerDraft(
+          originalDraftChat,
+          originalDraftAgent ?? undefined,
+          originWorkspaceTabId,
+          composerAuthorityScope
+        )
       }
       if (shouldResetAttachments) resetComposerAttachments()
       setAgentError(null)
@@ -4220,7 +4240,12 @@ export function useAgentChatController({
         return
       }
       if (
-        getComposerDraft(activeChatId, selectedAgent ?? undefined, workspaceTabId) ||
+        getComposerDraft(
+          activeChatId,
+          selectedAgent ?? undefined,
+          workspaceTabId,
+          composerAuthorityScope
+        ) ||
         composerImageAttachments.length ||
         composerFileAttachments.length ||
         composerReferenceAttachments.length
@@ -4229,11 +4254,14 @@ export function useAgentChatController({
         return
       }
       if (
-        !setComposerDraft(
-          activeChatId,
-          visibleFailure.content,
-          selectedAgent ?? undefined,
-          workspaceTabId
+        !setComposerDraftForDestination(
+          {
+            authorityScope: composerAuthorityScope,
+            agentRef: selectedAgent ?? undefined,
+            chatId: activeChatId,
+            workspaceChatTabId: workspaceTabId,
+          },
+          visibleFailure.content
         )
       ) {
         pushToast(
@@ -4255,6 +4283,7 @@ export function useAgentChatController({
     [
       visibleFailure,
       activeChatId,
+      composerAuthorityScope,
       composerImageAttachments,
       composerFileAttachments,
       composerReferenceAttachments,
@@ -4580,6 +4609,11 @@ export function useAgentChatController({
     captureChatDeleteFence,
     handleDeleteChat,
     handleDeleteChatForAgent,
+    isChatDeletionPending,
+    pendingDeleteRevision,
+    resolvePendingDeletionStatus,
+    resolveCrossScopeDeletionStatus,
+    ensureDeletionStatusCheck,
     handleSelectChat,
     handleLoadOlderMessages,
     loadMoreChatSessions,

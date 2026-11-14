@@ -6,6 +6,7 @@ import type { PendingRename } from '@lib/resolveSessionTitle'
 import type {
   ChatAuthorityScope,
   ChatDeleteFence,
+  ChatDeletionResolution,
   ChatIndex,
   ChatMetadata,
   SessionsListResult,
@@ -115,7 +116,8 @@ export interface ChatListControllerHost {
   clearActiveChat: () => void
   scrollChatToBottom: () => void
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
-  clearComposerDraft: (chatId: string) => void
+  clearDeletedChatDraft: (chatId: string, agentRef: string) => void
+  onConfirmedChatDeletion: (agentRef: string, chatId: string) => void
   getActiveChatId: () => string | null
   /** True while a chat switch is unconfirmed: its history is loading, or a remembered transcript is shown before its last-active write settles. */
   getChatSwitchInFlight: () => boolean
@@ -354,6 +356,193 @@ export function useChatListController({
   const chatListNextCursorByAgentRef = useRef<Record<string, string | null | undefined>>({})
   const chatListLoadingMoreByAgentRef = useRef<Set<string>>(new Set())
   const deletedChatIdsByAgentRef = useRef(new Map<string, Set<string>>())
+  const pendingDeleteAttemptSequenceRef = useRef(0)
+  const pendingDeleteAttemptsRef = useRef(
+    new Map<number, { scope: ChatAuthorityScope; agentRef: string; chatId: string }>()
+  )
+  const currentDeletionAuthorityScopeRef = useRef(authorityScope)
+  const deletedChatCacheAuthorityRef = useRef(authorityScope)
+  currentDeletionAuthorityScopeRef.current = authorityScope
+  const [pendingDeleteRevision, setPendingDeleteRevision] = useState(0)
+  const isChatDeletionPending = useCallback(
+    (agentRef: string, chatId: string) =>
+      deletedChatIdsByAgentRef.current.get(agentRef)?.has(chatId) === true ||
+      [...pendingDeleteAttemptsRef.current.values()].some(
+        attempt =>
+          attempt.agentRef === agentRef &&
+          attempt.chatId === chatId &&
+          sameAuthorityScope(attempt.scope, authorityScope)
+      ),
+    [authorityScope, pendingDeleteRevision]
+  )
+  const addPendingDeleteAttempt = useCallback(
+    (scope: ChatAuthorityScope, agentRef: string, chatId: string) => {
+      const id = ++pendingDeleteAttemptSequenceRef.current
+      pendingDeleteAttemptsRef.current.set(id, { scope, agentRef, chatId })
+      setPendingDeleteRevision(value => value + 1)
+      return id
+    },
+    []
+  )
+  const resolvePendingDeleteAttempt = useCallback((id: number) => {
+    if (!pendingDeleteAttemptsRef.current.delete(id)) return
+    setPendingDeleteRevision(value => value + 1)
+  }, [])
+  const completeObservedDeletionInView = useCallback(
+    (agentRef: string, chatId: string, cleanupPending: boolean) => {
+      host.current?.clearDeletedChatDraft(chatId, agentRef)
+      if (selectedAgentRef.current === agentRef && host.current?.getActiveChatId() === chatId) {
+        host.current?.clearActiveChat()
+      }
+      setChatList(previous =>
+        selectedAgentRef.current === agentRef
+          ? previous.filter(chat => chat.id !== chatId)
+          : previous
+      )
+      setLatestChatSessions(previous =>
+        previous.filter(session => session.agentRef !== agentRef || session.id !== chatId)
+      )
+      setLatestCatalogMutationRevision(value => value + 1)
+      chatStore.clearCachedRemoteData()
+      if (cleanupPending) {
+        host.current?.pushToast(
+          'Chat removed. Local transcript cleanup will retry when this team is active.',
+          'info'
+        )
+      }
+    },
+    [chatStore.clearCachedRemoteData, host]
+  )
+  const resolvePendingDeletionStatus = useCallback(
+    async (agentRef: string, chatId: string) => {
+      const attempts = [...pendingDeleteAttemptsRef.current.entries()].filter(
+        ([, attempt]) =>
+          attempt.agentRef === agentRef &&
+          attempt.chatId === chatId &&
+          sameAuthorityScope(attempt.scope, authorityScope)
+      )
+      if (!attempts.length) {
+        return {
+          status: deletedChatIdsByAgentRef.current.get(agentRef)?.has(chatId)
+            ? ('deleted' as const)
+            : ('unknown' as const),
+          cleanupPending: false,
+        }
+      }
+      let resolution: Awaited<ReturnType<typeof chatStore.getChatDeletionStatus>>
+      try {
+        resolution = await chatStore.getChatDeletionStatus(agentRef, chatId, authorityScope)
+      } catch {
+        return { status: 'unknown' as const, cleanupPending: false }
+      }
+      if (resolution.status === 'unknown') return resolution
+      const stillSameDeletionIdentity = sameChatDeletionIdentity(
+        authorityScope,
+        currentDeletionAuthorityScopeRef.current
+      )
+      if (resolution.status === 'deleted' && stillSameDeletionIdentity) {
+        const deleted = deletedChatIdsByAgentRef.current.get(agentRef) ?? new Set<string>()
+        deleted.add(chatId)
+        deletedChatIdsByAgentRef.current.set(agentRef, deleted)
+        host.current?.onConfirmedChatDeletion(agentRef, chatId)
+      }
+      for (const [id] of attempts) resolvePendingDeleteAttempt(id)
+      // Resolve the captured attempt, but never let another user's or
+      // environment's late result mutate the current scope's deletion state.
+      return stillSameDeletionIdentity
+        ? resolution
+        : { status: 'unknown' as const, cleanupPending: false }
+    },
+    [authorityScope, chatStore.getChatDeletionStatus, resolvePendingDeleteAttempt]
+  )
+  const resolveCrossScopeDeletionStatus = useCallback(
+    (
+      agentRef: string,
+      chatId: string,
+      currentTeamId?: string,
+      requireAuthoritativeStatusWhenIndexCold = false
+    ): Promise<ChatDeletionResolution> | null => {
+      const renderedScope = currentDeletionAuthorityScopeRef.current
+      const scopeAtRead =
+        currentTeamId && currentTeamId !== renderedScope.teamId
+          ? { ...renderedScope, teamId: currentTeamId }
+          : renderedScope
+      if (deletedChatIdsByAgentRef.current.get(agentRef)?.has(chatId)) {
+        return Promise.resolve({ status: 'deleted', cleanupPending: false })
+      }
+      const cachedDeletedIds = deletedChatIdsByAgentRef.current.get(agentRef)
+      const attempts = [...pendingDeleteAttemptsRef.current.entries()].filter(
+        ([, attempt]) =>
+          attempt.agentRef === agentRef &&
+          attempt.chatId === chatId &&
+          sameChatDeletionIdentity(attempt.scope, scopeAtRead) &&
+          !sameAuthorityScope(attempt.scope, scopeAtRead)
+      )
+      // A missing per-agent set means this renderer has not hydrated that
+      // agent's ChatStore index yet. The durable tombstone is shared across
+      // teams, so a cold notification target must check the serialized store
+      // status before it can be accepted. An existing empty set is already an
+      // authoritative index snapshot for this agent.
+      const needsColdIndexStatus =
+        requireAuthoritativeStatusWhenIndexCold && cachedDeletedIds === undefined
+      if (!attempts.length && !needsColdIndexStatus) return null
+
+      return (async () => {
+        let resolution: ChatDeletionResolution
+        try {
+          // This is a current-scope read, so ChatStore queues it after any
+          // already-dispatched operation for the shared local chat identity.
+          resolution = await chatStore.getChatDeletionStatus(agentRef, chatId, scopeAtRead)
+        } catch {
+          return { status: 'unknown', cleanupPending: false }
+        }
+        if (!sameAuthorityScope(scopeAtRead, currentDeletionAuthorityScopeRef.current)) {
+          return { status: 'unknown', cleanupPending: false }
+        }
+        if (resolution.status === 'unknown') return resolution
+
+        if (resolution.status === 'deleted') {
+          const deleted = deletedChatIdsByAgentRef.current.get(agentRef) ?? new Set<string>()
+          deleted.add(chatId)
+          deletedChatIdsByAgentRef.current.set(agentRef, deleted)
+          host.current?.onConfirmedChatDeletion(agentRef, chatId)
+          completeObservedDeletionInView(agentRef, chatId, resolution.cleanupPending)
+        }
+
+        // The current-scope status resolves only the exact attempts captured
+        // before the read. A later attempt keeps its own gate and ordering.
+        for (const [id] of attempts) resolvePendingDeleteAttempt(id)
+        return resolution
+      })()
+    },
+    [
+      chatStore.getChatDeletionStatus,
+      completeObservedDeletionInView,
+      host,
+      resolvePendingDeleteAttempt,
+    ]
+  )
+  const ensureDeletionStatusCheck = useCallback(
+    (agentRef: string, chatId: string) => {
+      const hasCurrentScopeAttempt = [...pendingDeleteAttemptsRef.current.values()].some(
+        attempt =>
+          attempt.agentRef === agentRef &&
+          attempt.chatId === chatId &&
+          sameAuthorityScope(attempt.scope, authorityScope)
+      )
+      if (!hasCurrentScopeAttempt) return false
+      void resolvePendingDeletionStatus(agentRef, chatId).then(resolution => {
+        if (
+          resolution.status === 'deleted' &&
+          sameAuthorityScope(authorityScope, currentDeletionAuthorityScopeRef.current)
+        ) {
+          completeObservedDeletionInView(agentRef, chatId, resolution.cleanupPending)
+        }
+      })
+      return true
+    },
+    [authorityScope, completeObservedDeletionInView, resolvePendingDeletionStatus]
+  )
   const requestGenerationRef = useRef(0)
   const authorityScopeGenerationRef = useRef(0)
   const agentNamesRef = useRef(agentNames)
@@ -455,7 +644,14 @@ export function useChatListController({
   useEffect(() => {
     requestGenerationRef.current += 1
     authorityScopeGenerationRef.current += 1
-    deletedChatIdsByAgentRef.current.clear()
+    // ChatStore tombstones are keyed by environment + user, not team. Keep the
+    // already-authoritative terminal IDs across a same-user team switch so a
+    // newly selected equal-ID destination cannot prefill before its index read
+    // hydrates the renderer cache. A principal/environment change clears them.
+    if (!sameChatDeletionIdentity(deletedChatCacheAuthorityRef.current, authorityScope)) {
+      deletedChatIdsByAgentRef.current.clear()
+    }
+    deletedChatCacheAuthorityRef.current = authorityScope
     catalogOfflineByAgentRef.current.clear()
     catalogOfflineToastShownRef.current = false
     // A toast queued for this scope must never flush into the next scope or
@@ -467,7 +663,7 @@ export function useChatListController({
       }
       catalogOfflineToastQueuedRef.current = false
     }
-  }, [isAuthenticated, scopeKey])
+  }, [authorityScope, isAuthenticated, scopeKey])
 
   // R1-H1 — the pending-rename queue is per-USER identity. mcp-host keys a chat
   // session by userId (`${userSub}:rpc:${agent}:${chatId}`) and filters by
@@ -1529,29 +1725,59 @@ export function useChatListController({
       // SSE + connect/watchdog timers, so a later terminal can't fire onTerminal
       // and resurrect the just-deleted chat file via appendAssistantMessage.
       const deletedKey = makeTaskKey(agentRef, chatId)
+      // The target gate is visible synchronously before any delete IPC work.
+      const deleteAttemptId = addPendingDeleteAttempt(
+        deletion.fence.authorityScope,
+        agentRef,
+        chatId
+      )
       // R5 teardown: CHAT_DELETED removes the FSM entry AND emits the
       // `coordinator_release` effect (tracker.ack) — so a later terminal can't
       // fire onTerminal and resurrect the just-deleted chat file. Dispatched
       // FIRST (before the delete), preserving the ack-before-delete ordering.
       host.current?.dispatchSession(deletedKey, { type: 'CHAT_DELETED' })
-      let result: Awaited<ReturnType<typeof chatStore.deleteChat>>
+      let cleanupPending = false
+      let deletionConfirmedByStatus = false
       try {
-        result = await chatStore.deleteChat(agentRef, chatId, deletion.fence)
+        const result = await chatStore.deleteChat(agentRef, chatId, deletion.fence)
+        cleanupPending = result.cleanupPending
       } catch {
-        if (stillOwned()) {
-          host.current?.pushToast('Could not delete the chat. Please try again.', 'error')
+        const deletionResolution = await resolvePendingDeletionStatus(agentRef, chatId)
+        if (!stillOwned()) return
+        if (deletionResolution.status === 'deleted') {
+          // The status reader already recorded the tombstone, terminalized the
+          // matching receipt, and released its captured attempt. Continue through
+          // the same catalog and active-chat completion as a successful IPC result.
+          deletionConfirmedByStatus = true
+          cleanupPending = deletionResolution.cleanupPending
+        } else {
+          if (deletionResolution.status === 'not-deleted') {
+            host.current?.pushToast('Could not delete the chat. Please try again.', 'error')
+          }
+          if (deletionResolution.status === 'unknown') {
+            host.current?.pushToast(
+              'Could not confirm whether the chat was deleted. Its status is still unknown.',
+              'info'
+            )
+          }
+          // An unknown result remains gated; not-deleted/unknown do not run the
+          // committed-delete UI completion.
+          return
         }
-        return
       }
       if (!stillOwned()) return
-      const deleted = deletedChatIdsByAgentRef.current.get(agentRef) ?? new Set<string>()
-      deleted.add(chatId)
-      deletedChatIdsByAgentRef.current.set(agentRef, deleted)
+      if (!deletionConfirmedByStatus) {
+        const deleted = deletedChatIdsByAgentRef.current.get(agentRef) ?? new Set<string>()
+        deleted.add(chatId)
+        deletedChatIdsByAgentRef.current.set(agentRef, deleted)
+        host.current?.onConfirmedChatDeletion(agentRef, chatId)
+        resolvePendingDeleteAttempt(deleteAttemptId)
+      }
       setLatestCatalogMutationRevision(value => value + 1)
       chatStore.clearCachedRemoteData()
-      host.current?.clearComposerDraft(chatId)
+      host.current?.clearDeletedChatDraft(chatId, agentRef)
       removeLatestChatSession(agentRef, chatId)
-      if (result.cleanupPending) {
+      if (cleanupPending) {
         host.current?.pushToast(
           'Chat removed. Local transcript cleanup will retry when this team is active.',
           'info'
@@ -1598,6 +1824,9 @@ export function useChatListController({
       removeLatestChatSession,
       handleCreateChat,
       host,
+      addPendingDeleteAttempt,
+      resolvePendingDeleteAttempt,
+      resolvePendingDeletionStatus,
     ]
   )
 
@@ -1878,5 +2107,10 @@ export function useChatListController({
     writePendingSelection,
     clearPendingSelection,
     isChatDeleted,
+    isChatDeletionPending,
+    pendingDeleteRevision,
+    resolvePendingDeletionStatus,
+    resolveCrossScopeDeletionStatus,
+    ensureDeletionStatusCheck,
   }
 }

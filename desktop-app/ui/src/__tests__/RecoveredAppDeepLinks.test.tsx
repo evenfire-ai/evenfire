@@ -755,6 +755,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     const targetTeamId = String(target.teamId || '').trim()
     if (!targetTeamId || targetTeamId === liveTeamId) return false
     liveTeamId = targetTeamId
+    controller.currentTeamId = targetTeamId
     return true
   })
   const beginGfsResourceNavigation = vi.fn(
@@ -894,6 +895,10 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
+    get authorityScope() {
+      return `${controller.runtimeConfigState?.envKey ?? ''}:${controller.isAuthenticated}:${controller.authenticatedPrincipalIdentity ?? ''}:${controller.currentTeamId ?? ''}:${controller.sessionGeneration ?? ''}`
+    },
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     availableTeamIds: ['team-a', 'team-b'],
     teamDirectoryHydrated: true,
@@ -953,6 +958,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       setWorkspaceTabs((state: WorkspaceState) =>
         openFilesTab(state, { id: nextWorkspaceTabId(), path })
       )
+      return controller.workspaceTabs.activeTabId
     }),
     openPreviewSection: vi.fn((preview: Parameters<AppController['openPreviewSection']>[0]) => {
       beginUserNavigationIntent()
@@ -2115,6 +2121,7 @@ describe('App deep-link orchestration', () => {
     })
     const openFilesSection = vi.fn((path: string | null = null) => {
       currentController.setWorkspaceTabs(state => openFilesTab(state, { id: 'files-root', path }))
+      return currentController.workspaceTabs.activeTabId
     })
     currentController = makeController({
       initialExperienceLoading: false,

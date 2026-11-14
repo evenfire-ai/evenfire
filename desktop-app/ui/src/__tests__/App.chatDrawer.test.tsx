@@ -243,6 +243,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       openFilesTab(state, { id: nextWorkspaceTabId(), path })
     )
     forceControllerRender()
+    return controller.workspaceTabs.activeTabId
   })
   // Faithful to the real controller's openPreviewSection: open/focus a preview
   // tab for a previewable file through the real store producer (dedupe by gfsUri).
@@ -353,6 +354,9 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     statusTone: 'info',
     isAuthenticated: true,
     sessionGeneration: 1,
+    get authorityScope() {
+      return `${controller.runtimeConfigState?.envKey ?? ''}:${controller.isAuthenticated}:${controller.authenticatedPrincipalIdentity ?? ''}:${controller.currentTeamId ?? ''}:${controller.sessionGeneration ?? ''}`
+    },
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',

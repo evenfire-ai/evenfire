@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatComposerStateContextValue } from '@contexts/ChatComposerStateContext'
+import { ChatComposerStateProvider } from '@contexts/ChatComposerStateContext/context'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -16,13 +17,16 @@ import type { HostModelsResult } from '@hooks/useChatStore'
 import type { ComposerDraftWriteResult } from '@hooks/useComposerDraft'
 import {
   getComposerDraft,
+  getComposerDraftRevision,
   resetComposerDraftStore,
+  setAutomaticComposerDraft,
   setComposerDraft,
 } from '@lib/composerDraftStore'
 import { readComposerFile } from '@lib/composerFileAdmission'
 import type { PersistedConversationPrefillReceipt } from '@lib/gfsConversationPrefill'
 import {
   clearLatestGfsConversationContext,
+  getLatestGfsConversationContext,
   recordLatestGfsConversationContext,
 } from '@lib/gfsConversationPrefill'
 import {
@@ -62,6 +66,7 @@ const composerState: ChatComposerStateContextValue = {
 const draftState = {
   value: '',
   set: vi.fn<(value: string) => ComposerDraftWriteResult>(() => ({ accepted: true })),
+  useStore: false,
 }
 const PREFILL_SCOPE = 'desktop:true:user-1:team-1:1'
 
@@ -73,7 +78,12 @@ function installComposerPrefillReceipt(uri: string, sourceTabId: string) {
     origin: 'sidebar-session',
     agentRef: 'agent-1',
     chatId: 'chat-persisted',
-    resource: { uri, sourceTabId },
+    resource: {
+      uri,
+      sourceTabId,
+      activationId: getLatestGfsConversationContext()?.activationId ?? 0,
+      authorityScope: PREFILL_SCOPE,
+    },
     status: 'bound-eligible',
     destinationWorkspaceTabId: 'chat-tab',
   }
@@ -152,9 +162,16 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
   }),
 }))
 
-vi.mock('@hooks/useComposerDraft', () => ({
-  useComposerDraft: () => [draftState.value, draftState.set, null],
-}))
+vi.mock('@hooks/useComposerDraft', async importOriginal => {
+  const actual = await importOriginal<typeof import('@hooks/useComposerDraft')>()
+  return {
+    ...actual,
+    useComposerDraft: (...args: Parameters<typeof actual.useComposerDraft>) =>
+      draftState.useStore
+        ? actual.useComposerDraft(...args)
+        : [draftState.value, draftState.set, null],
+  }
+})
 
 /**
  * Shared model-selection view (issue #654). Mutable so a test can swap the
@@ -241,6 +258,7 @@ afterEach(() => {
   globalFilesMock.showComposerItem = false
   globalFilesMock.modalProps = undefined
   draftState.value = ''
+  draftState.useStore = false
   clearLatestGfsConversationContext()
   resetComposerDraftStore()
   draftState.set.mockReset()
@@ -374,21 +392,196 @@ describe.each([
   it('attempts the owner-held empty-chat receipt once from the exact visible GFS route', () => {
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
     composerState.activeChatId = 'chat-persisted'
+    recordLatestGfsConversationContext(
+      {
+        id: 'files-context',
+        kind: 'files',
+        title: 'Reports',
+        files: { path: uri },
+      },
+      false,
+      PREFILL_SCOPE
+    )
     const attempt = installComposerPrefillReceipt(uri, 'files-context')
-    recordLatestGfsConversationContext({
-      id: 'files-context',
-      kind: 'files',
-      title: 'Reports',
-      files: { path: uri },
-    })
 
     const { rerender } = render(<ComposerPanel inline={inline} />)
-    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe(uri)
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', PREFILL_SCOPE)).toBe('')
 
     rerender(<ComposerPanel inline={inline} />)
-    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe(uri)
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', PREFILL_SCOPE)).toBe('')
     expect(attempt).toHaveBeenCalledTimes(1)
+    expect(attempt).toHaveBeenCalledWith(1, '')
     expect(draftState.set).not.toHaveBeenCalled()
+  })
+
+  it('projects the real subscribed draft by scope and preserves a B edit when A returns', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    draftState.useStore = true
+    composerState.activeChatId = 'chat-persisted'
+    composerState.workspaceChatTabId = 'chat-tab'
+    composerState.authorityScope = 'scope-a'
+    setAutomaticComposerDraft(
+      {
+        authorityScope: 'scope-a',
+        agentRef: 'agent-1',
+        chatId: 'chat-persisted',
+        workspaceChatTabId: 'chat-tab',
+      },
+      uri
+    )
+    const wrapper = (scope: string) => (
+      <ChatComposerStateProvider value={{ ...composerState, authorityScope: scope }}>
+        <ComposerPanel inline={inline} />
+      </ChatComposerStateProvider>
+    )
+    const view = render(wrapper('scope-a'))
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    expect(input.value).toBe(uri)
+    const beforeRerender = getComposerDraftRevision(
+      'chat-persisted',
+      'agent-1',
+      'chat-tab',
+      'scope-a'
+    )
+
+    view.rerender(wrapper('scope-b'))
+    expect(input.value).toBe('')
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', 'scope-b')).toBe('')
+    expect(getComposerDraftRevision('chat-persisted', 'agent-1', 'chat-tab', 'scope-a')).toBe(
+      beforeRerender
+    )
+
+    fireEvent.change(input, { target: { value: 'Team B user text' } })
+    expect(input.value).toBe('Team B user text')
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', 'scope-b')).toBe(
+      'Team B user text'
+    )
+    view.rerender(wrapper('scope-a'))
+    expect(input.value).toBe('Team B user text')
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', 'scope-a')).toBe(
+      'Team B user text'
+    )
+    expect(actionsMock.handleSendAgentMessage).not.toHaveBeenCalled()
+    draftState.useStore = false
+  })
+
+  it('does not project automatic URI bytes to another agent with the same chat ID', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    draftState.useStore = true
+    composerState.activeChatId = 'chat-persisted'
+    composerState.workspaceChatTabId = 'chat-tab'
+    composerState.authorityScope = 'scope-a'
+    setAutomaticComposerDraft(
+      {
+        authorityScope: 'scope-a',
+        agentRef: 'agent-2',
+        chatId: 'chat-persisted',
+        workspaceChatTabId: 'chat-tab',
+      },
+      uri
+    )
+
+    render(
+      <ChatComposerStateProvider value={composerState}>
+        <ComposerPanel inline />
+      </ChatComposerStateProvider>
+    )
+
+    expect((screen.getByTestId('chat-input') as HTMLTextAreaElement).value).toBe('')
+    expect(getComposerDraft('chat-persisted', 'agent-2', 'chat-tab', 'scope-a')).toBe(uri)
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', 'scope-a')).toBe('')
+    expect(actionsMock.handleSendAgentMessage).not.toHaveBeenCalled()
+    draftState.useStore = false
+  })
+
+  it('does not project automatic URI bytes to another workspace Chat tab', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    draftState.useStore = true
+    composerState.activeChatId = 'chat-persisted'
+    composerState.workspaceChatTabId = 'chat-tab-b'
+    composerState.authorityScope = 'scope-a'
+    setAutomaticComposerDraft(
+      {
+        authorityScope: 'scope-a',
+        agentRef: 'agent-1',
+        chatId: 'chat-persisted',
+        workspaceChatTabId: 'chat-tab-a',
+      },
+      uri
+    )
+
+    render(
+      <ChatComposerStateProvider value={composerState}>
+        <ComposerPanel inline />
+      </ChatComposerStateProvider>
+    )
+
+    expect((screen.getByTestId('chat-input') as HTMLTextAreaElement).value).toBe('')
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab-a', 'scope-a')).toBe(uri)
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab-b', 'scope-a')).toBe('')
+    expect(actionsMock.handleSendAgentMessage).not.toHaveBeenCalled()
+    draftState.useStore = false
+  })
+
+  it('keeps a historical URI-identical ordinary draft visible without automatic provenance', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    draftState.useStore = true
+    composerState.activeChatId = 'chat-persisted'
+    composerState.workspaceChatTabId = 'chat-tab'
+    composerState.authorityScope = 'scope-a'
+    setComposerDraft('chat-persisted', uri, 'agent-1', 'chat-tab')
+    const wrapper = (scope: string) => (
+      <ChatComposerStateProvider value={{ ...composerState, authorityScope: scope }}>
+        <ComposerPanel inline={inline} />
+      </ChatComposerStateProvider>
+    )
+
+    const view = render(wrapper('scope-a'))
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    expect(input.value).toBe(uri)
+    view.rerender(wrapper('scope-b'))
+
+    expect(input.value).toBe(uri)
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', 'scope-a')).toBe(uri)
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', 'scope-b')).toBe(uri)
+    expect(actionsMock.handleSendAgentMessage).not.toHaveBeenCalled()
+    draftState.useStore = false
+  })
+
+  it('keeps URI-identical user text ordinary after editing a scoped autofill', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    draftState.useStore = true
+    composerState.activeChatId = 'chat-persisted'
+    composerState.workspaceChatTabId = 'chat-tab'
+    composerState.authorityScope = 'scope-a'
+    setAutomaticComposerDraft(
+      {
+        authorityScope: 'scope-a',
+        agentRef: 'agent-1',
+        chatId: 'chat-persisted',
+        workspaceChatTabId: 'chat-tab',
+      },
+      uri
+    )
+    const wrapper = (scope: string) => (
+      <ChatComposerStateProvider value={{ ...composerState, authorityScope: scope }}>
+        <ComposerPanel inline={inline} />
+      </ChatComposerStateProvider>
+    )
+    const view = render(wrapper('scope-a'))
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    expect(input.value).toBe(uri)
+
+    view.rerender(wrapper('scope-b'))
+    expect(input.value).toBe('')
+    fireEvent.change(input, { target: { value: uri } })
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', 'scope-b')).toBe(uri)
+
+    view.rerender(wrapper('scope-a'))
+    expect(input.value).toBe(uri)
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', 'scope-a')).toBe(uri)
+    expect(actionsMock.handleSendAgentMessage).not.toHaveBeenCalled()
+    draftState.useStore = false
   })
 
   it('does not overwrite a persisted chat draft with contextual GFS prefill', () => {
@@ -396,17 +589,21 @@ describe.each([
     composerState.activeChatId = 'chat-persisted'
     setComposerDraft('chat-persisted', 'existing draft', 'agent-1')
     draftState.value = 'existing draft'
-    const attempt = installComposerPrefillReceipt(uri, 'preview-context')
-    recordLatestGfsConversationContext({
-      id: 'preview-context',
-      kind: 'preview',
-      title: 'report.md',
-      preview: {
-        gfsUri: uri,
-        fileKind: 'markdown',
-        byteLength: 1,
+    recordLatestGfsConversationContext(
+      {
+        id: 'preview-context',
+        kind: 'preview',
+        title: 'report.md',
+        preview: {
+          gfsUri: uri,
+          fileKind: 'markdown',
+          byteLength: 1,
+        },
       },
-    })
+      false,
+      PREFILL_SCOPE
+    )
+    const attempt = installComposerPrefillReceipt(uri, 'preview-context')
 
     render(<ComposerPanel inline={inline} />)
     expect(getComposerDraft('chat-persisted', 'agent-1')).toBe('existing draft')
@@ -418,13 +615,17 @@ describe.each([
     composerState.activeChatId = 'chat-persisted'
     draftState.value = '  \n '
     setComposerDraft('chat-persisted', draftState.value, 'agent-1')
+    recordLatestGfsConversationContext(
+      {
+        id: 'files-context',
+        kind: 'files',
+        title: 'Reports',
+        files: { path: uri },
+      },
+      false,
+      PREFILL_SCOPE
+    )
     const attempt = installComposerPrefillReceipt(uri, 'files-context')
-    recordLatestGfsConversationContext({
-      id: 'files-context',
-      kind: 'files',
-      title: 'Reports',
-      files: { path: uri },
-    })
 
     const { rerender } = render(<ComposerPanel inline={inline} />)
     const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
@@ -433,7 +634,7 @@ describe.each([
 
     expect(textarea.value).toBe('  \n ')
     expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([1, 3])
-    expect(getComposerDraft('chat-persisted', 'agent-1')).toBe('  \n ')
+    expect(getComposerDraft('chat-persisted', 'agent-1', 'chat-tab', PREFILL_SCOPE)).toBe('  \n ')
     expect(attempt).toHaveBeenCalledOnce()
   })
 
@@ -441,12 +642,16 @@ describe.each([
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
     composerState.activeChatId = 'chat-persisted'
     const attempt = installComposerPrefillReceipt(uri, 'captured-files-owner')
-    recordLatestGfsConversationContext({
-      id: 'replacement-files-owner',
-      kind: 'files',
-      title: 'Reports',
-      files: { path: uri },
-    })
+    recordLatestGfsConversationContext(
+      {
+        id: 'replacement-files-owner',
+        kind: 'files',
+        title: 'Reports',
+        files: { path: uri },
+      },
+      false,
+      PREFILL_SCOPE
+    )
 
     render(<ComposerPanel inline={inline} />)
 

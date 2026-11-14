@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 import type {
   ChatAuthorityScope,
   ChatDeleteFence,
+  ChatDeletionResolution,
   ChatMessage,
   ReplaceChatMessagesOptions,
   SessionMessagesQuery,
@@ -98,6 +99,15 @@ export function useChatStore() {
   const deleteChat = useCallback(
     (agentRef: string, chatId: string, fence: ChatDeleteFence) =>
       window.clerum.chat.delete(agentRef, chatId, fence),
+    []
+  )
+  const getChatDeletionStatus = useCallback(
+    (agentRef: string, chatId: string, authorityScope: ChatAuthorityScope) =>
+      window.clerum.chat.deletionStatus(
+        agentRef,
+        chatId,
+        authorityScope
+      ) as Promise<ChatDeletionResolution>,
     []
   )
   const loadMessages = useCallback(
@@ -297,6 +307,7 @@ export function useChatStore() {
     getBindingGeneration,
     captureDeleteFence,
     deleteChat,
+    getChatDeletionStatus,
     loadMessages,
     appendMessages,
     upsertMessages,

@@ -28,7 +28,11 @@ export interface FilesPageProps {
   /** Live owner/session/intent fence for this queued request. */
   isPendingGfsDeepLinkCurrent?: () => boolean
   /** App-owned intent ordering for explicit navigation within this Files tab. */
-  onExplicitNavigationIntent?: () => void
+  onExplicitNavigationIntent?: () => number | void
+  /** Current App intent captured by programmatic Files-page seeds. */
+  navigationIntentSequence?: number
+  /** Validates a captured App intent after asynchronous resource resolution. */
+  isNavigationIntentCurrent?: (sequence: number) => boolean
   onPendingGfsDeepLinkOutcome?: (
     id: number,
     outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
@@ -49,7 +53,7 @@ export interface FilesPageProps {
    * the file kind and hands the descriptor up to the tab store through this
    * callback. Absent ⇒ no preview surface is available (the file downloads).
    */
-  onOpenPreview?: (preview: GfsPreviewResource) => void | boolean
+  onOpenPreview?: (preview: GfsPreviewResource, navigationIntentSequence?: number) => void | boolean
   /** Guarded preview completion for the queued resource-link request. */
   onOpenPendingGfsPreview?: (
     id: number,

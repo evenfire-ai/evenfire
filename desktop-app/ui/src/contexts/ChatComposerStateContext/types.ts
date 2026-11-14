@@ -22,7 +22,19 @@ export interface ChatComposerStateContextValue {
   persistedConversationPrefillReceipt?: PersistedConversationPrefillReceipt | null
   /** The renderer authority binding currently used to fence that receipt. */
   authorityScope?: string
-  onPersistedConversationPrefillAttempt?: (receiptId: number) => void
+  /** True only while this composer is the visible full-page or drawer input. */
+  composerInputVisible?: boolean
+  composerVisibilityEventId?: number
+  pendingDeletionRevision?: number
+  resourceActivationId?: number | null
+  onPersistedConversationPrefillAttempt?: (receiptId: number, inputText: string) => void
+  onComposerPrefillEvent?: (
+    event: 'focus' | 'visible' | 'resource-activation' | 'input-edit',
+    inputText?: string,
+    workspaceChatTabId?: string | null,
+    inputIsVisible?: boolean,
+    eventId?: number | null
+  ) => void
   composerImageAttachments: ComposerImageAttachment[]
   composerFileAttachments: ComposerFileAttachment[]
   /** Why the documents of the last attach were not attached (#678). */

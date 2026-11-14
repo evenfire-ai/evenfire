@@ -45,15 +45,22 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
 
     act(() =>
-      result.current.setWorkspaceTabs(state =>
-        openFilesTab(state, { id: 'files-context', path: uri, title: 'Reports' })
+      result.current.setWorkspaceTabs(
+        state => openFilesTab(state, { id: 'files-context', path: uri, title: 'Reports' }),
+        { resourceOwnerPublication: true }
       )
     )
-    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+    const context = getLatestGfsConversationContext()
+    expect(context).toMatchObject({ uri, sourceTabId: 'files-context' })
+    const activationId = context?.activationId
 
     act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
     expect(result.current.activeTab?.kind).toBe('chat')
-    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+    expect(getLatestGfsConversationContext()).toMatchObject({
+      uri,
+      sourceTabId: 'files-context',
+      activationId,
+    })
   })
 
   it('clears GFS context when a different non-chat workspace route becomes active', () => {
@@ -61,11 +68,12 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
 
     act(() =>
-      result.current.setWorkspaceTabs(state =>
-        openFilesTab(state, { id: 'files-context', path: uri })
+      result.current.setWorkspaceTabs(
+        state => openFilesTab(state, { id: 'files-context', path: uri }),
+        { resourceOwnerPublication: true }
       )
     )
-    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+    expect(getLatestGfsConversationContext()).toMatchObject({ uri, sourceTabId: 'files-context' })
 
     act(() => result.current.handleNavSelect(DESKTOP_ROUTES.settings))
     expect(getLatestGfsConversationContext()).toBeNull()

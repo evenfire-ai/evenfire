@@ -11,8 +11,17 @@ import {
   serverSessionMessages,
   serverSessions,
 } from '@hooks/domain/__tests__/__fixtures__/catalogFixtures'
+import { renderController } from '@hooks/domain/__tests__/__fixtures__/controllerHarness'
 import { ipcHostAccessRevoked } from '@hooks/domain/__tests__/__fixtures__/ipcErrors'
-import { uninstallMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
+import {
+  installMockClerum,
+  uninstallMockClerum,
+} from '@hooks/domain/__tests__/__fixtures__/mockClerum'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setAutomaticComposerDraft,
+} from '@lib/composerDraftStore'
 import {
   clearLatestGfsConversationContext,
   getLatestGfsConversationContext,
@@ -56,21 +65,171 @@ function sessions(items: Array<{ agent: string; chatId: string }>) {
 }
 function publishResource(app: Awaited<ReturnType<typeof mounted>>['app']) {
   act(() => {
-    app.result.current.setWorkspaceTabs(state =>
-      openFilesTab(state, {
-        id: 'files-u',
-        path: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        title: 'Folder U',
-      })
+    app.result.current.setWorkspaceTabs(
+      state =>
+        openFilesTab(state, {
+          id: 'files-u',
+          path: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          title: 'Folder U',
+        }),
+      { resourceOwnerPublication: true }
     )
   })
-  expect(getLatestGfsConversationContext()).toEqual({
+  expect(getLatestGfsConversationContext()).toMatchObject({
     uri: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     sourceTabId: 'files-u',
   })
 }
 
 describe('r4 A6 real useAppController host-verification acceptance', () => {
+  it('keeps hidden automatic scope bytes out of an attachment-only sender payload', async () => {
+    resetComposerDraftStore()
+    const clerum = installMockClerum()
+    await clerum.chat.create('agent-x', 'shared-chat')
+    const scopeA = 'desktop:true:user-1:team-a:1'
+    const scopeB = 'desktop:true:user-1:team-b:2'
+    const uri = 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const file = {
+      id: 'global-file:main:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      type: 'global_file' as const,
+      resourceId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      drive: 'main' as const,
+      gfsUri: 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      label: 'b.md',
+      version: 1,
+      bytes: 10,
+    }
+    const controller = renderController({
+      currentTeamId: 'team-b',
+      chatAuthorityTeamId: 'team-b',
+      composerAuthorityScope: scopeB,
+    })
+
+    try {
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+      await act(async () => {
+        await controller.result.current.switchToChat('agent-x', 'shared-chat')
+      })
+      expect(controller.result.current.activeChatId).toBe('shared-chat')
+      expect(
+        setAutomaticComposerDraft(
+          {
+            authorityScope: scopeA,
+            agentRef: 'agent-x',
+            chatId: 'shared-chat',
+            workspaceChatTabId: 'tab-a',
+          },
+          uri
+        )
+      ).toBe(true)
+      expect(getComposerDraft('shared-chat', 'agent-x', 'tab-b', scopeB)).toBe('')
+      expect(getComposerDraft('shared-chat', 'agent-x', 'tab-a', scopeA)).toBe(uri)
+
+      act(() => controller.result.current.handleAddComposerReferenceAttachments([file]))
+      await waitFor(() =>
+        expect(controller.result.current.composerReferenceAttachments).toHaveLength(1)
+      )
+      await act(async () => {
+        await controller.result.current.handleSendAgentMessage('', 'tab-b')
+      })
+      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce())
+      const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+        content?: string
+        fileReferences?: unknown[]
+      }
+      expect(request.content).toContain('Global Files: "b.md"')
+      expect(request.content).not.toContain(uri)
+      expect(request.fileReferences).toHaveLength(1)
+      expect(getComposerDraft('shared-chat', 'agent-x', 'tab-a', scopeA)).toBe(uri)
+      expect(getComposerDraft('shared-chat', 'agent-x', 'tab-b', scopeB)).toBe('')
+    } finally {
+      controller.unmount()
+      resetComposerDraftStore()
+    }
+  })
+
+  it('keeps another scope’s automatic bytes when failed-send recovery runs in the hidden scope', async () => {
+    resetComposerDraftStore()
+    const clerum = installMockClerum()
+    await clerum.chat.create('agent-x', 'shared-chat')
+    const scopeA = 'desktop:true:user-1:team-a:1'
+    const scopeB = 'desktop:true:user-1:team-b:2'
+    const uri = 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const reference = {
+      id: 'global-file:main:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      type: 'global_file' as const,
+      resourceId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      drive: 'main' as const,
+      gfsUri: 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      label: 'b.md',
+      version: 1,
+      bytes: 10,
+    }
+    const controller = renderController({
+      currentTeamId: 'team-a',
+      chatAuthorityTeamId: 'team-a',
+      composerAuthorityScope: scopeA,
+    })
+
+    try {
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+      await act(async () => {
+        await controller.result.current.switchToChat('agent-x', 'shared-chat')
+      })
+      expect(controller.result.current.activeChatId).toBe('shared-chat')
+      expect(
+        setAutomaticComposerDraft(
+          {
+            authorityScope: scopeA,
+            agentRef: 'agent-x',
+            chatId: 'shared-chat',
+            workspaceChatTabId: 'tab-a',
+          },
+          uri
+        )
+      ).toBe(true)
+      expect(getComposerDraft('shared-chat', 'agent-x', 'tab-a', scopeA)).toBe(uri)
+
+      controller.rerender({
+        currentTeamId: 'team-b',
+        chatAuthorityTeamId: 'team-b',
+        composerAuthorityScope: scopeB,
+      })
+      await waitFor(() =>
+        expect(getComposerDraft('shared-chat', 'agent-x', 'tab-a', scopeB)).toBe('')
+      )
+      await act(async () => {
+        await controller.result.current.switchToChat('agent-x', 'shared-chat')
+      })
+      expect(controller.result.current.activeChatId).toBe('shared-chat')
+
+      act(() => controller.result.current.handleAddComposerReferenceAttachments([reference]))
+      clerum.rpc.invokeHostMessage.mockRejectedValueOnce(new Error('network down'))
+      await act(async () => {
+        await controller.result.current.handleSendAgentMessage('', 'tab-a')
+      })
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce()
+      expect(controller.result.current.failedAgentSend?.content).toBe('')
+      const payload = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content?: string }
+      expect(payload.content).not.toContain(uri)
+
+      act(() => controller.result.current.handleRecoverFailedAgentSend('tab-a'))
+
+      expect(getComposerDraft('shared-chat', 'agent-x', 'tab-a', scopeA)).toBe(uri)
+      expect(getComposerDraft('shared-chat', 'agent-x', 'tab-a', scopeB)).toBe('')
+      expect(controller.result.current.failedAgentSend?.content).toBe('')
+      expect(controller.result.current.composerReferenceAttachments).toHaveLength(0)
+      expect(controller.spies.pushToast).toHaveBeenCalledWith(
+        'This composer no longer owns the draft. Select its chat tab and try again.',
+        'error'
+      )
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce()
+    } finally {
+      controller.unmount()
+      resetComposerDraftStore()
+    }
+  })
+
   it('releases a held host after successful verification and loads the requested chat', async () => {
     const { clerum, app } = await mounted()
     await holdHost(clerum, app)
@@ -286,6 +445,49 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
     })
   })
 
+  it('does not let delayed same-chat notification override newer Settings navigation', async () => {
+    const { clerum, app } = await mounted()
+    clerum.rpc.loadSessionMessages.mockResolvedValue(
+      await serverSessionMessages('agent-x', 'chat-1')
+    )
+    act(() =>
+      app.result.current.handleSelectChatAgent('agent-x', {
+        chatId: 'chat-1',
+        selectLatest: false,
+      })
+    )
+    await waitFor(() => expect(app.result.current.activeChatId).toBe('chat-1'))
+    await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.chat))
+
+    const setLastActive = deferred<void>()
+    clerum.chat.setLastActive.mockImplementation((agentRef, chatId) =>
+      agentRef === 'agent-x' && chatId === 'chat-1' ? setLastActive.promise : Promise.resolve()
+    )
+    let notificationOpen: Promise<void> | undefined
+    act(() => {
+      notificationOpen = app.result.current.handleOpenNotification({
+        id: 'same-chat-delayed',
+        kind: 'assistant_reply',
+        agentName: 'agent-x',
+        chatId: 'chat-1',
+        teamId: 'team-1',
+        text: 'Open current conversation',
+        timestamp: 3,
+        read: false,
+      } as Parameters<typeof app.result.current.handleOpenNotification>[0])
+    })
+    await waitFor(() => expect(clerum.chat.setLastActive).toHaveBeenCalledWith('agent-x', 'chat-1'))
+
+    act(() => app.result.current.handleNavSelect(DESKTOP_ROUTES.settings))
+    await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.settings))
+
+    await act(async () => {
+      setLastActive.resolve()
+      await notificationOpen
+    })
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.settings)
+  })
+
   it('retires a suspended receipt when opening an Agent workspace changes the target', async () => {
     const { clerum, app } = await mounted()
     publishResource(app)
@@ -315,12 +517,14 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
     expect(receiptId).toBeDefined()
 
     act(() =>
-      app.result.current.setWorkspaceTabs(state =>
-        openFilesTab(state, {
-          id: 'files-v',
-          path: 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-          title: 'Folder V',
-        })
+      app.result.current.setWorkspaceTabs(
+        state =>
+          openFilesTab(state, {
+            id: 'files-v',
+            path: 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            title: 'Folder V',
+          }),
+        { resourceOwnerPublication: true }
       )
     )
     await waitFor(() =>
@@ -339,12 +543,14 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
     act(() => app.result.current.handleNavSelect(DESKTOP_ROUTES.chat))
     await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.chat))
     act(() =>
-      app.result.current.setWorkspaceTabs(state =>
-        openFilesTab(state, {
-          id: 'files-u',
-          path: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          title: 'Folder U',
-        })
+      app.result.current.setWorkspaceTabs(
+        state =>
+          openFilesTab(state, {
+            id: 'files-u',
+            path: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            title: 'Folder U',
+          }),
+        { resourceOwnerPublication: true }
       )
     )
     await waitFor(() =>
@@ -510,6 +716,74 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
     })
   })
 
+  it('retires a suspended receipt on explicit Agents navigation and does not revive it', async () => {
+    const { app } = await mounted()
+    publishResource(app)
+    act(() =>
+      app.result.current.setWorkspaceTabs(state =>
+        openChatTab(state, {
+          id: 'chat-tab-c',
+          agentRef: 'agent-x',
+          chatId: 'chat-1',
+          title: 'Conversation C',
+        })
+      )
+    )
+    act(() =>
+      app.result.current.handleSelectChatAgent('agent-x', {
+        chatId: 'chat-1',
+        selectLatest: false,
+        keepNavItem: true,
+        activationOrigin: 'sidebar-session',
+      })
+    )
+    await waitFor(() => expect(app.result.current.activeChatId).toBe('chat-1'))
+    const receiptId = app.result.current.persistedConversationPrefillReceipt?.id
+    expect(receiptId).toBeDefined()
+
+    act(() =>
+      app.result.current.setWorkspaceTabs(
+        state =>
+          openFilesTab(state, {
+            id: 'files-v',
+            path: 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            title: 'Folder V',
+          }),
+        { resourceOwnerPublication: true }
+      )
+    )
+    await waitFor(() =>
+      expect(app.result.current.persistedConversationPrefillReceipt?.status).toBe(
+        'suspended-resource'
+      )
+    )
+
+    act(() => app.result.current.handleNavSelect(DESKTOP_ROUTES.agents))
+    await waitFor(() => expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.agents))
+    await waitFor(() =>
+      expect(app.result.current.persistedConversationPrefillReceipt).toMatchObject({
+        id: receiptId,
+        status: 'terminally-cancelled',
+      })
+    )
+
+    publishResource(app)
+    act(() =>
+      app.result.current.handleSelectChatAgent('agent-x', {
+        chatId: 'chat-1',
+        selectLatest: false,
+        keepNavItem: true,
+      })
+    )
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(app.result.current.persistedConversationPrefillReceipt).toMatchObject({
+      id: receiptId,
+      status: 'terminally-cancelled',
+    })
+  })
+
   it.each([
     ['old succeeds, latest rejects, old first', true, false, [0, 1]],
     ['old succeeds, latest rejects, latest first', true, false, [1, 0]],
@@ -666,9 +940,11 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
     })
     await waitFor(() => expect(app.result.current.sessionGeneration).toBe(2))
     expect(app.result.current.authorityScope).not.toBe(previousScope)
+    const replacementScope = app.result.current.authorityScope
     expect(app.result.current.persistedConversationPrefillReceipt?.status).toBe(
       'terminally-cancelled'
     )
+    expect(getComposerDraft('chat-1', 'agent-x', undefined, replacementScope)).toBe('')
 
     await act(async () => {
       verification.resolve(sessions([{ agent: 'agent-x', chatId: 'chat-1' }]))
@@ -681,6 +957,7 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
     expect(app.result.current.persistedConversationPrefillReceipt?.status).toBe(
       'terminally-cancelled'
     )
+    expect(getComposerDraft('chat-1', 'agent-x', undefined, replacementScope)).toBe('')
   })
 
   it('binds an existing exact destination during verification and cannot revive it after close', async () => {
@@ -762,6 +1039,79 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
     })
   })
 
+  it('rejects binding the same chat ID through a different agent tab', async () => {
+    const { clerum, app } = await mounted()
+    publishResource(app)
+    act(() => {
+      const otherAgentTab = openChatTab(app.result.current.workspaceTabs, {
+        id: 'other-agent-same-chat-tab',
+        agentRef: 'agent-y',
+        chatId: 'chat-1',
+        title: 'Other agent chat',
+      })
+      app.result.current.setWorkspaceTabs(state =>
+        selectWorkspaceTab(otherAgentTab, state.activeTabId ?? 'files-u')
+      )
+    })
+    await holdHost(clerum, app)
+    const verification = deferred<SessionsListResult>()
+    clerum.rpc.listSessions.mockImplementation(async (_host, _team, query) =>
+      query?.limit === 1 ? verification.promise : sessions([])
+    )
+    act(() =>
+      app.result.current.handleSelectChatAgent('agent-x', {
+        chatId: 'chat-1',
+        selectLatest: false,
+        keepNavItem: true,
+        activationOrigin: 'sidebar-session',
+      })
+    )
+    await waitFor(() =>
+      expect(app.result.current.persistedConversationPrefillReceipt?.status).toBe(
+        'awaiting-authorization'
+      )
+    )
+    const receiptId = app.result.current.persistedConversationPrefillReceipt!.id
+    let bound = true
+    act(() => {
+      bound = app.result.current.bindPersistedConversationPrefillDestination(
+        receiptId,
+        'other-agent-same-chat-tab'
+      )
+    })
+    expect(bound).toBe(false)
+    expect(app.result.current.persistedConversationPrefillReceipt).toMatchObject({
+      id: receiptId,
+      status: 'awaiting-authorization',
+      destinationWorkspaceTabId: null,
+      agentRef: 'agent-x',
+      chatId: 'chat-1',
+    })
+    expect(
+      getComposerDraft(
+        'chat-1',
+        'agent-y',
+        'other-agent-same-chat-tab',
+        app.result.current.authorityScope
+      )
+    ).toBe('')
+    await act(async () => {
+      verification.resolve(sessions([{ agent: 'agent-x', chatId: 'chat-1' }]))
+      await verification.promise
+    })
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(
+      getComposerDraft(
+        'chat-1',
+        'agent-y',
+        'other-agent-same-chat-tab',
+        app.result.current.authorityScope
+      )
+    ).toBe('')
+  })
+
   it('terminally fences a pending receipt when the session generation changes', async () => {
     const { clerum, app } = await mounted()
     clerum.rpc.listSessions.mockResolvedValue(sessions([{ agent: 'agent-x', chatId: 'chat-1' }]))
@@ -769,12 +1119,14 @@ describe('r4 A6 real useAppController host-verification acceptance', () => {
       await serverSessionMessages('agent-x', 'chat-1')
     )
     act(() => {
-      app.result.current.setWorkspaceTabs(state =>
-        openFilesTab(state, {
-          id: 'files-u',
-          path: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          title: 'Folder U',
-        })
+      app.result.current.setWorkspaceTabs(
+        state =>
+          openFilesTab(state, {
+            id: 'files-u',
+            path: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            title: 'Folder U',
+          }),
+        { resourceOwnerPublication: true }
       )
       app.result.current.handleSelectChatAgent('agent-x', {
         chatId: 'chat-1',

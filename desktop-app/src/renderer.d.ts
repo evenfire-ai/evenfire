@@ -776,6 +776,11 @@ declare global {
           chatId: string,
           fence: ChatDeleteFence
         ) => Promise<ChatDeleteResult>
+        deletionStatus: (
+          agentRef: string,
+          chatId: string,
+          authorityScope: ChatAuthorityScope
+        ) => Promise<import('./types.js').ChatDeletionResolution>
         loadMessages: (
           agentRef: string,
           chatId: string,

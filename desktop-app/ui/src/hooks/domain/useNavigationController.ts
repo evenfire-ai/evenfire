@@ -1,7 +1,10 @@
 import { type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../constants/navigation'
 import {
   clearLatestGfsConversationContext,
+  getLatestGfsConversationContext,
+  isGfsConversationContextAvailable,
   recordLatestGfsConversationContext,
 } from '../../lib/gfsConversationPrefill'
 import type { GfsPreviewResource } from '../../lib/gfsPreview'
@@ -37,6 +40,35 @@ export interface WorkspaceNavigationSnapshot {
   lastActiveChatTabId: string | null
 }
 
+export interface WorkspaceTabsSetOptions {
+  /** Publish, suppress, or bind an owner result to an exact Preview tab and URI. */
+  resourceOwnerPublication?:
+    | false
+    | true
+    | {
+        sourceTabId: string
+        gfsUri: string
+      }
+}
+
+function isResourceOwnerPublicationForTab(
+  publication: WorkspaceTabsSetOptions['resourceOwnerPublication'],
+  tab: ReturnType<typeof activeWorkspaceTab>
+): boolean {
+  if (publication === true) return Boolean(tab && (tab.kind === 'files' || tab.kind === 'preview'))
+  if (
+    !publication ||
+    tab?.kind !== 'preview' ||
+    tab.id !== publication.sourceTabId ||
+    !tab.preview
+  ) {
+    return false
+  }
+  return normalizeGfsResourceUri(tab.preview.gfsUri) === normalizeGfsResourceUri(publication.gfsUri)
+}
+
+const getEmptyAuthorityScope = () => ''
+
 /**
  * Owner of the universal tab store (mini-spec 03 §3/§4/§6). The store lives here
  * — upstream of `useAgentChatController`, which reads `navItem` in its effect
@@ -52,36 +84,100 @@ export interface WorkspaceNavigationSnapshot {
  * single-sourced and cleared the instant any tab is (re)activated, so a derived
  * `navItem` and the residual can never both be live in one commit.
  */
-export function useNavigationController() {
+export function useNavigationController(getAuthorityScope: () => string = getEmptyAuthorityScope) {
   const [workspaceTabs, setWorkspaceTabsState] = useState<WorkspaceTabsState>(() =>
     createWorkspaceTabsState('chat-tab-1')
   )
   const workspaceTabsRef = useRef(workspaceTabs)
-  const setWorkspaceTabs = useCallback((action: SetStateAction<WorkspaceTabsState>) => {
-    const current = workspaceTabsRef.current
-    const next = typeof action === 'function' ? action(current) : action
-    if (next === current) return
-    const previousActiveTab = activeWorkspaceTab(current)
-    const nextActiveTab = activeWorkspaceTab(next)
-    if (nextActiveTab?.kind === 'files' || nextActiveTab?.kind === 'preview') {
-      recordLatestGfsConversationContext(nextActiveTab)
-    } else if (
-      !(
-        (previousActiveTab?.kind === 'files' || previousActiveTab?.kind === 'preview') &&
-        nextActiveTab?.kind === 'chat'
-      ) &&
-      (previousActiveTab?.kind !== nextActiveTab?.kind ||
-        previousActiveTab?.id !== nextActiveTab?.id ||
-        (previousActiveTab?.kind === 'chat' &&
-          nextActiveTab?.kind === 'chat' &&
-          (previousActiveTab.chat?.agentRef !== nextActiveTab.chat?.agentRef ||
-            previousActiveTab.chat?.chatId !== nextActiveTab.chat?.chatId)))
-    ) {
-      clearLatestGfsConversationContext()
-    }
-    workspaceTabsRef.current = next
-    setWorkspaceTabsState(next)
-  }, [])
+  const getWorkspaceTabs = useCallback(() => workspaceTabsRef.current, [])
+  const setWorkspaceTabs = useCallback(
+    (action: SetStateAction<WorkspaceTabsState>, options: WorkspaceTabsSetOptions = {}) => {
+      const current = workspaceTabsRef.current
+      const next = typeof action === 'function' ? action(current) : action
+      if (next === current) {
+        if (options.resourceOwnerPublication === false) {
+          if (getLatestGfsConversationContext()) {
+            clearLatestGfsConversationContext()
+            const suspendedState = { ...current }
+            workspaceTabsRef.current = suspendedState
+            setWorkspaceTabsState(suspendedState)
+          }
+          return
+        }
+        const activeTab = activeWorkspaceTab(current)
+        if (isResourceOwnerPublicationForTab(options.resourceOwnerPublication, activeTab)) {
+          const previousResource = getLatestGfsConversationContext()
+          recordLatestGfsConversationContext(activeTab!, false, getAuthorityScope(), true)
+          if (getLatestGfsConversationContext() !== previousResource) {
+            const publishedState = { ...current }
+            workspaceTabsRef.current = publishedState
+            setWorkspaceTabsState(publishedState)
+          }
+        }
+        return
+      }
+      const authorityScope = getAuthorityScope()
+      if (options.resourceOwnerPublication === false) clearLatestGfsConversationContext()
+      const retainedResource = getLatestGfsConversationContext(authorityScope)
+      const retainedOwner = retainedResource
+        ? current.tabs.find(tab => tab.id === retainedResource.sourceTabId)
+        : undefined
+      const retainedOwnerAfter = retainedResource
+        ? next.tabs.find(tab => tab.id === retainedResource.sourceTabId)
+        : undefined
+      if (
+        retainedOwner?.kind === 'preview' &&
+        retainedOwner.preview?.unavailable &&
+        !retainedOwnerAfter
+      ) {
+        clearLatestGfsConversationContext()
+      }
+      const previousActiveTab = activeWorkspaceTab(current)
+      const nextActiveTab = activeWorkspaceTab(next)
+      if (nextActiveTab?.kind === 'files' || nextActiveTab?.kind === 'preview') {
+        const activatedDifferentResourceTab =
+          previousActiveTab?.kind !== nextActiveTab.kind ||
+          previousActiveTab.id !== nextActiveTab.id
+        const retainedCurrentOwner = getLatestGfsConversationContext(authorityScope)
+        const hasSameScopeOwnerAuthority =
+          retainedCurrentOwner?.sourceTabId === nextActiveTab.id &&
+          isGfsConversationContextAvailable(retainedCurrentOwner, next.tabs, authorityScope)
+        const resourceOwnerPublication = isResourceOwnerPublicationForTab(
+          options.resourceOwnerPublication,
+          nextActiveTab
+        )
+        if (resourceOwnerPublication || hasSameScopeOwnerAuthority) {
+          recordLatestGfsConversationContext(
+            nextActiveTab,
+            activatedDifferentResourceTab,
+            authorityScope,
+            resourceOwnerPublication
+          )
+        } else if (activatedDifferentResourceTab) {
+          // A different resource tab has not yet published a result under the
+          // current authority. Do not let the previously active resource remain
+          // eligible while that owner is revalidated.
+          clearLatestGfsConversationContext()
+        }
+      } else if (
+        !(
+          (previousActiveTab?.kind === 'files' || previousActiveTab?.kind === 'preview') &&
+          nextActiveTab?.kind === 'chat'
+        ) &&
+        (previousActiveTab?.kind !== nextActiveTab?.kind ||
+          previousActiveTab?.id !== nextActiveTab?.id ||
+          (previousActiveTab?.kind === 'chat' &&
+            nextActiveTab?.kind === 'chat' &&
+            (previousActiveTab.chat?.agentRef !== nextActiveTab.chat?.agentRef ||
+              previousActiveTab.chat?.chatId !== nextActiveTab.chat?.chatId)))
+      ) {
+        clearLatestGfsConversationContext()
+      }
+      workspaceTabsRef.current = next
+      setWorkspaceTabsState(next)
+    },
+    [getAuthorityScope]
+  )
   const [navigationIntentSequence, setNavigationIntentSequence] = useState(0)
   const navigationIntentSequenceRef = useRef(0)
   const userNavigationGenerationRef = useRef<number | null>(null)
@@ -140,7 +236,14 @@ export function useNavigationController() {
   // Residual: the Apps route shown with no launched app (the picker). Launching
   // an app creates a store app tab and clears this.
   const [appsPickerActive, setAppsPickerActive] = useState(false)
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
+  const [selectedAgent, setSelectedAgentState] = useState<string | null>(null)
+  const selectedAgentRef = useRef<string | null>(selectedAgent)
+  selectedAgentRef.current = selectedAgent
+  const getSelectedAgent = useCallback(() => selectedAgentRef.current, [])
+  const setSelectedAgent = useCallback((agent: string | null) => {
+    selectedAgentRef.current = agent
+    setSelectedAgentState(agent)
+  }, [])
   const [selectedAgentRoute, setSelectedAgentRoute] = useState<AgentWorkspaceRoute>(
     AGENT_WORKSPACE_ROUTES.connectors
   )
@@ -328,11 +431,16 @@ export function useNavigationController() {
   // Dedupes by path in the store: the sidebar "Files" entry (root) and a plugin
   // deep-link to a specific gfsUri both route here (mini-spec 06 §3).
   const openFilesSection = useCallback(
-    (path: string | null = null) => {
-      beginUserNavigationIntent()
+    (
+      path: string | null = null,
+      options: WorkspaceTabsSetOptions = {},
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
-      setWorkspaceTabs(current => openFilesTab(current, { id, path }))
+      setWorkspaceTabs(current => openFilesTab(current, { id, path }), options)
+      return workspaceTabsRef.current.activeTabId
     },
     [beginUserNavigationIntent, nextWorkspaceTabId]
   )
@@ -341,21 +449,28 @@ export function useNavigationController() {
   // gfsUri in the store: opening the same file twice focuses its existing tab
   // instead of stacking duplicates. A direct clone of `openFilesSection`.
   const openPreviewSection = useCallback(
-    (preview: GfsPreviewResource) => {
-      beginUserNavigationIntent()
+    (
+      preview: GfsPreviewResource,
+      options: WorkspaceTabsSetOptions = {},
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
-      setWorkspaceTabs(current =>
-        openPreviewTab(current, {
-          id,
-          title: preview.name,
-          gfsUri: preview.gfsUri,
-          fileKind: preview.kind,
-          byteLength: preview.bytes,
-          ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
-          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
-        })
+      setWorkspaceTabs(
+        current =>
+          openPreviewTab(current, {
+            id,
+            title: preview.name,
+            gfsUri: preview.gfsUri,
+            fileKind: preview.kind,
+            byteLength: preview.bytes,
+            ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
+            ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+          }),
+        options
       )
+      return workspaceTabsRef.current.activeTabId
     },
     [beginUserNavigationIntent, nextWorkspaceTabId]
   )
@@ -461,7 +576,7 @@ export function useNavigationController() {
         ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
       })
       setAppsPickerActive(false)
-      setWorkspaceTabs(next)
+      setWorkspaceTabs(next, { resourceOwnerPublication: true })
       return next.activeTabId !== request.ownerTabId
     },
     [isGfsResourceNavigationCurrent, nextWorkspaceTabId, setWorkspaceTabs]
@@ -531,6 +646,7 @@ export function useNavigationController() {
     // Universal tab store.
     workspaceTabs,
     setWorkspaceTabs,
+    getWorkspaceTabs,
     navigationIntentSequence,
     beginUserNavigationIntent,
     isNavigationIntentCurrent,
@@ -553,6 +669,7 @@ export function useNavigationController() {
     openPreviewSection,
     // Agent/chat selection state (stays here through this slice; §4).
     selectedAgent,
+    getSelectedAgent,
     selectedAgentRoute,
     setSelectedAgent,
     setSelectedAgentRoute,

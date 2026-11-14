@@ -206,28 +206,42 @@ function makeController(): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
-  const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
-    controller.beginUserNavigationIntent()
-    clearAppsPicker()
-    setWorkspaceTabs((state: WorkspaceState) =>
-      openPreviewTab(state, {
-        id: nextWorkspaceTabId(),
-        title: preview.name,
-        gfsUri: preview.gfsUri,
-        fileKind: preview.kind,
-        byteLength: preview.bytes,
-        ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
-        ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
-      })
-    )
-  })
-  const openFilesSection = vi.fn((path: string | null = null) => {
-    controller.beginUserNavigationIntent()
-    clearAppsPicker()
-    setWorkspaceTabs((state: WorkspaceState) =>
-      openFilesTab(state, { id: nextWorkspaceTabId(), path })
-    )
-  })
+  const openPreviewSection = vi.fn(
+    (
+      preview: GfsPreviewResource,
+      _options: Parameters<AppController['openPreviewSection']>[1] = {},
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) controller.beginUserNavigationIntent()
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) =>
+        openPreviewTab(state, {
+          id: nextWorkspaceTabId(),
+          title: preview.name,
+          gfsUri: preview.gfsUri,
+          fileKind: preview.kind,
+          byteLength: preview.bytes,
+          ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
+          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+        })
+      )
+      return controller.workspaceTabs.activeTabId
+    }
+  )
+  const openFilesSection = vi.fn(
+    (
+      path: string | null = null,
+      _options: Parameters<AppController['openFilesSection']>[1] = {},
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) controller.beginUserNavigationIntent()
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) =>
+        openFilesTab(state, { id: nextWorkspaceTabId(), path })
+      )
+      return controller.workspaceTabs.activeTabId
+    }
+  )
   const showAppsPicker = vi.fn(() => {
     controller.beginUserNavigationIntent()
     if (controller.appsPickerActive) return
@@ -242,6 +256,10 @@ function makeController(): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    sessionGeneration: 1,
+    get authorityScope() {
+      return `${controller.runtimeConfigState?.envKey ?? ''}:${controller.isAuthenticated}:${controller.authenticatedPrincipalIdentity ?? ''}:${controller.currentTeamId ?? ''}:${controller.sessionGeneration ?? ''}`
+    },
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     me: { id: 'user-a', email: 'user-a@example.com', name: 'User A', teamId: 'team-a' },
     currentTeamId: 'team-a',

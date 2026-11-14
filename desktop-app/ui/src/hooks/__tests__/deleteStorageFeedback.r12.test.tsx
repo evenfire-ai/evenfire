@@ -6,6 +6,15 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-libra
 import { promises as fs } from 'node:fs'
 import { SidebarNav } from '@components/SidebarNav'
 import { ChatThread } from '@components/agents/ChatThread'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setAutomaticComposerDraft,
+} from '@lib/composerDraftStore'
+import {
+  clearLatestGfsConversationContext,
+  recordLatestGfsConversationContext,
+} from '@lib/gfsConversationPrefill'
 import { installAppControllerClerum } from '../domain/__tests__/__fixtures__/appControllerHarness'
 import { deferred } from '../domain/__tests__/__fixtures__/catalogFixtures'
 import { renderChatActionConsumer } from '../domain/__tests__/__fixtures__/chatActionConsumerHarness'
@@ -30,6 +39,8 @@ afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
   uninstallMockClerum()
+  clearLatestGfsConversationContext()
+  resetComposerDraftStore()
   Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
   Reflect.deleteProperty(window, 'matchMedia')
 })
@@ -102,6 +113,132 @@ function confirmStorageDelete() {
   )
 }
 
+it('keeps hidden automatic bytes when the real ChatThread resend action runs in another scope', async () => {
+  const { app, clerum } = await mountStorageDelete()
+  const deleteDialog = screen.getByRole('dialog', { name: 'Delete session?' })
+  fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Cancel' }))
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete session?' })).toBeNull())
+  expect(clerum.chat.delete).not.toHaveBeenCalled()
+
+  const scopeA = app.getVm().authorityScope
+  const originTab = app
+    .getVm()
+    .workspaceTabs.tabs.find(
+      tab => tab.kind === 'chat' && tab.chat?.agentRef === 'agent-x' && tab.chat.chatId === 'chat-1'
+    )
+  expect(originTab).toBeTruthy()
+  const uri = 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  expect(
+    setAutomaticComposerDraft(
+      {
+        authorityScope: scopeA,
+        agentRef: 'agent-x',
+        chatId: 'chat-1',
+        workspaceChatTabId: originTab!.id,
+      },
+      uri
+    )
+  ).toBe(true)
+
+  await act(async () => app.getVm().handleEnsureTeamContext({ teamId: 'team-2' }))
+  await waitFor(() => expect(app.getVm().currentTeamId).toBe('team-2'))
+  act(() => app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-1', selectLatest: false }))
+  await waitFor(() => expect(screen.getByText('chat-1 real history')).toBeTruthy())
+  await waitFor(() => expect(app.getVm().sessionStateByChatId['chat-1']?.syncing).toBe(false))
+  const scopeB = app.getVm().authorityScope
+  const destination = app
+    .getVm()
+    .workspaceTabs.tabs.find(
+      tab => tab.kind === 'chat' && tab.chat?.agentRef === 'agent-x' && tab.chat.chatId === 'chat-1'
+    )
+  expect(destination).toBeTruthy()
+  expect(destination!.id).toBe(originTab!.id)
+  expect(getComposerDraft('chat-1', 'agent-x', destination!.id, scopeB)).toBe('')
+  expect(getComposerDraft('chat-1', 'agent-x', originTab!.id, scopeA)).toBe(uri)
+
+  await clerum.chat.upsertMessages('agent-x', 'chat-1', [
+    { id: 'resend-user', role: 'user', content: 'original prompt', timestamp: 2 },
+    {
+      id: 'resend-error',
+      role: 'assistant',
+      content: 'previous send failed',
+      timestamp: 3,
+      isError: true,
+    },
+  ])
+  act(() => app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-2', selectLatest: false }))
+  await waitFor(() => expect(screen.getByText('chat-2 real history')).toBeTruthy())
+  act(() => app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-1', selectLatest: false }))
+  await screen.findAllByText('previous send failed')
+
+  fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
+
+  await waitFor(() =>
+    expect(getComposerDraft('chat-1', 'agent-x', originTab!.id, scopeA)).toBe(uri)
+  )
+  expect(getComposerDraft('chat-1', 'agent-x', destination!.id, scopeB)).toBe('')
+  expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+  await waitFor(() => expect(app.getVm().toasts).toHaveLength(1))
+  expect(app.getVm().toasts[0]?.tone).toBe('error')
+  expect(app.getVm().toasts[0]?.text).toBe(
+    'This composer no longer owns the draft. Select its chat tab and try again.'
+  )
+  expect(getComposerDraft('chat-1', 'agent-x', destination!.id, scopeB)).toBe('')
+  expect(getComposerDraft('chat-1', 'agent-x', originTab!.id, scopeA)).toBe(uri)
+  expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+})
+
+it('does not register or dispatch ChatThread deletion until confirmation', async () => {
+  const { app, clerum } = await mountStorageDelete()
+  const sidebarDialog = screen.getByRole('dialog', { name: 'Delete session?' })
+  fireEvent.click(within(sidebarDialog).getByRole('button', { name: 'Cancel' }))
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete session?' })).toBeNull())
+  expect(clerum.chat.delete).not.toHaveBeenCalled()
+
+  act(() => app.getVm().handleSelectChatAgent('agent-x', { selectLatest: false }))
+  await waitFor(() => expect(screen.getAllByTestId('agent-chat-row').length).toBeGreaterThan(0))
+  const target = app.getVm().chatList.find(chat => chat.id === 'chat-2')
+  expect(target).toBeTruthy()
+  const targetMenuName = `Session actions for ${target!.title}`
+  const targetRow = document.querySelector<HTMLElement>(
+    '[data-testid="agent-chat-row"][data-chat-id="chat-2"]'
+  )
+  expect(targetRow).toBeTruthy()
+  fireEvent.click(within(targetRow!).getByRole('button', { name: targetMenuName }))
+  const menu = within(targetRow!).getByRole('group', { name: targetMenuName })
+  fireEvent.click(within(menu).getByRole('button', { name: 'Delete' }))
+  await screen.findByRole('dialog', { name: 'Delete session?' })
+
+  const pendingRevision = app.getVm().pendingDeleteRevision
+  expect(app.getVm().isChatDeletionPending('agent-x', 'chat-2')).toBe(false)
+  expect(clerum.chat.delete).not.toHaveBeenCalled()
+  expect(clerum.chat.deletionStatus).not.toHaveBeenCalledWith(
+    'agent-x',
+    'chat-2',
+    expect.anything()
+  )
+
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'Delete session?' })).getByRole('button', {
+      name: 'Cancel',
+    })
+  )
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete session?' })).toBeNull())
+  await act(async () => {
+    await Promise.resolve()
+    await new Promise(resolve => setTimeout(resolve, 0))
+  })
+
+  expect(app.getVm().pendingDeleteRevision).toBe(pendingRevision)
+  expect(app.getVm().isChatDeletionPending('agent-x', 'chat-2')).toBe(false)
+  expect(clerum.chat.delete).not.toHaveBeenCalled()
+  expect(clerum.chat.deletionStatus).not.toHaveBeenCalledWith(
+    'agent-x',
+    'chat-2',
+    expect.anything()
+  )
+})
+
 it('reports a current storage deletion failure once and retains the actual conversation', async () => {
   const { app, clerum } = await mountStorageDelete()
   clerum.chat.delete.mockRejectedValueOnce(new Error('storage deletion failed'))
@@ -125,19 +262,34 @@ it.each([false, true])(
   'reports a failed explicit deletion after same-scope navigation (otherAgent=%s)',
   async otherAgent => {
     const { app, clerum } = await mountStorageDelete('chat-2', otherAgent)
+    const deletionAgent = 'agent-x'
+    const deletionChatId = 'chat-2'
+    const agent = otherAgent ? 'agent-y' : 'agent-x'
+    const chatId = otherAgent ? 'other-chat' : 'chat-3'
+    const history = otherAgent ? 'other agent real history' : 'chat-3 real history'
     const entered = deferred<void>()
     const held = deferred<Awaited<ReturnType<typeof clerum.chat.delete>>>()
+    const statusEntered = deferred<void>()
+    const statusHeld = deferred<void>()
+    const readDeletionStatus = clerum.chat.deletionStatus.getMockImplementation()!
+    let observedStatus: Awaited<ReturnType<typeof clerum.chat.deletionStatus>> | undefined
     clerum.chat.delete.mockImplementationOnce(async () => {
       entered.resolve()
       return held.promise
+    })
+    clerum.chat.deletionStatus.mockImplementation(async (...args) => {
+      const status = await readDeletionStatus(...args)
+      if (args[0] === deletionAgent && args[1] === deletionChatId) {
+        observedStatus = status
+        statusEntered.resolve()
+        return statusHeld.promise.then(() => status)
+      }
+      return status
     })
     confirmStorageDelete()
     await act(async () => {
       await entered.promise
     })
-    const agent = otherAgent ? 'agent-y' : 'agent-x'
-    const chatId = otherAgent ? 'other-chat' : 'chat-3'
-    const history = otherAgent ? 'other agent real history' : 'chat-3 real history'
     act(() => app.getVm().handleSelectChatAgent(agent, { chatId, selectLatest: false }))
     await waitFor(() => expect(screen.getByText(history)).toBeTruthy())
     await waitFor(() => expect(app.getVm().sessionStateByChatId[chatId]?.syncing).toBe(false))
@@ -146,12 +298,37 @@ it.each([false, true])(
       held.reject(new Error('requested storage deletion failed'))
       await held.promise.catch(() => undefined)
     })
+    await act(async () => {
+      await statusEntered.promise
+    })
+    expect(
+      clerum.chat.deletionStatus.mock.calls.filter(
+        ([requestedAgent, requestedChat]) =>
+          requestedAgent === deletionAgent && requestedChat === deletionChatId
+      )
+    ).toHaveLength(1)
+    expect(app.getVm().isChatDeletionPending('agent-x', 'chat-2')).toBe(true)
+    expect(app.getVm().toasts).toEqual([])
+    expect(screen.queryAllByRole('alert')).toEqual([])
+    expect((await clerum.readIndex('agent-x')).chats.some(chat => chat.id === 'chat-2')).toBe(true)
+    await act(async () => {
+      statusHeld.resolve()
+      await statusHeld.promise
+    })
+    await waitFor(() => expect(app.getVm().toasts).toHaveLength(1))
+    expect(observedStatus?.status).toBe('not-deleted')
+    expect(app.getVm().isChatDeletionPending('agent-x', 'chat-2')).toBe(false)
     expect(app.getVm().selectedAgent).toBe(agent)
     expect(app.getVm().activeChatId).toBe(chatId)
     expect(app.getVm().activeMessages.map(message => message.content)).toEqual([history])
     expect(screen.getByText(history)).toBeTruthy()
     expect(app.getVm().chatMessagesLoading).toBe(false)
     expect(app.getVm().toasts).toHaveLength(1)
+    expect(app.getVm().toasts[0]?.tone).toBe('error')
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Could not delete the chat. Please try again.'
+    )
+    expect(screen.queryByText(/deleted successfully/i)).toBeNull()
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(screen.getByRole('alert').textContent).toContain('Could not delete the chat')
     expect({ text: app.getVm().statusText, tone: app.getVm().statusTone }).toEqual(status)
@@ -159,6 +336,164 @@ it.each([false, true])(
     expect(app.getVm().latestChatSessions.some(chat => chat.id === 'chat-2')).toBe(true)
   }
 )
+
+it('keeps a later ChatThread delete attempt gated when an earlier real status read says not-deleted', async () => {
+  resetComposerDraftStore()
+  const { app, clerum } = await mountStorageDelete()
+  const actualDelete = clerum.chat.delete.getMockImplementation()!
+  const actualStatus = clerum.chat.deletionStatus.getMockImplementation()!
+  const actualReadFile = fs.readFile.bind(fs)
+  const actualWriteFile = fs.writeFile.bind(fs)
+  const statusRequested = deferred<void>()
+  const statusReadEntered = deferred<void>()
+  const releaseStatusRead = deferred<void>()
+  const secondIndexWriteEntered = deferred<void>()
+  const releaseSecondIndexWrite = deferred<void>()
+  let holdStatusRead = false
+  let indexWriteCount = 0
+
+  vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+    const result = await actualReadFile(...args)
+    if (holdStatusRead && String(args[0]).endsWith('/index.json')) {
+      holdStatusRead = false
+      statusReadEntered.resolve()
+      await releaseStatusRead.promise
+    }
+    return result
+  })
+  vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+    if (String(args[0]).endsWith('/index.json.tmp')) {
+      indexWriteCount += 1
+      if (indexWriteCount === 1) throw new Error('first delete failed before index commit')
+      if (indexWriteCount === 2) {
+        await actualWriteFile(...args)
+        secondIndexWriteEntered.resolve()
+        await releaseSecondIndexWrite.promise
+        return
+      }
+    }
+    return actualWriteFile(...args)
+  })
+  clerum.chat.delete.mockImplementationOnce((...args) => actualDelete(...args))
+  clerum.chat.deletionStatus.mockImplementationOnce((...args) => {
+    statusRequested.resolve()
+    holdStatusRead = true
+    return actualStatus(...args)
+  })
+
+  try {
+    confirmStorageDelete()
+    await act(async () => statusRequested.promise)
+    await act(async () => statusReadEntered.promise)
+    expect(app.getVm().isChatDeletionPending('agent-x', 'chat-2')).toBe(true)
+
+    act(() => app.getVm().handleSelectChatAgent('agent-x', { selectLatest: false }))
+    await waitFor(() => expect(app.getVm().activeChatId).toBeNull())
+    const targetRow = await waitFor(() => {
+      const row = screen
+        .getAllByTestId('agent-chat-row')
+        .find(candidate => candidate.getAttribute('data-chat-id') === 'chat-2')
+      expect(row).toBeTruthy()
+      return row!
+    })
+    fireEvent.click(within(targetRow).getByRole('button', { name: /Session actions for/ }))
+    fireEvent.click(within(targetRow).getByRole('button', { name: 'Delete' }))
+    await screen.findByRole('dialog', { name: 'Delete session?' })
+    confirmStorageDelete()
+    await waitFor(() => expect(clerum.chat.delete).toHaveBeenCalledTimes(2))
+
+    await act(async () => {
+      releaseStatusRead.resolve()
+      await releaseStatusRead.promise
+    })
+    await act(async () => secondIndexWriteEntered.promise)
+    await waitFor(() => expect(app.getVm().toasts).toHaveLength(1))
+    expect(app.getVm().toasts[0]?.text).toBe('Could not delete the chat. Please try again.')
+    expect((await clerum.readIndex('agent-x')).chats.some(chat => chat.id === 'chat-2')).toBe(true)
+
+    act(() =>
+      app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-2', selectLatest: false })
+    )
+    await waitFor(() => expect(app.getVm().activeChatId).toBe('chat-2'))
+    const destination = app
+      .getVm()
+      .workspaceTabs.tabs.find(
+        tab =>
+          tab.kind === 'chat' && tab.chat?.agentRef === 'agent-x' && tab.chat.chatId === 'chat-2'
+      )
+    expect(destination).toBeTruthy()
+    recordLatestGfsConversationContext(
+      {
+        id: 'files-source',
+        kind: 'files',
+        title: 'Files',
+        files: { path: 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+      },
+      false,
+      app.getVm().authorityScope
+    )
+    act(() => app.getVm().handleComposerPrefillEvent('focus', '', destination!.id, true, 812))
+    expect(app.getVm().persistedConversationPrefillReceipt).toBeNull()
+    expect(getComposerDraft('chat-2', 'agent-x', destination!.id, app.getVm().authorityScope)).toBe(
+      ''
+    )
+
+    await waitFor(() => expect(app.getVm().isChatDeletionPending('agent-x', 'chat-2')).toBe(true))
+  } finally {
+    releaseStatusRead.resolve()
+    releaseSecondIndexWrite.resolve()
+    if (clerum.chat.delete.mock.calls.length > 1) {
+      await waitFor(async () =>
+        expect((await clerum.readIndex('agent-x')).chats.some(chat => chat.id === 'chat-2')).toBe(
+          false
+        )
+      )
+      await waitFor(() => expect(app.getVm().chatMessagesLoading).toBe(false))
+      await waitFor(() =>
+        expect(app.getVm().sessionStateByChatId['chat-2']?.syncing ?? false).toBe(false)
+      )
+    }
+  }
+})
+
+it('reports no failure when the durable ChatStore result is deleted', async () => {
+  const { app, clerum } = await mountStorageDelete()
+  const deleteFromStore = clerum.chat.delete.getMockImplementation()!
+  const readDeletionStatus = clerum.chat.deletionStatus.getMockImplementation()!
+  let observedStatus: Awaited<ReturnType<typeof clerum.chat.deletionStatus>> | undefined
+  clerum.chat.delete.mockImplementationOnce(async (...args) => {
+    await deleteFromStore(...args)
+    throw new Error('delete response was lost after durable commit')
+  })
+  clerum.chat.deletionStatus.mockImplementationOnce(async (...args) => {
+    observedStatus = await readDeletionStatus(...args)
+    return observedStatus
+  })
+
+  confirmStorageDelete()
+
+  await waitFor(() => expect(app.getVm().isChatDeletionPending('agent-x', 'chat-2')).toBe(true))
+  await waitFor(() => expect(observedStatus?.status).toBe('deleted'))
+  expect(app.getVm().toasts).toEqual([])
+  expect((await clerum.readIndex('agent-x')).chats.some(chat => chat.id === 'chat-2')).toBe(false)
+})
+
+it('reports uncertainty and keeps the deletion gate when status cannot be read', async () => {
+  const { app, clerum } = await mountStorageDelete()
+  clerum.chat.delete.mockRejectedValueOnce(new Error('delete response lost'))
+  clerum.chat.deletionStatus.mockRejectedValueOnce(new Error('status response lost'))
+
+  confirmStorageDelete()
+
+  await waitFor(() => expect(app.getVm().toasts).toHaveLength(1))
+  expect(app.getVm().toasts[0]?.tone).toBe('info')
+  expect(app.getVm().toasts[0]?.text).toBe(
+    'Could not confirm whether the chat was deleted. Its status is still unknown.'
+  )
+  expect(screen.queryByText(/deleted successfully/i)).toBeNull()
+  expect(app.getVm().isChatDeletionPending('agent-x', 'chat-2')).toBe(true)
+  expect((await clerum.readIndex('agent-x')).chats.some(chat => chat.id === 'chat-2')).toBe(true)
+})
 
 it.each([false, true])(
   'delete access confirmation remains observable across navigation (navigated=%s)',

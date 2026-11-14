@@ -1,10 +1,30 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ChatStore } from '../chatStore.js'
 import { turnsToChatMessages } from '../serverTurnAdapter.js'
 import type { ChatMessage } from '../types.js'
+
+type IpcHandler = (event: unknown, payload: unknown) => Promise<unknown>
+
+const ipc = vi.hoisted(() => ({ handlers: new Map<string, IpcHandler>() }))
+
+vi.mock('electron', () => ({
+  BrowserWindow: { fromWebContents: vi.fn(), getAllWindows: vi.fn(() => []) },
+  Notification: vi.fn(),
+  app: { on: vi.fn(), getPath: vi.fn(() => '/nonexistent'), getVersion: vi.fn(), isPackaged: true },
+  clipboard: { writeText: vi.fn() },
+  dialog: { showSaveDialog: vi.fn() },
+  ipcMain: {
+    handle: vi.fn((channel: string, handler: IpcHandler) => {
+      ipc.handlers.set(channel, handler)
+    }),
+    on: vi.fn(),
+    removeHandler: vi.fn(),
+  },
+}))
+vi.mock('../appService.js', () => ({ AppService: class {} }))
 
 let tempDir: string
 let store: ChatStore
@@ -14,6 +34,21 @@ const TEAM_A_SCOPE = {
   teamId: 'team-a',
 } as const
 const TEAM_B_SCOPE = { ...TEAM_A_SCOPE, teamId: 'team-b' } as const
+let deletionAuthority = { authorityScope: TEAM_A_SCOPE, sessionGeneration: 1 }
+const ipcService = {
+  getChatDeletionFenceAuthority: vi.fn(() => deletionAuthority),
+}
+
+function invokeIpc(channel: string, event: unknown, payload: unknown): Promise<unknown> {
+  const handler = ipc.handlers.get(channel)
+  if (!handler) throw new Error(`No IPC handler registered for ${channel}`)
+  return handler(event, payload)
+}
+
+beforeAll(async () => {
+  const { registerIpcHandlers } = await import('../ipc.js')
+  registerIpcHandlers(ipcService as never, async () => 0)
+})
 
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(join(tmpdir(), 'chatstore-test-'))
@@ -185,6 +220,293 @@ describe('renameChat', () => {
 // ── deleteChat ───────────────────────────────────────────────────────────────
 
 describe('deleteChat', () => {
+  it('reports authoritative deletion status and shares the local tombstone across teams', async () => {
+    expect((await store.getChatDeletionStatus('agent-1', 'status-chat', TEAM_A_SCOPE)).status).toBe(
+      'not-deleted'
+    )
+    await store.createChat('agent-1', 'status-chat')
+    expect((await store.getChatDeletionStatus('agent-1', 'status-chat', TEAM_A_SCOPE)).status).toBe(
+      'not-deleted'
+    )
+    await store.deleteChat('agent-1', 'status-chat', TEAM_A_SCOPE)
+    expect((await store.getChatDeletionStatus('agent-1', 'status-chat', TEAM_A_SCOPE)).status).toBe(
+      'deleted'
+    )
+
+    store.setAuthorityScope(TEAM_B_SCOPE)
+    expect((await store.getChatDeletionStatus('agent-1', 'status-chat', TEAM_B_SCOPE)).status).toBe(
+      'deleted'
+    )
+    expect((await store.getChatDeletionStatus('agent-1', 'status-chat', TEAM_A_SCOPE)).status).toBe(
+      'unknown'
+    )
+  })
+
+  it('reports not-deleted after the real index write fails before the commit point', async () => {
+    const chatId = 'pre-commit-failure'
+    await store.createChat('agent-1', chatId)
+    const realWriteFile = fs.writeFile.bind(fs)
+    let rejectedIndexWrite = false
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+      if (String(args[0]) === `${agentPath('index.json')}.tmp`) {
+        rejectedIndexWrite = true
+        throw transientFileReadError('EIO')
+      }
+      return realWriteFile(...(args as Parameters<typeof fs.writeFile>))
+    })
+
+    await expect(store.deleteChat('agent-1', chatId, TEAM_A_SCOPE)).rejects.toMatchObject({
+      code: 'EIO',
+    })
+    expect(rejectedIndexWrite).toBe(true)
+    expect((await store.getIndex('agent-1')).chats.map(chat => chat.id)).toContain(chatId)
+    expect((await store.getChatDeletionStatus('agent-1', chatId, TEAM_A_SCOPE)).status).toBe(
+      'not-deleted'
+    )
+  })
+
+  it('does not confirm a post-rename sync failure when restart restores the prior index', async () => {
+    const chatId = 'post-rename-sync-crash-recovery'
+    const messages: ChatMessage[] = [
+      { id: 'kept-message', role: 'user', content: 'still present', timestamp: 1 },
+    ]
+    await store.createChat('agent-1', chatId)
+    await store.saveMessages('agent-1', chatId, messages)
+    const priorIndex = await fs.readFile(agentPath('index.json'), 'utf-8')
+    const originalOpen = fs.open.bind(fs)
+    const originalRename = fs.rename.bind(fs)
+    const syncSpies: Array<{ mockRestore: () => void }> = []
+    let indexRenameCompleted = false
+    let postCommitSyncAttempts = 0
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      const result = await originalRename(from, to)
+      if (String(from) === agentPath('index.json.tmp')) indexRenameCompleted = true
+      return result
+    })
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await originalOpen(...(args as Parameters<typeof fs.open>))
+      if (String(args[0]) === agentPath()) {
+        const originalSync = handle.sync.bind(handle)
+        const syncSpy = vi.spyOn(handle, 'sync').mockImplementation(async () => {
+          if (indexRenameCompleted) {
+            postCommitSyncAttempts += 1
+            throw transientFileReadError('EIO')
+          }
+          return originalSync()
+        })
+        syncSpies.push(syncSpy)
+      }
+      return handle
+    })
+
+    try {
+      await expect(store.deleteChat('agent-1', chatId, TEAM_A_SCOPE)).rejects.toMatchObject({
+        code: 'EIO',
+      })
+      await expect(
+        store.getChatDeletionStatus('agent-1', chatId, TEAM_A_SCOPE)
+      ).resolves.toMatchObject({ status: 'unknown', cleanupPending: false })
+      expect(postCommitSyncAttempts).toBe(2)
+    } finally {
+      vi.restoreAllMocks()
+    }
+
+    // Model the old valid directory entry surviving a crash after the failed
+    // directory sync. The real store wrote its ahead sidecar before the rename.
+    await fs.writeFile(agentPath('index.json'), priorIndex)
+    const restartedStore = new ChatStore(tempDir)
+    restartedStore.setAuthorityScope(TEAM_A_SCOPE)
+
+    expect((await restartedStore.listChats('agent-1')).map(chat => chat.id)).toContain(chatId)
+    expect(await restartedStore.loadMessages('agent-1', chatId)).toEqual(messages)
+    await expect(
+      restartedStore.getChatDeletionStatus('agent-1', chatId, TEAM_A_SCOPE)
+    ).resolves.toMatchObject({ status: 'not-deleted', cleanupPending: false })
+    expect(
+      (await readJsonFile<{ deletedChatTombstones: unknown[] }>(agentPath('.tombstones.json')))
+        .deletedChatTombstones
+    ).toEqual([])
+  })
+
+  it('reconciles a failed tombstone rollback before reporting authoritative not-deleted', async () => {
+    const chatId = 'failed-tombstone-rollback'
+    await store.createChat('agent-1', chatId)
+    const realWriteFile = fs.writeFile.bind(fs)
+    const realRename = fs.rename.bind(fs)
+    let sidecarRenameCount = 0
+    let indexRenameCount = 0
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+      const result = await realWriteFile(...(args as Parameters<typeof fs.writeFile>))
+      if (String(args[0]) === agentPath('index.json.tmp')) store.setAuthorityScope(TEAM_B_SCOPE)
+      return result
+    })
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(from) === agentPath('index.json.tmp')) indexRenameCount += 1
+      if (String(from) === agentPath('.tombstones.json.tmp')) {
+        sidecarRenameCount += 1
+        if (sidecarRenameCount === 2) throw transientFileReadError('EIO')
+      }
+      return realRename(from, to)
+    })
+
+    await expect(store.deleteChat('agent-1', chatId, TEAM_A_SCOPE)).rejects.toBeInstanceOf(
+      AggregateError
+    )
+    expect(sidecarRenameCount).toBe(2)
+    expect(indexRenameCount).toBe(0)
+    expect((await store.getIndex('agent-1')).chats.map(chat => chat.id)).toContain(chatId)
+    expect(
+      (await readJsonFile<{ deletedChatTombstones: unknown[] }>(agentPath('.tombstones.json')))
+        .deletedChatTombstones
+    ).toContainEqual({ chatId, authorityScope: TEAM_A_SCOPE })
+
+    // A status read may say not-deleted only after reconciling the ahead sidecar
+    // to the valid, authoritative index. A later index recovery must not resurrect
+    // an operation that was reported as a definitive no-commit.
+    await expect(
+      store.getChatDeletionStatus('agent-1', chatId, TEAM_B_SCOPE)
+    ).resolves.toMatchObject({ status: 'not-deleted', cleanupPending: false })
+    const reconciledSidecar = await readJsonFile<{ deletedChatTombstones: unknown[] }>(
+      agentPath('.tombstones.json')
+    )
+    expect(reconciledSidecar.deletedChatTombstones).toEqual([])
+
+    await realWriteFile(agentPath('index.json'), '{"version":2,"chats":[')
+    const recovered = await store.getIndex('agent-1')
+    expect(recovered.deletedChatTombstones ?? []).toEqual([])
+    await expect(
+      store.getChatDeletionStatus('agent-1', chatId, TEAM_B_SCOPE)
+    ).resolves.toMatchObject({ status: 'unknown', cleanupPending: false })
+  })
+
+  it('keeps deletion status unknown when recovery sees an ahead sidecar and corrupt index', async () => {
+    const chatId = 'ambiguous-sidecar-recovery'
+    await store.createChat('agent-1', chatId)
+    const realWriteFile = fs.writeFile.bind(fs)
+    const realRename = fs.rename.bind(fs)
+    let sidecarRenameCount = 0
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+      const result = await realWriteFile(...(args as Parameters<typeof fs.writeFile>))
+      if (String(args[0]) === agentPath('index.json.tmp')) store.setAuthorityScope(TEAM_B_SCOPE)
+      return result
+    })
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(from) === agentPath('.tombstones.json.tmp')) {
+        sidecarRenameCount += 1
+        if (sidecarRenameCount === 2) throw transientFileReadError('EIO')
+      }
+      return realRename(from, to)
+    })
+
+    await expect(store.deleteChat('agent-1', chatId, TEAM_A_SCOPE)).rejects.toBeInstanceOf(
+      AggregateError
+    )
+    expect(sidecarRenameCount).toBe(2)
+    await realWriteFile(agentPath('index.json'), '{"version":2,"chats":[')
+
+    // The ahead sidecar is necessary for later tombstone recovery, but without a
+    // valid index it cannot prove whether the pre-commit delete reached its commit point.
+    await expect(
+      store.getChatDeletionStatus('agent-1', chatId, TEAM_B_SCOPE)
+    ).resolves.toMatchObject({ status: 'unknown', cleanupPending: false })
+    expect(
+      (await readJsonFile<{ deletedChatTombstones: unknown[] }>(agentPath('.tombstones.json')))
+        .deletedChatTombstones
+    ).toContainEqual({ chatId, authorityScope: TEAM_A_SCOPE })
+  })
+
+  it('aborts before index rename when authority changes during prepared delete persistence', async () => {
+    const chatId = 'scope-before-index-rename'
+    const messages = [{ id: 'kept-message', role: 'user' as const, content: 'keep', timestamp: 1 }]
+    await store.createChat('agent-1', chatId)
+    await store.saveMessages('agent-1', chatId, messages)
+    const realWriteFile = fs.writeFile.bind(fs)
+    let preparedIndex = false
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+      await realWriteFile(...(args as Parameters<typeof fs.writeFile>))
+      if (String(args[0]) === `${agentPath('index.json')}.tmp`) {
+        preparedIndex = true
+        store.setAuthorityScope(TEAM_B_SCOPE)
+      }
+    })
+
+    await expect(
+      store.deleteChat('agent-1', 'scope-before-index-rename', TEAM_A_SCOPE)
+    ).rejects.toThrow('Chat deletion authority scope changed')
+    expect(preparedIndex).toBe(true)
+    await expect(fs.access(agentPath('index.json.tmp'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const sidecar = await readJsonFile<{ deletedChatTombstones: unknown[] }>(
+      agentPath('.tombstones.json')
+    )
+    expect(sidecar.deletedChatTombstones).toEqual([])
+    expect((await store.getChatDeletionStatus('agent-1', chatId, TEAM_B_SCOPE)).status).toBe(
+      'not-deleted'
+    )
+
+    // Recovery must not turn the aborted A-scope intent into a terminal shared tombstone.
+    await realWriteFile(agentPath('index.json'), '{"version":2,"chats":[')
+    const recovered = await store.getIndex('agent-1')
+    expect(recovered.deletedChatTombstones ?? []).toEqual([])
+    // A malformed durable index cannot establish either commit outcome, even
+    // when recovery sees no sidecar tombstone.
+    expect((await store.getChatDeletionStatus('agent-1', chatId, TEAM_B_SCOPE)).status).toBe(
+      'unknown'
+    )
+    expect(await store.loadMessages('agent-1', chatId)).toEqual(messages)
+  })
+
+  it('orders a new-scope deletion status behind an invoked index rename', async () => {
+    const chatId = 'scope-after-index-rename-invocation'
+    await store.createChat('agent-1', chatId)
+    const realRename = fs.rename.bind(fs)
+    let renameEntered!: () => void
+    const entered = new Promise<void>(resolve => {
+      renameEntered = resolve
+    })
+    let releaseRename!: () => void
+    const release = new Promise<void>(resolve => {
+      releaseRename = resolve
+    })
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      const result = await realRename(from, to)
+      if (String(from) === agentPath('index.json.tmp')) {
+        renameEntered()
+        await release
+      }
+      return result
+    })
+
+    let deletionSettled = false
+    const deletion = store.deleteChat('agent-1', chatId, TEAM_A_SCOPE).finally(() => {
+      deletionSettled = true
+    })
+    try {
+      await entered
+      store.setAuthorityScope(TEAM_B_SCOPE)
+      let statusSettled = false
+      const status = store.getChatDeletionStatus('agent-1', chatId, TEAM_B_SCOPE).finally(() => {
+        statusSettled = true
+      })
+
+      await Promise.resolve()
+      expect(deletionSettled).toBe(false)
+      expect(statusSettled).toBe(false)
+
+      releaseRename()
+      await expect(deletion).resolves.toEqual({ cleanupPending: false })
+      await expect(status).resolves.toMatchObject({ status: 'deleted', cleanupPending: false })
+      expect(deletionSettled).toBe(true)
+      expect(statusSettled).toBe(true)
+      expect((await store.getIndex('agent-1')).deletedChatTombstones).toContainEqual({
+        chatId,
+        authorityScope: TEAM_A_SCOPE,
+      })
+    } finally {
+      releaseRename()
+      await deletion.catch(() => undefined)
+    }
+  })
+
   it('persists a confirmed deletion across a new store instance', async () => {
     await store.createChat('agent-1', 'deleted-session')
     await store.createChat('agent-1', 'kept-session')
@@ -3117,5 +3439,56 @@ describe('createChat after a catalog page reported the session', () => {
     await store.createChat('agent-1', 'remote')
 
     expect(rememberedTitles().get('agent-1')?.has('remote')).toBe(false)
+  })
+})
+
+describe('chat:deletionStatus IPC authority', () => {
+  it('requires a trusted sender and the exact current authority scope', async () => {
+    const binding = await import('../chatStoreBinding.js')
+    binding.__setChatStoreBaseDirForTests(tempDir)
+    deletionAuthority = { authorityScope: TEAM_A_SCOPE, sessionGeneration: 1 }
+
+    try {
+      await binding.bindChatStoreForUser('user-a', 'env-a', { teamId: 'team-a' })
+      const boundStore = binding.requireChatStore()
+      const readStatus = vi.spyOn(boundStore, 'getChatDeletionStatus')
+      const trusted = { senderFrame: { url: 'file:///app/index.html' } }
+      const payload = {
+        agentRef: 'agent-1',
+        chatId: 'chat-1',
+        authorityScope: TEAM_A_SCOPE,
+      }
+
+      await expect(invokeIpc('chat:deletionStatus', trusted, payload)).resolves.toEqual({
+        status: 'not-deleted',
+        cleanupPending: false,
+      })
+      expect(readStatus).toHaveBeenCalledWith('agent-1', 'chat-1', TEAM_A_SCOPE)
+
+      await expect(
+        invokeIpc('chat:deletionStatus', trusted, {
+          ...payload,
+          authorityScope: TEAM_B_SCOPE,
+        })
+      ).rejects.toThrow('Chat deletion status authority changed')
+      await expect(
+        invokeIpc('chat:deletionStatus', trusted, { ...payload, authorityScope: null })
+      ).rejects.toThrow('Invalid chat deletion authority scope')
+      await expect(
+        invokeIpc('chat:deletionStatus', trusted, { ...payload, chatId: '   ' })
+      ).rejects.toThrow('agentRef and chatId are required')
+      await expect(
+        invokeIpc(
+          'chat:deletionStatus',
+          { senderFrame: { url: 'https://untrusted.example/' } },
+          payload
+        )
+      ).rejects.toThrow('Untrusted IPC sender')
+
+      expect(readStatus).toHaveBeenCalledTimes(1)
+    } finally {
+      binding.unbindChatStore()
+      binding.__setChatStoreBaseDirForTests(null)
+    }
   })
 })

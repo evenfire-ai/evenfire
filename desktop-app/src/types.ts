@@ -1057,6 +1057,13 @@ export interface ChatDeleteResult {
   cleanupPending: boolean
 }
 
+export type ChatDeletionStatus = 'deleted' | 'not-deleted' | 'unknown'
+
+export interface ChatDeletionResolution {
+  status: ChatDeletionStatus
+  cleanupPending: boolean
+}
+
 /** Server-reported session lifecycle (D.1). `idle` once no task is in flight. */
 export type SessionLifecycleState = 'idle' | 'processing' | 'awaiting_approval'
 

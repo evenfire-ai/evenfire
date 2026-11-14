@@ -344,6 +344,8 @@ export function FilesPage({
   pendingGfsDeepLinkOwnerTabId,
   isPendingGfsDeepLinkCurrent,
   onExplicitNavigationIntent,
+  navigationIntentSequence: appNavigationIntentSequence,
+  isNavigationIntentCurrent,
   onPendingGfsDeepLinkOutcome,
   remoteGfsChangeEpoch,
   onLocationChange,
@@ -484,7 +486,7 @@ export function FilesPage({
   const seedPendingRef = useRef(false)
   const beginExplicitFilesNavigation = useCallback(() => {
     seedPendingRef.current = false
-    onExplicitNavigationIntent?.()
+    return onExplicitNavigationIntent?.()
   }, [onExplicitNavigationIntent])
   useEffect(() => {
     pageActiveRef.current = true
@@ -1080,11 +1082,16 @@ export function FilesPage({
   // "not previewable" so the caller downloads instead of silently doing nothing.
   const openFilePreview = (
     resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name' | 'version'>,
-    openPreview = onOpenPreview
+    openPreview = onOpenPreview,
+    navigationIntentSequence?: number
   ): boolean => {
     const preview = resolveGfsPreview(resource)
     if (!preview || !openPreview) return false
-    return openPreview(preview) !== false
+    return (
+      (navigationIntentSequence === undefined
+        ? openPreview(preview)
+        : openPreview(preview, navigationIntentSequence)) !== false
+    )
   }
 
   useEffect(() => {
@@ -1634,10 +1641,27 @@ export function FilesPage({
     openPendingPreview?: (
       preview: GfsPreviewResource,
       returnLocation: { gfsUri: string | null; name: string | null }
-    ) => boolean
+    ) => boolean,
+    openOptions: {
+      preserveSeedPending?: boolean
+      startNavigationIntent?: boolean
+      navigationIntentSequence?: number
+    } = {}
   ) => {
     const returnCrumbs = [...crumbs]
-    const shouldContinue = () => pageActiveRef.current && (isCurrent?.() ?? true)
+    const navigationIntentSequence = openPendingPreview
+      ? undefined
+      : openOptions.startNavigationIntent === false
+        ? openOptions.navigationIntentSequence
+        : openOptions.preserveSeedPending
+          ? onExplicitNavigationIntent?.()
+          : beginExplicitFilesNavigation()
+    const shouldContinue = () =>
+      pageActiveRef.current &&
+      (isCurrent?.() ?? true) &&
+      (navigationIntentSequence === undefined ||
+        !isNavigationIntentCurrent ||
+        isNavigationIntentCurrent(navigationIntentSequence))
     const opened =
       onFailure || isCurrent
         ? await ctrl.openUri(uri, { onFailure, shouldContinue })
@@ -1663,7 +1687,11 @@ export function FilesPage({
         onOpened?.()
         return true
       }
-      const previewOpened = openFilePreview(opened)
+      const previewOpened = openFilePreview(
+        opened,
+        onOpenPreview,
+        navigationIntentSequence ?? undefined
+      )
       if (!shouldContinue()) return false
       ctrl.restoreCrumbs(returnCrumbs)
       if (!previewOpened) {
@@ -1686,7 +1714,11 @@ export function FilesPage({
     // suppresses the pre-open location the same way the initial mount does.
     seedPendingRef.current = true
     onPendingGfsUriHandled?.()
-    void handleOpenGfsLink(pendingGfsUri)
+    void handleOpenGfsLink(pendingGfsUri, undefined, undefined, undefined, undefined, {
+      preserveSeedPending: true,
+      startNavigationIntent: false,
+      navigationIntentSequence: appNavigationIntentSequence,
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGfsUri])
 
@@ -1763,7 +1795,8 @@ export function FilesPage({
       isCurrent,
       onOpenPendingGfsPreview
         ? (preview, returnLocation) => onOpenPendingGfsPreview(link.id, preview, returnLocation)
-        : undefined
+        : undefined,
+      { preserveSeedPending: true, startNavigationIntent: false }
     ).catch(error => reportFailure({ kind: 'error', error }))
 
     return () => {
@@ -3054,7 +3087,14 @@ export function FilesPage({
           share: () => openManageCurrent(),
           preview:
             currentIsFile && currentPreviewAvailable
-              ? () => void openFilePreview(current)
+              ? () => {
+                  const navigationIntentSequence = beginExplicitFilesNavigation()
+                  void openFilePreview(
+                    current,
+                    onOpenPreview,
+                    navigationIntentSequence ?? undefined
+                  )
+                }
               : undefined,
           download: currentIsFile
             ? () => void handleDownload(current.gfsUri, current.name)
@@ -3095,13 +3135,13 @@ export function FilesPage({
       pushToast?.(`You do not have read access to ${resource.name || resource.drive}`, 'error')
       return
     }
-    beginExplicitFilesNavigation()
+    const navigationIntentSequence = beginExplicitFilesNavigation()
     if (resource.kind === 'directory') {
       if (currentIsFolder) ctrl.openChild(resource)
       else ctrl.openResource(resource)
       return
     }
-    if (openFilePreview(resource)) return
+    if (openFilePreview(resource, onOpenPreview, navigationIntentSequence ?? undefined)) return
     void handleDownload(resource.gfsUri, resource.name)
   }
 
@@ -3134,7 +3174,12 @@ export function FilesPage({
           move: () => openMoveTarget(resource),
           share: () => openManage(resource),
           delete: () => openDeleteTarget(resource),
-          preview: canPreview ? () => void openFilePreview(resource) : undefined,
+          preview: canPreview
+            ? () => {
+                const navigationIntentSequence = beginExplicitFilesNavigation()
+                void openFilePreview(resource, onOpenPreview, navigationIntentSequence ?? undefined)
+              }
+            : undefined,
           download: canDownload
             ? () => void handleDownload(resource.gfsUri, resource.name)
             : undefined,

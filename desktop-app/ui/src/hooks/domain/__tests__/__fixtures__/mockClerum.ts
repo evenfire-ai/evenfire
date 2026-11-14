@@ -2,7 +2,12 @@ import { type Mock, inject, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { ChatStore } from '../../../../../../src/chatStore'
-import type { ChatDeleteFence, ChatIndex, ChatMessage } from '../../../../../../src/types'
+import type {
+  ChatAuthorityScope,
+  ChatDeleteFence,
+  ChatIndex,
+  ChatMessage,
+} from '../../../../../../src/types'
 import type {} from './mockClerumStoreRoot'
 
 /**
@@ -38,6 +43,7 @@ interface ChatMock {
   getBindingGeneration: Fn
   captureDeleteFence: Fn
   delete: Fn
+  deletionStatus: Fn
   loadMessages: Fn
   appendMessages: Fn
   upsertMessages: Fn
@@ -81,6 +87,8 @@ export interface MockClerum {
   readIndex: (agentRef: string) => Promise<ChatIndex>
   /** Persist selection through the same producer used by chat:setLastActive. */
   persistLastActive: (agentRef: string, chatId: string) => Promise<void>
+  /** Mirror the main-process ChatStore authority binding when the test App switches teams. */
+  setChatStoreAuthorityScope: (scope: ChatAuthorityScope) => void
 }
 
 export function installMockClerum(): MockClerum {
@@ -112,6 +120,12 @@ export function installMockClerum(): MockClerum {
       store.setAuthorityScope(fence.authorityScope)
       return store.deleteChat(agentRef, chatId, fence.authorityScope)
     }),
+    deletionStatus: vi.fn(
+      (agentRef: string, chatId: string, authorityScope: ChatAuthorityScope) => {
+        store.setAuthorityScope(authorityScope)
+        return store.getChatDeletionStatus(agentRef, chatId, authorityScope)
+      }
+    ),
     loadMessages: vi.fn((agentRef: string, chatId: string, limit?: number, offset?: number) =>
       store.loadMessages(agentRef, chatId, limit, offset)
     ),
@@ -185,6 +199,7 @@ export function installMockClerum(): MockClerum {
     readIndex: (agentRef: string) => store.getIndex(agentRef),
     persistLastActive: (agentRef: string, chatId: string) =>
       store.setLastActiveChatId(agentRef, chatId),
+    setChatStoreAuthorityScope: (scope: ChatAuthorityScope) => store.setAuthorityScope(scope),
   }
 
   Object.defineProperty(window, 'clerum', {
