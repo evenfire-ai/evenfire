@@ -29,6 +29,7 @@ const resolve4Mock = vi.mocked(dns.resolve4) as unknown as Mock
 vi.mock('./config', () => ({
   config: {
     namespace: 'mcp-server',
+    k8sRequestTimeoutMs: 30_000,
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
@@ -445,7 +446,9 @@ describe('#513: a non-DNS exception inside the resolve block is not a DNS condit
     expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'ext-egress-classify-mcp-a.example.com-443' })
     )
-    expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+    expect(
+      mockApi.deleteNamespacedNetworkPolicy.mock.calls.map(([params]) => params)
+    ).not.toContainEqual(
       expect.objectContaining({ name: 'ext-egress-classify-mcp-b.example.com-443' })
     )
   })
