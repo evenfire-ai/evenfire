@@ -22,6 +22,7 @@ export type McpServerCondition = {
 }
 
 export type McpServerStatus = {
+  appliedCredentialsRevision?: string
   conditions?: McpServerCondition[]
   resolvedEgressIPs?: unknown
 }

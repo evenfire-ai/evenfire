@@ -42,6 +42,9 @@ const NON_SECRET_REFERENCE_PATHS = new Set([
   'llmhook.yaml:spec.target.image.ref',
   'mcpserver.yaml:spec.auth.secretKey',
   'mcpserver.yaml:spec.envSecret.keys[].secretKey',
+  // Content hash of the Secret data HCC last applied, recorded by HCC for its
+  // own restart comparison. No reference is followed from it.
+  'mcpserver.yaml:status.appliedCredentialsRevision',
   'workflowrecipe.yaml:spec.agent.soulRef',
   'workflowrecipe.yaml:spec.agent.soulRef.storageRef',
   'workflowrecipe.yaml:spec.contextRef',
