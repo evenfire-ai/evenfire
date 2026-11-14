@@ -62,7 +62,9 @@ export function serializeOutputForStatus(value: unknown): string {
  * - an object that contains itself is written as "[Circular]" where it repeats;
  * - an output whose JSON form is a string (a Date, a `toJSON` returning a
  *   string) is that string, which is what WRC receives for it;
- * - an output with no JSON form (a function, a symbol) is `String(output)`.
+ * - an output with no JSON form is `String(output)`: undefined, a function, a
+ *   symbol, or an object whose `toJSON` returns one of those (for a plain
+ *   object that text is "[object Object]").
  * Throws when JSON cannot serialize the output (a BigInt, a throwing `toJSON`).
  */
 function serializeOutputForReport(output: unknown): string {
