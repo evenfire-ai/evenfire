@@ -55,6 +55,7 @@ let handoffTeamsFileConsentToChannelReader: ReturnType<typeof vi.fn>
 let resolveTeamsTarget: ReturnType<typeof vi.fn>
 let sendSlackTargetMessage: ReturnType<typeof vi.fn>
 let submitMcpHostDecision: ReturnType<typeof vi.fn>
+let submitMcpHostEnrollment: ReturnType<typeof vi.fn>
 let updateSlackTargetMessage: ReturnType<typeof vi.fn>
 let updateTeamsTargetMessage: ReturnType<typeof vi.fn>
 let verifySlackTargetSignature: ReturnType<typeof vi.fn>
@@ -123,7 +124,7 @@ async function waitForMockCall(mock: ReturnType<typeof vi.fn>, count = 1): Promi
 describe('workflow approval request reader server', () => {
   beforeAll(async () => {
     ;({ createServer } = await import('../src/server.js'))
-    ;({ submitMcpHostDecision } = await import('../src/mcpHostClient.js'))
+    ;({ submitMcpHostDecision, submitMcpHostEnrollment } = await import('../src/mcpHostClient.js'))
     ;({
       handoffSlackMessageToChannelReader,
       handoffTeamsFileConsentToChannelReader,
@@ -1792,6 +1793,43 @@ describe('workflow approval request reader server', () => {
       await vi.advanceTimersByTimeAsync(60_000)
       await settle()
       expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+    })
+
+    it('answers a synchronous enrollment with 429 and Retry-After and does not retry it', async () => {
+      vi.mocked(submitMcpHostEnrollment).mockResolvedValueOnce(admissionLimited(9))
+      const server = createServer({ ...baseConfig, telegramWebhookSecret: 'telegram-secret' })
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+      const { port } = server.address() as AddressInfo
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/webhooks/telegram`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-telegram-bot-api-secret-token': 'telegram-secret',
+          },
+          body: JSON.stringify({
+            message: {
+              text: '/start nonce_1234567890123456',
+              from: { id: 123 },
+              chat: { id: 456 },
+            },
+          }),
+        })
+
+        expect(response.status).toBe(429)
+        expect(response.headers.get('retry-after')).toBe('9')
+        expect(await response.json()).toEqual({
+          ok: false,
+          error: 'runtime_service_admission_limited',
+        })
+      } finally {
+        await new Promise<void>(resolve => server.close(() => resolve()))
+      }
+      expect(submitMcpHostEnrollment).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(60_000)
+      await settle()
+      expect(submitMcpHostEnrollment).toHaveBeenCalledOnce()
+      expect(decisionAdmissionRetries.size).toBe(0)
     })
 
     it('reports a 429 without a usable wait with the generic text and no retry', async () => {
