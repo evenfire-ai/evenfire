@@ -695,6 +695,7 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       hasSignal: (signal: string) => signal === 'cancel' && cancelRequested,
     }
     const snippetRunner = {
+      healthCheck: async () => ({ status: 'healthy' as const }),
       execute: async ({ stepId }: { stepId: string }) => {
         if (stepId === 'effect-one') {
           effects.first += 1
