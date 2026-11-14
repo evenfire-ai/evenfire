@@ -10,6 +10,7 @@ import {
   resolveImageCapabilitiesMode,
 } from './helpers/imageCapabilityEvidence'
 import {
+  desktopUserKey,
   findUserFilesWithMarker,
   hostPathExists,
   latestUserMemoryWrite,
@@ -133,7 +134,10 @@ function sha256Utf8(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex')
 }
 
-/** The single user folder that holds `marker`, found by content, never computed. */
+/**
+ * The single user folder that holds `marker`, found by content. Journey 1
+ * compares its key with the key expected for the signed-in account.
+ */
 function onlyUserFileWith(profile: string, marker: string): { path: string; userKey: string } {
   const files = findUserFilesWithMarker(profile, marker)
   expect(files, `exactly one file under users/ holds ${marker}`).toHaveLength(1)
@@ -160,9 +164,14 @@ test.describe('memory-notes fixture', () => {
   const checklistNonce = `memnonce${randomBytes(6).toString('hex')}`
   /** The user folder journey 1 found; journeys 2 and 3 must use the same one. */
   let userKey: string | undefined
+  /** The key the Host derives for the signed-in account (control-plane id). */
+  let expectedUserKey!: string
 
   test.beforeAll(async ({}, testInfo) => {
     env = requireImageCapabilitiesFixtureEnv()
+    const desktopUserId = process.env.E2E_DESKTOP_USER_ID ?? ''
+    expect(desktopUserId, 'E2E_DESKTOP_USER_ID (set by the lane runner)').not.toBe('')
+    expectedUserKey = desktopUserKey(desktopUserId)
     await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', env.externalRestApiBaseUrl)
     await assertAllowedTarget('RPC_PROXY_BASE_URL', env.rpcProxyBaseUrl)
     // One run token per lane run, so a reused profile's earlier notes never
@@ -210,6 +219,7 @@ test.describe('memory-notes fixture', () => {
       const found = onlyUserFileWith(env.profile, deployNonce)
       expect(found.path).toBe(userFilePath(found.userKey, 'MEMORY.md'))
       expect(readHostFile(env.profile, found.path)).toContain(text)
+      expect(found.userKey, 'the folder belongs to the signed-in account').toBe(expectedUserKey)
       userKey = found.userKey
     })
   })

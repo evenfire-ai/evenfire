@@ -7,6 +7,7 @@ import {
   appendedAttempts,
   parseEvidenceSnapshot,
 } from './e2e-playwright/helpers/imageCapabilityEvidence.js'
+import { desktopUserKey } from './e2e-playwright/helpers/memoryNotesPodEvidence.js'
 
 // The fixture is untyped ESM outside this package; only its reason list is read,
 // through a typed dynamic import so the compiler does not resolve the module.
@@ -256,5 +257,16 @@ describe('rejection reason parity', () => {
     // Witness: the set is not empty, so equality is not two empty lists.
     expect((declared as readonly string[]).length).toBeGreaterThan(0)
     expect(FIXTURE_RESPONSE_KIND.rejected).toBe('rejected')
+  })
+})
+
+describe('desktopUserKey', () => {
+  it("is sha256('rpc:' + account id) cut to 16 hex characters", () => {
+    // Computed outside the code under test: printf 'rpc:<id>' | shasum -a 256 | cut -c1-16
+    expect(desktopUserKey('11111111-2222-4333-8444-555555555555')).toBe('da73ae30afdaad84')
+  })
+
+  it('throws on an empty account id', () => {
+    expect(() => desktopUserKey('')).toThrow(/empty Desktop account id/)
   })
 })

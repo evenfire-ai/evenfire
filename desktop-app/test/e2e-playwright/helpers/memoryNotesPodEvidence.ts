@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 
 /**
  * Read-only reads of the lane's Host pod for the memory-notes journey.
@@ -100,8 +101,21 @@ export function userFilePath(userKey: string, relativePath: string): string {
 }
 
 /**
+ * The user key the Host derives for a Desktop account: the Desktop message
+ * arrives on channel `rpc` with the account id as its sender, and the key is
+ * sha256('rpc:' + id) cut to 16 hex characters. Restated here on purpose, not
+ * imported from mcp-host: a change to the Host's derivation fails the lane and
+ * has to be made here too.
+ */
+export function desktopUserKey(userId: string): string {
+  if (userId.length === 0) throw new Error('[memory-notes] empty Desktop account id')
+  return createHash('sha256').update(`rpc:${userId}`, 'utf8').digest('hex').slice(0, 16)
+}
+
+/**
  * Files under `users/` whose content holds `marker` (fixed-string grep). The
- * spec never computes a user key: it finds the folder by the run marker.
+ * spec finds the folder by the run marker, then compares the key it found with
+ * the key expected for the signed-in account.
  */
 export function findUserFilesWithMarker(profile: string, marker: string): string[] {
   const result = execInHost(profile, [

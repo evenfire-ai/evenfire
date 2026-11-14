@@ -8,9 +8,12 @@ import { fileURLToPath } from 'node:url'
 import {
   baseImage,
   controlApiFetch,
+  desktopLoginEmail,
+  desktopUserIdFromAdminUsers,
   fixtureImage,
   fixturePassLine,
   installSignalRestore,
+  laneEnvironment,
   modelInputs,
   playwrightLaneConfig,
   playwrightVerdict,
@@ -496,4 +499,92 @@ test('controlApiFetch keeps every caller header whatever form it is passed in', 
   } finally {
     await new Promise(resolve => server.close(resolve))
   }
+})
+
+const loginEmail = 'admin@evenfire.local'
+const accountId = '11111111-2222-4333-8444-555555555555'
+
+test('the Desktop account id is the one admin user whose email is exactly the login email', () => {
+  assert.equal(desktopLoginEmail, loginEmail)
+  assert.equal(
+    desktopUserIdFromAdminUsers({ items: [{ id: accountId, email: loginEmail }] }, loginEmail),
+    accountId
+  )
+  // The search also matches substrings; only the exact email counts.
+  assert.equal(
+    desktopUserIdFromAdminUsers(
+      {
+        items: [
+          { id: 'other-1', email: `x${loginEmail}` },
+          { id: accountId, email: loginEmail },
+          { id: 'other-2', email: `${loginEmail}.backup` },
+        ],
+      },
+      loginEmail
+    ),
+    accountId
+  )
+  assert.throws(() => desktopUserIdFromAdminUsers({ items: [] }, loginEmail), /found 0/)
+  assert.throws(
+    () =>
+      desktopUserIdFromAdminUsers({ items: [{ id: 'x', email: `x${loginEmail}` }] }, loginEmail),
+    /found 0/
+  )
+  assert.throws(
+    () =>
+      desktopUserIdFromAdminUsers(
+        {
+          items: [
+            { id: 'a', email: loginEmail },
+            { id: 'b', email: loginEmail },
+          ],
+        },
+        loginEmail
+      ),
+    /found 2/
+  )
+  assert.throws(
+    () => desktopUserIdFromAdminUsers({ items: [{ email: loginEmail }] }, loginEmail),
+    /has no id/
+  )
+})
+
+test('only the memory-notes lane environment carries the signed-in account id', () => {
+  const inputs = {
+    base: { PATH: '/usr/bin', E2E_DESKTOP_USER_ID: 'stale' },
+    runId: 'image-capabilities-0123456789ab',
+    evidence: '/evidence',
+    profile,
+    urls: { externalRestApi: 'http://127.0.0.1:1', rpcProxy: 'http://127.0.0.1:2' },
+    models: modelInputs('image-capabilities-0123456789ab'),
+    adminPassword: 'secret',
+  }
+  // The object main() built inline before the extraction, from the same inputs.
+  const before = {
+    ...inputs.base,
+    NODE_ENV: 'test',
+    IMAGE_CAPABILITIES_RUN_ID: 'image-capabilities-0123456789ab',
+    IMAGE_CAPABILITIES_RUN_DIR: '/evidence',
+    E2E_HOST_REF: 'chatllm',
+    E2E_DEV_LOGIN_EMAIL: loginEmail,
+    E2E_DESKTOP_PASSWORD: 'secret',
+    E2E_K8S_CONTEXT: profile,
+    EXTERNAL_REST_API_BASE_URL: 'http://127.0.0.1:1',
+    RPC_PROXY_BASE_URL: 'http://127.0.0.1:2',
+    QA_RECORDER_CONFIRM_CHAT: '1',
+    QA_RECORDER_IMAGE_MODEL_SUPPORTED: 'glm-5.3-flash',
+    QA_RECORDER_IMAGE_MODEL_UNSUPPORTED: 'glm-5.3',
+    QA_RECORDER_IMAGE_MODEL_UNKNOWN: inputs.models[2].model,
+    QA_RECORDER_ROOT: '/evidence',
+  }
+  for (const lane of ['image', 'document-upload', 'attachment-gfs-save']) {
+    assert.deepEqual(laneEnvironment({ ...inputs, lane }), before, lane)
+  }
+  const memory = laneEnvironment({ ...inputs, lane: 'memory-notes', desktopUserId: accountId })
+  // The id given wins over any value already in the base environment.
+  assert.deepEqual(memory, { ...before, E2E_DESKTOP_USER_ID: accountId })
+  assert.throws(
+    () => laneEnvironment({ ...inputs, lane: 'memory-notes' }),
+    /needs the signed-in account id/
+  )
 })
