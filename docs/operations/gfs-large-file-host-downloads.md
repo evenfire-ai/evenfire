@@ -481,7 +481,12 @@ reads the room the bounds leave; a file larger than the room is refused before
 anything is written, so an earlier file of that name stays. Where the turn has
 `clerum__kept_files_delete`, the refusal offers the user's own kept files,
 oldest first, to delete after approval; otherwise it says why it cannot make
-room. While the download store is closed or not initialized, no file is
+room. The user approves the delete on a card that shows each file's name, size
+and creation date. In the usual progress flow Telegram cuts the card at 4096
+characters; when that flow is unavailable, Telegram sends it as several
+messages with the buttons on the first. Slack may not show a card above its
+block text limit. Desktop shows the whole list of any call the delete accepts.
+While the download store is closed or not initialized, no file is
 generated. When the volume cannot be measured, the Host reads it once more and
 then generates without this check (the folder quota and the free-space floor
 still apply); the next sweep counts the file. The check is soft: two
