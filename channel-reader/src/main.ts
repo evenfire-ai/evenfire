@@ -194,6 +194,31 @@ function parseToolApprovalAction(content: string): {
   }
 }
 
+/**
+ * Text as Slack mrkdwn shows it literally: `&`, `<` and `>` are Slack's
+ * control characters (mentions such as `<!channel>`, links, entities), so
+ * they become `&amp;`, `&lt;` and `&gt;`, `&` first so no entity is escaped
+ * twice.
+ */
+function escapeSlackMarkup(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * The message content and the options of a tool approval for one channel.
+ * The notification carries tool parameters (file names, commands) as written,
+ * so for Slack both the message text and the section block are escaped; the
+ * other channels get it unchanged.
+ */
+function toolApprovalDelivery(
+  channelType: Message['channelType'],
+  notification: string,
+  actionToken: string
+): { content: string; options: SendMessageOptions | undefined } {
+  const content = channelType === 'slack' ? escapeSlackMarkup(notification) : notification
+  return { content, options: toolApprovalMessageOptions(channelType, content, actionToken) }
+}
+
 function toolApprovalMessageOptions(
   channelType: Message['channelType'],
   notification: string,
@@ -1559,12 +1584,8 @@ export class ChannelReader {
               createdAt: new Date(),
               actionToken,
             })
-            await this.sendReply(
-              msg,
-              notification,
-              undefined,
-              toolApprovalMessageOptions(msg.channelType, notification, actionToken)
-            )
+            const delivery = toolApprovalDelivery(msg.channelType, notification, actionToken)
+            await this.sendReply(msg, delivery.content, undefined, delivery.options)
           } else if (response.success && response.response) {
             console.log('[Main] mcp-host response:')
             console.log(`[Main]   Model: ${response.model}`)
@@ -1600,12 +1621,8 @@ export class ChannelReader {
             createdAt: new Date(),
             actionToken,
           })
-          await this.sendReply(
-            msg,
-            notification,
-            undefined,
-            toolApprovalMessageOptions(msg.channelType, notification, actionToken)
-          )
+          const delivery = toolApprovalDelivery(msg.channelType, notification, actionToken)
+          await this.sendReply(msg, delivery.content, undefined, delivery.options)
         } else if (response.success && response.response) {
           console.log('[Main] mcp-host response:')
           console.log(`[Main]   Model: ${response.model}`)
@@ -1867,12 +1884,8 @@ export class ChannelReader {
           createdAt: new Date(),
           actionToken,
         })
-        await this.sendReply(
-          msg,
-          notification,
-          undefined,
-          toolApprovalMessageOptions(msg.channelType, notification, actionToken)
-        )
+        const delivery = toolApprovalDelivery(msg.channelType, notification, actionToken)
+        await this.sendReply(msg, delivery.content, undefined, delivery.options)
       } else if (response.success && response.response) {
         await this.sendReply(msg, response.response, response.attachments)
       } else if (response.error) {
@@ -1975,11 +1988,8 @@ export class ChannelReader {
             return editStatus(content)
           },
         })
-        await editStatus(
-          params.notification,
-          false,
-          toolApprovalMessageOptions(msg.channelType, params.notification, actionToken)
-        )
+        const delivery = toolApprovalDelivery(msg.channelType, params.notification, actionToken)
+        await editStatus(delivery.content, false, delivery.options)
       }
 
       const deliverFinalResult = async (): Promise<boolean> => {

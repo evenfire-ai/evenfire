@@ -712,3 +712,154 @@ describe('async progress flow — SSE-driven approval', () => {
     expect(sentReplies.map(r => r.content)).toContain('Denied. The tool will not be executed.')
   })
 })
+
+describe('tool approval text and Slack markup', () => {
+  // A delete card name that is a Slack mention, and a shell command with the
+  // characters Slack mrkdwn reads as markup.
+  const NOTIFICATION = [
+    'Delete these files permanently:',
+    'upload: "<!channel> & <@U999> <http://a.example|b>.md" — 1 B (1 bytes), created 2026-11-10 09:12:45 UTC',
+    'Tool `shell_exec` requires approval. Parameters: {"command":"a < b && c > d"}',
+  ].join('\n')
+  const ESCAPED = [
+    'Delete these files permanently:',
+    'upload: "&lt;!channel&gt; &amp; &lt;@U999&gt; &lt;http://a.example|b&gt;.md" — 1 B (1 bytes), created 2026-11-10 09:12:45 UTC',
+    'Tool `shell_exec` requires approval. Parameters: {"command":"a &lt; b &amp;&amp; c &gt; d"}',
+  ].join('\n')
+
+  function approvalRpcClient(sendMessage: () => Promise<unknown>, taskId: string) {
+    return {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(sendMessage),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId,
+          requestId: `approval-${taskId}`,
+          userId: 'U123',
+          notification: NOTIFICATION,
+        },
+      })),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+  }
+
+  function adapterFor(channelType: 'slack' | 'telegram') {
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
+    const sendMessage = vi.fn<ChannelAdapter['sendMessage']>(async () => `${channelType}-status-1`)
+    const adapter: ChannelAdapter = {
+      channelType,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage,
+      editMessage,
+    }
+    return { adapter, editMessage, sendMessage }
+  }
+
+  async function suspendOnProgress(
+    channelType: 'slack' | 'telegram',
+    taskId: string
+  ): Promise<ReturnType<typeof adapterFor>> {
+    streamCalls.length = 0
+    const parts = adapterFor(channelType)
+    const reader = new ChannelReader({
+      rpcClient: approvalRpcClient(
+        async () => ({ success: true, status: 'pending' as const, taskId }),
+        taskId
+      ),
+      adapters: new Map([[channelType, parts.adapter]]),
+      channels: channelType === 'telegram' ? [makeChannel()] : [],
+      sleep: async () => undefined,
+    })
+    const source =
+      channelType === 'slack' ? makeSlackMessage('<@U999> clean up') : makeMessage('clean up')
+    await reader.handleMessages([source])
+    expect(streamCalls).toHaveLength(1)
+    streamCalls[0].fireSuspended({
+      taskId,
+      requestId: `approval-${taskId}`,
+      toolName: 'clerum__kept_files_delete',
+      displayName: 'Delete kept files',
+      reason: 'approval_required',
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    streamCalls[0].fireTerminal({ taskId, status: 'cancelled' })
+    return parts
+  }
+
+  it('escapes Slack markup in the edited approval text and in its section block', async () => {
+    const { editMessage } = await suspendOnProgress('slack', 'task-slack-escape-1')
+    const approvalEdits = editMessage.mock.calls.filter(call => call[3]?.slackBlocks)
+    expect(approvalEdits).toHaveLength(1)
+    const [, , content, options] = approvalEdits[0]!
+    expect(content).toBe(ESCAPED)
+    const blocks = options!.slackBlocks!
+    expect(blocks[0]).toEqual({ type: 'section', text: { type: 'mrkdwn', text: ESCAPED } })
+    expect(blocks[1]).toMatchObject({
+      type: 'actions',
+      block_id: expect.stringMatching(/^tool_approval_/),
+      elements: [
+        expect.objectContaining({
+          action_id: 'tool_approval_approve',
+          value: expect.stringMatching(/^tool:a:/),
+        }),
+        expect.objectContaining({
+          action_id: 'tool_approval_always',
+          value: expect.stringMatching(/^tool:l:/),
+        }),
+        expect.objectContaining({
+          action_id: 'tool_approval_deny',
+          value: expect.stringMatching(/^tool:d:/),
+        }),
+      ],
+    })
+  })
+
+  it('escapes Slack markup in an approval sent without a task id', async () => {
+    const parts = adapterFor('slack')
+    const reader = new ChannelReader({
+      rpcClient: approvalRpcClient(
+        async () => ({
+          success: true,
+          status: 'waiting_approval' as const,
+          approval: {
+            taskId: 'task-slack-sync-1',
+            requestId: 'approval-task-slack-sync-1',
+            userId: 'U123',
+            notification: NOTIFICATION,
+          },
+        }),
+        'task-slack-sync-1'
+      ),
+      adapters: new Map([['slack', parts.adapter]]),
+      channels: [],
+      sleep: async () => undefined,
+    })
+    await reader.handleMessages([makeSlackMessage('<@U999> clean up')])
+    const approvalSends = parts.sendMessage.mock.calls.filter(call => call[4]?.slackBlocks)
+    expect(approvalSends).toHaveLength(1)
+    const [, content, , , options] = approvalSends[0]!
+    expect(content).toBe(ESCAPED)
+    expect(options!.slackBlocks![0]).toEqual({
+      type: 'section',
+      text: { type: 'mrkdwn', text: ESCAPED },
+    })
+  })
+
+  it('keeps a Telegram approval as written, with no Slack blocks', async () => {
+    const { editMessage } = await suspendOnProgress('telegram', 'task-telegram-raw-1')
+    const approvalEdits = editMessage.mock.calls.filter(call => call[3]?.telegramInlineKeyboard)
+    expect(approvalEdits).toHaveLength(1)
+    const [, , content, options] = approvalEdits[0]!
+    expect(content).toBe(NOTIFICATION)
+    expect(options!.slackBlocks).toBeUndefined()
+  })
+})
