@@ -144,30 +144,9 @@ export interface ChannelReaderRuntimeSource {
   sender: string
 }
 
-const RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT = 1
 const RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX = 60
 const DIRECT_SERVICE_ADMISSION_ERROR = 'runtime_service_admission_limited'
 const TELEGRAM_RUNTIME_MESSAGE_POST_TIMEOUT_MS = 15_000
-
-export class RuntimeServiceAdmissionLimitedError extends Error {
-  constructor(readonly retryAfterSeconds: number) {
-    super(`MCP Host runtime service admission limited the request for ${retryAfterSeconds}s`)
-    this.name = 'RuntimeServiceAdmissionLimitedError'
-  }
-}
-
-function runtimeAdmissionRetryAfter(response: Response): number {
-  const value = response.headers.get('retry-after')
-  if (!value || !/^(?:0|[1-9]\d{0,2})$/.test(value)) {
-    return RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT
-  }
-  const seconds = Number(value)
-  return Number.isSafeInteger(seconds) &&
-    seconds >= 1 &&
-    seconds <= RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX
-    ? seconds
-    : RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT
-}
 
 function runtimeAdmissionRetryAfterFromHeader(response: Response): number | undefined {
   const value = response.headers.get('retry-after')
@@ -202,8 +181,6 @@ async function directServiceAdmissionRetryAfter(response: Response): Promise<num
  */
 export class RPCClient {
   private readonly baseUrl: string
-  private notificationAdmissionRetryUntil = 0
-  private cronResultsAdmissionRetryUntil = 0
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl
@@ -602,12 +579,6 @@ export class RPCClient {
     hostRef: string
     limit: number
   }): Promise<NotificationDelivery[]> {
-    if (Date.now() < this.notificationAdmissionRetryUntil) {
-      throw new RuntimeServiceAdmissionLimitedError(
-        Math.max(1, Math.ceil((this.notificationAdmissionRetryUntil - Date.now()) / 1000))
-      )
-    }
-
     const response = await fetch(
       `${this.baseUrl}/v1/runtime/workflow-approval-notifications/claim`,
       {
@@ -617,11 +588,6 @@ export class RPCClient {
         body: JSON.stringify(params),
       }
     )
-    if (response.status === 429) {
-      const retryAfterSeconds = runtimeAdmissionRetryAfter(response)
-      this.notificationAdmissionRetryUntil = Date.now() + retryAfterSeconds * 1000
-      throw new RuntimeServiceAdmissionLimitedError(retryAfterSeconds)
-    }
     const body = (await response.json().catch(() => ({}))) as FetchDeliveriesResponse & {
       error?: string
     }
@@ -866,9 +832,6 @@ export class RPCClient {
         headers: this.runtimeHeaders(source),
       }
     )
-    if (response.status === 429) {
-      throw new RuntimeServiceAdmissionLimitedError(runtimeAdmissionRetryAfter(response))
-    }
     if (!response.ok) {
       throw new Error(`Failed to get task result: ${response.status}`)
     }
@@ -890,21 +853,11 @@ export class RPCClient {
       status?: 'completed'
     }>
   > {
-    if (Date.now() < this.cronResultsAdmissionRetryUntil) {
-      throw new RuntimeServiceAdmissionLimitedError(
-        Math.max(1, Math.ceil((this.cronResultsAdmissionRetryUntil - Date.now()) / 1000))
-      )
-    }
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/cron/results`, {
         method: 'GET',
         headers: this.runtimeHeaders(),
       })
-      if (response.status === 429) {
-        const retryAfterSeconds = runtimeAdmissionRetryAfter(response)
-        this.cronResultsAdmissionRetryUntil = Date.now() + retryAfterSeconds * 1000
-        throw new RuntimeServiceAdmissionLimitedError(retryAfterSeconds)
-      }
       if (!response.ok) return []
       const data = (await response.json()) as {
         results: Array<{
@@ -919,8 +872,7 @@ export class RPCClient {
         }>
       }
       return data.results || []
-    } catch (error) {
-      if (error instanceof RuntimeServiceAdmissionLimitedError) throw error
+    } catch {
       // Silent — cron results are best-effort
       return []
     }
@@ -930,19 +882,10 @@ export class RPCClient {
    * Acknowledge delivery of a cron result.
    */
   async acknowledgeCronResult(taskId: string, source: ChannelReaderRuntimeSource): Promise<void> {
-    if (Date.now() < this.cronResultsAdmissionRetryUntil) {
-      throw new RuntimeServiceAdmissionLimitedError(
-        Math.max(1, Math.ceil((this.cronResultsAdmissionRetryUntil - Date.now()) / 1000))
-      )
-    }
     const response = await fetch(`${this.baseUrl}/v1/runtime/cron/results/${taskId}`, {
       method: 'DELETE',
       headers: this.runtimeHeaders(source),
     })
-    if (response.status === 429) {
-      this.cronResultsAdmissionRetryUntil = Date.now() + runtimeAdmissionRetryAfter(response) * 1000
-      throw new RuntimeServiceAdmissionLimitedError(runtimeAdmissionRetryAfter(response))
-    }
     if (!response.ok) {
       throw new Error(`Failed to acknowledge cron result: ${response.status}`)
     }

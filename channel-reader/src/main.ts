@@ -19,12 +19,7 @@ import { logTelegramRetryDisposition } from './logger'
 import type { NotificationDeliveryClient } from './notificationDeliveryClient'
 import { createProgressStream } from './progressClient'
 import { formatFinalMessage, formatProgressUpdate } from './progressFormatter'
-import {
-  type ChannelReaderRuntimeSource,
-  MessageResponse,
-  RPCClient,
-  RuntimeServiceAdmissionLimitedError,
-} from './rpcClient'
+import { type ChannelReaderRuntimeSource, MessageResponse, RPCClient } from './rpcClient'
 import {
   type PendingTelegramAdmissionRetry,
   TelegramAdmissionRetryQueue,
@@ -1610,13 +1605,14 @@ export class ChannelReader {
           await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext, pendingRetry)
         } catch (err) {
           if (msg.channelType === 'telegram') {
-            // rpcClient.sendMessage does not throw, so this catch is reached
-            // only after the Host answered the async POST: the status message
-            // send threw (the task was accepted and runs), or sendReply threw
-            // in the no-taskId branch (the Host already answered). The
-            // admission-limit answer (Host answered without accepting) returns
-            // before either. A re-submit would be a second submission, so
-            // Telegram does not fall back.
+            // rpcClient.sendMessage returns an error response for any failure
+            // of the POST itself (its try covers the fetch and the response
+            // handling), and sendReply catches its own send errors. The call
+            // that rejects here is the status message send, which runs after
+            // the Host accepted the async POST and returned a task id (the
+            // task runs). The admission-limit answer (Host answered without
+            // accepting) returns before that send. A re-submit would be a
+            // second submission, so Telegram does not fall back.
             console.error(
               `[Main] Progress flow failed after the Host answered; Telegram does not re-submit:`,
               err
@@ -2342,14 +2338,9 @@ export class ChannelReader {
 
         void (async () => {
           const deadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
-          let retryDelayMs = RESULT_POLL_FALLBACK_INTERVAL_MS
           while (!finalDelivered && Date.now() < deadline) {
-            await new Promise(resolve =>
-              setTimeout(resolve, Math.min(retryDelayMs, Math.max(0, deadline - Date.now())))
-            )
-            retryDelayMs = RESULT_POLL_FALLBACK_INTERVAL_MS
+            await new Promise(resolve => setTimeout(resolve, RESULT_POLL_FALLBACK_INTERVAL_MS))
             if (finalDelivered) return
-            if (Date.now() >= deadline) return
             try {
               const delivered = await deliverFinalResult()
               if (delivered) {
@@ -2358,12 +2349,6 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
-              if (err instanceof RuntimeServiceAdmissionLimitedError) {
-                retryDelayMs = Math.max(
-                  RESULT_POLL_FALLBACK_INTERVAL_MS,
-                  err.retryAfterSeconds * 1000
-                )
-              }
               console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
             }
           }
