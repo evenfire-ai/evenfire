@@ -743,6 +743,90 @@ describe('ipc host status stream handlers', () => {
     expect(result).toEqual({ targets: [], accounts: [] })
   })
 
+  // Every GFS channel that takes a drive: [channel, service method, payload
+  // without drive, index of the drive argument in the service call].
+  const RID = '11111111-1111-1111-1111-111111111111'
+  const GFS_DRIVE_CHANNELS: Array<[string, string, Record<string, unknown>, number]> = [
+    ['gfs:listAccessible', 'listAccessibleGfsResources', {}, 0],
+    ['gfs:listChildren', 'listGfsChildren', { resourceId: RID }, 1],
+    ['gfs:affordances', 'gfsAffordances', { resourceId: RID }, 1],
+    ['gfs:createFolder', 'createGfsFolder', { parentResourceId: RID, name: 'a' }, 2],
+    [
+      'gfs:createFile',
+      'createGfsFile',
+      { parentResourceId: RID, name: 'a.txt', encodedData: 'YQ==' },
+      3,
+    ],
+    [
+      'gfs:createFileFromPath',
+      'createGfsFileFromPath',
+      { parentResourceId: RID, name: 'a.txt', filePath: '/tmp/a.txt' },
+      3,
+    ],
+    [
+      'gfs:startFileUpload',
+      'startGfsFileUpload',
+      { parentResourceId: RID, name: 'a.txt', filePath: '/tmp/a.txt' },
+      3,
+    ],
+    ['gfs:startFileReplace', 'startGfsFileReplace', { resourceId: RID, filePath: '/tmp/a' }, 2],
+    ['gfs:getUploadSnapshot', 'getGfsUploadSnapshot', { uploadId: 'up-1' }, 1],
+    ['gfs:listUploadSessions', 'listGfsUploadSessions', {}, 0],
+    ['gfs:pauseUpload', 'pauseGfsUpload', { uploadId: 'up-1' }, 1],
+    ['gfs:resumeUpload', 'resumeGfsUpload', { uploadId: 'up-1' }, 1],
+    ['gfs:cancelUpload', 'cancelGfsUpload', { uploadId: 'up-1' }, 1],
+    ['gfs:replaceFile', 'replaceGfsFile', { resourceId: RID, encodedData: 'YQ==' }, 2],
+    ['gfs:replaceFileFromPath', 'replaceGfsFileFromPath', { resourceId: RID, filePath: '/a' }, 2],
+    ['gfs:renameResource', 'renameGfsResource', { resourceId: RID, newName: 'b' }, 2],
+    [
+      'gfs:moveResource',
+      'moveGfsResource',
+      { resourceId: RID, destinationId: RID, expectedSessionGeneration: 1 },
+      3,
+    ],
+    ['gfs:deleteResource', 'deleteGfsResource', { resourceId: RID }, 1],
+    ['gfs:grant', 'grantGfs', { resourceId: RID, subjectKeys: ['user:user-1'], bits: ['read'] }, 3],
+    ['gfs:listGrants', 'listGfsGrants', { resourceId: RID }, 1],
+    ['gfs:listShares', 'listGfsShares', { resourceId: RID }, 1],
+    ['gfs:createShare', 'createGfsShare', { resourceId: RID, subjectKeys: ['user:user-1'] }, 2],
+  ]
+
+  it('covers every GFS IPC channel that forwards a drive', () => {
+    const forwarding = [...testState.handlers.keys()].filter(channel =>
+      GFS_DRIVE_CHANNELS.some(([listed]) => listed === channel)
+    )
+    expect(GFS_DRIVE_CHANNELS).toHaveLength(22)
+    expect(forwarding).toHaveLength(22)
+  })
+
+  it.each(GFS_DRIVE_CHANNELS)(
+    '%s rejects a blank drive instead of defaulting it (R2-L8)',
+    async (channel, method, payload, driveIndex) => {
+      const mocked = service as unknown as Record<string, ReturnType<typeof vi.fn>>
+      mocked[method] ??= vi.fn()
+      mocked[method].mockReset()
+      mocked[method].mockResolvedValue({})
+      const handler = testState.handlers.get(channel)
+      expect(handler).toBeDefined()
+      const { event } = makeTrustedEvent()
+
+      for (const blank of ['', '   ']) {
+        await expect(
+          Promise.resolve(handler?.(event, { ...payload, drive: blank }))
+        ).rejects.toThrow('drive_required')
+      }
+      expect(mocked[method]).not.toHaveBeenCalled()
+
+      // Liveness witness: the same channel forwards a named drive (trimmed)
+      // and leaves an omitted drive to the service default.
+      await Promise.resolve(handler?.(event, { ...payload, drive: ' main ' }))
+      await Promise.resolve(handler?.(event, { ...payload }))
+      expect(mocked[method]).toHaveBeenCalledTimes(2)
+      expect(mocked[method].mock.calls[0][driveIndex]).toBe('main')
+      expect(mocked[method].mock.calls[1][driveIndex]).toBeUndefined()
+    }
+  )
+
   it('routes GFS grant requests through trusted IPC with sanitized input', async () => {
     service.grantGfs.mockResolvedValue(undefined)
     const { event } = makeTrustedEvent()

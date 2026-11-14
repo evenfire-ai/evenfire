@@ -164,7 +164,7 @@ describe('GfsClient.listChildren', () => {
     expect(out.items[1]?.updatedAt).toBeUndefined()
   })
 
-  it('omits the drive query when none is given and forwards an explicit empty drive', async () => {
+  it('omits the drive query when none is given and rejects an explicit blank drive', async () => {
     // `drive` is documented as optional (docs/reference/plugin-ui-sdk.md): the
     // server applies its own default, exactly as `listAccessible` already does.
     const requestJson = vi.fn(async () => ({
@@ -181,11 +181,10 @@ describe('GfsClient.listChildren', () => {
     expect(url).toBe(`https://api.example/api/v1/me/gfs/resources/${RID}/children`)
     expect(url).not.toContain('drive=')
 
-    await expect(client.listChildren(RID, 'tok', { drive: '' })).resolves.toEqual({
-      items: [CHILD],
-      nextCursor: null,
-    })
-    expect(requestJson).toHaveBeenCalledTimes(2)
+    // A blank drive is not an omitted one: it fails closed before any request
+    // instead of reaching the server's default drive (R2-L8).
+    await expect(client.listChildren(RID, 'tok', { drive: '' })).rejects.toThrow('drive_required')
+    expect(requestJson).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -782,6 +781,82 @@ describe('GfsClient resource mutations', () => {
         body: { newParentId: '22222222-2222-2222-2222-222222222222', ifMatch: 4 },
       }
     )
+  })
+})
+
+describe('GfsClient drive arguments (R2-L8)', () => {
+  const SUBJECTS = [{ type: 'user' as const, id: 'u2' }]
+  // Each call takes the drive under test; `undefined` means omitted.
+  const CALLS: Array<[string, (client: GfsClient, drive: string | undefined) => Promise<unknown>]> =
+    [
+      ['listChildren', (c, drive) => c.listChildren(RID, 'tok', { drive })],
+      ['listAccessible', (c, drive) => c.listAccessible('tok', { drive })],
+      ['affordances', (c, drive) => c.affordances(RID, 'tok', drive)],
+      [
+        'createResource',
+        (c, drive) =>
+          c.createResource({ parentResourceId: RID, drive, name: 'd', kind: 'directory' }, 'tok'),
+      ],
+      [
+        'replaceFile',
+        (c, drive) => c.replaceFile({ resourceId: RID, drive, encodedData: 'YQ==' }, 'tok'),
+      ],
+      [
+        'renameResource',
+        (c, drive) => c.renameResource({ resourceId: RID, drive, newName: 'n' }, 'tok'),
+      ],
+      [
+        'moveResource',
+        (c, drive) => c.moveResource({ resourceId: RID, drive, destinationId: RID }, 'tok'),
+      ],
+      ['deleteResource', (c, drive) => c.deleteResource({ resourceId: RID, drive }, 'tok')],
+      [
+        'grant',
+        (c, drive) =>
+          c.grant({ resourceId: RID, drive, subjects: SUBJECTS, permissions: ['read'] }, 'tok'),
+      ],
+      ['listGrants', (c, drive) => c.listGrants({ resourceId: RID, drive }, 'tok')],
+      [
+        'createShare',
+        (c, drive) =>
+          c.createShare(
+            { resourceId: RID, drive, subjects: SUBJECTS, permissions: ['read'] },
+            'tok'
+          ),
+      ],
+      ['listShares', (c, drive) => c.listShares({ resourceId: RID, drive }, 'tok')],
+    ]
+
+  function sentDrive(call: unknown[]): string | null {
+    const url = new URL(String(call[1]))
+    if (url.searchParams.has('drive')) return url.searchParams.get('drive')
+    const body = (call[2] as { body?: { drive?: string } } | undefined)?.body
+    return body?.drive ?? null
+  }
+
+  it('covers all twelve client calls that carry a drive', () => {
+    expect(CALLS).toHaveLength(12)
+  })
+
+  it.each(CALLS)('%s rejects a blank drive before any request', async (_name, call) => {
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { ...CHILD, items: [], nextCursor: null },
+      items: [],
+      held: [],
+      isOperator: false,
+    })) as GfsTransport['requestJson']
+    const client = new GfsClient(transport({ requestJson }))
+
+    for (const blank of ['', '   ']) {
+      await expect(call(client, blank)).rejects.toThrow('drive_required')
+    }
+    expect(requestJson).not.toHaveBeenCalled()
+
+    // Liveness witness: the same call sends a named drive unchanged.
+    await call(client, 'main')
+    expect(requestJson).toHaveBeenCalledTimes(1)
+    expect(sentDrive((requestJson as ReturnType<typeof vi.fn>).mock.calls[0])).toBe('main')
   })
 })
 
