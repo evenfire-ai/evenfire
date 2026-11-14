@@ -1087,6 +1087,20 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         continuation_count: 0,
       },
     ])
+
+    // A run id that is not the canonical text of a uuid is not found, without a
+    // database error, as `run_id::text = $1` answered.
+    for (const malformedRunId of ['not-a-uuid', String(result.row.run_id).toUpperCase()]) {
+      await expect(
+        resumeWorkflowRun({
+          runId: malformedRunId,
+          recipeNamespace: config.sandboxNamespace,
+          recipeName: teamOnlyRecipe,
+          authority: resumeAuthority,
+          db: databasePool,
+        })
+      ).rejects.toMatchObject({ status: 404, code: 'workflow_run_not_found' })
+    }
   })
 
   it('serializes concurrent grant revocation against the durable resume write', async () => {

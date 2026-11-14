@@ -7,7 +7,9 @@ import { config } from '../src/config.js'
 import { type DbClient, initDb } from '../src/db.js'
 import { K8sGateway } from '../src/k8s.js'
 import { createExternalRpcDelegationsRouter } from '../src/routes/external/rpcDelegations.js'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
+import { loadDatabaseCandidates } from '../src/services/access/databaseAuthorityCandidates.js'
 import {
   type LiveActionAuthorizationInput,
   type LiveAuthorizationResult,
@@ -585,6 +587,76 @@ describeRealPostgres('action access paths on live producers and real PostgreSQL'
       },
     })
     expect(run.map(path => path.selectedPath.kind)).toContain('team')
+  })
+
+  it('matches run and artifact candidates only for the canonical run id text', async () => {
+    const candidateGrants = async (type: string, logicalId: string): Promise<string[]> => {
+      const budget = AccessExecutionBudget.create('action')
+      try {
+        const result = await loadDatabaseCandidates({
+          db: databasePool,
+          budget,
+          snapshot: {
+            userId,
+            sessionContract: 'v2',
+            sessionLive: true,
+            sessionRevision: 'candidate-shapes',
+            memberships: [],
+          } as never,
+          // Built by hand: the statement must see shapes the identity
+          // validator would refuse before any read.
+          resource: {
+            environmentId,
+            type,
+            logicalId,
+            canonicalId: `${type}:${logicalId}`,
+          } as never,
+        })
+        return result.candidates.map(candidate => String(candidate.grantId))
+      } finally {
+        budget.close()
+      }
+    }
+    const missingRunId = randomUUID()
+    const rows: Array<[string, string, string[]]> = [
+      ['workflow_run', directRunId, [`workflow_runs:user:${directRunId}`]],
+      ['workflow_run', teamRunId, [`workflow_runs:team:${teamId}:${teamRunId}`]],
+      ['workflow_run', missingRunId, []],
+      ['workflow_run', directRunId.toUpperCase(), []],
+      ['workflow_run', `{${directRunId}}`, []],
+      ['workflow_run', directRunId.replaceAll('-', ''), []],
+      ['workflow_run', ` ${directRunId}`, []],
+      ['workflow_run', `${directRunId} `, []],
+      ['workflow_run', 'not-a-uuid', []],
+      [
+        'workflow_artifact',
+        `${directRunId}/report.json`,
+        [`workflow_artifacts:user:${directRunId}:${directRunId}/report.json`],
+      ],
+      [
+        'workflow_artifact',
+        `${directRunId}/a/b`,
+        [`workflow_artifacts:user:${directRunId}:${directRunId}/a/b`],
+      ],
+      ['workflow_artifact', `${directRunId}/`, []],
+      ['workflow_artifact', `${directRunId}//x`, []],
+      ['workflow_artifact', `${directRunId.toUpperCase()}/report.json`, []],
+      ['workflow_artifact', 'not-a-uuid/x', []],
+      ['workflow_artifact', directRunId, []],
+      ['workflow_approval', directApprovalId, [`workflow_approvals:user:${directApprovalId}`]],
+      ['notification', randomUUID(), []],
+    ]
+    const observed: Array<[string, string, string[]]> = []
+    for (const [type, logicalId] of rows) {
+      observed.push([type, logicalId, await candidateGrants(type, logicalId)])
+    }
+    expect(observed).toEqual(rows)
+
+    // Every other resource type still runs the statement with the run-id
+    // parameters null: a GFS resource reaches its two grants.
+    const gfs = await candidateGrants('gfs_resource', gfsResourceId)
+    expect(gfs).toHaveLength(2)
+    expect(gfs.every(grantId => grantId.startsWith('gfs_grants:'))).toBe(true)
   })
 
   it('resolves producer Context aliases to one canonical authority identity', async () => {

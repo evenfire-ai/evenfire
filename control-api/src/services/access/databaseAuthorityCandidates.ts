@@ -22,6 +22,7 @@ import {
   budgetContextRefsForGraph,
   loadRuntimeBehaviorPolicySnapshot,
 } from './runtimeBehaviorSource.js'
+import { canonicalWorkflowRunId } from './workflowRunId.js'
 
 export type ResourceAuthorityResult = Readonly<{
   exists: boolean
@@ -98,6 +99,11 @@ export async function loadDatabaseCandidates(input: {
   workflowRunRecipeGraph?: OperationalResourceGraphResult | null
 }): Promise<ResourceAuthorityResult> {
   const { resource, snapshot } = input
+  // $6 and $7 are the run id of a workflow_run, or of a workflow_artifact's
+  // first segment (what split_part($3, '/', 1) yields), when it is exactly
+  // what run_id::text renders; null otherwise, which matches no row, as the
+  // text comparison did. Computed here rather than cast in SQL: the cast
+  // would raise on a malformed id, whichever branch $2 selects.
   const result = await query(
     input.db,
     input.budget,
@@ -113,7 +119,7 @@ export async function loadDatabaseCandidates(input: {
            ON uwt.user_id = $1
           AND uwt.recipe_namespace = wr.recipe_namespace
           AND uwt.recipe_name = wr.recipe_name
-        WHERE $2::text = 'workflow_run' AND wr.run_id::text = $3
+        WHERE $2::text = 'workflow_run' AND wr.run_id = $6::uuid
           AND wr.actor_type = 'user' AND wr.actor_id = $1
           AND wr.team_id IS NULL AND wr.usage_team_id IS NULL
        UNION ALL
@@ -128,7 +134,7 @@ export async function loadDatabaseCandidates(input: {
            ON twt.team_id = tm.team_id
           AND twt.recipe_namespace = wr.recipe_namespace
           AND twt.recipe_name = wr.recipe_name
-        WHERE $2::text = 'workflow_run' AND wr.run_id::text = $3
+        WHERE $2::text = 'workflow_run' AND wr.run_id = $6::uuid
           AND (wr.actor_type IN ('scheduled', 'autonomous')
             OR (wr.actor_type = 'user' AND (wr.actor_id = $1 OR wr.actor_id IS NULL)))
        UNION ALL
@@ -141,7 +147,7 @@ export async function loadDatabaseCandidates(input: {
           AND uwt.recipe_namespace = wr.recipe_namespace
           AND uwt.recipe_name = wr.recipe_name
         WHERE $2::text = 'workflow_artifact'
-          AND wr.run_id::text = split_part($3, '/', 1)
+          AND wr.run_id = $7::uuid
           AND split_part($3, '/', 2) <> ''
           AND wr.actor_type = 'user' AND wr.actor_id = $1
           AND wr.team_id IS NULL AND wr.usage_team_id IS NULL
@@ -158,7 +164,7 @@ export async function loadDatabaseCandidates(input: {
           AND twt.recipe_namespace = wr.recipe_namespace
           AND twt.recipe_name = wr.recipe_name
         WHERE $2::text = 'workflow_artifact'
-          AND wr.run_id::text = split_part($3, '/', 1)
+          AND wr.run_id = $7::uuid
           AND split_part($3, '/', 2) <> ''
        UNION ALL
        SELECT 'direct', 'workflow_approvals:user:' || war.id, NULL, NULL, NULL,
@@ -245,6 +251,10 @@ export async function loadDatabaseCandidates(input: {
       resource.logicalId,
       input.budget.limits.accessPaths + 1,
       WORKFLOW_TRIGGER_TRIM_CODE_POINTS,
+      resource.type === 'workflow_run' ? canonicalWorkflowRunId(resource.logicalId) : null,
+      resource.type === 'workflow_artifact'
+        ? canonicalWorkflowRunId(resource.logicalId.split('/')[0] ?? '')
+        : null,
     ]
   )
   const rows = result.rows as Record<string, unknown>[]

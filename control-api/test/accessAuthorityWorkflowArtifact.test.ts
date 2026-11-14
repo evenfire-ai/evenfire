@@ -17,8 +17,10 @@ describe('workflow artifact authority producer', () => {
   it('derives exact artifact capability from the authoritative run grant', async () => {
     const query = vi.fn(async (sql: string, values: unknown[]) => {
       expect(sql).toContain("$2::text = 'workflow_artifact'")
-      expect(sql).toContain("wr.run_id::text = split_part($3, '/', 1)")
+      expect(sql).toContain('wr.run_id = $7::uuid')
+      expect(sql).toContain("split_part($3, '/', 2) <> ''")
       expect(values.slice(0, 3)).toEqual([userId, 'workflow_artifact', `${runId}/${artifactName}`])
+      expect(values.slice(5, 7)).toEqual([null, runId])
       return {
         rows: [
           {

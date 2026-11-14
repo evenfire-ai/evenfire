@@ -194,6 +194,31 @@ describe('resolver phases K1, P, K2 (T-L8)', () => {
     ])
   })
 
+  it('does not pre-read the run recipe for a run id that is not canonical', async () => {
+    // The uppercase form of a valid lowercase id.
+    const malformedRunId = 'ABCDEF00-0000-4000-8000-000000000006'
+    const malformed = statements()
+    const tripwire = installAccessTransactionTripwire(malformed.handler)
+    const fake = createFakeOperationalGateway({ objects: objects(), tripwire })
+    await resolveLiveActionAuthorization(
+      {
+        session,
+        operationId: 'workflow.run.manage',
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'workflow_run',
+          logicalId: malformedRunId,
+        }),
+        operationTarget: { runId: malformedRunId, action: 'resume' },
+      },
+      { gateway: fake.gateway }
+    )
+    // Witness: the resolver ran its transaction for this resource.
+    expect(malformed.seen).toContain('snapshot')
+    expect(malformed.seen).not.toContain('run-recipe-preread')
+    expect(tripwire.openTransactions()).toBe(0)
+  })
+
   it('fails a resume closed when the run names another recipe inside the transaction', async () => {
     const db = statements({ runRecipe: `${config.sandboxNamespace}/other` })
     const tripwire = installAccessTransactionTripwire(db.handler)

@@ -2,6 +2,7 @@ import type { Pool } from 'pg'
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import { runAccessDatabaseQuery } from '../access/accessDatabaseQuery.js'
 import { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
+import { canonicalWorkflowRunId } from '../access/workflowRunId.js'
 import type { WorkflowRunRow } from '../workflowRunService.js'
 import {
   type WorkflowAuthorityBinding,
@@ -70,7 +71,7 @@ const LOCK_RUN_FOR_RESUME = `
     FROM workflow_runs run
     LEFT JOIN workflow_authority_bindings initiating
       ON initiating.id = run.initiating_authority_binding_id
-   WHERE run.run_id::text = $1
+   WHERE run.run_id = $1::uuid
      AND run.recipe_namespace = $2
      AND run.recipe_name = $3
    FOR UPDATE OF run`
@@ -88,7 +89,7 @@ const RESUME_PAUSED_RUN = `
          failure_reason = NULL,
          last_reconciled_at = now(),
          updated_at = now()
-   WHERE run_id::text = $1
+   WHERE run_id = $1::uuid
      AND recipe_namespace = $2
      AND recipe_name = $3
      AND phase = 'AuthorizationPaused'
@@ -235,6 +236,11 @@ export async function resumeWorkflowRun(input: {
 }): Promise<WorkflowRunRow> {
   const budget = AccessExecutionBudget.create('action')
   try {
+    // A run id that is not the canonical text of a uuid names no run; checked
+    // before the statements cast it.
+    if (!canonicalWorkflowRunId(input.runId)) {
+      throw new WorkflowRunResumeError(404, 'workflow_run_not_found')
+    }
     return await withTransaction(async db => {
       await runAccessDatabaseQuery(
         db,

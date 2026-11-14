@@ -10,6 +10,7 @@ type QueryResult = { rows: unknown[]; rowCount: number }
 
 const state = vi.hoisted(() => ({
   log: [] as string[],
+  statements: {} as Record<string, string>,
   rows: {} as Record<string, unknown[]>,
   authorize: vi.fn(),
 }))
@@ -29,6 +30,7 @@ const fakeClient = vi.hoisted(() => ({
       throw new Error(`Unexpected resume statement: ${sql}`)
     })()
     state.log.push(kind)
+    state.statements[kind] = sql
     const rows = state.rows[kind] ?? []
     return { rows, rowCount: rows.length }
   },
@@ -151,6 +153,7 @@ function pausedRunRows(): Record<string, unknown[]> {
 
 beforeEach(() => {
   state.log = []
+  state.statements = {}
   state.rows = pausedRunRows()
   state.authorize.mockReset().mockResolvedValue({
     status: 'allowed',
@@ -189,7 +192,29 @@ describe('workflow run resume service (T-W3)', () => {
       'COMMIT',
     ])
     expect(state.authorize).toHaveBeenCalledTimes(0)
+    expect(state.statements['lock-run']).toContain('run.run_id = $1::uuid')
+    expect(state.statements['resume-run']).toContain('run_id = $1::uuid')
   })
+
+  // The uppercase form of a valid lowercase id.
+  it.each(['not-a-uuid', 'AAAAAAAA-5555-4555-8555-555555555555'])(
+    'answers 404 for the run id %s without a statement',
+    async malformedRunId => {
+      await expect(
+        resumeWorkflowRun({
+          runId: malformedRunId,
+          recipeNamespace,
+          recipeName,
+          authority: resumeAuthority(),
+        })
+      ).rejects.toMatchObject({ status: 404, code: 'workflow_run_not_found' })
+      expect(state.log).toEqual([])
+
+      // Witness: the canonical id of the same run reaches the run lock.
+      await resumeWorkflowRun({ runId, recipeNamespace, recipeName, authority: resumeAuthority() })
+      expect(state.log).toContain('lock-run')
+    }
+  )
 
   it('still rejects a grant revoked before the resume transaction locks it', async () => {
     state.rows['lineage-direct-grant'] = []

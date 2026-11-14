@@ -48,6 +48,7 @@ import {
   canonicalResourceIdentity,
   resourceIdentityKey,
 } from './resourceIdentity.js'
+import { canonicalWorkflowRunId } from './workflowRunId.js'
 
 export type LiveAuthorizationInput = Readonly<{
   session: AccessAuthoritySession
@@ -352,14 +353,17 @@ async function loadKubernetesPhase(input: {
     return { graph: null, workflowRunRecipeGraph: null }
   }
   // One autocommit statement names the run's recipe; phase P re-reads the run in
-  // its snapshot and requires the same recipe.
+  // its snapshot and requires the same recipe. A run id that is not canonical
+  // names no run.
+  const runId = canonicalWorkflowRunId(input.request.resource.logicalId)
+  if (!runId) return { graph: null, workflowRunRecipeGraph: null }
   const run = await runAccessDatabaseQuery(
     pool,
     input.budget,
     `SELECT recipe_namespace, recipe_name
        FROM workflow_runs
-      WHERE run_id::text = $1`,
-    [input.request.resource.logicalId]
+      WHERE run_id = $1::uuid`,
+    [runId]
   )
   const row = run.rows[0] as Record<string, unknown> | undefined
   if (!row) return { graph: null, workflowRunRecipeGraph: null }
