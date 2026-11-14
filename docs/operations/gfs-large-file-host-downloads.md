@@ -505,20 +505,31 @@ older than the retention period, are removed by the first sweep.
 
 A save from the Host volume (`generatedFile`, `sourcePath`, `uploadedFileId`)
 scans the bytes before they are sent and refuses a file in which it finds a
-protected value of this Host in clear. It reads text in UTF-8, UTF-16 or
-Latin-1, with or without control characters such as ANSI colours or form
-feeds, up to the GFS file limit (`MCP_HOST_GFS_MAX_FILE_BYTES`), and Office
-packages. Text above 4 MiB is read in overlapping windows of 256 Ki
-characters, with other tasks running between windows; there a value is found
-when its extent, markup that splits it included, is at most 64 Ki characters.
-The result says `scanned` only for a file the Host read as it was written. A
-file it cannot read as text (a PDF, an image, an archive, other binary data),
-a file above the GFS file limit and a file whose scan fails are saved with
-`secretScan: not_scanned`, and the model tells the user. A generated file with
-no save record (a dashboard, a file generated before records existed, a file
-whose record is missing) is saved by name and goes through the same scan;
-files the previous version withheld have no record and follow this rule until
-they expire.
+protected value of this Host in clear. Every file up to the GFS file limit
+(`MCP_HOST_GFS_MAX_FILE_BYTES`), whatever its format, is searched for the UTF-8
+bytes of each value of at least four characters. A file with no zero byte and
+no PDF, ZIP, GIF, RIFF media or gzip signature is also read as text, to find a
+value written in Latin-1, a value split by markup or a number written with
+separators: as UTF-8 when its bytes are valid UTF-8, with or without control
+characters such as ANSI colours or form feeds, and otherwise as Latin-1, one
+character per byte. Office packages are read part by part. Text above 4 MiB is
+read in overlapping windows of 256 Ki characters, with other tasks running
+between windows; there a split value is found when its extent, markup included,
+is at most 64 Ki characters. The result says `scanned` only for UTF-8 text or
+an Office package in which nothing was found. Every other file in which nothing
+was found (a PDF, an image, an archive, text in UTF-16 or a legacy encoding, a
+file with a zero byte), a file above the GFS file limit other than an Office
+package, and a file whose scan fails, are saved with `secretScan: not_scanned`,
+and the model tells the user. The scan does not find: a value written in
+UTF-16; a value in a legacy encoding whose bytes are neither its UTF-8 nor its
+Latin-1 spelling (a euro sign in Windows-1252, Shift_JIS); a split value or a
+separated number in a file with a zero byte or one of those signatures; a
+non-ASCII value written in UTF-8 and split by markup in a file that is not
+valid UTF-8; and a value in compressed data other than the text parts of an
+Office package. A generated file with no save record (a dashboard, a file
+generated before records existed, a file whose record is missing) is saved by
+name and goes through the same scan; files the previous version withheld have
+no record and follow this rule until they expire.
 
 An admission replaces a caller's `.gfs-downloads`, deleting every copy in it
 (pinned ones included), only when the check answers about the directory itself:
