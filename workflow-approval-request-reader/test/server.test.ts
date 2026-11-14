@@ -1614,21 +1614,24 @@ describe('workflow approval request reader server', () => {
     it('submits another user decision at once while a retry is armed; the retry still runs once', async () => {
       vi.mocked(submitMcpHostDecision)
         .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce({ ok: false, status: 403, error: 'approval_requester_mismatch' })
         .mockResolvedValueOnce({ ok: true })
-        .mockResolvedValueOnce({ ok: false, status: 409, error: 'approval_not_pending' })
 
       await postSlack(slackAction({ eventId: 'slack-armed-first' }))
       await settle()
       await postSlack(slackAction({ eventId: 'slack-other-user', user: 'U999', decision: 'deny' }))
       await settle()
 
+      // Another user's click is not held: it is submitted and control-api,
+      // which accepts only the requester, refuses it. The armed retry stays.
       expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
       expect(vi.mocked(submitMcpHostDecision).mock.calls[1]?.[1]).toMatchObject({
         providerUserId: 'U999',
         decision: 'deny',
       })
-      expect(slackUpdateTexts()).toEqual(['Denied. Workflow approval recorded.'])
-      expect(threadTexts()).toHaveLength(1)
+      expect(slackUpdateTexts()).toEqual([])
+      expect(threadTexts()).toHaveLength(2)
+      expect(threadTexts()[1]).toContain('<@U999>')
       expect(decisionAdmissionRetries.size).toBe(1)
 
       await vi.advanceTimersByTimeAsync(7_000)
@@ -1638,31 +1641,40 @@ describe('workflow approval request reader server', () => {
         providerUserId: 'U123',
         decision: 'approve',
       })
-      expect(slackUpdateTexts()).toEqual([
-        'Denied. Workflow approval recorded.',
-        'This workflow approval is no longer pending. Trigger the workflow again to request approval.',
-      ])
+      expect(slackUpdateTexts()).toEqual(['Approved. Workflow approval recorded.'])
       await vi.advanceTimersByTimeAsync(60_000)
       await settle()
       expect(submitMcpHostDecision).toHaveBeenCalledTimes(3)
     })
 
-    it('submits the same user other decision at once while a retry is armed', async () => {
+    it('holds the same user other decision while that user retry is armed; the first decision is sent', async () => {
       vi.mocked(submitMcpHostDecision)
         .mockResolvedValueOnce(admissionLimited(7))
         .mockResolvedValueOnce({ ok: true })
 
       await postSlack(slackAction({ eventId: 'slack-armed-approve' }))
       await settle()
-      await postSlack(slackAction({ eventId: 'slack-same-user-deny', decision: 'deny' }))
+      const response = await postSlack(
+        slackAction({ eventId: 'slack-same-user-deny', decision: 'deny' })
+      )
       await settle()
 
+      expect(response).toEqual({ status: 200, body: { ok: true } })
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(1)
+      expect(threadTexts()).toHaveLength(2)
+      expect(threadTexts()[1]).toContain(
+        'Your earlier decision for this workflow approval is still being sent.'
+      )
+      expect(decisionAdmissionRetries.size).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(7_000)
+      await settle()
       expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
       expect(vi.mocked(submitMcpHostDecision).mock.calls[1]?.[1]).toMatchObject({
         providerUserId: 'U123',
-        decision: 'deny',
+        decision: 'approve',
       })
-      expect(slackUpdateTexts()).toEqual(['Denied. Workflow approval recorded.'])
+      expect(slackUpdateTexts()).toEqual(['Approved. Workflow approval recorded.'])
     })
 
     it('arms one retry when two first attempts are refused', async () => {

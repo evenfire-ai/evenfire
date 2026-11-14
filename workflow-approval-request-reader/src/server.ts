@@ -405,22 +405,23 @@ function decisionRetryScheduledText(retryAfterSeconds: number): string {
   return `The assistant is busy. Your decision will be sent again in ${retryAfterSeconds} seconds. If the approval message has not changed a minute from now, choose again.`
 }
 
-function sameDecisionClick(
+function decisionAlreadySentText(): string {
+  return 'Your earlier decision for this workflow approval is still being sent. Its result will appear on the approval message.'
+}
+
+function sameUserClick(
   command: ProviderDecisionCommand,
   holder: { providerUserId: string; decision: 'approve' | 'deny' } | undefined
 ): boolean {
-  return (
-    holder !== undefined &&
-    holder.providerUserId === command.providerUserId &&
-    holder.decision === command.decision
-  )
+  return holder !== undefined && holder.providerUserId === command.providerUserId
 }
 
 /**
  * Arms the one background retry of a Slack or Teams decision refused by the
  * Host's admission limit. Returns `scheduled` when this call armed it, `held`
- * when the same user's same decision is already armed (nothing more to say),
- * and `not_scheduled` otherwise (the caller reports the wait).
+ * when a decision of the same user is already armed (that first decision is
+ * the one sent; nothing more to say), and `not_scheduled` otherwise (the
+ * caller reports the wait).
  */
 function armDecisionAdmissionRetry(
   command: ProviderDecisionCommand,
@@ -448,28 +449,36 @@ function armDecisionAdmissionRetry(
   }
   log.warn('provider decision retry not scheduled', { ...fields, reason: outcome })
   return outcome === 'already_pending' &&
-    sameDecisionClick(command, decisionAdmissionRetries.pending(approvalRequestId))
+    sameUserClick(command, decisionAdmissionRetries.pending(approvalRequestId))
     ? 'held'
     : 'not_scheduled'
 }
 
 /**
- * True when this click repeats the click whose retry is armed (same provider
- * user, same decision): it is not submitted again and is only logged. A click
- * from another user, or the other decision, is submitted at once.
+ * While a user's decision waits for its one retry, that first decision is the
+ * one sent, as a first click decides when the Host is not saturated: any later
+ * click of the same provider user (the same or the other decision) is not
+ * submitted. Returns `same` for a repeated click, `other` for the other
+ * decision, or `none` when the click is submitted. A click from another user
+ * is submitted at once; control-api accepts a decision only from the approval's
+ * requester.
  */
-function holdDuplicateDecisionClick(command: ProviderDecisionCommand): boolean {
+function holdClickWhileOwnRetryPending(
+  command: ProviderDecisionCommand
+): 'same' | 'other' | 'none' {
   const holder = command.approvalRequestId
     ? decisionAdmissionRetries.pending(command.approvalRequestId)
     : undefined
-  if (!sameDecisionClick(command, holder)) return false
+  if (!holder || !sameUserClick(command, holder)) return 'none'
+  const held = holder.decision === command.decision ? 'same' : 'other'
   log.info('provider decision click held while its retry is pending', {
     medium: command.medium,
     approvalRequestId: command.approvalRequestId,
     providerEventId: command.providerEventId,
     pending: decisionAdmissionRetries.size,
+    held,
   })
-  return true
+  return held
 }
 
 function logDecisionSubmissionCrash(command: ProviderDecisionCommand, err: unknown): void {
@@ -486,7 +495,24 @@ function submitSlackDecisionInBackground(
   command: ProviderDecisionCommand,
   feedback: SlackDecisionFeedbackContext | null
 ): void {
-  if (holdDuplicateDecisionClick(command)) return
+  const held = holdClickWhileOwnRetryPending(command)
+  if (held === 'other' && feedback) {
+    void sendSlackTargetMessage(cfg, {
+      targetId: feedback.targetId,
+      channelId: feedback.channelId,
+      text: `<@${command.providerUserId}> ${decisionAlreadySentText()}`,
+      threadTs: feedback.threadTs || feedback.messageTs,
+    })
+      .then(sendResult =>
+        logSlackDecisionFeedbackFailure(sendResult, {
+          approvalRequestId: command.approvalRequestId,
+          providerEventId: command.providerEventId,
+          action: 'send_held',
+        })
+      )
+      .catch(err => logDecisionSubmissionCrash(command, err))
+  }
+  if (held !== 'none') return
   void submitMcpHostDecision(cfg, command)
     .then(result => handleSlackDecisionResult(cfg, command, feedback, result, 'first'))
     .catch(err => logDecisionSubmissionCrash(command, err))
@@ -616,7 +642,8 @@ function submitTeamsDecisionInBackground(
   command: ProviderDecisionCommand,
   feedback: TeamsDecisionFeedbackContext | null
 ): void {
-  if (holdDuplicateDecisionClick(command)) return
+  // Teams has no send call here; a held click is logged only.
+  if (holdClickWhileOwnRetryPending(command) !== 'none') return
   void submitMcpHostDecision(cfg, command)
     .then(result => handleTeamsDecisionResult(cfg, command, feedback, result, 'first'))
     .catch(err => logDecisionSubmissionCrash(command, err))
