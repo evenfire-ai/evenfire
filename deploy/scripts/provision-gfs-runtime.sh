@@ -11,10 +11,10 @@ Usage:
   deploy/scripts/provision-gfs-runtime.sh --context <kube-context> --overlay <overlay-dir> [--allow-prod] [--skip-auth-sync] [--skip-instances]
 
 Runs the post-overlay GFS runtime provisioning steps and applies overlay CRD
-instances. Existing Contexts are user-managed and are not reapplied; changes
-to their bootstrap manifests require an explicit migration. Production contexts
-require --allow-prod; the Makefile prod target must perform the human confirmation
-before passing that flag.
+instances. Connector selections on mcp-server/context1 remain user-managed;
+its other declared fields and all other instances are applied normally.
+Production contexts require --allow-prod; the Makefile prod target must perform
+the human confirmation before passing that flag.
 
 Environment:
   ALLOWED_CONTEXTS   Comma-separated exact kube-contexts to treat as allowed dev

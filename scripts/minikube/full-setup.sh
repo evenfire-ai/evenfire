@@ -1949,8 +1949,8 @@ log "Aligning the Profile UI browser origin on profiles/external-rest-api..."
 bash "${SCRIPT_DIR}/sync-external-rest-api-cors-origin.sh" --context="${PROFILE}"
 ok "External REST browser origin aligned for the branch profile (no-op otherwise)"
 
-# 6e. Deploy CRD instances. The seed selects the initial Context only; an
-# existing Context belongs to the user and is preserved on subsequent runs.
+# 6e. Deploy CRD instances. The seed selects context1's initial connectors;
+# later runs preserve those selections while applying its other fields.
 if [ "$SEED_PROFILE" = "e2e" ]; then
   # airtable-server.yaml names the LOCAL ref clerum/airtable-mcp-server:test,
   # and this directory is rendered outside kustomize,

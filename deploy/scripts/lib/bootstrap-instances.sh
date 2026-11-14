@@ -2,13 +2,51 @@
 # Shared instance bootstrap policy. Callers authorize the Kubernetes context
 # and, for local profiles, hold the appropriate mutation lease.
 
+read_bootstrap_context() (
+  set -o pipefail
+  local context="${1:?Kubernetes context is required}"
+  local resource="${2:?Context declaration is required}"
+  local response
+
+  if ! response="$(kubectl --context "$context" get -f - --ignore-not-found -o json <<<"$resource")"; then
+    printf '[bootstrap-instances] ERROR: cannot inspect an existing Context\n' >&2
+    return 1
+  fi
+  [ -n "$response" ] || return 0
+
+  # A manifest-based kubectl get returns a v1 List, even for one object.
+  # Accept the previously supported single-object form too, but never treat
+  # an invalid, ambiguous, or differently identified response as absence.
+  if ! printf '%s\n%s\n' "$response" "$resource" | jq -s -e -c '
+    if length != 2 then error("unexpected Context response count")
+    else .[0] as $response | .[1] as $desired |
+      (if ($response | type) != "object" then error("invalid Context response")
+       elif $response.kind == "List" then
+         if $response.apiVersion != "v1" or ($response.items | type) != "array" then
+           error("invalid Context List")
+         elif ($response.items | length) == 1 then $response.items[0]
+         else error("unexpected Context List cardinality") end
+       else $response end) as $observed |
+      if ($observed | type) != "object" then error("invalid Context item")
+      elif $observed.apiVersion != $desired.apiVersion or $observed.kind != $desired.kind or
+           $observed.metadata.name != $desired.metadata.name or
+           ($observed.metadata.namespace // "") != ($desired.metadata.namespace // "") then
+        error("Context identity mismatch")
+      else $observed end
+    end
+  '; then
+    printf '[bootstrap-instances] ERROR: cannot validate Context response\n' >&2
+    return 1
+  fi
+)
+
 apply_bootstrap_instances() (
   set -o pipefail
   local context="${1:?Kubernetes context is required}"
   local instances="${2:?instances manifest or directory is required}"
   local seed="${3:-}"
-  local resources seed_resources contexts others other_count resource existing
-  local -a missing=()
+  local resources seed_resources='[]' plan resource existing target_apply initial migration
+  local base_apply seed_apply base_count seed_count
 
   if ! command -v jq >/dev/null 2>&1; then
     printf '[bootstrap-instances] ERROR: jq is required\n' >&2
@@ -23,15 +61,6 @@ apply_bootstrap_instances() (
     return 1
   fi
 
-  if ! jq -e '
-    [ .[] | select(.kind == "Context" and ((.apiVersion // "") | startswith("clerum.io/"))) |
-      [((.apiVersion // "") | split("/")[0]), .kind, (.metadata.namespace // ""), .metadata.name] ]
-    | group_by(.) | all(.[]; length == 1)
-  ' <<<"$resources" >/dev/null; then
-    printf '[bootstrap-instances] ERROR: ambiguous base Context declarations\n' >&2
-    return 1
-  fi
-
   if [ -n "$seed" ]; then
     if ! seed_resources="$(kubectl --context "$context" create --dry-run=client -f "$seed" -o json | jq -s -c '
       [ .[] | if .kind == "List" then .items[] else . end ]
@@ -41,86 +70,101 @@ apply_bootstrap_instances() (
       return 1
     fi
 
-    # A profile may supply a different initial Context declaration. Resolve it
-    # before creation, but never use it to replace a Context that already exists.
-    if ! resources="$(printf '%s\n%s\n' "$resources" "$seed_resources" | jq -s -c '
-      def is_context:
-        .kind == "Context" and ((.apiVersion // "") | startswith("clerum.io/"));
-      def identity:
-        [((.apiVersion // "") | split("/")[0]), .kind,
-         (.metadata.namespace // ""), .metadata.name];
-      def unique_contexts:
-        [ .[] | select(is_context) | identity ] | group_by(.) | all(.[]; length == 1);
-      .[0] as $base | .[1] as $seed
-      | if (($base | unique_contexts) and ($seed | unique_contexts)) | not then
-          error("ambiguous Context declarations")
-        else
-          [ $base[] | if is_context then . as $item |
-              ([ $seed[] | select(is_context) | select(identity == ($item | identity)) ] | first) // $item
-            else . end ]
-          + [ $seed[] | if is_context then . as $item |
-                select(all($base[]; (is_context | not) or (identity != ($item | identity))))
-              else . end ]
-        end
-    ')"; then
-      printf '[bootstrap-instances] ERROR: cannot compose instance declarations\n' >&2
-      return 1
-    fi
   fi
 
-  if ! contexts="$(jq -c '.[] | select(.kind == "Context" and ((.apiVersion // "") | startswith("clerum.io/")))' <<<"$resources")" ||
-     ! others="$(jq -c '{apiVersion:"v1", kind:"List", items:[.[] | select((.kind == "Context" and ((.apiVersion // "") | startswith("clerum.io/"))) | not)]}' <<<"$resources")" ||
-     ! other_count="$(jq '.items | length' <<<"$others")"; then
+  # Protect only mcp-server/context1's connector selection. Keep the base and
+  # seed apply order; the seed supplies context1's initial value if it exists.
+  if ! plan="$(printf '%s\n%s\n' "$resources" "$seed_resources" | jq -s -c '
+    def is_target:
+      .kind == "Context" and ((.apiVersion // "") | startswith("clerum.io/")) and
+      .metadata.namespace == "mcp-server" and .metadata.name == "context1";
+    def applyable:
+      if is_target then .spec = ((.spec // {}) | del(.mcpServers)) else . end;
+    def apply_list:
+      {apiVersion:"v1", kind:"List", items:[.[] | applyable]};
+    .[0] as $base | .[1] as $seed
+    | [ $base[] | select(is_target) ] as $base_target
+    | [ $seed[] | select(is_target) ] as $seed_target
+    | if ($base_target | length) > 1 or ($seed_target | length) > 1 then
+        error("ambiguous context1 declarations")
+      else
+        {target: ($seed_target[0] // $base_target[0] // null),
+         base: ($base | apply_list), seed: ($seed | apply_list)}
+      end
+  ')" ||
+     ! resource="$(jq -c '.target // empty' <<<"$plan")" ||
+     ! base_apply="$(jq -c '.base' <<<"$plan")" ||
+     ! seed_apply="$(jq -c '.seed' <<<"$plan")" ||
+     ! base_count="$(jq '.items | length' <<<"$base_apply")" ||
+     ! seed_count="$(jq '.items | length' <<<"$seed_apply")"; then
     printf '[bootstrap-instances] ERROR: cannot classify instance declarations\n' >&2
     return 1
   fi
 
-  # Validate every existing Context before creating or applying any instances.
-  while IFS= read -r resource; do
-    [ -n "$resource" ] || continue
-    if ! existing="$(kubectl --context "$context" get -f - --ignore-not-found -o json <<<"$resource")"; then
-      printf '[bootstrap-instances] ERROR: cannot inspect an existing Context\n' >&2
+  # Transfer only the connector list from client-side apply to Control UI.
+  # Keep the rest of the previous apply baseline so normal field updates and
+  # removals continue to work.
+  if [ -n "$resource" ]; then
+    if ! target_apply="$(jq -c '.spec = ((.spec // {}) | del(.mcpServers))' <<<"$resource")"; then
+      printf '[bootstrap-instances] ERROR: cannot prepare context1 declaration\n' >&2
+      return 1
+    fi
+    if ! existing="$(read_bootstrap_context "$context" "$resource")"; then
       return 1
     fi
     if [ -z "$existing" ]; then
-      missing+=("$resource")
-      continue
+      # Store the initial selection without claiming it in last-applied.
+      # Exclusive create fails if another writer wins the existence race.
+      if ! initial="$(printf '%s\n%s\n' "$resource" "$target_apply" | jq -s -c '
+        (.[1] | del(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]) | tojson) as $baseline
+        | .[0] | .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = $baseline
+      ')"; then
+        printf '[bootstrap-instances] ERROR: cannot prepare initial context1\n' >&2
+        return 1
+      fi
+      kubectl --context "$context" create -f - <<<"$initial" || return 1
+    else
+      # An older deployment may have claimed mcpServers in last-applied. Remove
+      # only that field from the old baseline, with identity and value tests so
+      # a concurrent deploy cannot overwrite a newer baseline. A UI connector
+      # update does not change this annotation and remains untouched.
+      if ! migration="$(jq -c '
+        . as $live |
+        ($live.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] // null) as $old |
+        if $old == null then empty
+        elif ($old | type) != "string" then error("invalid last-applied annotation")
+        else ($old | fromjson) as $previous |
+          if ($previous | type) != "object" or $previous.apiVersion != $live.apiVersion or
+             $previous.kind != $live.kind or $previous.metadata.name != $live.metadata.name or
+             (($previous.metadata.namespace // $live.metadata.namespace) != $live.metadata.namespace) or
+             (($previous.spec // {}) | type) != "object" then
+            error("invalid last-applied Context")
+          elif (($previous.spec // {}) | has("mcpServers")) then
+            if ($live.metadata.uid | type) != "string" or $live.metadata.uid == "" then
+              error("missing Context UID")
+            else
+              [ {op:"test",path:"/metadata/uid",value:$live.metadata.uid},
+                {op:"test",path:"/metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration",value:$old},
+                {op:"replace",path:"/metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration",
+                 value:($previous | del(.spec.mcpServers) | tojson)} ]
+            end
+          else empty end
+        end
+      ' <<<"$existing" 2>/dev/null)"; then
+        printf '[bootstrap-instances] ERROR: invalid context1 last-applied configuration\n' >&2
+        return 1
+      fi
+      if [ -n "$migration" ]; then
+        kubectl --context "$context" -n mcp-server patch contexts.clerum.io context1 \
+          --type=json --patch-file=/dev/stdin -o name <<<"$migration" || return 1
+      fi
     fi
-
-    if ! printf '%s\n%s\n' "$existing" "$resource" | jq -s -e '
-      def managed:
-        {apiVersion, kind,
-         metadata: ((.metadata // {}) |
-                    {name, namespace: (.namespace // ""), labels: (.labels // {}),
-                     annotations: ((.annotations // {}) | del(.["kubectl.kubernetes.io/last-applied-configuration"]))}
-                    + (if has("ownerReferences") then {ownerReferences} else {} end)
-                    + (if has("finalizers") then {finalizers} else {} end)),
-         spec: ((.spec // {}) | del(.mcpServers))};
-      def contains_declared($live; $desired):
-        if ($desired | type) == "object" then
-          ($live | type) == "object" and
-          all($desired | keys[]; . as $key |
-            ($live | has($key)) and contains_declared($live[$key]; $desired[$key]))
-        else $live == $desired end;
-      .[0] as $live | .[1] as $desired
-      | ($live.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] // null) as $saved
-      | if $saved == null then contains_declared(($live | managed); ($desired | managed))
-        else (($saved | fromjson | managed) == ($desired | managed)) end
-    ' >/dev/null; then
-      printf '[bootstrap-instances] ERROR: existing Context manifest changed or its last-applied configuration is invalid; use an explicit Context migration\n' >&2
-      return 1
-    fi
-    printf '[bootstrap-instances] Preserving existing Context configuration\n' >&2
-  done <<<"$contexts"
-
-  if [ "${#missing[@]}" -gt 0 ]; then
-    for resource in "${missing[@]}"; do
-      # Exclusive create fails if another writer wins after the existence check.
-      kubectl --context "$context" create --save-config -f - <<<"$resource" || return 1
-    done
   fi
 
-  if [ "$other_count" -gt 0 ]; then
-    kubectl --context "$context" apply -f - <<<"$others" || return 1
+  if [ "$base_count" -gt 0 ]; then
+    kubectl --context "$context" apply -f - <<<"$base_apply" || return 1
+  fi
+  if [ "$seed_count" -gt 0 ]; then
+    kubectl --context "$context" apply -f - <<<"$seed_apply" || return 1
   fi
 )

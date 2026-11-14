@@ -126,7 +126,7 @@ else
 fi
 
 # ── jq ─────────────────────────────────────────────────────────────────
-# Instance bootstrap uses jq to preserve user-managed Contexts.
+# Instance bootstrap uses jq to preserve the user-managed context1.
 if command -v jq >/dev/null 2>&1; then
   ok "jq       available"
 else

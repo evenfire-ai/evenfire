@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Existing Contexts belong to the user after bootstrap, even when kubectl's
+# mcp-server/context1 keeps user selections after bootstrap, even when kubectl's
 # last-applied annotation still records the original empty connector list.
 # jq programs use single quotes so their variables are not expanded by Bash.
 # shellcheck disable=SC2016
@@ -8,6 +8,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 SCRIPT="${PROVISION_GFS_RUNTIME_SCRIPT:-$ROOT/deploy/scripts/provision-gfs-runtime.sh}"
 JQ="$(command -v jq)"
+TEST_BASH="${TEST_BASH:-/bin/bash}"
 TEST_CONTEXT="clerum-context-preservation-test"
 export TEST_CONTEXT
 TMP="$(mktemp -d)"
@@ -62,6 +63,7 @@ while [ "$#" -gt 0 ]; do
     -p|--patch) patch="$2"; shift 2 ;;
     --patch=*) patch="${1#*=}"; shift ;;
     --patch-file) patch="$(cat "$2")"; shift 2 ;;
+    --patch-file=*) patch="$(cat "${1#*=}")"; shift ;;
     --field-manager) shift 2 ;;
     --field-manager=*|--validate=*) shift ;;
     --save-config) save_config=true; shift ;;
@@ -113,10 +115,14 @@ advance_version() {
   "$TEST_JQ" -c '.metadata.resourceVersion = (((.metadata.resourceVersion // "0") | tonumber) + 1 | tostring)'
 }
 
-concurrent_add() {
+concurrent_connector_update() {
   local live
   live="$(lookup Context mcp-server context1)"
-  live="$(printf '%s\n' "$live" | "$TEST_JQ" -c '.spec.mcpServers += ["ui-concurrent-tools"]' | advance_version)"
+  if [ "$TEST_RACE" = read-remove ]; then
+    live="$(printf '%s\n' "$live" | "$TEST_JQ" -c '.spec.mcpServers |= map(select(. != "ui-calendar"))' | advance_version)"
+  else
+    live="$(printf '%s\n' "$live" | "$TEST_JQ" -c '.spec.mcpServers += ["ui-concurrent-tools"]' | advance_version)"
+  fi
   save_object "$live"
   : >"$TEST_STATE.raced"
 }
@@ -165,20 +171,85 @@ if [ "$verb" = get ] || [ "$verb" = patch ]; then
     printf 'fixture: injected Context read failure (Forbidden)\n' >&2
     exit 1
   fi
+  if [ "$verb" = get ] && [ "$kind/$namespace/$name" = Context/mcp-server/context1 ] && [ "$TEST_FAILURE" = read-with-stdout ]; then
+    lookup Context mcp-server context1 | "$TEST_JQ" -c '{apiVersion:"v1",kind:"List",items:[.]}'
+    printf 'fixture: injected Context read failure after output\n' >&2
+    exit 1
+  fi
   live="$(lookup "$kind" "$namespace" "$name")"
-  [ -n "$live" ] || not_found "$resource" "$name"
+  if [ -z "$live" ]; then
+    if [ "$verb" = get ] && [ "$kind" = Context ] && [ "$file" = - ] &&
+       [ "${TEST_GET_RESPONSE:-list}" = empty-list ]; then
+      printf '%s\n' '{"apiVersion":"v1","kind":"List","items":[]}'
+      exit 0
+    fi
+    not_found "$resource" "$name"
+  fi
   if [ "$verb" = get ]; then
     # Return the snapshot read by this request, then model an independent UI
     # update before the provisioner's next API operation.
-    if [ "$TEST_RACE" = read ] && [ "$kind/$namespace/$name" = Context/mcp-server/context1 ] && [ ! -f "$TEST_STATE.raced" ]; then
-      concurrent_add
+    if { [ "$TEST_RACE" = read ] || [ "$TEST_RACE" = read-remove ]; } &&
+       [ "$kind/$namespace/$name" = Context/mcp-server/context1 ] && [ ! -f "$TEST_STATE.raced" ]; then
+      concurrent_connector_update
     fi
     case "$output" in
-      json|'') printf '%s\n' "$live" ;;
+      json|'')
+        if [ "$kind" = Context ] && [ -n "$file" ]; then
+          [ "$file" = - ] && $ignore_missing && [ "$output" = json ] || {
+            printf 'fixture: Context get must use -f - --ignore-not-found -o json\n' >&2
+            exit 96
+          }
+          case "${TEST_GET_RESPONSE:-list}" in
+            list) printf '%s\n' "$live" | "$TEST_JQ" -c '{apiVersion:"v1",kind:"List",items:[.]}' ;;
+            empty-list) printf '%s\n' '{"apiVersion":"v1","kind":"List","items":[]}' ;;
+            object) printf '%s\n' "$live" ;;
+            multiple) printf '%s\n' "$live" | "$TEST_JQ" -c '{apiVersion:"v1",kind:"List",items:[.,.]}' ;;
+            wrong-name) printf '%s\n' "$live" | "$TEST_JQ" -c '{apiVersion:"v1",kind:"List",items:[. | .metadata.name="different"]}' ;;
+            wrong-namespace) printf '%s\n' "$live" | "$TEST_JQ" -c '{apiVersion:"v1",kind:"List",items:[. | .metadata.namespace="different"]}' ;;
+            wrong-kind) printf '%s\n' "$live" | "$TEST_JQ" -c '{apiVersion:"v1",kind:"List",items:[. | .kind="Host"]}' ;;
+            wrong-api) printf '%s\n' "$live" | "$TEST_JQ" -c '{apiVersion:"v1",kind:"List",items:[. | .apiVersion="other.example/v1"]}' ;;
+            malformed) printf '%s\n' '{invalid-json' ;;
+            invalid-items) printf '%s\n' '{"apiVersion":"v1","kind":"List","items":{}}' ;;
+            null-items) printf '%s\n' '{"apiVersion":"v1","kind":"List","items":null}' ;;
+            missing-items) printf '%s\n' '{"apiVersion":"v1","kind":"List"}' ;;
+            null-item) printf '%s\n' '{"apiVersion":"v1","kind":"List","items":[null]}' ;;
+            scalar-item) printf '%s\n' '{"apiVersion":"v1","kind":"List","items":["unexpected"]}' ;;
+            nested) printf '%s\n' "$live" | "$TEST_JQ" -c '{apiVersion:"v1",kind:"List",items:[{apiVersion:"v1",kind:"List",items:[.]}]}' ;;
+            wrong-list-api) printf '%s\n' "$live" | "$TEST_JQ" -c '{apiVersion:"v2",kind:"List",items:[.]}' ;;
+            null) printf '%s\n' 'null' ;;
+            whitespace) printf ' \t ' ;;
+            two-documents) printf '%s\n%s\n' "$live" "$live" ;;
+            *) printf 'fixture: unsupported Context get response\n' >&2; exit 97 ;;
+          esac
+        else
+          printf '%s\n' "$live"
+        fi ;;
       name) printf '%s/%s\n' "$resource" "$name" ;;
       *) printf 'fixture: unsupported get output %s\n' "$output" >&2; exit 93 ;;
     esac
     exit 0
+  fi
+
+  # A second deploy can change the baseline, or a replacement Context can
+  # appear, between the provisioner's read and its annotation migration.
+  if [ "$verb" = patch ] && [ "$kind/$namespace/$name" = Context/mcp-server/context1 ] &&
+     { [ "$TEST_RACE" = baseline ] || [ "$TEST_RACE" = recreate ]; } &&
+     [ ! -f "$TEST_STATE.raced" ]; then
+    if [ "$TEST_RACE" = baseline ]; then
+      live="$(printf '%s\n' "$live" | "$TEST_JQ" -c '
+        .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] |=
+          (fromjson | .spec.description = "concurrent deploy" | tojson)')"
+    else
+      live="$(printf '%s\n' "$live" | "$TEST_JQ" -c '
+        .metadata.uid = "replacement-uid" | .spec.mcpServers = ["replacement-tools"]')"
+    fi
+    live="$(printf '%s\n' "$live" | advance_version)"
+    save_object "$live"
+    : >"$TEST_STATE.raced"
+  fi
+  if [ "$verb" = patch ] && [ "$kind/$namespace/$name" = Context/mcp-server/context1 ] && [ "$TEST_FAILURE" = patch ]; then
+    printf 'fixture: injected Context migration failure (Forbidden)\n' >&2
+    exit 1
   fi
 
   # JSON Patch test failures are atomic conflicts. JSON Merge Patch is also
@@ -222,7 +293,7 @@ if [ "$verb" = create ] || [ "$verb" = apply ]; then
     ns="$(printf '%s\n' "$desired" | "$TEST_JQ" -r --arg ns "${namespace:-default}" '.metadata.namespace // $ns')"
     desired="$(printf '%s\n' "$desired" | "$TEST_JQ" -c --arg ns "$ns" '.metadata.namespace = $ns')"
     live="$(lookup "$kind" "$ns" "$name")"
-    if [ "$kind/$ns/$name" = Context/another-team/context2 ] && [ -z "$live" ] && [ "$TEST_RACE" = create ]; then
+    if [ "$kind/$ns/$name" = Context/mcp-server/context1 ] && [ -z "$live" ] && [ "$TEST_RACE" = create ]; then
       # Another actor wins immediately before this write. Create must fail;
       # apply would reconcile the winner and expose the clobber to the test.
       concurrent="$(printf '%s\n' "$desired" | "$TEST_JQ" -c '.spec.mcpServers = ["ui-racing-creator"] | .metadata.uid = "racing-creator-uid" | .metadata.resourceVersion = "1"')"
@@ -234,7 +305,7 @@ if [ "$verb" = create ] || [ "$verb" = apply ]; then
       fi
       live="$concurrent"
     fi
-    if [ "$kind/$ns/$name" = Context/another-team/context2 ] && [ -z "$live" ] && [ "$TEST_FAILURE" = create ]; then
+    if [ "$kind/$ns/$name" = Context/mcp-server/context1 ] && [ -z "$live" ] && [ "$TEST_FAILURE" = create ]; then
       printf 'fixture: injected Context create failure (InternalError)\n' >&2
       exit 1
     fi
@@ -314,8 +385,9 @@ run_provision() {
     TEST_MUTATIONS="$CASE_DIR/mutations.log" TEST_JQ="$JQ" \
     TEST_RENDER="${RENDER:-stream}" \
     TEST_FAILURE="${FAILURE:-none}" TEST_RACE="${RACE:-none}" \
+    TEST_GET_RESPONSE="${GET_RESPONSE:-list}" \
     ALLOWED_CONTEXTS="$TEST_CONTEXT" PATH="$TMP/bin:$PATH" \
-    /bin/bash "$SCRIPT" --context "$TEST_CONTEXT" --overlay "$CASE_DIR/overlay" \
+    "$TEST_BASH" "$SCRIPT" --context "$TEST_CONTEXT" --overlay "$CASE_DIR/overlay" \
     --skip-auth-sync "$@" >"$CASE_DIR/output.log" 2>&1
 }
 
@@ -329,7 +401,11 @@ expect_success() {
 assert_state() {
   "$JQ" -e --slurpfile expected "$CASE_DIR/expected-context.json" '
     map(select(.kind == "Context" and .metadata.name == "context1" and .metadata.namespace == "mcp-server"))[0] |
-    . == $expected[0]' "$CASE_DIR/state.json" >/dev/null || fail 'existing Context changed after bootstrap'
+    .metadata.uid == $expected[0].metadata.uid and
+    .spec.mcpServers == $expected[0].spec.mcpServers and
+    .metadata.labels["ui-label"] == $expected[0].metadata.labels["ui-label"] and
+    .status == $expected[0].status' "$CASE_DIR/state.json" >/dev/null ||
+    fail 'existing context1 lost its identity, connectors, or unrelated live state'
   "$JQ" -e --slurpfile desired "$TMP/overlay/instances/02-context.json" '
     map(select(.kind == "Context" and .metadata.name == "context2" and .metadata.namespace == "another-team"))[0] |
     del(.metadata.uid, .metadata.resourceVersion, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]) == $desired[0]' \
@@ -342,18 +418,125 @@ assert_state() {
 }
 
 for RENDER in stream list; do
-  init_case "preserve-$RENDER"
-  expect_success
-  assert_state
-  # A UI addition between deploys must survive the next application too.
-  "$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then .spec.mcpServers += ["ui-added-later"] else . end)' \
+  for GET_RESPONSE in list object; do
+    init_case "preserve-$RENDER-$GET_RESPONSE"
+    expect_success
+    assert_state
+    # A UI addition between deploys must survive the next application too.
+    "$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then .spec.mcpServers += ["ui-added-later"] else . end)' \
+      "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+    mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+    remember_existing_context
+    expect_success
+    assert_state
+    pass "Context connectors survive $RENDER dry-run and $GET_RESPONSE get JSON"
+  done
+done
+GET_RESPONSE=list
+
+# Only mcp-server/context1 has the new preservation policy. Existing Contexts
+# with the same name in another namespace, or another name in the same
+# namespace, continue through the normal apply path.
+init_case other-contexts-apply
+index=2
+for identity in another-team/context2 another-team/context1 mcp-server/context2; do
+  ns="${identity%/*}"
+  name="${identity#*/}"
+  desired="$CASE_DIR/overlay/instances/0${index}-other-context.json"
+  "$JQ" --arg ns "$ns" --arg name "$name" \
+    '.metadata.namespace = $ns | .metadata.name = $name | .spec.contextId = $name' \
+    "$TMP/overlay/instances/02-context.json" >"$desired"
+  "$JQ" --slurpfile desired "$desired" '
+    . + [($desired[0] | .metadata.uid = "existing-other-context" |
+      .metadata.resourceVersion = "7" |
+      .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = ($desired[0] | tojson) |
+      .spec.description = "user drift" | .spec.mcpServers = ["ui-only"])]' \
     "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
   mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
-  remember_existing_context
-  expect_success
-  assert_state
-  pass "Context connectors survive repeated provisioning with $RENDER dry-run JSON"
+  index=$((index + 4))
 done
+rm -- "$CASE_DIR/overlay/instances/02-context.json"
+expect_success
+for identity in another-team/context2 another-team/context1 mcp-server/context2; do
+  ns="${identity%/*}"
+  name="${identity#*/}"
+  "$JQ" -e --arg ns "$ns" --arg name "$name" '
+    any(.[]; .kind == "Context" and .metadata.namespace == $ns and .metadata.name == $name and
+      .spec.description == "new context" and .spec.mcpServers == ["bootstrap-tools"])' \
+    "$CASE_DIR/state.json" >/dev/null || fail "non-target Context $identity was not reconciled"
+  grep -Fq "$(printf 'apply\tContext\t%s\t%s' "$ns" "$name")" "$CASE_DIR/mutations.log" ||
+    fail "non-target Context $identity did not use apply"
+done
+"$JQ" -e --slurpfile expected "$CASE_DIR/expected-context.json" '
+  any(.[]; .kind == "Context" and .metadata.namespace == "mcp-server" and
+    .metadata.name == "context1" and .metadata.uid == $expected[0].metadata.uid and
+    .spec.mcpServers == $expected[0].spec.mcpServers)' "$CASE_DIR/state.json" >/dev/null ||
+  fail 'target connectors changed while applying other Contexts'
+pass 'only mcp-server/context1 is preserved; other Contexts still apply'
+
+init_case target-not-declared
+rm -- "$CASE_DIR/overlay/instances/01-context.json"
+expect_success
+assert_state
+if grep -Fq 'get -f - --ignore-not-found -o json' "$CASE_DIR/calls.log"; then
+  fail 'bootstrap read context1 when it was not declared'
+fi
+if grep -Fq "$(printf 'create\tContext\tmcp-server\tcontext1')" "$CASE_DIR/mutations.log"; then
+  fail 'bootstrap created context1 when it was not declared'
+fi
+pass 'a manifest without context1 only applies its declared resources'
+
+init_case target-declarative-update
+"$JQ" 'map(if .kind == "Context" and .metadata.namespace == "mcp-server" and .metadata.name == "context1" then
+  .metadata.labels.retired = "old" |
+  .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] |=
+    (fromjson | .metadata.labels.retired = "old" | tojson)
+  else . end)' "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+"$JQ" '.spec.description = "new declarative description" |
+  del(.metadata.labels["managed-by"]) | .metadata.labels.release = "new"' \
+  "$CASE_DIR/overlay/instances/01-context.json" >"$CASE_DIR/context.next"
+mv "$CASE_DIR/context.next" "$CASE_DIR/overlay/instances/01-context.json"
+expect_success
+"$JQ" -e 'map(select(.kind == "Context" and .metadata.namespace == "mcp-server" and .metadata.name == "context1"))[0] |
+  .metadata.uid == "existing-context-uid" and .spec.mcpServers == ["ui-calendar", "ui-drive"] and
+  .spec.description == "new declarative description" and .metadata.labels.release == "new" and
+  .metadata.labels["ui-label"] == "retained" and
+  (.metadata.labels | has("managed-by") | not) and (.metadata.labels | has("retired") | not) and
+  ((.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] | fromjson | .spec | has("mcpServers")) | not)' \
+  "$CASE_DIR/state.json" >/dev/null || fail 'context1 did not apply other declared changes while preserving connectors'
+pass 'context1 preserves connectors while applying other declarative changes'
+
+GET_RESPONSE=empty-list
+init_case empty-get-list
+cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
+if run_provision; then
+  fail 'unexpected empty Context get List was accepted'
+fi
+grep -Fq 'cannot validate Context response' "$CASE_DIR/output.log" ||
+  fail 'empty Context get List did not fail at response validation'
+cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" ||
+  fail 'empty Context get List changed instance state'
+[ ! -s "$CASE_DIR/mutations.log" ] || fail 'empty Context get List reached an instance mutation'
+pass 'empty Context get List fails before instance mutation'
+GET_RESPONSE=list
+
+for GET_RESPONSE in multiple wrong-name wrong-namespace wrong-kind wrong-api malformed invalid-items null-items missing-items null-item scalar-item nested wrong-list-api null whitespace two-documents; do
+  init_case "invalid-get-$GET_RESPONSE"
+  cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
+  if run_provision; then
+    fail "invalid Context get response $GET_RESPONSE was accepted"
+  fi
+  grep -Fq 'cannot validate Context response' "$CASE_DIR/output.log" ||
+    fail "$GET_RESPONSE did not fail at the Context response validation"
+  grep -Fq 'get -f - --ignore-not-found -o json' "$CASE_DIR/calls.log" ||
+    fail "$GET_RESPONSE did not exercise the manifest-based Context get"
+  cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" ||
+    fail "$GET_RESPONSE changed state before rejecting the response"
+  [ ! -s "$CASE_DIR/mutations.log" ] || fail "$GET_RESPONSE reached an instance mutation"
+  pass "invalid Context get response $GET_RESPONSE fails before mutation"
+done
+GET_RESPONSE=list
 
 init_case no-last-applied
 "$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
@@ -377,6 +560,10 @@ mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
 remember_existing_context
 expect_success
 assert_state
+"$JQ" -e 'map(select(.kind == "Context" and .metadata.name == "context1"))[0] |
+  .metadata.ownerReferences[0].uid == "owner-uid" and
+  .metadata.finalizers == ["fixture.example/finalizer"]' "$CASE_DIR/state.json" >/dev/null ||
+  fail 'undeclared owner references or finalizers were removed'
 pass 'unmanaged Context retains owner references and finalizers not declared by bootstrap'
 
 init_case changed-bootstrap-connectors
@@ -388,28 +575,26 @@ assert_state
 pass 'changes to bootstrap connectors do not replace user selections'
 
 init_case contexts-only
-rm -- "$CASE_DIR/overlay/instances/03-host.json" "$CASE_DIR/overlay/instances/04-channel.json" "$CASE_DIR/overlay/instances/05-gfs.json"
+rm -- "$CASE_DIR/overlay/instances/02-context.json" "$CASE_DIR/overlay/instances/03-host.json" "$CASE_DIR/overlay/instances/04-channel.json" "$CASE_DIR/overlay/instances/05-gfs.json"
 expect_success
 "$JQ" -e --slurpfile expected "$CASE_DIR/expected-context.json" '
-  map(select(.kind == "Context" and .metadata.name == "context1"))[0] == $expected[0]' \
-  "$CASE_DIR/state.json" >/dev/null || fail 'Context-only provisioning changed the existing Context'
-if grep -q '^apply' "$CASE_DIR/mutations.log"; then
-  fail 'Context-only provisioning issued an apply'
-fi
-pass 'a Context-only instance directory needs no apply'
+  map(select(.kind == "Context" and .metadata.name == "context1"))[0] |
+  .metadata.uid == $expected[0].metadata.uid and .spec.mcpServers == $expected[0].spec.mcpServers' \
+  "$CASE_DIR/state.json" >/dev/null || fail 'Context-only provisioning changed context1 connectors'
+pass 'a Context-only instance directory preserves context1 connectors'
 
 init_case no-last-applied-drift
 "$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
   del(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])
   else . end)' "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
 mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
-cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
-if run_provision; then
-  fail 'unmanaged Context with declarative drift was accepted'
-fi
-grep -Fq 'explicit Context migration' "$CASE_DIR/output.log" || fail 'unmanaged drift did not report the required migration'
-cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" || fail 'unmanaged drift rejection mutated instances'
-pass 'existing Context without last-applied rejects declarative drift'
+remember_existing_context
+expect_success
+assert_state
+"$JQ" -e 'any(.[]; .kind == "Context" and .metadata.name == "context1" and
+  .spec.description == "declarative description")' "$CASE_DIR/state.json" >/dev/null ||
+  fail 'context1 without last-applied did not apply its declared fields'
+pass 'context1 without last-applied applies declarative fields and preserves connectors'
 
 RENDER=stream
 RACE="read"
@@ -422,16 +607,65 @@ expect_success
 assert_state
 pass 'concurrent UI addition after the existence read survives provisioning'
 
+init_case concurrent-read-clean-baseline
+"$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
+  .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] |=
+    (fromjson | del(.spec.mcpServers) | tojson) else . end)' \
+  "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+remember_existing_context
+"$JQ" '.spec.mcpServers += ["ui-concurrent-tools"]' \
+  "$CASE_DIR/expected-context.json" >"$CASE_DIR/expected-context.next"
+mv "$CASE_DIR/expected-context.next" "$CASE_DIR/expected-context.json"
+expect_success
+[ -f "$CASE_DIR/state.json.raced" ] || fail 'concurrent UI update with clean baseline was not exercised'
+assert_state
+pass 'concurrent UI addition survives after ownership was already transferred'
+
+RACE=read-remove
+init_case concurrent-removal
+"$JQ" '.spec.mcpServers |= map(select(. != "ui-calendar"))' \
+  "$CASE_DIR/expected-context.json" >"$CASE_DIR/expected-context.next"
+mv "$CASE_DIR/expected-context.next" "$CASE_DIR/expected-context.json"
+expect_success
+[ -f "$CASE_DIR/state.json.raced" ] || fail 'concurrent UI removal was not exercised'
+assert_state
+pass 'concurrent UI removal survives provisioning'
+
 RACE=create
 init_case concurrent-create
+"$JQ" 'map(select(.kind != "Context" or .metadata.namespace != "mcp-server" or .metadata.name != "context1"))' \
+  "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
 if run_provision; then
   fail 'creation race was reported as successful provisioning'
 fi
 [ -f "$CASE_DIR/state.json.raced" ] || fail 'concurrent creation was not exercised'
-"$JQ" -e 'map(select(.kind == "Context" and .metadata.name == "context2" and .metadata.namespace == "another-team"))[0] |
+"$JQ" -e 'map(select(.kind == "Context" and .metadata.name == "context1" and .metadata.namespace == "mcp-server"))[0] |
   .metadata.uid == "racing-creator-uid" and .spec.mcpServers == ["ui-racing-creator"]' \
   "$CASE_DIR/state.json" >/dev/null || fail 'creation race overwrote the winning Context'
 pass 'Context creation race fails without overwriting the winner'
+RACE=none
+
+for RACE in baseline recreate; do
+  init_case "concurrent-$RACE"
+  if run_provision; then
+    fail "concurrent $RACE was reported as successful provisioning"
+  fi
+  [ -f "$CASE_DIR/state.json.raced" ] || fail "concurrent $RACE was not exercised"
+  [ ! -s "$CASE_DIR/mutations.log" ] || fail "concurrent $RACE reached an instance mutation"
+  if [ "$RACE" = baseline ]; then
+    "$JQ" -e 'map(select(.kind == "Context" and .metadata.name == "context1"))[0] |
+      .spec.mcpServers == ["ui-calendar", "ui-drive"] and
+      (.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] | fromjson | .spec.description) == "concurrent deploy"' \
+      "$CASE_DIR/state.json" >/dev/null || fail 'migration overwrote the newer baseline'
+  else
+    "$JQ" -e 'map(select(.kind == "Context" and .metadata.name == "context1"))[0] |
+      .metadata.uid == "replacement-uid" and .spec.mcpServers == ["replacement-tools"]' \
+      "$CASE_DIR/state.json" >/dev/null || fail 'migration overwrote the replacement Context'
+  fi
+  pass "concurrent $RACE fails without overwriting the winner"
+done
 RACE=none
 
 init_case skip-instances
@@ -441,40 +675,48 @@ cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" || fail '--skip-instances 
 [ ! -s "$CASE_DIR/mutations.log" ] || fail '--skip-instances issued an instance mutation'
 pass '--skip-instances preserves all instance state'
 
-for GUARD in manifest label annotation owner-reference finalizer spec invalid-annotation; do
-  init_case "guard-$GUARD"
-  case "$GUARD" in
-    manifest) expression='.spec.description = "changed bootstrap description"' ;;
-    label) expression='.metadata.labels["managed-by"] = "changed"' ;;
-    annotation) expression='.metadata.annotations["fixture.example/owner"] = "changed"' ;;
-    owner-reference) expression='.metadata.ownerReferences = [{apiVersion:"v1",kind:"ConfigMap",name:"owner",uid:"owner-uid"}]' ;;
-    finalizer) expression='.metadata.finalizers = ["fixture.example/finalizer"]' ;;
-    spec) expression='.spec.sharedFileSystems = ["fixture-gfs"]' ;;
-    invalid-annotation) expression='' ;;
+for FIELD in manifest label annotation owner-reference finalizer spec; do
+  init_case "declared-$FIELD"
+  case "$FIELD" in
+    manifest) expression='.spec.description = "changed bootstrap description"'; check='.spec.description == "changed bootstrap description"' ;;
+    label) expression='.metadata.labels["managed-by"] = "changed"'; check='.metadata.labels["managed-by"] == "changed"' ;;
+    annotation) expression='.metadata.annotations["fixture.example/owner"] = "changed"'; check='.metadata.annotations["fixture.example/owner"] == "changed"' ;;
+    owner-reference) expression='.metadata.ownerReferences = [{apiVersion:"v1",kind:"ConfigMap",name:"owner",uid:"owner-uid"}]'; check='.metadata.ownerReferences[0].uid == "owner-uid"' ;;
+    finalizer) expression='.metadata.finalizers = ["fixture.example/finalizer"]'; check='.metadata.finalizers == ["fixture.example/finalizer"]' ;;
+    spec) expression='.spec.sharedFileSystems = ["fixture-gfs"]'; check='.spec.sharedFileSystems == ["fixture-gfs"]' ;;
   esac
-  if [ "$GUARD" = invalid-annotation ]; then
-    "$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
-      .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = "invalid-json"
-      else . end)' "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
-    mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
-  else
-    "$JQ" "$expression" "$CASE_DIR/overlay/instances/01-context.json" >"$CASE_DIR/context.next"
-    mv "$CASE_DIR/context.next" "$CASE_DIR/overlay/instances/01-context.json"
-  fi
-  cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
-  if run_provision; then
-    fail "invalid Context $GUARD was reported as successful provisioning"
-  fi
-  grep -Fq 'explicit Context migration' "$CASE_DIR/output.log" || {
-    cat "$CASE_DIR/output.log" >&2
-    fail "$GUARD case did not report the required migration"
-  }
-  cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" || fail "$GUARD rejection mutated instances"
-  pass "Context $GUARD divergence fails before instance mutation"
+  "$JQ" "$expression" "$CASE_DIR/overlay/instances/01-context.json" >"$CASE_DIR/context.next"
+  mv "$CASE_DIR/context.next" "$CASE_DIR/overlay/instances/01-context.json"
+  expect_success
+  assert_state
+  "$JQ" -e "map(select(.kind == \"Context\" and .metadata.name == \"context1\"))[0] | $check" \
+    "$CASE_DIR/state.json" >/dev/null || fail "declared $FIELD was not applied"
+  pass "context1 $FIELD applies without replacing connectors"
 done
 
-for FAILURE in render read create apply; do
+init_case invalid-last-applied
+"$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
+  .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = "invalid-json"
+  else . end)' "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
+if run_provision; then
+  fail 'invalid last-applied annotation was accepted'
+fi
+grep -Fq 'invalid context1 last-applied configuration' "$CASE_DIR/output.log" ||
+  fail 'invalid last-applied annotation did not report the correct failure'
+cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" || fail 'invalid annotation changed instance state'
+[ ! -s "$CASE_DIR/mutations.log" ] || fail 'invalid annotation reached an instance mutation'
+pass 'invalid last-applied annotation fails before instance mutation'
+
+for FAILURE in render read read-with-stdout patch create apply; do
   init_case "failure-$FAILURE"
+  if [ "$FAILURE" = create ]; then
+    "$JQ" 'map(select(.kind != "Context" or .metadata.namespace != "mcp-server" or .metadata.name != "context1"))' \
+      "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+    mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+  fi
+  cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
   if run_provision; then
     fail "unexpected $FAILURE failure was reported as successful provisioning"
   fi
@@ -482,6 +724,12 @@ for FAILURE in render read create apply; do
     cat "$CASE_DIR/output.log" >&2
     fail "$FAILURE case failed without reaching the intended API error"
   }
+  case "$FAILURE" in
+    render|read|read-with-stdout|patch)
+      cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" || fail "$FAILURE changed instance state"
+      [ ! -s "$CASE_DIR/mutations.log" ] || fail "$FAILURE reached an instance mutation"
+      ;;
+  esac
   pass "unexpected $FAILURE error fails provisioning"
 done
 
@@ -494,8 +742,9 @@ run_shared_bootstrap() {
   TEST_STATE="$CASE_DIR/state.json" TEST_CALLS="$CASE_DIR/calls.log" \
     TEST_MUTATIONS="$CASE_DIR/mutations.log" TEST_JQ="$JQ" \
     TEST_RENDER=stream TEST_FAILURE=none TEST_RACE=none \
+    TEST_GET_RESPONSE="${GET_RESPONSE:-list}" \
     PATH="$TMP/bin:$PATH" \
-    /bin/bash -c '. "$1"; shift; apply_bootstrap_instances "$@"' -- \
+    "$TEST_BASH" -c '. "$1"; shift; apply_bootstrap_instances "$@"' -- \
     "$ROOT/deploy/scripts/lib/bootstrap-instances.sh" "$TEST_CONTEXT" \
     "$CASE_DIR/overlay/instances" "$@" >"$CASE_DIR/output.log" 2>&1
 }
@@ -520,6 +769,44 @@ assert_state
   "$CASE_DIR/state.json" >/dev/null || fail 'seed non-Context resource was not applied'
 pass 'shared bootstrap preserves an existing Context while applying seed resources'
 
+init_case shared-other-context-seed
+make_seed
+"$JQ" '.spec.description = "seed description" | .spec.mcpServers = ["seed-tools"]' \
+  "$CASE_DIR/overlay/instances/02-context.json" >"$CASE_DIR/seed/other-context.json"
+if ! run_shared_bootstrap "$CASE_DIR/seed"; then
+  cat "$CASE_DIR/output.log" >&2
+  fail 'shared bootstrap failed while applying a non-target Context from base and seed'
+fi
+"$JQ" -e 'any(.[]; .kind == "Context" and .metadata.namespace == "another-team" and
+  .metadata.name == "context2" and .spec.description == "seed description" and
+  .spec.mcpServers == ["seed-tools"])' "$CASE_DIR/state.json" >/dev/null ||
+  fail 'seed did not apply after the base non-target Context'
+[ "$(grep -Fc "$(printf 'apply\tContext\tanother-team\tcontext2')" "$CASE_DIR/mutations.log")" -eq 2 ] ||
+  fail 'non-target Context was not applied once per source'
+pass 'non-target Contexts apply from base and then seed'
+
+init_case shared-context1-base-seed-order
+make_seed
+"$JQ" '.metadata.labels["base-only"] = "base"' \
+  "$CASE_DIR/overlay/instances/01-context.json" >"$CASE_DIR/context.next"
+mv "$CASE_DIR/context.next" "$CASE_DIR/overlay/instances/01-context.json"
+"$JQ" 'map(if .kind == "Context" and .metadata.namespace == "mcp-server" and .metadata.name == "context1" then
+  .metadata.labels["base-only"] = "unmanaged" else . end)' \
+  "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+remember_existing_context
+if ! run_shared_bootstrap "$CASE_DIR/seed"; then
+  cat "$CASE_DIR/output.log" >&2
+  fail 'shared bootstrap failed applying context1 base and seed'
+fi
+assert_state
+"$JQ" -e 'map(select(.kind == "Context" and .metadata.namespace == "mcp-server" and .metadata.name == "context1"))[0] |
+  (.metadata.labels | has("base-only") | not)' "$CASE_DIR/state.json" >/dev/null ||
+  fail 'context1 seed did not remove a field declared by the base'
+[ "$(grep -Fc "$(printf 'apply\tContext\tmcp-server\tcontext1')" "$CASE_DIR/mutations.log")" -eq 2 ] ||
+  fail 'context1 was not applied once per source'
+pass 'context1 applies base then seed while preserving connectors'
+
 init_case shared-new-seed
 make_seed
 "$JQ" 'map(select(.kind != "Context" or .metadata.name != "context1"))' \
@@ -530,7 +817,8 @@ if ! run_shared_bootstrap "$CASE_DIR/seed"; then
   fail 'shared bootstrap failed with a new Context and seed'
 fi
 "$JQ" -e 'any(.[]; .kind == "Context" and .metadata.name == "context1" and
-  .spec.mcpServers == ["demo-one", "demo-two"])' "$CASE_DIR/state.json" >/dev/null ||
+  .spec.mcpServers == ["demo-one", "demo-two"] and
+  ((.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] | fromjson | .spec | has("mcpServers")) | not))' "$CASE_DIR/state.json" >/dev/null ||
   fail 'new Context did not receive the seed connector selection'
 pass 'shared bootstrap selects seed connectors for a new Context'
 
@@ -543,22 +831,25 @@ if ! run_shared_bootstrap; then
   fail 'shared bootstrap failed with a new minimal Context'
 fi
 "$JQ" -e 'any(.[]; .kind == "Context" and .metadata.name == "context1" and
-  .spec.mcpServers == [])' "$CASE_DIR/state.json" >/dev/null ||
+  .spec.mcpServers == [] and
+  ((.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] | fromjson | .spec | has("mcpServers")) | not))' "$CASE_DIR/state.json" >/dev/null ||
   fail 'new minimal Context did not receive the empty bootstrap selection'
 pass 'shared bootstrap selects minimal connectors for a new Context'
 
-init_case shared-validate-before-create
+init_case shared-declarative-update
 mv "$CASE_DIR/overlay/instances/01-context.json" "$CASE_DIR/overlay/instances/99-context.json"
 "$JQ" '.spec.description = "changed bootstrap description"' \
   "$CASE_DIR/overlay/instances/99-context.json" >"$CASE_DIR/context.next"
 mv "$CASE_DIR/context.next" "$CASE_DIR/overlay/instances/99-context.json"
-cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
-if run_shared_bootstrap; then
-  fail 'shared bootstrap accepted declarative Context drift'
+if ! run_shared_bootstrap; then
+  cat "$CASE_DIR/output.log" >&2
+  fail 'shared bootstrap rejected an ordinary context1 declarative change'
 fi
-cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" ||
-  fail 'shared bootstrap created a missing Context before validating existing Contexts'
-pass 'shared bootstrap validates existing Contexts before creating missing ones'
+assert_state
+"$JQ" -e 'any(.[]; .kind == "Context" and .metadata.name == "context1" and
+  .spec.description == "changed bootstrap description")' "$CASE_DIR/state.json" >/dev/null ||
+  fail 'shared bootstrap did not apply the context1 declarative change'
+pass 'shared bootstrap applies context1 declarative changes while preserving connectors'
 
 init_case shared-ambiguous-seed
 make_seed
@@ -634,6 +925,7 @@ STUB
   TEST_STATE="$CASE_DIR/state.json" TEST_CALLS="$CASE_DIR/calls.log" \
     TEST_MUTATIONS="$CASE_DIR/mutations.log" TEST_JQ="$JQ" \
     TEST_RENDER=stream TEST_FAILURE=none TEST_RACE=none \
+    TEST_GET_RESPONSE="${GET_RESPONSE:-list}" \
     PATH="$TMP/bin:$PATH" /usr/bin/make --no-print-directory -C "$repo" \
     MINIKUBE_PROFILE="$TEST_CONTEXT" minikube-deploy-instances >"$CASE_DIR/output.log" 2>&1
 }

@@ -304,6 +304,38 @@ async function waitForBusinessResult(): Promise<void> {
     .toBe('42')
 }
 
+async function provisionInstances(): Promise<void> {
+  await run(
+    'node',
+    [
+      'scripts/minikube/run-with-deadline.mjs',
+      '--timeout-seconds',
+      '1200',
+      '--label',
+      'issue628-provision',
+      '--',
+      'bash',
+      'scripts/minikube/with-t2-mutation-lock.sh',
+      '--',
+      'bash',
+      'deploy/scripts/provision-gfs-runtime.sh',
+      '--context',
+      profile,
+      '--overlay',
+      'deploy/overlays/minikube',
+    ],
+    1_230_000
+  )
+}
+
+async function refreshProfileForwards(): Promise<void> {
+  await onProfile(
+    '/usr/bin/make',
+    ['-f', 'scripts/minikube-profiles/branch.mk', 'branch-profile-pf'],
+    180_000
+  )
+}
+
 async function dismissReminder(page: Page): Promise<void> {
   const reminder = page.getByRole('button', { name: 'Remind me later' })
   if (await reminder.isVisible().catch(() => false)) await reminder.click()
@@ -436,27 +468,7 @@ test(persistenceTestName, async ({ page, browser }) => {
     await waitForBusinessResult()
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      await run(
-        'node',
-        [
-          'scripts/minikube/run-with-deadline.mjs',
-          '--timeout-seconds',
-          '1200',
-          '--label',
-          'issue628-provision',
-          '--',
-          'bash',
-          'scripts/minikube/with-t2-mutation-lock.sh',
-          '--',
-          'bash',
-          'deploy/scripts/provision-gfs-runtime.sh',
-          '--context',
-          profile,
-          '--overlay',
-          'deploy/overlays/minikube',
-        ],
-        1_230_000
-      )
+      await provisionInstances()
       await assertContext()
       expect(await policies()).toEqual(baselinePolicies)
       await waitForBusinessResult()
@@ -503,6 +515,8 @@ test(persistenceTestName, async ({ page, browser }) => {
     await assertContext()
     expect(await policies()).toEqual(baselinePolicies)
     await waitForBusinessResult()
+    // Port-forwards select a Pod and do not follow it through a rollout.
+    await refreshProfileForwards()
 
     if (profileRestart) {
       const beforeRestart = await restartIdentity()
@@ -553,6 +567,65 @@ test(persistenceTestName, async ({ page, browser }) => {
       await dismissReminder(freshPage)
       await openAgentConnectors(freshPage)
       await expect(freshPage.getByRole('row', { name: new RegExp(connector) })).toBeVisible()
+
+      await freshPage.getByRole('button', { name: 'Actions for connector ' + connector }).click()
+      await freshPage.getByRole('menuitem', { name: 'Remove connector', exact: true }).click()
+      const confirm = freshPage.getByRole('alertdialog', {
+        name: 'Remove connector from this agent?',
+      })
+      await expect(confirm).toBeVisible()
+      const removed = freshPage.waitForResponse(response =>
+        matchesControlResponse(response, 'PUT', '/api/v1/admin/contexts/context1')
+      )
+      await confirm.getByRole('button', { name: 'Remove connector', exact: true }).click()
+      expect((await removed).ok()).toBe(true)
+      await expect(freshPage.getByRole('row', { name: new RegExp(connector) })).toHaveCount(0)
+
+      const afterRemoval = await snapshot()
+      expect(afterRemoval.uid).toBe(original.uid)
+      expect([...afterRemoval.servers].sort()).toEqual([...original.servers].sort())
+      await provisionInstances()
+      const afterRemovalDeploy = await snapshot()
+      expect(afterRemovalDeploy.uid).toBe(original.uid)
+      expect([...afterRemovalDeploy.servers].sort()).toEqual([...original.servers].sort())
+      await expect
+        .poll(
+          async () => {
+            try {
+              return (await policies()).some(policy => policy.name === 'ctx-context1-' + connector)
+            } catch {
+              return true
+            }
+          },
+          { timeout: 180_000, intervals: [2_000, 5_000] }
+        )
+        .toBe(false)
+      await refreshProfileForwards()
+
+      const afterRemovalBrowser = await browser.newContext({ baseURL: uiUrl })
+      try {
+        const afterRemovalPage = await afterRemovalBrowser.newPage()
+        await afterRemovalPage.goto('/')
+        await loginControlUiVisible(afterRemovalPage)
+        await dismissReminder(afterRemovalPage)
+        await openAgentConnectors(afterRemovalPage)
+        if (original.servers.length === 0) {
+          await expect(afterRemovalPage.getByText('No connectors attached yet.')).toBeVisible()
+        } else {
+          for (const server of original.servers) {
+            await expect(
+              afterRemovalPage
+                .getByRole('row')
+                .filter({ has: afterRemovalPage.getByText(server, { exact: true }) })
+            ).toBeVisible()
+          }
+        }
+        await expect(
+          afterRemovalPage.getByRole('row', { name: new RegExp(connector) })
+        ).toHaveCount(0)
+      } finally {
+        await afterRemovalBrowser.close()
+      }
     } finally {
       await fresh.close()
     }

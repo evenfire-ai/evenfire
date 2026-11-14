@@ -6,7 +6,7 @@ metadata:
 spec:
   contextId: context1
   description: Default minikube context — defines which MCP servers the host can access.
-  # Initial value on a clean install. Existing Context selections are preserved.
+  # Initial value on a clean install. Existing context1 selections are preserved.
   # mcp-host's native tools (shell,
   # fileRead/fileWrite, httpRequest, memory) work without any MCP server, so
   # chatllm is fully usable out of the box. Install servers from the registry,

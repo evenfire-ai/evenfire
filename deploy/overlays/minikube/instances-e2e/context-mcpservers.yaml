@@ -1,5 +1,5 @@
-# Initial Context selection under SEED_PROFILE=e2e. Existing Contexts keep their
-# user-managed selection, including any demo connectors the user has removed.
+# Initial context1 selection under SEED_PROFILE=e2e. An existing context1 keeps
+# its user-managed selection, including demo connectors the user has removed.
 apiVersion: clerum.io/v1alpha1
 kind: Context
 metadata:
