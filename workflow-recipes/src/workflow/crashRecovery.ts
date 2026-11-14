@@ -30,6 +30,10 @@ export interface CrashRecoveryResult {
 /** The fields read from a pod that exists. */
 interface ObservedPodReadiness {
   phase?: string
+  /**
+   * Whether this pod can be waited on as the serving pod of its name: phase
+   * Running, condition Ready=True, and not being deleted.
+   */
   ready: boolean
   waitingReason?: string
   schedulingReason?: string
@@ -54,9 +58,14 @@ export interface PresentPodReadiness extends ObservedPodReadiness {
   kind: 'present'
 }
 
-/** The pod exists and is being deleted. */
+/**
+ * The pod exists and is being deleted. It is never `ready`: a deletion is not
+ * undone, so this pod will not serve under its name again, even though it can
+ * keep condition Ready=True until its containers stop.
+ */
 export interface TerminatingPodReadiness extends ObservedPodReadiness {
   kind: 'terminating'
+  ready: false
   /**
    * `metadata.deletionTimestamp` (ISO 8601): the deletion request time plus
    * the pod's grace period.
@@ -264,6 +273,7 @@ export function inspectPodReadiness(pod: k8s.V1Pod): PresentPodReadiness | Termi
   if (pod.metadata?.deletionTimestamp) {
     return {
       ...observed,
+      ready: false,
       kind: 'terminating',
       deletingAt: new Date(pod.metadata.deletionTimestamp).toISOString(),
     }

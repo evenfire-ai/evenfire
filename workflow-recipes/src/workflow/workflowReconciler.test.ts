@@ -1579,6 +1579,97 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       }
     )
 
+    it('holds the coordinator while a predecessor deleted in this pass still reports Ready', async () => {
+      const { created, conflicts, deleted, readinessReads } = await useFakePods(
+        'hybrid-recipe',
+        {
+          coordinator: { phase: 'Failed', ageMs: 5 * MINUTE_MS },
+          mcpHost: { phase: 'Running', ageMs: 5 * MINUTE_MS, ready: true },
+        },
+        { gracefulDelete: true }
+      )
+
+      const result = await reconcileRun('hybrid-recipe', hybridSpec, {
+        phase: 'recovering',
+        attempt: 0,
+        startedAt: isoDateAgo(5 * MINUTE_MS),
+      })
+
+      // Witnesses: the predecessor was deleted, its name was still taken (the
+      // create got a 409), and the gate read it.
+      expect(deleted).toContain('hybrid-recipe-mcp-host')
+      expect(conflicts).toEqual(['hybrid-recipe-mcp-host'])
+      expect(readinessReads).toEqual(['hybrid-recipe-mcp-host'])
+      expect(created).toEqual([])
+      expect(result).toMatchObject({
+        phase: 'deploying',
+        workflowPhase: 'recovering',
+        message: 'Waiting for mcp-host pod to become Ready (phase=Running)',
+      })
+    })
+
+    it.each([
+      { state: 'live', deletingAgoMs: undefined, coordinatorCreated: true },
+      { state: 'being deleted', deletingAgoMs: 1000, coordinatorCreated: false },
+    ])(
+      'starts the coordinator on a Ready mcp-host only when the pod is not being deleted ($state)',
+      async row => {
+        const { created, conflicts, readinessReads } = await useFakePods('hybrid-recipe', {
+          mcpHost: {
+            phase: 'Running',
+            ageMs: MINUTE_MS,
+            ready: true,
+            ...(row.deletingAgoMs !== undefined && { deletingAgoMs: row.deletingAgoMs }),
+          },
+        })
+
+        const result = await reconcileRun('hybrid-recipe', hybridSpec, {
+          phase: 'initializing',
+          startedAt: isoDateAgo(MINUTE_MS),
+        })
+
+        // Witnesses: the pod was there at the pass start (no create was
+        // attempted for it), and the gate read it.
+        expect(conflicts).toEqual([])
+        expect(created).not.toContain('hybrid-recipe-mcp-host')
+        expect(readinessReads).toEqual(['hybrid-recipe-mcp-host'])
+        expect(created.includes('hybrid-recipe-coordinator')).toBe(row.coordinatorCreated)
+        expect(result.message === 'Waiting for mcp-host pod to become Ready (phase=Running)').toBe(
+          !row.coordinatorCreated
+        )
+      }
+    )
+
+    it.each([
+      { deletingAgoMs: 4 * MINUTE_MS - 1, phase: 'deploying' },
+      { deletingAgoMs: 4 * MINUTE_MS, phase: 'failed' },
+    ])(
+      'ends the wait for a predecessor that stays Ready while stuck terminating (deleted $deletingAgoMs ms ago)',
+      async row => {
+        vi.useFakeTimers({ toFake: ['Date'] })
+        const { created, readinessReads } = await useFakePods('hybrid-recipe', {
+          mcpHost: {
+            phase: 'Running',
+            ageMs: 60 * MINUTE_MS,
+            ready: true,
+            deletingAgoMs: row.deletingAgoMs,
+          },
+        })
+
+        const result = await reconcileRun('hybrid-recipe', hybridSpec, {
+          phase: 'recovering',
+          attempt: 1,
+          startedAt: isoDateAgo(60 * MINUTE_MS),
+        })
+
+        expect(readinessReads).toEqual(['hybrid-recipe-mcp-host'])
+        expect(created).toEqual([])
+        expect(result.phase).toBe(row.phase)
+        expect(result.message).toContain('Waiting for mcp-host pod to become Ready (phase=Running)')
+        expect(result.message.includes(deadlineMessage)).toBe(row.phase === 'failed')
+      }
+    )
+
     it('gives no verdict when the predecessor is gone at the gate read', async () => {
       const { created, conflicts, readinessReads } = await useFakePods(
         'hybrid-recipe',
@@ -1615,8 +1706,9 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       const actual = await vi.importActual<typeof import('./crashRecovery')>('./crashRecovery')
       crashRecoveryMocks.evaluateCrashRecovery.mockImplementation(actual.evaluateCrashRecovery)
 
-      // Pods on an absolute clock. A deleted Running pod keeps its name for
-      // 5.5 s; its deletionTimestamp is the request plus the 30 s grace period.
+      // Pods on an absolute clock. A deleted Running pod keeps its name and
+      // its Ready condition for 5.5 s; its deletionTimestamp is the request
+      // plus the 30 s grace period.
       type TimedPod = {
         phase: string
         createdAtMs: number
@@ -1648,7 +1740,6 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
         if (pod.deletionTimestampMs === undefined) {
           pod.deletionTimestampMs = Date.now() + 30 * SECOND_MS
           pod.goneAtMs = Date.now() + 5500
-          pod.ready = false
         }
       })
       mockCoreApi.createNamespacedPod.mockImplementation(
@@ -1737,6 +1828,9 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       // Witness: at least one gate read found no pod (the predecessor was gone
       // and its replacement not created yet).
       expect(messages).toContain('Waiting for mcp-host pod to become Ready (phase=missing)')
+      // Witness: at least one gate read found the predecessor still there,
+      // Ready and being deleted, and held the coordinator.
+      expect(messages).toContain('Waiting for mcp-host pod to become Ready (phase=Running)')
     })
 
     it('gives an mcp-host created after slow output pods a full window on the first deploy', async () => {

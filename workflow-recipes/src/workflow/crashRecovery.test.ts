@@ -151,6 +151,36 @@ describe('crash recovery pod readiness classification', () => {
   })
 })
 
+describe('inspectPodReadiness on a pod that is being deleted', () => {
+  it('never reports a pod with a deletionTimestamp ready, even while its Ready condition is True', () => {
+    const status = { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] }
+    const metadata = { uid: 'pod-uid-4', creationTimestamp: new Date('2026-11-13T10:00:00.000Z') }
+
+    // Control: the same pod is ready while it is not being deleted.
+    expect(inspectPodReadiness({ metadata, status })).toEqual({
+      kind: 'present',
+      phase: 'Running',
+      ready: true,
+      uid: 'pod-uid-4',
+      createdAt: '2026-11-13T10:00:00.000Z',
+    })
+
+    expect(
+      inspectPodReadiness({
+        metadata: { ...metadata, deletionTimestamp: new Date('2026-11-13T10:05:30.000Z') },
+        status,
+      })
+    ).toEqual({
+      kind: 'terminating',
+      phase: 'Running',
+      ready: false,
+      uid: 'pod-uid-4',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      deletingAt: '2026-11-13T10:05:30.000Z',
+    })
+  })
+})
+
 describe('getPodReadiness', () => {
   it('returns the absent state on GET 404 and the inspected pod on GET 200', async () => {
     const readNamespacedPod = vi
