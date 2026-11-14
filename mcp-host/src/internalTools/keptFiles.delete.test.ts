@@ -16,6 +16,7 @@ import {
 import { MAKE_ROOM_SENTENCE, NativeToolRegistry } from '../core/tools/nativeToolRegistry'
 import { type Conversation, ConversationState, type PendingApproval } from '../core/types'
 import {
+  APPROVAL_INPUT_PREVIEW_BYTES,
   KEPT_FILES_DELETE_APPROVAL_TOOL,
   projectApprovalInputPreview,
 } from '../progress/approvalInputPreview'
@@ -639,7 +640,15 @@ describe('registration and approval of the delete', () => {
 
 describe('the delete approval names every file', () => {
   const SECRET = 'synthetic-delete-name-secret'
-  const redact = (text: string) => text.split(SECRET).join('[REDACTED:P]')
+  // A plain protected value whose card escape (`\u{2028}`) is none of the
+  // forms the channel redactor matches (JSON leaves U+2028 as it is).
+  const LINE_SECRET = 'card\u2028line-protected-value'
+  const redact = (text: string) =>
+    text.split(SECRET).join('[REDACTED:P]').split(LINE_SECRET).join('[REDACTED:L]')
+  const VALUES = ' — 1.2 MB (1,234,567 bytes), created 2026-11-10 09:12:45 UTC'
+  const SLACK_TRAILER = 'Use the approval controls to continue or cancel.'
+  const REPLY_TRAILER = 'Reply /approve or /deny to this message.'
+  const CLI_TRAILER = 'Request ID: r. Please approve via CLI: POST /v1/runtime/approvals/approve'
   type CardFile = { kind: string; name: string; createdAt?: string; sizeBytes?: number }
   const withValues = (files: CardFile[]) =>
     files.map((file, n) => ({
@@ -657,14 +666,21 @@ describe('the delete approval names every file', () => {
     )!
   }
 
-  function notification(files: CardFile[], channelType = 'slack'): string {
+  function notification(
+    files: CardFile[],
+    channelType = 'slack',
+    defaultPolicy = 'channel_users'
+  ): string {
     const proto = AgentStateMachine.prototype as unknown as {
       buildApprovalNotification(a: PendingApproval, u: string, c?: string): string
     }
     return proto.buildApprovalNotification.call(
       {
-        approvalConfig: { defaultPolicy: 'channel_users', channels: {}, tools: {} },
-        secretEntriesProvider: () => [{ name: 'P', value: SECRET }],
+        approvalConfig: { defaultPolicy, channels: {}, tools: {} },
+        secretEntriesProvider: () => [
+          { name: 'P', value: SECRET },
+          { name: 'L', value: LINE_SECRET },
+        ],
       },
       {
         request_id: 'r',
@@ -677,6 +693,51 @@ describe('the delete approval names every file', () => {
       'user-1',
       channelType
     )
+  }
+
+  /** The card in Desktop and in a Slack channel. */
+  function both(files: CardFile[]): string[] {
+    return [preview(files).text, notification(files)]
+  }
+
+  function fileLines(text: string): string[] {
+    return text.split('\n').filter(line => line.startsWith('upload: '))
+  }
+
+  /**
+   * The name an `upload` line quotes, decoded by the inverse of the card
+   * escape (`\\`, `\"`, `\u{HEX}`). Throws on an unknown escape, on a name
+   * that is never closed, and on any text after it but the file's values.
+   */
+  function quotedName(line: string): string {
+    const prefix = 'upload: "'
+    if (!line.startsWith(prefix)) throw new Error(`not a file line: ${line}`)
+    let name = ''
+    let at = prefix.length
+    while (at < line.length) {
+      const character = line[at]!
+      if (character === '"') {
+        const rest = line.slice(at + 1)
+        if (rest !== VALUES) throw new Error(`unexpected text after the name: ${rest}`)
+        return name
+      }
+      if (character !== '\\') {
+        name += character
+        at += 1
+        continue
+      }
+      const next = line[at + 1]
+      if (next === '\\' || next === '"') {
+        name += next
+        at += 2
+        continue
+      }
+      const hex = /^u\{([0-9A-F]+)\}/.exec(line.slice(at + 1))
+      if (!hex) throw new Error(`unknown escape: ${line.slice(at, at + 10)}`)
+      name += String.fromCodePoint(Number.parseInt(hex[1]!, 16))
+      at += 1 + hex[0].length
+    }
+    throw new Error(`the name is never closed: ${line}`)
   }
 
   it('lists twenty names of 60 characters in full, in Desktop and in a channel', () => {
@@ -803,5 +864,127 @@ describe('the delete approval names every file', () => {
     expect(preview([{ kind: 'generated', name: 'report.md' }]).text).toContain(
       'generated: "report.md"'
     )
+  })
+
+  it('escapes a quote in a name, so the name cannot forge a size and a date after it', () => {
+    const name = 'x.pdf" — 1 B (1 bytes), created 2020-01-01 00:00:00 UTC; "y.pdf'
+    for (const text of both([{ kind: 'upload', name }])) {
+      expect(fileLines(text)).toEqual([
+        `upload: "x.pdf\\" — 1 B (1 bytes), created 2020-01-01 00:00:00 UTC; \\"y.pdf"${VALUES}`,
+      ])
+    }
+  })
+
+  it('renders each name one way, so an escape never reads as literal text', () => {
+    const names = ['a\\', 'a\\"', 'a\\u{A}text', 'a\ntext', 'a"b']
+    for (const text of both(names.map(name => ({ kind: 'upload', name })))) {
+      const lines = fileLines(text)
+      expect(lines.map(quotedName)).toEqual(names)
+      expect(new Set(lines).size).toBe(names.length)
+    }
+  })
+
+  it('shows a line or paragraph separator in a name as its escape', () => {
+    for (const text of both([{ kind: 'upload', name: 'a\u2028b\u2029c' }])) {
+      expect(fileLines(text)).toEqual([`upload: "a\\u{2028}b\\u{2029}c"${VALUES}`])
+      expect(text).not.toContain('\u2028')
+      expect(text).not.toContain('\u2029')
+    }
+  })
+
+  it('shows default-ignorable and format characters of a name as escapes', () => {
+    const cases = [
+      ['\u3164x', '\\u{3164}x'],
+      ['❤\uFE0F.md', '❤\\u{FE0F}.md'],
+      ['\u0600x', '\\u{600}x'],
+    ] as const
+    for (const text of both(cases.map(([name]) => ({ kind: 'upload', name })))) {
+      expect(fileLines(text)).toEqual(cases.map(([, shown]) => `upload: "${shown}"${VALUES}`))
+    }
+  })
+
+  it('shows a lone surrogate in a name as its escape, so the card is well-formed text', () => {
+    for (const text of both([{ kind: 'upload', name: 'x\uD800y' }])) {
+      expect(fileLines(text)).toEqual([`upload: "x\\u{D800}y"${VALUES}`])
+      expect(text.isWellFormed()).toBe(true)
+    }
+  })
+
+  it('redacts a protected value in a name before escaping it, in both', () => {
+    const files = [{ kind: 'upload', name: `a-${LINE_SECRET}.md` }]
+    for (const text of both(files)) {
+      expect(fileLines(text)).toEqual([`upload: "a-[REDACTED:L].md"${VALUES}`])
+      expect(text).not.toContain(LINE_SECRET)
+      expect(text).not.toContain('card\\u{2028}line-protected-value')
+    }
+    expect(preview(files).truncated).toBe(true)
+  })
+
+  it('shows a kind as one escaped value on its own line', () => {
+    const files = [
+      { kind: 'upload\nx\u2028', name: 'a.md' },
+      { kind: 'generated', name: 'b.md' },
+    ]
+    const shown = `upload\\u{A}x\\u{2028}: "a.md"${VALUES}`
+    const desktop = preview(files).text.split('\n')
+    expect(desktop).toHaveLength(files.length + 2)
+    expect(desktop[1]).toBe(shown)
+    const channel = notification(files).split('\n')
+    expect(channel).toHaveLength(files.length + 3)
+    expect(channel[1]).toBe(shown)
+  })
+
+  it('redacts a protected value in a kind and marks the Desktop preview as changed', () => {
+    const files = [{ kind: SECRET, name: 'a.md' }]
+    const desktop = preview(files)
+    expect(desktop.text.split('\n')[1]).toBe(`[REDACTED:P]: "a.md"${VALUES}`)
+    expect(desktop.text).not.toContain(SECRET)
+    expect(desktop.truncated).toBe(true)
+    const channel = notification(files)
+    expect(channel.split('\n')[1]).toBe(`[REDACTED:P]: "a.md"${VALUES}`)
+    expect(channel).not.toContain(SECRET)
+    // Witness: the same file under a plain kind is not marked.
+    expect(preview([{ kind: 'upload', name: 'a.md' }]).truncated).toBe(false)
+  })
+
+  it('cuts the channel card at the Desktop bound and keeps its trailer whole', () => {
+    const files = Array.from({ length: 300 }, () => ({ kind: 'upload', name: 'x'.repeat(255) }))
+    const desktop = preview(files)
+    expect(desktop.truncated).toBe(true)
+    expect(Buffer.byteLength(desktop.text, 'utf8')).toBeLessThanOrEqual(
+      APPROVAL_INPUT_PREVIEW_BYTES
+    )
+    // Witness: the cut card still opens with the fixed line and lists files.
+    expect(desktop.text.split('\n')[0]).toBe('Delete these files permanently:')
+    expect(fileLines(desktop.text).length).toBeGreaterThan(0)
+    for (const [policy, trailer] of [
+      ['channel_users', SLACK_TRAILER],
+      ['cli_only', CLI_TRAILER],
+    ] as const) {
+      const channel = notification(files, 'slack', policy)
+      expect(channel).toBe(`${desktop.text}\n${trailer}`)
+      const card = channel.slice(0, -(trailer.length + 1))
+      expect(Buffer.byteLength(card, 'utf8')).toBeLessThanOrEqual(APPROVAL_INPUT_PREVIEW_BYTES)
+    }
+  })
+
+  it('adds no line to a card under the bound, whatever the trailer', () => {
+    const files = Array.from({ length: 20 }, (_, n) => ({
+      kind: 'upload',
+      name: `${'x'.repeat(250)}${String(n).padStart(5, '0')}`,
+    }))
+    const desktop = preview(files)
+    expect(desktop.truncated).toBe(false)
+    for (const [channelType, policy, trailer] of [
+      ['slack', 'channel_users', SLACK_TRAILER],
+      ['telegram', 'channel_users', REPLY_TRAILER],
+      ['slack', 'cli_only', CLI_TRAILER],
+    ] as const) {
+      const lines = notification(files, channelType, policy).split('\n')
+      expect(lines).toHaveLength(23)
+      expect(lines.slice(0, 22).join('\n')).toBe(desktop.text)
+      expect(lines[21]).toBe('Total files: 20')
+      expect(lines[22]).toBe(trailer)
+    }
   })
 })

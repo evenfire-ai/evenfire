@@ -94,7 +94,10 @@ export interface LlmInProgressEvent {
 
 export interface ApprovalInputPreview {
   text: string
-  /** Also true when redaction changes the command; never claim an exact full copy. */
+  /**
+   * Also true when redaction changes the command, or a kind or name on a
+   * kept-files delete card; never claim an exact full copy.
+   */
   truncated: boolean
 }
 

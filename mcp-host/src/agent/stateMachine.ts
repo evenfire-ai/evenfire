@@ -48,7 +48,7 @@ import { logger } from '../logger'
 import { McpManager } from '../mcp'
 import {
   KEPT_FILES_DELETE_APPROVAL_TOOL,
-  keptFilesDeleteApprovalLines,
+  keptFilesDeleteApprovalCard,
 } from '../progress/approvalInputPreview'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
@@ -1651,16 +1651,19 @@ export class AgentStateMachine extends EventEmitter {
     }
 
     if (approval.tool_name === KEPT_FILES_DELETE_APPROVAL_TOOL) {
-      // The user approves a permanent delete by the names it lists, in full
-      // lines instead of the cut parameter summary, redacted like the preview.
+      // The user approves a permanent delete by the names it lists: the same
+      // card text as the Desktop preview (whole lines instead of the cut
+      // parameter summary, redacted, escaped and cut at
+      // APPROVAL_INPUT_PREVIEW_BYTES), followed by the instruction, which the
+      // cut never reaches.
       const safety = new BasicSafety(this.secretEntriesProvider)
-      const projected = keptFilesDeleteApprovalLines(
+      const card = keptFilesDeleteApprovalCard(
         approval.parameters,
         text => safety.sanitizeOutput(approval.tool_name, text).content
       )
-      if (projected) {
+      if (card) {
         return [
-          ...projected.lines,
+          card.text,
           canApproveViaChannel
             ? channelType === 'slack'
               ? 'Use the approval controls to continue or cancel.'
