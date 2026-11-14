@@ -83,9 +83,10 @@ import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
 import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
+import { GfsHomeStateNotice } from '@/gfs/GfsHomeStateNotice'
 import { GfsInheritedAccessDialog } from '@/gfs/GfsInheritedAccessDialog'
 import type { GfsInheritedAccessDialogRequest } from '@/gfs/GfsInheritedAccessDialog/types'
-import { callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
+import { callerHomeNotice, callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
@@ -3076,6 +3077,13 @@ export function FilesPage({
       current || rootView === 'shared' ? null : callerHomeRootNode(ctrl.home, accessibleResources),
     [accessibleResources, ctrl.home, current, rootView]
   )
+  // A home that is not ready says so on the overview, with the sidebar's
+  // notice: not in a folder, not in Shared with me, not for a revoked session
+  // (its own surface explains it), and not for a retired home.
+  const myHomeNotice =
+    myHome || current || rootView === 'shared' || accessRevoked || ctrl.home?.state === 'retired'
+      ? null
+      : callerHomeNotice(ctrl.home, ctrl.homeError)
   // The controller owns current-view loading semantics, including the
   // page-wide authority gate and the distinction between initial and
   // background query activity.
@@ -3342,6 +3350,20 @@ export function FilesPage({
               <IconContexts aria-hidden="true" width={16} height={16} />
               {myHome.name}
             </Button>
+          </section>
+        ) : myHomeNotice ? (
+          <section className="page-card da-gfs-my-home" aria-label="My home">
+            <Button
+              align="start"
+              className="da-gfs-my-home__open"
+              color="neutral"
+              disabled
+              variant="text"
+            >
+              <IconContexts aria-hidden="true" width={16} height={16} />
+              {GFS_MY_HOME_LABEL}
+            </Button>
+            <GfsHomeStateNotice notice={myHomeNotice} variant="page" />
           </section>
         ) : null}
         <section

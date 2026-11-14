@@ -34,10 +34,16 @@ export class DesktopFilesNav {
     if (state === 'retired') {
       await expect(this.page.getByRole('treeitem', { name: 'My home' })).toHaveCount(0)
     } else if (state === 'pending') {
-      await expect(this.page.getByText('Your home folder is being prepared')).toBeVisible()
+      await expect(
+        this.page
+          .getByRole('tree', { name: 'File destinations' })
+          .getByText('Your home folder is being prepared')
+      ).toBeVisible()
     } else if (state === 'conflict') {
       await expect(
-        this.page.getByText('Your home folder needs attention from an administrator')
+        this.page
+          .getByRole('tree', { name: 'File destinations' })
+          .getByText('Your home folder needs attention from an administrator')
       ).toBeVisible()
     } else if (state === 'ready') {
       await expect(this.page.getByRole('treeitem', { name: 'My home' })).toHaveAttribute(
@@ -48,6 +54,25 @@ export class DesktopFilesNav {
       await expect(
         this.page.getByRole('tree', { name: 'File destinations' }).getByRole('alert')
       ).toBeVisible()
+    }
+  }
+
+  /**
+   * The Files page overview's "My home" card for a home that is not ready: a
+   * status line while it is prepared, an alert for a conflict or a load error.
+   */
+  async expectFilesHomeState(state: 'pending' | 'conflict' | 'unavailable'): Promise<void> {
+    const card = this.page.getByRole('region', { name: 'My home' })
+    if (state === 'pending') {
+      await expect(
+        card.getByRole('status').getByText('Your home folder is being prepared')
+      ).toBeVisible()
+    } else if (state === 'conflict') {
+      await expect(
+        card.getByRole('alert').getByText('Your home folder needs attention from an administrator')
+      ).toBeVisible()
+    } else {
+      await expect(card.getByRole('alert')).toBeVisible()
     }
   }
 
@@ -71,11 +96,12 @@ export class DesktopFilesNav {
     await expect(this.page.getByRole('region', { name: 'My home' })).toHaveCount(0)
     // The EvenDrive overview adds the home, in its own card.
     await this.openFiles()
-    await expect(
-      this.page
-        .getByRole('region', { name: 'My home' })
-        .getByRole('button', { name: 'My home', exact: true })
-    ).toBeVisible()
+    const openHome = this.page
+      .getByRole('region', { name: 'My home' })
+      .getByRole('button', { name: 'My home', exact: true })
+    await expect(openHome).toBeVisible()
+    // A home that is not ready shows a disabled "My home" label in the same card.
+    await expect(openHome).toBeEnabled()
     await expect(
       this.page
         .getByRole('region', { name: 'EvenDrive browser' })

@@ -12,6 +12,7 @@ import {
   accessibleResource,
   childView,
   gfsRouteFailureMessage,
+  homeView,
   listAccessiblePage,
   listChildrenPage,
   moveResourceReceipt,
@@ -1052,6 +1053,7 @@ describe('FilesPage Move permission generation fencing', () => {
       value: {
         auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
             resourceId === 'source-parent' ? children : listChildrenPage([])
@@ -1210,6 +1212,7 @@ describe('FilesPage Move permission generation fencing', () => {
       value: {
         auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
             resourceId === 'source-parent' ? children : listChildrenPage([])

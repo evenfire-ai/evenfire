@@ -8419,6 +8419,123 @@ describe('FilesPage', () => {
       expect(onLocationChange).toHaveBeenCalledTimes(locationCalls)
     })
 
+    describe('My home card for a home that is not ready', () => {
+      const renderHome = (
+        overrides: Record<string, unknown>,
+        pendingGfsUri: string | null = null
+      ) => {
+        const controller = {
+          ...baseController(),
+          accessibleResources: [sharedRow('alpha-1', 'Alpha shared')],
+          ...overrides,
+        }
+        hookMock.useGfsBrowserController.mockReturnValue(controller)
+        render(
+          <QueryClientProvider client={new QueryClient()}>
+            <FilesPage pendingGfsUri={pendingGfsUri} />
+          </QueryClientProvider>
+        )
+        return controller
+      }
+      const homeCard = () => screen.queryByRole('region', { name: 'My home' })
+
+      it('shows a pending home as a disabled label with a status line', () => {
+        renderHome({ home: { state: 'pending', drive: null, resourceId: null, path: null } })
+        const card = homeCard()!
+        expect(within(card).getByRole('button', { name: 'My home' }).hasAttribute('disabled')).toBe(
+          true
+        )
+        expect(within(card).getByRole('status').textContent).toContain(
+          'Your home folder is being prepared'
+        )
+        expect(within(card).queryByRole('alert')).toBeNull()
+        // Witness: the shared rows still render beside the card.
+        expect(screen.getAllByText('Alpha shared').length).toBeGreaterThan(0)
+      })
+
+      it('shows a home in conflict as an alert', () => {
+        renderHome({ home: { state: 'conflict', drive: 'main', resourceId: null, path: null } })
+        const card = homeCard()!
+        expect(within(card).getByRole('alert').textContent).toContain(
+          'Your home folder needs attention from an administrator'
+        )
+        expect(within(card).getByRole('button', { name: 'My home' }).hasAttribute('disabled')).toBe(
+          true
+        )
+      })
+
+      it('shows a home that could not be loaded as an alert with the error', () => {
+        renderHome({ home: null, homeError: 'Home service unavailable' })
+        const card = homeCard()!
+        expect(within(card).getByRole('alert').textContent).toContain('Home service unavailable')
+      })
+
+      it.each([
+        [
+          'a retired home',
+          { home: { state: 'retired', drive: null, resourceId: null, path: null } },
+        ],
+        [
+          'a revoked session with a home error',
+          { accessState: 'revoked', home: null, homeError: 'Home service unavailable' },
+        ],
+        ['no home data and no error', { home: null }],
+        [
+          'a folder open with a pending home',
+          {
+            home: { state: 'pending', drive: null, resourceId: null, path: null },
+            current: {
+              resourceId: 'folder-1',
+              gfsUri: 'gfs://main/folder1',
+              name: 'Folder',
+              kind: 'directory' as const,
+            },
+            crumbs: [
+              {
+                resourceId: 'folder-1',
+                gfsUri: 'gfs://main/folder1',
+                name: 'Folder',
+                kind: 'directory' as const,
+                version: 1,
+                bytes: 0,
+              },
+            ],
+          },
+        ],
+      ])('shows no home card for %s', (_name, overrides) => {
+        renderHome(overrides)
+        // Witness: the page itself rendered.
+        expect(screen.getByRole('region', { name: 'EvenDrive browser' })).toBeTruthy()
+        expect(homeCard()).toBeNull()
+      })
+
+      it('shows no home card in the Shared with me view', () => {
+        renderHome(
+          { home: { state: 'pending', drive: null, resourceId: null, path: null } },
+          GFS_SHARED_WITH_ME_LOCATION
+        )
+        const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
+        // Witness: the Shared with me view is the one rendered.
+        expect(
+          within(shared)
+            .getByRole('button', { name: 'Shared with me' })
+            .getAttribute('aria-current')
+        ).toBe('page')
+        expect(homeCard()).toBeNull()
+      })
+
+      it('keeps the ready card an enabled button that opens the home, with no notice', () => {
+        const controller = renderHome({
+          home: { state: 'ready', drive: 'main', resourceId: 'home-1', path: '/Users/owner' },
+        })
+        const card = homeCard()!
+        expect(within(card).queryByRole('status')).toBeNull()
+        expect(within(card).queryByRole('alert')).toBeNull()
+        fireEvent.click(within(card).getByRole('button', { name: 'My home' }))
+        expect(controller.openResource).toHaveBeenCalledTimes(1)
+      })
+    })
+
     it('titles the Files tab My home at the home root and the folder name inside it', () => {
       const renderCurrent = (current: { resourceId: string; gfsUri: string; name: string }) => {
         hookMock.useGfsBrowserController.mockReturnValue({

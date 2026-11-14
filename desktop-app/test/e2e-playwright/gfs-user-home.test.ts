@@ -841,6 +841,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
       const nav = new DesktopFilesNav(session.page)
       await nav.openFiles()
       await nav.expectHomeState('conflict')
+      await nav.expectFilesHomeState('conflict')
       await nav.openSharedWithMe()
       await expect(session.page.getByRole('button', { name: `Open ${shared.name}` })).toBeVisible()
       setupComplete = true

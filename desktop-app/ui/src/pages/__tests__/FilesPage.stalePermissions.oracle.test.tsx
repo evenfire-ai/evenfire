@@ -10,6 +10,7 @@ import {
   accessibleResource,
   affordancesFailureMessage,
   childView,
+  homeView,
   listAccessiblePage,
   listChildrenPage,
   resolveResource,
@@ -1469,6 +1470,7 @@ describe('FilesPage stale permission action oracle', () => {
       configurable: true,
       value: {
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => sharedFiles),
           resolve: vi.fn(),
           listChildren: vi.fn(async () => listChildrenPage([])),

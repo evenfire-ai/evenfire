@@ -27,6 +27,12 @@ export const DRAG_COLD_CHECK_MAX_CONCURRENCY = 2
 /** Label of the caller's own home wherever EvenDrive shows it as a root. */
 export const GFS_MY_HOME_LABEL = 'My home'
 
+/** Home-state notice for a home that is still being provisioned. */
+export const GFS_HOME_PENDING_TEXT = 'Your home folder is being prepared'
+
+/** Home-state notice for a home in conflict, which only an administrator resolves. */
+export const GFS_HOME_CONFLICT_TEXT = 'Your home folder needs attention from an administrator'
+
 /** Label of the collection of resources others share with the caller. */
 export const GFS_SHARED_WITH_ME_LABEL = 'Shared with me'
 

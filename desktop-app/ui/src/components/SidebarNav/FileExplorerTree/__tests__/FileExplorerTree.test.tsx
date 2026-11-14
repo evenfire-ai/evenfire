@@ -250,6 +250,45 @@ describe('My home', () => {
     expect(screen.getByRole('treeitem', { name: 'Shared with me' })).toBeTruthy()
     expect(first.onOpenFolder).not.toHaveBeenCalled()
   })
+
+  it('announces each home state with its role inside the File destinations tree', async () => {
+    installClerum({
+      getHome: async () =>
+        homeView({
+          state: 'pending',
+          drive: null,
+          path: null,
+          resourceId: null,
+          heldPermissions: [],
+        }),
+    })
+    renderTree()
+    const pendingTree = await screen.findByRole('tree', { name: 'File destinations' })
+    expect((await within(pendingTree).findByRole('status')).textContent).toContain(
+      'Your home folder is being prepared'
+    )
+    expect(within(pendingTree).queryByRole('alert')).toBeNull()
+    cleanup()
+
+    installClerum({ getHome: async () => homeView({ state: 'conflict', resourceId: null }) })
+    renderTree()
+    const conflictTree = await screen.findByRole('tree', { name: 'File destinations' })
+    expect((await within(conflictTree).findByRole('alert')).textContent).toContain(
+      'Your home folder needs attention from an administrator'
+    )
+    cleanup()
+
+    installClerum({
+      getHome: async () => {
+        throw new Error('home service unavailable')
+      },
+    })
+    renderTree()
+    const errorTree = await screen.findByRole('tree', { name: 'File destinations' })
+    expect((await within(errorTree).findByRole('alert')).textContent).toContain(
+      'home service unavailable'
+    )
+  })
 })
 
 describe('FileExplorerTree — lazy fetch and expand/collapse', () => {

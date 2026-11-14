@@ -23,7 +23,8 @@ import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
-import { callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
+import { GfsHomeStateNotice } from '@/gfs/GfsHomeStateNotice'
+import { callerHomeNotice, callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
@@ -636,6 +637,7 @@ export function FileExplorerTree({
     () => callerHomeRootNode(ctrl.home, ctrl.accessibleResources),
     [ctrl.accessibleResources, ctrl.home]
   )
+  const homeNotice = callerHomeNotice(ctrl.home, ctrl.homeError)
 
   /** Cached destination names for the numbered-name ladder and suggestion —
    * the same shared children cache the Files page seeds its commit from, keyed
@@ -1265,13 +1267,7 @@ export function FileExplorerTree({
               My home
             </Button>
           ) : null}
-          {ctrl.homeError ? <p role="alert">{ctrl.homeError}</p> : null}
-          {ctrl.home?.state === 'pending' ? (
-            <p role="status">Your home folder is being prepared</p>
-          ) : null}
-          {ctrl.home?.state === 'conflict' ? (
-            <p role="alert">Your home folder needs attention from an administrator</p>
-          ) : null}
+          {homeNotice ? <GfsHomeStateNotice notice={homeNotice} variant="sidebar" /> : null}
           <Button
             align="start"
             block

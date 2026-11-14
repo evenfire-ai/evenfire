@@ -1,6 +1,22 @@
-import { GFS_MY_HOME_LABEL } from '@constants/gfsBrowser'
+import {
+  GFS_HOME_CONFLICT_TEXT,
+  GFS_HOME_PENDING_TEXT,
+  GFS_MY_HOME_LABEL,
+} from '@constants/gfsBrowser'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
-import type { GfsCallerHome } from './callerHome.types'
+import type { GfsCallerHome, GfsHomeNotice } from './callerHome.types'
+
+/**
+ * The notice for a home that is not ready, or null when there is nothing to
+ * say (ready, retired, or no data yet). A load error wins: the controller
+ * reports no home state while its home query has failed.
+ */
+export function callerHomeNotice(home: GfsCallerHome, error: string | null): GfsHomeNotice | null {
+  if (error) return { kind: 'error', text: error }
+  if (home?.state === 'conflict') return { kind: 'conflict', text: GFS_HOME_CONFLICT_TEXT }
+  if (home?.state === 'pending') return { kind: 'pending', text: GFS_HOME_PENDING_TEXT }
+  return null
+}
 
 /** True only for the caller's READY home root: same resource AND same drive. */
 export function isCallerHomeRoot(

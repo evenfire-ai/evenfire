@@ -8,3 +8,10 @@ export type GfsCallerHome = {
   resourceId: string | null
   path: string | null
 } | null
+
+/**
+ * What EvenDrive says about a home that is not ready: one notice shared by the
+ * sidebar and the Files page. `text` is the sentence shown for that state, or
+ * the presented error message when the home could not be loaded.
+ */
+export type GfsHomeNotice = { kind: 'pending' | 'conflict' | 'error'; text: string }
