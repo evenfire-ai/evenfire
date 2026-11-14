@@ -14,7 +14,7 @@ cat >"$TMP/repo/scripts/minikube/require-t2-mutation-lock.sh" <<'STUB'
 #!/bin/bash
 set -euo pipefail
 printf 'lease\n' >>"$TEST_CALLS"
-[[ "${TEST_LEASE_OK:-true}" == true ]]
+[[ "${TEST_LEASE_OK:-true}" == true ]] || exit 1
 if [[ "${TEST_CASE:-}" == lost-lease && "$(grep -c '^lease$' "$TEST_CALLS")" -gt 1 ]]; then
   exit 1
 fi
@@ -34,7 +34,7 @@ STUB
 cat >"$TMP/bin/minikube" <<'STUB'
 #!/bin/bash
 set -euo pipefail
-[[ "$1" == -p && "$2" == "$TEST_PROFILE" ]]
+[[ "$1" == -p && "$2" == "$TEST_PROFILE" ]] || exit 1
 shift 2
 printf 'minikube-%s\n' "$1" >>"$TEST_CALLS"
 case "$1" in
@@ -61,9 +61,9 @@ if [[ "$1" == */run-with-deadline.mjs ]]; then
   shift
   exec "$@"
 fi
-[[ "$E2E_CONTROL_UI_URL" == http://127.0.0.1:28117 ]]
-[[ "$TEST_ADMIN_USERNAME" == admin && "$TEST_ADMIN_PASSWORD" == fixture-password-only ]]
-[[ "$E2E_REPORT_PATH" == /* ]]
+[[ "$E2E_CONTROL_UI_URL" == http://127.0.0.1:28117 ]] || exit 1
+[[ "$TEST_ADMIN_USERNAME" == admin && "$TEST_ADMIN_PASSWORD" == fixture-password-only ]] || exit 1
+[[ "$E2E_REPORT_PATH" == /* ]] || exit 1
 printf 'playwright\n' >>"$TEST_CALLS"
 STUB
 chmod +x "$TMP/bin/make" "$TMP/bin/minikube" "$TMP/bin/node"
