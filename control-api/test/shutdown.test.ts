@@ -19,6 +19,14 @@ describe('Control API shutdown', () => {
     expect(poolIndex).toBeGreaterThan(names.indexOf('gfs-user-home-reconciler'))
   })
 
+  it('stops the entity-change dispatcher before pools close', () => {
+    const names = [...CONTROL_API_SHUTDOWN_STEP_NAMES] as string[]
+    const corePoolIndex = names.indexOf('core-database-pool')
+
+    expect(names.indexOf('entity-change-dispatcher')).toBeGreaterThanOrEqual(0)
+    expect(corePoolIndex).toBeGreaterThan(names.indexOf('entity-change-dispatcher'))
+  })
+
   it('stops the shared OAuth grant sweep before database pools close', () => {
     const names = [...CONTROL_API_SHUTDOWN_STEP_NAMES] as string[]
 

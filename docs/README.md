@@ -88,6 +88,7 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 | [Workflow output PVC upgrade](deploy/workflow-output-pvc-upgrade.md)             | Per-recipe output PVC ownership change                           |
 | [Plugin Workload SDK upgrade](deploy/plugin-workload-sdk-upgrade.md)             | promptBridge / clientNotifications rollout order and migration   |
 | [Host PVC layout upgrade](deploy/host-pvc-layout-upgrade.md)                     | Upgrading stateless Hosts from v0.10.x / v0.11.x                 |
+| [LLM catalog seed retirement](deploy/llm-catalog-seed-retirement-upgrade.md)     | `0135_llm_retire_seeded_catalog`: seeds handed over, prices kept |
 | **Runbooks**                                                                     |                                                                  |
 | [GFS permission store](deploy/gfs-permission-store.md)                           | `gfs_controller` DB credential: provisioning, rotation, recovery |
 | [Password work ownership recovery](how-to/password-work-ownership-recovery.md)   | Recover the bcrypt work-bounding singleton                       |
@@ -144,6 +145,7 @@ Contributor-facing. Most assume a local development cluster and the lanes in
 | [Stateless idle calibration](testing/stateless-idle-calibration.md)                  | Measuring the stateless time-to-idle                |
 | [Local measurements](testing/local-measurements.md)                                  | Running benchmarks through the intake gate          |
 | [CodeQL rate-limiting dispositions](how-to/codeql-js-missing-rate-limiting.md)       | Audited dispositions for `js/missing-rate-limiting` |
+| [Dependency scanning](testing/dependency-scanning.md)                                | CI advisory gates, incl. React inside `next`        |
 
 ## For coding agents
 

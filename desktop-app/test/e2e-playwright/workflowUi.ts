@@ -9,7 +9,6 @@ import {
   expect,
 } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
@@ -59,7 +58,7 @@ const WORKFLOW_TRIGGER_SEED_SCRIPT = path.join(
   'scripts/minikube/seed-workflow-triggers-test-data.sh'
 )
 let workflowFixturesSeeded = false
-const passwordSeededFor = new Set<string>()
+const passwordSeededFor = new Map<string, string>()
 const API_REQUEST_RETRY_DELAYS_MS = [250, 500]
 const HUMAN_E2E_RECORDED = process.env.HUMAN_E2E_RECORDED === '1'
 
@@ -343,9 +342,8 @@ export function seedDesktopPasswordLogin(
   email: string,
   password = E2E_DESKTOP_PASSWORD
 ): void {
-  const passwordFingerprint = createHash('sha256').update(password).digest('hex')
-  const cacheKey = `${userId}:${email}:${passwordFingerprint}`
-  if (passwordSeededFor.has(cacheKey)) return
+  const cacheKey = `${userId}:${email}`
+  if (passwordSeededFor.get(cacheKey) === password) return
   if (!password || password.length < 8) {
     throw new Error('E2E desktop password must be at least 8 characters')
   }
@@ -391,14 +389,15 @@ export function seedDesktopPasswordLogin(
     if (!result.includes(userId)) {
       throw new Error(`no password row updated for ${email}`)
     }
-    passwordSeededFor.add(cacheKey)
+    passwordSeededFor.set(cacheKey, password)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(`failed to seed Desktop password login for ${email}: ${message}`)
   }
 }
 
-// One paced retry at most; a longer Retry-After means the identity budget is spent.
+// One paced retry at most; a longer Retry-After means another client spent the source's
+// minute, or the identity is in its failure cooldown.
 const MAX_PACE_RETRY_SECONDS = 15
 
 async function pacedPasswordLogin(
@@ -423,7 +422,7 @@ async function pacedPasswordLogin(
   }
   if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds > MAX_PACE_RETRY_SECONDS) {
     throw new Error(
-      `password-login for ${email} is rate limited beyond the pace (identity budget spent?): HTTP 429 ${first.body}`
+      `password-login for ${email} is rate limited beyond the pace (source limit or failure cooldown?): HTTP 429 ${first.body}`
     )
   }
   deferPasswordPace(retryAfterSeconds)
@@ -535,6 +534,9 @@ export async function launchAndLogin(
   try {
     app = await electron.launch({
       args: [`--user-data-dir=${isolatedPaths.userDataDir}`, path.join(compiledAppPath, 'main.js')],
+      ...(process.env.E2E_DESKTOP_VIDEO_DIR
+        ? { recordVideo: { dir: process.env.E2E_DESKTOP_VIDEO_DIR } }
+        : {}),
       env: {
         ...process.env,
         EVENFIRE_DEV_ISOLATION: '1',
@@ -857,7 +859,6 @@ export async function waitForNewRun(
   timeoutMs = 45_000
 ): Promise<WorkflowRunsResult['items'][number]> {
   let freshRun: WorkflowRunsResult['items'][number] | null = null
-  let lastTransientError = ''
 
   await expect
     .poll(
@@ -867,7 +868,7 @@ export async function waitForNewRun(
           const fresh = (runs.items || []).find(item => !previousIds.includes(item.id))
           if (fresh) {
             freshRun = fresh
-            return fresh.id
+            return 'found'
           }
         } catch (error) {
           const message =
@@ -875,19 +876,17 @@ export async function waitForNewRun(
           if (!message.includes('socket hang up') && !message.includes('fetch failed')) {
             throw error
           }
-          lastTransientError = message
+          return `transient error: ${message}`
         }
-        return null
+        return 'no new run yet'
       },
       {
         timeout: timeoutMs,
         intervals: [500, 1_000, 2_000],
-        message: `timed out waiting for a new run for ${ns}/${name}${
-          lastTransientError ? `; last transient error=${lastTransientError}` : ''
-        }`,
+        message: `timed out waiting for a new run for ${ns}/${name}`,
       }
     )
-    .not.toBeNull()
+    .toBe('found')
 
   if (!freshRun) {
     throw new Error(`timed out waiting for a new run for ${ns}/${name}`)

@@ -375,7 +375,11 @@ export async function retireDesktopUser(
   reasonInput: string,
   idempotencyKeyInput: string,
   requestIdInput: string | null | undefined,
-  options: { db?: DbClient; retainWithoutLinkHistory?: boolean } = {}
+  options: {
+    db?: DbClient
+    authorize?: (db: DbClient) => Promise<void>
+    retainWithoutLinkHistory?: boolean
+  } = {}
 ): Promise<RetireDesktopUserResult> {
   const actor = normalizeRetirementActor(actorInput)
   const targetUserId = requireUuid(userIdInput, 'userId')
@@ -493,6 +497,7 @@ export async function retireDesktopUser(
       )
     }
     const lifecycleVersion = requireLifecycleVersion(user.lifecycle_version)
+    await options.authorize?.(db)
 
     const history = await db.query(
       `SELECT EXISTS(

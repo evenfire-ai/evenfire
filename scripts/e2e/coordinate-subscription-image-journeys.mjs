@@ -24,7 +24,10 @@ const NAMESPACE = 'control-plane'
 const IMPORT_PATH = '/app/scripts/e2e/fixtures/subscription-image-provider.mjs'
 const PROXY_DOCKERFILE = 'scripts/e2e/fixtures/subscription-image-proxy.Dockerfile'
 const PROVIDERS = ['grok-subscription', 'codex-subscription']
-export const CATALOG_CRON_KEYS = ['LLM_CATALOG_SYNC_CRON_ENABLED', 'SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED']
+// Every switch that makes control-api sync a catalog on its own. The boot sync
+// runs even with the periodic cron off and is on by default, so it is fenced too.
+export const CATALOG_CRON_KEYS = ['LLM_CATALOG_SYNC_CRON_ENABLED', 'SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED',
+  'LLM_CATALOG_BOOT_SYNC_ENABLED']
 const fail = code => { throw new Error(code) }
 const assert = (value, code) => { if (!value) fail(code) }
 const validImageId = value => /^sha256:[a-f0-9]{64}$/.test(value ?? '')
@@ -135,8 +138,9 @@ export async function openControlApiCatalogIsolation(options) {
       'COORDINATOR_CATALOG_API_NOT_READY')
     const flags = json(options.context, ['-n', NAMESPACE, 'exec', ready.metadata.name, '-c', 'control-api', '--',
       'env', '-u', 'NODE_OPTIONS', 'node', '-e',
-      "const c=require('./dist/config.js').config;process.stdout.write(JSON.stringify({llm:c.llmCatalogSyncCronEnabled,subscription:c.subscriptionCatalogSyncCronEnabled}))"])
-    assert(flags.llm === false && flags.subscription === false, 'COORDINATOR_CATALOG_CRONS_STILL_ENABLED')
+      "const c=require('./dist/config.js').config;process.stdout.write(JSON.stringify({llm:c.llmCatalogSyncCronEnabled,subscription:c.subscriptionCatalogSyncCronEnabled,boot:c.llmCatalogBootSyncEnabled}))"])
+    assert(flags.llm === false && flags.subscription === false && flags.boot === false,
+      'COORDINATOR_CATALOG_CRONS_STILL_ENABLED')
     return state
   } catch (error) {
     // No QA mutation has started while opening this fence, so restore its exact

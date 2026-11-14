@@ -8,7 +8,7 @@ import {
   requireChatStore,
   unbindChatStore,
 } from '../src/chatStoreBinding.js'
-import { registerIpcHandlers, sanitizeChatLoadWindow } from '../src/ipc.js'
+import { registerIpcHandlers, sanitizeChatLoadWindow, sanitizeChatMessageIds } from '../src/ipc.js'
 import type { HostStatusStreamEvent } from '../src/types.js'
 
 const testState = vi.hoisted(() => {
@@ -71,6 +71,27 @@ describe('chat IPC pagination validation', () => {
     [Number.MAX_SAFE_INTEGER + 1, 0],
   ])('rejects an invalid limit/offset pair: %s, %s', (limit, offset) => {
     expect(() => sanitizeChatLoadWindow(limit, offset)).toThrow()
+  })
+})
+
+describe('chat IPC message id validation', () => {
+  it('accepts 1 to 16 non-blank ids of at most 128 characters', () => {
+    expect(sanitizeChatMessageIds(['a'])).toEqual(['a'])
+    const sixteen = Array.from({ length: 16 }, (_, i) => `id-${i}`)
+    expect(sanitizeChatMessageIds(sixteen)).toEqual(sixteen)
+    expect(sanitizeChatMessageIds(['x'.repeat(128)])).toEqual(['x'.repeat(128)])
+  })
+
+  it.each([
+    ['a non-array', 'id-1'],
+    ['an empty array', []],
+    ['17 ids', Array.from({ length: 17 }, (_, i) => `id-${i}`)],
+    ['a non-string', [42]],
+    ['an empty string', ['']],
+    ['a blank string', ['   ']],
+    ['a string of 129 characters', ['x'.repeat(129)]],
+  ])('rejects %s', (_label, input) => {
+    expect(() => sanitizeChatMessageIds(input)).toThrow('Invalid chat message ids')
   })
 })
 
@@ -214,6 +235,68 @@ describe('ipc host status stream handlers', () => {
     const index = await requireChatStore().getIndex('agent-x')
     expect(index.deletedChatTombstones).toContainEqual({ chatId: 'c1', authorityScope })
     expect(index.pendingChatCleanup).toEqual([])
+  })
+
+  it('chat:removeMessages requires agentRef and chatId and passes the sanitized ids to the bound store', async () => {
+    await bindChatStoreForUser('user-1', 'env-1', { teamId: 'team-a' })
+    const handler = testState.handlers.get('chat:removeMessages')
+    expect(handler).toBeDefined()
+    const { event } = makeTrustedEvent()
+    await expect(
+      Promise.resolve(handler?.(event, { chatId: 'c1', messageIds: ['pending'] }))
+    ).rejects.toThrow('agentRef and chatId are required')
+    await expect(
+      Promise.resolve(handler?.(event, { agentRef: 'agent-x', messageIds: ['pending'] }))
+    ).rejects.toThrow('agentRef and chatId are required')
+    await expect(
+      Promise.resolve(handler?.(event, { agentRef: 'agent-x', chatId: 'c1', messageIds: [] }))
+    ).rejects.toThrow('Invalid chat message ids')
+
+    const store = requireChatStore()
+    await store.createChat('agent-x', 'c1')
+    await store.saveMessages('agent-x', 'c1', [
+      { id: 'kept', role: 'user', content: 'kept', timestamp: 1 },
+      { id: 'pending', role: 'user', content: 'pending', timestamp: 2 },
+    ])
+    const remove = vi.spyOn(store, 'removeMessages')
+    const removed = await Promise.resolve(
+      handler?.(event, { agentRef: 'agent-x', chatId: 'c1', messageIds: [' pending '] })
+    )
+    expect(remove).toHaveBeenCalledWith('agent-x', 'c1', ['pending'])
+    expect(removed).toBe(1)
+    expect((await store.loadMessages('agent-x', 'c1')).map(message => message.id)).toEqual(['kept'])
+  })
+
+  it('rejects an untrusted sender for chat:removeMessages before the store is called', async () => {
+    await bindChatStoreForUser('user-1', 'env-1', { teamId: 'team-a' })
+    const store = requireChatStore()
+    await store.createChat('agent-x', 'c1')
+    await store.saveMessages('agent-x', 'c1', [
+      { id: 'pending', role: 'user', content: 'pending', timestamp: 1 },
+    ])
+    const remove = vi.spyOn(store, 'removeMessages')
+    const handler = testState.handlers.get('chat:removeMessages')
+    expect(handler).toBeDefined()
+    const payload = { agentRef: 'agent-x', chatId: 'c1', messageIds: ['pending'] }
+
+    await expect(
+      Promise.resolve(
+        handler?.(
+          {
+            senderFrame: { url: 'https://evil.example.com' },
+            sender: { id: 1, send: vi.fn(), once: vi.fn() },
+          },
+          payload
+        )
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(remove).not.toHaveBeenCalled()
+    expect((await store.loadMessages('agent-x', 'c1')).map(message => message.id)).toEqual([
+      'pending',
+    ])
+    // Witness: the same payload from the trusted sender reaches the store and removes the turn.
+    await expect(Promise.resolve(handler?.(makeTrustedEvent().event, payload))).resolves.toBe(1)
+    expect(remove).toHaveBeenCalledTimes(1)
   })
 
   it('rejects untrusted sender for stream start', async () => {

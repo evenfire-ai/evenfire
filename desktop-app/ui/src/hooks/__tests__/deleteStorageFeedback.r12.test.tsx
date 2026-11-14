@@ -41,6 +41,9 @@ function StorageDeleteSidebar() {
     <SidebarNav
       navItem={nav.navItem}
       collapsed={false}
+      compactMode={false}
+      compactMenuOpen={false}
+      onCompactMenuOpenChange={() => undefined}
       activeSandboxUiApp={null}
       availableSandboxUiApps={[]}
       onCollapsedChange={() => undefined}

@@ -54,9 +54,9 @@ export const test = base.extend<Fixtures>({
   },
 
   appPage: async ({ electronApp }, use) => {
-    // Seed the password without an API login: control-api charges every
-    // attempt, successful ones included, against a 5-per-15-minutes budget
-    // (control-api/src/services/auth/passwordAdmissionState.ts).
+    // Seed the password without an API login: control-api paces attempts per
+    // source and counts successful logins per identifier
+    // (docs/operations/password-admission.md).
     seedPasswordForEmail(E2E_EMAIL)
 
     const page = await electronApp.firstWindow()

@@ -1,0 +1,251 @@
+{
+  "cases": {
+    "decidable_auto_enabled": {
+      "source": "live",
+      "fetchedAt": "2026-08-12T00:00:00.000Z",
+      "ranAt": "2026-08-12T00:00:05.000Z",
+      "added": 72,
+      "updated": 0,
+      "staled": 0,
+      "enabledImageInputChanged": 0,
+      "materialized": true,
+      "providerCounts": {
+        "openai": {
+          "inserted": 51,
+          "autoEnabled": 35,
+          "skippedUndecidable": 0,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 1,
+            "no_tool_call": 7,
+            "status": 8,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 48
+        },
+        "claude": {
+          "inserted": 17,
+          "autoEnabled": 17,
+          "skippedUndecidable": 0,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 17
+        },
+        "groq": {
+          "inserted": 4,
+          "autoEnabled": 0,
+          "skippedUndecidable": 0,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 3
+        }
+      },
+      "decidable": true
+    },
+    "decidable_capped": {
+      "source": "live",
+      "fetchedAt": "2026-08-12T00:00:00.000Z",
+      "ranAt": "2026-08-12T00:00:05.000Z",
+      "added": 22,
+      "updated": 0,
+      "staled": 0,
+      "enabledImageInputChanged": 0,
+      "materialized": true,
+      "providerCounts": {
+        "openai": {
+          "inserted": 17,
+          "autoEnabled": 1,
+          "skippedUndecidable": 0,
+          "deferredByCap": 34,
+          "ineligible": {
+            "no_text_output": 1,
+            "no_tool_call": 7,
+            "status": 8,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 14
+        },
+        "claude": {
+          "inserted": 1,
+          "autoEnabled": 1,
+          "skippedUndecidable": 0,
+          "deferredByCap": 16,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 1
+        },
+        "groq": {
+          "inserted": 4,
+          "autoEnabled": 0,
+          "skippedUndecidable": 0,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 3
+        }
+      },
+      "decidable": true
+    },
+    "decidable_none_enabled": {
+      "source": "live",
+      "fetchedAt": "2026-08-12T00:00:00.000Z",
+      "ranAt": "2026-08-12T00:00:05.000Z",
+      "added": 4,
+      "updated": 0,
+      "staled": 0,
+      "enabledImageInputChanged": 0,
+      "materialized": true,
+      "providerCounts": {
+        "groq": {
+          "inserted": 4,
+          "autoEnabled": 0,
+          "skippedUndecidable": 0,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 3
+        }
+      },
+      "decidable": true
+    },
+    "undecidable_vendored": {
+      "source": "vendored",
+      "fetchedAt": "2026-08-12T00:00:00.000Z",
+      "ranAt": "2026-08-12T00:00:05.000Z",
+      "added": 4,
+      "updated": 0,
+      "staled": 0,
+      "enabledImageInputChanged": 0,
+      "materialized": true,
+      "providerCounts": {
+        "openai": {
+          "inserted": 0,
+          "autoEnabled": 0,
+          "skippedUndecidable": 51,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 0
+        },
+        "claude": {
+          "inserted": 0,
+          "autoEnabled": 0,
+          "skippedUndecidable": 17,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 0
+        },
+        "groq": {
+          "inserted": 4,
+          "autoEnabled": 0,
+          "skippedUndecidable": 0,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 3
+        }
+      },
+      "decidable": false
+    },
+    "undecidable_implausible": {
+      "source": "live",
+      "fetchedAt": "2026-08-12T00:00:00.000Z",
+      "ranAt": "2026-08-12T00:00:05.000Z",
+      "added": 4,
+      "updated": 0,
+      "staled": 0,
+      "enabledImageInputChanged": 0,
+      "materialized": true,
+      "providerCounts": {
+        "openai": {
+          "inserted": 0,
+          "autoEnabled": 0,
+          "skippedUndecidable": 51,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 0
+        },
+        "claude": {
+          "inserted": 0,
+          "autoEnabled": 0,
+          "skippedUndecidable": 17,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 0
+        },
+        "groq": {
+          "inserted": 4,
+          "autoEnabled": 0,
+          "skippedUndecidable": 0,
+          "deferredByCap": 0,
+          "ineligible": {
+            "no_text_output": 0,
+            "no_tool_call": 0,
+            "status": 0,
+            "not_runnable": 0
+          },
+          "dismissed": 0,
+          "pricesLoaded": 3
+        }
+      },
+      "decidable": false
+    }
+  }
+}

@@ -17,6 +17,7 @@ import {
   allowTeamApprovalThroughAdminRoute,
   applyRecipe,
   cleanupRecipe,
+  cleanupTeam,
   grantTeamThroughAdminRoute,
   withRuntimeRecipe,
 } from './workflow-approval-quadrants/recipes'
@@ -233,38 +234,45 @@ test('Desktop team context can trigger only through the current team grant', asy
   })
 
   const teamId = await adminCreateTeamForUser(teamName, userId)
-  await grantTeamThroughAdminRoute(WORKFLOW_RECIPE_NS, recipeName, teamId)
-
-  const { app, page } = await launchAndLogin(E2E_EMAIL)
   try {
-    let runId = ''
-    await test.step('Desktop triggers the team-granted workflow without a visible team switch', async () => {
-      await openWorkflowsPageThroughDesktopUi(page)
-      const detailCard = await selectWorkflow(page, recipeName, RECIPE_NS)
+    await grantTeamThroughAdminRoute(WORKFLOW_RECIPE_NS, recipeName, teamId)
 
-      const triggerButton = detailCard.getByRole('button', { name: /^Trigger$/ })
-      await expect(triggerButton).toBeVisible({ timeout: 15_000 })
-      await triggerButton.click()
+    const { app, page } = await launchAndLogin(E2E_EMAIL)
+    try {
+      let runId = ''
+      await test.step('Desktop triggers the team-granted workflow without a visible team switch', async () => {
+        await openWorkflowsPageThroughDesktopUi(page)
+        const detailCard = await selectWorkflow(page, recipeName, RECIPE_NS)
 
-      await expect(page.getByRole('status').filter({ hasText: 'Workflow triggered.' })).toBeVisible(
-        {
+        const triggerButton = detailCard.getByRole('button', { name: /^Trigger$/ })
+        await expect(triggerButton).toBeVisible({ timeout: 15_000 })
+        await triggerButton.click()
+
+        await expect(
+          page.getByRole('status').filter({ hasText: 'Workflow triggered.' })
+        ).toBeVisible({
           timeout: 10_000,
-        }
-      )
+        })
 
-      const newRun = await waitForLatestWorkflowRun(recipeName)
-      expect(newRun.actorType).toBe('user')
-      expect(newRun.actorId).toBe(userId)
-      expect(newRun.teamId).toBe(teamId)
-      runId = newRun.runId
-    })
+        const newRun = await waitForLatestWorkflowRun(recipeName)
+        expect(newRun.actorType).toBe('user')
+        expect(newRun.actorId).toBe(userId)
+        expect(newRun.teamId).toBe(teamId)
+        runId = newRun.runId
+      })
 
-    expect(workflowRunTeamSignal(runId)).toBe(`user:${teamId}`)
+      expect(workflowRunTeamSignal(runId)).toBe(`user:${teamId}`)
 
-    expect(workflowRunCountForRecipe(recipeName)).toBe(1)
+      expect(workflowRunCountForRecipe(recipeName)).toBe(1)
+    } finally {
+      await app.close()
+    }
   } finally {
-    await app.close()
-    await cleanupRecipe(recipeName)
+    try {
+      await cleanupRecipe(recipeName)
+    } finally {
+      cleanupTeam(teamId)
+    }
   }
 })
 
@@ -288,65 +296,72 @@ test('Desktop team approval preserves the target-team grant boundary for mcp-hos
   })
 
   const teamId = await adminCreateTeamForUser(teamName, userId)
-  await grantTeamThroughAdminRoute(WORKFLOW_RECIPE_NS, recipeName, teamId)
-  await allowTeamApprovalThroughAdminRoute(WORKFLOW_RECIPE_NS, recipeName, teamId)
-  await allowTeamApprovalThroughAdminRoute(WORKFLOW_RECIPE_NS, recipeName, originalTeamId)
-
-  const tokens = await issueRuntimeTokens(request, 'wrc', WORKFLOW_RECIPE_NS, recipeName)
-  const approvalId = await createTeamApproval(
-    request,
-    tokens,
-    WORKFLOW_RECIPE_NS,
-    recipeName,
-    teamId
-  )
-
-  expect(approvalStatus(approvalId)).toBe('pending')
-  expect(workflowRunCountForApproval(approvalId)).toBe(0)
-  expect(typedIntentSignal(approvalId)).toBe(
-    `${WORKFLOW_RECIPE_NS}/${recipeName}:${WORKFLOW_RECIPE_NS}/${recipeName}`
-  )
-
-  const { app, page } = await launchAndLogin(E2E_EMAIL)
   try {
-    await test.step('Desktop approves the Team B target approval without a visible team switch', () =>
-      approvePendingApprovalThroughDesktopUi(page, recipeName, teamName))
+    await grantTeamThroughAdminRoute(WORKFLOW_RECIPE_NS, recipeName, teamId)
+    await allowTeamApprovalThroughAdminRoute(WORKFLOW_RECIPE_NS, recipeName, teamId)
+    await allowTeamApprovalThroughAdminRoute(WORKFLOW_RECIPE_NS, recipeName, originalTeamId)
 
-    expect(approvalStatus(approvalId)).toBe('approved')
+    const tokens = await issueRuntimeTokens(request, 'wrc', WORKFLOW_RECIPE_NS, recipeName)
+    const approvalId = await createTeamApproval(
+      request,
+      tokens,
+      WORKFLOW_RECIPE_NS,
+      recipeName,
+      teamId
+    )
+
+    expect(approvalStatus(approvalId)).toBe('pending')
     expect(workflowRunCountForApproval(approvalId)).toBe(0)
+    expect(typedIntentSignal(approvalId)).toBe(
+      `${WORKFLOW_RECIPE_NS}/${recipeName}:${WORKFLOW_RECIPE_NS}/${recipeName}`
+    )
 
-    await test.step('mcp-host consumes the Desktop-approved Team B approval', () =>
-      triggerWorkflow(request, tokens, WORKFLOW_RECIPE_NS, recipeName, approvalId))
+    const { app, page } = await launchAndLogin(E2E_EMAIL)
+    try {
+      await test.step('Desktop approves the Team B target approval without a visible team switch', () =>
+        approvePendingApprovalThroughDesktopUi(page, recipeName, teamName))
 
-    expect(approvalStatus(approvalId)).toBe('consumed')
-    expect(workflowRunCountForApproval(approvalId)).toBe(1)
-    expect(workflowRunTeamSignalForApproval(approvalId)).toBe(`autonomous:${teamId}`)
+      expect(approvalStatus(approvalId)).toBe('approved')
+      expect(workflowRunCountForApproval(approvalId)).toBe(0)
 
-    await test.step('Control API rejects Team A approval when only Team B has trigger grant', async () => {
-      await expectCreateTeamApprovalRejected(
-        request,
-        tokens,
-        WORKFLOW_RECIPE_NS,
-        recipeName,
-        originalTeamId,
-        403,
-        'Target not authorized to trigger this recipe'
-      )
-      expect(workflowRunCountForRecipe(recipeName)).toBe(1)
-      expect(
-        Number(
-          profilesSql(`
+      await test.step('mcp-host consumes the Desktop-approved Team B approval', () =>
+        triggerWorkflow(request, tokens, WORKFLOW_RECIPE_NS, recipeName, approvalId))
+
+      expect(approvalStatus(approvalId)).toBe('consumed')
+      expect(workflowRunCountForApproval(approvalId)).toBe(1)
+      expect(workflowRunTeamSignalForApproval(approvalId)).toBe(`autonomous:${teamId}`)
+
+      await test.step('Control API rejects Team A approval when only Team B has trigger grant', async () => {
+        await expectCreateTeamApprovalRejected(
+          request,
+          tokens,
+          WORKFLOW_RECIPE_NS,
+          recipeName,
+          originalTeamId,
+          403,
+          'Target not authorized to trigger this recipe'
+        )
+        expect(workflowRunCountForRecipe(recipeName)).toBe(1)
+        expect(
+          Number(
+            profilesSql(`
             SELECT COUNT(*)
               FROM workflow_approval_requests
              WHERE recipe_namespace = ${sqlLiteral(WORKFLOW_RECIPE_NS)}
                AND recipe_name = ${sqlLiteral(recipeName)}
                AND target_team_id = ${sqlLiteral(originalTeamId)};
           `)
-        )
-      ).toBe(0)
-    })
+          )
+        ).toBe(0)
+      })
+    } finally {
+      await app.close()
+    }
   } finally {
-    await app.close()
-    await cleanupRecipe(recipeName)
+    try {
+      await cleanupRecipe(recipeName)
+    } finally {
+      cleanupTeam(teamId)
+    }
   }
 })

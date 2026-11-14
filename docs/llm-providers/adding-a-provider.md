@@ -57,11 +57,13 @@ Add `{ baseURL, defaultModel, tokenizer: 'fallback' }`. The data-driven arm in
   single-credential with no required non-secret env (all OpenAI-compatible
   api-key providers qualify). These enums are additive — old resources stay valid.
 
-### 4. Allowlist seed — control-api migration (`control-api/src/db.ts`)
+### 4. Allowlist rows — no seed migration
 
-Append a new migration (next `NNNN_…` version, append-only + idempotent) that
-`INSERT … ON CONFLICT DO NOTHING`s one sensible default `(provider, model, vendor)`
-into `llm_allowed_models`. Operators curate the rest from `/llm-models`.
+Do not seed `llm_allowed_models`. A new installation gets its catalog from the
+catalog sync (models.dev, via `PROVIDER_KEY_MAP`), which runs at boot and
+inserts the provider's models enabled or disabled according to its
+auto-enable policy (step 3). Ids models.dev does not list are added by the
+operator from `/llm-models`.
 
 ### 5. Image-input capability — `llm_allowed_models.image_input` (#654)
 
@@ -69,8 +71,9 @@ Declare image support **per exact `(provider, model)` pair**, never from the
 model name, family, or an OpenAI-compatible request shape. Do it in one of two
 ways:
 
-- **Seed it** in the same migration as step 4 for ids the provider's own
-  documentation covers. Keep it to exact ids (no family extrapolation),
+- **Seed it** in a migration for ids the provider's own documentation covers.
+  The `UPDATE` below only reaches rows that exist when the migration runs, so
+  on a new installation (empty allowlist) it changes nothing. Keep it to exact ids (no family extrapolation),
   reference the public `https://` doc page, and set `checkedAt` to the date the
   doc was **read** — never the deploy date, so re-running the migration cannot
   rejuvenate evidence.
@@ -116,11 +119,13 @@ curated evidence and never overwrites newer discovery evidence — see
 
 What operators still curate:
 
-1. ids models.dev does not list — 15 of the 44 pairs the allowlist seeds today
-   (for example `zai:glm-5`, `zai:glm-5.1`, the Bedrock Claude ids,
-   `openai:gpt-5.1-codex`, `openrouter:anthropic/claude-sonnet-latest`). After a
-   deploy, the sync that runs shortly after control-api starts fills
-   `image_input` for the 29 listed pairs; the unlisted ones stay `unknown`
+1. ids models.dev does not list — rows an operator added by hand and, on
+   installations upgraded from a release that seeded a default catalog, the
+   seeded pairs models.dev does not list (for example `zai:glm-5`,
+   `zai:glm-5.1`, the Bedrock Claude ids, `openai:gpt-5.1-codex`,
+   `openrouter:anthropic/claude-sonnet-latest`). After a deploy, the sync that
+   runs shortly after control-api starts fills `image_input` for every listed
+   pair; the unlisted ones stay `unknown`
    (images refused, text unaffected) until an operator curates them with
    `PUT /admin/llm-models/:id` and an `image_input` field;
 2. models where the vendor documentation disagrees with models.dev (curated
@@ -151,8 +156,10 @@ package — no other UI change. A nicer `SECRET_FIELD_HINTS` placeholder is opti
 
 ### 7. Param compatibility (important)
 
-The OpenAI-compatible driver (`mcp-host/src/llm/openaiCompatible.ts`) shares the
-`openai` provider's request shape. Some providers **reject** params: Groq
+The OpenAI-compatible endpoint profile (`compatibleProfile` in
+`mcp-host/src/llm/openaiFamily/endpointProfiles.ts`) shares the Chat
+Completions request shape that Azure also uses (official `openai` is on the
+Responses API, so its request shape is not the reference here). Some providers **reject** params: Groq
 (`n>1`, `logprobs`, `logit_bias`), Cerebras (`frequency_penalty`/`presence_penalty`),
 Moonshot (`tool_choice: 'required'`, temperature outside `[0,1]`), DeepSeek
 reasoner (sampling params). Keep the default request to a **conservative,
@@ -267,11 +274,11 @@ Surfaces to update:
 - [ ] `mcp-host/src/llm/registryCore.ts` — `RUNTIME_FIELDS` row (baseURL/defaultModel/tokenizer)
 - [ ] `mcp-host/src/llm/registry.ts` — `makeProvider` arm (driver path only)
 - [ ] `control-api/src/services/modelsDevClient.ts` — `PROVIDER_KEY_MAP` entry (our id → models.dev key; verify against live `api.json`)
+- [ ] `packages/llm-providers/index.cjs` — `PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT` entry: `true` only for a direct provider whose models.dev ids are the ids its API accepts; `false` for aggregators, multi-vendor hosts and clouds with deployment/region-specific ids (omit for oauth-broker providers). The package test fails until this entry exists
 - [ ] `control-ui/lib/llm.ts` — `LLM_DEFAULT_MODEL_BY_PROVIDER` entry
 
 **Data / assets** (not type-checked, but required for the provider to work end-to-end):
 
-- [ ] `control-api/src/db.ts` — allowlist seed migration (append-only, idempotent)
 - [ ] `control-api/src/db.ts` — curated `image_input` evidence only for ids that
       models.dev does not list, or where the vendor document contradicts
       models.dev (exact ids, `checkedAt` = the date the doc was read)

@@ -43,32 +43,6 @@ async function findFirstActiveMembership(
   )
 }
 
-async function findPendingInvitationMembership(
-  db: {
-    query: (
-      text: string,
-      values?: unknown[]
-    ) => Promise<{ rows: unknown[]; rowCount: number | null }>
-  },
-  email: string
-) {
-  return db.query(
-    `SELECT COALESCE(it.team_id, i.team_id) AS team_id,
-            COALESCE(it.role, i.role) AS role,
-            t.name AS team_name
-       FROM invitations i
-  LEFT JOIN invitation_teams it ON it.invitation_id = i.id
-       JOIN teams t ON t.id = COALESCE(it.team_id, i.team_id)
-      WHERE LOWER(i.email) = LOWER($1)
-        AND COALESCE(it.team_id, i.team_id) IS NOT NULL
-        AND i.status = 'pending'
-        AND i.expires_at > NOW()
-      ORDER BY i.created_at DESC
-      LIMIT 1`,
-    [email]
-  )
-}
-
 async function healAcceptedInvitationMemberships(
   db: {
     query: (
@@ -195,11 +169,7 @@ export async function googleLoginData(input: { email: string; name?: string; pic
     await healAcceptedInvitationMemberships(db, user.id, input.email)
     await linkAcceptedInvitationsToUser(db, user.id, input.email)
 
-    let membership = await findFirstActiveMembership(db, user.id)
-
-    if ((membership.rowCount ?? 0) === 0) {
-      membership = await findPendingInvitationMembership(db, input.email)
-    }
+    const membership = await findFirstActiveMembership(db, user.id)
 
     return {
       isNewUser,
@@ -223,24 +193,10 @@ export async function passwordLoginData(input: { email: string; password: string
         name: user.name,
         picture: user.picture,
       },
+      credentialHash: user.password_hash,
       membership: await currentMemberMembership(db, user),
     }
   })
-}
-
-/** Resolve ordinary session claims in the same transaction as password recovery. */
-export async function getMemberSessionContext(
-  db: Pick<DbTransactionClient, 'query'>,
-  user: { id: string; email: string; lifecycle_version?: number | string | null }
-) {
-  const membership = await currentMemberMembership(db, user)
-  return {
-    userId: user.id,
-    email: user.email,
-    teamId: membership.team_id,
-    role: membership.role,
-    authGeneration: Number(user.lifecycle_version || 0),
-  }
 }
 
 export async function verifyUserPassword(input: {

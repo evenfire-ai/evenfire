@@ -5,6 +5,7 @@ import {
   MAX_REQUEST_HOLD_MS,
   MAX_TIMER_DELAY_MS,
   parseArtifactDownloadMaxBytes,
+  parsePositiveInt,
   parsePositiveIntMs,
   parseSandboxUiAllowedPorts,
   parseWakeMaxHoldMs,
@@ -51,6 +52,34 @@ describe('parseArtifactDownloadMaxBytes', () => {
 
   it('rejects non-numeric values', () => {
     expect(() => parseArtifactDownloadMaxBytes('big')).toThrow(/invalid value/)
+  })
+})
+
+describe('parsePositiveInt (stream admission caps)', () => {
+  it('accepts a positive integer', () => {
+    expect(parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', '7')).toBe(7)
+  })
+
+  it('trims surrounding whitespace', () => {
+    expect(parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', ' 7 ')).toBe(7)
+  })
+
+  it('rejects an invalid value and names the variable', () => {
+    expect(() => parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', 'abc')).toThrow(
+      'RPC_PROXY_STREAM_MAX_PER_USER contains invalid value "abc" (must be a positive integer)'
+    )
+    // The message echoes the trimmed input, so a whitespace-only value shows as empty.
+    expect(() => parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', ' ')).toThrow(
+      'RPC_PROXY_STREAM_MAX_PER_USER contains invalid value "" (must be a positive integer)'
+    )
+    expect(() => parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', 'Infinity')).toThrow(
+      'RPC_PROXY_STREAM_MAX_PER_USER contains invalid value "Infinity" (must be a positive integer)'
+    )
+  })
+
+  it('accepts a numeric form that evaluates to a positive integer, as the timeouts do', () => {
+    expect(parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', '1e3')).toBe(1000)
+    expect(parsePositiveInt('RPC_PROXY_STREAM_MAX_PER_USER', '0x10')).toBe(16)
   })
 })
 
@@ -121,12 +150,29 @@ describe('parseWakeMaxHoldMs', () => {
   })
 })
 
-describe('config timeouts loaded from the environment', () => {
+describe('config values loaded from the environment', () => {
+  // Each stream admission cap is compared with `>=` in its route's 429 check
+  // (rpcHostStatusStream.ts, rpcHostActivityStream.ts): NaN turns the cap off and
+  // 0 rejects every stream, so a value that does not read as a whole number of at
+  // least 1 must stop startup.
+  const STREAM_CAPS = [
+    ['RPC_PROXY_STREAM_MAX_CONCURRENT', 'streamMaxConcurrent', 1000],
+    ['RPC_PROXY_STREAM_MAX_PER_USER', 'streamMaxPerUser', 3],
+    ['RPC_PROXY_STREAM_MAX_PER_USER_HOST', 'streamMaxPerUserHost', 1],
+    ['RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT', 'activityStreamMaxConcurrent', 1000],
+    ['RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER', 'activityStreamMaxPerUser', 3],
+    ['RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST', 'activityStreamMaxPerUserHost', 1],
+  ] as const
+  // Before this change the caps used bare `Number()` and accepted every one of these:
+  // `abc` (NaN) and `Infinity` turned the cap off, `0`, `-1` and `' '` (0) rejected
+  // every stream, and `1.5` acted as a cap of 2. All of them are startup errors now.
+  const INVALID_STREAM_CAPS = ['abc', '0', '-1', '1.5', ' ', 'Infinity']
   const ENV_KEYS = [
     'RPC_PROXY_UPSTREAM_TIMEOUT_MS',
     'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
     'RPC_PROXY_WAKE_MAX_HOLD_MS',
-  ] as const
+    ...STREAM_CAPS.map(([key]) => key),
+  ]
   const saved = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]))
 
   afterEach(() => {
@@ -157,12 +203,58 @@ describe('config timeouts loaded from the environment', () => {
   )
 
   it('loads RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS and rejects an oversized one', async () => {
-    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '300000'
-    expect((await loadConfig()).artifactDownloadTimeoutMs).toBe(300_000)
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '120000'
+    expect((await loadConfig()).artifactDownloadTimeoutMs).toBe(120_000)
 
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '2147483648'
     await expect(loadConfig()).rejects.toThrow(/RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS/)
   })
+
+  it('defaults the upstream timeout, the artifact download timeout and the per-user-host cap', async () => {
+    delete process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS
+    delete process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS
+    delete process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST
+    const loaded = await loadConfig()
+    expect(loaded.upstreamTimeoutMs).toBe(8_000)
+    expect(loaded.artifactDownloadTimeoutMs).toBe(100_000)
+    expect(loaded.activityStreamMaxPerUserHost).toBe(1)
+  })
+
+  it('an explicit value still overrides each of those defaults', async () => {
+    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS = '45000'
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS = '120000'
+    process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST = '2'
+    const loaded = await loadConfig()
+    expect(loaded.upstreamTimeoutMs).toBe(45_000)
+    expect(loaded.artifactDownloadTimeoutMs).toBe(120_000)
+    expect(loaded.activityStreamMaxPerUserHost).toBe(2)
+  })
+
+  it.each(STREAM_CAPS)(
+    'defaults %s (config.%s) to %i when it is unset or empty',
+    async (key, field, defaultValue) => {
+      delete process.env[key]
+      expect((await loadConfig())[field]).toBe(defaultValue)
+      process.env[key] = ''
+      expect((await loadConfig())[field]).toBe(defaultValue)
+    }
+  )
+
+  it.each(STREAM_CAPS)('trims and accepts a padded %s (config.%s)', async (key, field) => {
+    process.env[key] = ' 7 '
+    expect((await loadConfig())[field]).toBe(7)
+  })
+
+  it.each(STREAM_CAPS.flatMap(([key]) => INVALID_STREAM_CAPS.map(value => [key, value])))(
+    'fails loud on %s=%s',
+    async (key, value) => {
+      process.env[key] = value
+      // The error echoes the trimmed input, so `' '` reports an empty value.
+      await expect(loadConfig()).rejects.toThrow(
+        `${key} contains invalid value "${value.trim()}" (must be a positive integer)`
+      )
+    }
+  )
 
   it('clamps RPC_PROXY_WAKE_MAX_HOLD_MS above the cap in the loaded config', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
@@ -196,15 +288,29 @@ describe('minikube rpc-proxy ConfigMap', () => {
     return Number(match[1])
   }
 
-  it('sets an artifact download timeout sized for the 250 MB cap', () => {
+  it('sets an artifact download timeout sized for the largest response rpc-proxy accepts', () => {
     const timeoutMs = value('RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS')
-    const maxMb = value('RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB')
-    expect(maxMb).toBe(250)
-    // The 60 s default needs 4.2 MB/s to move 250 MB; the overlay must not.
-    const requiredMbPerSecond = maxMb / (timeoutMs / 1000)
-    expect(requiredMbPerSecond).toBeLessThanOrEqual(1)
-    expect(timeoutMs).toBeGreaterThan(60_000)
-    // ...and it must load through the same parser as production.
+    // rpc-proxy answers 413 to a response above RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB, from
+    // its Content-Length or while reading it (readArtifactResponseBuffer in routes/rpc.ts),
+    // so that cap is the largest body this timer has to move.
+    const proxyCapMiB = value('RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB')
+    expect(parseArtifactDownloadMaxBytes(String(proxyCapMiB))).toBe(proxyCapMiB * 1024 * 1024)
+    // The Host checks its own cap on the file before it redacts it, and redaction can make
+    // the response longer, so the Host cap does not bound the response. A proxy cap below
+    // it would reject files the Host serves.
+    const artifactPaths = readFileSync(
+      resolve(__dirname, '../../../mcp-host/src/workflow/artifactPaths.ts'),
+      'utf8'
+    )
+    const cap = artifactPaths.match(/^export const MAX_ARTIFACT_BYTES = (\d+) \* 1024 \* 1024$/m)
+    if (!cap) throw new Error('MAX_ARTIFACT_BYTES (in MiB) is missing from artifactPaths.ts')
+    const hostCapMiB = Number(cap[1])
+    expect(hostCapMiB).toBe(50)
+    expect(proxyCapMiB).toBeGreaterThanOrEqual(hostCapMiB)
+    // The overlay must move its largest accepted body at 1 MiB/s or slower.
+    const requiredMiBPerSecond = proxyCapMiB / (timeoutMs / 1000)
+    expect(requiredMiBPerSecond).toBeLessThanOrEqual(1)
+    // ...and the timer must load through the same parser as production.
     expect(parsePositiveIntMs('RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS', String(timeoutMs))).toBe(
       timeoutMs
     )

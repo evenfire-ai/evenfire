@@ -5,12 +5,13 @@ import { createExternalClientRateLimiters } from '../../middleware/externalClien
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
+  requireExternalSessionRateLimitContext,
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
 import { sendPasswordAdmissionError } from '../../middleware/passwordLoginAdmission.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
-import { rootLogger } from '../../observability/logger.js'
+import { type Logger, rootLogger } from '../../observability/logger.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
   filterAccessValues,
@@ -47,6 +48,16 @@ type TeamDirectoryMember = {
   status: string
 }
 
+type TeamDirectoryPartialError = {
+  teamId?: string
+  source: 'operational_resources' | 'members' | 'contexts' | 'agents'
+  code: 'unavailable'
+}
+
+function requestLogger(req: { log?: Logger }): Logger {
+  return req.log ?? rootLogger
+}
+
 function projectTeamMembers(values: unknown): TeamDirectoryMember[] {
   if (!Array.isArray(values)) return []
   return values.map(value => {
@@ -68,6 +79,33 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
     config.approvalRlExternalClientIpPerMin,
     config.approvalRlExternalEdgePerMin
   )
+  // `/me` is the session probe clients use to decide whether a stored session
+  // has ended, so it is registered before the generic chain below and answers
+  // a rejected session with the `invalid_session` envelope instead of the bare
+  // 401 that the service-credential guard also sends. Every other users route
+  // keeps the bare 401. The edge sends this GET with no body, so the body-token
+  // fallback of `requireExternalSessionRateLimitContext` never selects a token
+  // here; an outdated client receives the `upgrade_required` envelope (426).
+  router.get(
+    '/external/users/:userId/me',
+    ...externalUsersRateLimits,
+    requireExternalSessionRateLimitContext({
+      purpose: 'protected',
+      client: req => ({ version: req.header('x-evenfire-client-version') || undefined }),
+    }),
+    requireExternalUserParamMatch(),
+    async (req, res, next) => {
+      try {
+        const teamId = String(req.query.teamId || '')
+        const data = await getMe(req.params.userId, teamId)
+        if (!data) return res.status(404).json({ error: 'not_found' })
+        return res.status(200).json(data)
+      } catch (error) {
+        return next(error)
+      }
+    }
+  )
+
   router.use('/external/users', ...externalUsersRateLimits, requireValidExternalSessionToken)
 
   router.get(
@@ -105,6 +143,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         const truncated = allTeams.length > teams.length
         let activeContextIds: Set<string> | null = null
         let activeAgentNames: Set<string> | null = null
+        const initialPartialErrors: TeamDirectoryPartialError[] = []
         try {
           const [contextIds, agentNames] = await Promise.all([
             listActiveContextIds(gateway),
@@ -113,43 +152,60 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           activeContextIds = new Set(contextIds)
           activeAgentNames = new Set(agentNames)
         } catch (err) {
-          ;(req.log ?? rootLogger).warn(
-            { err, module: 'external-users', userId: req.params.userId },
-            'access reconciliation failed for team directory'
+          requestLogger(req).warn(
+            { err, userId: req.params.userId, source: 'operational_resources' },
+            'external user team directory reconciliation failed'
           )
+          initialPartialErrors.push({ source: 'operational_resources', code: 'unavailable' })
         }
 
-        const items = await mapWithConcurrencyLimit(teams, 4, async team => {
-          try {
-            const [members, contexts, agents] = await Promise.all([
-              listMembers(team.id),
-              getTeamContexts(team.id),
-              getTeamAgents(team.id),
-            ])
-            return {
-              team,
-              members: projectTeamMembers(members),
-              contextIds: filterAccessValues(contexts?.contextIds, activeContextIds),
-              agentNames: filterAccessValues(agents?.agentNames, activeAgentNames),
-            }
-          } catch (err) {
-            ;(req.log ?? rootLogger).warn(
-              { err, module: 'external-users', teamId: team.id },
-              'team-directory fetch failed'
-            )
-            return {
-              team,
-              members: [],
-              contextIds: [],
-              agentNames: [],
+        const mapped = await mapWithConcurrencyLimit(teams, 4, async team => {
+          const [members, contexts, agents] = await Promise.allSettled([
+            listMembers(team.id),
+            getTeamContexts(team.id),
+            getTeamAgents(team.id),
+          ])
+          const partialErrors: TeamDirectoryPartialError[] = []
+          for (const [source, result] of [
+            ['members', members],
+            ['contexts', contexts],
+            ['agents', agents],
+          ] as const) {
+            if (result.status === 'rejected') {
+              requestLogger(req).warn(
+                { err: result.reason, userId: req.params.userId, teamId: team.id, source },
+                'external user team directory source fetch failed'
+              )
+              partialErrors.push({ teamId: team.id, source, code: 'unavailable' })
             }
           }
+          return {
+            item: {
+              team,
+              members: members.status === 'fulfilled' ? projectTeamMembers(members.value) : [],
+              contextIds:
+                contexts.status === 'fulfilled'
+                  ? filterAccessValues(contexts.value?.contextIds, activeContextIds)
+                  : [],
+              agentNames:
+                agents.status === 'fulfilled'
+                  ? filterAccessValues(agents.value?.agentNames, activeAgentNames)
+                  : [],
+            },
+            partialErrors,
+          }
         })
+        const partialErrors = [
+          ...initialPartialErrors,
+          ...mapped.flatMap(result => result.partialErrors),
+        ]
 
         return res.status(200).json({
           currentTeamId: listed.currentTeamId || currentTeamId,
           truncated,
-          items,
+          complete: partialErrors.length === 0 && !truncated,
+          partialErrors,
+          items: mapped.map(result => result.item),
         })
       } catch (error) {
         return next(error)
@@ -172,21 +228,6 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
   )
 
   router.get(
-    '/external/users/:userId/me',
-    requireExternalUserParamMatch(),
-    async (req, res, next) => {
-      try {
-        const teamId = String(req.query.teamId || '')
-        const data = await getMe(req.params.userId, teamId)
-        if (!data) return res.status(404).json({ error: 'not_found' })
-        return res.status(200).json(data)
-      } catch (error) {
-        return next(error)
-      }
-    }
-  )
-
-  router.get(
     '/external/users/:userId/contexts',
     requireExternalUserParamMatch(),
     async (req, res, next) => {
@@ -196,9 +237,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         try {
           active = new Set(await listActiveContextIds(gateway))
         } catch (err) {
-          ;(req.log ?? rootLogger).warn(
-            { err, module: 'external-users', userId: req.params.userId },
-            'context reconciliation failed'
+          requestLogger(req).warn(
+            { err, userId: req.params.userId, source: 'contexts' },
+            'external user context reconciliation failed'
           )
         }
         return res.status(200).json({
@@ -240,9 +281,9 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
           // Spec §7.2: never fail the catalog purely because Kubernetes is
           // unavailable. Preserve the names authorized by the directory DB;
           // omit enriched DTOs because their live Host identity is unverified.
-          ;(req.log ?? rootLogger).warn(
-            { err, module: 'external-users', userId: req.params.userId },
-            'MCP server enrichment failed'
+          requestLogger(req).warn(
+            { err, userId: req.params.userId, source: 'agents' },
+            'external user MCP server enrichment failed'
           )
           agents = []
         }

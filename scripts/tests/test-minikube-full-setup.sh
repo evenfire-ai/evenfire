@@ -1532,6 +1532,43 @@ assert_recovery_migrations_are_head_bound() {
 
 # The guard that keeps this file honest: a case defined but never added to the
 # call block below reports nothing at all, which reads as a green run.
+# The LLM model seed may re-enable a disabled row only on a DB this run
+# created. Run the real block from full-setup.sh against a stubbed $KC.
+assert_control_db_freshness_is_derived_fail_closed() {
+  local block problems="" got
+  block="$(awk '/^# Whether this run starts the control DB empty/{s=1} s{print} s && /^fi$/{exit}' \
+    "$REPO_ROOT/scripts/minikube/full-setup.sh")"
+  if [ -z "$block" ]; then
+    fail "full-setup.sh has no control DB freshness block"
+    return
+  fi
+  freshness() { # <RESET_DB> <pvc lookup: present|absent|error>
+    bash -c '
+      set -euo pipefail
+      err() { echo "ERR $*"; }
+      kc_stub() { case "$PVC" in present) echo persistentvolumeclaim/control-postgres-data ;; absent) ;; error) return 1 ;; esac; }
+      KC=kc_stub RESET_DB="$1" PVC="$2"
+      eval "$3"
+      echo "fresh=$CONTROL_DB_CREATED_BY_RUN"' _ "$1" "$2" "$block" 2>&1 || true
+  }
+  got="$(freshness true present)";  [ "$got" = "fresh=true" ]  || problems+="reset: $got; "
+  got="$(freshness false absent)";  [ "$got" = "fresh=true" ]  || problems+="no volume: $got; "
+  got="$(freshness false present)"; [ "$got" = "fresh=false" ] || problems+="reused volume: $got; "
+  got="$(freshness false error)"
+  case "$got" in *fresh=*) problems+="failed lookup did not stop setup: $got; " ;; esac
+  # shellcheck disable=SC2016
+  if grep -Fq 'LLM_ENSURE_DB_FRESH="${CONTROL_DB_CREATED_BY_RUN}"' "$REPO_ROOT/scripts/minikube/full-setup.sh" &&
+     [ "$(grep -nF '# Whether this run starts the control DB empty' "$REPO_ROOT/scripts/minikube/full-setup.sh" | cut -d: -f1)" -lt \
+       "$(grep -nF '# 6b. Deploy via kustomize' "$REPO_ROOT/scripts/minikube/full-setup.sh" | cut -d: -f1)" ]; then :; else
+    problems+="freshness is not computed before 6b or not passed to the seed; "
+  fi
+  if [ -z "$problems" ]; then
+    pass "control DB freshness: reset or no volume is fresh, a reused volume is not, a failed lookup aborts"
+  else
+    fail "$problems"
+  fi
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-full-setup.sh"
@@ -1591,6 +1628,7 @@ assert_a_cluster_with_no_record_keeps_the_env_default
 assert_the_effective_tag_comes_from_the_record_not_the_pin
 assert_the_effective_tag_precedence_is_override_then_record_then_pin
 assert_the_pull_path_forwards_skip_uis
+assert_control_db_freshness_is_derived_fail_closed
 assert_every_defined_case_is_invoked
 
 exit $FAIL

@@ -89,13 +89,14 @@ async function build(source = fakeSource()): Promise<void> {
   audit = new PluginAuditLog(path.join(tmpDir, 'audit'))
   gate = new PluginConsentGate({
     store,
+    isMountCurrent: () => true,
     presentPrompt: request => {
       prompts.push(request)
       // Answer on the next tick, the way a real renderer would.
       setTimeout(() => gate.resolvePrompt(request.promptId, nextDecision(request)), 0)
     },
     cancelPrompt: () => undefined,
-    setSurfaceVisible: async () => undefined,
+    setSurfaceVisible: async () => true,
     isWindowReady: () => true,
     // Cooldowns are asserted directly in pluginConsentGate.test.ts; spending
     // ten real seconds per back-to-back prompt here would only slow the suite.

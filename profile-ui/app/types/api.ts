@@ -29,6 +29,9 @@ export type AcceptInvitationResponse = {
   userId: string | null
   passwordPending: boolean
   email: string
+  // Set by the edge when the invitation was already accepted: the answer is a
+  // success without a session, so no session cookie was set.
+  replay?: true
 }
 
 export type DesktopAuthorizationResponse = {

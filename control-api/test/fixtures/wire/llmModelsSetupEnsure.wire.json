@@ -1,0 +1,101 @@
+{
+  "list": {
+    "status": 200,
+    "body": {
+      "rows": [
+        {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "provider": "openai",
+          "model": "gpt-5.4-mini",
+          "vendor": null,
+          "display_name": null,
+          "context_window_tokens": null,
+          "enabled": true,
+          "source": "discovery",
+          "discovered_at": "2026-11-01T00:00:00.000Z",
+          "last_seen_at": "2026-11-01T00:00:00.000Z",
+          "stale": false,
+          "image_input": {
+            "state": "unknown"
+          },
+          "created_at": "2026-11-01T00:00:00.000Z",
+          "updated_at": "2026-11-01T00:00:00.000Z"
+        },
+        {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "provider": "zai",
+          "model": "glm-4.7",
+          "vendor": null,
+          "display_name": null,
+          "context_window_tokens": null,
+          "enabled": false,
+          "source": "discovery",
+          "discovered_at": "2026-11-01T00:00:00.000Z",
+          "last_seen_at": "2026-11-01T00:00:00.000Z",
+          "stale": false,
+          "image_input": {
+            "state": "unknown"
+          },
+          "created_at": "2026-11-01T00:00:00.000Z",
+          "updated_at": "2026-11-01T00:00:00.000Z"
+        }
+      ]
+    }
+  },
+  "create": {
+    "status": 201,
+    "body": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "provider": "zai",
+      "model": "glm-5.1",
+      "vendor": null,
+      "display_name": null,
+      "context_window_tokens": null,
+      "enabled": true,
+      "source": "manual",
+      "discovered_at": null,
+      "last_seen_at": null,
+      "stale": false,
+      "image_input": {
+        "state": "unknown"
+      },
+      "created_at": "2026-11-01T00:00:00.000Z",
+      "updated_at": "2026-11-01T00:00:00.000Z"
+    }
+  },
+  "create_conflict": {
+    "status": 409,
+    "body": {
+      "error": "conflict",
+      "message": "a row for this provider/model already exists"
+    }
+  },
+  "create_configmap_write_failed": {
+    "status": 503,
+    "body": {
+      "error": "configmap_write_failed",
+      "message": "the allowlist was saved but the ConfigMap could not be updated; runtime propagation is delayed — retry or it will reconcile on the next change/boot"
+    }
+  },
+  "enable": {
+    "status": 200,
+    "body": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "provider": "zai",
+      "model": "glm-4.7",
+      "vendor": null,
+      "display_name": null,
+      "context_window_tokens": null,
+      "enabled": true,
+      "source": "discovery",
+      "discovered_at": "2026-11-01T00:00:00.000Z",
+      "last_seen_at": "2026-11-01T00:00:00.000Z",
+      "stale": false,
+      "image_input": {
+        "state": "unknown"
+      },
+      "created_at": "2026-11-01T00:00:00.000Z",
+      "updated_at": "2026-11-01T00:00:00.000Z"
+    }
+  }
+}

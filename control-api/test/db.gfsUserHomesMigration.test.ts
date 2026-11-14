@@ -6,7 +6,7 @@ vi.mock('pg', () => ({
   }),
 }))
 
-const VERSION = '0131_gfs_user_homes'
+const VERSION = '0139_gfs_user_homes'
 
 function recordingQuery(appliedVersions: string[]) {
   return vi.fn(async (sql: string) =>
@@ -16,16 +16,19 @@ function recordingQuery(appliedVersions: string[]) {
   )
 }
 
-describe('0131_gfs_user_homes migration', () => {
-  it('registers exactly once immediately after 0130 and keeps its earlier name', async () => {
+describe('0139_gfs_user_homes migration', () => {
+  it("registers exactly once, last, immediately after dev's 0138 and with no legacy name", async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(migration => migration.version)
     const index = versions.indexOf(VERSION)
 
     expect(index).toBeGreaterThan(0)
-    expect(versions[index - 1]).toBe('0130_password_login_success_admission')
+    expect(versions[index - 1]).toBe('0138_legacy_password_security_epoch_backfill')
+    expect(index).toBe(versions.length - 1)
     expect(versions.filter(version => version === VERSION)).toHaveLength(1)
-    expect(CONTROL_API_MIGRATIONS[index].legacyVersions).toEqual(['0130_gfs_user_homes'])
+    // The earlier names (0130/0131_gfs_user_homes) never reached a merged branch
+    // or a deployed database, so no receipt under them is accepted.
+    expect(CONTROL_API_MIGRATIONS[index].legacyVersions).toBeUndefined()
   })
 
   it('applies and records the migration on upgrade but does not rerun it once recorded', async () => {
@@ -58,45 +61,5 @@ describe('0131_gfs_user_homes migration', () => {
       currentQuery.mock.calls.some(([sql]) => sql.includes('CREATE TABLE gfs_user_homes'))
     ).toBe(false)
     expect(currentRelease).toHaveBeenCalledOnce()
-  })
-
-  it('records 0131 without re-running DDL when only 0130_gfs_user_homes is recorded', async () => {
-    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
-    const earlier = CONTROL_API_MIGRATIONS.map(migration => migration.version).filter(
-      version => version !== VERSION
-    )
-    const legacyQuery = recordingQuery([...earlier, '0130_gfs_user_homes'])
-    const legacyRelease = vi.fn()
-    await initDb({
-      connect: vi.fn().mockResolvedValue({ query: legacyQuery, release: legacyRelease }),
-    } as never)
-
-    expect(
-      legacyQuery.mock.calls.some(([sql]) => sql.includes('CREATE TABLE gfs_user_homes'))
-    ).toBe(false)
-    // Witness: the renamed migration is recorded, so the run is not a no-op.
-    expect(legacyQuery).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO schema_migrations(version)'),
-      [VERSION]
-    )
-    expect(legacyRelease).toHaveBeenCalledOnce()
-  })
-
-  it('accepts the legacy 0130_gfs_user_homes receipt as evidence for 0131', async () => {
-    const { CONTROL_API_MIGRATIONS, assertDbReady } = await import('../src/db.js')
-    const recorded = [
-      ...CONTROL_API_MIGRATIONS.map(migration => migration.version).filter(
-        version => version !== VERSION
-      ),
-      '0130_gfs_user_homes',
-    ]
-    const query = vi.fn(async (sql: string) =>
-      sql.includes('password_admission_rollout_is_ready')
-        ? { rows: [{ ready: true }], rowCount: 1 }
-        : { rows: recorded.map(version => ({ version })), rowCount: recorded.length }
-    )
-
-    await expect(assertDbReady({ query })).resolves.toBeUndefined()
-    expect(query).toHaveBeenCalledWith(expect.stringContaining('schema_migrations'))
   })
 })

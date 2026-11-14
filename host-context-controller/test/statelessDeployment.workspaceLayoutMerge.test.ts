@@ -21,6 +21,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -932,7 +933,7 @@ describe('workspace layout merge', () => {
     expect(snapshot(root)).toEqual(refusedTree)
     expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
     // Witness: without the root symlink the same rollback init splits the tree.
-    rmSync(join(root, 'evenfire'))
+    unlinkSync(join(root, 'evenfire'))
     baseInit(root)
     expect(readdirSync(join(root, 'state'))).toContain('state.db')
   }, 15_000)

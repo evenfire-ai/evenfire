@@ -19,6 +19,7 @@ import type { ToolDefinition } from '../../core/types'
 import { createLLMProvider } from '../index'
 import { OpenAIProvider } from '../openai'
 import { OpenAICompatibleProvider } from '../openaiCompatible'
+import { recordedResponse } from '../openaiFamily/__tests__/responsesFixtures'
 import { descriptorFor } from '../registryCore'
 
 const R6_COMPAT = [
@@ -215,15 +216,15 @@ describe('param audit — OpenAI-compatible driver sends a portable param set', 
   })
 
   it('native OpenAI keeps full fidelity (no clamping/downgrade)', async () => {
-    const mockClient = createMockOpenAIClient()
-    const provider = new OpenAIProvider(mockClient as never, 'gpt-4o')
+    const create = vi.fn(async (_payload: unknown) => recordedResponse('v1-fc-gpt-6.1-terra'))
+    const provider = new OpenAIProvider({ responses: { create } } as never, 'gpt-4o')
 
     await provider.completeSingleTurnWithTools([{ role: 'user', content: 'Hi' }], tools, {
       temperature: 1.7,
       tool_choice: 'required',
     })
 
-    const callArgs = mockClient.chat.completions.create.mock.calls[0][0]
+    const callArgs = create.mock.calls[0]![0] as { temperature?: number; tool_choice?: string }
     expect(callArgs.temperature).toBe(1.7)
     expect(callArgs.tool_choice).toBe('required')
   })

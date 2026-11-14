@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "suiteManifest": "tests/contracts/password-recovery-suites.json",
+  "preGateScript": "scripts/minikube/pre-gate-sync.sh",
+  "t1Packages": [
+    "packages/workflow-runtime-core",
+    "control-api",
+    "external-rest-api"
+  ],
+  "localT1ExtraPackages": [
+    "gfs-controller"
+  ],
+  "consumerDependencies": {
+    "control-api": [
+      "packages/workflow-runtime-core",
+      "rpc-proxy",
+      "external-rest-api"
+    ],
+    "external-rest-api": [
+      "control-api"
+    ],
+    "mcp-host": [
+      "codex-llm-proxy",
+      "grok-llm-proxy"
+    ],
+    "desktop-app": [
+      "mcp-host"
+    ],
+    "profile-ui": [
+      "packages/frontend-components"
+    ],
+    "workflow-recipes": [
+      "packages/workflow-runtime-core"
+    ],
+    "packages/workflow-sdk": [
+      "packages/workflow-runtime-core"
+    ]
+  },
+  "consumerArtifacts": {
+    "control-api": [
+      "packages/workflow-runtime-core/dist/index.js",
+      "external-rest-api/dist/app.js"
+    ],
+    "workflow-recipes": [
+      "packages/workflow-runtime-core/dist/index.js"
+    ],
+    "packages/workflow-sdk": [
+      "packages/workflow-runtime-core/dist/index.js"
+    ]
+  },
+  "producers": {
+    "observedDev": {
+      "env": "TASK106_R61_B1_DEV_SOURCE_DIR",
+      "commit": "0b26101eb247adcc44f70d39451f3e82c3225d47",
+      "sourceHashes": {
+        "control-api/src/db.ts": "1948ad306fe56b368f120edbc70ddbac6cb9b981d9fd218e7ded2575ed3b2beb"
+      },
+      "buildPackages": [
+        "packages/workflow-runtime-core",
+        "control-api"
+      ],
+      "artifactDirectories": [
+        "packages/workflow-runtime-core/dist",
+        "control-api/dist"
+      ],
+      "lockfiles": [
+        "packages/workflow-runtime-core/package-lock.json",
+        "control-api/package-lock.json"
+      ],
+      "runner": "control-api/dist/migrate.js"
+    },
+    "latestDev": {
+      "env": "TASK106_R61_B1_LATEST_DEV_SOURCE_DIR",
+      "commit": "31abc80d8d69200f3df8ac6e7118ffb781e69136",
+      "sourceHashes": {
+        "control-api/src/db.ts": "1f8e1890a4e5efd42e7c6350e103fdeaa7ef897c764771f175904e0e58a826b8",
+        "control-api/src/migrate.ts": "2b582252753c6455fc85d7cb4563313e3b63ecf7c7630aa6252f70f0bb286a81"
+      },
+      "buildPackages": [
+        "packages/workflow-runtime-core",
+        "control-api"
+      ],
+      "artifactDirectories": [
+        "packages/workflow-runtime-core/dist",
+        "control-api/dist"
+      ],
+      "lockfiles": [
+        "packages/workflow-runtime-core/package-lock.json",
+        "control-api/package-lock.json"
+      ],
+      "runner": "control-api/dist/migrate.js"
+    }
+  },
+  "nativeChecks": {
+    "mcp-host": [
+      {
+        "package": "mcp-host",
+        "kind": "sqlite"
+      },
+      {
+        "package": "mcp-host",
+        "kind": "canvas"
+      }
+    ],
+    "desktop-app": [
+      {
+        "package": "mcp-host",
+        "kind": "canvas"
+      }
+    ]
+  },
+  "t1TestRoots": [
+    "control-api"
+  ]
+}

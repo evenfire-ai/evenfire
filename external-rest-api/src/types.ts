@@ -21,6 +21,11 @@ export type AuthClaims = {
   teamId: string
   role: TeamRole
   exp: number
+  sessionContract?: 'v2'
+  sid?: string
+  jti?: string
+  sv?: number
+  ver?: 2
 }
 
 export type ChannelMapping = {

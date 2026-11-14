@@ -1,9 +1,12 @@
 // Control API admits one password verification every 7.5 seconds across the
-// server (passwordAdmissionState.ts paceMs). The pace is measured between
-// client clicks, so it keeps 2.5 s for renderer, IPC and network delay before
-// the server permit: an 8 s gap returned 429 rate_limited in J8. Start with a
-// full interval to account for an earlier preflight or a recent lane.
-const PASSWORD_PACE_MS = 10_000
+// server (passwordAdmissionState.ts paceMs) and five attempts per source in each
+// clock minute (sourceAttemptsPerMinute); the source limit counts correct
+// passwords too. Space every attempt from this worker so a clock minute holds at
+// most five. The pace is measured between client clicks, so it also keeps room
+// for renderer, IPC and network delay before the server permit (an 8 s gap
+// returned 429 rate_limited in J8). Start with a full interval to account for an
+// earlier preflight or a recent lane.
+const PASSWORD_PACE_MS = 13_000
 let lastPasswordAttemptAt = Date.now()
 
 export async function awaitPasswordPace(): Promise<void> {

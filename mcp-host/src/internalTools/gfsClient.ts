@@ -354,6 +354,17 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
         },
         call
       ),
+    createFileFromBytes: ({ drive, parentResourceId, name, contentBase64 }, call) =>
+      request(
+        writerBase,
+        `/v1/resources/${encodeURIComponent(parentResourceId)}/children?drive=${encodeURIComponent(drive)}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name, kind: 'file', contentBase64 }),
+        },
+        call
+      ),
     createFolder: ({ drive, parentResourceId, name }, call) =>
       request(
         writerBase,

@@ -46,9 +46,9 @@ export interface EgressState {
 }
 
 export interface EgressCoreConfig {
-  /** grace/overlap kept after the DNS TTL, in ms (plan default 300000) */
+  /** grace/overlap kept after the DNS TTL, in ms (HCC and WRC default to 3600 s) */
   overlapMs: number
-  /** alarm cap; on overflow we evict, never reject (plan default >=128) */
+  /** alarm cap; on overflow we evict, never reject (HCC default 128, WRC default 256) */
   maxEntries: number
 }
 
@@ -157,9 +157,7 @@ export declare const NETWORK_READY_GENERATION_ANNOTATION: string
  * Unknown/missing codes default to 'permanent'. Shared source of truth for WRC
  * and HCC so fail-static behaves identically platform-wide (issue #299).
  */
-export declare function classifyDnsError(
-  errOrCode: unknown
-): 'transient' | 'permanent'
+export declare function classifyDnsError(errOrCode: unknown): 'transient' | 'permanent'
 
 /**
  * Codes that are a positive permanent verdict about the NAME (issue #513): the

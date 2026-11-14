@@ -35,27 +35,23 @@ function matchesAllowedImagePrefix(image, rawPrefix) {
   return next === '/' || next === ':' || next === '@'
 }
 
-// Permissive audit-mode default: current fleet hosts + registry.evenfire.ai.
-// This is the CODE FALLBACK used only when the env var is unset. It is NOT
-// kept in sync with deploy/base: deploy/base is environment-generic and
-// ships only the vendor-neutral subset of this list
-// (ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/) via
-// CONTROL_API_/CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES, since the base tree is
-// shared across clusters and must not hardcode any one fleet's identity. The
-// private gcp-dev/gcp-prod overlays each patch that env var to the real,
-// fleet-specific Artifact Registry + registry.evenfire.ai prefixes below —
-// those overlay values are the effective ones in prod. This constant is only
-// the safety-net default for local/dev-mode runs where the env var is unset.
+// Default allowlist when CONTROL_API_ALLOWED_IMAGE_PREFIXES /
+// CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES is unset: the vendor-neutral list that
+// deploy/base ships for both variables, plus registry.evenfire.ai/, the shared
+// Evenfire registry that hosts published plugin images
+// (docs/how-to/publish-plugin-to-registry.md). deploy/base leaves it out, so a
+// deployment that sets the variables chooses for itself. Deployments that pull
+// from their own registry set the variables to their own prefixes.
 // Prefixes match against the RAW image ref, so a Docker Hub image is listed in
 // its short form (e.g. 'mongodb/'), which matches 'mongodb/x' but NOT the
 // fully-qualified 'docker.io/mongodb/x' — add the docker.io/-qualified prefix
 // too if an org publishes that form.
 const DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES = Object.freeze([
-  'us-central1-docker.pkg.dev/your-gcp-project/clerum/',
-  'registry.evenfire.ai/',
+  'ghcr.io/evenfire-ai/',
   'mongodb/',
   'mcr.microsoft.com/',
   'clerum/',
+  'registry.evenfire.ai/',
 ])
 
 /**

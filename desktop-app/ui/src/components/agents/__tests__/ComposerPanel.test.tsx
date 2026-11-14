@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatComposerStateContextValue } from '@contexts/ChatComposerStateContext'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
@@ -83,21 +83,8 @@ vi.mock('@contexts/McpRuntimeContext', () => ({
   useMcpRuntimeContext: () => ({ hostRuntimeStatus: null, activeLlmProvider: null }),
 }))
 
-vi.mock('@contexts/AuthContext', () => ({
-  useAuthContext: () => ({ me: { id: 'user-1', teamId: 'team-1' } }),
-}))
-
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({ selectedAgent: 'agent-1' }),
-}))
-
-vi.mock('@hooks/domain/useAgentsDataController', () => ({
-  useAgentsDataController: () => ({
-    accessCatalog: { userId: 'user-1', teamId: 'team-1' },
-    agentNames: ['agent-1'],
-    loading: false,
-    error: null,
-  }),
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
@@ -324,6 +311,42 @@ describe.each([
     expect(textarea.selectionStart).toBe(4)
     expect(textarea.selectionEnd).toBe(8)
     otherInput.remove()
+  })
+
+  it('defers automatic RAF focus to compact navigation but preserves desktop and explicit focus', () => {
+    let frame: FrameRequestCallback | undefined
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+      frame = callback
+      return 17
+    })
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+    composerState.activeChatId = 'chat-1'
+
+    const first = render(<ComposerPanel inline />)
+    const trigger = document.createElement('button')
+    trigger.className = 'compact-navigation-toggle'
+    document.body.append(trigger)
+    trigger.focus()
+    act(() => frame?.(0))
+    expect(document.activeElement).toBe(trigger)
+    first.unmount()
+    trigger.remove()
+
+    composerState.composerFocusRequestId = 1
+    frame = undefined
+    const explicit = render(<ComposerPanel inline />)
+    const textarea = screen.getByTestId('chat-input')
+    expect(document.activeElement).toBe(textarea)
+    act(() => frame?.(0))
+    expect(document.activeElement).toBe(textarea)
+    explicit.unmount()
+
+    composerState.composerFocusRequestId = 0
+    frame = undefined
+    render(<ComposerPanel inline />)
+    const desktopTextarea = screen.getByTestId('chat-input')
+    act(() => frame?.(0))
+    expect(document.activeElement).toBe(desktopTextarea)
   })
 })
 

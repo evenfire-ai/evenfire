@@ -28,6 +28,7 @@ vi.mock('../src/middleware/rpcAccessAuth.js', () => ({
   requireValidRpcAccessToken: () => (_req: unknown, _res: unknown, next: () => void) => next(),
   requireValidRpcAccessTokenAny: () => (_req: unknown, _res: unknown, next: () => void) => next(),
   requireRpcTokenUserMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireRpcTokenHostMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
 }))
 
 function buildApp() {

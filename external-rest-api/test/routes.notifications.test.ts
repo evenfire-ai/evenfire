@@ -1,16 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
 import { createNotificationsRouter } from '../src/routes/notifications.js'
 
 const authTokenMock = vi.hoisted(() => ({
   verifyToken: vi.fn(),
 }))
 
-const controlApiClientMock = vi.hoisted(() => ({
-  controlApiStreamRequest: vi.fn(),
-  controlApiRequest: vi.fn(),
-  ControlApiError: class ControlApiError extends Error {
+const controlApiClientMock = vi.hoisted(() => {
+  class ControlApiError extends Error {
     status: number
     body: unknown
     constructor(message: string, status: number, body: unknown) {
@@ -18,8 +17,19 @@ const controlApiClientMock = vi.hoisted(() => ({
       this.status = status
       this.body = body
     }
-  },
-}))
+  }
+  class ControlApiPathError extends ControlApiError {
+    constructor() {
+      super('Control API request path is not allowed', 400, { error: 'invalid_request' })
+    }
+  }
+  return {
+    controlApiStreamRequest: vi.fn(),
+    controlApiRequest: vi.fn(),
+    ControlApiError,
+    ControlApiPathError,
+  }
+})
 
 vi.mock('../src/authToken.js', () => authTokenMock)
 vi.mock('../src/controlApiClient.js', () => controlApiClientMock)
@@ -53,6 +63,7 @@ describe('routes/notifications', () => {
     const app = express()
     app.use(express.json())
     app.use(createNotificationsRouter())
+    app.use(externalRestPublicErrorHandler)
     return app
   }
 
@@ -146,7 +157,7 @@ describe('routes/notifications', () => {
     )
   })
 
-  it('propagates partial preference PUT validation errors from control-api', async () => {
+  it('forwards partial preference PUT validation errors from control-api', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     controlApiClientMock.controlApiRequest.mockRejectedValueOnce(
       new controlApiClientMock.ControlApiError('invalid_channel_fallback_enabled', 400, {
@@ -157,6 +168,7 @@ describe('routes/notifications', () => {
     const response = await request(makeApp())
       .put('/me/notification-preferences')
       .set('authorization', 'Bearer user-session-token')
+      .set('x-correlation-id', 'notifications_ID-42')
       .send({ preferredMedium: 'telegram' })
       .expect(400)
 

@@ -87,8 +87,13 @@ Two behaviours surprise people:
   you are mid-edit on. Stage or discard that file and commit again.
 
 Every refusal names the file and the fix. If you need to bypass the hook to
-get unstuck, say so in the PR rather than leaving it silent. The two release
-validators run in CI and will catch what the hook would have.
+get unstuck, say so in the PR rather than leaving it silent. A commit made
+without the hook leaves its services' versions where they were, and the
+required version check on pull requests into `dev` then fails with
+`code changed but <service>/package.json stayed at <version>`. To fix it, make
+a commit in that service with the hook on, or set the version above the base's
+with `npm version` (see
+[Releases and upgrades](docs/deploy/releases-and-upgrades.md)).
 
 ## Branches and pull requests
 
@@ -100,21 +105,31 @@ validators run in CI and will catch what the hook would have.
   release branch; changes reach it when `dev` is promoted.
 - CI (`.github/workflows/ci-public.yml`) builds, tests and typechecks every
   service in its matrix on each pull request.
+- CI also gates dependency advisories: `npm audit` for every lockfile against
+  a reviewed baseline, a check of the React copy bundled inside `next`, and a
+  Trivy scan of the Next.js app images. Lockfile scanners cannot see the
+  React inside `next`. See
+  [dependency scanning](docs/testing/dependency-scanning.md) for why, and for
+  what to do when one of these checks fails.
 
 ## Desktop App (Electron)
 
-If Electron's `postinstall` is skipped, `npm ci` still exits successfully but
-the Electron runtime is never downloaded. The failure then shows up later as a
-test error that looks like a product bug. For any `desktop-app` work:
+Electron 42 and later do not download the runtime in a `postinstall` script.
+`npm ci` installs only the `electron` package; the runtime is downloaded the
+first time `require('electron')` resolves. A missing or failed download then
+shows up later as a test error that looks like a product bug. For any
+`desktop-app` work:
 
 1. Use Node 24.
-2. Run `npm ci` **without** `--ignore-scripts`.
+2. Run `npm ci` **without** `--ignore-scripts` (keytar, esbuild and the macOS
+   DMG tooling still build in lifecycle scripts).
 3. Run `npm run verify:electron` and confirm it passes before you trust any
-   test or build result.
+   test or build result. It downloads the runtime if it is missing and fails
+   unless `electron` resolves to an executable.
 
 If the check reports `Electron failed to install correctly`, switch to Node 24,
-repair `node_modules`, and reinstall. Do not set
-`ELECTRON_SKIP_BINARY_DOWNLOAD` or point Electron at an unverified binary.
+delete `desktop-app/node_modules/electron`, rerun `npm ci`, and rerun the
+check. Do not point `ELECTRON_OVERRIDE_DIST_PATH` at an unverified binary.
 
 ## Validating against a cluster
 
