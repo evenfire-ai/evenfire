@@ -446,3 +446,96 @@ describe('StatusReporter', () => {
     expect(fetchMock.mock.calls[3][1].headers.Authorization).toBe('Bearer jwt-4')
   })
 })
+
+// --- The request body carries a byte-bounded toolsCalled -------------------
+
+describe('StatusReporter with byte-heavy tool calls', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('bounds multi-byte and control-character toolsCalled in the real request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const cjk = '日本語テキスト'.repeat(800)
+    const control = '\u0001\u001b'.repeat(2_500)
+    const toolsCalled = Array.from({ length: 100 }, (_, i) => ({
+      serverName: 'srv',
+      toolName: 'tool',
+      durationMs: 1,
+      args: i % 2 ? { query: cjk } : control,
+      result:
+        i >= 50
+          ? {
+              success: true,
+              artifact: { name: 'a/b', format: 'pdf', path: '/output/x' },
+              content: cjk,
+            }
+          : i % 2
+            ? control
+            : [{ type: 'text', text: cjk }],
+    }))
+    const output = 'r'.repeat(150_000)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('review', 'completed', { output, toolsCalled })
+
+    const rawBody: string = fetchMock.mock.calls[0][1].body
+    const body = JSON.parse(rawBody)
+    // Liveness: the report went out with the full output and every call.
+    expect(body.output).toBe(output)
+    expect(body.toolsCalled).toHaveLength(100)
+    expect(body.toolsCalled[0].result.preview.length).toBeGreaterThan(300)
+    const toolsCalledBytes = Buffer.byteLength(JSON.stringify(body.toolsCalled))
+    expect(toolsCalledBytes).toBeGreaterThan(200 * 1024)
+    // 150 values of at most 2 x 1,024 + 31 bytes, plus at most 80 bytes per call.
+    expect(toolsCalledBytes).toBeLessThanOrEqual(150 * (2 * 1024 + 31) + 100 * 80)
+    // With a 150 KB output the whole body fits WRC's 512 KiB request limit.
+    expect(Buffer.byteLength(rawBody)).toBeLessThan(512 * 1024)
+  })
+
+  it('sends byte-bounded artifact results, previews and non-record args in the real request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const artifact = {
+      name: 'report.docx',
+      format: 'docx',
+      path: '/output/report.docx',
+      sizeBytes: 2048,
+      createdAt: '2026-10-16T00:00:00.000Z',
+    }
+    // Fits the 1,024-character limit, over 2,048 bytes, artifact accepted by WRC.
+    const artifactResult = { success: true, artifact, content: '日'.repeat(800) }
+    const craftedPreview = { truncated: true, preview: '\u0001'.repeat(1_024) }
+    const stringArgs = '日'.repeat(680)
+    const toolsCalled = [
+      { serverName: 'clerum', toolName: 'generate_docx', args: {}, result: artifactResult },
+      { serverName: 'srv', toolName: 'tool', args: stringArgs, result: craftedPreview },
+    ]
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('build', 'completed', { output: 'done', toolsCalled })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.toolsCalled).toHaveLength(2)
+    // The artifact result is reduced to what WRC extracts, not previewed.
+    expect(body.toolsCalled[0].result).toEqual({ success: true, artifact })
+    // A string arg whose {value} record is over the byte limit is previewed whole.
+    expect(body.toolsCalled[1].args).toEqual({ truncated: true, preview: stringArgs })
+    // A preview over the byte limit is bounded again instead of passed through.
+    const result = body.toolsCalled[1].result as { truncated: boolean; preview: string }
+    expect(result).not.toEqual(craftedPreview)
+    expect(result.truncated).toBe(true)
+    expect(result.preview.length).toBeGreaterThan(300)
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(2 * 1024 + 31)
+  })
+})
