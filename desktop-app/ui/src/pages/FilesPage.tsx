@@ -3360,11 +3360,12 @@ export function FilesPage({
                   <Button
                     className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
                     color="neutral"
-                    // In the Shared with me view this is the active crumb: inert,
-                    // and styled as a view root like "My home" at the home root.
-                    // A revoked session offers nothing but retry.
+                    // In the Shared with me view this is the active crumb: inert
+                    // (no click handler) but not disabled, and styled as a view
+                    // root like "My home" at the home root. A revoked session
+                    // offers nothing but retry.
                     aria-current={!current && rootView === 'shared' ? 'page' : undefined}
-                    disabled={!current && (accessRevoked || rootView === 'shared')}
+                    disabled={!current && accessRevoked}
                     onClick={
                       !current && rootView === 'shared'
                         ? undefined

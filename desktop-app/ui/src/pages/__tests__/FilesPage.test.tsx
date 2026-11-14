@@ -8400,6 +8400,25 @@ describe('FilesPage', () => {
       )
     })
 
+    it('keeps the open Shared with me root crumb enabled but inert', () => {
+      const { controller, onLocationChange } = renderAt(null)
+      const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
+      // Liveness witness: from the overview the same crumb resets and narrows the view.
+      fireEvent.click(within(shared).getByRole('button', { name: 'Shared with me' }))
+      expect(controller.reset).toHaveBeenCalledTimes(1)
+      expect(onLocationChange).toHaveBeenLastCalledWith(
+        GFS_SHARED_WITH_ME_LOCATION,
+        'Shared with me'
+      )
+      const rootCrumb = within(shared).getByRole('button', { name: 'Shared with me' })
+      expect(rootCrumb.getAttribute('aria-current')).toBe('page')
+      expect(rootCrumb.hasAttribute('disabled')).toBe(false)
+      const locationCalls = onLocationChange.mock.calls.length
+      fireEvent.click(rootCrumb)
+      expect(controller.reset).toHaveBeenCalledTimes(1)
+      expect(onLocationChange).toHaveBeenCalledTimes(locationCalls)
+    })
+
     it('titles the Files tab My home at the home root and the folder name inside it', () => {
       const renderCurrent = (current: { resourceId: string; gfsUri: string; name: string }) => {
         hookMock.useGfsBrowserController.mockReturnValue({

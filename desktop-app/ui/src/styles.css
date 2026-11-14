@@ -15436,8 +15436,9 @@ pre {
 /* The open root of a view ("My home", "Shared with me") reads as the view's
    muted title, not as a highlighted folder crumb. */
 .da-gfs-drive__breadcrumb--view-root.ui-button[aria-current='page'] {
-  opacity: 0.5;
+  color: var(--text-muted);
   background: transparent;
+  cursor: default;
 }
 
 /* Breadcrumb drop-move verdict tints (drop-move parity, refusal UX matrix):
