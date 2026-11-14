@@ -199,11 +199,11 @@ apply_instances() {
     if ! printf '%s\n%s\n' "$existing" "$resource" | jq -s -e '
       def managed:
         {apiVersion, kind,
-         metadata: {name: .metadata.name, namespace: (.metadata.namespace // ""),
-                    labels: (.metadata.labels // {}),
-                    annotations: ((.metadata.annotations // {}) | del(.["kubectl.kubernetes.io/last-applied-configuration"])),
-                    ownerReferences: (.metadata.ownerReferences // []),
-                    finalizers: (.metadata.finalizers // [])},
+         metadata: ((.metadata // {}) |
+                    {name, namespace: (.namespace // ""), labels: (.labels // {}),
+                     annotations: ((.annotations // {}) | del(.["kubectl.kubernetes.io/last-applied-configuration"]))}
+                    + (if has("ownerReferences") then {ownerReferences} else {} end)
+                    + (if has("finalizers") then {finalizers} else {} end)),
          spec: ((.spec // {}) | del(.mcpServers))};
       def contains_declared($live; $desired):
         if ($desired | type) == "object" then

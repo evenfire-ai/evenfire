@@ -366,6 +366,38 @@ expect_success
 assert_state
 pass 'existing Context without last-applied remains intact when declared fields match'
 
+init_case no-last-applied-foreign-metadata
+"$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
+  del(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]) |
+  .spec.description = "declarative description" |
+  .metadata.ownerReferences = [{apiVersion:"clerum.io/v1alpha1",kind:"WorkflowRecipe",name:"another-owner",uid:"owner-uid"}] |
+  .metadata.finalizers = ["fixture.example/finalizer"] else . end)' \
+  "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
+mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+remember_existing_context
+expect_success
+assert_state
+pass 'unmanaged Context retains owner references and finalizers not declared by bootstrap'
+
+init_case changed-bootstrap-connectors
+"$JQ" '.spec.mcpServers = ["a-new-bootstrap-default"]' \
+  "$CASE_DIR/overlay/instances/01-context.json" >"$CASE_DIR/context.next"
+mv "$CASE_DIR/context.next" "$CASE_DIR/overlay/instances/01-context.json"
+expect_success
+assert_state
+pass 'changes to bootstrap connectors do not replace user selections'
+
+init_case contexts-only
+rm -- "$CASE_DIR/overlay/instances/03-host.json" "$CASE_DIR/overlay/instances/04-channel.json" "$CASE_DIR/overlay/instances/05-gfs.json"
+expect_success
+"$JQ" -e --slurpfile expected "$CASE_DIR/expected-context.json" '
+  map(select(.kind == "Context" and .metadata.name == "context1"))[0] == $expected[0]' \
+  "$CASE_DIR/state.json" >/dev/null || fail 'Context-only provisioning changed the existing Context'
+if grep -q '^apply' "$CASE_DIR/mutations.log"; then
+  fail 'Context-only provisioning issued an apply'
+fi
+pass 'a Context-only instance directory needs no apply'
+
 init_case no-last-applied-drift
 "$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
   del(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])
@@ -409,17 +441,25 @@ cmp -s "$CASE_DIR/before.json" "$CASE_DIR/state.json" || fail '--skip-instances 
 [ ! -s "$CASE_DIR/mutations.log" ] || fail '--skip-instances issued an instance mutation'
 pass '--skip-instances preserves all instance state'
 
-for GUARD in manifest annotation; do
+for GUARD in manifest label annotation owner-reference finalizer spec invalid-annotation; do
   init_case "guard-$GUARD"
-  if [ "$GUARD" = manifest ]; then
-    "$JQ" '.spec.description = "changed bootstrap description"' \
-      "$CASE_DIR/overlay/instances/01-context.json" >"$CASE_DIR/context.next"
-    mv "$CASE_DIR/context.next" "$CASE_DIR/overlay/instances/01-context.json"
-  else
+  case "$GUARD" in
+    manifest) expression='.spec.description = "changed bootstrap description"' ;;
+    label) expression='.metadata.labels["managed-by"] = "changed"' ;;
+    annotation) expression='.metadata.annotations["fixture.example/owner"] = "changed"' ;;
+    owner-reference) expression='.metadata.ownerReferences = [{apiVersion:"v1",kind:"ConfigMap",name:"owner",uid:"owner-uid"}]' ;;
+    finalizer) expression='.metadata.finalizers = ["fixture.example/finalizer"]' ;;
+    spec) expression='.spec.sharedFileSystems = ["fixture-gfs"]' ;;
+    invalid-annotation) expression='' ;;
+  esac
+  if [ "$GUARD" = invalid-annotation ]; then
     "$JQ" 'map(if .kind == "Context" and .metadata.name == "context1" then
       .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = "invalid-json"
       else . end)' "$CASE_DIR/state.json" >"$CASE_DIR/state.next"
     mv "$CASE_DIR/state.next" "$CASE_DIR/state.json"
+  else
+    "$JQ" "$expression" "$CASE_DIR/overlay/instances/01-context.json" >"$CASE_DIR/context.next"
+    mv "$CASE_DIR/context.next" "$CASE_DIR/overlay/instances/01-context.json"
   fi
   cp "$CASE_DIR/state.json" "$CASE_DIR/before.json"
   if run_provision; then
