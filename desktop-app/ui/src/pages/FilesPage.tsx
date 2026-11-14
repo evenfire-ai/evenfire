@@ -3537,14 +3537,15 @@ export function FilesPage({
                     ? `Preparing ${zipJob.folderName}.zip — downloading ${zipJob.progress.filesAdded} of ${zipJob.progress.filesFound} ${zipJob.progress.filesFound === 1 ? 'file' : 'files'}…`
                     : `Preparing ${zipJob.folderName}.zip — assembling archive…`}
               </span>
-              <button
-                type="button"
-                className="da-gfs-zip-progress__stop"
+              <Button
                 aria-label="Stop preparing zip"
+                color="neutral"
                 onClick={() => zipAbortRef.current?.abort()}
+                size="xs"
+                variant="outline"
               >
                 Stop
-              </button>
+              </Button>
             </div>
           ) : null}
 
