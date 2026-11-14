@@ -76,15 +76,20 @@ function serializeOutputForReport(output: unknown): string {
  * JSON.stringify replacer that replaces an object with "[Circular]" only when
  * it is one of its own ancestors. JSON.stringify calls the replacer with
  * `this` set to the object that holds `value`, so the ancestors of `value` are
- * the stack up to and including that holder.
+ * the stack up to and including that holder. `onStack` holds the same objects
+ * as the stack, so the ancestor test does not scan it.
  */
 function circularReferenceMarker(): (this: unknown, key: string, value: unknown) => unknown {
-  const ancestors: unknown[] = []
+  const ancestors: object[] = []
+  const onStack = new Set<object>()
   return function (this: unknown, _key: string, value: unknown): unknown {
     if (typeof value !== 'object' || value === null) return value
-    while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop()
-    if (ancestors.includes(value)) return '[Circular]'
+    while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) {
+      onStack.delete(ancestors.pop() as object)
+    }
+    if (onStack.has(value)) return '[Circular]'
     ancestors.push(value)
+    onStack.add(value)
     return value
   }
 }
