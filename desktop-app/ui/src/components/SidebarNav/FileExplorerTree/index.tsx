@@ -4,6 +4,7 @@ import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
+  GFS_ACCESS_REVOKED_BODY,
   GFS_RESOURCE_DRAG_TYPE,
   GFS_SHARED_WITH_ME_LABEL,
   GFS_SHARED_WITH_ME_LOCATION,
@@ -1307,10 +1308,7 @@ export function FileExplorerTree({
               outlives any gesture's ownership, so a drag whose probe died
               stays explained even after the revocation invalidated it. */}
           <p className="da-file-explorer__revoked-body">{GFS_DROP_SESSION_LOST_MESSAGE}</p>
-          <p className="da-file-explorer__revoked-body">
-            Your current session cannot access these files. Sign in again or contact an
-            administrator.
-          </p>
+          <p className="da-file-explorer__revoked-body">{GFS_ACCESS_REVOKED_BODY}</p>
           <Button onClick={() => ctrl.retryAccess()} size="xs" variant="text">
             Retry file access
           </Button>

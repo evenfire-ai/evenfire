@@ -33,6 +33,10 @@ export const GFS_HOME_PENDING_TEXT = 'Your home folder is being prepared'
 /** Home-state notice for a home in conflict, which only an administrator resolves. */
 export const GFS_HOME_CONFLICT_TEXT = 'Your home folder needs attention from an administrator'
 
+/** Body of the revoked-access surface, shared by the Files page and the sidebar. */
+export const GFS_ACCESS_REVOKED_BODY =
+  'Your current session cannot access these files. Sign in again or contact an administrator.'
+
 /** Label of the collection of resources others share with the caller. */
 export const GFS_SHARED_WITH_ME_LABEL = 'Shared with me'
 

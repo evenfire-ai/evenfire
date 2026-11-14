@@ -3,7 +3,11 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { FOLDER_HOVER_EXPAND_DELAY_MS, GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
+import {
+  FOLDER_HOVER_EXPAND_DELAY_MS,
+  GFS_ACCESS_REVOKED_BODY,
+  GFS_SHARED_WITH_ME_LOCATION,
+} from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -929,6 +933,7 @@ describe('FileExplorerTree — shared revoked access across controller mounts (R
     // (a) The tree shows the unauthorized + retry surface — NOT "No shared files
     // yet." (b) The independent second mount reads revoked (shared flag).
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    expect(screen.getByText(GFS_ACCESS_REVOKED_BODY)).toBeTruthy()
     expect(screen.queryByText('No shared files yet.')).toBeNull()
     await waitFor(() => expect(screen.getByTestId('probe-access').textContent).toBe('revoked'))
 

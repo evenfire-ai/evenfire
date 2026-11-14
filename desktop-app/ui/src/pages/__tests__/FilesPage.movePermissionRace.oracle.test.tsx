@@ -5,6 +5,7 @@ import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ToastStack } from '@components/Common/ToastStack'
+import { GFS_ACCESS_REVOKED_BODY } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useToastController } from '@hooks/domain/useToastController'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -1256,9 +1257,7 @@ describe('FilesPage Move permission generation fencing', () => {
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
 
       expect(screen.queryByText('File access is not authorized')).toBeNull()
-      expect(
-        screen.queryByText('Your current Desktop session cannot access this location.')
-      ).toBeNull()
+      expect(screen.queryByText(GFS_ACCESS_REVOKED_BODY)).toBeNull()
       expect(screen.queryByRole('alert')).toBeNull()
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {

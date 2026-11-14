@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { randomUUID } from 'node:crypto'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
-import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
+import { GFS_ACCESS_REVOKED_BODY, GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
@@ -4495,6 +4495,7 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    expect(screen.getByText(GFS_ACCESS_REVOKED_BODY)).toBeTruthy()
     // Fail closed: no cached rows, no loading spinner — only the retry path.
     expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Shared with me' }).hasAttribute('disabled')).toBe(

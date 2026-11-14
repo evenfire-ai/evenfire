@@ -35,6 +35,7 @@ import {
   IconShare,
 } from '@components/SidebarNav/icons'
 import {
+  GFS_ACCESS_REVOKED_BODY,
   GFS_DEFAULT_DISCOVERY_DRIVE,
   GFS_MY_HOME_LABEL,
   GFS_RESOURCE_DRAG_TYPE,
@@ -3660,10 +3661,7 @@ export function FilesPage({
               <div className="da-gfs-alert" role="alert">
                 <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
               </div>
-              <EmptyState
-                title="File access is not authorized"
-                body="Your current Desktop session cannot access this location. Sign in again or contact an administrator."
-              />
+              <EmptyState title="File access is not authorized" body={GFS_ACCESS_REVOKED_BODY} />
               <div className="da-gfs-footer-actions">
                 <Button onClick={() => ctrl.retryAccess()} size="sm" variant="outline">
                   Retry file access
