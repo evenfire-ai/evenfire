@@ -48,9 +48,12 @@ parse → normalize → dispatch. Normalized payloads become one of:
   are handed off to `channel-reader-{host}:8099/internal/slack/handoff` with a
   bearer handoff token. Slack `url_verification` challenges are echoed.
 
-Slack button decisions are acknowledged with `200` immediately and submitted in
-the background; the original Slack message is then updated (or a threaded
-failure reply sent) through control-api's slack-target proxy endpoints.
+Slack and Teams button decisions are acknowledged with `200` immediately and
+submitted in the background. The original message is updated when the decision
+is recorded, or when a click finds the approval no longer pending; a background
+retry changes it only when it succeeds. Failures and waits are sent as a
+separate message, placed per the channel's reply-in-threads setting (Slack and
+Teams), through control-api's target proxy endpoints.
 
 ## Configuration
 

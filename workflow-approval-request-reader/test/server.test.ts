@@ -27,6 +27,7 @@ vi.mock('../src/controlApiClient.js', () => ({
     appName: 'evenfire',
   }),
   sendSlackTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
+  sendTeamsTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
   updateSlackTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
   updateTeamsTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
   verifySlackTargetSignature: vi.fn().mockResolvedValue({
@@ -54,6 +55,7 @@ let handoffTeamsMessageToChannelReader: ReturnType<typeof vi.fn>
 let handoffTeamsFileConsentToChannelReader: ReturnType<typeof vi.fn>
 let resolveTeamsTarget: ReturnType<typeof vi.fn>
 let sendSlackTargetMessage: ReturnType<typeof vi.fn>
+let sendTeamsTargetMessage: ReturnType<typeof vi.fn>
 let submitMcpHostDecision: ReturnType<typeof vi.fn>
 let submitMcpHostEnrollment: ReturnType<typeof vi.fn>
 let updateSlackTargetMessage: ReturnType<typeof vi.fn>
@@ -133,6 +135,7 @@ describe('workflow approval request reader server', () => {
     ;({
       resolveTeamsTarget,
       sendSlackTargetMessage,
+      sendTeamsTargetMessage,
       updateSlackTargetMessage,
       updateTeamsTargetMessage,
       verifySlackTargetSignature,
@@ -155,6 +158,7 @@ describe('workflow approval request reader server', () => {
       appName: 'evenfire',
     })
     vi.mocked(sendSlackTargetMessage).mockResolvedValue({ ok: true })
+    vi.mocked(sendTeamsTargetMessage).mockResolvedValue({ ok: true })
     vi.mocked(updateSlackTargetMessage).mockResolvedValue({ ok: true })
     vi.mocked(updateTeamsTargetMessage).mockResolvedValue({ ok: true })
     vi.mocked(verifySlackTargetSignature).mockResolvedValue({
@@ -592,7 +596,7 @@ describe('workflow approval request reader server', () => {
       conversationId: '19:channel-1@thread.tacv2',
       messageId: 'approval-card-1',
       serviceUrl: 'https://smba.trafficmanager.net/amer/',
-      text: 'This workflow approval is no longer pending. Trigger the workflow again to request approval.',
+      text: 'This workflow approval is no longer pending.',
     })
   })
 
@@ -664,7 +668,7 @@ describe('workflow approval request reader server', () => {
       targetId: SLACK_TARGET_ID,
       channelId: 'C123',
       messageTs: '1710000000.000003',
-      text: 'This workflow approval is no longer pending. Trigger the workflow again to request approval.',
+      text: 'This workflow approval is no longer pending.',
       blocks: [],
     })
     expect(sendSlackTargetMessage).not.toHaveBeenCalled()
@@ -1412,12 +1416,16 @@ describe('workflow approval request reader server', () => {
       retryAfterSeconds,
     })
 
+    const SLACK_APPROVAL_TS = '1710000000.000001'
+
     function slackAction(options: {
       decision?: 'approve' | 'deny'
       user?: string
       eventId: string
       feedback?: boolean
       approvalId?: string
+      /** The approval message is itself a reply in this Slack thread. */
+      threadTs?: string
     }): string {
       return JSON.stringify({
         type: 'block_actions',
@@ -1427,9 +1435,31 @@ describe('workflow approval request reader server', () => {
         user: { id: options.user ?? 'U123' },
         team: { id: 'T123' },
         channel: { id: 'C123' },
-        ...(options.feedback === false ? {} : { container: { message_ts: '1710000000.000001' } }),
+        ...(options.feedback === false ? {} : { container: { message_ts: SLACK_APPROVAL_TS } }),
+        ...(options.threadTs
+          ? { message: { ts: SLACK_APPROVAL_TS, thread_ts: options.threadTs } }
+          : {}),
         trigger_id: options.eventId,
       })
+    }
+
+    /** The Slack target verification answer, with or without `replyInThreads`. */
+    function slackTargetReplies(replyInThreads: boolean | undefined): void {
+      vi.mocked(verifySlackTargetSignature).mockResolvedValue({
+        ok: true,
+        hostRef: 'sandbox-recipes/figure-d-recipe',
+        communicationChannelRef: 'channels/slack-app',
+        providerWorkspaceId: 'T123',
+        channelName: 'slack-app',
+        channelNamespace: 'channels',
+        ...(replyInThreads === undefined ? {} : { replyInThreads }),
+      })
+    }
+
+    function slackSendThreads(): Array<string | null | undefined> {
+      return vi
+        .mocked(sendSlackTargetMessage)
+        .mock.calls.map(call => (call[1] as { threadTs?: string | null }).threadTs)
     }
 
     async function postSlack(body: string): Promise<{ status: number; body: unknown }> {
@@ -1445,18 +1475,22 @@ describe('workflow approval request reader server', () => {
       )
     }
 
-    function teamsAction(eventId: string): string {
+    function teamsAction(
+      eventId: string,
+      options: { decision?: 'approve' | 'deny'; user?: string } = {}
+    ): string {
+      const decision = options.decision ?? 'approve'
       return JSON.stringify({
         type: 'message',
         id: eventId,
-        text: 'Approve',
+        text: decision === 'deny' ? 'Deny' : 'Approve',
         value: {
           action:
-            `approve:${APPROVAL_ID}:sandbox-recipes/research-summary-workflow:` +
+            `${decision}:${APPROVAL_ID}:sandbox-recipes/research-summary-workflow:` +
             '0123456789abcdef',
         },
         serviceUrl: 'https://smba.trafficmanager.net/amer/',
-        from: { id: 'teams-user-1' },
+        from: { id: options.user ?? 'teams-user-1' },
         conversation: {
           id: '19:channel-1@thread.tacv2;messageid=root-post-1',
           conversationType: 'channel',
@@ -1493,6 +1527,47 @@ describe('workflow approval request reader server', () => {
         .mocked(updateTeamsTargetMessage)
         .mock.calls.map(call => (call[1] as { text: string }).text)
     }
+
+    /**
+     * The texts of the Teams notices. Every call is checked for its exact
+     * arguments: the card's ids from the webhook payload and no threading flag
+     * (control-api decides the placement).
+     */
+    function teamsSendTexts(): string[] {
+      return vi.mocked(sendTeamsTargetMessage).mock.calls.map(call => {
+        const params = call[1] as { text: string }
+        expect(params).toEqual({
+          targetId: TEAMS_TARGET_ID,
+          conversationId: '19:channel-1@thread.tacv2',
+          threadConversationId: '19:channel-1@thread.tacv2;messageid=root-post-1',
+          replyToId: 'root-post-1',
+          serviceUrl: 'https://smba.trafficmanager.net/amer/',
+          text: params.text,
+        })
+        return params.text
+      })
+    }
+
+    async function postTeams(body: string): Promise<{ status: number; body: unknown }> {
+      return postWebhook(
+        { ...baseConfig, enabledMedia: new Set(['teams']) },
+        'teams',
+        body,
+        { authorization: 'Bearer teams-token' },
+        TEAMS_TARGET_ID
+      )
+    }
+
+    const T_SCHED_7 =
+      'The assistant is busy. Your decision will be sent again in 7 seconds. If the approval message has not changed a minute from now, choose again.'
+    const T_RETRY_STALE =
+      'Your earlier decision was not recorded: this workflow approval is no longer pending.'
+    const T_HELD =
+      'Your earlier decision for this workflow approval is still being sent. Its result will appear on the approval message, or in a message here if it is not recorded.'
+    const staleAnswers = [
+      { status: 409, error: 'approval_not_pending' },
+      { status: 403, error: 'approval_not_pending' },
+    ]
 
     let decisionAdmissionRetries: typeof import('../src/decisionAdmissionRetry.js').decisionAdmissionRetries
 
@@ -1575,21 +1650,97 @@ describe('workflow approval request reader server', () => {
       expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
     })
 
-    it('marks the approval stale when the retry finds it no longer pending', async () => {
+    it.each(staleAnswers)(
+      'leaves the approval message alone when the retry finds the approval no longer pending ($status)',
+      async answer => {
+        vi.mocked(submitMcpHostDecision)
+          .mockResolvedValueOnce(admissionLimited(7))
+          .mockResolvedValueOnce({ ok: false, ...answer })
+
+        await postSlack(slackAction({ eventId: `slack-retry-stale-${answer.status}` }))
+        await settle()
+        await vi.advanceTimersByTimeAsync(7_000)
+        await settle()
+
+        // Witness: the retry ran and its result was reported to the user.
+        expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+        expect(threadTexts()).toEqual([`<@U123> ${T_SCHED_7}`, `<@U123> ${T_RETRY_STALE}`])
+        expect(slackUpdateTexts()).toEqual([])
+      }
+    )
+
+    it('keeps the recorded decision of another user when a pending retry later finds the approval decided', async () => {
       vi.mocked(submitMcpHostDecision)
         .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce({ ok: true })
         .mockResolvedValueOnce({ ok: false, status: 409, error: 'approval_not_pending' })
 
-      await postSlack(slackAction({ eventId: 'slack-retry-stale' }))
+      await postSlack(slackAction({ eventId: 'slack-b-armed' }))
       await settle()
+      await postSlack(slackAction({ eventId: 'slack-a-decides', user: 'U999' }))
+      await settle()
+      expect(slackUpdateTexts()).toEqual(['Approved. Workflow approval recorded.'])
+
       await vi.advanceTimersByTimeAsync(7_000)
       await settle()
 
-      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
-      expect(slackUpdateTexts()).toEqual([
-        'This workflow approval is no longer pending. Trigger the workflow again to request approval.',
-      ])
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(3)
+      expect(slackUpdateTexts()).toEqual(['Approved. Workflow approval recorded.'])
+      expect(threadTexts()).toEqual([`<@U123> ${T_SCHED_7}`, `<@U123> ${T_RETRY_STALE}`])
     })
+
+    it.each(staleAnswers)(
+      'marks the approval stale when another user click finds it decided while a retry is armed ($status)',
+      async answer => {
+        vi.mocked(submitMcpHostDecision)
+          .mockResolvedValueOnce(admissionLimited(7))
+          .mockResolvedValueOnce({ ok: false, ...answer })
+          .mockResolvedValueOnce({ ok: false, ...answer })
+
+        await postSlack(slackAction({ eventId: `slack-3d-armed-${answer.status}` }))
+        await settle()
+        await postSlack(
+          slackAction({ eventId: `slack-3d-other-${answer.status}`, user: 'U999' })
+        )
+        await settle()
+        expect(slackUpdateTexts()).toEqual(['This workflow approval is no longer pending.'])
+
+        await vi.advanceTimersByTimeAsync(7_000)
+        await settle()
+
+        // Witness: the armed retry ran; it adds a notice, not a second shared write.
+        expect(submitMcpHostDecision).toHaveBeenCalledTimes(3)
+        expect(slackUpdateTexts()).toEqual(['This workflow approval is no longer pending.'])
+        expect(threadTexts()).toEqual([`<@U123> ${T_SCHED_7}`, `<@U123> ${T_RETRY_STALE}`])
+      }
+    )
+
+    it.each([
+      { medium: 'slack' as const, eventId: 'slack-first-403-stale' },
+      { medium: 'teams' as const, eventId: 'teams-first-403-stale' },
+    ])(
+      'marks the approval stale when the first attempt gets the consult answer approval_not_pending ($medium)',
+      async ({ medium, eventId }) => {
+        vi.mocked(submitMcpHostDecision).mockResolvedValueOnce({
+          ok: false,
+          status: 403,
+          error: 'approval_not_pending',
+        })
+
+        if (medium === 'slack') await postSlack(slackAction({ eventId }))
+        else await postTeams(teamsAction(eventId))
+        await settle()
+
+        expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+        if (medium === 'slack') {
+          expect(slackUpdateTexts()).toEqual(['This workflow approval is no longer pending.'])
+          expect(sendSlackTargetMessage).not.toHaveBeenCalled()
+        } else {
+          expect(teamsUpdateTexts()).toEqual(['This workflow approval is no longer pending.'])
+          expect(sendTeamsTargetMessage).not.toHaveBeenCalled()
+        }
+      }
+    )
 
     it('does not submit the same click again while its retry is armed', async () => {
       vi.mocked(submitMcpHostDecision)
@@ -1622,8 +1773,8 @@ describe('workflow approval request reader server', () => {
       await postSlack(slackAction({ eventId: 'slack-other-user', user: 'U999', decision: 'deny' }))
       await settle()
 
-      // Another user's click is not held: it is submitted and control-api,
-      // which accepts only the requester, refuses it. The armed retry stays.
+      // Another user's click is not held: it is submitted, and control-api
+      // decides who may decide; here it refuses it. The armed retry stays.
       expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
       expect(vi.mocked(submitMcpHostDecision).mock.calls[1]?.[1]).toMatchObject({
         providerUserId: 'U999',
@@ -1662,9 +1813,7 @@ describe('workflow approval request reader server', () => {
       expect(response).toEqual({ status: 200, body: { ok: true } })
       expect(submitMcpHostDecision).toHaveBeenCalledTimes(1)
       expect(threadTexts()).toHaveLength(2)
-      expect(threadTexts()[1]).toContain(
-        'Your earlier decision for this workflow approval is still being sent.'
-      )
+      expect(threadTexts()[1]).toBe(`<@U123> ${T_HELD}`)
       expect(decisionAdmissionRetries.size).toBe(1)
 
       await vi.advanceTimersByTimeAsync(7_000)
@@ -1731,27 +1880,266 @@ describe('workflow approval request reader server', () => {
         .mockResolvedValueOnce(admissionLimited(7))
         .mockResolvedValueOnce({ ok: true })
 
-      const response = await postWebhook(
-        { ...baseConfig, enabledMedia: new Set(['teams']) },
-        'teams',
-        teamsAction('teams-retry-ok'),
-        { authorization: 'Bearer teams-token' },
-        TEAMS_TARGET_ID
-      )
+      const response = await postTeams(teamsAction('teams-retry-ok'))
       await settle()
 
       expect(response).toEqual({ status: 200, body: { ok: true } })
-      expect(teamsUpdateTexts()).toEqual([
-        'The assistant is busy. Your decision will be sent again in 7 seconds. If the approval message has not changed a minute from now, choose again.',
+      expect(teamsSendTexts()).toEqual([T_SCHED_7])
+
+      await vi.advanceTimersByTimeAsync(6_999)
+      await settle()
+      expect(teamsUpdateTexts()).toEqual([])
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await settle()
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+      expect(teamsUpdateTexts()).toEqual(['Approved. Workflow approval recorded.'])
+      expect(teamsSendTexts()).toEqual([T_SCHED_7])
+    })
+
+    it('reports the second wait of a Teams retry as a new message and keeps the card', async () => {
+      vi.mocked(submitMcpHostDecision)
+        .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce(admissionLimited(9))
+
+      await postTeams(teamsAction('teams-retry-refused'))
+      await settle()
+      await vi.advanceTimersByTimeAsync(7_000)
+      await settle()
+
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+      expect(teamsSendTexts()).toEqual([
+        T_SCHED_7,
+        'The assistant is busy. Try again in 9 seconds.',
       ])
+      expect(teamsUpdateTexts()).toEqual([])
+    })
+
+    it.each(staleAnswers)(
+      'keeps the Teams card when the retry finds the approval no longer pending ($status)',
+      async answer => {
+        vi.mocked(submitMcpHostDecision)
+          .mockResolvedValueOnce(admissionLimited(7))
+          .mockResolvedValueOnce({ ok: false, ...answer })
+
+        await postTeams(teamsAction(`teams-retry-stale-${answer.status}`))
+        await settle()
+        await vi.advanceTimersByTimeAsync(7_000)
+        await settle()
+
+        expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
+        expect(teamsSendTexts()).toEqual([T_SCHED_7, T_RETRY_STALE])
+        expect(teamsUpdateTexts()).toEqual([])
+      }
+    )
+
+    it('reports a Teams wait without arming when 64 retries are already pending', async () => {
+      const runners = Array.from({ length: 64 }, () => vi.fn())
+      runners.forEach((run, index) => {
+        const id = `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`
+        expect(
+          decisionAdmissionRetries.schedule(
+            id,
+            { providerUserId: 'U000', decision: 'approve' },
+            30,
+            run
+          )
+        ).toBe('scheduled')
+      })
+      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
+
+      await postTeams(teamsAction('teams-full'))
+      await settle()
+
+      expect(teamsSendTexts()).toEqual(['The assistant is busy. Try again in 7 seconds.'])
+      expect(teamsUpdateTexts()).toEqual([])
+      expect(decisionAdmissionRetries.size).toBe(64)
+      expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+    })
+
+    it('tells a Teams user that the earlier decision is still being sent', async () => {
+      vi.mocked(submitMcpHostDecision)
+        .mockResolvedValueOnce(admissionLimited(7))
+        .mockResolvedValueOnce({ ok: true })
+
+      await postTeams(teamsAction('teams-armed-approve'))
+      await settle()
+      const response = await postTeams(teamsAction('teams-same-user-deny', { decision: 'deny' }))
+      await settle()
+
+      expect(response).toEqual({ status: 200, body: { ok: true } })
+      expect(submitMcpHostDecision).toHaveBeenCalledTimes(1)
+      expect(teamsSendTexts()).toEqual([T_SCHED_7, T_HELD])
+      expect(teamsUpdateTexts()).toEqual([])
 
       await vi.advanceTimersByTimeAsync(7_000)
       await settle()
       expect(submitMcpHostDecision).toHaveBeenCalledTimes(2)
-      expect(teamsUpdateTexts()).toEqual([
-        'The assistant is busy. Your decision will be sent again in 7 seconds. If the approval message has not changed a minute from now, choose again.',
-        'Approved. Workflow approval recorded.',
-      ])
+      expect(vi.mocked(submitMcpHostDecision).mock.calls[1]?.[1]).toMatchObject({
+        decision: 'approve',
+      })
+      expect(teamsUpdateTexts()).toEqual(['Approved. Workflow approval recorded.'])
+    })
+
+    it('logs a refused Teams notice and leaves the card alone', async () => {
+      const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      vi.mocked(sendTeamsTargetMessage).mockResolvedValue({
+        ok: false,
+        status: 404,
+        error: 'not_found',
+      })
+      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
+
+      const response = await postTeams(teamsAction('teams-send-refused'))
+      await settle()
+
+      expect(response).toEqual({ status: 200, body: { ok: true } })
+      expect(teamsSendTexts()).toEqual([T_SCHED_7])
+      expect(teamsUpdateTexts()).toEqual([])
+      const warnings = consoleWarn.mock.calls.map(call => JSON.parse(String(call[0])))
+      expect(warnings).toContainEqual(
+        expect.objectContaining({
+          msg: 'teams decision feedback failed',
+          action: 'send_retry_scheduled',
+          status: 404,
+          error: 'not_found',
+        })
+      )
+    })
+
+    it.each([
+      {
+        name: 'a control-api refusal',
+        result: { ok: false, status: 409, error: 'approval_requester_mismatch' },
+        text: 'I could not approve this workflow approval. Try again in a moment.',
+      },
+      {
+        name: 'a can-approve denial',
+        result: { ok: false, status: 403, error: 'cross_bot_mismatch' },
+        text: 'You are not allowed to decide this workflow approval from this Teams conversation.',
+      },
+    ])('keeps the Teams card when the first attempt gets $name', async ({ result, text }) => {
+      vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(result)
+
+      await postTeams(teamsAction(`teams-first-${result.error}`))
+      await settle()
+
+      expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+      expect(teamsSendTexts()).toEqual([text])
+      expect(updateTeamsTargetMessage).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      { medium: 'slack' as const, label: 'Slack' },
+      { medium: 'teams' as const, label: 'Teams' },
+    ])(
+      'arms one retry, for the first click, when one user two first attempts are both refused ($label)',
+      async ({ medium }) => {
+        const pending: Array<(value: unknown) => void> = []
+        vi.mocked(submitMcpHostDecision)
+          .mockImplementationOnce(() => new Promise(resolve => pending.push(resolve)) as never)
+          .mockImplementationOnce(() => new Promise(resolve => pending.push(resolve)) as never)
+          .mockResolvedValueOnce({ ok: true })
+
+        if (medium === 'slack') {
+          await postSlack(slackAction({ eventId: 'slack-race-approve' }))
+          await postSlack(slackAction({ eventId: 'slack-race-deny', decision: 'deny' }))
+        } else {
+          await postTeams(teamsAction('teams-race-approve'))
+          await postTeams(teamsAction('teams-race-deny', { decision: 'deny' }))
+        }
+        await settle()
+        expect(pending).toHaveLength(2)
+        // The first click's answer is handled first, so its decision is armed.
+        pending[0]?.(admissionLimited(7))
+        await settle()
+        pending[1]?.(admissionLimited(7))
+        await settle()
+
+        expect(decisionAdmissionRetries.size).toBe(1)
+        const notices = medium === 'slack' ? threadTexts() : teamsSendTexts()
+        expect(notices).toEqual([medium === 'slack' ? `<@U123> ${T_SCHED_7}` : T_SCHED_7])
+
+        await vi.advanceTimersByTimeAsync(7_000)
+        await settle()
+        expect(submitMcpHostDecision).toHaveBeenCalledTimes(3)
+        expect(vi.mocked(submitMcpHostDecision).mock.calls[2]?.[1]).toMatchObject({
+          decision: 'approve',
+        })
+      }
+    )
+
+    describe('Slack notice placement follows the reply-in-threads setting', () => {
+      const placements = [
+        { name: 'on', replyInThreads: true, threadTs: undefined, expected: SLACK_APPROVAL_TS },
+        { name: 'off', replyInThreads: false, threadTs: undefined, expected: undefined },
+        { name: 'unset', replyInThreads: undefined, threadTs: undefined, expected: undefined },
+        {
+          name: 'on, approval message in a thread',
+          replyInThreads: true,
+          threadTs: '1709999999.000009',
+          expected: '1709999999.000009',
+        },
+        {
+          name: 'off, approval message in a thread',
+          replyInThreads: false,
+          threadTs: '1709999999.000009',
+          expected: undefined,
+        },
+      ]
+
+      it.each(placements)(
+        'places the retry-scheduled notice with the setting $name',
+        async ({ name, replyInThreads, threadTs, expected }) => {
+          slackTargetReplies(replyInThreads)
+          vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
+
+          await postSlack(slackAction({ eventId: `slack-placement-scheduled-${name}`, threadTs }))
+          await settle()
+
+          expect(threadTexts()).toEqual([`<@U123> ${T_SCHED_7}`])
+          expect(slackSendThreads()).toEqual([expected])
+        }
+      )
+
+      it.each(placements)(
+        'places the held-click notice with the setting $name',
+        async ({ name, replyInThreads, threadTs, expected }) => {
+          slackTargetReplies(replyInThreads)
+          vi.mocked(submitMcpHostDecision).mockResolvedValueOnce(admissionLimited(7))
+
+          await postSlack(slackAction({ eventId: `slack-placement-armed-${name}`, threadTs }))
+          await settle()
+          await postSlack(
+            slackAction({ eventId: `slack-placement-held-${name}`, decision: 'deny', threadTs })
+          )
+          await settle()
+
+          expect(submitMcpHostDecision).toHaveBeenCalledOnce()
+          expect(threadTexts()).toEqual([`<@U123> ${T_SCHED_7}`, `<@U123> ${T_HELD}`])
+          expect(slackSendThreads()).toEqual([expected, expected])
+        }
+      )
+
+      it.each(placements)(
+        'places the failure notice with the setting $name',
+        async ({ name, replyInThreads, threadTs, expected }) => {
+          slackTargetReplies(replyInThreads)
+          vi.mocked(submitMcpHostDecision).mockResolvedValueOnce({
+            ok: false,
+            status: 504,
+            error: 'mcp_host_unavailable',
+          })
+
+          await postSlack(slackAction({ eventId: `slack-placement-failure-${name}`, threadTs }))
+          await settle()
+
+          expect(threadTexts()).toEqual([
+            '<@U123> I could not approve this workflow approval. Try again in a moment.',
+          ])
+          expect(slackSendThreads()).toEqual([expected])
+        }
+      )
     })
 
     it('retries a Slack decision without feedback context and sends no message', async () => {
