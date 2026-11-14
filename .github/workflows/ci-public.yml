@@ -1089,6 +1089,9 @@ jobs:
       - name: Test GFS grant WorkflowRecipe seed rendering
         run: bash scripts/tests/test-seed-gfs-grant-workflow.sh
 
+      - name: Test GFS provisioning preserves Context connectors
+        run: bash scripts/tests/test-provision-gfs-runtime.sh
+
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh
 
