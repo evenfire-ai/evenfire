@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { boundToolsCalledForStatus } from '@clerum/workflow-runtime-core'
 import {
   type AuthenticatedRequest,
   createWorkflowEndpointHandlers,
@@ -356,6 +357,101 @@ describe('postStepStatus — step-level update', () => {
     const result = step.toolsCalled?.[0]?.result
     expect(result).toMatchObject({ truncated: true })
     expect((result as { preview?: string }).preview).toHaveLength(1024)
+  })
+
+  it('stores a coordinator-bounded toolsCalled report exactly like the raw report', async () => {
+    const toolsCalled: Array<Record<string, unknown>> = Array.from({ length: 60 }, (_, i) => ({
+      serverName: 'git',
+      toolName: 'read_file',
+      args: { path: `src/file-${i}.ts`, padding: 'p'.repeat(i % 2 ? 2048 : 10) },
+      result: [{ type: 'text', text: 'x'.repeat(i % 3 ? 4096 : 10) }],
+      durationMs: i,
+    }))
+    // An artifact past the 50 stored calls must still reach status.artifacts.
+    toolsCalled[55] = {
+      serverName: 'clerum',
+      toolName: 'generate_docx',
+      args: { path: 'report', padding: 'c'.repeat(4096) },
+      result: {
+        success: true,
+        artifact: {
+          name: 'report.docx',
+          format: 'docx',
+          path: '/output/report.docx',
+          sizeBytes: 2048,
+          createdAt: '2026-10-16T00:00:00.000Z',
+        },
+      },
+      durationMs: 55,
+    }
+    const stored = async (calls: unknown[]) => {
+      const customApi = makeCustomApi({
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { name: 'my-recipe', resourceVersion: '1' },
+          spec: { steps: [{ id: 's1' }] },
+          status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+        }),
+      })
+      const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+      const result = await h.postStepStatus('my-recipe', makeClaims(), {
+        stepId: 's1',
+        phase: 'completed',
+        toolsCalled: calls as never,
+      })
+      expect(result.status).toBe(200)
+      const patchOps = getStatusPatchOps(customApi)
+      return {
+        toolsCalled: (
+          patchOps.find(op => op.path === '/status/steps/-')?.value as {
+            toolsCalled?: unknown[]
+          }
+        ).toolsCalled,
+        artifact: patchOps.find(op => op.path === '/status/artifacts/-')?.value,
+      }
+    }
+
+    const fromRaw = await stored(toolsCalled)
+    const fromBounded = await stored(boundToolsCalledForStatus(toolsCalled))
+
+    expect(fromRaw.artifact).toMatchObject({ name: 'report.docx' })
+    expect(fromBounded).toEqual(fromRaw)
+  })
+
+  it('still extracts an artifact whose tool result is too large for a preview', async () => {
+    const customApi = makeCustomApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'my-recipe', resourceVersion: '1' },
+        spec: { steps: [{ id: 's1' }] },
+        status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+      }),
+    })
+    const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+    const artifact = {
+      name: 'big.pdf',
+      format: 'pdf',
+      path: '/output/big.pdf',
+      sizeBytes: 4096,
+      createdAt: '2026-10-16T00:00:00.000Z',
+    }
+
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 's1',
+      phase: 'completed',
+      toolsCalled: boundToolsCalledForStatus([
+        {
+          serverName: 'clerum',
+          toolName: 'generate_pdf',
+          args: {},
+          result: { success: true, artifact, content: 'q'.repeat(5_000) },
+          durationMs: 1,
+        },
+      ]) as never,
+    })
+
+    expect(result.status).toBe(200)
+    expect(
+      getStatusPatchOps(customApi).find(op => op.path === '/status/artifacts/-')?.value
+    ).toEqual(artifact)
   })
 
   it('patches only the touched step so stale reads cannot overwrite sibling step status', async () => {
@@ -2103,5 +2199,157 @@ describe('deleteArtifactFile — per-file artifact delete', () => {
       })
     )
     expect(result.status).toBe(403)
+  })
+})
+
+// --- Stored tool calls are bounded in serialized bytes ---------------------
+
+describe('postStepStatus with byte-heavy tool calls', () => {
+  it('stores a byte-heavy report within the serialized limit, raw or coordinator-bounded', async () => {
+    const units = ['日本語テキスト', '\u0001\u001b', '"\\']
+    const fill = (unit: string, chars: number) =>
+      unit.repeat(Math.ceil(chars / unit.length)).slice(0, chars)
+    const toolsCalled: Array<Record<string, unknown>> = Array.from({ length: 60 }, (_, i) => ({
+      serverName: 'git',
+      toolName: 'read_file',
+      // Odd calls are over the character limit. Even calls carry 900 characters,
+      // which as JSON text fit the character limit only for the CJK unit (and
+      // then exceed the byte limit); the quote and control units escape past it.
+      args: { query: fill(units[i % 3], i % 2 ? 5_000 : 900) },
+      result:
+        i % 2 ? [{ type: 'text', text: fill(units[i % 3], 5_000) }] : fill(units[i % 3], 1_024),
+      durationMs: i,
+    }))
+    toolsCalled[55] = {
+      serverName: 'clerum',
+      toolName: 'generate_docx',
+      args: { path: 'report', padding: fill(units[0], 4_096) },
+      result: {
+        success: true,
+        artifact: {
+          name: 'report.docx',
+          format: 'docx',
+          path: '/output/report.docx',
+          sizeBytes: 2048,
+          createdAt: '2026-10-16T00:00:00.000Z',
+        },
+      },
+      durationMs: 55,
+    }
+    const stored = async (calls: unknown[]) => {
+      const customApi = makeCustomApi({
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { name: 'my-recipe', resourceVersion: '1' },
+          spec: { steps: [{ id: 's1' }] },
+          status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+        }),
+      })
+      const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+      const result = await h.postStepStatus('my-recipe', makeClaims(), {
+        stepId: 's1',
+        phase: 'completed',
+        toolsCalled: calls as never,
+      })
+      expect(result.status).toBe(200)
+      const patchOps = getStatusPatchOps(customApi)
+      return {
+        toolsCalled: (
+          patchOps.find(op => op.path === '/status/steps/-')?.value as {
+            toolsCalled?: Array<{ args?: unknown; result?: unknown }>
+          }
+        ).toolsCalled,
+        artifact: patchOps.find(op => op.path === '/status/artifacts/-')?.value,
+      }
+    }
+
+    const fromRaw = await stored(toolsCalled)
+    const fromBounded = await stored(boundToolsCalledForStatus(toolsCalled))
+
+    // Liveness: 50 calls stored, the artifact past them extracted, previews carry text.
+    expect(fromRaw.toolsCalled).toHaveLength(50)
+    expect(fromRaw.artifact).toMatchObject({ name: 'report.docx' })
+    const previews = (fromRaw.toolsCalled ?? []).filter(
+      call => (call.result as { truncated?: boolean } | undefined)?.truncated === true
+    )
+    expect(previews.length).toBeGreaterThanOrEqual(25)
+    for (const call of previews) {
+      expect((call.result as { preview: string }).preview.length).toBeGreaterThan(300)
+    }
+
+    const maxValueBytes = 2 * 1024 + 31
+    for (const call of fromRaw.toolsCalled ?? []) {
+      expect(Buffer.byteLength(JSON.stringify(call.args))).toBeLessThanOrEqual(maxValueBytes)
+      expect(Buffer.byteLength(JSON.stringify(call.result))).toBeLessThanOrEqual(maxValueBytes)
+    }
+    expect(fromBounded).toEqual(fromRaw)
+  })
+
+  it('extracts a byte-heavy accepted artifact and bounds previews and non-record args from either report', async () => {
+    const artifact = {
+      name: 'report.docx',
+      format: 'docx',
+      path: '/output/report.docx',
+      sizeBytes: 2048,
+      createdAt: '2026-10-16T00:00:00.000Z',
+    }
+    const stringArgs = '日'.repeat(680)
+    const toolsCalled = [
+      {
+        serverName: 'clerum',
+        toolName: 'generate_docx',
+        args: {},
+        // Fits the 1,024-character limit but not the 2,048-byte limit.
+        result: { success: true, artifact, content: '日'.repeat(800) },
+        durationMs: 1,
+      },
+      {
+        serverName: 'srv',
+        toolName: 'tool',
+        args: stringArgs,
+        result: { truncated: true, preview: '\u0001'.repeat(1_024) },
+        durationMs: 2,
+      },
+    ]
+    const stored = async (calls: unknown[]) => {
+      const customApi = makeCustomApi({
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { name: 'my-recipe', resourceVersion: '1' },
+          spec: { steps: [{ id: 's1' }] },
+          status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+        }),
+      })
+      const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+      const result = await h.postStepStatus('my-recipe', makeClaims(), {
+        stepId: 's1',
+        phase: 'completed',
+        toolsCalled: calls as never,
+      })
+      expect(result.status).toBe(200)
+      const patchOps = getStatusPatchOps(customApi)
+      return {
+        toolsCalled: (
+          patchOps.find(op => op.path === '/status/steps/-')?.value as {
+            toolsCalled?: Array<{ args?: unknown; result?: unknown }>
+          }
+        ).toolsCalled,
+        artifacts: patchOps.filter(op => op.path === '/status/artifacts/-').map(op => op.value),
+      }
+    }
+
+    const fromBounded = await stored(boundToolsCalledForStatus(toolsCalled))
+    const fromRaw = await stored(toolsCalled)
+
+    for (const report of [fromBounded, fromRaw]) {
+      // Liveness: both calls stored and the artifact extracted.
+      expect(report.toolsCalled).toHaveLength(2)
+      expect(report.artifacts).toEqual([expect.objectContaining({ name: 'report.docx' })])
+      expect(report.toolsCalled?.[1].args).toEqual({ truncated: true, preview: stringArgs })
+      const preview = report.toolsCalled?.[1].result as { truncated: boolean; preview: string }
+      expect(preview.truncated).toBe(true)
+      expect(preview.preview.length).toBeGreaterThan(300)
+      expect(Buffer.byteLength(JSON.stringify(preview))).toBeLessThanOrEqual(2 * 1024 + 31)
+    }
+    // The coordinator sends the reduced artifact, which WRC stores as is.
+    expect(fromBounded.toolsCalled?.[0].result).toEqual({ success: true, artifact })
   })
 })
