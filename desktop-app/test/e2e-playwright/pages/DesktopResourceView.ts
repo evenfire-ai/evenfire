@@ -111,8 +111,4 @@ export class DesktopResourceView {
     await this.page.keyboard.press('Escape')
     await expect(menu).toBeHidden()
   }
-
-  async expectRefused(code: string): Promise<void> {
-    await expect(this.page.getByRole('alert').getByText(code)).toBeVisible()
-  }
 }

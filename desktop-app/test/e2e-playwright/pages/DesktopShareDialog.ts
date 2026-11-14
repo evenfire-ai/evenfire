@@ -95,10 +95,4 @@ export class DesktopShareDialog {
     await expect(row).toContainText(role)
     if (inherited) await expect(row).toHaveAttribute('data-inherited', 'true')
   }
-
-  async expectNoRevoke(subjectLabel: string): Promise<void> {
-    const row = this.row(subjectLabel)
-    await expect(row).toBeVisible()
-    await expect(row.getByRole('button', { name: `Actions for ${subjectLabel}` })).toHaveCount(0)
-  }
 }
