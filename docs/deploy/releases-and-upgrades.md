@@ -329,6 +329,7 @@ Read the notes for every release you skip over, not only the target release.
 | [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac)                                | Every cluster. Apply the updated Role before you roll the new host-context-controller image.                                                                                                                                                                                                                                  |
 | [HCC McpServer verdict changes](#hcc-mcpserver-verdict-changes)                        | You alert, filter or report on HCC's McpServer conditions, NetworkPolicy pass results or log lines.                                                                                                                                                                                                                           |
 | [McpServer CRD: applied credentials record](#mcpserver-crd-applied-credentials-record) | Every cluster. Apply the updated McpServer CRD before you roll the new host-context-controller image.                                                                                                                                                                                                                         |
+| [Numeric settings in plain digits](#numeric-settings-in-plain-digits)                  | You set one of twelve HCC or mcp-host numeric variables to anything but plain digits, or `CLERUM_DYNAMIC_TOOLS_THRESHOLD` to an invalid value. The pod no longer starts.                                                                                                                                                      |
 
 #### Snippet runner Node permissions
 
@@ -559,6 +560,31 @@ differs from the release's file. The first completed reconcile of each
 Secret-backed McpServer after the upgrade writes the field once; afterwards it
 changes only when the Secret data changes. Rolling back to an older image
 ignores the field.
+
+### Numeric settings in plain digits
+
+Twelve numeric settings now follow the plain-digit rule of the HCC pass bounds:
+unset or `""` means the default, and any other value must be plain decimal
+digits, or the component refuses to start.
+
+| Component               | Variables                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| host-context-controller | `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS`, `CONTEXT_MAPPER_HEARTBEAT_POLL_MS`, `HCC_HOST_FULL_RECONCILE_CONCURRENCY`                                                                                                                                                                                                                                                       |
+| mcp-host                | `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`, `CLERUM_DYNAMIC_TOOLS_THRESHOLD`, `MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS`, `MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS`, `MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS`, `MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS`, `MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS`, `MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN`, `MCP_CATALOG_BOOTSTRAP_BACKOFF_MS` |
+
+Values that used to be accepted and now stop the pod: surrounding white space,
+`+5000`, `05000`, `5e3`, `0x1388`, `5000.0`, and for the catalog-bootstrap
+variables also a fraction such as `2000.5`. A value of only white space used to
+mean the default for the HCC variables and `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`;
+it now stops the pod. `deploy/base` and the minikube overlay set the three HCC
+variables in plain digits and set none of the mcp-host ones.
+
+A value that used to be replaced by the default with a warning
+(`CLERUM_DYNAMIC_TOOLS_THRESHOLD`: `0`, a negative number or text) now stops the
+Host at startup; `60abc` used to become `60` and now stops it too.
+
+`""` now means the default for the catalog-bootstrap variables; it used to stop
+the Host.
 
 ### mcp-host authority staleness floor
 
