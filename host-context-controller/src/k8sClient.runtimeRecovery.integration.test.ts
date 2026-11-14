@@ -1096,6 +1096,56 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       )
     })
 
+    it('T2.7 #1488 the status echo of the fail-closed verdict does not retire the reconcile before its delete', async () => {
+      const state = await startCertified()
+      expect(fixture.deployments.has(witness)).toBe(true)
+      const remove = vi.spyOn(state.reconciler.appsApi, 'deleteNamespacedDeployment')
+      const revisionBefore = state.mcpServerDesiredRevision
+      let echoed = false
+      // The Secret stays gone, also for the fleet reconcile the status echo requests.
+      failNext('witness-input', ...Array.from({ length: 5 }, () => absentInput))
+      // The retract reads the Deployment before it deletes it. Deliver the watch
+      // update the verdict write produced at that point, before the delete.
+      fixture.readDeployment = async () => {
+        if (echoed) return
+        const conditions = fixture.server.status?.conditions ?? []
+        if (!conditions.some((c: any) => c.type === 'SecretResolved' && c.status === 'False'))
+          return
+        echoed = true
+        await state.getMcpServerWatchCallback()('MODIFIED', structuredClone(fixture.server))
+      }
+
+      await watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'DELETED')
+      await drain(state)
+      fixture.readDeployment = undefined
+
+      // Witness: the watcher processed the status update before the delete.
+      expect(echoed).toBe(true)
+      expect(state.mcpServerDesiredRevision).toBeGreaterThan(revisionBefore)
+      expect(remove).toHaveBeenCalledTimes(1)
+      expect(remove.mock.calls[0][0]).toEqual({ name: witness, namespace: 'mcp-server' })
+      expect(fixture.deployments.has(witness)).toBe(false)
+      expect(fixture.server.status.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'SecretResolved',
+            status: 'False',
+            reason: 'SecretNotFound',
+          }),
+          expect.objectContaining({
+            type: 'Ready',
+            status: 'False',
+            reason: 'SecretValidationFailed',
+          }),
+          expect.objectContaining({
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'RuntimeNotDesired',
+          }),
+        ])
+      )
+    })
+
     it('I9 a Secret change whose reconcile is dropped because authority moved is still converged at recovery', async () => {
       const state = await startCertified()
       const warn = vi.spyOn(hccLogger, 'warn')

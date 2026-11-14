@@ -3153,29 +3153,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       const withdrawRuntime = shouldFailClosedForSecretFailure(secretResult.reason)
       let cleanupComplete = true
       let retract: RetractManagedRuntimeResult | undefined
-      if (withdrawRuntime) {
-        // #1338: the Secret verdict is known here, whatever the
-        // retract does. Withdraw readiness before its first await: the retract
-        // can throw, be denied, or end with a declined write, and each of those
-        // returns below before the status write. Retiring the poll first stops
-        // an in-flight tick from republishing ready:true.
-        this.retireReadinessWindow(server.name)
-        this.setStatus(server.name, {
-          deployed: false,
-          ready: false,
-          message: secretResult.message,
-        })
-        retract = await this.retractManagedRuntime(server, 'fail-closed', isCurrent)
-        if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
-        cleanupComplete = retract.cleanupComplete
-      } else {
-        hccLogger.warn('Preserving existing runtime after a Secret read failure', {
-          scope: '[Reconciler]',
-          name: server.name,
-          transient: secretResult.transient === true,
-        })
-      }
-      if (!isCurrent()) return false
+      // #1338, #1488: the Secret verdict is known here, whatever the retract
+      // does. Publish it in memory and on the CRD before the retract's first
+      // await: the retract can throw, be denied, or end with a declined write,
+      // and each of those returns below. A persisted Ready=True left behind
+      // would be trusted again after a restart. Retiring the poll first stops
+      // an in-flight tick from republishing ready:true.
+      if (withdrawRuntime) this.retireReadinessWindow(server.name)
       this.setStatus(server.name, {
         deployed: false,
         ready: false,
@@ -3201,6 +3185,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
+      if (withdrawRuntime) {
+        retract = await this.retractManagedRuntime(server, 'fail-closed', isCurrent)
+        if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
+        cleanupComplete = retract.cleanupComplete
+      } else {
+        hccLogger.warn('Preserving existing runtime after a Secret read failure', {
+          scope: '[Reconciler]',
+          name: server.name,
+          transient: secretResult.transient === true,
+        })
+      }
+      if (!isCurrent()) return false
       if (retract && !retract.retracted && !retract.foreignRuntime) return false
       // A 401/403 is an answer about HCC's identity or authorization, not about
       // the Secret, so no Secret event follows when it recovers. The fail-closed

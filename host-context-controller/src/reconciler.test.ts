@@ -15,6 +15,7 @@ import { MANAGED_BY_LABEL, MCPSERVER_LABEL, WRC_MANAGED_BY_VALUE } from './const
 import type { DeploymentObservation } from './informers/deploymentInformer'
 import { K8sRequestTimeoutError } from './k8s/k8sRequestDeadline'
 import { hccLogger } from './logger'
+import { runtimeDesired } from './mcpServerSafety'
 import { registry } from './metrics'
 import {
   McpServerReconciler,
@@ -852,10 +853,11 @@ describe('PR-B B1 — validateSecret result shape', () => {
     expect(reconciler.getStatus('pg')).toMatchObject({ deployed: false, ready: false })
   })
 
-  it('fail-closed incomplete delete does not write RuntimeNotDesired', async () => {
+  it('fail-closed incomplete delete writes the Secret verdict first and does not write RuntimeNotDesired', async () => {
     const err = new Error('not found') as Error & { code?: number }
     err.code = 404
     coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
     let seenDeploymentRead = false
     let deniedDeploymentDelete = false
     appsApi.readNamespacedDeployment.mockImplementation(async () => {
@@ -881,7 +883,18 @@ describe('PR-B B1 — validateSecret result shape', () => {
     expect(seenDeploymentRead).toBe(true)
     expect(deniedDeploymentDelete).toBe(true)
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
-    expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+    // #1488: the verdict is persisted before the retract, which was denied here.
+    const sets = patchedConditionSets(customApi)
+    expect(sets).toHaveLength(2)
+    expect(sets[0]).toContainEqual(
+      expect.objectContaining({ type: 'SecretResolved', status: 'False', reason: 'SecretNotFound' })
+    )
+    expect(sets[1]).toContainEqual(
+      expect.objectContaining({ type: 'Ready', status: 'False', reason: 'SecretValidationFailed' })
+    )
+    expect(sets.some(conditions => conditions.some(c => c.reason === 'RuntimeNotDesired'))).toBe(
+      false
+    )
     expect(reconciler.hasIncompleteReconciliation()).toBe(true)
   })
 
@@ -3918,6 +3931,149 @@ describe('#1338: a fail-closed verdict withdraws readiness before the retract', 
     expect(tickReadReturned).toBe(true)
     expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
     expect(f.condition('Ready')?.status).not.toBe('True')
+  })
+})
+
+describe('#1488: a fail-closed Secret verdict is persisted before the retract', () => {
+  let logs: ReturnType<typeof captureH3Logs>
+  beforeEach(() => {
+    logs = captureH3Logs()
+  })
+  afterEach(() => {
+    logs.restore()
+    vi.useRealTimers()
+  })
+
+  async function failClosedWithDeleteError() {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    expect(f.condition('Ready')).toMatchObject({ status: 'True', reason: 'ReconcileSuccess' })
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Absent())
+    f.appsApi.deleteNamespacedDeployment.mockRejectedValueOnce(
+      Object.assign(new Error('internal error'), { code: 500 })
+    )
+    await expect(f.reconciler.reconcile(server)).rejects.toThrow(
+      'Failed to delete runtime Kubernetes resources for McpServer "h3-server"'
+    )
+    return { server, f }
+  }
+
+  it('T2.1 a Deployment delete that fails leaves the fail-closed conditions persisted', async () => {
+    const { server, f } = await failClosedWithDeleteError()
+
+    // Witness: the retract reached the delete and it failed.
+    expect(f.appsApi.deleteNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(f.condition('SecretResolved')).toMatchObject({
+      status: 'False',
+      reason: 'SecretNotFound',
+    })
+    expect(f.condition('Ready')).toMatchObject({
+      status: 'False',
+      reason: 'SecretValidationFailed',
+    })
+    const persisted = { ...server, status: { conditions: f.status.current() } } as McpServerCRD
+    expect(runtimeDesired(persisted)).toBe(false)
+  })
+
+  it('T2.2 after a restart the persisted verdict is not ready, also when the first Secret read times out', async () => {
+    const { server, f } = await failClosedWithDeleteError()
+    const restarted = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
+      appsApi: asAppsApi(f.appsApi),
+      coreApi: asCoreApi(f.coreApi),
+      customApi: asCustomApi(f.customApi),
+    })
+    const persisted = { ...server, status: { conditions: f.status.current() } } as McpServerCRD
+    const keptBefore = await reconcileCallFailures('secret_read', 'verdict_kept')
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
+
+    await restarted.reconcile(persisted)
+
+    // Witness: the keep rule ran and kept the persisted (not-ready) verdict.
+    expect(await reconcileCallFailures('secret_read', 'verdict_kept')).toBe(keptBefore + 1)
+    expect(restarted.getStatus(persisted)).toMatchObject({ ready: false })
+  })
+
+  it('T2.4 a complete retract writes SecretResolved, then Ready, then DeploymentReady=RuntimeNotDesired', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const patchesBefore = f.patches()
+    const conditionsBefore = f.status.current()
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Absent())
+
+    await f.reconciler.reconcile(server)
+
+    // Witness: the retract ran to the Deployment delete.
+    expect(f.appsApi.deleteNamespacedDeployment).toHaveBeenCalledTimes(1)
+    const sets = patchedConditionSets(f.customApi).slice(patchesBefore)
+    const changed = sets.map((conditions, index) => {
+      const previous = index === 0 ? conditionsBefore : sets[index - 1]
+      return conditions
+        .filter(
+          condition =>
+            !previous.some(
+              old =>
+                old.type === condition.type &&
+                old.status === condition.status &&
+                old.reason === condition.reason
+            )
+        )
+        .map(condition => condition.type)
+    })
+    expect(changed).toEqual([['SecretResolved'], ['Ready'], ['DeploymentReady']])
+    expect(f.condition('SecretResolved')).toMatchObject({
+      status: 'False',
+      reason: 'SecretNotFound',
+    })
+    expect(f.condition('Ready')).toMatchObject({
+      status: 'False',
+      reason: 'SecretValidationFailed',
+    })
+    expect(f.condition('DeploymentReady')).toMatchObject({
+      status: 'False',
+      reason: 'RuntimeNotDesired',
+    })
+  })
+
+  it('T2.5 a ReadError that is not kept writes the same conditions and retracts nothing', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(
+      Object.assign(new Error('bad request'), { code: 400 })
+    )
+
+    await f.reconciler.reconcile(server)
+
+    expect(
+      logs.entries.some(
+        e => e.message === 'Preserving existing runtime after a Secret read failure'
+      )
+    ).toBe(true)
+    expect(f.appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(f.condition('SecretResolved')).toMatchObject({ status: 'False', reason: 'ReadError' })
+    expect(f.condition('Ready')).toMatchObject({
+      status: 'False',
+      reason: 'SecretValidationFailed',
+    })
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
+  })
+
+  it('T2.6 SecretAccessDenied still waits for an external change after the reconcile', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(
+      Object.assign(new Error('forbidden'), { code: 403 })
+    )
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.condition('SecretResolved')).toMatchObject({
+      status: 'False',
+      reason: 'SecretAccessDenied',
+    })
+    expect((f.reconciler as any).verdictsAwaitingExternalChange.get('h3-server')).toBe(
+      'SecretAccessDenied'
+    )
   })
 })
 

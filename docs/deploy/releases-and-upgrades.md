@@ -327,6 +327,7 @@ Read the notes for every release you skip over, not only the target release.
 | [HCC NetworkPolicy pass bounds](#hcc-networkpolicy-pass-bounds)                    | You upgrade host-context-controller. It can now exit and restart when a NetworkPolicy pass reaches its hard limit, and it refuses to start when `HCC_K8S_REQUEST_TIMEOUT_MS`, `HCC_HOST_K8S_REQUEST_TIMEOUT_MS` or the hard limit is not plain digits, or when a request timeout is not below the hard limit. No RBAC change. |
 | [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor)          | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`.                                                                                                                                                               |
 | [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac)                            | Every cluster. Apply the updated Role before you roll the new host-context-controller image.                                                                                                                                                                                                                                  |
+| [HCC McpServer verdict changes](#hcc-mcpserver-verdict-changes)                    | You alert, filter or report on HCC's McpServer conditions, NetworkPolicy pass results or log lines.                                                                                                                                                                                                                           |
 
 #### Snippet runner Node permissions
 
@@ -520,6 +521,18 @@ readiness budget is published at HCC's next re-read of the Deployment (every
 60 s) instead of within seconds. Control UI can still report a false failure
 for a credential rotation that converges between 120 s and 180 s when that
 correction arrives after 180 s.
+
+### HCC McpServer verdict changes
+
+These host-context-controller (HCC) changes need no action unless you alert,
+filter or report on the signals they name.
+
+- **Fail-closed verdicts are persisted before the retract.** When an McpServer's
+  Secret check fails closed (`SecretNotFound`, `SecretMissingKey`,
+  `SecretAccessDenied`), HCC writes `SecretResolved=False` and `Ready=False`
+  before it deletes the runtime. NetworkPolicy intent follows `SecretResolved`,
+  so the server's allows are revoked from that write on, also when the
+  Deployment delete then fails.
 
 ### mcp-host authority staleness floor
 

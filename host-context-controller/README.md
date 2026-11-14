@@ -89,13 +89,11 @@ A Secret ADDED event that arrives while the McpServer inventory is not authorita
 
 Watch establishment has no deadline. A Deployment watch that never establishes delays a correction to the next re-read (every 60 s); a Secret watch that never establishes stops Secret events for its namespace.
 
-If the retract of a fail-closed verdict aborts and HCC then restarts, the McpServer keeps its persisted `Ready=True`, and a transient failure of the first Secret read after the restart keeps that verdict.
-
 ### Fail-closed Secret verdicts
 
 Three behaviours are stricter than before this change:
 
-- When the Secret check fails closed (`SecretNotFound`, `SecretMissingKey` or `SecretAccessDenied`), HCC stops the readiness poll and publishes the in-memory not-ready verdict, with the Secret message, before it retracts the runtime. Before, a retract that threw, was denied or ended with a declined write returned first, so the previous in-memory verdict, possibly ready, stayed in place.
+- When the Secret check fails closed (`SecretNotFound`, `SecretMissingKey` or `SecretAccessDenied`), HCC stops the readiness poll, publishes the in-memory not-ready verdict with the Secret message, and writes `SecretResolved=False` and `Ready=False` (`SecretValidationFailed`) to the McpServer status, all before it retracts the runtime. A retract that throws, is denied or ends with a declined write therefore leaves the fail-closed verdict persisted, and a restart does not bring back a persisted `Ready=True`. NetworkPolicy intent turns fail-closed with that write, also when the Deployment delete then fails. Before, such a retract returned first, so the previous verdict, possibly ready, stayed in memory and on the CRD.
 - An authoritative not-ready verdict is kept over any Secret `ReadError`, transient or not. HCC writes no condition, and the McpServer lane retry owns the obligation. Before, the `ReadError` rewrote `SecretResolved` to reason `ReadError` and `Ready` to `SecretValidationFailed`. After a terminal `RolloutIncomplete` the conditions likewise stay as they were.
 - NetworkPolicy intent therefore stays fail-closed. Intent follows the `SecretResolved` reason, and `ReadError` is not a fail-closed reason, so before this change one failed Secret read turned a `SecretNotFound` or `SecretAccessDenied` server back to "runtime desired" and its allows could return. Now the fail-closed reason stays until a Secret read returns a result.
 
