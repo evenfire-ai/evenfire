@@ -15371,11 +15371,7 @@ pre {
   flex-direction: column;
   gap: 0;
   overflow: visible;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
+  padding: 0 0 var(--space-3);
 }
 
 .da-gfs-drive__header.page-card__header {
@@ -15649,7 +15645,7 @@ pre {
   width: auto;
   align-content: start;
   gap: 0;
-  margin: var(--space-2) 0 var(--space-3);
+  margin: var(--space-2) var(--space-4) var(--space-3);
   overflow: visible;
 }
 
