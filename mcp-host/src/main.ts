@@ -1173,55 +1173,84 @@ async function initializeMcpServers(): Promise<void> {
 }
 
 /**
+ * The body of one context-mapper poll, with the module state it reads passed
+ * in, so tests run the real order of checks (#1491): a cold start retries the
+ * authoritative initialization; otherwise the snapshot is fetched, published
+ * only into the manager that was current when the poll started, and success
+ * is recorded only while that manager is still current. Any failure goes to
+ * `onFailure`.
+ */
+export async function runContextMapperPoll<M>(deps: {
+  getManager: () => M | null
+  isShuttingDown: () => boolean
+  initialize: () => Promise<void>
+  pollServers: () => Promise<{ servers: McpServerInfo[] }>
+  reconcile: (servers: McpServerInfo[], manager: M) => Promise<void>
+  recordSuccess: () => void
+  onFailure: (error: unknown) => void
+}): Promise<void> {
+  try {
+    // Cold-start discovery failures intentionally leave the manager unset.
+    // Retry the authoritative initialization instead of declaring an empty
+    // fleet or permanently no-oping every reconciliation tick.
+    const manager = deps.getManager()
+    if (!manager) {
+      await deps.initialize()
+      return
+    }
+
+    await pollAuthoritativeMcpSnapshotIfCurrent({
+      poll: deps.pollServers,
+      // A delayed fetch may resolve after shutdown or after a manager swap.
+      // Never publish that stale snapshot into a closed/retired manager.
+      isCurrent: () => !deps.isShuttingDown() && deps.getManager() === manager,
+      reconcile: servers => deps.reconcile(servers, manager),
+    })
+    if (!deps.isShuttingDown() && deps.getManager() === manager) {
+      deps.recordSuccess()
+    }
+  } catch (error) {
+    deps.onFailure(error)
+  }
+}
+
+/**
  * Poll context-mapper for McpServer changes.
  */
 async function pollContextMapper(): Promise<void> {
   if (!contextMapperClient) return
 
-  try {
-    // Cold-start discovery failures intentionally leave the manager unset.
-    // Retry the authoritative initialization instead of declaring an empty
-    // fleet or permanently no-oping every reconciliation tick.
-    if (!mcpManager) {
-      await initializeMcpServers()
-      return
-    }
-
-    const manager = mcpManager
-    await pollAuthoritativeMcpSnapshotIfCurrent({
-      poll: () => contextMapperClient!.pollServers(),
-      // A delayed fetch may resolve after shutdown or after a manager swap.
-      // Never publish that stale snapshot into a closed/retired manager.
-      isCurrent: () => !isShuttingDown && mcpManager === manager,
-      reconcile: servers =>
-        reconcileAuthoritativeMcpSnapshot({
-          servers,
-          manager,
-          serverState: lastServerState,
-          getAuthToken: (serverName, expectedRevision) =>
-            contextMapperClient!.getAuthToken(serverName, expectedRevision),
-          coordinator: mcpFleetCoordinator,
-        }),
-    })
-    if (!isShuttingDown && mcpManager === manager) {
-      recordMcpAuthoritySuccess()
-    }
-  } catch (error) {
-    handleMcpAuthorityPollFailure(
-      error,
-      createMcpAuthorityPollFailureOptions({
-        getManager: () => mcpManager,
-        lastSuccessAt: () => mcpAuthorityLastSuccessAt,
-        revoke: revokeMcpAuthority,
-        onCallerAuthorizationRejected: () =>
-          logger.warn({}, '[Main] HCC poll rejected caller authority'),
-        onInventoryAuthorityRevoked: () =>
-          logger.warn({}, '[Main] HCC inventory no longer resolves live Host authority'),
-        onUnavailable: () =>
-          logger.error({}, '[Main] HCC authority poll failed (reason=unavailable)'),
-      })
-    )
-  }
+  await runContextMapperPoll({
+    getManager: () => mcpManager,
+    isShuttingDown: () => isShuttingDown,
+    initialize: initializeMcpServers,
+    pollServers: () => contextMapperClient!.pollServers(),
+    reconcile: (servers, manager) =>
+      reconcileAuthoritativeMcpSnapshot({
+        servers,
+        manager,
+        serverState: lastServerState,
+        getAuthToken: (serverName, expectedRevision) =>
+          contextMapperClient!.getAuthToken(serverName, expectedRevision),
+        coordinator: mcpFleetCoordinator,
+      }),
+    recordSuccess: () => recordMcpAuthoritySuccess(),
+    onFailure: error =>
+      handleMcpAuthorityPollFailure(
+        error,
+        createMcpAuthorityPollFailureOptions({
+          getManager: () => mcpManager,
+          lastSuccessAt: () => mcpAuthorityLastSuccessAt,
+          revoke: revokeMcpAuthority,
+          onCallerAuthorizationRejected: () =>
+            logger.warn({}, '[Main] HCC poll rejected caller authority'),
+          onInventoryAuthorityRevoked: () =>
+            logger.warn({}, '[Main] HCC inventory no longer resolves live Host authority'),
+          onUnavailable: () =>
+            logger.error({}, '[Main] HCC authority poll failed (reason=unavailable)'),
+        })
+      ),
+  })
 }
 
 /**

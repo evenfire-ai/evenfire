@@ -709,7 +709,10 @@ function assertPositiveSafeIntegerMs(name: string, value: number): void {
  * - J also absorbs the setInterval drift over the N + 1 ticks (about 0.5 ms per
  *   tick measured, so about 1.5 ms at N = 2);
  * - cold start before the first success: no deadline is armed until then, so S
- *   does not govern it.
+ *   does not govern it;
+ * - a poll whose pollServers() answers and whose reconciliation then fails:
+ *   each server's getAuthToken has its own request timeout T, so that poll
+ *   lasts longer than T (R1-L11).
  *
  * Every argument must be a positive safe integer, so a value that did not come
  * through the strict parsers in this file still fails closed: setInterval(fn, NaN)
