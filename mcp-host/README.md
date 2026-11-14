@@ -249,6 +249,9 @@ These apply to recipe-bound mcp-host pods that WRC creates.
 | `CLERUM_WORKFLOW_APPROVAL_RECIPE_NAMESPACE`                                  | `mcp-host` | WRC    | _No effect_ in mcp-host's current code.                                                                                                                                                       |
 | `CLERUM_WORKFLOW_MAX_ITERATIONS`                                             | `50`       | -      | LLM/tool rounds per workflow step before forced wrap-up. A step's `maxIterations` overrides it.                                                                                               |
 | `CLERUM_MAX_STEP_TIMEOUT_SECONDS`                                            | `5400`     | -      | Ceiling for a step's `timeoutSeconds` (larger values are clamped). Must be 60 to 604800; an invalid value logs a warning and uses the default.                                                |
+| `CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED`                                     | `true`     | -      | Keep workflow step tool results at or above the threshold in memory for the step execution, with a summary inline. Only `false` disables it; another value logs a warning.                    |
+| `CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD`                                   | `131072`   | -      | Bytes at which a step tool result is stored; also the largest single read back. Must be 4096 to 1048576; an invalid value logs a warning and uses the default.                                |
+| `CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES`                                | `16777216` | -      | Bytes one step execution may store; a result that would exceed it stays inline. Must be 1048576 to 268435456; an invalid value logs a warning and uses the default.                           |
 | `CLERUM_WORKFLOW_RESULT_ARTIFACT_POLL_ATTEMPTS`                              | `180`      | -      | Polls a chat Host makes for a triggered workflow's result artifacts.                                                                                                                          |
 | `CLERUM_WORKFLOW_RESULT_ARTIFACT_POLL_INTERVAL_MS`                           | `1000`     | -      | Milliseconds between those polls.                                                                                                                                                             |
 | `CLERUM_WRC_URL`                                                             | empty      | WRC    | WRC endpoint, used as the SDK credential broker.                                                                                                                                              |
@@ -265,6 +268,11 @@ These apply to recipe-bound mcp-host pods that WRC creates.
 | `PLUGIN_WORKLOAD_SDK_MAX_CONNECTIONS_PER_WORKLOAD`                           | `10`       | -      | SDK connections per workload.                                                                                                                                                                 |
 | `PLUGIN_WORKLOAD_SDK_MAX_RPM_PER_WORKLOAD`                                   | `100`      | -      | Requests per minute per workload.                                                                                                                                                             |
 | `PLUGIN_WORKLOAD_SDK_MAX_LLM_RESPONSE_BYTES`                                 | `1048576`  | -      | Maximum LLM response size returned through the SDK.                                                                                                                                           |
+
+The `CLERUM_WORKFLOW_TOOL_SPILLOVER_*` variables are read at the start of each
+step execution, separately from the first-party `CLERUM_TOOL_SPILLOVER_*`
+settings. WRC copies them from its own environment into the recipe pods it
+creates, so set them on the WRC Deployment.
 
 `PLUGIN_WORKLOAD_SDK_TOKEN` is not read as a setting. mcp-host only lists it,
 with the runtime tokens above and every provider key, as a reserved secret name
