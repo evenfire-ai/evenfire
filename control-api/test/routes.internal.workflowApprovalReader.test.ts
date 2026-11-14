@@ -102,10 +102,19 @@ async function seedSlackTarget(
 
 async function seedTeamsTarget(
   gateway: MockGateway,
-  overrides: { tenantId?: string | null; name?: string } = {}
+  overrides: {
+    tenantId?: string | null
+    name?: string
+    appId?: string | null
+    appPassword?: string | null
+    teams?: Array<{ channelId?: string; tenantId?: string; replyInThreads?: boolean }>
+  } = {}
 ): Promise<string> {
   const name = overrides.name ?? 'teams-bot'
   const tenantId = overrides.tenantId === undefined ? 'tenant-1' : overrides.tenantId
+  const appId = overrides.appId === undefined ? 'teams-app-1' : overrides.appId
+  const appPassword =
+    overrides.appPassword === undefined ? 'teams-app-secret' : overrides.appPassword
   await gateway.createResource(
     'communicationchannels',
     {
@@ -113,8 +122,9 @@ async function seedTeamsTarget(
       spec: {
         credentialsSecretRef: { name: 'teams-app-credentials' },
         hostRef: 'sandbox-recipes/agent-a',
+        ...(overrides.teams ? { teams: overrides.teams } : {}),
         teamsSettings: {
-          appId: 'teams-app-1',
+          ...(appId ? { appId } : {}),
           appName: 'evenfire',
           replyOnlyWhenMentioned: true,
           ...(tenantId ? { tenantId } : {}),
@@ -124,9 +134,7 @@ async function seedTeamsTarget(
     'channels'
   )
   gateway.seedSecret('teams-app-credentials', 'channels', {
-    data: {
-      'teams-app-password': b64('teams-app-secret'),
-    },
+    data: appPassword ? { 'teams-app-password': b64(appPassword) } : {},
   })
   return encodeTeamsTargetId('channels', name)
 }
@@ -503,5 +511,404 @@ describe('Teams target proxy routes', () => {
     expect(res.status).toBe(400)
     expect(res.body).toEqual({ error: 'invalid_teams_service_url' })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+function teamsTokenAnswer(): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ access_token: 'teams-access-token' }),
+  } as Response
+}
+
+function teamsProviderAnswer(status: number, body: Record<string, unknown>): Response {
+  return { ok: status >= 200 && status < 300, status, json: async () => body } as Response
+}
+
+async function teamsTargetApp(
+  overrides: Parameters<typeof seedTeamsTarget>[1] = {}
+): Promise<{ app: ReturnType<typeof createApp>; targetId: string }> {
+  mockPoolQuery.mockReset()
+  const gateway = new MockGateway('channels')
+  const targetId = await seedTeamsTarget(gateway, overrides)
+  return { app: createApp(gateway as never), targetId }
+}
+
+describe('Teams update-message route refusals', () => {
+  const updateBody = {
+    conversationId: '19:channel-1@thread.tacv2',
+    messageId: 'activity-1',
+    serviceUrl: 'https://smba.trafficmanager.net/amer/',
+    text: 'Approved. Workflow approval recorded.',
+  }
+
+  function updatePath(targetId: string): string {
+    return `/api/v1/internal/workflow-approval-reader/teams-targets/${encodeURIComponent(
+      targetId
+    )}/update-message`
+  }
+
+  it('answers 401 without service auth and with another service token', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp()
+
+    const anonymous = await request(app).post(updatePath(targetId)).send(updateBody)
+    const otherService = await authedPost(
+      app,
+      updatePath(targetId),
+      updateBody,
+      'dev-rpc-proxy-token',
+      'rpc-proxy'
+    )
+
+    expect(anonymous.status).toBe(401)
+    expect(otherService.status).toBe(401)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('answers 400 for a target id that does not decode and 409 for a target without an app id', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { app } = await teamsTargetApp({ appId: null })
+
+    const badTarget = await authedPost(app, updatePath('teams:not-base64-json'), updateBody)
+    const notReady = await authedPost(
+      app,
+      updatePath(encodeTeamsTargetId('channels', 'teams-bot')),
+      updateBody
+    )
+
+    expect(badTarget.status).toBe(400)
+    expect(badTarget.body).toEqual({ error: 'invalid_target_id' })
+    expect(notReady.status).toBe(409)
+    expect(notReady.body).toEqual({ error: 'teams_target_not_ready' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('answers 400 when a required field is missing', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp()
+
+    for (const field of ['conversationId', 'messageId', 'serviceUrl', 'text'] as const) {
+      const body: Record<string, string> = { ...updateBody }
+      delete body[field]
+      const res = await authedPost(app, updatePath(targetId), body)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid_teams_message_update' })
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('answers 409 when the app password is missing', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp({ appPassword: null })
+
+    const res = await authedPost(app, updatePath(targetId), updateBody)
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'teams_app_password_missing' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('answers 502 when the token exchange is refused', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(teamsProviderAnswer(400, { error: 'invalid_client' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp()
+
+    const res = await authedPost(app, updatePath(targetId), updateBody)
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'teams_token_exchange_failed',
+      providerError: 'invalid_client',
+    })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('answers 502 when Bot Framework refuses the update', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(teamsTokenAnswer())
+      .mockResolvedValueOnce(teamsProviderAnswer(403, {}))
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp()
+
+    const res = await authedPost(app, updatePath(targetId), updateBody)
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({ error: 'teams_update_failed', providerError: 'http_403' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Teams send-message route', () => {
+  const CONVERSATION_ID = '19:channel-1@thread.tacv2'
+  const THREAD_CONVERSATION_ID = '19:channel-1@thread.tacv2;messageid=1700000000000'
+  const ENCODED_CONVERSATION_ID = '19%3Achannel-1%40thread.tacv2'
+  const ENCODED_THREAD_CONVERSATION_ID = '19%3Achannel-1%40thread.tacv2%3Bmessageid%3D1700000000000'
+  const REPLY_TO_ID = '1700000000000'
+  const TEXT = 'The assistant is busy. Try again in 9 seconds.'
+  const sendBody = {
+    conversationId: CONVERSATION_ID,
+    threadConversationId: THREAD_CONVERSATION_ID,
+    replyToId: REPLY_TO_ID,
+    serviceUrl: 'https://smba.trafficmanager.net/amer/',
+    text: TEXT,
+  }
+  const threadedUrl = `https://smba.trafficmanager.net/amer/v3/conversations/${ENCODED_THREAD_CONVERSATION_ID}/activities/${REPLY_TO_ID}`
+  const topLevelUrl = `https://smba.trafficmanager.net/amer/v3/conversations/${ENCODED_CONVERSATION_ID}/activities`
+
+  function sendPath(targetId: string): string {
+    return `/api/v1/internal/workflow-approval-reader/teams-targets/${encodeURIComponent(
+      targetId
+    )}/send-message`
+  }
+
+  function stubSuccessfulSend(): ReturnType<typeof vi.fn> {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(teamsTokenAnswer())
+      .mockResolvedValueOnce(teamsProviderAnswer(201, { id: 'activity-2' }))
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  function sentActivity(fetchMock: ReturnType<typeof vi.fn>): {
+    url: string
+    method: string
+    authorization: string | null
+    body: unknown
+  } {
+    const init = fetchMock.mock.calls[1]?.[1] as RequestInit
+    return {
+      url: String(fetchMock.mock.calls[1]?.[0]),
+      method: String(init.method),
+      authorization: (init.headers as Headers).get('Authorization'),
+      body: JSON.parse(String(init.body)),
+    }
+  }
+
+  it('replies in the card thread when the group does not set reply-in-threads', async () => {
+    const fetchMock = stubSuccessfulSend()
+    const { app, targetId } = await teamsTargetApp()
+
+    const res = await authedPost(app, sendPath(targetId), sendBody)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, id: 'activity-2' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(
+      'https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token'
+    )
+    expect(sentActivity(fetchMock)).toEqual({
+      url: threadedUrl,
+      method: 'POST',
+      authorization: 'Bearer teams-access-token',
+      body: { type: 'message', text: TEXT, replyToId: REPLY_TO_ID },
+    })
+  })
+
+  it.each([
+    {
+      name: 'the group sets reply-in-threads',
+      teams: [{ channelId: CONVERSATION_ID, tenantId: 'tenant-1', replyInThreads: true }],
+    },
+    {
+      name: 'no group matches the conversation',
+      teams: [{ channelId: '19:other@thread.tacv2', tenantId: 'tenant-1', replyInThreads: false }],
+    },
+    {
+      name: 'the only matching channel belongs to another tenant',
+      teams: [{ channelId: CONVERSATION_ID, tenantId: 'tenant-2', replyInThreads: false }],
+    },
+  ])('replies in the card thread when $name', async ({ teams }) => {
+    const fetchMock = stubSuccessfulSend()
+    const { app, targetId } = await teamsTargetApp({ teams })
+
+    const res = await authedPost(app, sendPath(targetId), sendBody)
+
+    expect(res.status).toBe(200)
+    expect(sentActivity(fetchMock)).toMatchObject({
+      url: threadedUrl,
+      body: { type: 'message', text: TEXT, replyToId: REPLY_TO_ID },
+    })
+  })
+
+  it('posts at the top level of the conversation when the group turns reply-in-threads off', async () => {
+    const fetchMock = stubSuccessfulSend()
+    const { app, targetId } = await teamsTargetApp({
+      teams: [{ channelId: CONVERSATION_ID, tenantId: 'tenant-1', replyInThreads: false }],
+    })
+
+    const res = await authedPost(app, sendPath(targetId), sendBody)
+
+    expect(res.status).toBe(200)
+    expect(sentActivity(fetchMock)).toEqual({
+      url: topLevelUrl,
+      method: 'POST',
+      authorization: 'Bearer teams-access-token',
+      body: { type: 'message', text: TEXT },
+    })
+  })
+
+  it('posts at the top level when no card id is given', async () => {
+    const fetchMock = stubSuccessfulSend()
+    const { app, targetId } = await teamsTargetApp()
+    const { replyToId: _replyToId, ...withoutReplyTo } = sendBody
+
+    const res = await authedPost(app, sendPath(targetId), withoutReplyTo)
+
+    expect(res.status).toBe(200)
+    expect(sentActivity(fetchMock)).toMatchObject({
+      url: topLevelUrl,
+      body: { type: 'message', text: TEXT },
+    })
+  })
+
+  it('builds the activity from the text and card id only', async () => {
+    const fetchMock = stubSuccessfulSend()
+    const { app, targetId } = await teamsTargetApp({
+      teams: [{ channelId: CONVERSATION_ID, tenantId: 'tenant-1', replyInThreads: true }],
+    })
+
+    const res = await authedPost(app, sendPath(targetId), {
+      ...sendBody,
+      attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: {} }],
+      entities: [{ type: 'mention', text: '<at>Someone</at>' }],
+      summary: 'injected',
+      threaded: false,
+    })
+
+    expect(res.status).toBe(200)
+    expect(sentActivity(fetchMock)).toEqual({
+      url: threadedUrl,
+      method: 'POST',
+      authorization: 'Bearer teams-access-token',
+      body: { type: 'message', text: TEXT, replyToId: REPLY_TO_ID },
+    })
+  })
+
+  it('answers 401 without service auth and with another service token', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp()
+
+    const anonymous = await request(app).post(sendPath(targetId)).send(sendBody)
+    const otherService = await authedPost(
+      app,
+      sendPath(targetId),
+      sendBody,
+      'dev-rpc-proxy-token',
+      'rpc-proxy'
+    )
+
+    expect(anonymous.status).toBe(401)
+    expect(otherService.status).toBe(401)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('answers 400 for a target id that does not decode and 409 for a target without an app id', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { app } = await teamsTargetApp({ appId: null })
+
+    const badTarget = await authedPost(app, sendPath('teams:not-base64-json'), sendBody)
+    const notReady = await authedPost(
+      app,
+      sendPath(encodeTeamsTargetId('channels', 'teams-bot')),
+      sendBody
+    )
+
+    expect(badTarget.status).toBe(400)
+    expect(badTarget.body).toEqual({ error: 'invalid_target_id' })
+    expect(notReady.status).toBe(409)
+    expect(notReady.body).toEqual({ error: 'teams_target_not_ready' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each(['http://attacker.example.com', 'https://smba.trafficmanager.net.evil.example'])(
+    'answers 400 for the service URL %s before reading the credentials',
+    async serviceUrl => {
+      const fetchMock = vi.fn()
+      vi.stubGlobal('fetch', fetchMock)
+      const { app, targetId } = await teamsTargetApp()
+
+      const res = await authedPost(app, sendPath(targetId), { ...sendBody, serviceUrl })
+
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid_teams_service_url' })
+      expect(fetchMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it('answers 400 when a required field is missing', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp()
+
+    for (const field of ['conversationId', 'serviceUrl', 'text'] as const) {
+      const body: Record<string, string> = { ...sendBody }
+      delete body[field]
+      const res = await authedPost(app, sendPath(targetId), body)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid_teams_message' })
+    }
+    const blank = await authedPost(app, sendPath(targetId), { ...sendBody, text: '   ' })
+    expect(blank.status).toBe(400)
+    expect(blank.body).toEqual({ error: 'invalid_teams_message' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('answers 409 when the app password is missing', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp({ appPassword: null })
+
+    const res = await authedPost(app, sendPath(targetId), sendBody)
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'teams_app_password_missing' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('answers 502 when the token exchange is refused', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(teamsProviderAnswer(400, { error: 'invalid_client' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp()
+
+    const res = await authedPost(app, sendPath(targetId), sendBody)
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'teams_token_exchange_failed',
+      providerError: 'invalid_client',
+    })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('answers 502 when Bot Framework refuses the message', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(teamsTokenAnswer())
+      .mockResolvedValueOnce(teamsProviderAnswer(403, { error: 'BotNotInConversationRoster' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { app, targetId } = await teamsTargetApp()
+
+    const res = await authedPost(app, sendPath(targetId), sendBody)
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'teams_send_failed',
+      providerError: 'BotNotInConversationRoster',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

@@ -71,7 +71,7 @@ type CommunicationChannelResource = {
       replyOnlyWhenMentioned?: boolean
       workspaceId?: string
     }
-    teams?: Array<{ channelId?: string; tenantId?: string }>
+    teams?: Array<{ channelId?: string; tenantId?: string; replyInThreads?: boolean }>
     teamsSettings?: {
       appId?: string
       appName?: string
@@ -347,6 +347,57 @@ async function fetchTeamsBotAccessToken(params: {
   return { ok: true, accessToken: tokenBody.access_token }
 }
 
+type ResolvedTeamsTarget = Extract<Awaited<ReturnType<typeof resolveTeamsTarget>>, { ok: true }>
+
+/**
+ * Reads the target channel's app password and exchanges it for a Bot Framework
+ * access token. Shared by the Teams update and send routes, so both refuse with
+ * the same status and body.
+ */
+async function teamsBotAccessTokenForTarget(
+  gateway: K8sGateway,
+  resolved: ResolvedTeamsTarget
+): Promise<
+  { ok: true; accessToken: string } | { ok: false; status: number; body: Record<string, string> }
+> {
+  const secret = (await gateway.getSecret(
+    resolved.secretName,
+    resolved.channelNamespace
+  )) as SecretResource
+  const appPassword = decodeSecretString(secret, 'teams-app-password')
+  if (!appPassword) {
+    return { ok: false, status: 409, body: { error: 'teams_app_password_missing' } }
+  }
+  const token = await fetchTeamsBotAccessToken({
+    appId: resolved.appId,
+    tenantId: resolved.tenantId,
+    appPassword,
+  })
+  if (!token.ok) {
+    return {
+      ok: false,
+      status: 502,
+      body: { error: 'teams_token_exchange_failed', providerError: token.error },
+    }
+  }
+  return { ok: true, accessToken: token.accessToken }
+}
+
+/**
+ * Whether a notice for `conversationId` goes to the card's thread. Same rule as
+ * channel-reader: only a group of this channel and tenant with
+ * `replyInThreads: false` turns threads off; no matching group means threaded.
+ */
+function teamsConversationRepliesInThreads(
+  resolved: ResolvedTeamsTarget,
+  conversationId: string
+): boolean {
+  const group = (resolved.channel.spec?.teams ?? []).find(
+    item => item.channelId === conversationId && item.tenantId === resolved.tenantId
+  )
+  return group?.replyInThreads !== false
+}
+
 export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway): Router {
   const router = Router()
 
@@ -453,25 +504,9 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
           return
         }
 
-        const secret = (await gateway.getSecret(
-          resolved.secretName,
-          resolved.channelNamespace
-        )) as SecretResource
-        const appPassword = decodeSecretString(secret, 'teams-app-password')
-        if (!appPassword) {
-          res.status(409).json({ error: 'teams_app_password_missing' })
-          return
-        }
-        const token = await fetchTeamsBotAccessToken({
-          appId: resolved.appId,
-          tenantId: resolved.tenantId,
-          appPassword,
-        })
+        const token = await teamsBotAccessTokenForTarget(gateway, resolved)
         if (!token.ok) {
-          res.status(502).json({
-            error: 'teams_token_exchange_failed',
-            providerError: token.error,
-          })
+          res.status(token.status).json(token.body)
           return
         }
 
@@ -501,6 +536,76 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
           return
         }
         res.status(200).json({ ok: true, id: body.id ?? messageId })
+      } catch (err) {
+        next(err)
+      }
+    }
+  )
+
+  /**
+   * Posts a new plain-text message for a workflow approval decision notice.
+   * Where it goes follows the channel's Teams reply-in-threads setting for
+   * `conversationId`; the request cannot override it. The activity is built from
+   * `text` and `replyToId` only.
+   */
+  router.post(
+    '/internal/workflow-approval-reader/teams-targets/:targetId/send-message',
+    requireInternalToken,
+    requireInternalService('workflow-approval-reader'),
+    async (req, res, next) => {
+      try {
+        const resolved = await resolveTeamsTarget(gateway, String(req.params.targetId || ''))
+        if (!resolved.ok) {
+          res.status(resolved.status).json({ error: resolved.error })
+          return
+        }
+        const conversationId = String(req.body?.conversationId || '').trim()
+        const threadConversationId = String(req.body?.threadConversationId || '').trim()
+        const replyToId = String(req.body?.replyToId || '').trim()
+        const serviceUrl = String(req.body?.serviceUrl || '').trim()
+        const text = String(req.body?.text || '').trim()
+        if (!conversationId || !serviceUrl || !text) {
+          res.status(400).json({ error: 'invalid_teams_message' })
+          return
+        }
+        if (!isAllowedTeamsServiceUrl(serviceUrl)) {
+          res.status(400).json({ error: 'invalid_teams_service_url' })
+          return
+        }
+
+        const token = await teamsBotAccessTokenForTarget(gateway, resolved)
+        if (!token.ok) {
+          res.status(token.status).json(token.body)
+          return
+        }
+
+        const threaded =
+          replyToId !== '' && teamsConversationRepliesInThreads(resolved, conversationId)
+        const conversationsRoot = `${stripTrailingSlashes(serviceUrl)}/v3/conversations`
+        const url = threaded
+          ? `${conversationsRoot}/${encodeURIComponent(
+              threadConversationId || conversationId
+            )}/activities/${encodeURIComponent(replyToId)}`
+          : `${conversationsRoot}/${encodeURIComponent(conversationId)}/activities`
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: providerJsonHeaders(token.accessToken),
+          body: JSON.stringify(
+            threaded ? { type: 'message', text, replyToId } : { type: 'message', text }
+          ),
+        })
+        const body = (await response.json().catch(() => ({}))) as {
+          id?: string
+          error?: string
+        }
+        if (!response.ok) {
+          res.status(502).json({
+            error: 'teams_send_failed',
+            providerError: body.error || `http_${response.status}`,
+          })
+          return
+        }
+        res.status(200).json({ ok: true, id: body.id ?? null })
       } catch (err) {
         next(err)
       }
