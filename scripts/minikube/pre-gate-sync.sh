@@ -832,8 +832,8 @@ if [[ "${cluster_changed}" == "true" ]]; then
   assert_hcc_gateway_np08_routes
 
   hcc_edge_protocol="$(${KC} get deployment host-context-controller -n control-plane -o json | \
-    jq -er '[.spec.template.spec.containers[]?.env[]? | \
-      select(.name == "CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL") | .value] | \
+    jq -er '[.spec.template.spec.containers[]?.env[]? |
+      select(.name == "CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL") | .value] |
       if length == 1 then .[0] else error("protocol selector must be explicit") end')"
   if [[ "${hcc_edge_protocol}" == "dedicated-header-v1" ]]; then
     # Upgrade order: the producer cohort must be fully Ready before the strict
