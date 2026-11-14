@@ -29,6 +29,7 @@ set -euo pipefail
 printf 'kubectl %s\n' "$*" >>"$CALL_LOG"
 case " $* " in
   *' create --dry-run=client '*) cat "$INSTANCE_FIXTURE" ;;
+  *' apply -f - '*) cat >/dev/null ;;
   *' get globalfilesystem gfs -o name '*) printf 'globalfilesystem.clerum.io/gfs\n' ;;
   *' get globalfilesystem gfs -o jsonpath={.status.phase} '*) printf 'Ready' ;;
   *' get deployment gfsc-writer '*) printf 'gfs-controller-db\n' ;;

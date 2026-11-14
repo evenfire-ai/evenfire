@@ -286,7 +286,23 @@ if [ "$verb" = get ] || [ "$verb" = patch ]; then
 fi
 
 if [ "$verb" = create ] || [ "$verb" = apply ]; then
-  objects="$(manifests)"
+  if [ "$verb" = apply ] && [ "$file" = - ]; then
+    payload="$(cat)"
+    # kubectl validates a v1/List as a whole on the client, which rejects a
+    # Context missing its required mcpServers even when the live object has it.
+    # Separate JSON documents are validated per resource instead.
+    if ! printf '%s\n' "$payload" | "$TEST_JQ" -s -e '
+      all(.[]; if .kind == "List" then
+        all(.items[]; .kind != "Context" or .metadata.namespace != "mcp-server" or
+          .metadata.name != "context1" or (.spec | has("mcpServers")))
+        else true end)' >/dev/null; then
+      printf 'fixture: Context List fails client validation without mcpServers\n' >&2
+      exit 1
+    fi
+    objects="$(printf '%s\n' "$payload" | manifests)"
+  else
+    objects="$(manifests)"
+  fi
   while IFS= read -r desired; do
     kind="$(printf '%s\n' "$desired" | "$TEST_JQ" -r '.kind')"
     name="$(printf '%s\n' "$desired" | "$TEST_JQ" -r '.metadata.name')"

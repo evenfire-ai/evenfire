@@ -161,10 +161,13 @@ apply_bootstrap_instances() (
     fi
   fi
 
+  # Keep each resource as its own JSON document. A v1/List forces kubectl's
+  # client-side validation, which rejects the intentionally omitted required
+  # mcpServers field before the server can validate the merged Context.
   if [ "$base_count" -gt 0 ]; then
-    kubectl --context "$context" apply -f - <<<"$base_apply" || return 1
+    jq -c '.items[]' <<<"$base_apply" | kubectl --context "$context" apply -f - || return 1
   fi
   if [ "$seed_count" -gt 0 ]; then
-    kubectl --context "$context" apply -f - <<<"$seed_apply" || return 1
+    jq -c '.items[]' <<<"$seed_apply" | kubectl --context "$context" apply -f - || return 1
   fi
 )
