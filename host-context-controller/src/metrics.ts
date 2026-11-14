@@ -249,7 +249,10 @@ export const secretInformerRunning = gauge({
   labelNames: ['namespace'] as const,
 })
 
-export const secretInformerListsTotal = counter({
+export const SECRET_INFORMER_LIST_OUTCOMES = ['initial', 'relist', 'failed'] as const
+export type SecretInformerListOutcome = (typeof SECRET_INFORMER_LIST_OUTCOMES)[number]
+
+const secretInformerListsTotal = counter({
   name: 'clerum_hcc_secret_informer_lists_total',
   help:
     'Paginated Secret lists of a resume-mode SecretInformer, by namespace and outcome ' +
@@ -257,11 +260,36 @@ export const secretInformerListsTotal = counter({
   labelNames: ['namespace', 'outcome'] as const,
 })
 
-export const secretInformerResumesTotal = counter({
+const secretInformerResumesTotal = counter({
   name: 'clerum_hcc_secret_informer_resumes_total',
   help: 'Secret watches of a resume-mode SecretInformer reopened from the last resourceVersion seen',
   labelNames: ['namespace'] as const,
 })
+
+/**
+ * Exposes the list and resume series of one resume-mode SecretInformer at 0.
+ * The namespaces are known only where the informer is built, so its
+ * constructor calls this; a replay-mode informer never emits these series.
+ */
+export function exposeSecretInformerResumeSeries(namespace: string): void {
+  for (const outcome of SECRET_INFORMER_LIST_OUTCOMES) {
+    secretInformerListsTotal.inc({ namespace, outcome }, 0)
+  }
+  secretInformerResumesTotal.inc({ namespace }, 0)
+}
+
+/** Counts one Secret list of a resume-mode informer; reachable only through this typed helper. */
+export function countSecretInformerList(
+  namespace: string,
+  outcome: SecretInformerListOutcome
+): void {
+  secretInformerListsTotal.inc({ namespace, outcome })
+}
+
+/** Counts one resumed Secret watch; reachable only through this helper. */
+export function countSecretInformerResume(namespace: string): void {
+  secretInformerResumesTotal.inc({ namespace })
+}
 
 export const deploymentInformerRunning = gauge({
   name: 'clerum_hcc_deployment_informer_running',
@@ -271,21 +299,50 @@ export const deploymentInformerRunning = gauge({
   labelNames: ['namespace'] as const,
 })
 
-export const secretAccessProbesTotal = counter({
+export const SECRET_ACCESS_PROBE_OUTCOMES = ['allowed', 'denied', 'failed', 'no-target'] as const
+export type SecretAccessProbeOutcome = (typeof SECRET_ACCESS_PROBE_OUTCOMES)[number]
+
+const secretAccessProbesTotal = counter({
   name: 'clerum_hcc_secret_access_probes_total',
   help:
     'Secret access probes run while an McpServer is denied, by outcome ' +
     '(allowed, denied, failed, no-target)',
   labelNames: ['outcome'] as const,
 })
+// Every label set exists at 0 from start (see the overrun counter above).
+for (const outcome of SECRET_ACCESS_PROBE_OUTCOMES) {
+  secretAccessProbesTotal.inc({ outcome }, 0)
+}
 
-export const mcpserverRolloutRereadsTotal = counter({
+/** Counts one Secret access probe; the counter is reachable only through this typed helper. */
+export function countSecretAccessProbe(outcome: SecretAccessProbeOutcome): void {
+  secretAccessProbesTotal.inc({ outcome })
+}
+
+export const MCPSERVER_ROLLOUT_REREAD_OUTCOMES = [
+  'unchanged',
+  'moved',
+  'deleted',
+  'failed',
+] as const
+export type McpServerRolloutRereadOutcome = (typeof MCPSERVER_ROLLOUT_REREAD_OUTCOMES)[number]
+
+const mcpserverRolloutRereadsTotal = counter({
   name: 'clerum_hcc_mcpserver_rollout_rereads_total',
   help:
     'Periodic Deployment reads of McpServers at a terminal RolloutIncomplete, by outcome ' +
     '(unchanged, moved, deleted, failed)',
   labelNames: ['outcome'] as const,
 })
+// Every label set exists at 0 from start (see the overrun counter above).
+for (const outcome of MCPSERVER_ROLLOUT_REREAD_OUTCOMES) {
+  mcpserverRolloutRereadsTotal.inc({ outcome }, 0)
+}
+
+/** Counts one terminal-rollout re-read; the counter is reachable only through this typed helper. */
+export function countMcpServerRolloutReread(outcome: McpServerRolloutRereadOutcome): void {
+  mcpserverRolloutRereadsTotal.inc({ outcome })
+}
 
 export const mcpserverMissingSecret = gauge({
   name: 'clerum_hcc_mcpserver_missing_secret',

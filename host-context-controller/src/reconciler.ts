@@ -31,11 +31,12 @@ import {
   shouldFailClosedForSecretFailure,
 } from './mcpServerSafety'
 import {
+  type SecretAccessProbeOutcome,
   type VerdictCallSite,
   countMcpServerVerdictCallFailure,
+  countSecretAccessProbe,
   createsTotal,
   mcpserverMissingSecret,
-  secretAccessProbesTotal,
 } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
@@ -132,8 +133,6 @@ export type McpServerMutationOptions = {
 
 /** A published verdict only a change outside HCC can move. See verdictsAwaitingExternalChange. */
 export type VerdictAwaitingExternalChange = 'RolloutIncomplete' | 'SecretAccessDenied'
-
-export type SecretAccessProbeOutcome = 'allowed' | 'denied' | 'failed' | 'no-target'
 
 /**
  * Transport error codes that mean the request got no answer from the
@@ -619,7 +618,7 @@ export class McpServerReconciler {
    */
   async probeSecretAccess(names: string[]): Promise<SecretAccessProbeOutcome> {
     const outcome = await this.runSecretAccessProbe(names)
-    secretAccessProbesTotal.inc({ outcome })
+    countSecretAccessProbe(outcome)
     return outcome
   }
 

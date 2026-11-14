@@ -64,6 +64,7 @@ import {
   type NetworkPolicyPassOverrunPhase,
   type NetworkPolicyPassOverrunSeverity,
   contextMetadataOnlyEventsTotal,
+  countMcpServerRolloutReread,
   countNetworkPolicyPassOverrun,
   hostDeleteCleanupTotal,
   hostFleetLifecycleCatchTotal,
@@ -75,7 +76,6 @@ import {
   initialConvergencePassResultsTotal,
   initialConvergenceRetriesTotal,
   initialConvergenceSwallowedTotal,
-  mcpserverRolloutRereadsTotal,
   netPolDefaultsOnlyTickDurationSeconds,
   netPolDefaultsOnlyTicksTotal,
   netPolResyncTicksSkippedTotal,
@@ -2876,7 +2876,7 @@ export class McpServerWatcher implements McpServerProvider {
     const outcomes = results.map(result =>
       result.status === 'fulfilled' ? result.value : 'failed'
     )
-    for (const outcome of outcomes) if (outcome) mcpserverRolloutRereadsTotal.inc({ outcome })
+    for (const outcome of outcomes) if (outcome) countMcpServerRolloutReread(outcome)
     const failed = outcomes.filter(outcome => outcome === 'failed').length
     if (failed === 0) return
     hccLogger.warn('[K8s] Terminal rollout re-read failed', {

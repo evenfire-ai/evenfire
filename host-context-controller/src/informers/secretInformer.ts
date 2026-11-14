@@ -28,10 +28,11 @@
 import * as k8s from '@kubernetes/client-node'
 import { hccLogger } from '../logger'
 import {
+  countSecretInformerList,
+  countSecretInformerResume,
+  exposeSecretInformerResumeSeries,
   secretInformerEventsTotal,
-  secretInformerListsTotal,
   secretInformerReconnectsTotal,
-  secretInformerResumesTotal,
   secretInformerRunning,
 } from '../metrics'
 
@@ -144,6 +145,7 @@ export class SecretInformer {
     deps?: SecretInformerDeps
   ) {
     this.list = mode.mode === 'resume' ? mode.list : null
+    if (mode.mode === 'resume') exposeSecretInformerResumeSeries(namespace)
     if (deps?.watch) {
       this.watch = deps.watch
     } else {
@@ -246,7 +248,7 @@ export class SecretInformer {
     }
 
     try {
-      if (resumed) secretInformerResumesTotal.inc({ namespace: this.namespace })
+      if (resumed) countSecretInformerResume(this.namespace)
       const request = await this.watch.watch(path, queryParams, watchCallback, doneCallback)
       // Client 1.4.0: HTTP 403 / fetch failure calls done(err) then resolves.
       // Resetting here would pin every informer at 1s forever.
@@ -357,7 +359,7 @@ export class SecretInformer {
     try {
       ;({ secrets: listedSecrets, resourceVersion: listVersion } = await this.listAllSecrets(list))
     } catch (err) {
-      secretInformerListsTotal.inc({ namespace: this.namespace, outcome: 'failed' })
+      countSecretInformerList(this.namespace, 'failed')
       // A failed list is never treated as empty: that would synthesize
       // DELETED for every Secret and fail the fleet closed.
       hccLogger.error(
@@ -376,7 +378,7 @@ export class SecretInformer {
     this.cache = listedSecrets
     this.resumeVersion = listVersion
     this.listed = true
-    secretInformerListsTotal.inc({ namespace: this.namespace, outcome })
+    countSecretInformerList(this.namespace, outcome)
     for (const [name, entry] of listedSecrets) {
       const cached = previous.get(name)
       if (cached === undefined) {
