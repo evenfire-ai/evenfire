@@ -13,10 +13,10 @@ const THRESHOLD = 4096
 const WORKSPACE = '/workspace'
 
 describe('resolveStepSpilloverConfig', () => {
-  it('defaults to enabled, 32 KiB threshold and 16 MiB budget', () => {
+  it('defaults to enabled, 128 KiB threshold and 16 MiB budget', () => {
     expect(resolveStepSpilloverConfig({})).toEqual({
       enabled: true,
-      thresholdBytes: 32768,
+      thresholdBytes: 131072,
       budgetBytes: 16777216,
     })
   })
@@ -42,16 +42,16 @@ describe('resolveStepSpilloverConfig', () => {
   it('accepts sizes within bounds', () => {
     expect(
       resolveStepSpilloverConfig({
-        CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD: '131072',
+        CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD: '65536',
         CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES: '1048576',
       })
-    ).toMatchObject({ thresholdBytes: 131072, budgetBytes: 1048576 })
+    ).toMatchObject({ thresholdBytes: 65536, budgetBytes: 1048576 })
   })
 
   it.each(['abc', '4095', '1048577', '8192.5', '-1'])('ignores threshold %j', value => {
     expect(
       resolveStepSpilloverConfig({ CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD: value }).thresholdBytes
-    ).toBe(32768)
+    ).toBe(131072)
   })
 
   it.each(['abc', '1048575', '268435457'])('ignores budget %j', value => {

@@ -242,7 +242,7 @@ describe('WorkflowService step spillover — results are kept in memory', () => 
     'writes nothing to the output folder and drops the results when the step %s',
     async (_label, responses, status) => {
       const llm = provider([...responses])
-      const payload = 'L'.repeat(100 * 1024)
+      const payload = 'L'.repeat(300 * 1024)
 
       const res = await service(llm, client(payload)).executeStep({
         stepId: 'review',
@@ -280,7 +280,7 @@ describe('WorkflowService step spillover — results are kept in memory', () => 
       return { content: 'done', tool_calls: null, usage, finish_reason: 'stop' }
     }) as never)
 
-    const res = await service(llm, client('L'.repeat(100 * 1024))).executeStep(
+    const res = await service(llm, client('L'.repeat(300 * 1024))).executeStep(
       { stepId: 'review', instruction: 'go', mcpServers: SERVERS },
       undefined,
       { signal: controller.signal }
@@ -310,7 +310,7 @@ describe('WorkflowService step spillover — results are kept in memory', () => 
       return { content: 'done', tool_calls: null, usage, finish_reason: 'stop' }
     }) as never)
 
-    const res = await service(llm, client('L'.repeat(100 * 1024))).executeStep({
+    const res = await service(llm, client('L'.repeat(300 * 1024))).executeStep({
       stepId: 'review',
       instruction: 'go',
       mcpServers: SERVERS,

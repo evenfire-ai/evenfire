@@ -131,8 +131,8 @@ afterEach(async () => {
 })
 
 describe('WorkflowService step spillover — default (enabled)', () => {
-  it('spills a 100 KiB MCP result, then offers the read tool', async () => {
-    const payload = big(100 * 1024)
+  it('spills a 300 KiB MCP result, then offers the read tool', async () => {
+    const payload = big(300 * 1024)
     const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: { path: 'a' } }] },
@@ -181,8 +181,29 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     expect(await fs.readdir(outputDir)).toEqual([])
   })
 
+  it('keeps a 100 KiB result inline under the default 128 KiB threshold', async () => {
+    const payload = big(100 * 1024)
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: 'done', tool_calls: null },
+    ])
+
+    const res = await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    expect(toolResultMessages(llm)).toEqual([
+      `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`,
+    ])
+    expect(offeredTools(llm)[1]).not.toContain(READ_TOOL)
+  })
+
   it('makes the read tool callable under an allowlist only after a spill', async () => {
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(64 * 1024) } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(192 * 1024) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: READ_TOOL, arguments: { ref: FIRST_REF } }] },
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
@@ -212,7 +233,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     // Before the first spill the read tool is outside the allowlist.
     expect(records[0]?.result).toMatchObject({ success: false })
     expect(JSON.stringify(records[0]?.result)).toContain('is not allowed in this step')
-    // After the spill it is callable (64 KiB > threshold, so a whole read is refused
+    // After the spill it is callable (192 KiB > threshold, so a whole read is refused
     // by the size limit, not by the allowlist).
     expect(records[2]?.result).toMatchObject({ success: false })
     expect(JSON.stringify(records[2]?.result)).toContain('pass range')
@@ -222,7 +243,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
   })
 
   it('returns a byte range and records only ref and size', async () => {
-    const payload = Array.from({ length: 50 * 1024 }, (_, i) =>
+    const payload = Array.from({ length: 150 * 1024 }, (_, i) =>
       String.fromCharCode(97 + (i % 26))
     ).join('')
     const serialized = JSON.stringify(payload)
@@ -254,7 +275,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
   })
 
   it('answers a whole read of a large blob with a recoverable error', async () => {
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(100 * 1024) } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(300 * 1024) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
       { content: null, tool_calls: [{ name: READ_TOOL, arguments: { ref: FIRST_REF } }] },
@@ -274,7 +295,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
   })
 
   it('does not spill a large tool error', async () => {
-    const payload = big(100 * 1024)
+    const payload = big(300 * 1024)
     const client = mockMcpClient([{ name: 'read' }], {
       read: { content: payload, isError: true },
     })
@@ -328,7 +349,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
         sizeBytes: 12,
         createdAt: '2026-05-13T00:00:00.000Z',
       },
-      notes: big(64 * 1024),
+      notes: big(192 * 1024),
     }
     const client = mockMcpClient([{ name: 'make_report' }], { make_report: { content: artifact } })
     const llm = mockLlmProvider([
@@ -354,7 +375,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
 describe('WorkflowService step spillover — kill switch', () => {
   it('keeps the full result inline and never offers the read tool', async () => {
     vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED', 'false')
-    const payload = big(100 * 1024)
+    const payload = big(300 * 1024)
     const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
@@ -434,7 +455,7 @@ describe('WorkflowService step spillover — first-party flag', () => {
   it('still spills when the first-party spillover is disabled', async () => {
     vi.stubEnv('CLERUM_TOOL_SPILLOVER_ENABLED', 'false')
     config.toolSpilloverEnabled = false
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(100 * 1024) } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(300 * 1024) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
       { content: 'done', tool_calls: null },
@@ -454,8 +475,8 @@ describe('WorkflowService step spillover — first-party flag', () => {
 
 describe('WorkflowService step spillover — other executions', () => {
   it('keeps the blobs of an execution when another execution of the same step ends', async () => {
-    const payloadA = 'A'.repeat(100 * 1024)
-    const payloadB = 'B'.repeat(100 * 1024)
+    const payloadA = 'A'.repeat(300 * 1024)
+    const payloadB = 'B'.repeat(300 * 1024)
     const client = mockMcpClient([{ name: 'a' }, { name: 'b' }], {
       a: { content: payloadA },
       b: { content: payloadB },
@@ -575,7 +596,7 @@ describe('WorkflowService step spillover — metrics', () => {
       outputBytes: await metricTotal('clerum_tool_output_bytes'),
     }
 
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(100 * 1024) } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(300 * 1024) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
       {
