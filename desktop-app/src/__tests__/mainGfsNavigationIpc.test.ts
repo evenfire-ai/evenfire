@@ -359,6 +359,41 @@ describe('main.ts GFS navigation-generation composition', () => {
     ).toHaveLength(1)
   })
 
+  it('honors Exit when retry becomes available while the exit-only dialog is open', async () => {
+    if (!harness.sessionPreclearRecoveryRequired) {
+      throw new Error('main.ts did not register the session recovery callback')
+    }
+    harness.showMessageBox.mockClear()
+    harness.appQuit.mockClear()
+    harness.exitRecovery.mockClear()
+    harness.retryRecovery.mockClear()
+    let resolveDialog!: (value: { response: number }) => void
+    harness.showMessageBox.mockImplementationOnce(
+      () => new Promise(resolve => (resolveDialog = resolve)) as never
+    )
+    const notice = { transitionId: 48, sessionGeneration: 2, reason: 'environment-change' }
+    harness.sessionPreclearRecoveryRequired(notice, {
+      attemptsRemaining: 1,
+      retryAvailable: false,
+    })
+
+    await vi.waitFor(() => expect(harness.showMessageBox).toHaveBeenCalledOnce())
+    expect(harness.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ buttons: ['Exit'] })
+    )
+    harness.sessionPreclearRecoveryRequired(notice, {
+      attemptsRemaining: 1,
+      retryAvailable: true,
+    })
+    resolveDialog({ response: 0 })
+
+    await vi.waitFor(() => expect(harness.appQuit).toHaveBeenCalledOnce())
+    expect(harness.exitRecovery).toHaveBeenCalledOnce()
+    expect(harness.exitRecovery).toHaveBeenCalledWith(notice)
+    expect(harness.retryRecovery).not.toHaveBeenCalled()
+    expect(harness.showMessageBox).toHaveBeenCalledOnce()
+  })
+
   it('keeps post-invalidation App and resource links above the main queue reset floors', () => {
     const mainWindow = harness.windows[0]
     const ownContents = mainWindow?.webContents

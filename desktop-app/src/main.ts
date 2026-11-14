@@ -140,6 +140,7 @@ function showSessionRecoveryDialog(
     try {
       while (!recovery.terminal) {
         const canRetry = recovery.state?.retryAvailable === true
+        const displayedActions = canRetry ? (['Retry', 'Exit'] as const) : (['Exit'] as const)
         const result = await dialog.showMessageBox({
           type: 'warning',
           title: 'Session could not be verified',
@@ -148,19 +149,15 @@ function showSessionRecoveryDialog(
           detail: canRetry
             ? `You can retry the check (${recovery.state?.attemptsRemaining ?? 0} attempts remain) or exit.\n\nNo Markdown draft will be recovered after exiting.`
             : 'An authority check is still unresolved or this recovery has no attempts left. Retry may become available after an outstanding check settles; you can exit now. No Markdown draft will be recovered after exiting.',
-          buttons: canRetry ? ['Retry', 'Exit'] : ['Exit'],
+          buttons: [...displayedActions],
           defaultId: canRetry ? 0 : 0,
           cancelId: canRetry ? 1 : 0,
           noLink: true,
         })
         if (recovery.terminal) break
-        if (!canRetry && recovery.state?.retryAvailable && result.response === 0) {
-          // A formerly unresolved request settled while the Exit-only notice
-          // was open. Re-present the now-available Retry choice before honoring
-          // the user's response.
-          continue
-        }
-        if (!canRetry || result.response !== 0) {
+        const selectedAction = displayedActions[result.response] ?? 'Exit'
+        if (selectedAction === 'Exit') {
+          recovery.terminal = true
           appService.exitSessionPreclearRecovery(notice)
           app.quit()
           break
