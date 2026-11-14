@@ -15,7 +15,7 @@ import {
   HostReconciler,
   destructiveCleanupAllowed,
 } from './hostReconciler'
-import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
+import { K8sRequestTimeoutError } from './k8s/k8sRequestDeadline'
 import { registry } from './metrics'
 import { HostCRD } from './types'
 
@@ -280,7 +280,7 @@ describe('HostReconciler fleet failure isolation', () => {
 
   it('continues with Host B when Host A reaches its Kubernetes request deadline', async () => {
     const reconciler = makeBasicReconciler()
-    const timeout = new HostK8sRequestTimeoutError('AppsV1Api.readNamespacedDeployment', 30_000)
+    const timeout = new K8sRequestTimeoutError('AppsV1Api.readNamespacedDeployment', 30_000)
     const reconcile = vi.spyOn(reconciler, 'reconcile').mockImplementation(async host => {
       if (host.name === 'host-a') throw timeout
     })
