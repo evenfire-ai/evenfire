@@ -18,7 +18,7 @@
       "kind": "deprecated_model_enabled",
       "provider": "claude",
       "model": "claude-fable-5",
-      "displayName": "Claude Fable 5"
+      "displayName": "claude-fable-5"
     },
     {
       "kind": "stale_discovery_enabled",

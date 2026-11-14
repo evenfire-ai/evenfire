@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react'
-import type { AdminAttentionItem, AdminCatalogModelAttentionItem, LlmAllowedModel } from '@lib/api'
+import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
+import type { AdminAttentionItem, LlmAllowedModel } from '@lib/api'
+import type { GroupedAttentionItems } from '@lib/llmModelAttention'
 
 export type LlmModelsTab = 'catalog' | 'discovery'
 
@@ -22,14 +24,28 @@ export type CatalogAttentionBannerProps = {
   models?: LlmAllowedModel[]
 }
 
-export type CatalogModelAttentionGroupProps = {
-  items: AdminCatalogModelAttentionItem[]
-  /** The group's explanation, given the item count. */
-  lede: (count: number) => ReactNode
+export type CatalogAttentionDialogProps = {
+  open: boolean
+  onDismiss: () => void
+  groups: GroupedAttentionItems
   modelIdsByPair: Map<string, string>
 }
 
 export type AttentionReviewLinkProps = {
   item: AdminAttentionItem
   modelIdsByPair: Map<string, string>
+}
+
+export type AttentionSectionProps = {
+  lede: ReactNode
+  columns: TableHeaderColumn[]
+  children: ReactNode
+}
+
+export type AttentionProviderCellProps = {
+  provider: string
+}
+
+export type AttentionModelCellProps = {
+  item: AdminAttentionItem
 }
