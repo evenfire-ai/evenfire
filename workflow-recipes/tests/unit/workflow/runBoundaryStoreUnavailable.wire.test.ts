@@ -299,6 +299,7 @@ async function runWire(
   }
   let snippetRuns = 0
   const snippetRunner = {
+    healthCheck: vi.fn().mockResolvedValue({ status: 'healthy' }),
     execute: vi.fn(async () => {
       snippetRuns += 1
       order.push('snippet')
