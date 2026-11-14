@@ -240,18 +240,25 @@ new Desktop has operator authority in Files again. An older Control API has no
 `/me/gfs/home`: the new Desktop shows My home as unavailable, while Shared with
 me and its row actions keep working with the drive each row reports.
 
-After roll-forward, the planned startup repair runs once per Control API
-process start, before its first regular tick, in batches of 50. For ready or
-conflict rows, it cleans home entries for users retired or deleted during the
-window. It marks a ready home with a missing or narrowed owner grant as
-`ownership_conflict`. An operator restores it as described under conflicts;
-the repair does not re-grant it. It is not run on every tick.
+After roll-forward, each Control API process runs one full startup repair
+pass. It runs at the start of the first reconciler tick in which that process
+holds the reconciler lock, before the tick provisions homes, and reads the
+home registry in batches of 50. For ready or conflict rows, it cleans home
+entries for users retired or deleted during the window. It marks a ready home
+with a missing or narrowed owner grant as `ownership_conflict`. An operator
+restores it as described under conflicts; the repair does not re-grant it.
 
-Startup repair is conditional on its T1 cost gate: a pass over 10,000 ready
-homes with nothing to repair must finish in under five seconds using index
-scans. If that gate fails, the plan removes the repair and accepts a documented
-rollback gap instead. Check the release's T1 evidence before relying on the
-repair.
+The full pass does not repeat. A row whose repair fails is logged as
+`user_home_startup_repair_failed` and kept in a retry list. Each later tick
+(every 60 seconds) retries only the rows in that list and drops the ones that
+succeed. A row that keeps failing therefore logs
+`user_home_startup_repair_failed` once a minute until its cause is fixed or the
+process restarts, and a restart runs a new full pass.
+
+The pass uses index scans only: the real-PostgreSQL suite
+`control-api/test/gfs.userHomeStartupCost.realPostgres.integration.test.ts`
+scans 10,000 ready homes with nothing to repair in under five seconds and fails
+on any sequential scan.
 
 A hard delete during rollback can also remove the user's agent associations
 before repair runs: the `user_agents` foreign key cascades on deletion
