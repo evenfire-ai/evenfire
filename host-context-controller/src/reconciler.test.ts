@@ -198,23 +198,52 @@ function secretResolvedTrue(): StatusConditionFixture {
   }
 }
 
+/**
+ * A status subresource that holds the conditions and HCC's applied-credentials
+ * record (L1a), as a CRD that declares both fields stores them.
+ */
 function installLiveStatus(
   customApi: ReturnType<typeof createMockCustomApi>,
-  initial: StatusConditionFixture[] = []
-): { current: () => StatusConditionFixture[] } {
+  initial: StatusConditionFixture[] = [],
+  options: { record?: string; prunesRecord?: boolean } = {}
+): {
+  current: () => StatusConditionFixture[]
+  record: () => string | undefined
+  recordPatches: () => number
+} {
   let conditions = [...initial]
+  let record = options.record
+  let recordPatches = 0
   customApi.getNamespacedCustomObjectStatus.mockImplementation(async () => ({
     metadata: { resourceVersion: '1' },
-    status: { conditions },
+    status: { conditions, ...(record !== undefined && { appliedCredentialsRevision: record }) },
   }))
   customApi.patchNamespacedCustomObjectStatus.mockImplementation(
     async (req: { body: Array<{ op?: string; path?: string; value?: unknown }> }) => {
+      const recordOp = req.body.find(
+        candidate =>
+          candidate.path === '/status/appliedCredentialsRevision' ||
+          (candidate.path === '/status' &&
+            (candidate.value as { appliedCredentialsRevision?: string })
+              ?.appliedCredentialsRevision !== undefined)
+      )
+      if (recordOp) {
+        recordPatches += 1
+        if (options.prunesRecord) return {}
+        if (recordOp.op === 'remove') record = undefined
+        else if (recordOp.path === '/status')
+          record = (recordOp.value as { appliedCredentialsRevision: string })
+            .appliedCredentialsRevision
+        else record = recordOp.value as string
+        return {}
+      }
       const op = req.body.find(
         candidate =>
           candidate.op === 'add' &&
           (candidate.path === '/status' || candidate.path === '/status/conditions')
       )
       if (!op) throw new Error('status condition add operation was not emitted')
+      if (op.path === '/status') record = undefined
       conditions = (
         op.path === '/status'
           ? ((op.value as { conditions?: StatusConditionFixture[] }).conditions ?? [])
@@ -223,7 +252,7 @@ function installLiveStatus(
       return {}
     }
   )
-  return { current: () => conditions }
+  return { current: () => conditions, record: () => record, recordPatches: () => recordPatches }
 }
 
 function persistReadySeed(server: McpServerCRD): McpServerCRD {
@@ -1296,6 +1325,85 @@ describe('PR-B B1 — writeStatusCondition', () => {
       customApi: asCustomApi(customApi),
     })
   })
+
+  it.each([
+    [
+      'with a status object',
+      { status: { conditions: [] } },
+      {
+        op: 'add',
+        path: '/status/conditions',
+        value: [
+          {
+            type: 'Ready',
+            status: 'True',
+            reason: 'ReconcileSuccess',
+            message: 'ok',
+            lastTransitionTime: '2026-01-02T03:04:05.000Z',
+            observedGeneration: 3,
+          },
+        ],
+      },
+    ],
+    [
+      'without a status object',
+      {},
+      {
+        op: 'add',
+        path: '/status',
+        value: {
+          conditions: [
+            {
+              type: 'Ready',
+              status: 'True',
+              reason: 'ReconcileSuccess',
+              message: 'ok',
+              lastTransitionTime: '2026-01-02T03:04:05.000Z',
+              observedGeneration: 3,
+            },
+          ],
+        },
+      },
+    ],
+  ])(
+    'T-A1.12 sends the same patch body for one condition write %s',
+    async (_label, stored, addOperation) => {
+      vi.useFakeTimers({ now: new Date('2026-01-02T03:04:05.000Z') })
+      try {
+        customApi.getNamespacedCustomObjectStatus.mockResolvedValue({
+          metadata: { resourceVersion: '7' },
+          ...stored,
+        })
+        customApi.patchNamespacedCustomObjectStatus.mockResolvedValue({})
+        const server = makeServer({ name: 'pg' })
+        server.uid = 'uid-pg'
+        server.generation = 3
+
+        await expect(
+          reconciler.writeStatusCondition(server, {
+            type: 'Ready',
+            status: 'True',
+            reason: 'ReconcileSuccess',
+            message: 'ok',
+          })
+        ).resolves.toBe('wrote')
+
+        expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+        expect(
+          JSON.stringify(customApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body)
+        ).toBe(
+          JSON.stringify([
+            { op: 'test', path: '/metadata/uid', value: 'uid-pg' },
+            { op: 'test', path: '/metadata/generation', value: 3 },
+            { op: 'test', path: '/metadata/resourceVersion', value: '7' },
+            addOperation,
+          ])
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
 
   it('bumps DeploymentReady lastTransitionTime when reason changes at the same status', async () => {
     customApi.getNamespacedCustomObjectStatus.mockResolvedValueOnce({
@@ -5156,5 +5264,316 @@ describe('#1338: transient failures of the other managed reconcile calls', () =>
     expect(f.customApi.patchNamespacedCustomObject).toHaveBeenCalledTimes(2)
     expect(f.reconciler.getStatus(server)).toMatchObject({ ready: false })
     expect(f.reconciler.getStatus(server).message).toContain('Pre-deploy handshake failed')
+  })
+})
+
+describe('L1a: the applied credentials record in McpServer status (content hash)', () => {
+  let logs: ReturnType<typeof captureH3Logs>
+  beforeEach(() => {
+    logs = captureH3Logs()
+  })
+  afterEach(() => {
+    logs.restore()
+    vi.useRealTimers()
+  })
+
+  const RECORD = /^sha256:[0-9a-f]{64}$/
+
+  function rotate(f: ReturnType<typeof h3Cluster>, value = 'rotated-fixture-input-value') {
+    f.coreApi.readNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => ({
+      metadata: { name, resourceVersion: '2' },
+      data: { password: storedSecret(value) },
+    }))
+  }
+
+  function rewriteSameData(f: ReturnType<typeof h3Cluster>) {
+    f.coreApi.readNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => ({
+      metadata: { name, resourceVersion: '9' },
+      data: { password: storedSecret('fixture-input-value') },
+    }))
+  }
+
+  /** A new process on the same cluster, given the object as the watcher caches it. */
+  function restart(f: ReturnType<typeof h3Cluster>, server: McpServerCRD, withRecord = true) {
+    const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
+      appsApi: asAppsApi(f.appsApi),
+      coreApi: asCoreApi(f.coreApi),
+      customApi: asCustomApi(f.customApi),
+    })
+    reconciler.setIncompleteReconciliationListener(vi.fn())
+    const record = f.status.record()
+    const persisted = {
+      ...server,
+      status: {
+        conditions: f.status.current(),
+        ...(withRecord && record !== undefined && { appliedCredentialsRevision: record }),
+      },
+    } as McpServerCRD
+    return { reconciler, persisted }
+  }
+
+  async function readyWithRecord(server = h3Server()) {
+    const f = await h3ReadyCluster(server)
+    // Witness that the writer ran on the first completed reconcile.
+    expect(f.status.record()).toMatch(RECORD)
+    expect(f.status.recordPatches()).toBe(1)
+    return f
+  }
+
+  function recordWriteIn(req: any): boolean {
+    return req.body.some(
+      (op: any) =>
+        op.path === '/status/appliedCredentialsRevision' ||
+        op.value?.appliedCredentialsRevision !== undefined
+    )
+  }
+
+  it.each([
+    [
+      'the Service read',
+      (f: ReturnType<typeof h3Cluster>) =>
+        f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService')),
+    ],
+    [
+      'the Deployment read',
+      (f: ReturnType<typeof h3Cluster>) =>
+        f.appsApi.readNamespacedDeployment.mockRejectedValueOnce(
+          h3Timeout('readNamespacedDeployment')
+        ),
+    ],
+  ])(
+    'T-A1.1 after a restart, a Secret rotated while HCC was down and a timeout at %s publish not-ready',
+    async (_site, fail) => {
+      const server = h3Server()
+      const f = await readyWithRecord(server)
+      const { reconciler, persisted } = restart(f, server)
+      expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+      rotate(f)
+      fail(f)
+      const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+
+      await reconciler.reconcile(persisted)
+
+      expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
+      expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+      expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    }
+  )
+
+  it('T-A1.1 the same for a remote server whose ConfigMap read times out', async () => {
+    const base = h3Server()
+    const server = {
+      ...base,
+      spec: { ...base.spec, remote: { baseUrl: 'https://api.example.com' } },
+    }
+    const f = await readyWithRecord(server)
+    const { reconciler, persisted } = restart(f, server)
+    rotate(f)
+    f.coreApi.readNamespacedConfigMap.mockRejectedValueOnce(h3Timeout('readNamespacedConfigMap'))
+    const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+
+    await reconciler.reconcile(persisted)
+
+    expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+    expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it('T-A1.2 (the #1338 property) after a restart with the Secret unchanged, a Service timeout keeps ready', async () => {
+    const server = h3Server()
+    const f = await readyWithRecord(server)
+    const { reconciler, persisted } = restart(f, server)
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const kept = await reconcileCallFailures('resource_sync', 'verdict_kept')
+
+    await reconciler.reconcile(persisted)
+
+    expect(await reconcileCallFailures('resource_sync', 'verdict_kept')).toBe(kept + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+  })
+
+  it('T-A1.3 (migration) a persisted status without the record keeps ready on a rotated Secret, as before', async () => {
+    const server = h3Server()
+    const f = await readyWithRecord(server)
+    const { reconciler, persisted } = restart(f, server, false)
+    rotate(f)
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const kept = await reconcileCallFailures('resource_sync', 'verdict_kept')
+
+    await reconciler.reconcile(persisted)
+
+    expect(await reconcileCallFailures('resource_sync', 'verdict_kept')).toBe(kept + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+  })
+
+  it('T-A1.4 (README known limit) a rotated Secret whose first read after a restart times out keeps ready', async () => {
+    const server = h3Server()
+    const f = await readyWithRecord(server)
+    const { reconciler, persisted } = restart(f, server)
+    rotate(f)
+    f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
+    const kept = await reconcileCallFailures('secret_read', 'verdict_kept')
+
+    await reconciler.reconcile(persisted)
+
+    expect(await reconcileCallFailures('secret_read', 'verdict_kept')).toBe(kept + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+  })
+
+  it('T-A1.5 a second reconcile of an unchanged server reads and writes no record', async () => {
+    const server = h3Server()
+    const f = await readyWithRecord(server)
+    const statusReads = f.customApi.getNamespacedCustomObjectStatus.mock.calls.length
+    const secretReads = f.secretReads()
+    const conditionWrites = vi.spyOn(f.reconciler, 'writeStatusCondition')
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(secretReads + 1)
+    // Each condition write reads the status once; the record adds no read.
+    expect(conditionWrites).toHaveBeenCalled()
+    expect(f.customApi.getNamespacedCustomObjectStatus.mock.calls.length - statusReads).toBe(
+      conditionWrites.mock.calls.length
+    )
+    expect(f.status.recordPatches()).toBe(1)
+  })
+
+  it('T-A1.6 a rotation with HCC running records the new content hash with one patch', async () => {
+    const server = h3Server()
+    const f = await readyWithRecord(server)
+    const first = f.status.record()
+    rotate(f)
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(f.status.recordPatches()).toBe(2)
+    expect(f.status.record()).toMatch(RECORD)
+    expect(f.status.record()).not.toBe(first)
+  })
+
+  it('T-A1.7 a failed record write leaves an obligation, and the next reconcile writes it', async () => {
+    const server = h3Server()
+    const f = h3Cluster()
+    const livePatch = f.customApi.patchNamespacedCustomObjectStatus.getMockImplementation()
+    if (!livePatch) throw new Error('h3Cluster installs a status store')
+    let failRecord = true
+    f.customApi.patchNamespacedCustomObjectStatus.mockImplementation(async (req: any) => {
+      if (recordWriteIn(req) && failRecord) {
+        failRecord = false
+        throw Object.assign(new Error('internal error'), { code: 500 })
+      }
+      return livePatch(req)
+    })
+
+    await f.reconciler.reconcile(server)
+
+    expect(failRecord).toBe(false)
+    expect(f.status.record()).toBeUndefined()
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(true)
+    expect(f.listener).toHaveBeenCalledWith('h3-server')
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.status.record()).toMatch(RECORD)
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
+  it('T-A1.8 (content hash) a Secret rewritten with the same data while HCC was down still keeps ready', async () => {
+    const server = h3Server()
+    const f = await readyWithRecord(server)
+    const { reconciler, persisted } = restart(f, server)
+    rewriteSameData(f)
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const kept = await reconcileCallFailures('resource_sync', 'verdict_kept')
+
+    await reconciler.reconcile(persisted)
+
+    expect(await reconcileCallFailures('resource_sync', 'verdict_kept')).toBe(kept + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+  })
+
+  it('T-A1.9 a CRD that prunes the field costs one write attempt per process', async () => {
+    const server = h3Server()
+    const f = h3Cluster()
+    const pruning = installLiveStatus(f.customApi, [], { prunesRecord: true })
+
+    await f.reconciler.reconcile(server)
+    await f.reconciler.reconcile(server)
+    await f.reconciler.reconcile(server)
+
+    expect(f.secretReads()).toBe(3)
+    expect(pruning.recordPatches()).toBe(1)
+    expect(pruning.record()).toBeUndefined()
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+  })
+
+  it('T-A1.10 removing envSecret from the spec removes the record after the sync', async () => {
+    const server = h3Server()
+    const f = await readyWithRecord(server)
+    const withoutSecret = { ...server, spec: { ...server.spec, envSecret: undefined } }
+
+    await f.reconciler.reconcile(withoutSecret)
+
+    expect(f.status.recordPatches()).toBe(2)
+    expect(f.status.record()).toBeUndefined()
+  })
+
+  it('T-A1.11 the record is the content hash the Deployment carries, and no Secret value', async () => {
+    const server = h3Server()
+    const f = await readyWithRecord(server)
+    const record = f.status.record() ?? ''
+
+    expect(record).toMatch(RECORD)
+    expect(record).not.toContain('fixture-input-value')
+    expect(record).not.toContain(storedSecret('fixture-input-value'))
+    const deployment = f.deployments.get('h3-server')
+    expect(record).toBe(
+      `sha256:${deployment.spec.template.metadata.annotations['clerum.io/credentials-revision']}`
+    )
+  })
+
+  it('T-A1.14 a stale record whose Deployment is already up to date is cleared, so a rollout read timeout keeps ready', async () => {
+    const server = h3Server()
+    const f = await readyWithRecord(server)
+    const stale = f.status.record()
+    const livePatch = f.customApi.patchNamespacedCustomObjectStatus.getMockImplementation()
+    if (!livePatch) throw new Error('h3Cluster installs a status store')
+    // HCC applies a rotation, but the record write fails before a restart.
+    rotate(f)
+    f.customApi.patchNamespacedCustomObjectStatus.mockImplementation(async (req: any) => {
+      if (recordWriteIn(req)) throw Object.assign(new Error('internal error'), { code: 500 })
+      return livePatch(req)
+    })
+    await f.reconciler.reconcile(server)
+    expect(f.appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(f.status.record()).toBe(stale)
+    f.customApi.patchNamespacedCustomObjectStatus.mockImplementation(livePatch)
+    const { reconciler, persisted } = restart(f, server)
+    const kept = await reconcileCallFailures('rollout_read', 'verdict_kept')
+    f.appsApi.readNamespacedDeployment
+      .mockImplementationOnce(f.readDeployment)
+      .mockRejectedValueOnce(h3Timeout('readNamespacedDeployment'))
+
+    await reconciler.reconcile(persisted)
+
+    expect(f.appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(await reconcileCallFailures('rollout_read', 'verdict_kept')).toBe(kept + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+    expect(f.status.record()).toMatch(RECORD)
+    expect(f.status.record()).not.toBe(stale)
+  })
+
+  it('T-A1.15 a pre-deploy server writes the record and completes the handshake on its first reconcile', async () => {
+    const server = h3Server({ annotations: { [PRE_DEPLOY_ANNOTATION]: 'true' } })
+    const f = h3Cluster()
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.status.record()).toMatch(RECORD)
+    expect(f.customApi.patchNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
+    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
   })
 })

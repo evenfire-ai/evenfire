@@ -785,7 +785,7 @@ spec:
                   description: >-
                     Content hash (sha256:<hex>) of the spec.envSecret data that
                     host-context-controller last applied to the managed Deployment;
-                    the same value as the Deployment's clerum.io/credentials-revision
+                    the hex part is the Deployment's clerum.io/credentials-revision
                     pod-template annotation. Written by host-context-controller only.
                     Never contains Secret values. Compare for equality.
                 resolvedEgressIPs:

@@ -238,6 +238,17 @@ const DEFAULT_FULL_RECONCILE_MAX_CONCURRENCY = 10
 // Status is a read/merge/write transaction shared with other controllers.
 // Bound optimistic-conflict retries so a hot object cannot stall reconciliation.
 const STATUS_CONDITION_WRITE_MAX_ATTEMPTS = 3
+
+/**
+ * The value HCC records in `status.appliedCredentialsRevision` for a Secret
+ * content revision (L1a): the revision prefixed with its algorithm, or none
+ * when the McpServer has no envSecret (empty revision).
+ */
+function appliedCredentialsRecord(revision: string): string | undefined {
+  return revision === '' ? undefined : `sha256:${revision}`
+}
+
+type StatusWritePrecondition = { op: 'test'; path: string; value: string | number }
 /** Types HCC no longer writes and strips from every status write (#606). A future writer must not reuse `NetworkReady`; remove the entry first. */
 const RETIRED_STATUS_CONDITION_TYPES = ['NetworkReady'] as const
 export const RUNTIME_NOT_DESIRED_DISABLED_MESSAGE =
@@ -468,7 +479,14 @@ export class McpServerReconciler {
 
   // The Secret revision this process last applied to each server's Deployment,
   // so a read of another revision proves the runtime differs from the Secret.
+  // Empty after a restart: until a server's first completed Deployment sync,
+  // the record persisted in status.appliedCredentialsRevision stands in for it.
   private readonly appliedSecretRevisions = new Map<string, string>()
+
+  // The status.appliedCredentialsRevision value this process last confirmed on
+  // the CRD for each name (undefined: confirmed absent). A CRD that prunes the
+  // field therefore costs one write attempt per process, not one per reconcile.
+  private readonly confirmedCredentialsRecords = new Map<string, string | undefined>()
 
   /**
    * Published verdicts that HCC cannot finish by retrying. They are not
@@ -819,6 +837,7 @@ export class McpServerReconciler {
       }
       if (previousIdentity !== undefined && previousIdentity.uid !== server.uid) {
         this.managedSnapshot.delete(server.name)
+        this.confirmedCredentialsRecords.delete(server.name)
       }
     }
     this.statusIdentities.set(server.name, {
@@ -843,6 +862,7 @@ export class McpServerReconciler {
     this.managedSnapshot.delete(name)
     this.verdictsAwaitingExternalChange.delete(name)
     this.appliedSecretRevisions.delete(name)
+    this.confirmedCredentialsRecords.delete(name)
     const poll = this.readinessPolls.get(name)
     if (poll) {
       if (poll.timer !== undefined) clearTimeout(poll.timer)
@@ -2842,32 +2862,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         merged,
       ]
 
-      const writePreconditions: Array<{
-        op: 'test'
-        path: string
-        value: string | number
-      }> = []
-      if (server.uid !== undefined) {
-        writePreconditions.push({
-          op: 'test',
-          path: '/metadata/uid',
-          value: server.uid,
-        })
-      }
-      if (server.generation !== undefined) {
-        writePreconditions.push({
-          op: 'test',
-          path: '/metadata/generation',
-          value: server.generation,
-        })
-      }
-      if (resourceVersion !== undefined) {
-        writePreconditions.push({
-          op: 'test',
-          path: '/metadata/resourceVersion',
-          value: resourceVersion,
-        })
-      }
+      const writePreconditions = this.statusWritePreconditions(server, resourceVersion)
       const statusPatch = [
         ...writePreconditions,
         ...(hasStatusObject
@@ -2921,6 +2916,134 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       }
     }
     return decline()
+  }
+
+  /**
+   * The `test` operations every McpServer status patch carries: the uid and
+   * generation of the reconciled object and the resourceVersion just read.
+   */
+  private statusWritePreconditions(
+    server: McpServerCRD,
+    resourceVersion: string | undefined
+  ): StatusWritePrecondition[] {
+    const writePreconditions: StatusWritePrecondition[] = []
+    if (server.uid !== undefined) {
+      writePreconditions.push({
+        op: 'test',
+        path: '/metadata/uid',
+        value: server.uid,
+      })
+    }
+    if (server.generation !== undefined) {
+      writePreconditions.push({
+        op: 'test',
+        path: '/metadata/generation',
+        value: server.generation,
+      })
+    }
+    if (resourceVersion !== undefined) {
+      writePreconditions.push({
+        op: 'test',
+        path: '/metadata/resourceVersion',
+        value: resourceVersion,
+      })
+    }
+    return writePreconditions
+  }
+
+  /**
+   * L1a: record in `status.appliedCredentialsRevision` the content revision of
+   * the Secret the Deployment now carries, so a restarted process can tell a
+   * Secret that changed while HCC was down. Skips when the value this process
+   * confirmed (or, before that, the reconciled object's status) already
+   * matches. Uses the preconditions, bounded conflict retry and fence of
+   * writeStatusCondition, and like it never throws: a declined or failed write
+   * records an obligation, so the lane retries the reconcile and the write.
+   */
+  private async persistAppliedCredentialsRevision(
+    server: McpServerCRD,
+    wanted: string | undefined,
+    isCurrent: () => boolean
+  ): Promise<void> {
+    const confirmed = this.confirmedCredentialsRecords.has(server.name)
+      ? this.confirmedCredentialsRecords.get(server.name)
+      : server.status?.appliedCredentialsRevision
+    if (confirmed === wanted) return
+    for (let attempt = 1; attempt <= STATUS_CONDITION_WRITE_MAX_ATTEMPTS; attempt += 1) {
+      if (!isCurrent()) {
+        this.recordIncompletePublication(server)
+        return
+      }
+      let stored: string | undefined
+      let hasStatusObject = false
+      let resourceVersion: string | undefined
+      try {
+        const current = (await this.customApi.getNamespacedCustomObjectStatus({
+          group: 'clerum.io',
+          version: 'v1alpha1',
+          namespace: server.namespace,
+          plural: 'mcpservers',
+          name: server.name,
+        })) as {
+          metadata?: { resourceVersion?: string }
+          status?: { appliedCredentialsRevision?: string }
+        }
+        hasStatusObject = typeof current.status === 'object' && current.status !== null
+        stored = current.status?.appliedCredentialsRevision
+        resourceVersion = current.metadata?.resourceVersion
+      } catch (error) {
+        hccLogger.warn('Failed to read status — applied credentials record not written', {
+          scope: '[Reconciler]',
+          name: server.name,
+          err: error,
+        })
+        this.recordIncompletePublication(server)
+        return
+      }
+      if (!isCurrent()) {
+        this.recordIncompletePublication(server)
+        return
+      }
+      if (stored === wanted) {
+        this.confirmedCredentialsRecords.set(server.name, wanted)
+        return
+      }
+      const operation =
+        wanted === undefined
+          ? { op: 'remove', path: '/status/appliedCredentialsRevision' }
+          : hasStatusObject
+            ? { op: 'add', path: '/status/appliedCredentialsRevision', value: wanted }
+            : { op: 'add', path: '/status', value: { appliedCredentialsRevision: wanted } }
+      try {
+        await this.customApi.patchNamespacedCustomObjectStatus({
+          group: 'clerum.io',
+          version: 'v1alpha1',
+          namespace: server.namespace,
+          plural: 'mcpservers',
+          name: server.name,
+          body: [...this.statusWritePreconditions(server, resourceVersion), operation],
+        })
+        this.confirmedCredentialsRecords.set(server.name, wanted)
+        return
+      } catch (error) {
+        const errorCode = getErrorCode(error)
+        if (
+          (errorCode === 409 || errorCode === 422) &&
+          attempt < STATUS_CONDITION_WRITE_MAX_ATTEMPTS
+        ) {
+          continue
+        }
+        hccLogger.warn('Failed to write the applied credentials record', {
+          scope: '[Reconciler]',
+          name: server.name,
+          attempt,
+          maxAttempts: STATUS_CONDITION_WRITE_MAX_ATTEMPTS,
+          err: error,
+        })
+        this.recordIncompletePublication(server)
+        return
+      }
+    }
   }
 
   private recordIncompletePublication(server: McpServerCRD): 'declined' {
@@ -3211,13 +3334,26 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
 
     // Ensure resources exist and are up to date. A create or replace attempt, or
-    // a Secret revision other than the one this process last applied, means the
-    // live runtime differed from desired (or was absent), so a later transient
-    // failure in this reconcile must not keep the published verdict (#1338).
+    // a Secret revision other than the one this process last applied (after a
+    // restart: the one recorded in status), means the live runtime differed from
+    // desired (or was absent), so a later transient failure in this reconcile
+    // must not keep the published verdict (#1338, L1a).
     const knownRevision = this.appliedSecretRevisions.get(server.name)
-    let runtimeDiffers = knownRevision !== undefined && knownRevision !== secretResult.revision
+    const wantedRecord = appliedCredentialsRecord(secretResult.revision)
+    // L1a: after a restart this process has no in-memory revision; the record
+    // persisted in status says what the Deployment was last synced with.
+    const persistedRecord = server.status?.appliedCredentialsRevision
+    const differsFromRecordOnly =
+      knownRevision === undefined &&
+      persistedRecord !== undefined &&
+      persistedRecord !== wantedRecord
+    let runtimeDiffers =
+      (knownRevision !== undefined && knownRevision !== secretResult.revision) ||
+      differsFromRecordOnly
+    let writeAttempted = false
     const noteRuntimeWrite = (): void => {
       runtimeDiffers = true
+      writeAttempted = true
     }
     let deploymentApply: ResourceApplyResult | undefined
     try {
@@ -3287,6 +3423,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         deploymentApply === 'up_to_date'
       ) {
         this.appliedSecretRevisions.set(server.name, secretResult.revision)
+        // A difference that came only from the record is disproved when the
+        // Deployment compared up to date with no write: it carries the content
+        // revision just read (for example a record whose write failed before a
+        // restart).
+        if (deploymentApply === 'up_to_date' && differsFromRecordOnly && !writeAttempted) {
+          runtimeDiffers = false
+        }
+        await this.persistAppliedCredentialsRevision(server, wantedRecord, isCurrent)
       }
     } catch (err) {
       if (!isCurrent()) return false

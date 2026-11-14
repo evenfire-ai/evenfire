@@ -157,7 +157,10 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
         } else if (patch.path === '/status') server.status = structuredClone(patch.value)
         else if (patch.path === '/status/conditions')
           server.status.conditions = structuredClone(patch.value)
-        else throw new Error(`Unexpected status patch ${patch.path}`)
+        else if (patch.path === '/status/appliedCredentialsRevision') {
+          if (patch.op === 'remove') delete server.status.appliedCredentialsRevision
+          else server.status.appliedCredentialsRevision = patch.value
+        } else throw new Error(`Unexpected status patch ${patch.path}`)
       }
       server.metadata.resourceVersion = String(++fixture.revision)
       return structuredClone(server)

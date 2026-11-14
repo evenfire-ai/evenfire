@@ -226,6 +226,11 @@ export interface McpServerResolvedEgressIP {
 }
 
 export interface McpServerCrdStatus {
+  /**
+   * `sha256:<hex>` of the envSecret data HCC last applied to the managed
+   * Deployment. Written by HCC only; never carries Secret values.
+   */
+  appliedCredentialsRevision?: string
   resolvedEgressIPs?: McpServerResolvedEgressIP[]
   conditions?: McpServerCondition[]
 }
