@@ -477,7 +477,6 @@ const TEMPLATES: RecipeTemplate[] = [
             name: 'research-summary',
             destination: 'pvc',
             format: 'pdf',
-            storageSize: '64Mi',
           },
           workloads: [
             {
@@ -775,7 +774,6 @@ const TEMPLATES: RecipeTemplate[] = [
             destination: 'pvc',
             name: 'custom-coordinator-output',
             format: 'json',
-            storageSize: '128Mi',
           },
           steps: [{ id: 'prepare' }, { id: 'emit-artifacts', dependsOn: ['prepare'] }],
         },
@@ -831,7 +829,6 @@ const TEMPLATES: RecipeTemplate[] = [
             destination: 'pvc',
             name: 'custom-coordinator-broker-output',
             format: 'multi',
-            storageSize: '256Mi',
           },
           steps: [
             { id: 'prepare' },
@@ -951,7 +948,6 @@ const TEMPLATES: RecipeTemplate[] = [
             destination: 'pvc',
             name: 'competitive-intel-report',
             format: 'pdf',
-            storageSize: '256Mi',
           },
           workloads: [
             {
@@ -1050,7 +1046,6 @@ const TEMPLATES: RecipeTemplate[] = [
             destination: 'pvc',
             name: 'market-data-dashboard',
             format: 'xlsx',
-            storageSize: '128Mi',
           },
           workloads: [
             {
@@ -1187,7 +1182,6 @@ const TEMPLATES: RecipeTemplate[] = [
             destination: 'pvc',
             name: 'due-diligence-package',
             format: 'multi',
-            storageSize: '512Mi',
           },
           workloads: [
             {
