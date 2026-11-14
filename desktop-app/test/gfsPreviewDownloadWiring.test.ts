@@ -53,24 +53,21 @@ describe('GfsClient.download — preview bound wiring (R1-H4 Part B)', () => {
   it('rejects an oversized preview download before returning the full payload', async () => {
     const t = boundedTransport()
     await expect(
-      new GfsClient(t).download(`gfs://main/${RID}`, 'tok', { maxBytes: 10, recordOpen: true })
+      new GfsClient(t).download(`gfs://main/${RID}`, 'tok', { maxBytes: 10 })
     ).rejects.toThrow(/exceeds the 10-byte limit/)
     // The ceiling must reach the transport — this is what the pre-fix head omits.
     expect(t.fetchBytes).toHaveBeenCalledWith(
-      `https://api.example/api/v1/me/gfs/proxy/${RID}?drive=main&intent=open`,
+      `https://api.example/api/v1/me/gfs/proxy/${RID}?drive=main`,
       'tok',
-      { maxBytes: 10, signal: undefined }
+      { maxBytes: 10 }
     )
   })
 
   it('leaves the save-to-disk path uncapped (no bound forwarded, full payload returned)', async () => {
     const t = boundedTransport()
-    const { bytes } = await new GfsClient(t).download(`gfs://main/${RID}`, 'tok', {
-      recordOpen: false,
-    })
+    const { bytes } = await new GfsClient(t).download(`gfs://main/${RID}`, 'tok')
     expect(bytes.byteLength).toBe(OVERSIZED.byteLength)
-    // Unbounded, non-cancellable call keeps the exact 2-arg fetchBytes signature;
-    // recordOpen=false adds no intent to the URL.
+    // Unbounded call keeps the exact 2-arg signature (no third opts arg).
     expect(t.fetchBytes).toHaveBeenCalledWith(
       `https://api.example/api/v1/me/gfs/proxy/${RID}?drive=main`,
       'tok'

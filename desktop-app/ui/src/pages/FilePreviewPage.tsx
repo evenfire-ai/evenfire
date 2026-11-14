@@ -76,11 +76,6 @@ export function FilePreviewPage({
   const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
-  // The reload generation this tab was OPENED at. A tab remount after a reload
-  // re-initialises this state, so the original open stays the only fetch that
-  // records: a revocation reload, a remote-change bump and returning to an open
-  // preview tab are all fetches of an already-opened file.
-  const [openedAtReloadVersion] = useState(reloadVersion ?? 0)
   const [denied, setDenied] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [copyContentReady, setCopyContentReady] = useState(false)
@@ -356,7 +351,6 @@ export function FilePreviewPage({
   // Remounting the body on a reload bump discards any stale bytes and re-runs the
   // fetch from scratch — the simplest correct "re-dispatch the fetch" (§3.B.3).
   const bodyKey = `${gfsUri}:${reloadToken}:${reloadVersion ?? 0}`
-  const recordOpen = reloadToken === 0 && (reloadVersion ?? 0) === openedAtReloadVersion
 
   return (
     <section className="page">
@@ -405,7 +399,6 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
-                  recordOpen={recordOpen}
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
                   headingLevel={2}
@@ -418,7 +411,6 @@ export function FilePreviewPage({
                   fileName={fileName}
                   gfsUri={gfsUri}
                   onDownloadError={handleDownloadError}
-                  recordOpen={recordOpen}
                   onCopyContentReady={handleCopyContentReady}
                   titleActions={fileActionsMenu}
                   headingLevel={2}
@@ -432,7 +424,6 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
-                  recordOpen={recordOpen}
                   titleActions={fileActionsMenu}
                   headingLevel={2}
                 />

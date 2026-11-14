@@ -24,8 +24,6 @@ export type SettingsTabPayload = {
  */
 export type FilesTabPayload = {
   path: string | null
-  /** Number of recent files revealed in this tab during its lifetime. */
-  recentVisibleCount?: number
 }
 
 /**

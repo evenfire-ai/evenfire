@@ -34,7 +34,6 @@ describe('GfsVideoPreviewBody', () => {
 
     render(
       <GfsVideoPreviewBody
-        recordOpen={false}
         byteLength={3}
         fileName="demo.mp4"
         gfsUri="gfs://main/video-1"
@@ -47,11 +46,7 @@ describe('GfsVideoPreviewBody', () => {
     expect(video.getAttribute('controls')).not.toBeNull()
     expect(video.getAttribute('src')).toBe('blob:gfs-video-preview')
     expect(createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'video/mp4' }))
-    expect(downloadPreview).toHaveBeenCalledWith(
-      'gfs://main/video-1',
-      GFS_VIDEO_PREVIEW_MAX_BYTES,
-      false
-    )
+    expect(downloadPreview).toHaveBeenCalledWith('gfs://main/video-1', GFS_VIDEO_PREVIEW_MAX_BYTES)
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
@@ -59,7 +54,6 @@ describe('GfsVideoPreviewBody', () => {
     const downloadPreview = stubDownload(new Uint8Array([1]).buffer)
     render(
       <GfsVideoPreviewBody
-        recordOpen={false}
         byteLength={GFS_VIDEO_PREVIEW_MAX_BYTES + 1}
         fileName="oversized.mp4"
         gfsUri="gfs://main/oversized"
@@ -81,7 +75,6 @@ describe('GfsVideoPreviewBody', () => {
     })
     render(
       <GfsVideoPreviewBody
-        recordOpen={false}
         byteLength={3}
         fileName="secret.mp4"
         gfsUri="gfs://main/secret"

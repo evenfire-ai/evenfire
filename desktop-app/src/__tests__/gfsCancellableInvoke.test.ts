@@ -46,7 +46,7 @@ type ClerumBridge = {
     ) => Promise<unknown>
     download: (
       uri: string,
-      options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration; recordOpen?: boolean }
+      options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration }
     ) => Promise<unknown>
     zipStream: {
       start: () => Promise<{ jobId: string }>
@@ -173,11 +173,10 @@ describe('preload cancellable GFS bridge (R2-L3)', () => {
 
   it('forwards the download bound and passes a signal-less call through untouched', async () => {
     electron.ipcRenderer.invoke.mockReturnValueOnce(Promise.resolve({ ok: true }))
-    bridge.gfs.download('gfs://main/x', { maxBytes: 512, recordOpen: true })
+    bridge.gfs.download('gfs://main/x', { maxBytes: 512 })
     expect(electron.ipcRenderer.invoke).toHaveBeenCalledWith('gfs:download', {
       uri: 'gfs://main/x',
       maxBytes: 512,
-      recordOpen: true,
       requestId: undefined,
     })
   })

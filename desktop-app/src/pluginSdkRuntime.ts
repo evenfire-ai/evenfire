@@ -279,9 +279,7 @@ export class PluginSdkRuntime {
         service.listAccessibleGfsResources(drive, cursor),
       listGfsChildren: (resourceId, drive, cursor) =>
         service.listGfsChildren(resourceId, drive, cursor),
-      // A plugin reading a file is not the user opening it: no open intent, so
-      // the read never surfaces in the user's Recent files.
-      downloadGfsUri: uri => service.downloadGfsUri(uri, { recordOpen: false }),
+      downloadGfsUri: uri => service.downloadGfsUri(uri),
       getPluginTheme: () => this.theme.get(),
       openGfsResource: input => this.openGfsResource(input.uri),
       showPluginNotification: input => this.showNotification(input),

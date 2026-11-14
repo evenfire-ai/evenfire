@@ -3,11 +3,7 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import {
-  FOLDER_HOVER_EXPAND_DELAY_MS,
-  GFS_RECENT_FILES_LOCATION,
-  GFS_SHARED_WITH_ME_LOCATION,
-} from '@constants/gfsBrowser'
+import { FOLDER_HOVER_EXPAND_DELAY_MS, GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -114,7 +110,6 @@ function renderTree(
   render(
     <QueryClientProvider client={queryClient}>
       <FileExplorerTree
-        activeLocation={props.activeLocation}
         onOpenFolder={onOpenFolder}
         onOpenPreview={onOpenPreview}
         pushToast={pushToast}
@@ -142,17 +137,6 @@ afterEach(() => {
 })
 
 describe('My home', () => {
-  it('marks the active Recent files destination in the sidebar', () => {
-    installClerum({})
-    renderTree({ activeLocation: GFS_RECENT_FILES_LOCATION })
-    expect(
-      screen.getByRole('treeitem', { name: 'Recent files' }).getAttribute('aria-selected')
-    ).toBe('true')
-    expect(
-      screen.getByRole('treeitem', { name: 'Shared with me' }).getAttribute('aria-selected')
-    ).toBe('false')
-  })
-
   it('shows the server-provided non-main home as a My home section that lists its folders and opens on click', async () => {
     const listHomeChildren = vi.fn(async () =>
       listChildrenPage([childView('child-1', 'Projects', 'directory', { drive: 'private' })])
@@ -168,10 +152,6 @@ describe('My home', () => {
       )
     )
     const home = screen.getByRole('treeitem', { name: 'My home' })
-    const recent = screen.getByRole('treeitem', { name: 'Recent files' })
-    expect(recent.compareDocumentPosition(home) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    fireEvent.click(recent)
-    expect(onOpenFolder).toHaveBeenLastCalledWith(GFS_RECENT_FILES_LOCATION)
     expect(await within(home).findByRole('treeitem', { name: 'Projects' })).toBeTruthy()
     expect(listHomeChildren).toHaveBeenCalledWith(
       'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -373,30 +353,6 @@ describe('FileExplorerTree — sanitizes externally-controlled GFS names in chro
     expect(await screen.findByRole('button', { name: 'Reports' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Expand Reports' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: `Re‮ports​` })).toBeNull()
-  })
-
-  it('refreshes the overview recent card after a successful download', async () => {
-    installClerum({
-      listAccessible: vi.fn(async () =>
-        listAccessiblePage([accessibleResource('z', 'archive.zip', 'file')])
-      ),
-      download: vi.fn(async () => downloadResult(resolvedFile('z', 'archive.zip'))),
-    })
-    const { QueryClient } = await import('@tanstack/react-query')
-    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
-
-    const { pushToast } = renderTree()
-
-    fireEvent.click(await screen.findByRole('button', { name: 'archive.zip' }))
-    // Witness: the save really completed, so the refresh below is a new step.
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
-    await waitFor(() =>
-      expect(
-        invalidate.mock.calls.some(
-          ([filters]) => Array.isArray(filters?.queryKey) && filters.queryKey.includes('recent')
-        )
-      ).toBe(true)
-    )
   })
 
   it('shows the cleaned name in the download toast while the raw name stays for the on-disk file', async () => {
@@ -601,9 +557,7 @@ describe('FileExplorerTree — file single-click activates', () => {
     const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
     fireEvent.click(fileButton)
 
-    await waitFor(() =>
-      expect(download).toHaveBeenCalledWith('gfs://main/zip-1', { recordOpen: true })
-    )
+    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
     expect(onOpenPreview).not.toHaveBeenCalled()
   })
@@ -962,9 +916,7 @@ describe('FileExplorerTree — download-path authority wiring (R1-H8)', () => {
     // surface, so the tree revokes and swaps in the unauthorized + retry surface
     // instead of surfacing the raw error as a toast.
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
-    await waitFor(() =>
-      expect(download).toHaveBeenCalledWith('gfs://main/zip-1', { recordOpen: true })
-    )
+    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
     expect(onOpenPreview).not.toHaveBeenCalled()
     // The authority path pre-empts the error toast (the catch returns before it).
     expect(pushToast).not.toHaveBeenCalledWith('401 Unauthorized', 'error')

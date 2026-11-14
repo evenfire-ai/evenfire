@@ -5,11 +5,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { randomUUID } from 'node:crypto'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
-import { GFS_RECENT_FILES_LOCATION, GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
+import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
-import { GFS_LISTING_GRID_COLUMNS } from '@lib/gfsListingGrid'
 import {
   accessibleResource,
   affordancesResult,
@@ -65,12 +64,6 @@ function baseController() {
     loadingCurrentView: false,
     accessibleError: null,
     accessibleNotice: null,
-    recentFiles: [],
-    loadingRecentFiles: false,
-    fetchingRecentFiles: false,
-    recentFilesFailure: null,
-    retryRecentFiles: vi.fn(),
-    refreshRecentFiles: vi.fn(),
     error: null,
     openError: null,
     resolving: false,
@@ -131,10 +124,9 @@ function baseController() {
 function renderFilesPage(
   pushToast?: (message: string, tone: Tone) => void,
   onOpenPreview?: (preview: unknown) => void,
-  pendingGfsUri: string | null = GFS_SHARED_WITH_ME_LOCATION,
+  pendingGfsUri?: string | null,
   onPendingGfsUriHandled?: () => void,
-  titlebarLeadingTarget?: HTMLElement | null,
-  onOpenFilesSection: (location: string | null, focusTab?: boolean) => void = vi.fn()
+  titlebarLeadingTarget?: HTMLElement | null
 ) {
   const clerum = (window as unknown as { clerum?: Record<string, unknown> }).clerum
   if (clerum) {
@@ -162,7 +154,6 @@ function renderFilesPage(
         pendingGfsUri={pendingGfsUri}
         onPendingGfsUriHandled={onPendingGfsUriHandled}
         titlebarLeadingTarget={titlebarLeadingTarget}
-        onOpenFilesSection={onOpenFilesSection}
       />
     </QueryClientProvider>
   )
@@ -509,7 +500,7 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, undefined, file.gfsUri, handled)
 
     expect(await screen.findByRole('heading', { name: 'report.txt', level: 3 })).toBeTruthy()
-    await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri, { recordOpen: true }))
+    await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
     expect(openUri).toHaveBeenCalledWith(
       file.gfsUri,
       expect.objectContaining({ shouldContinue: expect.any(Function) })
@@ -588,22 +579,11 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
-    const row = screen.getByRole('button', { name: 'Open Product' })
-    fireEvent.click(row)
-    fireEvent.keyDown(row, { key: 'Enter' })
-    const sizeCell = row.querySelector('.da-gfs-drive__size')
-    expect(sizeCell).toBeTruthy()
-    fireEvent.click(sizeCell!)
-    expect(openResource).toHaveBeenCalledTimes(3)
-
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Product' }))
     })
 
     expect(openResource).toHaveBeenCalledWith(expect.objectContaining({ resourceId: 'folder-1' }))
-    expect(openResource).toHaveBeenCalledTimes(4)
-    fireEvent.click(within(row).getByRole('button', { name: 'Options for Product' }))
-    expect(openResource).toHaveBeenCalledTimes(4)
     expect(screen.queryByRole('tab')).toBeNull()
   })
 
@@ -4697,7 +4677,7 @@ describe('FilesPage', () => {
       await Promise.resolve()
     })
 
-    expect(download).toHaveBeenCalledWith('gfs://main/file-1', { recordOpen: true })
+    expect(download).toHaveBeenCalledWith('gfs://main/file-1')
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
     expect(click).toHaveBeenCalled()
     expect(pushToast).toHaveBeenCalledWith('Downloaded report.pdf', 'success')
@@ -4756,7 +4736,7 @@ describe('FilesPage', () => {
 
     // Witness: the download really ran and really rejected, so the copy
     // assertions below describe a handled failure.
-    expect(download).toHaveBeenCalledWith('gfs://main/file-1', { recordOpen: true })
+    expect(download).toHaveBeenCalledWith('gfs://main/file-1')
     expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
   })
 
@@ -5222,7 +5202,7 @@ describe('FilesPage', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const makeElement = () => (
       <QueryClientProvider client={queryClient}>
-        <FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
+        <FilesPage />
       </QueryClientProvider>
     )
     const { rerender } = render(makeElement())
@@ -6859,7 +6839,7 @@ describe('FilesPage', () => {
       true
     )
     expect(copyButton.parentElement?.getAttribute('title')).toBe(
-      'No link is available for this view'
+      'No link is available on Shared with me'
     )
 
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Open link' }))
@@ -6937,9 +6917,7 @@ describe('FilesPage', () => {
     renderFilesPage()
     fireEvent.click(screen.getByRole('button', { name: 'diagram.PNG' }))
 
-    await waitFor(() =>
-      expect(download).toHaveBeenCalledWith('gfs://main/image-1', { recordOpen: true })
-    )
+    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/image-1'))
     expect(anchorClick).toHaveBeenCalled()
   })
 
@@ -8328,11 +8306,12 @@ describe('FilesPage', () => {
       bytes: 0,
       permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
     })
-    const onOpenFilesSection = vi.fn()
+    const openResource = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
       accessibleResources: [row('alpha-1', 'Alpha shared'), row('home-1', 'fixture')],
+      openResource,
     })
     renderFilesPage()
     const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
@@ -8340,11 +8319,11 @@ describe('FilesPage', () => {
     expect(within(shared).getAllByText('Alpha shared').length).toBeGreaterThan(0)
     expect(within(shared).queryByText('My home')).toBeNull()
     expect(within(shared).queryByText('fixture')).toBeNull()
-    cleanup()
-    renderFilesPage(undefined, undefined, null, undefined, undefined, onOpenFilesSection)
     const myHome = screen.getByRole('region', { name: 'My home' })
     fireEvent.click(within(myHome).getByRole('button', { name: 'My home' }))
-    expect(onOpenFilesSection).toHaveBeenCalledWith('gfs://main/home-1', true)
+    expect(openResource).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: 'home-1', name: 'My home' })
+    )
   })
 
   describe('EvenDrive overview and the Shared with me view', () => {
@@ -8361,28 +8340,25 @@ describe('FilesPage', () => {
       bytes: 0,
       permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
     })
-    const renderAt = (pendingGfsUri: string | null, over: Record<string, unknown> = {}) => {
+    const renderAt = (pendingGfsUri: string | null) => {
       const controller = {
         ...baseController(),
         home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
         accessibleResources: [sharedRow('alpha-1', 'Alpha shared'), sharedRow('home-1', 'fixture')],
-        ...over,
       }
       hookMock.useGfsBrowserController.mockReturnValue(controller)
       const onLocationChange = vi.fn()
       const onPendingGfsUriHandled = vi.fn()
-      const onOpenFilesSection = vi.fn()
       render(
         <QueryClientProvider client={new QueryClient()}>
           <FilesPage
             pendingGfsUri={pendingGfsUri}
             onLocationChange={onLocationChange}
             onPendingGfsUriHandled={onPendingGfsUriHandled}
-            onOpenFilesSection={onOpenFilesSection}
           />
         </QueryClientProvider>
       )
-      return { controller, onLocationChange, onPendingGfsUriHandled, onOpenFilesSection }
+      return { controller, onLocationChange, onPendingGfsUriHandled }
     }
 
     it('shows only what others share in the Shared with me view, without resolving it', () => {
@@ -8405,67 +8381,19 @@ describe('FilesPage', () => {
       )
     })
 
-    it('opens Recent files as its own tab without resolving a GFS URI', () => {
-      const { controller, onLocationChange, onPendingGfsUriHandled } =
-        renderAt(GFS_RECENT_FILES_LOCATION)
-      expect(screen.getByRole('heading', { name: 'Files', level: 2 })).toBeTruthy()
-      expect(screen.getByRole('region', { name: 'Recent files' })).toBeTruthy()
-      expect(screen.getByRole('heading', { name: 'Recent files', level: 3 }).className).toContain(
-        'da-gfs-section-title--current'
-      )
-      expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
-      expect(screen.queryByRole('region', { name: 'EvenDrive browser' })).toBeNull()
-      expect(controller.openUri).not.toHaveBeenCalled()
-      expect(onPendingGfsUriHandled).toHaveBeenCalledTimes(1)
-      expect(onLocationChange).toHaveBeenLastCalledWith(GFS_RECENT_FILES_LOCATION, 'Recent files')
-    })
-
-    it('does not show an empty recent list while authority is being revalidated', () => {
-      renderAt(GFS_RECENT_FILES_LOCATION, { authorityPending: true, loadingRecentFiles: false })
-      expect(screen.getByRole('status', { name: 'Loading recent files' })).toBeTruthy()
-      expect(screen.queryByText('No recent files')).toBeNull()
-    })
-
-    it('shows and retries an authority discovery failure in the Recent files view', () => {
-      const retryDiscovery = vi.fn()
-      const retryRecentFiles = vi.fn()
-      renderAt(GFS_RECENT_FILES_LOCATION, {
-        authorityPending: true,
-        discoveryFailure: { kind: 'failed', message: 'Discovery failed', retryAvailableAt: null },
-        retryDiscovery,
-        retryRecentFiles,
-      })
-      expect(screen.queryByText('No recent files')).toBeNull()
-      fireEvent.click(screen.getByRole('button', { name: 'Retry file listing' }))
-      expect(retryDiscovery).toHaveBeenCalledOnce()
-      expect(retryRecentFiles).not.toHaveBeenCalled()
-    })
-
-    it('opens My home and Shared with me from overview destinations without listing their contents', () => {
-      const { controller, onLocationChange, onOpenFilesSection } = renderAt(null)
+    it('shows the home and what others share in the overview, and narrows to Shared with me from the trail', () => {
+      const { controller, onLocationChange } = renderAt(null)
       expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
       expect(onLocationChange).toHaveBeenLastCalledWith(null, null)
-      expect(screen.queryByText('Alpha shared')).toBeNull()
-      fireEvent.click(within(screen.getByRole('region', { name: 'My home' })).getByRole('button'))
-      expect(onOpenFilesSection).toHaveBeenLastCalledWith('gfs://main/home-1', true)
-      fireEvent.click(
-        within(screen.getByRole('region', { name: 'Shared with me' })).getByRole('button')
+      const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
+      fireEvent.click(within(shared).getByRole('button', { name: 'Shared with me' }))
+      expect(controller.reset).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
+      expect(within(shared).getAllByText('Alpha shared').length).toBeGreaterThan(0)
+      expect(onLocationChange).toHaveBeenLastCalledWith(
+        GFS_SHARED_WITH_ME_LOCATION,
+        'Shared with me'
       )
-      expect(onOpenFilesSection).toHaveBeenLastCalledWith(GFS_SHARED_WITH_ME_LOCATION, true)
-      expect(controller.reset).not.toHaveBeenCalled()
-      expect(onLocationChange).toHaveBeenLastCalledWith(null, null)
-    })
-
-    it('keeps My home visible while provisioning and when it needs attention', () => {
-      renderAt(null, { home: { state: 'pending' }, loadingHome: false })
-      const home = screen.getByRole('region', { name: 'My home' })
-      expect(within(home).getByText('Your home folder is being prepared')).toBeTruthy()
-    })
-
-    it('shows a home conflict in the overview instead of hiding the section', () => {
-      renderAt(null, { home: { state: 'conflict' }, loadingHome: false })
-      const home = screen.getByRole('region', { name: 'My home' })
-      expect(within(home).getByText('Your home folder needs attention')).toBeTruthy()
     })
 
     it('titles the Files tab My home at the home root and the folder name inside it', () => {
@@ -9082,225 +9010,5 @@ describe('FilesPage — folder drag-and-drop', () => {
       .closest('.da-grid__row') as HTMLElement
     expect(folderRow.getAttribute('draggable')).toBe('true')
     expect(folderRow.getAttribute('title')).toBe('Drag Projects into a folder to move it')
-  })
-})
-
-describe('FilesPage recent files card (D1, D17, D20)', () => {
-  afterEach(() => {
-    cleanup()
-    vi.restoreAllMocks()
-  })
-
-  function withRecent(over: Record<string, unknown> = {}) {
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      home: {
-        state: 'ready',
-        drive: 'main',
-        resourceId: 'home-1',
-        path: '/Users/owner',
-        heldPermissions: ['read'],
-      },
-      accessibleResources: [
-        {
-          resourceId: 'shared-1',
-          rid: 'shared-1',
-          gfsUri: 'gfs://main/shared-1',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'shared.txt',
-          kind: 'file',
-          path: '/shared.txt',
-          version: 1,
-          bytes: 4,
-          updatedAt: '2026-10-30T10:00:00.000Z',
-          sources: ['share'],
-          permissions: ['read'],
-          coversDescendants: false,
-        },
-      ],
-      recentFiles: [
-        {
-          resourceId: 'recent-1',
-          gfsUri: 'gfs://main/recent-1',
-          drive: 'main',
-          name: 'recent-1.txt',
-          version: 1,
-          bytes: 4,
-          lastActivityAt: '2026-10-30T10:00:00.000Z',
-        },
-      ],
-      ...over,
-    })
-  }
-
-  it('renders recent files before the two overview destinations', () => {
-    withRecent()
-    renderFilesPage(undefined, undefined, null)
-
-    const recent = screen.getByRole('region', { name: 'Recent files' })
-    const home = screen.getByRole('region', { name: 'My home' })
-    expect(recent.compareDocumentPosition(home) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-
-    const heading = within(recent).getByRole('heading', { name: 'Recent files' })
-    expect(heading.tagName).toBe('H3')
-    const homeTitle = within(home).getByRole('button', { name: 'My home' })
-    const sharedTitle = within(screen.getByRole('region', { name: 'Shared with me' })).getByRole(
-      'button'
-    )
-    expect(heading.className).toContain('da-gfs-section-title')
-    expect(homeTitle.className).toContain('da-gfs-overview-destination')
-    expect(sharedTitle.className).toContain('da-gfs-overview-destination')
-    expect(homeTitle.className).toBe(sharedTitle.className)
-
-    const recentGrid = recent.querySelector('.da-grid.da-gfs-drive__grid') as HTMLElement | null
-    expect(recentGrid).toBeTruthy()
-    expect(recentGrid!.style.getPropertyValue('--da-grid-cols')).toBe(GFS_LISTING_GRID_COLUMNS)
-  })
-
-  it('refreshes both recent files and discovery from the overview toolbar', () => {
-    const refreshRecentFiles = vi.fn()
-    const retryDiscovery = vi.fn()
-    withRecent({ refreshRecentFiles, retryDiscovery })
-    const target = document.createElement('div')
-    document.body.appendChild(target)
-    try {
-      renderFilesPage(undefined, undefined, null, undefined, target)
-      fireEvent.click(within(target).getByRole('button', { name: 'Refresh' }))
-      expect(refreshRecentFiles).toHaveBeenCalledOnce()
-      expect(retryDiscovery).toHaveBeenCalledOnce()
-    } finally {
-      target.remove()
-    }
-  })
-
-  it('keeps toolbar refresh disabled until the recent-files retry window ends', () => {
-    vi.useFakeTimers()
-    const now = Date.now()
-    withRecent({
-      recentFilesFailure: {
-        kind: 'rate-limited',
-        message: 'Too many requests',
-        retryAvailableAt: now + 5_000,
-      },
-    })
-    const target = document.createElement('div')
-    document.body.appendChild(target)
-    try {
-      renderFilesPage(undefined, undefined, null, undefined, target)
-      const refresh = within(target).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement
-      expect(refresh.disabled).toBe(true)
-      act(() => vi.advanceTimersByTime(5_000))
-      expect(refresh.disabled).toBe(false)
-    } finally {
-      target.remove()
-      vi.useRealTimers()
-    }
-  })
-
-  it('opens a previewable recent file through the preview surface', () => {
-    withRecent({
-      recentFiles: [
-        {
-          resourceId: 'recent-1',
-          gfsUri: 'gfs://main/recent-1',
-          drive: 'main',
-          name: 'diagram.png',
-          version: 1,
-          bytes: 4,
-          lastActivityAt: '2026-10-30T10:00:00.000Z',
-        },
-      ],
-    })
-    const onOpenPreview = vi.fn()
-    renderFilesPage(undefined, onOpenPreview, null)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open diagram.png' }))
-
-    expect(onOpenPreview).toHaveBeenCalledWith(
-      expect.objectContaining({ gfsUri: 'gfs://main/recent-1' })
-    )
-  })
-
-  it('opens a recent file from the separate Recent files view', () => {
-    withRecent()
-    const onOpenPreview = vi.fn()
-    renderFilesPage(undefined, onOpenPreview, GFS_RECENT_FILES_LOCATION)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open recent-1.txt' }))
-
-    expect(onOpenPreview).toHaveBeenCalledWith(
-      expect.objectContaining({ gfsUri: 'gfs://main/recent-1' })
-    )
-  })
-
-  it('downloads a non-previewable recent file and refreshes the card', async () => {
-    const refreshRecentFiles = vi.fn()
-    withRecent({
-      refreshRecentFiles,
-      recentFiles: [
-        {
-          resourceId: 'recent-1',
-          gfsUri: 'gfs://main/recent-1',
-          drive: 'main',
-          name: 'archive.zip',
-          version: 1,
-          bytes: 4,
-          lastActivityAt: '2026-10-30T10:00:00.000Z',
-        },
-      ],
-    })
-    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(4) }))
-    Object.defineProperty(window, 'clerum', { configurable: true, value: { gfs: { download } } })
-    Object.defineProperty(URL, 'createObjectURL', {
-      configurable: true,
-      value: vi.fn(() => 'blob:gfs-page'),
-    })
-    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
-    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
-
-    renderFilesPage(undefined, undefined, null)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open archive.zip' }))
-
-    await waitFor(() =>
-      expect(download).toHaveBeenCalledWith('gfs://main/recent-1', { recordOpen: true })
-    )
-    await waitFor(() => expect(refreshRecentFiles).toHaveBeenCalled())
-  })
-
-  it('is absent outside the overview', () => {
-    // Shared with me: the card belongs to the overview only.
-    hookMock.useGfsBrowserController.mockReturnValue({ ...baseController() })
-    renderFilesPage(undefined, undefined, GFS_SHARED_WITH_ME_LOCATION)
-    expect(screen.queryByRole('region', { name: 'Recent files' })).toBeNull()
-
-    cleanup()
-
-    // A folder view.
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      current: {
-        resourceId: 'folder-1',
-        gfsUri: 'gfs://main/folder-1',
-        name: 'Folder',
-        kind: 'directory',
-        drive: 'main',
-      },
-    })
-    renderFilesPage()
-    expect(screen.queryByRole('region', { name: 'Recent files' })).toBeNull()
-
-    cleanup()
-
-    // Revoked access.
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      accessState: 'revoked',
-    })
-    renderFilesPage()
-    expect(screen.queryByRole('region', { name: 'Recent files' })).toBeNull()
-    // Witness: the revoked view really rendered its own verdict.
-    expect(screen.getByText('File access is not authorized')).toBeTruthy()
   })
 })

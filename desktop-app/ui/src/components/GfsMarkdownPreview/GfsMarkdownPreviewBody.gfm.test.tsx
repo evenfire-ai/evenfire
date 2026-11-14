@@ -43,7 +43,6 @@ describe('GfsMarkdownPreviewBody GFM rendering', () => {
 
     const { container } = render(
       <GfsMarkdownPreviewBody
-        recordOpen={false}
         byteLength={new TextEncoder().encode(markdown).byteLength}
         fileName="inventory.md"
         gfsUri="gfs://main/inventory"
@@ -77,7 +76,6 @@ describe('GfsMarkdownPreviewBody GFM rendering', () => {
 
     const { container } = render(
       <GfsMarkdownPreviewBody
-        recordOpen={false}
         byteLength={markdown.length}
         fileName="malformed.md"
         gfsUri="gfs://main/malformed"
@@ -100,7 +98,6 @@ describe('GfsMarkdownPreviewBody GFM rendering', () => {
 
     render(
       <GfsMarkdownPreviewBody
-        recordOpen={false}
         byteLength={new TextEncoder().encode(markdown).byteLength}
         fileName="inline.md"
         gfsUri="gfs://main/inline"

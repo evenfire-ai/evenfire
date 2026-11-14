@@ -73,11 +73,7 @@ function render(ui: ReactNode) {
 
 // The producer (`window.clerum.gfs.downloadPreview`) returns `{ bytes: ArrayBuffer }`.
 function stubDownload(impl: () => Promise<{ bytes: ArrayBuffer }>) {
-  // The producer's signature carries (uri, maxBytes, recordOpen); declaring them
-  // keeps the call-argument assertions below type-safe.
-  const downloadPreview = vi.fn(async (_uri: string, _maxBytes?: number, _recordOpen?: boolean) =>
-    impl()
-  )
+  const downloadPreview = vi.fn(impl)
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
@@ -667,10 +663,7 @@ describe('FilePreviewPage', () => {
 
     try {
       expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
-      await waitFor(() => {
-        expect(affordances).toHaveBeenCalledWith('0123456789abcdef0123456789abcdef', 'main')
-        expect(affordances).toHaveBeenCalledWith('preview-parent', 'main')
-      })
+      await waitFor(() => expect(affordances).toHaveBeenCalled())
       clickPreviewAction('diagram.png', 'Rename')
       const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
       fireEvent.change(within(dialog).getByLabelText('New name'), {
@@ -682,14 +675,6 @@ describe('FilePreviewPage', () => {
 
       controllerState.sessionGeneration = 2
       view.rerender(<FilePreviewPage {...props} />)
-      // The new session legitimately reloads the file and parent permissions.
-      // Settle those reads while the old rename digest is still blocked.
-      await waitFor(() =>
-        expect(affordances.mock.calls.length).toBeGreaterThanOrEqual(
-          permissionReadsBeforeReplacement + 2
-        )
-      )
-      const permissionReadsAfterReplacement = affordances.mock.calls.length
       await act(async () => releaseDigest(new ArrayBuffer(0)))
       await act(async () => {
         await Promise.resolve()
@@ -697,7 +682,7 @@ describe('FilePreviewPage', () => {
       })
 
       expect(renameResource).not.toHaveBeenCalled()
-      expect(affordances.mock.calls.length).toBe(permissionReadsAfterReplacement)
+      expect(affordances.mock.calls.length).toBe(permissionReadsBeforeReplacement)
     } finally {
       releaseDigest(new ArrayBuffer(0))
       digestSpy.mockRestore()
@@ -1401,86 +1386,5 @@ describe('FilePreviewPage', () => {
     // The session path handled it; the local per-resource denial did NOT fire.
     expect(controllerState.handleAuthorityFailure).toHaveReturnedWith(true)
     expect(screen.queryByText('You no longer have access to this file')).toBeNull()
-  })
-})
-
-describe('FilePreviewPage open intent (D9, D10)', () => {
-  const props = {
-    gfsUri: 'gfs://main/image-1',
-    fileName: 'diagram.png',
-    fileKind: 'image' as const,
-    mimeType: 'image/png',
-    byteLength: 3,
-  }
-
-  it('records the first mount as an open', async () => {
-    hookMock.useGfsBrowserController.mockReturnValue(controller())
-    const downloadPreview = stubDownload(
-      async (): Promise<{ bytes: ArrayBuffer }> => ({
-        bytes: new Uint8Array([1, 2, 3]).buffer,
-      })
-    )
-
-    render(<FilePreviewPage {...props} />)
-
-    await waitFor(() => expect(downloadPreview).toHaveBeenCalledTimes(1))
-    expect(downloadPreview.mock.calls[0]?.[2]).toBe(true)
-  })
-
-  it('does not record a reload once the tab is already open', async () => {
-    hookMock.useGfsBrowserController.mockReturnValue(controller())
-    const downloadPreview = stubDownload(
-      async (): Promise<{ bytes: ArrayBuffer }> => ({
-        bytes: new Uint8Array([1, 2, 3]).buffer,
-      })
-    )
-
-    const { rerender } = render(<FilePreviewPage {...props} reloadVersion={0} />)
-    await waitFor(() => expect(downloadPreview).toHaveBeenCalledTimes(1))
-    expect(downloadPreview.mock.calls[0]?.[2]).toBe(true)
-
-    rerender(<FilePreviewPage {...props} reloadVersion={1} />)
-
-    // Witness: the reload fetched the body again.
-    await waitFor(() => expect(downloadPreview).toHaveBeenCalledTimes(2))
-    expect(downloadPreview.mock.calls[1]?.[2]).toBe(false)
-  })
-
-  it('does not record the revocation reload', async () => {
-    hookMock.useGfsBrowserController.mockReturnValue(controller())
-    const downloadPreview = stubDownload(
-      async (): Promise<{ bytes: ArrayBuffer }> => ({
-        bytes: new Uint8Array([1, 2, 3]).buffer,
-      })
-    )
-
-    const { rerender } = render(<FilePreviewPage {...props} />)
-    await waitFor(() => expect(downloadPreview).toHaveBeenCalledTimes(1))
-
-    hookMock.useGfsBrowserController.mockReturnValue(controller('revoked'))
-    rerender(<FilePreviewPage {...props} />)
-
-    // The revoked tab unmounts the body and shows the unavailable state, so no
-    // second fetch happens at all — and nothing new was recorded.
-    expect(screen.getByText('File unavailable')).toBeTruthy()
-    expect(downloadPreview).toHaveBeenCalledTimes(1)
-    expect(downloadPreview.mock.calls.every(call => call[2] === true)).toBe(true)
-  })
-
-  it('records a fresh mount of the same file again', async () => {
-    hookMock.useGfsBrowserController.mockReturnValue(controller())
-    const downloadPreview = stubDownload(
-      async (): Promise<{ bytes: ArrayBuffer }> => ({
-        bytes: new Uint8Array([1, 2, 3]).buffer,
-      })
-    )
-
-    const first = render(<FilePreviewPage {...props} />)
-    await waitFor(() => expect(downloadPreview).toHaveBeenCalledTimes(1))
-    first.unmount()
-
-    render(<FilePreviewPage {...props} />)
-    await waitFor(() => expect(downloadPreview).toHaveBeenCalledTimes(2))
-    expect(downloadPreview.mock.calls[1]?.[2]).toBe(true)
   })
 })

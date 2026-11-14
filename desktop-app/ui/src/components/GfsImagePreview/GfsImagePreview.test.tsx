@@ -73,7 +73,6 @@ describe('GfsImagePreview layout', () => {
   it('centers in the workspace and follows sidebar expansion changes', async () => {
     render(
       <GfsImagePreview
-        recordOpen={false}
         byteLength={3}
         fileName="diagram.png"
         gfsUri="gfs://main/image-1"
@@ -113,7 +112,6 @@ describe('GfsImagePreview layout', () => {
     })
     render(
       <GfsImagePreview
-        recordOpen={false}
         byteLength={3}
         fileName="chat-image.png"
         dataBase64="AQID"
@@ -137,7 +135,6 @@ describe('GfsImagePreview layout', () => {
     })
     render(
       <GfsImagePreview
-        recordOpen={false}
         byteLength={3}
         fileName="drive-image.png"
         gfsUri="gfs://main/image-1"
@@ -181,7 +178,6 @@ describe('GfsImagePreview layout', () => {
     })
     const view = render(
       <GfsImagePreview
-        recordOpen={false}
         byteLength={3}
         fileName={fileName}
         {...source}
@@ -248,7 +244,6 @@ describe('GfsImagePreview layout', () => {
       })
       render(
         <GfsImagePreview
-          recordOpen={false}
           byteLength={3}
           fileName={fileName}
           {...source}
@@ -307,7 +302,6 @@ describe('GfsImagePreview layout', () => {
     })
     const view = render(
       <GfsImagePreview
-        recordOpen={false}
         byteLength={3}
         fileName="chat-image.png"
         dataBase64="AQID"
@@ -354,7 +348,6 @@ describe('GfsImagePreview layout', () => {
     })
     const preview = (gfsUri: string) => (
       <GfsImagePreview
-        recordOpen={false}
         byteLength={3}
         fileName="drive-image.png"
         gfsUri={gfsUri}
@@ -393,7 +386,6 @@ describe('GfsImagePreview layout', () => {
     window.clerum.gfs.downloadPreview = downloadPreview
     render(
       <GfsImagePreview
-        recordOpen={false}
         byteLength={3}
         fileName="diagram.png"
         gfsUri="gfs://main/image-1"
@@ -414,7 +406,6 @@ describe('GfsImagePreview layout', () => {
     const downloadPreview = vi.mocked(window.clerum.gfs.downloadPreview)
     render(
       <GfsImagePreview
-        recordOpen={false}
         byteLength={3}
         fileName="diagram.png"
         gfsUri="gfs://main/image-1"

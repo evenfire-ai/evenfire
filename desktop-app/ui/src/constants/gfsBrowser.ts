@@ -37,12 +37,3 @@ export const GFS_SHARED_WITH_ME_LABEL = 'Shared with me'
  * so it is never resolved against the server.
  */
 export const GFS_SHARED_WITH_ME_LOCATION = 'evendrive:shared-with-me'
-
-/** Client-only location for the dedicated Recent files tab. */
-export const GFS_RECENT_FILES_LOCATION = 'evendrive:recent-files'
-
-/** Maximum number of files shown in the EvenDrive overview. */
-export const GFS_RECENT_FILES_VISIBLE_LIMIT = 5
-
-/** The overview card's heading and accessible region name (D11). */
-export const GFS_RECENT_FILES_LABEL = 'Recent files'

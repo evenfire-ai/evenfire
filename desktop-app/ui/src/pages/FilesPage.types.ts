@@ -24,9 +24,6 @@ export interface FilesPageProps {
   pendingGfsDeepLink?: { id: number; uri: string } | null
   /** Stable destination tab captured by the App navigation authority. */
   workspaceTabId?: string
-  /** Expansion state owned by the current Recent files tab. */
-  recentVisibleCount?: number
-  onRecentVisibleCountChange?: (count: number) => void
   pendingGfsDeepLinkOwnerTabId?: string
   /** Live owner/session/intent fence for this queued request. */
   isPendingGfsDeepLinkCurrent?: () => boolean
@@ -44,8 +41,6 @@ export interface FilesPageProps {
    * `gfsUri` carries no name, hence the second argument.
    */
   onLocationChange?: (gfsUri: string | null, name: string | null) => void
-  /** Open an overview destination in its own Files tab. */
-  onOpenFilesSection?: (location: string | null, focusTab?: boolean) => void
   /** Monotonic signal from the app-level entity stream for live path reconciliation. */
   remoteGfsChangeEpoch?: number
   /**

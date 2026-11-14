@@ -17,7 +17,6 @@ export function GfsVideoPreviewBody({
   gfsUri,
   mimeType,
   onDownloadError,
-  recordOpen,
   titleId,
   titleActions,
   headerActions,
@@ -46,8 +45,7 @@ export function GfsVideoPreviewBody({
         assertGfsVideoPreviewSize(byteLength)
         const { bytes } = await window.clerum.gfs.downloadPreview(
           gfsUri,
-          GFS_VIDEO_PREVIEW_MAX_BYTES,
-          recordOpen
+          GFS_VIDEO_PREVIEW_MAX_BYTES
         )
         assertGfsVideoPreviewSize(bytes.byteLength)
         if (!active) return

@@ -8,7 +8,6 @@ import {
   onlineManager,
 } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -82,9 +81,6 @@ function installGfsBridge(
       gfs: {
         resolve: vi.fn(),
         listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
-        // The overview's recent card has its own list; an empty one keeps the
-        // page-level "Load more" assertions unambiguous.
-        listRecent: vi.fn(async () => ({ items: [] })),
         affordances: vi.fn(async () => ({
           held: [],
           canDelegate: false,
@@ -103,7 +99,7 @@ function renderFilesPage(queryClient = new QueryClient({ defaultOptions: desktop
     ...render(
       <AuthContext.Provider value={authValue}>
         <QueryClientProvider client={queryClient}>
-          <FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
+          <FilesPage />
         </QueryClientProvider>
       </AuthContext.Provider>
     ),
@@ -143,7 +139,6 @@ describe('FilesPage against the real GFS browser controller', () => {
           getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
-          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -199,7 +194,6 @@ describe('FilesPage against the real GFS browser controller', () => {
           getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
-          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -302,7 +296,6 @@ describe('FilesPage against the real GFS browser controller', () => {
         gfs: {
           listAccessible,
           resolve: vi.fn(),
-          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -368,7 +361,6 @@ describe('FilesPage against the real GFS browser controller', () => {
         gfs: {
           listAccessible,
           resolve: vi.fn(),
-          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -487,7 +479,6 @@ describe('FilesPage against the real GFS browser controller', () => {
         gfs: {
           listAccessible,
           resolve: vi.fn(),
-          listRecent: vi.fn(async () => ({ items: [] })),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances: vi.fn(async () => ({
             held: [],
@@ -567,7 +558,6 @@ describe('FilesPage against the real GFS browser controller', () => {
           listAccessible,
           listChildren,
           resolve: vi.fn(),
-          listRecent: vi.fn(async () => ({ items: [] })),
           affordances: vi.fn(async () => ({
             held: [],
             canDelegate: false,

@@ -5,7 +5,6 @@ import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ToastStack } from '@components/Common/ToastStack'
-import { GFS_SHARED_WITH_ME_LOCATION } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useToastController } from '@hooks/domain/useToastController'
 import { desktopQueryDefaults } from '@lib/queryClient'
@@ -13,7 +12,6 @@ import {
   accessibleResource,
   childView,
   gfsRouteFailureMessage,
-  homeView,
   listAccessiblePage,
   listChildrenPage,
   moveResourceReceipt,
@@ -1054,7 +1052,6 @@ describe('FilesPage Move permission generation fencing', () => {
       value: {
         auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
-          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
             resourceId === 'source-parent' ? children : listChildrenPage([])
@@ -1213,7 +1210,6 @@ describe('FilesPage Move permission generation fencing', () => {
       value: {
         auth: { getSessionGeneration: vi.fn(async () => authoritativeSessionGeneration) },
         gfs: {
-          getHome: vi.fn(async () => homeView()),
           listAccessible: vi.fn(async () => rows),
           listChildren: vi.fn(async (resourceId: string) =>
             resourceId === 'source-parent' ? children : listChildrenPage([])
@@ -1645,7 +1641,7 @@ describe('FilesPage Move permission generation fencing', () => {
     const renderPage = (teamId: string, userId = 'user-a') => (
       <AuthContext.Provider value={authFor(teamId, userId)}>
         <QueryClientProvider client={queryClient}>
-          <FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
+          <FilesPage />
         </QueryClientProvider>
       </AuthContext.Provider>
     )
@@ -1737,7 +1733,7 @@ describe('FilesPage Move permission generation fencing', () => {
     render(
       <AuthContext.Provider value={authFor('team-a')}>
         <QueryClientProvider client={queryClient}>
-          <FilesPage pendingGfsUri={GFS_SHARED_WITH_ME_LOCATION} />
+          <FilesPage />
         </QueryClientProvider>
       </AuthContext.Provider>
     )

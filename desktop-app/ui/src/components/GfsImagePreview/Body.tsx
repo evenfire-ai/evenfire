@@ -21,7 +21,6 @@ export function GfsImagePreviewBody({
   dataBase64,
   mimeType,
   onDownloadError,
-  recordOpen,
   onCopyContentReady,
   titleId,
   titleActions,
@@ -70,8 +69,7 @@ export function GfsImagePreviewBody({
             // Non-null by the source guard above (dataBase64 is absent → gfsUri
             // is present).
             gfsUri!,
-            GFS_IMAGE_PREVIEW_MAX_BYTES,
-            recordOpen
+            GFS_IMAGE_PREVIEW_MAX_BYTES
           )
           bytes = downloaded.bytes
           assertGfsImagePreviewSize(bytes.byteLength)

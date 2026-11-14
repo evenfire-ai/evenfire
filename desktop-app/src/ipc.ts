@@ -711,10 +711,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   })
   ipcMain.handle(
     'gfs:download',
-    async (
-      event,
-      payload: { uri: string; maxBytes?: number; recordOpen: boolean; requestId?: string }
-    ) => {
+    async (event, payload: { uri: string; maxBytes?: number; requestId?: string }) => {
       assertTrustedSender(event)
       // Optional producer-side bound (folder-zip walk): when present it is
       // validated here in main so an over-large body is rejected before it
@@ -724,23 +721,15 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       if (maxBytes !== undefined && maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
         throw new Error('download limit exceeds the allowed maximum')
       }
-      // Required on every download: the caller states whether this read is the
-      // user opening the file. A missing flag is a bug or a tampered payload,
-      // never an implicit "yes" (that would turn every background read into an
-      // open) nor an implicit "no" (that would lose the card's own entries).
-      if (typeof payload?.recordOpen !== 'boolean') {
-        throw new Error('recordOpen must be a boolean')
-      }
-      const recordOpen = payload.recordOpen
       const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
       return runWithGfsAbortSignal(requestId, signal =>
-        service.downloadGfsUri(sanitizeString(payload?.uri), { maxBytes, signal, recordOpen })
+        service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes, signal)
       )
     }
   )
   ipcMain.handle(
     'gfs:downloadPreview',
-    async (event, payload: { uri: string; maxBytes: number; recordOpen: boolean }) => {
+    async (event, payload: { uri: string; maxBytes: number }) => {
       assertTrustedSender(event)
       // The preview path is bounded: a required ceiling caps the download so an
       // oversized payload is rejected before it materializes (the save-to-disk
@@ -756,15 +745,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       if (maxBytes > GFS_PREVIEW_MAX_BYTES) {
         throw new Error('preview download limit exceeds the allowed maximum')
       }
-      // Same required-intent rule as 'gfs:download': a reload or a revocation
-      // retry says false, an actual open says true, and nothing is assumed.
-      if (typeof payload?.recordOpen !== 'boolean') {
-        throw new Error('recordOpen must be a boolean')
-      }
-      return service.downloadGfsUri(sanitizeString(payload?.uri), {
-        maxBytes,
-        recordOpen: payload.recordOpen,
-      })
+      return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
     }
   )
   ipcMain.handle(
@@ -776,11 +757,6 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       return service.listAccessibleGfsResources(drive, cursor)
     }
   )
-  ipcMain.handle('gfs:listRecent', async (event, payload: { drive?: string }) => {
-    assertTrustedSender(event)
-    const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
-    return service.listRecentGfsFiles(drive)
-  })
   ipcMain.handle(
     'gfs:listChildren',
     async (

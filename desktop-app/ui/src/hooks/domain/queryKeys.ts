@@ -69,11 +69,6 @@ export const desktopQueryKeys = {
       ['desktop-app', 'gfs', sessionScope, 'accessible', drive] as const,
       generation
     ),
-  gfsRecentFiles: (sessionScope: string, drive: string, generation?: number | null) =>
-    withGfsSessionGeneration(
-      ['desktop-app', 'gfs', sessionScope, 'recent', drive] as const,
-      generation
-    ),
   gfsChildren: (
     sessionScope: string,
     resourceId: string,
