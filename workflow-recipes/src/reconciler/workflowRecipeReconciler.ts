@@ -148,6 +148,7 @@ import * as rb from './resourceBuilder'
 import {
   classifySecretAccess,
   combineSecretAccess,
+  deniedSecretRevocationDigest,
   isSecretAccessibleByRecipe,
   parseSecretOwnership,
 } from './secretOwnership'
@@ -233,6 +234,16 @@ export class StatusRecordPrunedError extends Error {
     )
     this.name = 'StatusRecordPrunedError'
   }
+}
+
+/**
+ * Issue #1349 — per-workload revocation gate. `digest` identifies the denial
+ * (denied Secret names and versions); `alreadyApplied` is true when
+ * `status.secretOwnershipRevocations[workloadId]` holds that same digest.
+ */
+interface SecretRevocationGate {
+  digest: string | undefined
+  alreadyApplied: boolean
 }
 
 function pendingTransportNetworkConditions(
@@ -2540,6 +2551,7 @@ export class WorkflowRecipeReconciler {
       let workflowWorkloadConditions: StatusCondition[] | undefined
       let workflowTransportNetworkConditions: StatusCondition[] | undefined =
         workflowWorkloads.length === 0 ? [] : undefined
+      let workflowSecretRevocationRecordPending = false
       // Issue #1349 (D4) — both creation sites (workflow workloads below and the
       // inner reconcile) follow; the record must be gone before either runs.
       await this.clearTerminalRunTeardownRecordBeforeDeploy(recipe)
@@ -2561,6 +2573,8 @@ export class WorkflowRecipeReconciler {
           // workflow build path too; previously it was computed and dropped, so a
           // denied workflow workload degraded silently with no status condition.
           workflowSecretOwnershipConditions = workflowDeploy.secretOwnershipConditions
+          workflowSecretRevocationRecordPending =
+            workflowDeploy.secretRevocationRecordPending === true
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           const internalDependencyConditions =
@@ -2705,13 +2719,19 @@ export class WorkflowRecipeReconciler {
         // later reconcile() prune or the finalizer clears it. The
         // awaiting-trigger short-circuit does not reapply; the triggered run
         // applies them.
+        //
+        // Issue #1349 — a Secret revocation record that was not stored joins
+        // last, only when no other term set a requeue: the next pass repeats
+        // the revocation round and records it.
         requeueAfterMs: result.skipStatusPatch
           ? TRANSIENT_REQUEUE_BASE_MS
           : result.phase === 'deploying' ||
               result.pluginWorkloadSdkPolicyPending ||
               result.networkPolicyRetryPending
             ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS
-            : undefined,
+            : workflowSecretRevocationRecordPending
+              ? TRANSIENT_REQUEUE_BASE_MS
+              : undefined,
         requeueFixedInterval: !result.skipStatusPatch && result.phase === 'deploying',
         internalDependencyConditions: workflowInternalDependencyConditions,
         secretOwnershipConditions: workflowSecretOwnershipConditions,
@@ -3064,19 +3084,26 @@ export class WorkflowRecipeReconciler {
       // (see requeueAfterMs at the return) so the revocation is retried deterministically
       // instead of leaving a foreign-credentialed pod live until the next event.
       let deniedTeardownFailed = false
+      const revokedEntries: Record<string, string> = {}
       for (const workloadId of sortOrder) {
         const workload = (recipe.spec.workloads ?? []).find(w => w.id === workloadId)!
 
         if (secretOwnership.deniedWorkloadIds.has(workload.id)) {
           // Ownership-refused Secret ref — do not render. Tear down any prior
           // instance and surface the denial so the operator labels the Secret.
-          await this.teardownDeniedWorkload(workload, recipe, secretKeys).catch(err => {
+          const revocation = this.secretRevocationFor(recipe, workload, secretKeys)
+          try {
+            await this.teardownDeniedWorkload(workload, recipe, secretKeys, revocation)
+            if (!revocation.alreadyApplied && revocation.digest !== undefined) {
+              revokedEntries[workload.id] = revocation.digest
+            }
+          } catch (err) {
             deniedTeardownFailed = true
             createLogger('wrc', recipe.metadata.name).error(
               'Teardown of denied workload failed; will requeue',
               { id: workload.id, err }
             )
-          })
+          }
           workloadStatuses.push({
             id: workload.id,
             phase: 'failed',
@@ -3149,6 +3176,11 @@ export class WorkflowRecipeReconciler {
           })
         }
       }
+      // Issue #1349 — record the workloads revoked in this pass, also when another
+      // workload's teardown failed. A record that was not stored requeues the pass.
+      const secretRevocationRecordPending =
+        Object.keys(revokedEntries).length > 0 &&
+        !(await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries }))
 
       // Step 9: Create services for workloads with ports (no transport)
       for (const workload of recipe.spec.workloads ?? []) {
@@ -3418,6 +3450,7 @@ export class WorkflowRecipeReconciler {
         requeueAfterMs:
           legacyRawCleanupPending ||
           deniedTeardownFailed ||
+          secretRevocationRecordPending ||
           sdkOnlyRuntime?.phase === 'deploying' ||
           sdkOnlyRuntime?.phase === 'provider_unavailable' ||
           sdkOnlyPolicyPending ||
@@ -3912,6 +3945,8 @@ export class WorkflowRecipeReconciler {
     secretOwnershipConditions: StatusCondition[]
     workloadConditions: StatusCondition[]
     transportNetworkConditions?: StatusCondition[]
+    /** Issue #1349 — a revocation record was not stored; the caller requeues. */
+    secretRevocationRecordPending?: boolean
   }> {
     const workloads = recipe.spec.workloads ?? []
     if (workloads.length === 0)
@@ -4017,20 +4052,34 @@ export class WorkflowRecipeReconciler {
     // manifests as an unrendered workload (its dependent steps fail to connect)
     // plus the per-workload log below, so the workflow degrades without leaking a
     // foreign credential.
+    const revokedEntries: Record<string, string> = {}
     for (const workloadId of sortOrder) {
       const workload = workloads.find(w => w.id === workloadId)!
       if (secretOwnership.deniedWorkloadIds.has(workload.id)) {
-        createLogger('wrc', recipe.metadata.name).error(
-          'Secret ownership denied for workflow workload',
-          {
-            workloadId,
-            name,
-            value3: secretOwnership.messageByWorkload.get(workloadId) ?? 'foreign Secret reference',
-          }
-        )
+        const revocation = this.secretRevocationFor(recipe, workload, secretKeys)
+        if (!revocation.alreadyApplied) {
+          createLogger('wrc', recipe.metadata.name).error(
+            'Secret ownership denied for workflow workload',
+            {
+              workloadId,
+              name,
+              value3:
+                secretOwnership.messageByWorkload.get(workloadId) ?? 'foreign Secret reference',
+            }
+          )
+        }
         try {
-          await this.teardownDeniedWorkload(workload, recipe, secretKeys)
+          await this.teardownDeniedWorkload(workload, recipe, secretKeys, revocation)
+          if (!revocation.alreadyApplied && revocation.digest !== undefined) {
+            revokedEntries[workload.id] = revocation.digest
+          }
         } catch (err) {
+          // Issue #1349 — record the workloads already revoked in this pass
+          // before failing it; the retry then repeats only the failed one. A
+          // failed record write needs nothing more: this pass requeues anyway.
+          if (Object.keys(revokedEntries).length > 0) {
+            await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries })
+          }
           // Issue #637 — fail-loud + fail-closed. A denied workflow workload whose
           // teardown failed must NOT be left as a silent swallow (the prior
           // foreign-credentialed pod may still be live). Degrade + requeue so the
@@ -4086,6 +4135,12 @@ export class WorkflowRecipeReconciler {
         }
       }
     }
+    // Issue #1349 — a record that was not stored does not fail the deploy: the
+    // caller keeps this pass's result and requeues, and the next pass repeats
+    // the revocation round.
+    const secretRevocationRecordPending =
+      Object.keys(revokedEntries).length > 0 &&
+      !(await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries }))
 
     // Create Services for workloads with ports
     for (const workload of workloads) {
@@ -4168,6 +4223,7 @@ export class WorkflowRecipeReconciler {
           internalDependencyConditions,
           secretOwnershipConditions: secretOwnership.conditions,
           workloadConditions: [],
+          secretRevocationRecordPending,
         }
       }
       try {
@@ -4203,6 +4259,7 @@ export class WorkflowRecipeReconciler {
       secretOwnershipConditions: secretOwnership.conditions,
       workloadConditions: [],
       transportNetworkConditions: [],
+      secretRevocationRecordPending,
     }
   }
 
@@ -7092,18 +7149,25 @@ export class WorkflowRecipeReconciler {
     }
 
     const failedTeardowns: string[] = []
+    const revokedEntries: Record<string, string> = {}
     for (const workload of recipe.spec.workloads ?? []) {
       if (!secretOwnership.deniedWorkloadIds.has(workload.id)) continue
-      createLogger('wrc', recipe.metadata.name).warn(
-        'Revoking steady workflow workload because Secret access was denied',
-        {
-          id: workload.id,
-          name: recipe.metadata.name,
-          value3: secretOwnership.messageByWorkload.get(workload.id) ?? 'foreign Secret ref',
-        }
-      )
+      const revocation = this.secretRevocationFor(recipe, workload, secretKeys)
+      if (!revocation.alreadyApplied) {
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Revoking steady workflow workload because Secret access was denied',
+          {
+            id: workload.id,
+            name: recipe.metadata.name,
+            value3: secretOwnership.messageByWorkload.get(workload.id) ?? 'foreign Secret ref',
+          }
+        )
+      }
       try {
-        await this.teardownDeniedWorkload(workload, recipe, secretKeys)
+        await this.teardownDeniedWorkload(workload, recipe, secretKeys, revocation)
+        if (!revocation.alreadyApplied && revocation.digest !== undefined) {
+          revokedEntries[workload.id] = revocation.digest
+        }
       } catch (error) {
         // Teardown FAILED (e.g. RBAC 403 / apiserver 5xx). The foreign credential
         // is still live, so we must NOT report the workload as revoked. Requeue so
@@ -7116,12 +7180,20 @@ export class WorkflowRecipeReconciler {
         )
       }
     }
+    // Issue #1349 — record the workloads revoked in this pass, also when another
+    // workload's teardown failed, so the next pass does not repeat them.
+    const revocationRecordStored =
+      Object.keys(revokedEntries).length === 0 ||
+      (await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries }))
     if (failedTeardowns.length > 0) {
       return {
         ...clean,
         needsRequeue: true,
         requeueReason: `teardown failed for ${failedTeardowns.join(', ')}`,
       }
+    }
+    if (!revocationRecordStored) {
+      return { ...clean, needsRequeue: true, requeueReason: 'Secret revocation record not stored' }
     }
     return { conditions: secretOwnership.conditions, hadDenied: true, needsRequeue: false }
   }
@@ -7163,16 +7235,45 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
+   * Issue #1349 — the revocation gate of one denied workload. Entries are never
+   * removed: a stale entry is inert because a later denial of a re-labeled Secret
+   * carries another resourceVersion, hence another digest.
+   */
+  private secretRevocationFor(
+    recipe: WorkflowRecipeCRD,
+    workload: WorkloadDef,
+    secretKeys: rb.SecretKeysByName
+  ): SecretRevocationGate {
+    const refNames = [
+      ...(workload.envSecret?.name ? [workload.envSecret.name] : []),
+      ...(workload.imagePullSecrets ?? []),
+    ]
+    const digest = deniedSecretRevocationDigest(refNames, secretKeys)
+    return {
+      digest,
+      alreadyApplied:
+        digest !== undefined && recipe.status?.secretOwnershipRevocations?.[workload.id] === digest,
+    }
+  }
+
+  /**
    * Fail-closed teardown of a workload whose Secret ref is ownership-denied.
    * Stateful/PVC-backed workloads are NOT deleted (data-loss guard, parity with
    * deleteTransportRuntimeWorkloads) — they are left NotReady and the operator
    * must rotate the (potentially compromised) Secret; see plan §10.
+   *
+   * Issue #1349 — `revocation` is this workload's gate (see
+   * {@link secretRevocationFor}): a denial already revoked under the same digest
+   * returns at once, so a steady denial is revoked once per denied Secret version
+   * instead of on every pass.
    */
   private async teardownDeniedWorkload(
     workload: WorkloadDef,
     recipe: WorkflowRecipeCRD,
-    secretKeys: rb.SecretKeysByName
+    secretKeys: rb.SecretKeysByName,
+    revocation: SecretRevocationGate
   ): Promise<void> {
+    if (revocation.alreadyApplied) return
     // Issue #637 — for transport workloads the McpServer CRD + transport Service
     // (in mcp-server) carry the projected envSecret/imagePullSecrets to HCC. The
     // create-time skip only stops NEW foreign refs; on REVOCATION an already
@@ -7191,6 +7292,14 @@ export class WorkflowRecipeReconciler {
     // credential-free template. This stops continued injection; the operator must
     // still rotate the (potentially compromised) Secret to fully remediate.
     if (workload.type === 'statefulset') {
+      // Issue #1349 — a StatefulSet that was never deployed has nothing to
+      // re-render and no Pod to restart. Read it first: ensureStatefulSet creates
+      // the headless Service and the StatefulSet when they are absent.
+      const existing = await this.readStatefulSetIfPresent(
+        rb.resolveStatefulSetResourceName(recipe, workload.id),
+        ns
+      )
+      if (!existing) return
       const isolationLevel: SecurityIsolationLevel =
         recipe.spec.security?.isolationLevel ?? 'minimal'
       await this.ensureStatefulSet(workload as StatefulSetDef, recipe, isolationLevel, secretKeys)
