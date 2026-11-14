@@ -124,14 +124,6 @@ if [[ "$SERVICE_PRESENT" != true ]]; then
   wait_for_service_pod mcp-host mcp-host false
 fi
 printf 'RESTART_PHASE=workloads-ready\n'
-if ! branch_profile branch-profile-pf; then
-  printf 'ISSUE628_RESTART_FORWARD_FAILED: cannot restore profile port-forwards\n' >&2
-  exit 1
-fi
-if ! branch_profile branch-profile-health; then
-  printf 'ISSUE628_RESTART_HEALTH_FAILED: profile health did not recover\n' >&2
-  exit 1
-fi
 if [[ "$stopped_observed" != true ]]; then
   printf 'ISSUE628_RESTART_STOP_UNOBSERVED: profile restarted but stopped state was not verified\n' >&2
   exit 1

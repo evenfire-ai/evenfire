@@ -570,7 +570,6 @@ test(persistenceTestName, async ({ page, browser }) => {
         1_530_000,
         'profile-restart'
       )
-      profileMayBeUnavailable = false
       test.info().annotations.push({
         type: 'profile restart',
         description: restartLog
@@ -578,6 +577,15 @@ test(persistenceTestName, async ({ page, browser }) => {
           .filter(line => /^(NODE_IP_|RESTART_PHASE=)/.test(line))
           .join('; '),
       })
+      // The bounded restart runner reaps its child process group on exit, so
+      // forwards must be started by this longer-lived Playwright process.
+      await refreshProfileForwards()
+      await onProfile(
+        '/usr/bin/make',
+        ['-f', 'scripts/minikube-profiles/branch.mk', 'branch-profile-health'],
+        180_000
+      )
+      profileMayBeUnavailable = false
       await kube(
         ['wait', '--for=condition=Ready', 'nodes', '--all', '--timeout=300s'],
         360_000,
