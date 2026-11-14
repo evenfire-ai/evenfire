@@ -23,7 +23,7 @@ const BOUND_HOME_RECOVERY =
 const CONFLICT_CAUSES: Record<GfsUserHomeConflict, string> = {
   path_conflict: 'An item was found at the reserved home path.',
   ancestor_grant_conflict:
-    'An inherited grant or share on the drive root or Users folder exposed home folders.',
+    'A grant or share for a user, team, agent or context exists on the drive root or the Users folder. An operator must remove it before Retry can succeed.',
   ownership_conflict: 'The owner’s access was removed or reduced by an operator.',
 }
 

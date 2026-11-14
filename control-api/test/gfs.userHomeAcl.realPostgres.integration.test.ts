@@ -17,6 +17,7 @@ import {
   handleShareListForCaller,
   handleShareWrite,
 } from '../src/routes/gfs/shares.js'
+import { registerGfsUserHomeRoutes } from '../src/routes/gfs/userHomes.js'
 import {
   createDrive,
   createUser,
@@ -24,7 +25,28 @@ import {
   homeState,
 } from './helpers/userHomeRealPostgres.js'
 
-const holder = vi.hoisted(() => ({ pool: undefined as Pool | undefined }))
+const holder = vi.hoisted(() => ({
+  pool: undefined as Pool | undefined,
+  admin: undefined as string | undefined,
+}))
+vi.mock('../src/middleware/controlUIAuth.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/middleware/controlUIAuth.js')>()
+  return {
+    ...actual,
+    requireAuthForControlUI: (
+      req: express.Request,
+      res: express.Response,
+      next: express.NextFunction
+    ) => {
+      if (!req.header('x-operator')) return res.status(401).json({ error: 'Unauthorized' })
+      Object.assign(req, { adminAuth: { sub: holder.admin } })
+      next()
+    },
+  }
+})
+vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
+  rateLimitMiddleware: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+}))
 vi.mock('../src/db.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/db.js')>()
   return {
@@ -63,6 +85,7 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
        VALUES ($1, $2, 'test-hash', 'admin', 'active')`,
       [admin, `acl-${admin}`]
     )
+    holder.admin = admin
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => {
@@ -76,6 +99,9 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
     app.get('/shares', asyncHandler(handleShareListForCaller))
     app.post('/shares', asyncHandler(handleShareWrite))
     app.delete('/shares/:id', asyncHandler(handleShareDelete))
+    const homeRoutes = express.Router()
+    registerGfsUserHomeRoutes(homeRoutes)
+    app.use(homeRoutes)
   }, 60_000)
 
   afterAll(async () => {
@@ -1138,5 +1164,89 @@ describeRealPostgres('user-home ACL routes on PostgreSQL', () => {
       .expect(403)
       .expect(({ body }) => expect(body.error).toBe('home_owner_grant_protected'))
     expect(await otherRows()).toHaveLength(0)
+  })
+
+  it('recovers an ancestor conflict from non-inheritable entries: remove them, then Retry', async () => {
+    const users = (
+      await database.pool.query<{ resource_id: string }>(
+        `SELECT resource_id::text FROM gfs_resources
+          WHERE drive = $1 AND parent_resource_id = $2 AND name = 'Users'`,
+        [drive, root]
+      )
+    ).rows[0]!.resource_id
+    // Seeded by SQL: the write path refuses to create these entries (ancestor_home_exposure).
+    const team = randomUUID()
+    const teamGrant = await grant(users, 'team', team, ['read', 'write'], false)
+    const reader = randomUUID()
+    const userShare = (
+      await database.pool.query<{ id: string }>(
+        `INSERT INTO gfs_shares (drive, resource_id, subject_type, subject_id, permissions, include_descendants)
+         VALUES ($1,$2,'user',$3,ARRAY['read'],false) RETURNING id::text`,
+        [drive, root, reader]
+      )
+    ).rows[0]!.id
+    const blocked = await createUser(database.pool, 'Blocked')
+    expect(await provisionUserHome(blocked, { drive, dbPool: database.pool })).toBe('conflict')
+    expect(await homeState(database.pool, blocked)).toMatchObject({
+      state: 'conflict',
+      conflict_code: 'ancestor_grant_conflict',
+    })
+    // The owner's home, ready before the entries appeared, is not re-checked.
+    expect(await homeState(database.pool, owner)).toMatchObject({ state: 'ready' })
+
+    const detail = await request(app)
+      .get(`/gfs/user-homes/${blocked}`)
+      .set('x-operator', 'yes')
+      .expect(200)
+    expect(
+      detail.body.home.conflictDetail.entries.map(
+        (entry: { relation: string; path: string; subjectType: string; inherit: boolean }) => ({
+          relation: entry.relation,
+          path: entry.path,
+          subjectType: entry.subjectType,
+          inherit: entry.inherit,
+        })
+      )
+    ).toEqual([
+      { relation: 'grant', path: '/Users', subjectType: 'team', inherit: false },
+      { relation: 'share', path: '/', subjectType: 'user', inherit: false },
+    ])
+
+    // An entry cannot be edited there, not even to keep it non-inheritable.
+    await request(app)
+      .put('/grants')
+      .set('x-operator', 'yes')
+      .send({
+        drive,
+        resourceId: users,
+        subject: { type: 'team', id: team },
+        permissions: ['read'],
+        inherit: false,
+      })
+      .expect(409)
+      .expect(({ body }) => expect(body.error).toBe('ancestor_home_exposure'))
+    expect(
+      (
+        await database.pool.query('SELECT permissions, inherit FROM gfs_grants WHERE id = $1', [
+          teamGrant,
+        ])
+      ).rows
+    ).toEqual([{ permissions: ['read', 'write'], inherit: false }])
+
+    await request(app).delete(`/grants/${teamGrant}`).set('x-operator', 'yes').expect(200)
+    await request(app).delete(`/shares/${userShare}`).set('x-operator', 'yes').expect(200)
+    const cleared = await request(app)
+      .get(`/gfs/user-homes/${blocked}`)
+      .set('x-operator', 'yes')
+      .expect(200)
+    expect(cleared.body.home.conflictDetail.entries).toEqual([])
+
+    await request(app).post(`/gfs/user-homes/${blocked}/retry`).set('x-operator', 'yes').expect(202)
+    expect(await homeState(database.pool, blocked)).toMatchObject({ state: 'pending' })
+    expect(await provisionUserHome(blocked, { drive, dbPool: database.pool })).toBe('ready')
+    expect(await homeState(database.pool, blocked)).toMatchObject({
+      state: 'ready',
+      conflict_code: null,
+    })
   })
 })

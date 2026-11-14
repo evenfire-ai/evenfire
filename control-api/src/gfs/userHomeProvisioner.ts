@@ -469,14 +469,15 @@ async function installHome(
     throw new Error('GFS Users directory is not canonical')
   }
 
+  // Same rule as the write path (assertNoAncestorHomeExposure): any non-operator
+  // grant or share on the drive root or /Users blocks, whether or not it reaches
+  // descendants.
   const ancestors = await db.query(
     `SELECT 'grant' AS relation, id::text, resource_id::text FROM gfs_grants
-      WHERE drive = $1 AND resource_id = ANY($2::uuid[]) AND inherit = true
-        AND subject_type IN ('user', 'team', 'host', 'context')
+      WHERE drive = $1 AND resource_id = ANY($2::uuid[]) AND subject_type <> 'operator'
      UNION ALL
      SELECT 'share' AS relation, id::text, resource_id::text FROM gfs_shares
-      WHERE drive = $1 AND resource_id = ANY($2::uuid[]) AND include_descendants = true
-        AND subject_type IN ('user', 'team', 'host', 'context')`,
+      WHERE drive = $1 AND resource_id = ANY($2::uuid[]) AND subject_type <> 'operator'`,
     [drive, [root.resource_id, usersDirectory.resource_id]]
   )
   if (ancestors.rows.length) {

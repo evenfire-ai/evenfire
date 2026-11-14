@@ -27,14 +27,14 @@ async function currentAccess(
               g.subject_type, g.subject_id, g.permissions, g.inherit
          FROM gfs_grants g JOIN gfs_resources r ON r.resource_id = g.resource_id AND r.drive = g.drive
         WHERE g.drive = $2 AND g.resource_id = ANY($1::uuid[]) AND r.deleted_at IS NULL
-          AND (NOT $3::boolean OR (g.subject_type <> 'operator' AND g.inherit))
+          AND (NOT $3::boolean OR g.subject_type <> 'operator')
           AND (NOT $3::boolean OR $4::uuid[] IS NULL OR g.id = ANY($4::uuid[]))
        UNION ALL
        SELECT 'share'::text AS relation, s.id, s.resource_id, r.path_cache AS path,
               s.subject_type, s.subject_id, s.permissions, s.include_descendants AS inherit
          FROM gfs_shares s JOIN gfs_resources r ON r.resource_id = s.resource_id AND r.drive = s.drive
         WHERE s.drive = $2 AND s.resource_id = ANY($1::uuid[]) AND r.deleted_at IS NULL
-          AND (NOT $3::boolean OR (s.subject_type <> 'operator' AND s.include_descendants))
+          AND (NOT $3::boolean OR s.subject_type <> 'operator')
           AND (NOT $3::boolean OR $5::uuid[] IS NULL OR s.id = ANY($5::uuid[]))
      )
      SELECT * FROM access ORDER BY relation, resource_id, subject_type, subject_id, id`,

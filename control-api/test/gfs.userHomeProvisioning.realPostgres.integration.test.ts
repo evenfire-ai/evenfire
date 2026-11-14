@@ -497,13 +497,20 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
   })
 
   it.each([
-    { ancestor: 'root', table: 'gfs_grants' },
-    { ancestor: 'users', table: 'gfs_grants' },
-    { ancestor: 'root', table: 'gfs_shares' },
-    { ancestor: 'users', table: 'gfs_shares' },
+    { ancestor: 'root', table: 'gfs_grants', subjectType: 'team', inheritable: true },
+    { ancestor: 'users', table: 'gfs_grants', subjectType: 'team', inheritable: true },
+    { ancestor: 'root', table: 'gfs_shares', subjectType: 'team', inheritable: true },
+    { ancestor: 'users', table: 'gfs_shares', subjectType: 'team', inheritable: true },
+    { ancestor: 'root', table: 'gfs_grants', subjectType: 'team', inheritable: false },
+    { ancestor: 'users', table: 'gfs_grants', subjectType: 'team', inheritable: false },
+    { ancestor: 'root', table: 'gfs_shares', subjectType: 'team', inheritable: false },
+    { ancestor: 'users', table: 'gfs_shares', subjectType: 'team', inheritable: false },
+    { ancestor: 'users', table: 'gfs_grants', subjectType: 'user', inheritable: false },
+    { ancestor: 'users', table: 'gfs_grants', subjectType: 'host', inheritable: false },
+    { ancestor: 'users', table: 'gfs_grants', subjectType: 'context', inheritable: false },
   ] as const)(
-    'rejects inheritable $table on $ancestor while provisioning a separate safe drive',
-    async ({ ancestor, table }) => {
+    'rejects a non-operator $subjectType $table entry on $ancestor (reaches descendants: $inheritable) while provisioning a separate safe drive',
+    async ({ ancestor, table, subjectType, inheritable }) => {
       const blocked = await createUser(database.pool, 'Blocked User')
       const users = await database.pool.query(
         `INSERT INTO gfs_resources (drive, parent_resource_id, name, kind, path_cache)
@@ -512,10 +519,11 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
       )
       const ancestorId = ancestor === 'root' ? rootId : users.rows[0].resource_id
       const inherited = table === 'gfs_grants' ? 'inherit' : 'include_descendants'
+      const subjectId = subjectType === 'host' ? '1st:mcp-host/agent' : randomUUID()
       const offending = await database.pool.query(
         `INSERT INTO ${table} (drive, resource_id, subject_type, subject_id, permissions, ${inherited})
-       VALUES ($1,$2,'team',$3,ARRAY['read'],true) RETURNING id::text`,
-        [drive, ancestorId, randomUUID()]
+       VALUES ($1,$2,$3,$4,ARRAY['read'],$5) RETURNING id::text`,
+        [drive, ancestorId, subjectType, subjectId, inheritable]
       )
       expect(await provisionUserHome(blocked, { drive, dbPool: database.pool })).toBe('conflict')
       expect(await homeState(database.pool, blocked)).toMatchObject({
@@ -576,6 +584,22 @@ describeRealPostgres('user-home provisioning on PostgreSQL', () => {
     await createDrive(database.pool, safeDrive)
     const safe = await createUser(database.pool, 'Safe User')
     expect(await provisionUserHome(safe, { drive: safeDrive, dbPool: database.pool })).toBe('ready')
+  })
+
+  it('provisions past operator-subject grants on the drive root and /Users, inheritable or not', async () => {
+    const user = await createUser(database.pool, 'Operator Neighbour')
+    const users = await database.pool.query(
+      `INSERT INTO gfs_resources (drive, parent_resource_id, name, kind, path_cache)
+       VALUES ($1,$2,'Users','directory','/Users') RETURNING resource_id::text`,
+      [drive, rootId]
+    )
+    await database.pool.query(
+      `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit)
+       VALUES ($1,$2,'operator','',ARRAY['read'],false), ($1,$3,'operator','',ARRAY['read'],true)`,
+      [drive, rootId, users.rows[0].resource_id]
+    )
+    expect(await provisionUserHome(user, { drive, dbPool: database.pool })).toBe('ready')
+    await assertReady(user)
   })
 
   it('keeps a missing drive pending and succeeds after the drive appears', async () => {

@@ -276,7 +276,7 @@ describe('Home folder field', () => {
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     expect(
       await screen.findByText(
-        'An inherited grant or share on the drive root or Users folder exposed home folders.'
+        'A grant or share for a user, team, agent or context exists on the drive root or the Users folder. An operator must remove it before Retry can succeed.'
       )
     ).toHaveAttribute('role', 'status')
     expect(screen.queryByLabelText('Folder name')).not.toBeInTheDocument()

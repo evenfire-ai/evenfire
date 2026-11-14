@@ -350,7 +350,7 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
     })
   })
 
-  it('resolves current ancestor conflicts and stops showing a share after inheritance is removed', async () => {
+  it('resolves current ancestor conflicts, keeps showing a share made non-inheritable and stops showing it once it is removed', async () => {
     const fixture = await seedHome()
     const teamId = randomUUID()
     await fixturePool.query('INSERT INTO teams (id, name) VALUES ($1, $2)', [
@@ -412,20 +412,74 @@ describeRealPostgres('GFS user home recovery on real PostgreSQL', () => {
         },
       ],
     })
+    // Entries carry no row id: each step names them by relation, subject and inherit.
+    const userGrant = {
+      relation: 'grant',
+      subjectType: 'user',
+      subjectId: fixture.userId,
+      inherit: true,
+    }
+    const teamShare = (inherit: boolean) => ({
+      relation: 'share',
+      subjectType: 'team',
+      subjectId: teamId,
+      inherit,
+    })
+    const hostGrant = {
+      relation: 'grant',
+      subjectType: 'host',
+      subjectId: '1st:mcp-host/agent',
+      inherit: true,
+    }
+    const named = (entries: Array<Record<string, unknown>>) =>
+      entries.map(({ relation, subjectType, subjectId, inherit }) => ({
+        relation,
+        subjectType,
+        subjectId,
+        inherit,
+      }))
+    const storedIds = JSON.stringify({
+      resourceIds: [fixture.usersId],
+      grantIds: [grant.rows[0].id],
+      shareIds: [share.rows[0].id],
+    })
+    const withoutIds = JSON.stringify({ resourceIds: [fixture.usersId] })
+    const setDetail = (detail: string) =>
+      fixturePool.query(
+        'UPDATE gfs_user_homes SET conflict_detail = $2::jsonb WHERE user_id = $1',
+        [fixture.userId, detail]
+      )
+
     await fixturePool.query('UPDATE gfs_shares SET include_descendants = false WHERE id = $1', [
       share.rows[0].id,
     ])
     const changed = await get()
     expect(changed.status).toBe(200)
-    expect(changed.body.home.conflictDetail.entries).toHaveLength(1)
-    expect(changed.body.home.conflictDetail.entries[0].relation).toBe('grant')
-    await fixturePool.query(
-      'UPDATE gfs_user_homes SET conflict_detail = $2::jsonb WHERE user_id = $1',
-      [fixture.userId, JSON.stringify({ resourceIds: [fixture.usersId] })]
-    )
+    expect(named(changed.body.home.conflictDetail.entries)).toEqual([userGrant, teamShare(false)])
+
+    await setDetail(withoutIds)
+    const allCurrent = await get()
+    expect(allCurrent.status).toBe(200)
+    // Ordered by relation, then subject type (the detail query's ORDER BY).
+    expect(named(allCurrent.body.home.conflictDetail.entries)).toEqual([
+      hostGrant,
+      userGrant,
+      teamShare(false),
+    ])
+
+    await setDetail(storedIds)
+    await fixturePool.query('DELETE FROM gfs_shares WHERE id = $1', [share.rows[0].id])
+    const removed = await get()
+    expect(removed.status).toBe(200)
+    expect(named(removed.body.home.conflictDetail.entries)).toEqual([userGrant])
+
+    await setDetail(withoutIds)
     const withoutSpecificIds = await get()
     expect(withoutSpecificIds.status).toBe(200)
-    expect(withoutSpecificIds.body.home.conflictDetail.entries).toHaveLength(2)
+    expect(named(withoutSpecificIds.body.home.conflictDetail.entries)).toEqual([
+      hostGrant,
+      userGrant,
+    ])
     expect(withoutSpecificIds.body.home.conflictDetail.entries).toContainEqual(
       expect.objectContaining({
         relation: 'grant',
