@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
 import {
   __setChatStoreBaseDirForTests,
@@ -791,12 +791,25 @@ describe('ipc host status stream handlers', () => {
     ['gfs:createShare', 'createGfsShare', { resourceId: RID, subjectKeys: ['user:user-1'] }, 2],
   ]
 
-  it('covers every GFS IPC channel that forwards a drive', () => {
-    const forwarding = [...testState.handlers.keys()].filter(channel =>
-      GFS_DRIVE_CHANNELS.some(([listed]) => listed === channel)
+  // Scans the handler source instead of the table: a new channel that reads a
+  // drive without optionalDriveArg, or that is missing from the table, fails here.
+  it('reads a drive only through optionalDriveArg, in exactly the channels of the table', () => {
+    const ipcSource = readFileSync(new URL('../src/ipc.ts', import.meta.url), 'utf8')
+    const handlers = ipcSource
+      .split(/ipcMain\.handle\(\s*/)
+      .slice(1)
+      .flatMap(chunk => {
+        const channel = /^'([^']+)'/.exec(chunk)?.[1]
+        const reads = chunk.match(/\bpayload\??\.drive\b/g)?.length ?? 0
+        const declares = /\bdrive\??:\s*string\b/.test(chunk)
+        if (!channel || (reads === 0 && !declares)) return []
+        const checked = chunk.match(/optionalDriveArg\(payload\?\.drive\)/g)?.length ?? 0
+        return [{ channel, reads, checked }]
+      })
+    expect(handlers.filter(h => h.reads === 0 || h.reads !== h.checked)).toEqual([])
+    expect(handlers.map(h => h.channel).sort()).toEqual(
+      GFS_DRIVE_CHANNELS.map(([channel]) => channel).sort()
     )
-    expect(GFS_DRIVE_CHANNELS).toHaveLength(22)
-    expect(forwarding).toHaveLength(22)
   })
 
   it.each(GFS_DRIVE_CHANNELS)(

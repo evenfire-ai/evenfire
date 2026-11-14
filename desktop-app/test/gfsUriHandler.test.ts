@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 import {
   GfsClient,
@@ -834,8 +835,29 @@ describe('GfsClient drive arguments (R2-L8)', () => {
     return body?.drive ?? null
   }
 
-  it('covers all twelve client calls that carry a drive', () => {
-    expect(CALLS).toHaveLength(12)
+  // Scans the client source for three request shapes: a drive read from the
+  // call input, a `drive` query parameter, and a drive interpolated into a URL.
+  // Stated limit: a drive placed in a JSON body through a local variable is not
+  // scanned; the two such sites (grant, createShare) assign
+  // `const drive = resolveDrive(input.drive)` and are covered by the read rule.
+  it('sends a drive only after requireDrive or resolveDrive checked it', () => {
+    const clientSource = readFileSync(new URL('../src/gfs/uriHandler.ts', import.meta.url), 'utf8')
+    const reads = clientSource.match(/\b(?:input|opts)\??\.drive\b/g) ?? []
+    const checked =
+      clientSource.match(/\b(?:resolveDrive|requireDrive)\((?:input|opts)\.drive\)/g) ?? []
+    const presence = clientSource.match(/\bopts\?\.drive !== undefined/g) ?? []
+    expect(reads.length).toBeGreaterThan(0)
+    expect(reads.length).toBe(checked.length + presence.length)
+    const sinks = clientSource.match(/q\.set\('drive',\s*[^\n]*/g) ?? []
+    expect(sinks.length).toBeGreaterThan(0)
+    expect(
+      sinks.filter(s => !/^q\.set\('drive',\s*(?:resolveDrive|requireDrive)\(/.test(s))
+    ).toEqual([])
+    const interpolated = [
+      ...clientSource.matchAll(/drive=\$\{encodeURIComponent\(([^)]*)\)\}/g),
+    ].map(m => m[1])
+    expect(interpolated.length).toBeGreaterThan(0)
+    expect(interpolated.filter(n => n !== 'resolvedDrive' && n !== 'resource.drive')).toEqual([])
   })
 
   it.each(CALLS)('%s rejects a blank drive before any request', async (_name, call) => {
