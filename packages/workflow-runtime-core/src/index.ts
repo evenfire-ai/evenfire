@@ -14,6 +14,16 @@ export {
 export { withRetry, computeBackoff } from './coordinator/retry'
 export { emitLog, initLogger } from './status-reporter/logger'
 export {
+  MAX_STATUS_TOOL_CALLS,
+  STATUS_TOOL_ARGS_PREVIEW_LIMIT,
+  STATUS_TOOL_RESULT_PREVIEW_LIMIT,
+  boundToolsCalledForStatus,
+  normalizeArtifactForStatus,
+  normalizeToolArgsForStatus,
+  normalizeToolResultForStatus,
+} from './status-reporter/toolCallStatus'
+export type { StatusArtifact } from './status-reporter/toolCallStatus'
+export {
   AUTH_RETRY_DELAY_MS,
   AUTH_RETRY_MAX_ATTEMPTS,
   sendWithAuthRetryOn401,
