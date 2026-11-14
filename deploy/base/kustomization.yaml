@@ -20,21 +20,22 @@ resources:
   # docs/deploy/production.md), so the minikube overlay never inherits an
   # unconfigurable cloudflared pod.
 
-replacements:
-  - source:
-      version: v1
+configurations:
+  - kustomizeconfig/desktop-profile-ui-origin.yaml
+
+# Kustomize replacements from a base run before parent-overlay patches. This
+# delayed variable resolves the final source ConfigMap after overlay assembly.
+vars:
+  - name: DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
+    objref:
+      apiVersion: v1
       kind: ConfigMap
       name: desktop-profile-ui-config
       namespace: profiles
-      fieldPath: data.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
-    targets:
-      - select:
-          version: v1
-          kind: ConfigMap
-          name: control-api-config
-          namespace: control-plane
-        fieldPaths:
-          - data.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
+    fieldref:
+      fieldpath: data.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
+
+replacements:
   - source:
       group: clerum.io
       version: v1alpha1

@@ -167,7 +167,12 @@ If you run a perimeter firewall, these are the destinations the platform uses:
 
 Your overlay lists `deploy/base` as a resource and adds what base leaves out.
 Use [`deploy/overlays/minikube/kustomization.yaml`](../../deploy/overlays/minikube/kustomization.yaml)
-as the reference.
+as the reference. Set the public Profile UI origin only in the
+`desktop-profile-ui-config` ConfigMap's `DESKTOP_PROFILE_UI_PUBLIC_BASE_URL`
+key. The base Kustomization declares delayed variable projection into
+`control-api-config`; it resolves the final source ConfigMap after a parent
+overlay's patches. Do not maintain a second independent Profile UI URL in
+`control-api-config`.
 
 **Images.** Base refers to images by local `clerum/<name>` names. Add the
 [`deploy/components/ghcr-images`](../../deploy/components/ghcr-images/kustomization.yaml)
