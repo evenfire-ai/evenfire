@@ -205,6 +205,73 @@ export function hasTerminalRunTeardownRecord(recipe: WorkflowRecipeCRD): boolean
 }
 
 /**
+ * The workloads the terminal run teardown deletes: transport runtimes that are
+ * neither StatefulSets nor PVC-backed (#558: never delete stateful data here).
+ */
+export function isRemovedByTerminalRunTeardown(workload: WorkloadDef): boolean {
+  if (!workload.transport) return false
+  if (workload.type === 'statefulset') return false
+  return !(workload as { volumeClaimTemplates?: unknown[] }).volumeClaimTemplates?.length
+}
+
+/**
+ * Issue #1349 — true when no workload that names a Secret (`envSecret` or
+ * `imagePullSecrets`) is left deployed with it after the terminal teardown: each
+ * one is denied (revoked, and its gate skips it until the Secret changes) or is
+ * deleted by the teardown. A workload whose Secret is accessible or missing and
+ * that the teardown keeps makes it false.
+ */
+export function noSecretBearingWorkloadsRemain(
+  recipe: WorkflowRecipeCRD,
+  deniedWorkloadIds: ReadonlySet<string>
+): boolean {
+  return (recipe.spec.workloads ?? [])
+    .filter(w => Boolean(w.envSecret?.name) || (w.imagePullSecrets?.length ?? 0) > 0)
+    .every(w => deniedWorkloadIds.has(w.id) || isRemovedByTerminalRunTeardown(w))
+}
+
+/** Issue #637 — outcome of the steady-state Secret ownership enforcer. */
+interface SteadyOwnershipOutcome {
+  conditions: StatusCondition[]
+  hadDenied: boolean
+  needsRequeue: boolean
+  requeueReason?: string
+  /** Workloads denied in this pass (all torn down when `hadDenied`); empty otherwise. */
+  deniedWorkloadIds: ReadonlySet<string>
+}
+
+/**
+ * Issue #637 — shape a steady enforcer outcome into the `ReconcileResult` a
+ * short-circuit returns, or `null` to let it fall through to its steady return.
+ */
+function steadyOwnershipResult(
+  outcome: SteadyOwnershipOutcome,
+  phase: RecipePhase
+): ReconcileResult | null {
+  if (outcome.needsRequeue) {
+    // Could not verify or could not tear down — requeue (transient) rather than
+    // report a clean or revoked status. `skipStatusPatch` + `requeueAfterMs`
+    // schedules a deterministic retry without writing a misleading condition.
+    return {
+      phase,
+      message: `EnvSecretOwnershipDenied recheck deferred: ${outcome.requeueReason} — requeuing`,
+      workloadStatuses: [],
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+      skipStatusPatch: true,
+    }
+  }
+  if (outcome.hadDenied) {
+    return {
+      phase,
+      message: 'EnvSecretOwnershipDenied: foreign Secret ref revoked on steady workflow',
+      workloadStatuses: [],
+      secretOwnershipConditions: outcome.conditions,
+    }
+  }
+  return null
+}
+
+/**
  * A workflow latched `failed` by a transient infra error skips the terminal
  * block and is handed to the inner reconciler as `recovering`. Policy failures
  * never self-heal: their message embeds operator-controlled workload fields.
@@ -2284,15 +2351,22 @@ export class WorkflowRecipeReconciler {
         // recorded on the run CR and later passes skip it. A failed step (or a
         // record that was not stored) is retried through a requeue.
         const terminalTeardownSettled = await this.teardownTerminalRunComputeIfRunScoped(recipe)
-        const withTeardownRetry = (result: ReconcileResult): ReconcileResult =>
-          terminalTeardownSettled || result.requeueAfterMs !== undefined
-            ? result
-            : { ...result, requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS }
         // Issue #637 — a terminal (completed/failed/cancelled) workflow that is NOT
         // run-scoped keeps its steady envSecret/imagePullSecrets workloads. Enforce
         // revocation on a mid-life re-label here too (run-scoped compute is already
         // torn down above; this teardown is idempotent/404-tolerant).
-        const terminalOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, derivedPhase)
+        const ownershipOutcome = await this.enforceActiveWorkflowSecretOwnership(recipe)
+        // Issue #1349 — written before the denial return below, which is the
+        // common case for a run child whose Secrets all name the parent recipe.
+        const secretFactSettled = await this.recordNoSecretBearingWorkloads(
+          recipe,
+          ownershipOutcome
+        )
+        const withTeardownRetry = (result: ReconcileResult): ReconcileResult =>
+          (terminalTeardownSettled && secretFactSettled) || result.requeueAfterMs !== undefined
+            ? result
+            : { ...result, requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS }
+        const terminalOwnership = steadyOwnershipResult(ownershipOutcome, derivedPhase)
         if (terminalOwnership) return withTeardownRetry(terminalOwnership)
         await this.settleNetworkPolicyMarkerForTerminalRun(recipe)
         // The recipe phase may remain active across running -> completed. Still
@@ -4579,10 +4653,8 @@ export class WorkflowRecipeReconciler {
     const targeted: string[] = []
     const errors: unknown[] = []
     for (const workload of recipe.spec.workloads ?? []) {
-      if (!workload.transport) continue
       // Defense in depth: never delete a stateful/PVC-backed workload here.
-      if (workload.type === 'statefulset') continue
-      if ((workload as { volumeClaimTemplates?: unknown[] }).volumeClaimTemplates?.length) continue
+      if (!isRemovedByTerminalRunTeardown(workload)) continue
 
       const ns = this.resolveWorkloadNamespace(workload, recipe.spec.ui?.workloadRef)
       const resourceName = rb.resolveWorkloadRuntimeResourceName(recipe, workload)
@@ -7107,13 +7179,15 @@ export class WorkflowRecipeReconciler {
    * live because the delete actually failed). `hadDenied` is returned ONLY when
    * every denied workload was torn down successfully.
    */
-  private async enforceActiveWorkflowSecretOwnership(recipe: WorkflowRecipeCRD): Promise<{
-    conditions: StatusCondition[]
-    hadDenied: boolean
-    needsRequeue: boolean
-    requeueReason?: string
-  }> {
-    const clean = { conditions: [] as StatusCondition[], hadDenied: false, needsRequeue: false }
+  private async enforceActiveWorkflowSecretOwnership(
+    recipe: WorkflowRecipeCRD
+  ): Promise<SteadyOwnershipOutcome> {
+    const clean: SteadyOwnershipOutcome = {
+      conditions: [],
+      hadDenied: false,
+      needsRequeue: false,
+      deniedWorkloadIds: new Set(),
+    }
     const hasSecretRefs = (recipe.spec.workloads ?? []).some(
       w => !!w.envSecret?.name || (w.imagePullSecrets ?? []).length > 0
     )
@@ -7145,7 +7219,7 @@ export class WorkflowRecipeReconciler {
       }
     }
     if (secretOwnership.deniedWorkloadIds.size === 0) {
-      return { conditions: secretOwnership.conditions, hadDenied: false, needsRequeue: false }
+      return { ...clean, conditions: secretOwnership.conditions }
     }
 
     const failedTeardowns: string[] = []
@@ -7195,7 +7269,12 @@ export class WorkflowRecipeReconciler {
     if (!revocationRecordStored) {
       return { ...clean, needsRequeue: true, requeueReason: 'Secret revocation record not stored' }
     }
-    return { conditions: secretOwnership.conditions, hadDenied: true, needsRequeue: false }
+    return {
+      conditions: secretOwnership.conditions,
+      hadDenied: true,
+      needsRequeue: false,
+      deniedWorkloadIds: secretOwnership.deniedWorkloadIds,
+    }
   }
 
   /**
@@ -7210,28 +7289,31 @@ export class WorkflowRecipeReconciler {
     recipe: WorkflowRecipeCRD,
     phase: RecipePhase
   ): Promise<ReconcileResult | null> {
-    const outcome = await this.enforceActiveWorkflowSecretOwnership(recipe)
-    if (outcome.needsRequeue) {
-      // Could not verify or could not tear down — requeue (transient) rather than
-      // report a clean or revoked status. `skipStatusPatch` + `requeueAfterMs`
-      // schedules a deterministic retry without writing a misleading condition.
-      return {
-        phase,
-        message: `EnvSecretOwnershipDenied recheck deferred: ${outcome.requeueReason} — requeuing`,
-        workloadStatuses: [],
-        requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
-        skipStatusPatch: true,
-      }
+    return steadyOwnershipResult(await this.enforceActiveWorkflowSecretOwnership(recipe), phase)
+  }
+
+  /**
+   * Issue #1349 — after the terminal pass, record that no workload naming a Secret
+   * is left deployed with it, so the ownership backstop can skip this run child.
+   * Only the terminal block calls this, and only after the enforcer: the record
+   * lives inside `terminalRunTeardown`, which is removed before any re-deploy.
+   * Returns false when the write was due and was not stored, so the caller requeues.
+   */
+  private async recordNoSecretBearingWorkloads(
+    recipe: WorkflowRecipeCRD,
+    outcome: SteadyOwnershipOutcome
+  ): Promise<boolean> {
+    if (!recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()) return true
+    if (!hasTerminalRunTeardownRecord(recipe) || outcome.needsRequeue) return true
+    if (recipe.status?.terminalRunTeardown?.noSecretBearingWorkloads === true) return true
+    const workloads = recipe.spec.workloads ?? []
+    if (!workloads.some(w => !!w.envSecret?.name || (w.imagePullSecrets ?? []).length > 0)) {
+      return true
     }
-    if (outcome.hadDenied) {
-      return {
-        phase,
-        message: 'EnvSecretOwnershipDenied: foreign Secret ref revoked on steady workflow',
-        workloadStatuses: [],
-        secretOwnershipConditions: outcome.conditions,
-      }
-    }
-    return null
+    if (!noSecretBearingWorkloadsRemain(recipe, outcome.deniedWorkloadIds)) return true
+    return this.publishStatusRecord(recipe, {
+      terminalRunTeardown: { noSecretBearingWorkloads: true },
+    })
   }
 
   /**

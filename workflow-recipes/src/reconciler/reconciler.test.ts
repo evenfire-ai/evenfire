@@ -6,7 +6,11 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { loadConfig } from '../config'
-import { WorkflowRecipeWatcher, shouldPatchRecipeStatus } from '../k8sClient'
+import {
+  WorkflowRecipeWatcher,
+  shouldPatchRecipeStatus,
+  workflowNeedsOwnershipBackstop,
+} from '../k8sClient'
 import {
   CronJobDef,
   StatusCondition,
@@ -49,6 +53,7 @@ import {
   TRANSIENT_REQUEUE_BASE_MS,
   WORKFLOW_PROGRESS_REQUEUE_BASE_MS,
   WorkflowRecipeReconciler,
+  noSecretBearingWorkloadsRemain,
 } from './workflowRecipeReconciler'
 
 // ─── Mock K8s client ────────────────────────────────────────────────
@@ -143,7 +148,8 @@ function mergeStatusPatch(
 /**
  * Issue #1349 — a one-recipe CR store: the status patch merges into it and
  * GET answers from it, so pass 2 of a test reads what pass 1 stored. `prune`
- * drops status keys as an API server with an older CRD does.
+ * drops status keys as an API server with an older CRD does; a dotted key
+ * (`terminalRunTeardown.noSecretBearingWorkloads`) drops one field of a record.
  */
 function installRecipeStore(recipe: WorkflowRecipeCRD, options: { prune?: string[] } = {}) {
   const live = structuredClone(recipe)
@@ -157,8 +163,17 @@ function installRecipeStore(recipe: WorkflowRecipeCRD, options: { prune?: string
   })
   mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }) => {
     if (body.metadata?.uid && body.metadata.uid !== live.metadata.uid) throw { code: 409 }
-    const patch = { ...(body.status ?? {}) }
-    for (const key of options.prune ?? []) delete patch[key]
+    const patch: Record<string, unknown> = { ...(body.status ?? {}) }
+    for (const key of options.prune ?? []) {
+      const [field, member] = key.split('.')
+      if (member === undefined) {
+        delete patch[field]
+      } else if (patch[field] && typeof patch[field] === 'object') {
+        const record = { ...(patch[field] as Record<string, unknown>) }
+        delete record[member]
+        patch[field] = record
+      }
+    }
     live.status = mergeStatusPatch(live.status, patch)
     live.metadata.resourceVersion = String(Number(live.metadata.resourceVersion) + 1)
     return structuredClone(live)
@@ -12725,6 +12740,194 @@ describe('WorkflowRecipeReconciler', () => {
         expect.anything()
       )
       expect(stub.teardownComputePodsForTerminalRun).not.toHaveBeenCalled()
+      // T4.5 — the fact went with the record: the stored object carries neither,
+      // so the ownership backstop selects the re-deployed run again. (The fixture
+      // has no workload; the predicate reads the stored status with one that
+      // names a Secret.)
+      expect(store.current().status?.terminalRunTeardown).toBeUndefined()
+      expect(
+        workflowNeedsOwnershipBackstop({
+          ...store.current(),
+          spec: { ...store.current().spec, workloads: [secretBearingApi('app-creds')] },
+        })
+      ).toBe(true)
+    })
+
+    /** A non-transport Deployment that reads `secretName` (kept by the terminal teardown). */
+    function secretBearingApi(secretName: string): WorkloadDef {
+      return {
+        id: 'api',
+        type: 'deployment',
+        image: 'clerum/api:test',
+        envSecret: { name: secretName, keys: [{ secretKey: 'token', envVar: 'TOKEN' }] },
+      }
+    }
+
+    /** A terminal run child whose only workload reads `app-creds`, labeled for `owner`. */
+    function secretBearingTerminalRun(name: string, owner: string): WorkflowRecipeCRD {
+      const recipe = makeTerminalRunRecipe({ name, phase: 'completed' })
+      recipe.spec.workloads = [secretBearingApi('app-creds')]
+      mockCoreApi.readNamespacedSecret.mockResolvedValue({
+        metadata: { resourceVersion: '7', labels: { 'clerum.io/owner-recipe': owner } },
+        data: { token: 'eA==' },
+      })
+      return recipe
+    }
+
+    it('T4.1 noSecretBearingWorkloadsRemain: only denied or torn-down Secret-bearing workloads make it true (issue #1349)', () => {
+      const transport = { type: 'streamableHttp', path: '/mcp' } as WorkloadDef['transport']
+      const withWorkloads = (workloads: WorkloadDef[]) => {
+        const recipe = makeTerminalRunRecipe({ name: 'wf-run-fact' })
+        recipe.spec.workloads = workloads
+        return recipe
+      }
+      const plain: WorkloadDef = { id: 'plain', type: 'deployment', image: 'clerum/plain:test' }
+      const api = secretBearingApi('app-creds')
+      const pullOnly: WorkloadDef = {
+        id: 'pull',
+        type: 'deployment',
+        image: 'clerum/pull:test',
+        imagePullSecrets: ['registry-creds'],
+      }
+
+      // All Secret-bearing workloads denied (a workload with no Secret does not count).
+      expect(
+        noSecretBearingWorkloadsRemain(
+          withWorkloads([api, pullOnly, plain]),
+          new Set(['api', 'pull'])
+        )
+      ).toBe(true)
+      // One accessible (or missing: not denied) Deployment that the teardown keeps.
+      expect(noSecretBearingWorkloadsRemain(withWorkloads([api, pullOnly]), new Set(['api']))).toBe(
+        false
+      )
+      // An accessible transport Deployment is deleted by the terminal teardown.
+      expect(
+        noSecretBearingWorkloadsRemain(withWorkloads([{ ...api, transport }]), new Set())
+      ).toBe(true)
+      // A transport StatefulSet is never deleted there (#558).
+      expect(
+        noSecretBearingWorkloadsRemain(
+          withWorkloads([{ ...api, type: 'statefulset', transport }]),
+          new Set()
+        )
+      ).toBe(false)
+      // Nor is a PVC-backed transport Deployment.
+      expect(
+        noSecretBearingWorkloadsRemain(
+          withWorkloads([
+            {
+              ...api,
+              transport,
+              volumeClaimTemplates: [
+                {
+                  name: 'data',
+                  storageClass: 'standard',
+                  accessMode: 'ReadWriteOnce',
+                  size: '1Gi',
+                },
+              ],
+            } as WorkloadDef,
+          ]),
+          new Set()
+        )
+      ).toBe(false)
+    })
+
+    it('T4.2 the terminal pass records the no-Secret-bearing fact only when every Secret-bearing workload is denied (issue #1349)', async () => {
+      stubWorkflowReconciler()
+      const denied = installRecipeStore(secretBearingTerminalRun('wf-run-denied', 'parent-recipe'))
+
+      const deniedResult = await reconciler.reconcile(denied.current())
+
+      expect(denied.current().status?.terminalRunTeardown).toEqual({
+        completedAt: expect.any(String),
+        noSecretBearingWorkloads: true,
+      })
+      expect(deniedResult.requeueAfterMs).toBeUndefined()
+
+      // Same child, but its Secret is owned by the run: accessible, so not written.
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+      mockCoreApi.readNamespacedSecret.mockClear()
+      const accessible = installRecipeStore(
+        secretBearingTerminalRun('wf-run-accessible', 'wf-run-accessible')
+      )
+
+      const accessibleResult = await reconciler.reconcile(accessible.current())
+
+      // Witness: the terminal block and the enforcer ran.
+      expect(accessible.current().status?.terminalRunTeardown?.completedAt).toEqual(
+        expect.any(String)
+      )
+      expect(mockCoreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(accessible.current().status?.terminalRunTeardown).not.toHaveProperty(
+        'noSecretBearingWorkloads'
+      )
+      expect(
+        mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
+          ([arg]) => arg.body?.status?.terminalRunTeardown?.noSecretBearingWorkloads !== undefined
+        )
+      ).toHaveLength(0)
+      expect(accessibleResult.requeueAfterMs).toBeUndefined()
+    })
+
+    it('T4.6 a terminal pass whose ownership recheck is deferred does not record the fact (issue #1349)', async () => {
+      stubWorkflowReconciler()
+      // Its only Secret-bearing workload is a transport the terminal teardown
+      // deletes, so the deferred recheck alone keeps the fact unwritten.
+      const recipe = makeTerminalRunRecipe({
+        name: 'wf-run-deferred',
+        phase: 'completed',
+        transport: true,
+      })
+      recipe.spec.workloads = recipe.spec.workloads!.map(w => ({
+        ...w,
+        envSecret: { name: 'app-creds', keys: [{ secretKey: 'token', envVar: 'TOKEN' }] },
+      }))
+      expect(noSecretBearingWorkloadsRemain(recipe, new Set())).toBe(true)
+      const store = installRecipeStore(recipe)
+      mockCoreApi.readNamespacedSecret.mockRejectedValue({ code: 500, message: 'apiserver boom' })
+
+      const result = await reconciler.reconcile(store.current())
+
+      expect(result.message).toContain('EnvSecretOwnershipDenied recheck deferred')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(store.current().status?.terminalRunTeardown?.completedAt).toEqual(expect.any(String))
+      expect(store.current().status?.terminalRunTeardown).not.toHaveProperty(
+        'noSecretBearingWorkloads'
+      )
+    })
+
+    it('a fact the API server pruned (older CRD) is not reported as stored (issue #1349, T1.8 L-1)', async () => {
+      stubWorkflowReconciler()
+      const store = installRecipeStore(
+        secretBearingTerminalRun('wf-run-fact-pruned', 'parent-recipe'),
+        {
+          prune: ['terminalRunTeardown.noSecretBearingWorkloads'],
+        }
+      )
+      const errorLog = captureLogger('error')
+      const recipe = store.current()
+
+      const result = await reconciler.reconcile(recipe)
+      errorLog.mockRestore()
+
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: { status: { terminalRunTeardown: { noSecretBearingWorkloads: true } } },
+        }),
+        expect.anything()
+      )
+      const notStored = errorLog.mock.calls.find(
+        ([message]) => message === 'Run status record was not stored; requeueing'
+      )
+      expect(notStored).toBeDefined()
+      expect(String((notStored![1] as { err: Error }).err.message)).toContain(
+        'terminalRunTeardown.noSecretBearingWorkloads'
+      )
+      expect(recipe.status?.terminalRunTeardown?.completedAt).toEqual(expect.any(String))
+      expect(recipe.status?.terminalRunTeardown).not.toHaveProperty('noSecretBearingWorkloads')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
     })
   })
 

@@ -552,6 +552,15 @@ export function recipeReferencesNamedSecrets(recipe: WorkflowRecipeCRD): boolean
 export function workflowNeedsOwnershipBackstop(recipe: WorkflowRecipeCRD): boolean {
   if (recipe.metadata.deletionTimestamp) return false
   if ((recipe.spec.steps ?? []).length === 0) return false
+  // Issue #1349 — a recorded terminal run child whose terminal pass found no
+  // workload left deployed with a Secret has nothing for the backstop to revoke.
+  // Secret changes still reach it through the SecretWatcher.
+  if (
+    isRecordedTerminalRunChild(recipe) &&
+    recipe.status?.terminalRunTeardown?.noSecretBearingWorkloads === true
+  ) {
+    return false
+  }
   return recipeReferencesNamedSecrets(recipe)
 }
 

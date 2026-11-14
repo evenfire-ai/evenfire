@@ -1503,6 +1503,113 @@ describe('workload status refresh loop helpers', () => {
     })
   })
 
+  // Issue #1349 — a recorded terminal run child whose terminal pass left no
+  // workload deployed with a Secret (`noSecretBearingWorkloads`) has nothing for
+  // the ownership backstop to revoke.
+  function terminalRunChildWithSecret(
+    name: string,
+    status: Partial<NonNullable<WorkflowRecipeCRD['status']>>,
+    labels: Record<string, string> = { 'clerum.io/workflow-run-id': `run-${name}` }
+  ): WorkflowRecipeCRD {
+    return makeWorkloadRecipe({
+      metadata: { name, namespace: 'sandbox-recipes', labels },
+      spec: {
+        steps: [{ id: 'run', instruction: 'go' }],
+        workloads: [
+          {
+            id: 'api',
+            type: 'deployment',
+            image: 'clerum/api:test',
+            envSecret: { name: 'creds', keys: [{ secretKey: 'k', envVar: 'K' }] },
+          },
+        ],
+      },
+      status: {
+        phase: 'active',
+        workflowExecution: { phase: 'completed' },
+        ...status,
+      } as WorkflowRecipeCRD['status'],
+    })
+  }
+  const completedAt = '2026-11-12T10:00:00.000Z'
+
+  it('T4.3 workflowNeedsOwnershipBackstop skips a recorded terminal run child only when its teardown found no Secret-bearing workload (issue #1349)', () => {
+    const recordWithFact = { terminalRunTeardown: { completedAt, noSecretBearingWorkloads: true } }
+    expect(workflowNeedsOwnershipBackstop(terminalRunChildWithSecret('fact', recordWithFact))).toBe(
+      false
+    )
+    expect(
+      workflowNeedsOwnershipBackstop(
+        terminalRunChildWithSecret('record-only', { terminalRunTeardown: { completedAt } })
+      )
+    ).toBe(true)
+    expect(
+      workflowNeedsOwnershipBackstop(
+        terminalRunChildWithSecret('fact-without-record', {
+          terminalRunTeardown: { noSecretBearingWorkloads: true },
+        } as unknown as Partial<NonNullable<WorkflowRecipeCRD['status']>>)
+      )
+    ).toBe(true)
+    expect(
+      workflowNeedsOwnershipBackstop(
+        terminalRunChildWithSecret('running', {
+          ...recordWithFact,
+          workflowExecution: { phase: 'running' },
+        })
+      )
+    ).toBe(true)
+    expect(
+      workflowNeedsOwnershipBackstop(
+        terminalRunChildWithSecret('latched', {
+          ...recordWithFact,
+          phase: 'failed',
+          message: 'Workflow failed',
+          workflowExecution: {
+            phase: 'failed',
+            message: 'FetchError: request failed, reason: connect ETIMEDOUT 10.96.0.1:443',
+          },
+        })
+      )
+    ).toBe(true)
+    expect(
+      workflowNeedsOwnershipBackstop(terminalRunChildWithSecret('not-a-run', recordWithFact, {}))
+    ).toBe(true)
+  })
+
+  it('T4.4 the steady refresh skips a run child with the no-Secret-bearing fact and still enqueues its sibling (issue #1349)', async () => {
+    const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
+    const refreshWorkloadStatusOnly = vi.fn().mockResolvedValue(undefined)
+    const factChild = terminalRunChildWithSecret('fact-child', {
+      terminalRunTeardown: { completedAt, noSecretBearingWorkloads: true },
+    })
+    const sibling = terminalRunChildWithSecret('sibling-child', {
+      terminalRunTeardown: { completedAt },
+    })
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      eventQueue: { enqueue: typeof enqueue }
+      refreshWorkloadStatusOnly: typeof refreshWorkloadStatusOnly
+      refreshWorkloadStatusesForSteadyRecipes: () => Promise<void>
+      stopped: boolean
+    }
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([
+      [factChild.metadata.name, factChild],
+      [sibling.metadata.name, sibling],
+    ])
+    internal.eventQueue = { enqueue }
+    internal.refreshWorkloadStatusOnly = refreshWorkloadStatusOnly
+    internal.stopped = false
+
+    await internal.refreshWorkloadStatusesForSteadyRecipes()
+
+    // Witness: the sibling is enqueued for the ownership-only backstop.
+    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(sibling, { ownershipOnly: true })
+    expect(enqueue).not.toHaveBeenCalledWith(factChild.metadata.name, expect.any(Function))
+    expect(enqueue).toHaveBeenCalledTimes(1)
+  })
+
   it('triggerSecretDrivenReconcile forces a full reconcile so a Secret re-label reaches the ownership gate (Issue #637)', async () => {
     // A Secret re-label does NOT bump the recipe's generation, so a plain 'MODIFIED'
     // event is status-only and short-circuits before reconcile() (and the ownership
