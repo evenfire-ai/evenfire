@@ -9,6 +9,8 @@ export default defineConfig({
   reporter: [['list'], ['json', { outputFile: process.env.E2E_REPORT_PATH }]],
   use: {
     ...devices['Desktop Chrome'],
+    actionTimeout: 30_000,
+    navigationTimeout: 60_000,
     baseURL: process.env.E2E_CONTROL_UI_URL,
     trace: 'off',
     screenshot: 'off',

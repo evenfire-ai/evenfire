@@ -361,6 +361,10 @@ function matchesControlResponse(response: Response, method: string, path: string
 }
 
 async function deleteFixture(page: Page): Promise<void> {
+  const addDialog = page.getByRole('dialog', { name: 'Add connectors' })
+  if (await addDialog.isVisible()) {
+    await addDialog.getByRole('button', { name: 'Close dialog' }).click()
+  }
   await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
   await page.getByLabel('Search connectors', { exact: true }).fill(connector)
   const row = page.getByRole('row', { name: new RegExp(connector) })
@@ -432,8 +436,9 @@ test(persistenceTestName, async ({ page, browser }) => {
     await openAgentConnectors(page)
     await page.getByRole('button', { name: 'Add connector', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Add connectors' })
-    await expect(dialog.getByRole('option', { name: connector, exact: true })).toBeVisible()
-    await dialog.getByRole('option', { name: connector, exact: true }).click()
+    const connectorOption = dialog.getByRole('checkbox', { name: connector, exact: true })
+    await expect(connectorOption).toBeVisible()
+    await connectorOption.check()
     const saved = page.waitForResponse(response =>
       matchesControlResponse(response, 'PUT', '/api/v1/admin/contexts/context1')
     )
