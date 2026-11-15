@@ -684,10 +684,10 @@ export interface ReconcileResult {
    * backoff. Set for steady-state PROGRESS requeues (phase === 'deploying',
    * waiting on a Pod we created to advance). Progress is not an error, so it
    * must NOT inherit the transient-error backoff curve: exponential growth would
-   * stretch the poll cadence toward the 60s cap and re-expose the 240s mcp-host
-   * readiness deadline (MCP_HOST_READINESS_WAIT_TIMEOUT_MS) that this requeue
-   * exists to beat. Transient-ERROR requeues (skipStatusPatch) leave this
-   * false/undefined so genuine flakiness still backs off.
+   * stretch the poll cadence toward the 60s cap and delay each deploying
+   * sub-phase of a run by up to that long. Transient-ERROR requeues
+   * (skipStatusPatch) leave this false/undefined so genuine flakiness still
+   * backs off.
    */
   requeueFixedInterval?: boolean
   /** A legacy-only timer must not repeat the recipe's runtime lifecycle. */
@@ -2627,9 +2627,8 @@ export class WorkflowRecipeReconciler {
         // path requeues at a FIXED interval (requeueFixedInterval) so a run
         // advancing through its deploying sub-phases does NOT inherit the
         // transient-error backoff curve — exponential growth there would
-        // degrade the poll cadence toward the 60s cap and re-expose the 240s
-        // mcp-host readiness deadline this requeue exists to beat (see §5 and
-        // requeueFixedInterval doc).
+        // degrade the poll cadence toward the 60s cap and delay each deploying
+        // sub-phase by up to that long (see §5 and requeueFixedInterval doc).
         //
         // Plugin Workload SDK policy-pending also requeues, but on the backoff
         // path: it waits for an operator grant, which arrives by event or by the
@@ -8079,34 +8078,36 @@ export class WorkflowRecipeReconciler {
           : undefined)
 
     if (isWorkflow && workflowPhase) {
-      try {
-        const liveRecipe = (await this.customApi.getNamespacedCustomObject({
-          group: CRD_GROUP,
-          version: CRD_VERSION,
-          namespace: recipe.metadata.namespace,
-          plural: WORKFLOWRECIPE_PLURAL,
-          name: recipe.metadata.name,
-        })) as WorkflowRecipeCRD
-        const liveExecution = liveRecipe.status?.workflowExecution
-        if (
-          liveExecution?.phase &&
-          workflowPhase === 'initializing' &&
-          liveExecution.phase !== 'initializing'
-        ) {
-          existingWorkflowExecution = liveExecution
-          workflowPhase = undefined
-        } else if (
-          isTerminalWorkflowStatusPhase(liveExecution?.phase) &&
-          (!explicitWorkflowPhase || liveExecution?.phase !== workflowPhase)
-        ) {
-          existingWorkflowExecution = liveExecution
-          workflowPhase = undefined
-        } else if (liveExecution) {
-          existingWorkflowExecution = liveExecution
-        }
-      } catch {
-        // Best-effort race guard only; keep the original status patch path if
-        // the live read fails.
+      // `recipe` is the object this pass started from. Since then the workflow
+      // reconciler may have patched workflowExecution in this same pass (it
+      // writes `attempt + 1` before it replaces a pod), and the coordinator
+      // reports phases through the status endpoint. The patch below is built
+      // on this read, so a failed read fails the pass: the watcher drops a
+      // recipe that is gone (404) and retries after any other error. Patching
+      // from `recipe` instead would write the older `attempt` and phase back.
+      const liveRecipe = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+      })) as WorkflowRecipeCRD
+      const liveExecution = liveRecipe.status?.workflowExecution
+      if (
+        liveExecution?.phase &&
+        workflowPhase === 'initializing' &&
+        liveExecution.phase !== 'initializing'
+      ) {
+        existingWorkflowExecution = liveExecution
+        workflowPhase = undefined
+      } else if (
+        isTerminalWorkflowStatusPhase(liveExecution?.phase) &&
+        (!explicitWorkflowPhase || liveExecution?.phase !== workflowPhase)
+      ) {
+        existingWorkflowExecution = liveExecution
+        workflowPhase = undefined
+      } else if (liveExecution) {
+        existingWorkflowExecution = liveExecution
       }
     }
 

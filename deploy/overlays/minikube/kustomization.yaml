@@ -97,6 +97,9 @@ patchesStrategicMerge:
   # the base Deployment projects it from configmaps/control-api-config.yaml, the
   # one key that also feeds control-api.
   - patches/registry-env.yaml
+  # WRC external-egress overlap at 300 s (deploy/base: 3600 s) so the WRC egress
+  # degradation E2E can prove recovery inside its bounded wait.
+  - patches/wrc-external-egress-overlap.yaml
   # Grok subscriptions for workflow recipes, set explicitly like every other
   # subscription switch in this overlay (base ships it off).
   - patches/workflow-recipes-grok.yaml

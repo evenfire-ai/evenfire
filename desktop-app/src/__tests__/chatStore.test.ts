@@ -2519,6 +2519,253 @@ describe('messages', () => {
   })
 })
 
+// ── removeMessages ───────────────────────────────────────────────────────────
+
+describe('removeMessages', () => {
+  const user = (id: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
+    id,
+    role: 'user',
+    content: `text of ${id}`,
+    timestamp: 1000,
+    ...extra,
+  })
+  const assistant = (id: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content: `reply ${id}`,
+    timestamp: 2000,
+    ...extra,
+  })
+  const ids = async (chatId: string) =>
+    (await store.loadMessages('agent-1', chatId)).map(message => message.id)
+
+  async function seed(chatId: string, messages: ChatMessage[]) {
+    await store.createChat('agent-1', chatId)
+    await store.saveMessages('agent-1', chatId, messages)
+  }
+
+  it('removes an unsent local user turn, keeps the others and the indexed count', async () => {
+    await seed('remove-1', [user('turn-1-user'), assistant('turn-1-assistant'), user('pending')])
+    expect(await ids('remove-1')).toEqual(['turn-1-user', 'turn-1-assistant', 'pending'])
+    const countBefore = (await store.getIndex('agent-1')).chats.find(
+      c => c.id === 'remove-1'
+    )?.messageCount
+
+    await expect(store.removeMessages('agent-1', 'remove-1', ['pending'])).resolves.toBe(1)
+
+    expect(await ids('remove-1')).toEqual(['turn-1-user', 'turn-1-assistant'])
+    expect(countBefore).toBe(3)
+    expect(
+      (await store.getIndex('agent-1')).chats.find(c => c.id === 'remove-1')?.messageCount
+    ).toBe(countBefore)
+  })
+
+  it.each([
+    ['a server turn', [user('turn-1-user'), assistant('turn-1-assistant')], 'turn-1-user'],
+    [
+      'a user turn with a server turn number',
+      [user('numbered', { serverTurnNumber: 4 })],
+      'numbered',
+    ],
+    ['an assistant message', [user('local-user'), assistant('local-reply')], 'local-reply'],
+    ['a user turn with a task id', [user('accepted', { task_id: 'task-1' })], 'accepted'],
+    [
+      'a synchronously answered user turn (no task id, its reply stored after it)',
+      [user('turn-1-user'), assistant('turn-1-assistant'), user('sync'), assistant('sync-reply')],
+      'sync',
+    ],
+    [
+      'an answered user turn of a legacy chat with no turn numbers',
+      [user('legacy-1'), assistant('legacy-1-reply'), user('legacy-2')],
+      'legacy-1',
+    ],
+  ] as const)(
+    'refuses %s and leaves the stored list unchanged',
+    async (_label, messages, target) => {
+      await seed('refuse', [...messages])
+      const before = await ids('refuse')
+      expect(before).toContain(target)
+
+      await expect(store.removeMessages('agent-1', 'refuse', [target])).rejects.toThrow(
+        'is not an unanswered local user turn'
+      )
+
+      expect(await ids('refuse')).toEqual(before)
+    }
+  )
+
+  it.each([
+    [
+      'a preserveLocal user turn that is the last message',
+      [user('turn-1-user'), assistant('turn-1-assistant'), user('kept', { preserveLocal: true })],
+      'kept',
+    ],
+    [
+      'the last, unanswered user turn of a legacy chat',
+      [user('legacy-1'), assistant('legacy-1-reply'), user('legacy-2')],
+      'legacy-2',
+    ],
+  ] as const)('removes an unanswered last turn: %s', async (_label, messages, target) => {
+    await seed('allowed', [...messages])
+    expect(await ids('allowed')).toContain(target)
+
+    await expect(store.removeMessages('agent-1', 'allowed', [target])).resolves.toBe(1)
+
+    expect(await ids('allowed')).not.toContain(target)
+    expect(await ids('allowed')).toHaveLength(messages.length - 1)
+  })
+
+  it('removes a pending turn followed by numbered server turns from a reconcile', async () => {
+    await seed('reconciled', [
+      user('turn-1-user', { serverTurnNumber: 1 }),
+      assistant('turn-1-assistant', { serverTurnNumber: 1 }),
+    ])
+    await store.upsertMessages('agent-1', 'reconciled', [user('pending', { timestamp: 3000 })])
+    // The server window holds turn 1 and the new turn 2.
+    await store.replaceMessages('agent-1', 'reconciled', [
+      user('turn-1-user', { serverTurnNumber: 1 }),
+      assistant('turn-1-assistant', { serverTurnNumber: 1 }),
+      user('turn-2-user', { serverTurnNumber: 2, timestamp: 4000 }),
+      assistant('turn-2-assistant', { serverTurnNumber: 2, timestamp: 5000 }),
+    ])
+    // Witness: the reconcile stored a numbered assistant message after the turn.
+    expect(await ids('reconciled')).toEqual([
+      'turn-1-user',
+      'turn-1-assistant',
+      'pending',
+      'turn-2-user',
+      'turn-2-assistant',
+    ])
+
+    await expect(store.removeMessages('agent-1', 'reconciled', ['pending'])).resolves.toBe(1)
+
+    expect(await ids('reconciled')).toEqual([
+      'turn-1-user',
+      'turn-1-assistant',
+      'turn-2-user',
+      'turn-2-assistant',
+    ])
+  })
+
+  it('a request with one removable id and one refused id removes nothing', async () => {
+    await seed('mixed', [user('turn-1-user'), assistant('turn-1-assistant'), user('pending')])
+    const before = await ids('mixed')
+    expect(before).toEqual(['turn-1-user', 'turn-1-assistant', 'pending'])
+
+    await expect(
+      store.removeMessages('agent-1', 'mixed', ['pending', 'turn-1-user'])
+    ).rejects.toThrow('is not an unanswered local user turn')
+
+    expect(await ids('mixed')).toEqual(before)
+  })
+
+  it('an unknown id returns 0 and leaves the list unchanged', async () => {
+    await seed('unknown', [user('turn-1-user'), assistant('turn-1-assistant')])
+    const before = await ids('unknown')
+    expect(before).toHaveLength(2)
+
+    await expect(store.removeMessages('agent-1', 'unknown', ['not-stored'])).resolves.toBe(0)
+
+    expect(await ids('unknown')).toEqual(before)
+  })
+
+  it('a deleted chat returns 0, and a missing chat returns 0 and is not created', async () => {
+    await seed('deleted', [user('pending')])
+    await store.deleteChat('agent-1', 'deleted', TEAM_A_SCOPE)
+    await expect(store.removeMessages('agent-1', 'deleted', ['pending'])).resolves.toBe(0)
+
+    await expect(store.removeMessages('agent-1', 'missing', ['pending'])).resolves.toBe(0)
+    await expect(fs.access(chatMetaPath('missing'))).rejects.toThrow()
+    expect((await store.getIndex('agent-1')).chats.map(chat => chat.id)).not.toContain('missing')
+    // Witness that the check can see a created chat: an upsert creates one.
+    await store.upsertMessages('agent-1', 'upserted', [user('pending')])
+    await expect(fs.access(chatMetaPath('upserted'))).resolves.toBeUndefined()
+  })
+
+  it('a deleted chat whose files are still on disk returns 0 and keeps its snapshot', async () => {
+    const storedPageIds = async (chatId: string) => {
+      const pages = (await fs.readdir(chatPagesDir(chatId))).sort()
+      const messages = await Promise.all(
+        pages.map(
+          async page =>
+            (
+              JSON.parse(await fs.readFile(join(chatPagesDir(chatId), page), 'utf-8')) as {
+                messages: ChatMessage[]
+              }
+            ).messages
+        )
+      )
+      return messages.flat().map(message => message.id)
+    }
+    await seed('tombstoned', [user('kept'), user('pending')])
+    // A deletion whose file cleanup did not finish leaves the tombstone and the files.
+    const cleanup = vi
+      .spyOn(
+        store as unknown as {
+          finishPendingDeleteCleanup: (...args: unknown[]) => Promise<boolean>
+        },
+        'finishPendingDeleteCleanup'
+      )
+      .mockResolvedValue(false)
+    await expect(store.deleteChat('agent-1', 'tombstoned', TEAM_A_SCOPE)).resolves.toEqual({
+      cleanupPending: true,
+    })
+    // Witness: the tombstone is recorded and the snapshot is still on disk.
+    expect(cleanup).toHaveBeenCalled()
+    const index = await store.getIndex('agent-1')
+    expect(index.deletedChatTombstones?.map(tombstone => tombstone.chatId)).toContain('tombstoned')
+    const metaBefore = await fs.readFile(chatMetaPath('tombstoned'), 'utf-8')
+    expect(await storedPageIds('tombstoned')).toEqual(['kept', 'pending'])
+
+    await expect(store.removeMessages('agent-1', 'tombstoned', ['pending'])).resolves.toBe(0)
+
+    expect(await fs.readFile(chatMetaPath('tombstoned'), 'utf-8')).toBe(metaBefore)
+    expect(await storedPageIds('tombstoned')).toEqual(['kept', 'pending'])
+  })
+
+  it('runs in order with replaceMessages on the same chat, so a withdrawn turn stays removed', async () => {
+    const window = [user('turn-1-user'), assistant('turn-1-assistant')]
+
+    // Witness: a replace whose window omits a stored local turn keeps that turn,
+    // so the cases below depend on the removal, not on the replace dropping it.
+    await seed('replace-alone', [...window, user('pending')])
+    await store.replaceMessages('agent-1', 'replace-alone', window)
+    expect(await ids('replace-alone')).toEqual(['turn-1-user', 'turn-1-assistant', 'pending'])
+
+    await seed('remove-then-replace', [...window, user('pending')])
+    await Promise.all([
+      store.removeMessages('agent-1', 'remove-then-replace', ['pending']),
+      store.replaceMessages('agent-1', 'remove-then-replace', window),
+    ])
+    expect(await ids('remove-then-replace')).toEqual(['turn-1-user', 'turn-1-assistant'])
+
+    await seed('replace-then-remove', [...window, user('pending')])
+    await Promise.all([
+      store.replaceMessages('agent-1', 'replace-then-remove', window),
+      store.removeMessages('agent-1', 'replace-then-remove', ['pending']),
+    ])
+    expect(await ids('replace-then-remove')).toEqual(['turn-1-user', 'turn-1-assistant'])
+  })
+
+  it('runs in order with upsertMessages on the same chat', async () => {
+    await seed('ordered-a', [user('turn-1-user'), assistant('turn-1-assistant')])
+    const upsertThenRemove = [
+      store.upsertMessages('agent-1', 'ordered-a', [user('pending')]),
+      store.removeMessages('agent-1', 'ordered-a', ['pending']),
+    ]
+    await Promise.all(upsertThenRemove)
+    expect(await ids('ordered-a')).toEqual(['turn-1-user', 'turn-1-assistant'])
+
+    await seed('ordered-b', [user('turn-1-user'), assistant('turn-1-assistant'), user('pending')])
+    const removeThenUpsert = [
+      store.removeMessages('agent-1', 'ordered-b', ['pending']),
+      store.upsertMessages('agent-1', 'ordered-b', [user('pending')]),
+    ]
+    await Promise.all(removeThenUpsert)
+    expect(await ids('ordered-b')).toEqual(['turn-1-user', 'turn-1-assistant', 'pending'])
+  })
+})
+
 // ── lastActiveChatId ─────────────────────────────────────────────────────────
 
 describe('lastActiveChatId', () => {

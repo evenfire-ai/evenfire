@@ -1,0 +1,441 @@
+{
+  "name": "v5-strictfalse-gpt-6.1-terra",
+  "res": {
+    "id": "resp_fixture0012",
+    "object": "response",
+    "created_at": 1793885847,
+    "status": "completed",
+    "access_programs": {
+      "cyber": "standard"
+    },
+    "background": false,
+    "billing": {
+      "payer": "openai"
+    },
+    "completed_at": 1793885849,
+    "error": null,
+    "frequency_penalty": 0,
+    "image": {
+      "context_compression": "disabled"
+    },
+    "incomplete_details": null,
+    "instructions": null,
+    "max_output_tokens": 6000,
+    "max_tool_calls": null,
+    "model": "gpt-6.1-terra",
+    "moderation": null,
+    "output": [
+      {
+        "id": "fc_fixture0009",
+        "type": "function_call",
+        "status": "completed",
+        "arguments": "{\"query\":\"Responses API strict mode\"}",
+        "call_id": "call_fixture0009",
+        "name": "brave_web_search"
+      },
+      {
+        "id": "fc_fixture0010",
+        "type": "function_call",
+        "status": "completed",
+        "arguments": "{\"libraryName\":\"react\",\"query\":\"React library documentation\"}",
+        "call_id": "call_fixture0010",
+        "name": "resolve-library-id"
+      },
+      {
+        "id": "fc_fixture0011",
+        "type": "function_call",
+        "status": "completed",
+        "arguments": "{\"query\":\"\\\"tool calling\\\"\",\"max_results\":10}",
+        "call_id": "call_fixture0011",
+        "name": "search_papers"
+      }
+    ],
+    "parallel_tool_calls": true,
+    "presence_penalty": 0,
+    "previous_response_id": null,
+    "prompt_cache_key": null,
+    "prompt_cache_retention": "24h",
+    "reasoning": {
+      "context": "all_turns",
+      "effort": "medium",
+      "mode": "standard",
+      "summary": null
+    },
+    "safety_identifier": null,
+    "service_tier": "default",
+    "store": false,
+    "temperature": 1,
+    "text": {
+      "format": {
+        "type": "text"
+      },
+      "verbosity": "medium"
+    },
+    "tool_choice": "auto",
+    "tool_usage": {
+      "image_gen": {
+        "input_tokens": 0,
+        "input_tokens_details": {
+          "image_tokens": 0,
+          "text_tokens": 0
+        },
+        "output_tokens": 0,
+        "output_tokens_details": {
+          "image_tokens": 0,
+          "text_tokens": 0
+        },
+        "total_tokens": 0
+      },
+      "web_search": {
+        "num_requests": 0
+      }
+    },
+    "tools": [
+      {
+        "type": "function",
+        "description": "Search for papers on arXiv with advanced filtering and query optimization.\n\nQUERY CONSTRUCTION GUIDELINES:\n- Use QUOTED PHRASES for exact matches: \"multi-agent systems\", \"neural networks\", \"machine learning\"\n- Combine related concepts with OR: \"AI agents\" OR \"software agents\" OR \"intelligent agents\"  \n- Use field-specific searches for precision:\n  - ti:\"exact title phrase\" - search in titles only\n  - au:\"author name\" - search by author\n  - abs:\"keyword\" - search in abstracts only\n- Use ANDNOT to exclude unwanted results: \"machine learning\" ANDNOT \"survey\"\n- For best results, use 2-4 core concepts rather than long keyword lists\n\nADVANCED SEARCH PATTERNS:\n- Field + phrase: ti:\"transformer architecture\" for papers with exact title phrase\n- Multiple fields: au:\"Smith\" AND ti:\"quantum\" for author Smith's quantum papers  \n- Exclusions: \"deep learning\" ANDNOT (\"survey\" OR \"review\") to exclude survey papers\n- Broad + narrow: \"artificial intelligence\" AND (robotics OR \"computer vision\")\n\nCATEGO",
+        "name": "search_papers",
+        "output_schema": null,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Search query using quoted phrases for exact matches (e.g., '\"machine learning\" OR \"deep learning\"') or specific technical terms. Avoid overly broad or generic terms."
+            },
+            "max_results": {
+              "type": "integer",
+              "description": "Maximum number of results to return (default: 10, max: 50). Use 15-20 for comprehensive searches."
+            },
+            "date_from": {
+              "type": "string",
+              "description": "Start date for papers (YYYY-MM-DD format). Use to find recent work, e.g., '2023-01-01' for last 2 years."
+            },
+            "date_to": {
+              "type": "string",
+              "description": "End date for papers (YYYY-MM-DD format). Use with date_from to find historical work, e.g., '2020-12-31' for older research."
+            },
+            "categories": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Strongly recommended: arXiv categories to focus search (e.g., ['cs.AI', 'cs.MA'] for agent research, ['cs.LG'] for ML, ['cs.CL'] for NLP, ['cs.CV'] for vision). Greatly improves relevance."
+            },
+            "sort_by": {
+              "type": "string",
+              "enum": ["relevance", "date"],
+              "description": "Sort results by 'relevance' (most relevant first, default) or 'date' (newest first). Use 'relevance' for focused searches, 'date' for recent developments."
+            }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        },
+        "strict": false
+      },
+      {
+        "type": "function",
+        "description": "Performs web searches using the Brave Search API and returns comprehensive search results with rich metadata.\n\n    When to use:\n        - General web searches for information, facts, or current topics\n        - Location-based queries (restaurants, businesses, points of interest)\n        - News searches for recent events or breaking stories\n        - Finding videos, discussions, or FAQ content\n        - Research requiring diverse result types (web pages, images, reviews, etc.)\n\n    Returns a JSON list of web results with title, description, and URL.\n    \n    When the \"results_filter\" parameter is empty, JSON results may also contain FAQ, Discussions, News, and Video results.",
+        "name": "brave_web_search",
+        "output_schema": null,
+        "parameters": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "maxLength": 400,
+              "description": "Search query (max 400 chars, 50 words)"
+            },
+            "country": {
+              "default": "US",
+              "description": "Search query country, where the results come from. The country string is limited to 2 character country codes of supported countries.",
+              "type": "string",
+              "enum": [
+                "ALL",
+                "AR",
+                "AU",
+                "AT",
+                "BE",
+                "BR",
+                "CA",
+                "CL",
+                "DK",
+                "FI",
+                "FR",
+                "DE",
+                "HK",
+                "IN",
+                "ID",
+                "IT",
+                "JP",
+                "KR",
+                "MY",
+                "MX",
+                "NL",
+                "NZ",
+                "NO",
+                "CN",
+                "PL",
+                "PT",
+                "PH",
+                "RU",
+                "SA",
+                "ZA",
+                "ES",
+                "SE",
+                "CH",
+                "TW",
+                "TR",
+                "GB",
+                "US"
+              ]
+            },
+            "search_lang": {
+              "default": "en",
+              "description": "Search language preference. The 2 or more character language code for which the search results are provided.",
+              "type": "string",
+              "enum": [
+                "ar",
+                "eu",
+                "bn",
+                "bg",
+                "ca",
+                "zh-hans",
+                "zh-hant",
+                "hr",
+                "cs",
+                "da",
+                "nl",
+                "en",
+                "en-gb",
+                "et",
+                "fi",
+                "fr",
+                "gl",
+                "de",
+                "gu",
+                "he",
+                "hi",
+                "hu",
+                "is",
+                "it",
+                "jp",
+                "kn",
+                "ko",
+                "lv",
+                "lt",
+                "ms",
+                "ml",
+                "mr",
+                "nb",
+                "pl",
+                "pt-br",
+                "pt-pt",
+                "pa",
+                "ro",
+                "ru",
+                "sr",
+                "sk",
+                "sl",
+                "es",
+                "sv",
+                "ta",
+                "te",
+                "th",
+                "tr",
+                "uk",
+                "vi"
+              ]
+            },
+            "ui_lang": {
+              "default": "en-US",
+              "description": "The language of the UI. The 2 or more character language code for which the search results are provided.",
+              "type": "string",
+              "enum": [
+                "es-AR",
+                "en-AU",
+                "de-AT",
+                "nl-BE",
+                "fr-BE",
+                "pt-BR",
+                "en-CA",
+                "fr-CA",
+                "es-CL",
+                "da-DK",
+                "fi-FI",
+                "fr-FR",
+                "de-DE",
+                "zh-HK",
+                "en-IN",
+                "en-ID",
+                "it-IT",
+                "ja-JP",
+                "ko-KR",
+                "en-MY",
+                "es-MX",
+                "nl-NL",
+                "en-NZ",
+                "no-NO",
+                "zh-CN",
+                "pl-PL",
+                "en-PH",
+                "ru-RU",
+                "en-ZA",
+                "es-ES",
+                "sv-SE",
+                "fr-CH",
+                "de-CH",
+                "zh-TW",
+                "tr-TR",
+                "en-GB",
+                "en-US",
+                "es-US"
+              ]
+            },
+            "count": {
+              "default": 10,
+              "description": "Number of results (1-20, default 10). Applies only to web search results (i.e., has no effect on locations, news, videos, etc.)",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            },
+            "offset": {
+              "default": 0,
+              "description": "Pagination offset (max 9, default 0)",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9
+            },
+            "safesearch": {
+              "default": "moderate",
+              "description": "Filters search results for adult content. The following values are supported: 'off' - No filtering. 'moderate' - Filters explicit content (e.g., images and videos), but allows adult domains in search results. 'strict' - Drops all adult content from search results. The default value is 'moderate'.",
+              "type": "string",
+              "enum": ["off", "moderate", "strict"]
+            },
+            "freshness": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": ["pd", "pw", "pm", "py"]
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}to\\d{4}-\\d{2}-\\d{2}$"
+                }
+              ],
+              "description": "Filters search results by when they were discovered. The following values are supported: 'pd' - Discovered within the last 24 hours. 'pw' - Discovered within the last 7 days. 'pm' - Discovered within the last 31 days. 'py' - Discovered within the last 365 days. 'YYYY-MM-DDtoYYYY-MM-DD' - Timeframe is also supported by specifying the date range e.g. 2022-04-01to2022-07-30."
+            },
+            "text_decorations": {
+              "default": true,
+              "description": "Whether display strings (e.g. result snippets) should include decoration markers (e.g. highlighting characters).",
+              "type": "boolean"
+            },
+            "spellcheck": {
+              "default": true,
+              "description": "Whether to spellcheck the provided query.",
+              "type": "boolean"
+            },
+            "result_filter": {
+              "default": ["web", "query"],
+              "description": "Result filter (default ['web', 'query'])",
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "discussions",
+                  "faq",
+                  "infobox",
+                  "news",
+                  "query",
+                  "summarizer",
+                  "videos",
+                  "web",
+                  "locations",
+                  "rich"
+                ]
+              }
+            },
+            "goggles": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Goggles act as a custom re-ranking on top of Brave's search index. The parameter supports both a url where the Goggle is hosted or the definition of the Goggle. Multiple goggle URLs and/or definitions can be provided in an array. For more details, refer to the Goggles repository (i.e., https://github.com/brave/goggles-quickstart)."
+            },
+            "units": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "metric"
+                },
+                {
+                  "type": "string",
+                  "const": "imperial"
+                }
+              ],
+              "description": "The measurement units. If not provided, units are derived from search country."
+            },
+            "extra_snippets": {
+              "type": "boolean",
+              "description": "A snippet is an excerpt from a page you get as a result of the query, and extra_snippets allow you to get up to 5 additional, alternative excerpts. Only available under Free AI, Base AI, Pro AI, Base Data, Pro Data and Custom plans."
+            },
+            "summary": {
+              "type": "boolean",
+              "description": "This parameter enables summary key generation in web search results. This is required for summarizer to be enabled."
+            }
+          },
+          "required": ["query"]
+        },
+        "strict": false
+      },
+      {
+        "type": "function",
+        "description": "Resolves a package/product name to a Context7-compatible library ID and returns matching libraries.\n\nYou MUST call this function before 'Query Documentation' tool to obtain a valid Context7-compatible library ID UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.\n\nEach result includes:\n- Library ID: Context7-compatible identifier (format: /org/project)\n- Name: Library or package name\n- Description: Short summary\n- Code Snippets: Number of available code examples\n- Source Reputation: Authority indicator (High, Medium, Low, or Unknown)\n- Benchmark Score: Quality indicator (100 is the highest score)\n- Versions: List of versions if available. Use one of those versions if the user provides a version in their query. The format of the version is /org/project/version.\n\nFor best results, select libraries based on name match, source reputation, snippet coverage, benchmark score, and relevance to your use case.\n\nSelection Process",
+        "name": "resolve-library-id",
+        "output_schema": null,
+        "parameters": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "What to look up in the library's documentation. This is used to rank library results by relevance to what the user is trying to accomplish. The query is sent to the Context7 API for processing. Do not include any sensitive or confidential information such as API keys, passwords, credentials, personal data, or proprietary code in your query."
+            },
+            "libraryName": {
+              "type": "string",
+              "description": "Library name to search for and retrieve a Context7-compatible library ID. Use the official library name with proper punctuation — e.g., 'Next.js' instead of 'nextjs', 'Customer.io' instead of 'customerio', 'Three.js' instead of 'threejs'."
+            }
+          },
+          "required": ["query", "libraryName"]
+        },
+        "strict": false
+      }
+    ],
+    "top_logprobs": 0,
+    "top_p": 0.98,
+    "truncation": "disabled",
+    "usage": {
+      "input_tokens": 2413,
+      "input_tokens_details": {
+        "cache_write_tokens": 2410,
+        "cached_tokens": 0
+      },
+      "output_tokens": 84,
+      "output_tokens_details": {
+        "reasoning_tokens": 0
+      },
+      "total_tokens": 2497
+    },
+    "user": null,
+    "metadata": {},
+    "output_text": ""
+  }
+}

@@ -441,8 +441,90 @@ test('an orphan split PVC is reported without blocking the verdict (T9)', () => 
   const orphanPod = creates(r.calls).find(m => m.spec.volumes[0].persistentVolumeClaim.claimName === 'delta-workspace')
   assert.equal(orphanPod.spec.containers[0].image, 'registry.test/mcp-host:head')
   assert.equal(orphanPod.spec.containers[0].imagePullPolicy, 'Always')
-  assert.deepEqual(orphanPod.spec.imagePullSecrets, [{ name: 'clerum' }])
+  assert.deepEqual(orphanPod.spec.imagePullSecrets, [])
 })
+
+test('an orphan check Pod takes the HCC pull Secret: empty means none, a name is used', () => {
+  for (const [entry, expected] of [
+    [{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', value: '' }, []],
+    [{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', value: 'regcred' }, [{ name: 'regcred' }]],
+    // A real apiserver read omits `value` for an empty variable.
+    [{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET' }, []],
+  ]) {
+    const f = fleet()
+    f.hcc = hcc([entry])
+    f.pvcs.push(pvc('delta'))
+    f.checks['delta-workspace'] = { output: 'WILL_MERGE\n' }
+    const r = verify(f)
+    assert.equal(r.status, 0, `${JSON.stringify(entry)}: ${r.stdout}${r.stderr}`)
+    assert.match(row(r.stdout, 'delta-workspace'), /host=delta kind=ORPHAN state=NO_HOST result=SPLIT$/)
+    const orphanPod = creates(r.calls).find(m => m.spec.volumes[0].persistentVolumeClaim.claimName === 'delta-workspace')
+    assert.deepEqual(orphanPod.spec.imagePullSecrets, expected)
+    // Witness: the check Pod carries the HCC image, so the settings resolved.
+    assert.equal(orphanPod.spec.containers[0].image, 'registry.test/mcp-host:head')
+    assert.doesNotMatch(r.stderr, /cannot resolve/)
+  }
+})
+
+test('a duplicated HCC env entry resolves to the last one, as Kubernetes does', () => {
+  const pullSecretEnv = 'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET'
+  for (const first of [
+    { name: pullSecretEnv, value: 'first' },
+    { name: pullSecretEnv, valueFrom: { secretKeyRef: { name: 's', key: 'k' } } },
+  ]) {
+    const f = fleet()
+    f.hcc = hcc([first, { name: pullSecretEnv, value: 'regcred' }])
+    f.pvcs.push(pvc('delta'))
+    f.checks['delta-workspace'] = { output: 'WILL_MERGE\n' }
+    const r = verify(f)
+    assert.equal(r.status, 0, `${JSON.stringify(first)}: ${r.stdout}${r.stderr}`)
+    const orphanPod = creates(r.calls).find(m => m.spec.volumes[0].persistentVolumeClaim.claimName === 'delta-workspace')
+    assert.deepEqual(orphanPod.spec.imagePullSecrets, [{ name: 'regcred' }])
+    // Witness: the check Pod carries the HCC image, so the settings resolved.
+    assert.equal(orphanPod.spec.containers[0].image, 'registry.test/mcp-host:head')
+  }
+})
+
+const unresolved = name => ({ name, valueFrom: { secretKeyRef: { name: 's', key: 'k' } } })
+const withoutHostImage = () => {
+  const deployment = hcc()
+  deployment.spec.template.spec.containers[0].env = []
+  return deployment
+}
+for (const [setting, shown, deployment] of [
+  ['CONTEXT_MAPPER_HOST_IMAGE', '<valueFrom>', () => hcc([unresolved('CONTEXT_MAPPER_HOST_IMAGE')])],
+  ['CONTEXT_MAPPER_HOST_IMAGE', '<unset>', withoutHostImage],
+  ['CONTEXT_MAPPER_HOST_IMAGE', '', () => hcc([{ name: 'CONTEXT_MAPPER_HOST_IMAGE', value: '' }])],
+  [
+    'CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY',
+    '<valueFrom>',
+    () => hcc([unresolved('CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY')]),
+  ],
+  [
+    'CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY',
+    '',
+    () => hcc([{ name: 'CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY', value: '' }]),
+  ],
+  [
+    'CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET',
+    '<valueFrom>',
+    () => hcc([unresolved('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET')]),
+  ],
+]) {
+  test(`${setting} read as "${shown}" stops the run before the orphan check Pod`, () => {
+    const f = fleet()
+    f.hcc = deployment()
+    f.pvcs.push(pvc('delta'))
+    f.checks['delta-workspace'] = { output: 'WILL_MERGE\n' }
+    const r = verify(f)
+    // Witness: the run reached hcc_host_image and stopped there.
+    assert.equal(r.status, 2, r.stdout + r.stderr)
+    assert.ok(r.stderr.includes(`cannot resolve ${setting} (${shown})`), r.stderr)
+    const claims = creates(r.calls).map(m => m.spec.volumes[0].persistentVolumeClaim.claimName)
+    assert.ok(!claims.includes('delta-workspace'), claims.join(','))
+    assert.doesNotMatch(r.stdout, /^HOST_LAYOUT_VERIFY=/m)
+  })
+}
 
 test('r5 C1: a Host whose workspace PVC was not inspected fails both verdicts', () => {
   // Witness: the unmodified fleet passes with all three claims read.

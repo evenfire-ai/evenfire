@@ -2238,6 +2238,60 @@ export class ChatStore {
   }
 
   /**
+   * Remove local user turns that carry no stored sign of a server answer, such
+   * as the optimistic turn of a send the server rejected or that was never
+   * posted. The store cannot ask the server; it checks what is stored. Each
+   * requested message that is stored must be a user turn with no server turn
+   * number and no task id, with no assistant message lacking a server turn
+   * number stored after it (for example a synchronous reply, a legacy reply,
+   * an error reply, or the reply of an earlier task stored before its turn
+   * number is known). Numbered server turns after it are the normal result of
+   * a reconcile and do not count. If any requested message fails the rule,
+   * the call throws and removes nothing. Ids that are not stored are ignored.
+   * A deleted or missing chat is not created.
+   *
+   * Returns the number of messages removed. The indexed message count is not
+   * lowered: the index keeps the maximum because it can count server turns the
+   * local pages do not hold.
+   */
+  async removeMessages(agentRef: string, chatId: string, messageIds: string[]): Promise<number> {
+    return this.serializeChat(agentRef, chatId, async () => {
+      const index = await this.getIndex(agentRef)
+      if (this.isDeletedInScope(index, chatId)) return 0
+      const existingMeta = await this.readOrMigratePagedChatUnlocked(agentRef, chatId)
+      if (!existingMeta) return 0
+      const existingMessages = await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
+      const requested = new Set(messageIds)
+      existingMessages.forEach((message, position) => {
+        if (!requested.has(message.id)) return
+        const answeredLocally = existingMessages
+          .slice(position + 1)
+          .some(later => later.role === 'assistant' && messageServerTurnNumber(later) === undefined)
+        if (
+          message.role !== 'user' ||
+          messageServerTurnNumber(message) !== undefined ||
+          message.task_id ||
+          answeredLocally
+        ) {
+          throw new Error(`Chat message ${message.id} is not an unanswered local user turn`)
+        }
+      })
+      const remaining = existingMessages.filter(message => !requested.has(message.id))
+      const removed = existingMessages.length - remaining.length
+      if (removed === 0) return 0
+      const indexedCount = await this.indexedMessageCount(agentRef, chatId)
+      await this.writePagedChatUnlocked(agentRef, chatId, remaining, {
+        messageCount: Math.max(remaining.length, indexedCount ?? 0),
+      })
+      await this.updateChatIndexFromMessages(agentRef, chatId, remaining, {
+        preserveExistingTotals: true,
+        touchUpdatedAt: false,
+      })
+      return removed
+    })
+  }
+
+  /**
    * Flag that a task terminated while the chat was not the active view (D.5).
    * Idempotent: a no-op when already flagged, so a noisy task can't spam FS writes.
    */

@@ -1380,14 +1380,61 @@ function workflowPhaseForMcpHostReadinessWait(
   return execution?.phase === 'recovering' ? 'recovering' : 'initializing'
 }
 
+/**
+ * Whether the pre-coordinator wait for the mcp-host pod has run out. The gate
+ * judges the pod it read against that pod's own window of
+ * MCP_HOST_READINESS_WAIT_TIMEOUT_MS. Where the window starts depends only on
+ * the state of that pod:
+ * - absent: no pod has the name, so there is nothing to wait for and no
+ *   verdict. The next pass creates the pod, and that pod gets its own window.
+ *   The run start is not used.
+ * - present: the later of the run start and the creation of the pod. A pod
+ *   created after the run started (the output anchor/prepare pods ran first,
+ *   or crash recovery replaced it) gets the whole window; a pod that predates
+ *   the run, or that reports no creation time, is measured from the run start.
+ * - terminating: the pod is the predecessor of the pod this run waits for, and
+ *   its creation is not counted. The window starts at the later of the run
+ *   start and its deletionTimestamp (the deletion request plus its grace
+ *   period), so a predecessor that never goes away still ends the wait.
+ *
+ * Crash recovery writes `attempt + 1` to the recipe status before it replaces
+ * the pod and fails the run instead of replacing once the `attempt` it reads
+ * is 3, and each replacement gets a new window. The bound is on the stored
+ * `attempt`, not on the number of windows: a pod deleted by anything else is
+ * recreated without counting an attempt and gets a new window.
+ */
 function hasMcpHostReadinessWaitExpired(
   execution: WorkflowExecutionStatus | undefined,
+  readiness: PodReadiness,
   nowMs = Date.now()
 ): boolean {
   if (!execution?.startedAt) return false
 
   const startedAtMs = Date.parse(execution.startedAt)
-  return Number.isFinite(startedAtMs) && nowMs - startedAtMs >= MCP_HOST_READINESS_WAIT_TIMEOUT_MS
+  let waitStartedAtMs: number
+  switch (readiness.kind) {
+    case 'absent':
+      return false
+    case 'present':
+      waitStartedAtMs =
+        readiness.createdAt === undefined
+          ? startedAtMs
+          : Math.max(startedAtMs, Date.parse(readiness.createdAt))
+      break
+    case 'terminating':
+      waitStartedAtMs = Math.max(startedAtMs, Date.parse(readiness.deletingAt))
+      break
+    default: {
+      const unreachable: never = readiness
+      throw new Error(
+        `Unknown mcp-host pod readiness: ${String((unreachable as { kind: unknown }).kind)}`
+      )
+    }
+  }
+  return (
+    Number.isFinite(waitStartedAtMs) &&
+    nowMs - waitStartedAtMs >= MCP_HOST_READINESS_WAIT_TIMEOUT_MS
+  )
 }
 
 function trimOutputClaimName(spec: WorkflowRecipeSpec | undefined): string | undefined {
@@ -2945,7 +2992,7 @@ export class WorkflowReconciler {
         )
         if (!readiness.ready) {
           const message = mcpHostReadinessMessage(readiness)
-          if (hasMcpHostReadinessWaitExpired(currentStatus?.workflowExecution)) {
+          if (hasMcpHostReadinessWaitExpired(currentStatus?.workflowExecution, readiness)) {
             return withWorkflowConditions({
               phase: 'failed',
               message: `${message}; readiness deadline exceeded`,

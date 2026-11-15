@@ -30,7 +30,6 @@ import { DESKTOP_ROUTES } from '@constants/navigation'
 import type { PushNotificationInput } from '@hooks/domain/types'
 import { type ActiveChatVisibility, useChatNotifications } from '@hooks/domain/useChatNotifications'
 import { useAppController } from '@hooks/useAppController'
-import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import { httpErrorStatus, isAuthorizationError, isNetworkError } from '@lib/format'
@@ -212,28 +211,6 @@ async function produceSerializedAccessCatalogHttpFailure(status: number): Promis
     throw new Error(
       `The real AuthClient catalog producer lost HTTP ${status}: ${producerError.message}`
     )
-  }
-  return wrapLikeElectronIpc('access:refreshCatalog', producerError)
-}
-
-async function produceSerializedAccessCatalogMalformedResponse(): Promise<Error> {
-  const nativeFetch = globalThis.fetch
-  const actual =
-    await vi.importActual<typeof import('../../../src/authClient')>('../../../src/authClient')
-  let producerError: unknown
-  globalThis.fetch = vi.fn(
-    async () =>
-      new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } })
-  ) as typeof fetch
-  try {
-    await new actual.AuthClient().getTeamAgents('catalog-proof-session')
-  } catch (error) {
-    producerError = error
-  } finally {
-    globalThis.fetch = nativeFetch
-  }
-  if (!(producerError instanceof SyntaxError)) {
-    throw new Error(`The real AuthClient catalog producer did not expose its malformed response`)
   }
   return wrapLikeElectronIpc('access:refreshCatalog', producerError)
 }
@@ -782,6 +759,22 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       }
     }
   )
+  const beginConfirmedGfsResourceNavigation = vi.fn(
+    (id: number, uri: string, principalGeneration: number): GfsResourceNavigationRequest => {
+      const intentSequence = beginUserNavigationIntent()
+      const userNavigationGenerationAtActivation = testUserNavigationGeneration
+      const owner = assignGfsResourceNavigationOwner(controller.workspaceTabs, uri)
+      return {
+        id,
+        uri,
+        ownerTabId: owner.createDestination ? nextWorkspaceTabId() : owner.ownerTabId,
+        createDestination: owner.createDestination,
+        intentSequence,
+        principalGeneration,
+        userNavigationGenerationAtActivation,
+      }
+    }
+  )
   const isGfsResourceNavigationCurrent = vi.fn(
     (request: GfsResourceNavigationRequest, principalGeneration: number) =>
       canCompleteGfsResourceNavigation(request, {
@@ -974,6 +967,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     captureWorkspaceNavigation,
     restoreWorkspaceNavigation,
     beginGfsResourceNavigation,
+    beginConfirmedGfsResourceNavigation,
     isGfsResourceNavigationCurrent,
     activateGfsResourceNavigation,
     completeGfsResourceNavigationPreview,
@@ -1181,6 +1175,15 @@ describe('App deep-link orchestration', () => {
   async function waitForMounted() {
     await waitFor(() => expect(embedPhase()).toBe('mounted'))
   }
+
+  async function confirmPendingGfsLink(): Promise<void> {
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+  }
+
   it('retains a cold resource link through authentication and bootstrap readiness', async () => {
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
     const link = produceGfsResourceDeepLink(uri)
@@ -1215,6 +1218,7 @@ describe('App deep-link orchestration', () => {
     } as Partial<AppController>)
     rerender(<App />)
 
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -1240,6 +1244,7 @@ describe('App deep-link orchestration', () => {
       emitGfsDeepLink?.(link)
     })
 
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -1250,7 +1255,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
   })
 
-  it('does not let a link activated before a Chat selection take over an inactive Files root', async () => {
+  it('requires fresh Open after a delayed event follows a Chat selection', async () => {
     const uri = 'gfs://main/abababababababababababababababab'
     const queue = new GfsResourceDeepLinkQueue()
     const link = produceGfsResourceDeepLink(uri, queue)
@@ -1280,26 +1285,34 @@ describe('App deep-link orchestration', () => {
     // happens before the renderer receives this delayed event.
     act(() => emitGfsDeepLink?.(link))
 
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(filesPageHarness.resolveRequests).toEqual([])
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(currentController.beginConfirmedGfsResourceNavigation).not.toHaveBeenCalled()
+    await confirmPendingGfsLink()
+    await waitFor(() =>
+      expect(currentController.beginConfirmedGfsResourceNavigation).toHaveBeenCalledOnce()
+    )
+
     const activeTabButton = screen
       .getByRole('toolbar', { name: 'Workspace tabs' })
       .querySelector('button[aria-pressed="true"]')
-    expect(activeTabButton?.getAttribute('aria-label')).toBe('New chat')
-    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(activeTabButton?.getAttribute('aria-label')).toBe('Files')
+    expect(currentController.workspaceTabs.activeTabId).not.toBe('chat-tab-1')
     expect(
       currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-root')?.files?.path
     ).toBeNull()
-    expect(screen.queryByTestId('files-page-surface')).toBeNull()
+    expect(screen.getByTestId('files-page-surface')).toBeTruthy()
     expect(filesPageHarness.resolveRequests).toEqual([])
-    expect(document.activeElement).toBe(chatButton)
-    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
-    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
-    expect(queue.list()).toEqual([])
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri })
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(queue.list()).toEqual([link])
     expect(currentController.pushToast).not.toHaveBeenCalled()
 
     act(() => emitGfsDeepLink?.(link))
     expect(filesPageHarness.resolveRequests).toEqual([])
-    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
-    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(currentController.workspaceTabs.activeTabId).not.toBe('chat-tab-1')
   })
 
   it('keeps newer explicit link navigation and reserves a separate Files destination', async () => {
@@ -1326,6 +1339,7 @@ describe('App deep-link orchestration', () => {
     expect(link.userNavigationGenerationAtActivation).toBe(testUserNavigationGeneration)
     act(() => emitGfsDeepLink?.(link))
 
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -1367,6 +1381,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(link))
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -1410,6 +1425,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(link))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     const ownerId = currentController.workspaceTabs.activeTabId
     expect(currentController.workspaceTabs.activeTabId).toBe(ownerId)
@@ -1434,12 +1450,15 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
   })
 
-  it('releases a retryable link when a newer valid link arrives', async () => {
+  it('keeps a later activation raw until the confirmed GFS read settles', async () => {
     const uriA = 'gfs://main/afafafafafafafafafafafafafafafaf'
     const uriB = 'gfs://main/bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf'
     const queue = new GfsResourceDeepLinkQueue()
     const linkA = produceGfsResourceDeepLink(uriA, queue)
-    const producerResource = await resolveResource(
+    const resourceA = await resolveResource(
+      resolvedFile('afafafafafafafafafafafafafafafaf', 'older.md')
+    )
+    const resourceB = await resolveResource(
       resolvedFile('bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf', 'newer.md')
     )
     const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
@@ -1447,11 +1466,11 @@ describe('App deep-link orchestration', () => {
       path: uriA,
       title: 'Files owner',
     })
-    let resolveB!: (resource: unknown) => void
+    const deferred = new Map<string, (resource: unknown) => void>()
     resolveGfsResource.mockImplementation(
-      () =>
+      (uri: string) =>
         new Promise(resolve => {
-          resolveB = resolve
+          deferred.set(uri, resolve)
         })
     )
     filesPageHarness.resolveOnDeepLink = true
@@ -1460,14 +1479,23 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
-    act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(linkA.id, 'retryable'))
-    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
-
     const linkB = produceGfsResourceDeepLink(uriB, queue)
     act(() => emitGfsDeepLink?.(linkB))
-    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
+    expect(filesPageHarness.resolveRequests).toHaveLength(1)
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: linkA.id, uri: uriA })
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(queue.list()).toEqual([linkA, linkB])
+
+    await act(async () => {
+      deferred.get(uriA)?.(resourceA)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkA.id))
+    await confirmPendingGfsLink()
+    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
     expect(filesPageHarness.resolveRequests[1]).toEqual({
       id: linkB.id,
       tabId: 'files-owner',
@@ -1477,7 +1505,7 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
 
     await act(async () => {
-      resolveB(producerResource)
+      deferred.get(uriB)?.(resourceB)
       await Promise.resolve()
       await Promise.resolve()
     })
@@ -1522,6 +1550,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     expect(filesPageHarness.resolveRequests[0]).toEqual({
       id: linkA.id,
@@ -1594,6 +1623,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(link))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri: link.uri })
     expect(filesPageHarness.pendingGfsUri).toBe(ownerUri)
@@ -1658,6 +1688,7 @@ describe('App deep-link orchestration', () => {
       await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
       act(() => emitGfsDeepLink?.(linkA))
+      await confirmPendingGfsLink()
       await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
       fireEvent.click(screen.getByRole('button', { name: 'Files B' }))
       await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1))
@@ -1725,6 +1756,7 @@ describe('App deep-link orchestration', () => {
       render(<App />)
       await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
       act(() => emitGfsDeepLink?.(linkA))
+      await confirmPendingGfsLink()
       await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
 
       let finalButton: HTMLElement | null = null
@@ -1789,6 +1821,7 @@ describe('App deep-link orchestration', () => {
     render(<App />)
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
 
     fireEvent.click(screen.getByRole('button', { name: 'Close Files A' }))
@@ -1816,7 +1849,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.pushToast).not.toHaveBeenCalled()
   })
 
-  it('settles newer resource links without letting an older out-of-order result take over', async () => {
+  it('admits a queued newer activation only after the current destination settles', async () => {
     const uriA = 'gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     const uriB = 'gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
     const queue = new GfsResourceDeepLinkQueue()
@@ -1845,10 +1878,21 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     act(() => emitGfsDeepLink?.(linkB))
-    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
+    expect(filesPageHarness.resolveRequests).toHaveLength(1)
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+    expect(queue.list()).toEqual([linkA, linkB])
+
+    await act(async () => {
+      deferred.get(uriA)?.(resourceA)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkA.id))
+    await confirmPendingGfsLink()
+    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
 
     await act(async () => {
       deferred.get(uriB)?.(resourceB)
@@ -1856,15 +1900,6 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkB.id))
-    const savedPathAfterB = currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-a')
-      ?.files?.path
-    expect(savedPathAfterB).toBe(uriB)
-
-    await act(async () => {
-      deferred.get(uriA)?.(resourceA)
-      await Promise.resolve()
-      await Promise.resolve()
-    })
 
     expect(currentController.workspaceTabs.activeTabId).toBe('files-a')
     expect(
@@ -1909,12 +1944,14 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
 
     act(() => emitGfsDeepLink?.(linkA))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
     fireEvent.click(screen.getByRole('button', { name: 'Files B' }))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkA.id))
 
     linkB = produceGfsResourceDeepLink(uriB, queue)
     act(() => emitGfsDeepLink?.(linkB))
+    await confirmPendingGfsLink()
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
     expect(filesPageHarness.resolveRequests[1]).toEqual({
       id: linkB.id,
@@ -1986,6 +2023,7 @@ describe('App deep-link orchestration', () => {
 
     const linkB = produceGfsResourceDeepLink('gfs://main/22222222222222222222222222222222', queue)
     act(() => emitGfsDeepLink?.(linkB))
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -2079,8 +2117,11 @@ describe('App deep-link orchestration', () => {
     const { rerender } = render(<App />)
     await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
     act(() => emitGfsDeepLink?.(linkA))
+    await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open EvenDrive link?'))
+    expect(currentController.activateGfsResourceNavigation).not.toHaveBeenCalled()
+    await confirmPendingGfsLink()
     await waitFor(() =>
-      expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
+      expect(currentController.beginConfirmedGfsResourceNavigation).toHaveBeenCalledOnce()
     )
     const staleOutcome = filesPageHarness.props?.onPendingGfsDeepLinkOutcome
     expect(staleOutcome).toBeTypeOf('function')
@@ -2099,6 +2140,7 @@ describe('App deep-link orchestration', () => {
       emitGfsDeepLink?.(linkB)
       emitGfsDeepLink?.(linkB)
     })
+    await confirmPendingGfsLink()
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
@@ -3628,7 +3670,7 @@ describe('App deep-link orchestration', () => {
       .toBe('draft owned by B')
   })
 
-  it('keeps a confirmed current-team agent sendable through a transient catalog refresh', async () => {
+  it('keeps the selected agent sendable through catalog refresh failures and returns the text and the document to the composer after a send 403', async () => {
     composerPanelHarness.useRealComposerPanel = true
     composerPanelHarness.renderSendButton = true
     const existingBridge = window.clerum
@@ -3662,7 +3704,6 @@ describe('App deep-link orchestration', () => {
       expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject(
         {
           userId: HARNESS_ME.id,
-          teamId: HARNESS_ME.teamId,
           agentNames: ['agent-x', 'agent-y'],
         }
       )
@@ -3710,13 +3751,11 @@ describe('App deep-link orchestration', () => {
     )
     expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
       userId: HARNESS_ME.id,
-      teamId: HARNESS_ME.teamId,
       agentNames: ['agent-x', 'agent-y'],
     })
     expect(realController.current?.selectedAgent).toBe('agent-x')
     expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
     expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
-    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
     expect((composer as HTMLTextAreaElement).value).toBe(draft)
     expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
 
@@ -3731,10 +3770,8 @@ describe('App deep-link orchestration', () => {
     )
     expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
       userId: HARNESS_ME.id,
-      teamId: HARNESS_ME.teamId,
       agentNames: ['agent-x', 'agent-y'],
     })
-    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
     expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
     expect((composer as HTMLTextAreaElement).value).toBe(draft)
     expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
@@ -3765,11 +3802,9 @@ describe('App deep-link orchestration', () => {
     expect(realController.current?.selectedAgent).toBe('agent-x')
     expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
       userId: HARNESS_ME.id,
-      teamId: HARNESS_ME.teamId,
       agentNames: ['agent-x', 'agent-y'],
     })
     expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
-    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
     await act(async () => {
       rejectServerError(serverError)
       await serverErrorRefreshTask
@@ -3779,11 +3814,9 @@ describe('App deep-link orchestration', () => {
     )
     expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
       userId: HARNESS_ME.id,
-      teamId: HARNESS_ME.teamId,
       agentNames: ['agent-x', 'agent-y'],
     })
     expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
-    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
     expect((composer as HTMLTextAreaElement).value).toBe(draft)
     expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
 
@@ -3795,48 +3828,17 @@ describe('App deep-link orchestration', () => {
     await vi.waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce(), {
       timeout: 2_000,
     })
-    const recoverInput = await screen.findByRole('button', { name: 'Recover input' })
-    await waitFor(() => expect((recoverInput as HTMLButtonElement).disabled).toBe(false))
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce()
     expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
       content: draft,
       attachments: [expect.objectContaining({ filename: 'notes.txt' })],
     })
-  })
-
-  it.each([401, 403])(
-    'preserves explicit catalog HTTP %i authorization failures through IPC',
-    async status => {
-      const error = await produceSerializedAccessCatalogHttpFailure(status)
-      expect(error.message).toContain("Error invoking remote method 'access:refreshCatalog'")
-      expect(httpErrorStatus(error)).toBe(status)
-      expect(isAuthorizationError(error)).toBe(true)
-      expect(
-        resolveAgentCatalogAvailability({
-          selectedAgent: 'agent-x',
-          loading: false,
-          error: error.message,
-          catalogMatchesSession: true,
-          agentNames: ['agent-x'],
-        })
-      ).toBe('error')
-    }
-  )
-
-  it('keeps a genuinely unclassified catalog producer failure blocked', async () => {
-    const error = await produceSerializedAccessCatalogMalformedResponse()
-    expect(httpErrorStatus(error)).toBeUndefined()
-    expect(isNetworkError(error)).toBe(false)
-    expect(isAuthorizationError(error)).toBe(false)
-    expect(
-      resolveAgentCatalogAvailability({
-        selectedAgent: 'agent-x',
-        loading: false,
-        error: error.message,
-        catalogMatchesSession: true,
-        agentNames: ['agent-x'],
-      })
-    ).toBe('error')
+    // The rejected send returns its text and document to the composer.
+    await waitFor(() => expect((composer as HTMLTextAreaElement).value).toBe(draft))
+    await waitFor(() =>
+      expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
+    )
+    expect(screen.queryByRole('button', { name: 'Recover input' })).toBeNull()
   })
 
   it('keeps actual ComposerPanel drafts on their App-created workspace tabs', async () => {

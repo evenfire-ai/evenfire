@@ -80,7 +80,7 @@ export const config: ReaderConfig = {
     baseUrl: primaryMcpHostBaseUrl,
   }),
   mcpHostTargetsFile: process.env.WORKFLOW_APPROVAL_READER_MCP_HOST_TARGETS_FILE,
-  enabledMedia: csvSet(process.env.WORKFLOW_APPROVAL_READER_ENABLED_MEDIA || 'telegram,slack'),
+  enabledMedia: csvSet(process.env.WORKFLOW_APPROVAL_READER_ENABLED_MEDIA || 'telegram,slack,teams'),
   mcpHostTimeoutMs: intFromEnv('WORKFLOW_APPROVAL_READER_MCP_HOST_TIMEOUT_MS', 5000),
   mcpHostMessageTimeoutMs,
   rateLimitWindowMs: intFromEnv('WORKFLOW_APPROVAL_READER_RATE_LIMIT_WINDOW_MS', 60_000),
