@@ -38,6 +38,7 @@ import { PluginThemeStore } from './pluginThemeStore.js'
 type RuntimeDeps = {
   service: AppService
   getMainWindow: () => BrowserWindow | null
+  canRevealWindow?: (window: BrowserWindow) => boolean
   /** Overridable for tests. */
   userDataDir?: string
 }
@@ -397,7 +398,7 @@ export class PluginSdkRuntime {
     })
     notification.on('click', () => {
       const win = this.deps.getMainWindow()
-      if (win && !win.isDestroyed()) {
+      if (win && !win.isDestroyed() && (this.deps.canRevealWindow?.(win) ?? true)) {
         if (win.isMinimized()) win.restore()
         win.show()
         win.focus()

@@ -480,7 +480,8 @@ function sanitizeDesktopNotificationActions(
 export function registerIpcHandlers(
   service: AppService,
   logout: () => Promise<number>,
-  getMainWindow: () => BrowserWindow | null = () => null
+  getMainWindow: () => BrowserWindow | null = () => null,
+  canRevealWindow: (window: BrowserWindow) => boolean = () => true
 ): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
@@ -810,11 +811,12 @@ export function registerIpcHandlers(
       if (event.sender.isDestroyed()) return
       event.sender.send(channel, detail)
     }
-    const focusOwner = () => {
-      if (!owner || owner.isDestroyed()) return
+    const focusOwner = (): boolean => {
+      if (!owner || owner.isDestroyed() || !canRevealWindow(owner)) return false
       if (owner.isMinimized()) owner.restore()
       owner.show()
       owner.focus()
+      return true
     }
 
     const notification = new Notification({
@@ -828,11 +830,11 @@ export function registerIpcHandlers(
 
     activeDesktopNotifications.set(id, notification)
     notification.on('click', () => {
-      focusOwner()
+      if (!focusOwner()) return
       sendToRenderer('notifications:click', { id })
     })
     notification.on('action', (details, actionIndex) => {
-      focusOwner()
+      if (!focusOwner()) return
       const index =
         typeof details.actionIndex === 'number'
           ? details.actionIndex

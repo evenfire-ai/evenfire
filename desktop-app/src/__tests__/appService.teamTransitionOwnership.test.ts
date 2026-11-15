@@ -110,7 +110,15 @@ describe('AppService deliberate team transition ownership', () => {
     await getMeStarted.promise
     getMeResponse.resolve(me)
 
-    await expect(restore).resolves.toEqual({ authenticated: true, me, sessionGeneration: 1 })
+    await expect(restore).resolves.toMatchObject({
+      authenticated: true,
+      me,
+      sessionGeneration: 1,
+      authorityBinding: expect.objectContaining({
+        restBaseUrl: restA,
+        rpcBaseUrl: 'https://rpc-discovered.example.test',
+      }),
+    })
   })
 
   it('accepts Google login when RPC discovery enriches its captured REST profile', async () => {
@@ -214,7 +222,15 @@ describe('AppService deliberate team transition ownership', () => {
       appName: 'Environment A',
     })
     await save
-    await expect(restore).resolves.toEqual({ authenticated: true, me, sessionGeneration: 2 })
+    await expect(restore).resolves.toMatchObject({
+      authenticated: true,
+      me,
+      sessionGeneration: 2,
+      authorityBinding: expect.objectContaining({
+        restBaseUrl: restA,
+        rpcBaseUrl: 'https://rpc-discovered.example.test',
+      }),
+    })
     expect(getDesktopEnvironment).toHaveBeenCalledOnce()
 
     expect(runtimeConfig.getDesktopRuntimeConfigState().currentConfig.rpcProxyBaseUrl).toBe(

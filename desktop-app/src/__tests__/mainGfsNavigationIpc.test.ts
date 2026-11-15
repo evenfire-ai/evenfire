@@ -335,7 +335,7 @@ describe('main.ts GFS navigation-generation composition', () => {
     expect(listPending(ipcEvent(ownContents)).links).toEqual([])
   })
 
-  it('notifies a fresh renderer before revealing a cleared session', () => {
+  it('notifies a fresh renderer before revealing a cleared session', async () => {
     const ownContents = harness.windows[0]?.webContents
     if (!ownContents) throw new Error('main.ts did not create the owning BrowserWindow')
     if (!harness.sessionCleared) throw new Error('main.ts did not pass onSessionCleared')
@@ -349,14 +349,236 @@ describe('main.ts GFS navigation-generation composition', () => {
     expect(mainWindow.hide).toHaveBeenCalledOnce()
     expect(ownContents.reload).toHaveBeenCalledOnce()
     expect(mainWindow.show).not.toHaveBeenCalled()
+    const didNavigate = ownContents.listeners.get('did-navigate')
+    if (!didNavigate) throw new Error('main.ts did not register document navigation')
+    didNavigate()
+    const handshake = ownContents.mainFrame.send.mock.calls.find(
+      ([channel]) => channel === 'auth:markdownDocumentHandshake'
+    )
+    if (!handshake) throw new Error('main.ts did not send the document challenge')
     const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
-    rendererReady(ipcEvent(ownContents))
+    const firstReady = rendererReady(ipcEvent(ownContents), handshake[1]) as {
+      sessionTransitionRevealPending: boolean
+    }
     expect(ownContents.send).toHaveBeenCalledWith('auth:sessionCleared')
+    expect(firstReady.sessionTransitionRevealPending).toBe(true)
+    expect(mainWindow.show).not.toHaveBeenCalled()
+    const view = registeredHandler(harness.handleHandlers, 'auth:getRendererSessionView')
+    const receipt = (await view(ipcEvent(ownContents))) as {
+      documentEpoch: string
+      receiptId: string
+    }
+    const commitView = registeredHandler(harness.handleHandlers, 'auth:commitRendererSessionView')
+    await commitView(ipcEvent(ownContents), receipt)
     expect(mainWindow.show).toHaveBeenCalledOnce()
-    rendererReady(ipcEvent(ownContents))
+    rendererReady(ipcEvent(ownContents), handshake[1])
     expect(
       ownContents.send.mock.calls.filter(([channel]) => channel === 'auth:sessionCleared')
     ).toHaveLength(1)
+  })
+
+  it('does not let an existing deep-link focus request reveal a preclear-fenced window', async () => {
+    const mainWindow = harness.windows[0]
+    const ownContents = mainWindow?.webContents
+    if (!mainWindow || !ownContents || !harness.sessionPreclear) {
+      throw new Error('main.ts did not create a window and register session preclear')
+    }
+    mainWindow.show.mockClear()
+    mainWindow.focus.mockClear()
+    const notice = { transitionId: 211, sessionGeneration: 2, reason: 'environment-change' }
+    harness.sessionPreclear(notice)
+    mainWindow.show.mockClear()
+    mainWindow.focus.mockClear()
+
+    const openUrl = harness.appListeners.get('open-url')
+    if (!openUrl) throw new Error('main.ts did not register the OS deep-link route')
+    const clerumDeepLink = await import('../clerumDeepLink.js')
+    try {
+      vi.mocked(clerumDeepLink.routeClerumOauthCompleted).mockReturnValue({
+        kind: 'mcp',
+        mcpServerName: 'preclear-focus-test',
+        provider: 'test-provider',
+      })
+      openUrl({ preventDefault: vi.fn() }, 'clerum://oauth-completed?clientId=test&source=mcp')
+
+      expect(mainWindow.show).not.toHaveBeenCalled()
+      expect(mainWindow.focus).not.toHaveBeenCalled()
+    } finally {
+      // This harness shares the imported main module across tests; retire the test P even if an
+      // assertion fails so it cannot fence the following test cases.
+      harness.sessionPreclearCancelled?.(notice)
+      vi.mocked(clerumDeepLink.routeClerumOauthCompleted).mockReturnValue({ kind: 'ignore' })
+      // Drain the real mcp completion queue through the registered renderer-ready producer so
+      // this test does not leave task-owned state in the shared main-module singleton.
+      const didNavigate = ownContents.listeners.get('did-navigate')
+      didNavigate?.()
+      const handshake = ownContents.mainFrame.send.mock.calls
+        .filter(([channel]) => channel === 'auth:markdownDocumentHandshake')
+        .at(-1)?.[1]
+      if (handshake) {
+        registeredHandler(harness.handleHandlers, 'app:rendererReady')(
+          ipcEvent(ownContents),
+          handshake
+        )
+      }
+      mainWindow.show.mockClear()
+      mainWindow.focus.mockClear()
+    }
+  })
+
+  it('restores the same hidden renderer only after preclear recovery is confirmed', () => {
+    const mainWindow = harness.windows[0]
+    const ownContents = mainWindow?.webContents
+    if (
+      !mainWindow ||
+      !ownContents ||
+      !harness.sessionPreclear ||
+      !harness.sessionPreclearTimeout
+    ) {
+      throw new Error('main.ts did not register session preclear recovery callbacks')
+    }
+    const notice = { transitionId: 44, sessionGeneration: 2, reason: 'environment-change' }
+    ownContents.send.mockClear()
+    ownContents.reload.mockClear()
+    ownContents.mainFrame.send.mockClear()
+    mainWindow.show.mockClear()
+    expect(harness.sessionPreclear(notice)).toBe(true)
+    harness.sessionPreclearTimeout(notice)
+
+    expect(mainWindow.hide).toHaveBeenCalled()
+    expect(mainWindow.show).not.toHaveBeenCalled()
+    expect(ownContents.reload).not.toHaveBeenCalled()
+
+    harness.sessionPreclearCancelled?.(notice)
+    expect(ownContents.send).toHaveBeenCalledWith('auth:sessionClearCancelled', notice)
+    expect(ownContents.reload).not.toHaveBeenCalled()
+    expect(mainWindow.show).toHaveBeenCalledOnce()
+  })
+
+  it('reports draft loss only after a replacement renderer commits its current session view', async () => {
+    const mainWindow = harness.windows[0]
+    const ownContents = mainWindow?.webContents
+    if (
+      !mainWindow ||
+      !ownContents ||
+      !harness.sessionPreclear ||
+      !harness.sessionPreclearCancelled
+    ) {
+      throw new Error('main.ts did not register session preclear recovery callbacks')
+    }
+    const notice = { transitionId: 45, sessionGeneration: 2, reason: 'environment-change' }
+    ownContents.isLoading.mockReturnValue(true)
+    ownContents.send.mockClear()
+    ownContents.reload.mockClear()
+    ownContents.mainFrame.send.mockClear()
+    mainWindow.show.mockClear()
+
+    expect(harness.sessionPreclear(notice)).toBe(false)
+    harness.sessionPreclearCancelled(notice)
+    expect(ownContents.reload).toHaveBeenCalledOnce()
+    expect(mainWindow.show).not.toHaveBeenCalled()
+    expect(ownContents.send).not.toHaveBeenCalledWith('auth:markdownDraftLost')
+
+    ownContents.isLoading.mockReturnValue(false)
+    const didNavigate = ownContents.listeners.get('did-navigate')
+    if (!didNavigate) throw new Error('main.ts did not register document navigation')
+    didNavigate()
+    const handshake = ownContents.mainFrame.send.mock.calls.find(
+      ([channel]) => channel === 'auth:markdownDocumentHandshake'
+    )
+    if (!handshake) throw new Error('main.ts did not send the replacement document challenge')
+    const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
+    expect(
+      (
+        rendererReady(ipcEvent(ownContents), handshake[1]) as {
+          sessionTransitionRevealPending: boolean
+        }
+      ).sessionTransitionRevealPending
+    ).toBe(true)
+    const view = registeredHandler(harness.handleHandlers, 'auth:getRendererSessionView')
+    const receipt = (await view(ipcEvent(ownContents))) as {
+      documentEpoch: string
+      receiptId: string
+    }
+    const commitView = registeredHandler(harness.handleHandlers, 'auth:commitRendererSessionView')
+    await commitView(ipcEvent(ownContents), receipt)
+
+    expect(ownContents.send).toHaveBeenCalledWith('auth:markdownDraftLost')
+    expect(mainWindow.show).toHaveBeenCalledOnce()
+  })
+
+  it('retires a crashed recovery renderer and reports loss only after the replacement commits', async () => {
+    const mainWindow = harness.windows[0]
+    const ownContents = mainWindow?.webContents
+    if (
+      !mainWindow ||
+      !ownContents ||
+      !harness.sessionPreclear ||
+      !harness.sessionPreclearCancelled
+    ) {
+      throw new Error('main.ts did not register renderer recovery lifecycle callbacks')
+    }
+    const notice = { transitionId: 47, sessionGeneration: 2, reason: 'environment-change' }
+    ownContents.isLoading.mockReturnValue(false)
+    ownContents.send.mockClear()
+    ownContents.reload.mockClear()
+    ownContents.mainFrame.send.mockClear()
+    mainWindow.show.mockClear()
+
+    expect(harness.sessionPreclear(notice)).toBe(true)
+    const processGone = ownContents.listeners.get('render-process-gone')
+    if (!processGone) throw new Error('main.ts did not register renderer process loss')
+    processGone()
+    harness.sessionPreclearCancelled(notice)
+
+    expect(ownContents.reload).toHaveBeenCalledOnce()
+    expect(mainWindow.show).not.toHaveBeenCalled()
+    expect(ownContents.send).not.toHaveBeenCalledWith('auth:markdownDraftLost')
+
+    const didNavigate = ownContents.listeners.get('did-navigate')
+    if (!didNavigate) throw new Error('main.ts did not register document navigation')
+    didNavigate()
+    const handshake = ownContents.mainFrame.send.mock.calls.find(
+      ([channel]) => channel === 'auth:markdownDocumentHandshake'
+    )
+    if (!handshake) throw new Error('main.ts did not send the replacement document challenge')
+    const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
+    rendererReady(ipcEvent(ownContents), handshake[1])
+    const view = registeredHandler(harness.handleHandlers, 'auth:getRendererSessionView')
+    const receipt = (await view(ipcEvent(ownContents))) as {
+      documentEpoch: string
+      receiptId: string
+    }
+    const commitView = registeredHandler(harness.handleHandlers, 'auth:commitRendererSessionView')
+    await commitView(ipcEvent(ownContents), receipt)
+
+    expect(ownContents.send).toHaveBeenCalledWith('auth:markdownDraftLost')
+    expect(mainWindow.show).toHaveBeenCalledOnce()
+  })
+
+  it('keeps an unreadable session hidden and offers a bounded exit path', async () => {
+    if (!harness.sessionPreclearRecoveryRequired) {
+      throw new Error('main.ts did not register the session recovery callback')
+    }
+    harness.showMessageBox.mockClear()
+    harness.appQuit.mockClear()
+    harness.exitRecovery.mockClear()
+    const notice = { transitionId: 46, sessionGeneration: 2, reason: 'logout' }
+    harness.sessionPreclearRecoveryRequired(notice, {
+      attemptsRemaining: 0,
+      retryAvailable: false,
+    })
+
+    await vi.waitFor(() => expect(harness.showMessageBox).toHaveBeenCalledOnce())
+    expect(harness.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        buttons: ['Exit'],
+        message: expect.stringContaining('window will stay hidden'),
+        detail: expect.stringContaining('No Markdown draft will be recovered'),
+      })
+    )
+    await vi.waitFor(() => expect(harness.appQuit).toHaveBeenCalledOnce())
+    expect(harness.exitRecovery).toHaveBeenCalledWith(notice)
   })
 
   it('honors Exit when retry becomes available while the exit-only dialog is open', async () => {
@@ -462,7 +684,7 @@ describe('main.ts GFS navigation-generation composition', () => {
   })
   it.each(['sandboxUi', 'gfs'] as const)(
     'atomically guards %s exact-ID retirement with current session and navigation authority',
-    family => {
+    async family => {
       const ownContents = harness.windows[0]?.webContents
       if (!ownContents) throw new Error('main.ts did not create the owning BrowserWindow')
       const owner = ipcEvent(ownContents)
@@ -512,13 +734,11 @@ describe('main.ts GFS navigation-generation composition', () => {
         expect(() => acknowledge(owner, { id, authority: invalid })).toThrow()
         expect(list(owner).links).toEqual(links)
       }
-      for (const denied of [
-        ipcEvent(ownContents, 'https://untrusted.example/'),
-        ipcEvent({ id: 99 }),
-      ]) {
-        expect(() => acknowledge(denied, { id, authority })).toThrow()
-        expect(list(owner).links).toEqual(links)
-      }
+      expect(() =>
+        acknowledge(ipcEvent(ownContents, 'https://untrusted.example/'), { id, authority })
+      ).toThrow()
+      expect(() => acknowledge(ipcEvent({ id: 99 }), { id, authority })).toThrow()
+      expect(list(owner).links).toEqual(links)
       expect(acknowledge(owner, { id: Number.MAX_SAFE_INTEGER, authority })).toBe(false)
       harness.sessionGeneration = 41
       expect(acknowledge(owner, { id, authority })).toBe(false)
