@@ -398,6 +398,11 @@ export function App() {
     sessionGeneration: number | null
     kind: 'files' | 'preview'
   } | null>(null)
+  const filesActionOwnerRef = React.useRef<{
+    tabId: string
+    sessionGeneration: number | null
+    expectedLocationUri: string | null | undefined
+  } | null>(null)
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
   // The universal tab store lives in the controller (single writer; `vm.navItem`
   // is its projection). App composes the strip/reveal/reconcile over it.
@@ -416,6 +421,10 @@ export function App() {
   navigationIntentSequenceRef.current = vm.navigationIntentSequence
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
+  const clearExpectedFilesActionLocation = React.useCallback(() => {
+    const owner = filesActionOwnerRef.current
+    if (owner) filesActionOwnerRef.current = { ...owner, expectedLocationUri: undefined }
+  }, [])
   const filesSeedRef = React.useRef<{
     id: string | null
     path: string | null
@@ -1017,32 +1026,54 @@ export function App() {
   ])
 
   const handleOpenGfsRoute = React.useCallback(() => {
+    clearExpectedFilesActionLocation()
     cancelPendingGfsResourceAction()
     const requestId = ++gfsRouteDialogRequestSequenceRef.current
     setGfsRouteDialogRequestId(requestId)
     vm.openFilesSection(null)
-  }, [cancelPendingGfsResourceAction, vm.openFilesSection])
+  }, [cancelPendingGfsResourceAction, clearExpectedFilesActionLocation, vm.openFilesSection])
 
   const beginSidebarFilesAction = React.useCallback(
     (request: GfsResourceActionRequest, navigationUri: string | null) => {
       const previousRoute = gfsResourceActionRouteRef.current
-      const previousRequest = pendingGfsResourceActionRef.current
-      const isSameUriSuccessor = Boolean(
-        previousRoute?.kind === 'files' &&
-        previousRequest?.id === previousRoute.id &&
-        previousRoute.ownerTabId === workspaceTabsRef.current.activeTabId &&
-        previousRequest.targetResource?.kind === 'file' &&
-        previousRequest.targetUri === request.targetUri &&
-        request.targetResource?.kind === 'file' &&
-        navigationUri === request.targetUri
+      if (previousRoute) cancelPendingGfsResourceAction()
+
+      const actionOwner = filesActionOwnerRef.current
+      const ownerStillPresent = Boolean(
+        actionOwner &&
+        actionOwner.sessionGeneration === (vm.sessionGeneration ?? null) &&
+        workspaceTabsRef.current.tabs.some(
+          tab => tab.id === actionOwner.tabId && tab.kind === 'files'
+        )
       )
-      if (previousRoute && !isSameUriSuccessor) cancelPendingGfsResourceAction()
-      const receipt = vm.openFilesSectionWithReceipt(navigationUri)
+      if (actionOwner && !ownerStillPresent) filesActionOwnerRef.current = null
+
+      let receipt: { ownerTabId: string; intentSequence: number } | null
+      if (request.targetResource?.kind === 'file' && ownerStillPresent && actionOwner) {
+        filesActionOwnerRef.current = { ...actionOwner, expectedLocationUri: navigationUri }
+        const intentSequence = vm.beginUserNavigationIntent()
+        vm.setWorkspaceTabs(state => {
+          if (!state.tabs.some(tab => tab.id === actionOwner.tabId && tab.kind === 'files')) {
+            return state
+          }
+          const atParent = setFilesTabPath(state, actionOwner.tabId, navigationUri)
+          return selectWorkspaceTab(atParent, actionOwner.tabId)
+        })
+        receipt = { ownerTabId: actionOwner.tabId, intentSequence }
+      } else {
+        receipt = vm.openFilesSectionWithReceipt(navigationUri)
+      }
       if (!receipt) {
-        if (isSameUriSuccessor) cancelPendingGfsResourceAction()
         gfsResourceActionRouteRef.current = null
         setPendingGfsResourceAction(null)
         return
+      }
+      if (request.targetResource?.kind === 'file') {
+        filesActionOwnerRef.current = {
+          tabId: receipt.ownerTabId,
+          sessionGeneration: vm.sessionGeneration ?? null,
+          expectedLocationUri: navigationUri,
+        }
       }
       gfsResourceActionRouteRef.current = {
         id: request.id,
@@ -1055,8 +1086,10 @@ export function App() {
     },
     [
       cancelPendingGfsResourceAction,
+      vm.beginUserNavigationIntent,
       vm.activeWorkspaceTab,
       vm.openFilesSectionWithReceipt,
+      vm.setWorkspaceTabs,
       vm.sessionGeneration,
     ]
   )
@@ -1123,7 +1156,7 @@ export function App() {
       }
 
       let navigationUri: string | null = resource.gfsUri
-      if (actionId === 'move' || resource.readable === false) {
+      if (resource.kind === 'file' || actionId === 'move' || resource.readable === false) {
         if (resource.parentResourceId === null) {
           navigationUri = null
         } else {
@@ -1160,10 +1193,11 @@ export function App() {
 
   const handleSidebarOpenFilesSection = React.useCallback(
     (uri: string) => {
+      clearExpectedFilesActionLocation()
       cancelPendingGfsResourceAction()
       vm.openFilesSection(uri)
     },
-    [cancelPendingGfsResourceAction, vm.openFilesSection]
+    [cancelPendingGfsResourceAction, clearExpectedFilesActionLocation, vm.openFilesSection]
   )
 
   const handleGfsResourceActionHandled = React.useCallback(
@@ -1566,10 +1600,11 @@ export function App() {
       // user gets breadcrumbs, download, and sharing. Open (or focus) a files tab
       // AT this gfsUri — dedupe by path focuses the tab already showing it, or
       // spawns a new instance (mini-spec 06 §3).
+      clearExpectedFilesActionLocation()
       vm.openFilesSection(resource.gfsUri)
     })
     return () => off?.()
-  }, [vm.openFilesSection, vm.openPreviewSection])
+  }, [clearExpectedFilesActionLocation, vm.openFilesSection, vm.openPreviewSection])
 
   // Files tab render seam (mini-spec 06 §3). Only the ACTIVE files tab mounts a
   // FilesPage; it is keyed by that tab's id so switching files tabs remounts and
@@ -1578,6 +1613,30 @@ export function App() {
   // page reports back don't re-arm FilesPage's open-once seed effect.
   const activeFilesTab = vm.activeWorkspaceTab?.kind === 'files' ? vm.activeWorkspaceTab : undefined
   const activeFilesTabId = activeFilesTab?.id ?? null
+  const isPendingFilesActionCurrent = React.useCallback(
+    (requestId: number) => {
+      const route = gfsResourceActionRouteRef.current
+      return Boolean(
+        route?.kind === 'files' &&
+        route.id === requestId &&
+        route.ownerTabId === activeFilesTabId &&
+        workspaceTabsRef.current.activeTabId === route.ownerTabId &&
+        route.sessionGeneration === (vm.sessionGeneration ?? null) &&
+        vm.isNavigationIntentCurrent(route.intentSequence)
+      )
+    },
+    [activeFilesTabId, vm.isNavigationIntentCurrent, vm.sessionGeneration]
+  )
+  React.useEffect(() => {
+    const owner = filesActionOwnerRef.current
+    if (!owner) return
+    if (
+      owner.sessionGeneration !== (vm.sessionGeneration ?? null) ||
+      !workspaceTabs.tabs.some(tab => tab.id === owner.tabId && tab.kind === 'files')
+    ) {
+      filesActionOwnerRef.current = null
+    }
+  }, [vm.sessionGeneration, workspaceTabs.tabs])
   const activeGfsDeepLinkForFiles =
     activeGfsDeepLink?.ownerTabId === activeFilesTabId &&
     vm.isGfsResourceNavigationCurrent(activeGfsDeepLink, gfsDeepLinkGenerationRef.current)
@@ -1585,10 +1644,7 @@ export function App() {
       : null
   const activeFilesTabIdRef = React.useRef<string | null>(null)
   activeFilesTabIdRef.current = activeFilesTabId
-  if (
-    filesSeedRef.current.id !== activeFilesTabId ||
-    filesSeedRef.current.intentSequence !== vm.navigationIntentSequence
-  ) {
+  if (filesSeedRef.current.id !== activeFilesTabId) {
     filesSeedRef.current = {
       id: activeFilesTabId,
       path: activeFilesTab?.files?.path ?? null,
@@ -1602,14 +1658,38 @@ export function App() {
     (ownerTabId: string, intentSequence: number, gfsUri: string | null, name: string | null) => {
       if (!vm.isNavigationIntentCurrent(intentSequence)) return
       if (workspaceTabsRef.current.activeTabId !== ownerTabId) return
+      const owner = filesActionOwnerRef.current
+      const ownerStillPresent = Boolean(
+        owner &&
+        owner.sessionGeneration === (vm.sessionGeneration ?? null) &&
+        workspaceTabsRef.current.tabs.some(tab => tab.id === owner.tabId && tab.kind === 'files')
+      )
+      if (owner && !ownerStillPresent) filesActionOwnerRef.current = null
+      if (
+        ownerStillPresent &&
+        owner?.tabId === ownerTabId &&
+        owner.expectedLocationUri !== undefined &&
+        owner.expectedLocationUri !== gfsUri
+      ) {
+        return
+      }
       setWorkspaceTabs(state => {
         if (!vm.isNavigationIntentCurrent(intentSequence) || state.activeTabId !== ownerTabId) {
+          return state
+        }
+        const currentOwner = filesActionOwnerRef.current
+        if (
+          currentOwner?.tabId === ownerTabId &&
+          currentOwner.sessionGeneration === (vm.sessionGeneration ?? null) &&
+          currentOwner.expectedLocationUri !== undefined &&
+          currentOwner.expectedLocationUri !== gfsUri
+        ) {
           return state
         }
         return setFilesTabPath(state, ownerTabId, gfsUri, name ?? undefined)
       })
     },
-    [setWorkspaceTabs, vm.isNavigationIntentCurrent]
+    [setWorkspaceTabs, vm.isNavigationIntentCurrent, vm.sessionGeneration]
   )
   const handleActiveFilesLocationChange = React.useCallback(
     (gfsUri: string | null, name: string | null) => {
@@ -1629,10 +1709,11 @@ export function App() {
     ]
   )
   const handleFilesExplicitNavigationIntent = React.useCallback(() => {
+    clearExpectedFilesActionLocation()
     const intentSequence = vm.beginUserNavigationIntent()
     filesSeedRef.current = { ...filesSeedRef.current, intentSequence }
     return intentSequence
-  }, [vm.beginUserNavigationIntent])
+  }, [clearExpectedFilesActionLocation, vm.beginUserNavigationIntent])
   const isActiveGfsDeepLinkCurrent = React.useCallback(() => {
     const request = activeGfsDeepLinkRef.current
     return Boolean(
@@ -2357,6 +2438,7 @@ export function App() {
       pendingGfsDeepLinksRef.current = []
       processingGfsDeepLinkIdRef.current = null
       activeGfsDeepLinkRef.current = null
+      filesActionOwnerRef.current = null
       setActiveGfsDeepLink(null)
       setPendingGfsDeepLinkState([])
     },
@@ -2413,10 +2495,12 @@ export function App() {
         void acknowledgeGfsDeepLink(value.id)
         return
       }
+      clearExpectedFilesActionLocation()
       setPendingGfsDeepLinkState([...pendingGfsDeepLinksRef.current, request])
     },
     [
       acknowledgeGfsDeepLink,
+      clearExpectedFilesActionLocation,
       setPendingGfsDeepLinkState,
       vm.beginGfsResourceNavigation,
       vm.pushToast,
@@ -4879,6 +4963,7 @@ export function App() {
                                           ? pendingGfsResourceAction
                                           : null
                                       }
+                                      isPendingResourceActionCurrent={isPendingFilesActionCurrent}
                                       onPendingResourceActionHandled={
                                         handleGfsResourceActionHandled
                                       }

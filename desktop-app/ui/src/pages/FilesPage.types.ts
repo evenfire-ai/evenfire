@@ -62,6 +62,8 @@ export interface FilesPageProps {
   onRouteDialogRequestHandled?: (requestId: number) => void
   /** One-shot action requested by a sidebar resource row. */
   pendingResourceAction?: GfsResourceActionRequest | null
+  /** Read-only App receipt fence for this request's owner, intent, and session. */
+  isPendingResourceActionCurrent?: (requestId: number) => boolean
   onPendingResourceActionHandled?: (requestId: number) => void
 }
 

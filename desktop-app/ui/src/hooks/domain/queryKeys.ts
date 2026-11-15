@@ -2,6 +2,16 @@ export function isGfsSessionGeneration(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
+export type GfsAccessState = {
+  status: 'active' | 'revoked'
+  revokeRevision: number
+}
+
+export const INITIAL_GFS_ACCESS_STATE: GfsAccessState = {
+  status: 'active',
+  revokeRevision: 0,
+}
+
 export function hasGfsSessionGeneration(
   key: readonly unknown[],
   generation: number | null

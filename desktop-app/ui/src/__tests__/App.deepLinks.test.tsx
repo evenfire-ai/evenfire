@@ -5707,7 +5707,10 @@ describe('App deep-link orchestration', () => {
             await new Promise<void>(resolve => setImmediate(resolve))
         })
         expect(view.getByTestId('gfs-session-access').textContent).toBe('active')
-        expect(queryClient.getQueryData(currentAccessKey)).toBe('active')
+        expect(queryClient.getQueryData(currentAccessKey)).toEqual({
+          status: 'active',
+          revokeRevision: 0,
+        })
         expect(queryClient.getQueryData(currentPermissionKey)).toMatchObject({
           held: ['read', 'write', 'delete'],
         })
@@ -5723,7 +5726,10 @@ describe('App deep-link orchestration', () => {
           await waitFor(() =>
             expect(view.getByTestId('gfs-session-access').textContent).toBe('revoked')
           )
-          expect(queryClient.getQueryData(currentAccessKey)).toBe('revoked')
+          expect(queryClient.getQueryData(currentAccessKey)).toEqual({
+            status: 'revoked',
+            revokeRevision: 1,
+          })
           expect(queryClient.getQueryData(otherKey)).toEqual({ marker: 'unrelated retained cache' })
         }
         expect(request.mock.calls.some(([method]) => method === 'PATCH')).toBe(false)

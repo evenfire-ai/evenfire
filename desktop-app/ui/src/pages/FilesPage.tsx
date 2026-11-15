@@ -36,10 +36,12 @@ import {
 } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
 import {
+  INITIAL_GFS_ACCESS_STATE,
   desktopQueryKeys,
   isGfsSessionAuthorityCurrent,
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
+import type { GfsAccessState } from '@hooks/domain/queryKeys'
 import {
   GFS_UNAVAILABLE_LOCATION_MESSAGE,
   type GfsCrumb,
@@ -72,7 +74,12 @@ import {
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
-import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
+import {
+  type GfsResourceActionContext,
+  type GfsResourceActionId,
+  buildGfsResourceActions,
+  getGfsMenuActions,
+} from '@lib/gfsResourceActions'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
@@ -262,7 +269,7 @@ type GfsFolderDropTarget = Pick<GfsDriveResource, 'resourceId' | 'name'> & {
  * current breadcrumb (GfsCrumb); both carry the identity fields the delete /
  *  rename / move calls need (kind also powers dialog titles + the move cycle
  *  guard). */
-type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'version'> & {
+type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'gfsUri' | 'version'> & {
   kind: 'file' | 'directory'
   /** Present on list rows (GfsBrowserChild) — the move dialog uses it to
    * refuse a no-op move into the folder that already contains the target. */
@@ -361,6 +368,7 @@ export function FilesPage({
   routeDialogRequestId = 0,
   onRouteDialogRequestHandled,
   pendingResourceAction,
+  isPendingResourceActionCurrent,
   onPendingResourceActionHandled,
 }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
@@ -447,13 +455,17 @@ export function FilesPage({
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const lastHandledResourceActionIdRef = useRef<number | null>(null)
+  const executingPendingResourceActionIdRef = useRef<number | null>(null)
   const pendingResourceActionRef = useRef(pendingResourceAction)
-  const previousPendingResourceAction = pendingResourceActionRef.current
   const currentPendingResourceAction =
     pendingResourceAction?.id === lastHandledResourceActionIdRef.current
       ? null
       : pendingResourceAction
-  const pendingActionSeedRef = useRef<{ id: number; path: string | null | undefined } | null>(null)
+  const pendingActionSeedRef = useRef<{
+    id: number
+    path: string | null | undefined
+    parentResolutionStarted?: boolean
+  } | null>(null)
   const isActionOwnedFileSeed = (
     request: typeof pendingResourceAction,
     path: string | null | undefined
@@ -472,15 +484,6 @@ export function FilesPage({
     pendingActionSeedRef.current = {
       id: currentPendingResourceAction.id,
       path: pendingGfsUri,
-    }
-  } else if (
-    !currentPendingResourceAction &&
-    previousPendingResourceAction &&
-    pendingActionSeedRef.current?.id === previousPendingResourceAction.id
-  ) {
-    lastHandledResourceActionIdRef.current = previousPendingResourceAction.id
-    if (!isActionOwnedFileSeed(previousPendingResourceAction, pendingActionSeedRef.current.path)) {
-      pendingActionSeedRef.current = null
     }
   }
   pendingResourceActionRef.current = currentPendingResourceAction
@@ -902,11 +905,18 @@ export function FilesPage({
       ),
     [ctrl.handleAuthorityFailure, ctrl.sessionGeneration, sessionScope]
   )
-  const fetchRowAuthority = async (resourceId: string, resourceName: string, drive: string) => {
+  const fetchRowAuthority = async (
+    resourceId: string,
+    resourceName: string,
+    drive: string,
+    isRequestCurrent?: () => boolean
+  ) => {
     const requestedScope = sessionScope
     const requestedGeneration = ctrl.sessionGeneration
     if (!requestedScope || accessRevoked || !isGfsSessionGeneration(requestedGeneration)) {
-      pushToast?.(`Could not verify permissions for ${resourceName}. Try again.`, 'error')
+      if (isRequestCurrent?.() ?? true) {
+        pushToast?.(`Could not verify permissions for ${resourceName}. Try again.`, 'error')
+      }
       return null
     }
     const queryKey = desktopQueryKeys.gfsAffordances(
@@ -945,7 +955,10 @@ export function FilesPage({
         )
       )
         return null
-      if (!failClosedOnAuthorizationError(error, requestedScope, requestedGeneration)) {
+      if (
+        !failClosedOnAuthorizationError(error, requestedScope, requestedGeneration) &&
+        (isRequestCurrent?.() ?? true)
+      ) {
         pushToast?.(describeGfsReadError(error).message, 'error')
       }
       return null
@@ -956,7 +969,8 @@ export function FilesPage({
     resourceName: string,
     requiredBits: string[],
     drive = GFS_DRIVE_MAIN,
-    requiredGrantableBits: string[] = []
+    requiredGrantableBits: string[] = [],
+    isRequestCurrent?: () => boolean
   ) => {
     const requestedScope = sessionScope
     const requestedGeneration = ctrl.sessionGeneration
@@ -1000,7 +1014,8 @@ export function FilesPage({
       ? stateAuthority
       : controllerDataIsFresh
         ? controllerAuthority
-        : await fetchRowAuthority(resourceId, resourceName, drive)
+        : await fetchRowAuthority(resourceId, resourceName, drive, isRequestCurrent)
+    if (!(isRequestCurrent?.() ?? true)) return false
     if (!authority) return false
     const missing = requiredBits.filter(bit => !hasBit(authority, bit))
     if (missing.length > 0) {
@@ -1026,14 +1041,23 @@ export function FilesPage({
     authorityResourceId: string,
     authorityName: string,
     requiredBits: string[],
-    action: () => void
+    action: () => void,
+    actionContext?: GfsResourceActionContext
   ) => {
     const requestContext = rowActionContextRef.current
+    const isRequestCurrent = actionContext?.isRequestCurrent
+    const isAccessRevisionCurrent = actionContext?.isAccessRevisionCurrent
+    const isPermissionContinuationCurrent = () =>
+      (isRequestCurrent?.() ?? true) && (isAccessRevisionCurrent?.() ?? true)
     const allowed = await requireFreshRowPermissions(
       authorityResourceId,
       authorityName,
-      requiredBits
+      requiredBits,
+      GFS_DRIVE_MAIN,
+      [],
+      isPermissionContinuationCurrent
     )
+    if (!(isRequestCurrent?.() ?? true) || !(isAccessRevisionCurrent?.() ?? true)) return false
     if (!allowed) return false
     const latest = rowActionContextRef.current
     if (
@@ -1041,23 +1065,69 @@ export function FilesPage({
       latest.sessionScope !== requestContext.sessionScope ||
       latest.sessionGeneration !== requestContext.sessionGeneration ||
       latest.currentResourceId !== requestContext.currentResourceId ||
-      !latest.resourceVersions.has(target.resourceId) ||
-      latest.resourceVersions.get(target.resourceId) !== target.version
+      (!isRequestCurrent &&
+        (!latest.resourceVersions.has(target.resourceId) ||
+          latest.resourceVersions.get(target.resourceId) !== target.version))
     ) {
       return false
+    }
+    if (isRequestCurrent) {
+      let currentTarget: Awaited<ReturnType<typeof window.clerum.gfs.resolve>> | null = null
+      let targetReadDenied = false
+      try {
+        currentTarget = await window.clerum.gfs.resolve(target.gfsUri)
+      } catch (resolveError) {
+        if (!isRequestCurrent() || !(isAccessRevisionCurrent?.() ?? true)) return false
+        if (failClosedOnAuthorizationError(resolveError)) return false
+        if (
+          parseHttpStatus(
+            resolveError instanceof Error ? resolveError.message : String(resolveError)
+          ) === 403
+        ) {
+          // Some parent-authorized rows intentionally deny direct target reads.
+          // Preserve their established action flow and captured CAS version.
+          targetReadDenied = true
+        } else {
+          pushToast?.(
+            resolveError instanceof Error
+              ? resolveError.message
+              : 'Could not verify the current resource version.',
+            'error'
+          )
+          return false
+        }
+      }
+      if (!isRequestCurrent() || !(isAccessRevisionCurrent?.() ?? true)) return false
+      if (!targetReadDenied) {
+        const normalizedId = (value: string) => value.replace(/-/g, '').toLowerCase()
+        const normalizedParentId = (value: string | null | undefined) =>
+          value == null ? null : normalizedId(value)
+        if (
+          !currentTarget ||
+          normalizedId(currentTarget.resourceId) !== normalizedId(target.resourceId) ||
+          currentTarget.gfsUri !== target.gfsUri ||
+          currentTarget.kind !== target.kind ||
+          normalizedParentId(currentTarget.parentResourceId) !==
+            normalizedParentId(target.parentResourceId) ||
+          currentTarget.version !== target.version
+        ) {
+          pushToast?.('This resource changed before the action could run.', 'error')
+          return false
+        }
+      }
     }
     action()
     return true
   }
-  const openDeleteTarget = (resource: GfsActionTarget) => {
-    void runWithFreshResourcePermissions(
+  const openDeleteTarget = (resource: GfsActionTarget, actionContext?: GfsResourceActionContext) =>
+    runWithFreshResourcePermissions(
       resource,
       resource.resourceId,
       resource.name,
       ['delete'],
-      () => setDeleteTarget(resource)
+      () => setDeleteTarget(resource),
+      actionContext
     )
-  }
   const currentPermissionPresentationAvailable = Boolean(
     (affordances ?? cachedCurrentAffordances) &&
     !accessRevoked &&
@@ -1750,6 +1820,15 @@ export function FilesPage({
   useEffect(() => {
     if (!pendingGfsUri || pendingGfsDeepLink) return
     const request = pendingResourceActionRef.current
+    const parentRoutedFileAction = Boolean(
+      request?.targetResource?.kind === 'file' && request.navigationUri !== undefined
+    )
+    if (parentRoutedFileAction) {
+      // The action effect owns parent convergence. This tab seed only needs
+      // acknowledgment; resolving it here would race the action request.
+      onPendingGfsUriHandled?.()
+      return
+    }
     const navigationUri = request
       ? request.navigationUri === undefined
         ? request.targetUri
@@ -2495,43 +2574,123 @@ export function FilesPage({
     }
   }
 
-  const handleReplaceCurrentFile = async (file: File | null | undefined) => {
-    if (!file || !current) return
-    const target = {
-      resourceId: current.resourceId,
-      name: current.name,
-      version: current.version,
+  const handleReplaceTarget = async (
+    target: GfsActionTarget,
+    file: File | null | undefined,
+    actionContext?: GfsResourceActionContext
+  ) => {
+    if (!file) return
+    const capturedTarget = {
+      resourceId: target.resourceId,
+      name: target.name,
+      gfsUri: target.gfsUri,
+      kind: target.kind,
+      parentResourceId: target.parentResourceId ?? null,
+      version: target.version,
     }
     const requestContext = rowActionContextRef.current
+    const isRequestCurrent = actionContext?.isRequestCurrent
+    const isAccessRevisionCurrent = actionContext?.isAccessRevisionCurrent
+    const isPermissionContinuationCurrent = () =>
+      (isRequestCurrent?.() ?? true) && (isAccessRevisionCurrent?.() ?? true)
+    let mutationInvoked = false
     try {
       assertGfsFileUploadSize(file.size)
       const filePath = window.clerum.gfs.getPathForFile(file)
       if (!filePath) throw new Error('Could not resolve the selected local file')
-      pushToast?.(`Checking write permission for ${target.name}…`, 'info')
-      const allowed = await requireFreshRowPermissions(target.resourceId, target.name, ['write'])
+      pushToast?.(`Checking write permission for ${capturedTarget.name}…`, 'info')
+      const allowed = await requireFreshRowPermissions(
+        capturedTarget.resourceId,
+        capturedTarget.name,
+        ['write'],
+        GFS_DRIVE_MAIN,
+        [],
+        isPermissionContinuationCurrent
+      )
+      if (!(isRequestCurrent?.() ?? true) || !(isAccessRevisionCurrent?.() ?? true)) return
       const latest = rowActionContextRef.current
       if (
         !pageActiveRef.current ||
         latest.sessionScope !== requestContext.sessionScope ||
+        latest.sessionGeneration !== requestContext.sessionGeneration ||
         latest.currentResourceId !== requestContext.currentResourceId ||
-        latest.resourceVersions.get(target.resourceId) !== target.version
+        (!isRequestCurrent &&
+          latest.resourceVersions.get(capturedTarget.resourceId) !== capturedTarget.version)
       ) {
+        if (isRequestCurrent && !isRequestCurrent()) return
         pushToast?.(
-          `Replace was not started for ${target.name} because the workspace changed.`,
+          `Replace was not started for ${capturedTarget.name} because the workspace changed.`,
           'error'
         )
         return
       }
       if (!allowed) return
-      await ctrl.replaceFileFromPath(target.resourceId, filePath, target.version)
-      pushToast?.(`Replaced ${target.name}`, 'success')
+      if (isRequestCurrent) {
+        let currentTarget: Awaited<ReturnType<typeof window.clerum.gfs.resolve>> | null = null
+        let targetReadDenied = false
+        try {
+          currentTarget = await window.clerum.gfs.resolve(capturedTarget.gfsUri)
+        } catch (resolveError) {
+          if (!isRequestCurrent() || !(isAccessRevisionCurrent?.() ?? true)) return
+          if (failClosedOnAuthorizationError(resolveError)) return
+          if (
+            parseHttpStatus(
+              resolveError instanceof Error ? resolveError.message : String(resolveError)
+            ) === 403
+          ) {
+            targetReadDenied = true
+          } else {
+            pushToast?.(
+              resolveError instanceof Error
+                ? resolveError.message
+                : 'Could not verify the current resource version.',
+              'error'
+            )
+            return
+          }
+        }
+        if (!isRequestCurrent() || !(isAccessRevisionCurrent?.() ?? true)) return
+        if (!targetReadDenied) {
+          const normalizedId = (value: string) => value.replace(/-/g, '').toLowerCase()
+          const normalizedParentId = (value: string | null | undefined) =>
+            value == null ? null : normalizedId(value)
+          if (
+            !currentTarget ||
+            normalizedId(currentTarget.resourceId) !== normalizedId(capturedTarget.resourceId) ||
+            currentTarget.gfsUri !== capturedTarget.gfsUri ||
+            currentTarget.kind !== 'file' ||
+            normalizedParentId(currentTarget.parentResourceId) !==
+              normalizedParentId(capturedTarget.parentResourceId) ||
+            currentTarget.version !== capturedTarget.version
+          ) {
+            pushToast?.('This resource changed before the action could run.', 'error')
+            return
+          }
+        }
+      }
+      if (!(isRequestCurrent?.() ?? true) || !(isAccessRevisionCurrent?.() ?? true)) return
+      mutationInvoked = true
+      await ctrl.replaceFileFromPath(capturedTarget.resourceId, filePath, capturedTarget.version)
+      pushToast?.(`Replaced ${capturedTarget.name}`, 'success')
     } catch (replaceError) {
+      if (mutationInvoked) {
+        pushToast?.(
+          replaceError instanceof Error ? replaceError.message : String(replaceError),
+          'error'
+        )
+        return
+      }
       if (failClosedOnAuthorizationError(replaceError)) return
       pushToast?.(
         replaceError instanceof Error ? replaceError.message : String(replaceError),
         'error'
       )
     }
+  }
+
+  const handleReplaceCurrentFile = async (file: File | null | undefined) => {
+    if (!current) return
+    await handleReplaceTarget(current, file)
   }
 
   const handleRenameCurrent = async () => {
@@ -2991,29 +3150,39 @@ export function FilesPage({
     }
   }
 
-  const openRenameTarget = (target: GfsActionTarget) => {
-    void runWithFreshResourcePermissions(target, target.resourceId, target.name, ['write'], () => {
-      setRenameTarget(target)
-      setRenameDraft(target.name)
-    })
+  const openRenameTarget = (target: GfsActionTarget, actionContext?: GfsResourceActionContext) => {
+    return runWithFreshResourcePermissions(
+      target,
+      target.resourceId,
+      target.name,
+      ['write'],
+      () => {
+        setRenameTarget(target)
+        setRenameDraft(target.name)
+      },
+      actionContext
+    )
   }
 
-  const openMoveTarget = (target: GfsActionTarget) => {
+  const openMoveTarget = (target: GfsActionTarget, actionContext?: GfsResourceActionContext) => {
     const sourceParentId = target.parentResourceId
     if (!sourceParentId) {
-      pushToast?.('Could not verify the source folder for this move.', 'error')
-      return
+      if (actionContext?.isRequestCurrent?.() ?? true) {
+        pushToast?.('Could not verify the source folder for this move.', 'error')
+      }
+      return Promise.resolve(false)
     }
     const openGeneration = moveDialogGenerationRef.current + 1
     moveDialogGenerationRef.current = openGeneration
-    void runWithFreshResourcePermissions(
+    return runWithFreshResourcePermissions(
       target,
       sourceParentId,
       'the source folder',
       ['write', 'delete'],
       () => {
         if (moveDialogGenerationRef.current === openGeneration) setMoveTarget(target)
-      }
+      },
+      actionContext
     )
   }
 
@@ -3156,8 +3325,8 @@ export function FilesPage({
           'copy-link': () => void handleCopyLink(current.gfsUri),
           'copy-route': () => void handleCopyRoute(current.gfsUri, current.kind),
           'open-route': () => setOpenLinkOpen(true),
-          rename: () => openRenameTarget(current),
-          move: () => openMoveTarget(current),
+          rename: () => void openRenameTarget(current),
+          move: () => void openMoveTarget(current),
           'new-folder': () => openCreateFolder(current.resourceId, current.name),
           'upload-file': () =>
             requestUploadForFolder(
@@ -3219,16 +3388,23 @@ export function FilesPage({
     void handleDownload(resource.gfsUri, resource.name)
   }
 
-  const resourceMenuActionsFor = (resource: GfsDriveResource) => {
+  const resourceMenuActionsFor = (
+    resource: GfsDriveResource,
+    requestedActionId?: GfsResourceActionId
+  ) => {
     const isDirectory = resource.kind === 'directory'
+    const canReplace =
+      !isDirectory &&
+      resource.readable !== false &&
+      (requestedActionId === 'replace' || rowCanWrite(resource))
     const canPreview =
       !isDirectory && resource.readable !== false && isGfsPreviewFile(resource.name)
     const canDownload = !isDirectory && resource.readable !== false
     const canDownloadZip = isDirectory && resource.readable !== false
-    const canRename = rowCanRename(resource)
+    const canRename = rowCanRename(resource) || requestedActionId === 'rename'
     const canWrite = isDirectory && rowCanWrite(resource)
     const canManage = rowCanManage(resource)
-    const canDelete = rowCanDelete(resource)
+    const canDelete = rowCanDelete(resource) || requestedActionId === 'delete'
     return getGfsMenuActions(
       buildGfsResourceActions({
         kind: resource.kind,
@@ -3244,10 +3420,19 @@ export function FilesPage({
           'upload-file': canWrite
             ? () => requestUploadForFolder(resource.resourceId, new Set(), resource.name)
             : undefined,
-          rename: () => openRenameTarget(resource),
-          move: () => openMoveTarget(resource),
+          rename: async (_file, actionContext) => {
+            await openRenameTarget(resource, actionContext)
+          },
+          move: async (_file, actionContext) => {
+            await openMoveTarget(resource, actionContext)
+          },
+          replace: async (file, actionContext) => {
+            await handleReplaceTarget(resource, file, actionContext)
+          },
           share: () => openManage(resource),
-          delete: () => openDeleteTarget(resource),
+          delete: async (_file, actionContext) => {
+            await openDeleteTarget(resource, actionContext)
+          },
           preview: canPreview ? () => void openFilePreview(resource) : undefined,
           download: canDownload
             ? () => void handleDownload(resource.gfsUri, resource.name)
@@ -3256,11 +3441,12 @@ export function FilesPage({
         },
         canOpenFolder: isDirectory,
         canRename,
-        canMove: rowCanMove(resource),
+        canMove: rowCanMove(resource) || requestedActionId === 'move',
         canCreateFolder: canWrite,
         canUpload: canWrite,
         canShare: canManage,
         canDelete,
+        canReplace,
         canPreview,
         canDownload,
         canDownloadZip,
@@ -3280,12 +3466,27 @@ export function FilesPage({
     ) {
       return
     }
+    const isCurrentRequest = () =>
+      pendingResourceActionRef.current?.id === request.id &&
+      (isPendingResourceActionCurrent?.(request.id) ?? true)
+    if (!isCurrentRequest()) return
+    const accessStateKey = desktopQueryKeys.gfsAccessState(
+      ctrl.sessionScope ?? 'anonymous',
+      ctrl.sessionGeneration
+    )
+    const admittedAccessState =
+      queryClient.getQueryData<GfsAccessState>(accessStateKey) ?? INITIAL_GFS_ACCESS_STATE
+    const isAccessRevisionCurrent = () => {
+      const live =
+        queryClient.getQueryData<GfsAccessState>(accessStateKey) ?? INITIAL_GFS_ACCESS_STATE
+      return live.status === 'active' && live.revokeRevision === admittedAccessState.revokeRevision
+    }
     const navigationUri =
       request.navigationUri === undefined ? request.targetUri : request.navigationUri
     const markHandled = () => {
       lastHandledResourceActionIdRef.current = request.id
       pendingResourceActionRef.current = null
-      if (!isActionOwnedFileSeed(request, pendingActionSeedRef.current?.path)) {
+      if (pendingActionSeedRef.current?.id === request.id) {
         pendingActionSeedRef.current = null
       }
       onPendingResourceActionHandled?.(request.id)
@@ -3305,16 +3506,20 @@ export function FilesPage({
       return
     }
     const normalizeId = (id: string) => id.replace(/-/g, '').toLowerCase()
-    const exactTarget = (resource: GfsDriveResource | GfsCrumb | null | undefined) =>
+    const exactTargetIdentity = (resource: GfsDriveResource | GfsCrumb | null | undefined) =>
       Boolean(
         resource &&
         normalizeId(resource.resourceId) === normalizeId(target.resourceId) &&
         resource.kind === target.kind &&
         resource.gfsUri === request.targetUri &&
-        resource.name === target.name &&
-        resource.version === target.version
+        resource.name === target.name
       )
     const runAction = (actions: ReturnType<typeof buildGfsResourceActions>) => {
+      if (!isCurrentRequest() || executingPendingResourceActionIdRef.current === request.id) return
+      if (!isAccessRevisionCurrent()) {
+        markHandled()
+        return
+      }
       const action = actions.find(candidate => candidate.id === request.actionId)
       if (!action) {
         markHandled()
@@ -3322,18 +3527,62 @@ export function FilesPage({
         return
       }
       if (action.disabled) return
-      markHandled()
-      try {
-        action.run(request.file)
-      } catch (actionError) {
-        pushToast?.(
-          actionError instanceof Error ? actionError.message : String(actionError),
-          'error'
-        )
-      }
+      executingPendingResourceActionIdRef.current = request.id
+      void Promise.resolve(
+        action.run(request.file, {
+          isRequestCurrent: isCurrentRequest,
+          isAccessRevisionCurrent,
+        })
+      )
+        .then(() => {
+          if (isCurrentRequest()) markHandled()
+        })
+        .catch(actionError => {
+          if (isCurrentRequest()) {
+            pushToast?.(
+              actionError instanceof Error ? actionError.message : String(actionError),
+              'error'
+            )
+            markHandled()
+          }
+        })
+        .finally(() => {
+          if (executingPendingResourceActionIdRef.current === request.id) {
+            executingPendingResourceActionIdRef.current = null
+          }
+        })
     }
 
     if (request.navigationUri !== undefined) {
+      const parentRoutedFileAction = target.kind === 'file'
+      if (parentRoutedFileAction && !pendingActionSeedRef.current?.parentResolutionStarted) {
+        const parentIsCurrent =
+          navigationUri === null
+            ? current === null
+            : matchesCurrentResourceUri(current, navigationUri) && current?.kind === 'directory'
+        if (!parentIsCurrent) {
+          pendingActionSeedRef.current = {
+            id: request.id,
+            path: pendingActionSeedRef.current?.path,
+            parentResolutionStarted: true,
+          }
+          if (navigationUri === null) {
+            ctrl.reset()
+          } else {
+            void ctrl.openUri(navigationUri, { shouldContinue: isCurrentRequest }).then(opened => {
+              if (!isCurrentRequest() || opened === false) return
+              if (
+                opened.kind !== 'directory' ||
+                !matchesCurrentResourceUri(opened, navigationUri)
+              ) {
+                markHandled()
+                pushToast?.('The parent folder is no longer available.', 'error')
+              }
+            })
+          }
+          return
+        }
+      }
       if (ctrl.resolving || ctrl.authorityPending || loadingCurrentView) return
       const parentIsCurrent =
         navigationUri === null
@@ -3359,8 +3608,16 @@ export function FilesPage({
         )
         return
       }
-      const row = visibleResources.find(resource => exactTarget(resource))
+      const row = visibleResources.find(resource => exactTargetIdentity(resource))
       if (!row || row.parentResourceId !== target.parentResourceId) {
+        if (!isCurrentRequest()) return
+        const liveAccessState =
+          queryClient.getQueryData<GfsAccessState>(accessStateKey) ?? INITIAL_GFS_ACCESS_STATE
+        if (liveAccessState.status === 'revoked') return
+        if (!isAccessRevisionCurrent()) {
+          markHandled()
+          return
+        }
         markHandled()
         pushToast?.('This resource is no longer available from its parent folder.', 'error')
         return
@@ -3373,15 +3630,16 @@ export function FilesPage({
       ) {
         return
       }
-      if (request.actionId !== 'move' && permissionStatus?.status === 'error') {
-        markHandled()
-        pushToast?.(
-          permissionStatus.message ?? 'Could not verify permissions for this resource.',
-          'error'
-        )
-        return
+      const requestedTarget = {
+        ...row,
+        resourceId: target.resourceId,
+        gfsUri: request.targetUri,
+        name: target.name,
+        kind: target.kind,
+        parentResourceId: target.parentResourceId,
+        version: target.version,
       }
-      runAction(resourceMenuActionsFor(row))
+      runAction(resourceMenuActionsFor(requestedTarget, request.actionId))
       return
     }
 
@@ -3393,7 +3651,13 @@ export function FilesPage({
       return
     }
     if (ctrl.resolving || ctrl.authorityPending) return
-    if (!exactTarget(current)) {
+    if (
+      !current ||
+      normalizeId(current.resourceId) !== normalizeId(target.resourceId) ||
+      current.kind !== target.kind ||
+      current.gfsUri !== request.targetUri ||
+      current.name !== target.name
+    ) {
       markHandled()
       pushToast?.('This resource changed before the action could run.', 'error')
       return
@@ -3416,6 +3680,9 @@ export function FilesPage({
     loadingAffordances,
     loadingCurrentView,
     onPendingResourceActionHandled,
+    isPendingResourceActionCurrent,
+    current,
+    ctrl,
     pendingGfsUri,
     pendingResourceAction,
     pushToast,
