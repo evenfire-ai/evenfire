@@ -41,6 +41,7 @@ import {
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
+import type { GfsResourceDeepLinkEnvelope } from '@/App.types'
 import {
   accessibleResource,
   childView,
@@ -104,6 +105,7 @@ const appHarness = vi.hoisted(() => ({
     teamId?: string
     chatId?: string
   } | null,
+  emitGfsDeepLink: null as ((link: GfsResourceDeepLinkEnvelope) => void) | null,
 }))
 
 const allowNotificationDelivery = () => true
@@ -550,7 +552,10 @@ function installClerum(
       )
     }),
     getPathForFile: vi.fn((file: File) => file.name),
-    onDeepLink: vi.fn(() => vi.fn()),
+    onDeepLink: vi.fn((listener: (link: GfsResourceDeepLinkEnvelope) => void) => {
+      appHarness.emitGfsDeepLink = listener
+      return vi.fn()
+    }),
     listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
     acknowledgeDeepLink: vi.fn(async () => undefined),
   }
@@ -874,6 +879,7 @@ beforeEach(() => {
   appHarness.previewPagePendingActions = []
   appHarness.sandboxUiShortcutAppRef = null
   appHarness.latestConversationNotification = null
+  appHarness.emitGfsDeepLink = null
   appHarness.controller = makeController()
   appHarness.useRealNavigationController = false
   vi.mocked(useAppController).mockImplementation(useReactiveController)
@@ -4073,6 +4079,85 @@ describe('App → Files action lifecycle integration', () => {
     ).toBeTruthy()
     expect(gfs.download).not.toHaveBeenCalled()
     expect(gfs.downloadPreview).toHaveBeenCalledWith(markdown.gfsUri, expect.any(Number))
+  })
+
+  it('lets a confirmed GFS deep link replace the action owner expected location', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Vault')
+    )
+    const file = await resolveResource(
+      resolvedFile('44444444444444444444444444444444', 'report.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const linkedFolder = await resolveResource(
+      resolvedDirectory('55555555555555555555555555555555', 'Linked folder')
+    )
+    const { gfs } = installClerum([parent, file, linkedFolder], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+        accessibleResource(linkedFolder.resourceId, linkedFolder.name, 'directory', {
+          gfsUri: linkedFolder.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+    })
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer }))
+    const savedFiles: string[] = []
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      savedFiles.push(this.download)
+    })
+    Object.assign(gfs, { download })
+    appHarness.useRealNavigationController = true
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const parentRow = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(parentRow).getByRole('button', { name: 'Expand Vault' }))
+    await chooseRowAction(file.name, 'Download')
+    await waitFor(() => expect(download).toHaveBeenCalledOnce())
+    expect(savedFiles).toEqual([file.name])
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: parent.gfsUri },
+    })
+
+    const link: GfsResourceDeepLinkEnvelope = {
+      id: 1,
+      uri: linkedFolder.gfsUri,
+      userNavigationGenerationAtActivation: 0,
+    }
+    await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+    act(() => appHarness.emitGfsDeepLink?.(link))
+    await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(linkedFolder.gfsUri))
+    await waitFor(() => expect(appHarness.filesPageReportLocation).toBeTypeOf('function'))
+    act(() => {
+      appHarness.filesPageReportLocation?.(linkedFolder.gfsUri, linkedFolder.name)
+    })
+
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: linkedFolder.gfsUri },
+      })
+    )
   })
 
   it('preserves explicit non-previewable deep-link download and tab-path behavior', async () => {

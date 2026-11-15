@@ -2540,6 +2540,7 @@ export function App() {
         return
       }
 
+      clearExpectedFilesActionLocation()
       setPendingGfsDeepLinkState(
         pendingGfsDeepLinksRef.current.map(item =>
           item.envelope.id === linkId ? { ...item, request } : item
@@ -2548,6 +2549,7 @@ export function App() {
     },
     [
       bootSplashLoading,
+      clearExpectedFilesActionLocation,
       setPendingGfsDeepLinkState,
       vm.authenticatedPrincipalIdentity,
       vm.beginConfirmedGfsResourceNavigation,
