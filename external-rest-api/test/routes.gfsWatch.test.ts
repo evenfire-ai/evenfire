@@ -603,6 +603,29 @@ describe('GFS watch through external-rest-api', () => {
       expect(await until(() => upstreamStream.goneAt !== null, 1_000)).toBe(true)
       expect(upstreamStream.goneAt! - closedAt).toBeLessThanOrEqual(200)
     })
+    it('abandons the control-api request on the response closing alone, without an aborted request', async () => {
+      // Node emits a request's 'aborted' only while its body is unread. The JSON
+      // body parser reads this one to its end, so the socket going away reaches
+      // the handler only as the response's 'close'.
+      scenario.openDelayMs = 1_000
+      const payload = '{}'
+      const req = httpRequest(watchUrl(), {
+        method: 'GET',
+        headers: {
+          ...bearer(),
+          'content-type': 'application/json',
+          'content-length': String(payload.length),
+        },
+      })
+      req.on('error', () => {})
+      req.end(payload)
+      expect(await until(() => upstreamStream.opened === 1, 1_000)).toBe(true)
+      const closedAt = performance.now()
+      req.destroy()
+
+      expect(await until(() => upstreamStream.goneAt !== null, 1_000)).toBe(true)
+      expect(upstreamStream.goneAt! - closedAt).toBeLessThanOrEqual(200)
+    })
   })
 
   describe('PUT', () => {
