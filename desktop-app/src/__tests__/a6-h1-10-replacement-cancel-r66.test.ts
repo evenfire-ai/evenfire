@@ -869,4 +869,150 @@ describe('main.ts recovery dialog and BrowserWindow destruction', () => {
       me: { id: login.me.id },
     })
   })
+
+  it('T-R71-A retires W1 using its live-time id after the native object is destroyed', async () => {
+    const service = harness.service as any
+    const w1 = harness.windows[0] as any
+    if (!service || !w1) throw new Error('main startup did not construct W1 and AppService')
+    await vi.waitFor(() => expect(w1.loadFile).toHaveBeenCalled())
+    expect(await commitCurrentDocumentReceipt(w1)).toBe(true)
+
+    const w1Id = w1.webContents.id
+    let readsAfterDestroy = 0
+    Object.defineProperty(w1.webContents, 'id', {
+      configurable: true,
+      get() {
+        if (w1.isDestroyed()) {
+          readsAfterDestroy += 1
+          throw new Error('Object has been destroyed')
+        }
+        return w1Id
+      },
+    })
+    w1.isDestroyed.mockReturnValue(true)
+    const closed = w1.listeners.get('closed')
+    if (!closed) throw new Error('W1 closed callback was not registered')
+
+    expect(() => closed()).not.toThrow()
+    expect(readsAfterDestroy).toBe(0)
+    expect(service.markdownTabCloseDocuments.has(w1Id)).toBe(false)
+  })
+
+  it('T-R71-B retires only W1 when W2 is current before W1 closed', async () => {
+    const service = harness.service as any
+    const w1 = harness.windows[0] as any
+    if (!service || !w1) throw new Error('main startup did not construct W1 and AppService')
+    await vi.waitFor(() => expect(w1.loadFile).toHaveBeenCalled())
+    expect(await commitCurrentDocumentReceipt(w1)).toBe(true)
+    const w1Id = w1.webContents.id
+
+    w1.isDestroyed.mockReturnValue(true)
+    harness.appListeners.get('activate')?.()
+    await vi.waitFor(() => expect(harness.windows).toHaveLength(2))
+    const w2 = harness.windows.find(window => window !== w1) as any
+    if (!w2 || w2.isDestroyed()) throw new Error('activation did not publish replacement W2')
+    await vi.waitFor(() => expect(w2.loadFile).toHaveBeenCalled())
+    expect(await commitCurrentDocumentReceipt(w2)).toBe(true)
+    const w2Id = w2.webContents.id
+    expect(service.markdownTabCloseDocuments.has(w1Id)).toBe(true)
+    expect(service.markdownTabCloseDocuments.has(w2Id)).toBe(true)
+
+    const closed = w1.listeners.get('closed')
+    if (!closed) throw new Error('W1 closed callback was not registered')
+    closed()
+
+    expect(service.markdownTabCloseDocuments.has(w1Id)).toBe(false)
+    expect(service.markdownTabCloseDocuments.has(w2Id)).toBe(true)
+    expect(service.markdownTabCloseDocuments.size).toBe(1)
+    expect(w2.isDestroyed()).toBe(false)
+  })
+
+  it('T-R71-C rejects a queued W1 sender before destroyed sender-frame access', async () => {
+    const service = harness.service as any
+    const w1 = harness.windows[0] as any
+    if (!service || !w1) throw new Error('main startup did not construct W1 and AppService')
+    await vi.waitFor(() => expect(w1.loadFile).toHaveBeenCalled())
+    const didNavigateW1 = w1.webContents.listeners.get('did-navigate')
+    if (!didNavigateW1) throw new Error('W1 document lifecycle was not registered')
+    didNavigateW1()
+    const staleChallenge = w1.webContents.mainFrame.send.mock.calls
+      .filter(([channel]: unknown[]) => channel === 'auth:markdownDocumentHandshake')
+      .at(-1)?.[1]
+    if (!staleChallenge) throw new Error('main did not issue the W1 document challenge')
+    const w1Id = w1.webContents.id
+
+    w1.isDestroyed.mockReturnValue(true)
+    harness.appListeners.get('activate')?.()
+    await vi.waitFor(() => expect(harness.windows).toHaveLength(2))
+    const w2 = harness.windows.find(window => window !== w1) as any
+    if (!w2 || w2.isDestroyed()) throw new Error('activation did not publish replacement W2')
+    await vi.waitFor(() => expect(w2.loadFile).toHaveBeenCalled())
+    const closed = w1.listeners.get('closed')
+    if (!closed) throw new Error('W1 closed callback was not registered')
+    closed()
+    expect(await commitCurrentDocumentReceipt(w2)).toBe(true)
+    const w2Id = w2.webContents.id
+
+    const staleEvent = ipcEvent(w1.webContents)
+    let staleFrameReads = 0
+    Object.defineProperty(staleEvent, 'senderFrame', {
+      configurable: true,
+      get() {
+        staleFrameReads += 1
+        throw new Error('Object has been destroyed')
+      },
+    })
+    const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady') as any
+
+    expect(() => rendererReady(staleEvent, staleChallenge)).not.toThrow()
+    expect(staleFrameReads).toBe(0)
+    expect(service.markdownTabCloseDocuments.has(w1Id)).toBe(false)
+    expect(service.markdownTabCloseDocuments.has(w2Id)).toBe(true)
+    expect(service.markdownTabCloseDocuments.size).toBe(1)
+    expect(w2.isDestroyed()).toBe(false)
+  })
+
+  it('T-R71-D accepts the valid current W2 sender and its current document receipt', async () => {
+    const w1 = harness.windows[0] as any
+    if (!w1) throw new Error('main startup did not construct W1')
+    await vi.waitFor(() => expect(w1.loadFile).toHaveBeenCalled())
+    w1.isDestroyed.mockReturnValue(true)
+    harness.appListeners.get('activate')?.()
+    await vi.waitFor(() => expect(harness.windows).toHaveLength(2))
+    const w2 = harness.windows.find(window => window !== w1) as any
+    if (!w2 || w2.isDestroyed()) throw new Error('activation did not publish replacement W2')
+    await vi.waitFor(() => expect(w2.loadFile).toHaveBeenCalled())
+
+    expect(await commitCurrentDocumentReceipt(w2)).toBe(true)
+    const service = harness.service as any
+    expect(service.markdownTabCloseDocuments.has(w2.webContents.id)).toBe(true)
+  })
+
+  it.each([
+    ['destroyed current W1 before closed', true],
+    ['no current window after W1 closed', false],
+  ])('T-R71-E safely rejects rendererReady when %s', async (_case, destroyBeforeClosed) => {
+    const w1 = harness.windows[0] as any
+    if (!w1) throw new Error('main startup did not construct W1')
+    await vi.waitFor(() => expect(w1.loadFile).toHaveBeenCalled())
+    const staleEvent = ipcEvent(w1.webContents)
+    let senderFrameReads = 0
+    Object.defineProperty(staleEvent, 'senderFrame', {
+      configurable: true,
+      get() {
+        senderFrameReads += 1
+        throw new Error('Object has been destroyed')
+      },
+    })
+    w1.isDestroyed.mockReturnValue(true)
+    if (!destroyBeforeClosed) {
+      const closed = w1.listeners.get('closed')
+      if (!closed) throw new Error('W1 closed callback was not registered')
+      closed()
+    }
+    const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady') as any
+
+    expect(() => rendererReady(staleEvent, {})).not.toThrow()
+    expect(senderFrameReads).toBe(0)
+  })
 })

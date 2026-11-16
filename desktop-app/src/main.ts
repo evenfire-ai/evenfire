@@ -599,8 +599,10 @@ ipcMain.handle('window:close', event => {
 })
 
 ipcMain.handle('app:rendererReady', (event, payload: unknown) => {
+  const currentWindow = mainWindow
+  if (!currentWindow || currentWindow.isDestroyed()) return
+  if (event.sender !== currentWindow.webContents) return
   assertTrustedSender(event)
-  if (!mainWindow || event.sender !== mainWindow.webContents) return
   if (
     event.senderFrame !== event.sender.mainFrame ||
     !currentRendererDocumentEpoch ||
@@ -621,9 +623,9 @@ ipcMain.handle('app:rendererReady', (event, payload: unknown) => {
   }
   while (pendingSessionClearedNotifications > 0) {
     pendingSessionClearedNotifications -= 1
-    mainWindow.webContents.send('auth:sessionCleared')
+    currentWindow.webContents.send('auth:sessionCleared')
   }
-  emitWindowControlsState(mainWindow)
+  emitWindowControlsState(currentWindow)
   evenfireDeepLinkRouter.drainPending()
   // U5: flush mcp-oauth completions that arrived before the renderer installed
   // its listener (cold start). The onMcpOauthCompleted listener is registered by
@@ -1062,6 +1064,7 @@ async function createWindow(): Promise<void> {
       nodeIntegration: false,
     },
   })
+  const closeOwnerWebContentsId = window.webContents.id
   mainWindow = window
   if (devIsolationPolicy.pinWindowTitle) {
     // Keep the isolated identity in the window title after the renderer updates
@@ -1074,7 +1077,7 @@ async function createWindow(): Promise<void> {
   wireHostDesktopShortcutRouting(window)
   mainWindowRendererReady = false
   window.on('closed', () => {
-    appService.retireMarkdownTabCloseDocument(window.webContents.id)
+    appService.retireMarkdownTabCloseDocument(closeOwnerWebContentsId)
     if (mainWindow === window) {
       markActiveSessionPreclearRenderersLost()
       retireCurrentMarkdownRendererDocument(false)
