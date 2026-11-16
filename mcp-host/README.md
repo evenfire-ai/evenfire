@@ -281,7 +281,8 @@ for any other result it keeps the JSON-serialized result. The summary, the byte
 ranges read back and the budget count the bytes of the stored string, so a
 stored tool text can be smaller than the threshold. A result fetched when the
 next call is sent without tools (the forced final call) stays inline, because
-nothing could read it back.
+nothing could read it back. The two byte settings take decimal digits only;
+another form (`1e5`, `0x10000`, `65536.0`) logs a warning and uses the default.
 
 `PLUGIN_WORKLOAD_SDK_TOKEN` is not read as a setting. mcp-host only lists it,
 with the runtime tokens above and every provider key, as a reserved secret name

@@ -57,6 +57,40 @@ describe('resolveStepSpilloverConfig', () => {
     ).toBe(131072)
   })
 
+  it.each(['1e5', '0x10000', '0b10000000000000000', '0o200000', '65536.0', '65536.', '+65536'])(
+    'ignores threshold %j, which is in bounds but not written in decimal digits',
+    value => {
+      // Witness: the same number written in decimal digits is accepted.
+      expect(
+        resolveStepSpilloverConfig({ CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD: '65536' })
+          .thresholdBytes
+      ).toBe(65536)
+      expect(
+        resolveStepSpilloverConfig({ CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD: value })
+          .thresholdBytes
+      ).toBe(131072)
+    }
+  )
+
+  it('accepts decimal digits with surrounding whitespace', () => {
+    expect(
+      resolveStepSpilloverConfig({ CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD: ' 65536 ' })
+        .thresholdBytes
+    ).toBe(65536)
+  })
+
+  it('ignores a budget in bounds that is not written in decimal digits', () => {
+    // Witness: the same number written in decimal digits is accepted.
+    expect(
+      resolveStepSpilloverConfig({ CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES: '2097152' })
+        .budgetBytes
+    ).toBe(2097152)
+    expect(
+      resolveStepSpilloverConfig({ CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES: '0x200000' })
+        .budgetBytes
+    ).toBe(16777216)
+  })
+
   it.each(['abc', '1048575', '268435457'])('ignores budget %j', value => {
     expect(
       resolveStepSpilloverConfig({ CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES: value }).budgetBytes

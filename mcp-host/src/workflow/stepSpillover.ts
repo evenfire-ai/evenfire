@@ -114,8 +114,11 @@ function resolveBytes(
   max: number
 ): number {
   if (raw === undefined || raw.trim() === '') return fallback
-  const n = Number(raw)
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < min || n > max) {
+  // Decimal digits only; surrounding whitespace is allowed, as before.
+  // Number() alone would also accept 1e5, 0x10000, 65536.0 or +65536.
+  const value = raw.trim()
+  const n = Number(value)
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(n) || n < min || n > max) {
     logger.warn(
       { component: LOG_COMPONENT, envVar, value: raw.slice(0, 64), min, max, fallback },
       `Ignoring invalid ${envVar} (must be an integer within bounds); using fallback`
