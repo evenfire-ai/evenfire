@@ -220,6 +220,16 @@ export function isRemovedByTerminalRunTeardown(workload: WorkloadDef): boolean {
 }
 
 /**
+ * The workloads the Secret-denial teardown deletes. A StatefulSet is kept (its
+ * PVCs hold data): it is re-rendered without the denied refs and its Pods are
+ * restarted. Every other type is deleted; only a StatefulSet turns
+ * volumeClaimTemplates into PVCs.
+ */
+export function isDeletedBySecretDenialTeardown(workload: WorkloadDef): boolean {
+  return workload.type !== 'statefulset'
+}
+
+/**
  * Issue #1349 — true when no workload that names a Secret (`envSecret` or
  * `imagePullSecrets`) is left deployed with it after the terminal teardown: each
  * one is denied (revoked, and its gate skips it until the Secret changes) or is
@@ -7374,9 +7384,10 @@ export class WorkflowRecipeReconciler {
 
   /**
    * Fail-closed teardown of a workload whose Secret ref is ownership-denied.
-   * Stateful/PVC-backed workloads are NOT deleted (data-loss guard, parity with
-   * deleteTransportRuntimeWorkloads) — they are left NotReady and the operator
-   * must rotate the (potentially compromised) Secret; see plan §10.
+   * Only a StatefulSet is kept (data-loss guard: its PVCs hold data, see
+   * {@link isDeletedBySecretDenialTeardown}); it is re-rendered without the
+   * denied refs and its Pods are restarted. Every other type is deleted. The
+   * operator must still rotate the (potentially compromised) Secret.
    *
    * Issue #1349 — `revocation` is this workload's gate (see
    * {@link secretRevocationFor}): a denial already revoked under the same digest
@@ -7395,7 +7406,7 @@ export class WorkflowRecipeReconciler {
     // create-time skip only stops NEW foreign refs; on REVOCATION an already
     // materialized McpServer CRD keeps feeding the foreign credential until it is
     // removed. These objects are not stateful, so this runs even when the workload
-    // itself is PVC-backed and left running below. Idempotent (404-tolerant).
+    // itself is a StatefulSet, which is kept below. Idempotent (404-tolerant).
     if (workload.transport) {
       await deleteTransportDelegation(this.delegationDeps, recipe, workload, this.config.namespace)
     }
@@ -7410,7 +7421,7 @@ export class WorkflowRecipeReconciler {
     // re-render ignores the spec hash: a template an older strategic-merge patch
     // left with the foreign refs carries the desired hash, so the templates are
     // compared and the whole template is replaced when they differ.
-    if (workload.type === 'statefulset') {
+    if (!isDeletedBySecretDenialTeardown(workload)) {
       // Issue #1349 — a StatefulSet that was never deployed has nothing to
       // re-render and no Pod to restart. Read it first: ensureStatefulSet creates
       // the headless Service and the StatefulSet when they are absent.
@@ -7427,17 +7438,17 @@ export class WorkflowRecipeReconciler {
       await this.deleteStatefulSetManagedPods(workload as StatefulSetDef, recipe, ns)
       return
     }
-    // A non-StatefulSet workload that nonetheless declares volumeClaimTemplates is
-    // malformed for K8s; keep the data-loss guard rather than guess a safe re-render.
-    if ((workload as { volumeClaimTemplates?: unknown[] }).volumeClaimTemplates?.length) return
 
+    // Issue #1349 — every other type is deleted, including one that declares
+    // volumeClaimTemplates: only buildStatefulSet turns them into PVCs, so there
+    // is no data to protect.
     const resourceName = rb.resolveWorkloadRuntimeResourceName(recipe, workload)
     // Issue #637 — throwOnError so a non-404 delete failure (RBAC 403 / apiserver 5xx)
-    // PROPAGATES: the denied-workload teardown callers (deploy non-workflow ~1879,
-    // deploy workflow ~2632, steady enforcer ~3997) requeue and retry instead of
-    // writing a false "revoked" status over a still-live foreign credential. Brings
-    // Deployment/CronJob/Job/DaemonSet to parity with the StatefulSet/transport paths,
-    // which already re-throw non-404.
+    // PROPAGATES: the denied-workload teardown callers (the non-workflow deploy path
+    // in reconcile, deployWorkflowWorkloads and enforceActiveWorkflowSecretOwnership)
+    // requeue and retry instead of writing a false "revoked" status over a still-live
+    // foreign credential. Brings Deployment/CronJob/Job/DaemonSet to parity with the
+    // StatefulSet/transport paths, which already re-throw non-404.
     await this.deleteWorkload(workload.type, resourceName, ns, { throwOnError: true })
   }
 

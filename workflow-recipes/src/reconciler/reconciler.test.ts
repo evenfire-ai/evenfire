@@ -12533,6 +12533,73 @@ describe('WorkflowRecipeReconciler', () => {
       expect(second.requeueAfterMs).toBeUndefined()
     })
 
+    /** A Deployment that declares volumeClaimTemplates; only a StatefulSet turns them into PVCs. */
+    function deniedDeploymentWithClaims(id: string, secretName: string): WorkloadDef {
+      return {
+        ...deniedDeployment(id, secretName),
+        volumeClaimTemplates: [{ name: 'data', size: '1Gi' }],
+      } as unknown as WorkloadDef
+    }
+
+    it('T-P2-1 the non-workflow loop deletes a denied Deployment that declares volumeClaimTemplates', async () => {
+      mockCoreApi.readNamespacedSecret.mockImplementation(async () => ({
+        metadata: { resourceVersion: '5', labels: { 'clerum.io/owner-recipe': 'test-recipe' } },
+        data: { token: 'eA==' },
+      }))
+      const store = installRecipeStore(
+        makeRecipe({ spec: { workloads: [deniedDeploymentWithClaims('vct-api', 'qa-creds')] } })
+      )
+      const renders = () =>
+        [
+          ...mockAppsApi.createNamespacedDeployment.mock.calls,
+          ...mockAppsApi.replaceNamespacedDeployment.mock.calls,
+        ].filter(([arg]) => arg.body?.metadata?.labels?.['clerum.io/workload'] === 'vct-api')
+
+      await reconciler.reconcile(store.current())
+
+      // Pass 0 rendered the Deployment with the Secret reference.
+      expect(renders()).toHaveLength(1)
+      expect(
+        JSON.stringify(renders()[0][0].body?.spec?.template?.spec?.containers?.[0]?.env)
+      ).toContain('"secretKeyRef":{"name":"qa-creds","key":"token"}')
+      expect(deploymentDeletes('vct-api')).toBe(0)
+
+      denySecrets({ 'qa-creds': '7' })
+      mockCoreApi.deleteNamespacedPersistentVolumeClaim.mockClear()
+      const denied = await reconciler.reconcile(store.current())
+
+      // Witness: the Deployment delete was sent.
+      expect(deploymentDeletes('vct-api')).toBe(1)
+      expect(denied.phase).toBe('degraded')
+      expect(deniedCondition(denied)).toBe('True')
+      expect(store.current().status?.secretOwnershipRevocations?.['vct-api']).toMatch(
+        /^sha256:[0-9a-f]{64}$/
+      )
+      expect(mockCoreApi.deleteNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+    })
+
+    it('T-P2-2 the steady enforcer deletes a denied Deployment that declares volumeClaimTemplates', async () => {
+      const inner = stubInner()
+      denySecrets({ 'qa-creds': '7' })
+      const store = installRecipeStore(
+        runChild([deniedDeploymentWithClaims('vct-api', 'qa-creds')], {
+          phase: 'active',
+          workflowExecution: { phase: 'running' },
+        })
+      )
+
+      const result = await reconciler.reconcile(store.current())
+
+      // Witness: the pass classified the Secret.
+      expect(mockCoreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(deploymentDeletes('vct-api')).toBe(1)
+      expect(deniedCondition(result)).toBe('True')
+      expect(store.current().status?.secretOwnershipRevocations?.['vct-api']).toMatch(
+        /^sha256:[0-9a-f]{64}$/
+      )
+      expect(inner.reconcile).not.toHaveBeenCalled()
+    })
+
     it('T2.6 a denied StatefulSet that was never deployed is not created, and its revocation is recorded', async () => {
       denySecrets({ 'db-creds': '7' })
       const recipe = makeRecipe({
