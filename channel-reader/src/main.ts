@@ -2160,9 +2160,11 @@ export class ChannelReader {
       // Denies a request this stream did not show and tells the user when the
       // denial was accepted; a rejected denial is told only with
       // `noticeOnRejected`, and logged with the ids otherwise. Returns
-      // 'task_ended' without a denial when the task ended first: the bubble
-      // already shows the outcome. It denies as msg.sender, the user the Host's
-      // approval is bound to. Never rejects: sendDenial and sendReply catch.
+      // 'task_ended' when the task ended first or while the denial was in
+      // flight: the bubble already shows the outcome, so no notice follows, and
+      // when the task ended first no denial is sent. It denies as msg.sender,
+      // the user the Host's approval is bound to. Never rejects: sendDenial and
+      // sendReply catch.
       const denyUnshownApproval = async (params: {
         requestId: string
         noticeOnRejected: boolean
@@ -2174,6 +2176,7 @@ export class ChannelReader {
           msg.channelType,
           msg.channelId
         )
+        if (finalDelivered) return 'task_ended'
         if (denial.success) {
           await this.sendReply(msg, TOOL_APPROVAL_NOT_SHOWN_DENIED)
           return 'denied'

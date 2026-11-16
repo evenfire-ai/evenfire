@@ -1438,3 +1438,72 @@ describe('the status bubble when a multi-part approval is not shown', () => {
     expect.soft(bubbleEdits(vi6.rec).at(-1), 'A43(vi) last bubble edit').toBe(finalText)
   })
 })
+
+describe('tool approval not shown while the task ends', () => {
+  function bubbleEdits(rec: ReturnType<typeof recordingAdapter>): string[] {
+    return rec.editMessage.mock.calls
+      .filter(call => call[1] === 'telegram-msg-1')
+      .map(call => call[2])
+  }
+
+  it('A44 sends no notice when the task is cancelled while the refusal is denied', async () => {
+    silenceErrors()
+    for (const answer of [
+      { row: 'accepted', result: { success: true } },
+      { row: 'rejected', result: { success: false } },
+    ]) {
+      const taskId = `task-a44-${answer.row}`
+      const h = await startAsync('telegram', CARD_255, taskId)
+      h.rpc.getTaskResult.mockRejectedValueOnce(new Error('approval fetch failed'))
+      const held = gate()
+      h.rpc.sendDenial.mockImplementationOnce(async () => {
+        await held.promise
+        return answer.result
+      })
+      void h.suspend()
+      await settle()
+      // Witness: the refusal sent its denial before the cancel.
+      expect.soft(h.rpc.sendDenial, `A44(${answer.row}) denial sent`).toHaveBeenCalledTimes(1)
+      await h.end()
+      held.release()
+      await settle()
+
+      expect
+        .soft(bubbleEdits(h.rec), `A44(${answer.row}) cancel shown`)
+        .toContain('Request cancelled.')
+      expect
+        .soft(
+          sentContents(h.rec).some(content => content.includes('could not be shown')),
+          `A44(${answer.row}) no notice`
+        )
+        .toBe(false)
+      expect
+        .soft(h.rec.sendMessage, `A44(${answer.row}) only the bubble sent`)
+        .toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('A45 sends no notice when the task is cancelled while a failed delivery is denied', async () => {
+    silenceErrors()
+    const h = await startAsync('telegram', CARD_600, 'task-a45')
+    h.rec.hooks.set(3, async () => {
+      throw new Error('provider refused the message')
+    })
+    const held = gate()
+    h.rpc.sendDenial.mockImplementationOnce(async () => {
+      await held.promise
+      return { success: false }
+    })
+    void h.suspend()
+    await settle()
+    // Witness: the failed delivery sent its denial before the cancel.
+    expect(h.rpc.sendDenial).toHaveBeenCalledTimes(1)
+    await h.end()
+    held.release()
+    await settle()
+
+    expect(bubbleEdits(h.rec)).toContain('Request cancelled.')
+    expect(sentContents(h.rec).some(content => content.includes('could not be shown'))).toBe(false)
+    expect(bubbleEdits(h.rec).at(-1)).toBe('Request cancelled.')
+  })
+})
