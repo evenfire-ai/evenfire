@@ -560,9 +560,9 @@ The External REST API no longer serves `GET /api/v1/entity-changes/stream`. It
 answers 404, like any unrouted path. Desktop Apps that include the GFS watch
 client use the GFS watch routes instead. Older Desktop Apps keep requesting the
 retired stream and treat the 404 as a transient error. They show "Live updates
-disconnected; reconnecting." and retry every 15 s or less until the app is
-updated. Those apps get no live refresh, and each one sends about four requests
-per minute that fail with 404.
+disconnected; reconnecting." and back off to a retry every 15 to 18 s until
+the app is updated. Those apps get no live refresh, and each one sends three to
+four requests per minute that fail with 404.
 
 `minimumDesktopVersion` is what makes those apps show **Desktop update
 required**. `prepare-release.mjs` changes it only when you pass the flag, so cut
