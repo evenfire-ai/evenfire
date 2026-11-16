@@ -118,7 +118,6 @@ patchesStrategicMerge:
 patches:
   # ConfigMap overrides: replace base values with minikube-specific config
   - path: configmaps/control-api-config.yaml
-  - path: configmaps/desktop-profile-ui-config.yaml
   - path: configmaps/codex-llm-proxy-config.yaml
   - path: configmaps/grok-llm-proxy-config.yaml
   - path: configmaps/channel-reader-config.yaml

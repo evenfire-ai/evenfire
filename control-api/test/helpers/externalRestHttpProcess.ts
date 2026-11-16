@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createPublicKey, generateKeyPairSync } from 'node:crypto'
 import { access } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import request from 'supertest'
@@ -12,6 +13,8 @@ export type ExternalRestHttpProcess = {
 export type RecoveryHttpConfig = {
   controlApiBaseUrl: string
   controlApiServiceToken: string
+  publicBaseUrl?: string
+  desktopProfileUiBaseUrl?: string
   jwtPublicKey?: string
   jwtPrivateKey?: string
   jwtIssuer?: string
@@ -44,6 +47,28 @@ export async function startExternalRestHttpProcess(
     !['', '/', '/api/v1'].includes(upstream.pathname)
   )
     throw new Error('Recovery HTTP producer must be task-owned loopback')
+  const publicBaseUrl = config.publicBaseUrl || 'http://127.0.0.1'
+  const publicUrl = new URL(publicBaseUrl)
+  const explicitPort = Number(publicUrl.port)
+  if (
+    publicUrl.protocol !== 'http:' ||
+    publicUrl.hostname !== '127.0.0.1' ||
+    !explicitPort ||
+    publicUrl.username ||
+    publicUrl.password ||
+    publicUrl.pathname !== '/' ||
+    publicUrl.search ||
+    publicUrl.hash
+  ) {
+    if (config.publicBaseUrl) {
+      throw new Error(
+        'Recovery HTTP public base URL must be an explicit task-owned loopback origin'
+      )
+    }
+  }
+  if (config.publicBaseUrl && explicitPort < 1) {
+    throw new Error('Recovery HTTP public base URL must include its bound port')
+  }
   const entry = fileURLToPath(
     new URL(
       '../../../external-rest-api/test/helpers/passwordRecoveryHttpServer.mjs',
@@ -74,8 +99,11 @@ export async function startExternalRestHttpProcess(
       EXTERNAL_REST_API_JWT_PUBLIC_KEY: publicKey,
       EXTERNAL_REST_API_JWT_ISSUER: config.jwtIssuer || 'control-api',
       EXTERNAL_REST_API_JWT_AUDIENCE: config.jwtAudience || 'profile-ui',
-      EXTERNAL_REST_API_PUBLIC_BASE_URL: 'http://127.0.0.1',
+      EXTERNAL_REST_API_PUBLIC_BASE_URL: publicBaseUrl,
       EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL: 'http://127.0.0.1',
+      CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL:
+        config.desktopProfileUiBaseUrl || 'http://127.0.0.1:3001',
+      EXTERNAL_REST_API_TEST_PORT: config.publicBaseUrl ? String(explicitPort) : '0',
     },
   })
   // Do not forward child logs/configuration into assertion errors.

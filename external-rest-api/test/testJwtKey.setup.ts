@@ -16,3 +16,9 @@ function testPublicKey(): string {
 if (!process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY) {
   process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY = testPublicKey()
 }
+
+// Test-only stand-in for the deployment-projected canonical Profile UI URL.
+// Production config intentionally has no independent alias or default.
+if (!process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL) {
+  process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL = 'http://127.0.0.1:3001'
+}

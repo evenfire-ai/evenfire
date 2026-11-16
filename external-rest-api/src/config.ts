@@ -50,7 +50,10 @@ function requiredOrDevDefault(name: string, devDefault: string): string {
 }
 
 function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
   return (
     normalized === 'localhost' ||
     normalized === '::1' ||
@@ -68,8 +71,12 @@ function isPrivateIpv4(hostname: string): boolean {
     (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
     (octets[0] === 169 && octets[1] === 254) ||
     (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+    (octets[0] === 192 && octets[1] === 0 && (octets[2] === 0 || octets[2] === 2)) ||
+    (octets[0] === 192 && octets[1] === 88 && octets[2] === 99) ||
     (octets[0] === 192 && octets[1] === 168) ||
     (octets[0] === 198 && (octets[1] === 18 || octets[1] === 19)) ||
+    (octets[0] === 198 && octets[1] === 51 && octets[2] === 100) ||
+    (octets[0] === 203 && octets[1] === 0 && octets[2] === 113) ||
     octets[0] >= 224
   )
 }
@@ -80,13 +87,14 @@ export function validateDesktopProfileUiBaseUrl(raw: string, publicRestBaseUrl: 
   if (
     !value ||
     value !== raw ||
+    value.includes('\\') ||
     /[\u0000-\u0020\u007f]/.test(value) ||
     !rawOrigin ||
     (rawOrigin[3] !== '' && rawOrigin[3] !== '/') ||
     value.includes('?') ||
     value.includes('#')
   ) {
-    throw new Error('DESKTOP_PROFILE_UI_PUBLIC_BASE_URL must be an absolute HTTP(S) origin')
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
   }
 
   let profileUrl: URL
@@ -95,7 +103,7 @@ export function validateDesktopProfileUiBaseUrl(raw: string, publicRestBaseUrl: 
     profileUrl = new URL(value)
     restUrl = new URL(publicRestBaseUrl)
   } catch {
-    throw new Error('DESKTOP_PROFILE_UI_PUBLIC_BASE_URL must be an absolute HTTP(S) origin')
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
   }
   if (
     !['http:', 'https:'].includes(profileUrl.protocol) ||
@@ -103,10 +111,13 @@ export function validateDesktopProfileUiBaseUrl(raw: string, publicRestBaseUrl: 
     profileUrl.password ||
     !['http:', 'https:'].includes(restUrl.protocol)
   ) {
-    throw new Error('DESKTOP_PROFILE_UI_PUBLIC_BASE_URL must be an absolute HTTP(S) origin')
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
   }
 
-  const profileHost = profileUrl.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const profileHost = profileUrl.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
   const restLoopback = isLoopbackHostname(restUrl.hostname)
   const profileLoopback = isLoopbackHostname(profileHost)
   if (profileLoopback && !restLoopback) {
@@ -126,7 +137,7 @@ export function validateDesktopProfileUiBaseUrl(raw: string, publicRestBaseUrl: 
     mappedPrivateIpv4 = isPrivateIpv4(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`)
   }
   const privateIpv6 =
-    isIP(profileHost) === 6 && (profileHost === '::' || /^(fc|fd|fe[89a-f])/i.test(profileHost))
+    isIP(profileHost) === 6 && (profileHost === '::' || /^(fc|fd|fe[89a-fc]|ff)/i.test(profileHost))
   if (!profileLoopback && (isPrivateIpv4(profileHost) || mappedPrivateIpv4 || privateIpv6)) {
     throw new Error('Private IP Profile UI origins are not permitted')
   }
@@ -288,7 +299,7 @@ export const config: Config = {
     'http://127.0.0.1:8094'
   ).replace(/\/+$/, ''),
   desktopProfileUiBaseUrl: validateDesktopProfileUiBaseUrl(
-    requiredOrDevDefault('DESKTOP_PROFILE_UI_PUBLIC_BASE_URL', 'http://127.0.0.1:3001'),
+    required('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL'),
     requiredOrDevDefault('EXTERNAL_REST_API_PUBLIC_BASE_URL', 'http://127.0.0.1:8091')
   ),
   desktopAppName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME || 'Evenfire',

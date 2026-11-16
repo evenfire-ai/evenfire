@@ -65,6 +65,8 @@ describe('bounded External REST HTTP process ownership', () => {
           'EXTERNAL_REST_API_JWT_AUDIENCE',
           'EXTERNAL_REST_API_PUBLIC_BASE_URL',
           'EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL',
+          'CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL',
+          'EXTERNAL_REST_API_TEST_PORT',
         ].sort()
       )
       expect(env.NODE_ENV).toBe('test')

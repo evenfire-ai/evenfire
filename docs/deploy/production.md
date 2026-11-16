@@ -125,14 +125,14 @@ Then point the platform at your public URLs. In base and the minikube configs
 these are unset or `127.0.0.1`/`localhost` values that only work with
 port-forwards; set them in your overlay:
 
-| Variable                                                                                                                              | Where                |
-| ------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| `CONTROL_API_CONTROL_UI_BASE_URL`                                                                                                     | `control-api-config` |
-| `DESKTOP_PROFILE_UI_PUBLIC_BASE_URL` | `desktop-profile-ui-config` (profiles namespace; projected to External REST and Control API) |
-| `CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL`, `CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL` | `control-api-config` |
-| `CONTROL_API_OAUTH_CALLBACK_BASE_URL`                                                                                                 | `control-api-config` |
-| `CONTROL_API_GOOGLE_CLIENT_ID` (placeholder in base)                                                                                  | `control-api-config` |
-| `RPC_PROXY_CORS_ORIGIN`, `RPC_PROXY_OAUTH_CALLBACK_BASE_URL`                                                                          | `rpc-proxy-config`   |
+| Variable                                                                                   | Where                                                                                                |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `CONTROL_API_CONTROL_UI_BASE_URL`                                                          | `control-api-config`                                                                                 |
+| `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`                                                  | `control-api-config` (canonical operator setting; projected to External REST after overlay assembly) |
+| `CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL`, `CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL` | `control-api-config`                                                                                 |
+| `CONTROL_API_OAUTH_CALLBACK_BASE_URL`                                                      | `control-api-config`                                                                                 |
+| `CONTROL_API_GOOGLE_CLIENT_ID` (placeholder in base)                                       | `control-api-config`                                                                                 |
+| `RPC_PROXY_CORS_ORIGIN`, `RPC_PROXY_OAUTH_CALLBACK_BASE_URL`                               | `rpc-proxy-config`                                                                                   |
 
 Set `CONTROL_API_OAUTH_CALLBACK_BASE_URL` and `RPC_PROXY_OAUTH_CALLBACK_BASE_URL`
 to the same public origin, with no path or trailing slash. If you use OAuth
@@ -167,12 +167,11 @@ If you run a perimeter firewall, these are the destinations the platform uses:
 
 Your overlay lists `deploy/base` as a resource and adds what base leaves out.
 Use [`deploy/overlays/minikube/kustomization.yaml`](../../deploy/overlays/minikube/kustomization.yaml)
-as the reference. Set the public Profile UI origin only in the
-`desktop-profile-ui-config` ConfigMap's `DESKTOP_PROFILE_UI_PUBLIC_BASE_URL`
-key. The base Kustomization declares delayed variable projection into
-`control-api-config`; it resolves the final source ConfigMap after a parent
-overlay's patches. Do not maintain a second independent Profile UI URL in
-`control-api-config`.
+as the reference. Set the public Profile UI origin only in the existing
+`control-api-config` ConfigMap's `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` key.
+The root Kustomization projects the final value into External REST's
+`desktop-profile-ui-config` after overlay patches are applied. Do not configure
+a second Profile UI URL in the `profiles` namespace.
 
 **Images.** Base refers to images by local `clerum/<name>` names. Add the
 [`deploy/components/ghcr-images`](../../deploy/components/ghcr-images/kustomization.yaml)
@@ -262,9 +261,11 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    Secrets and public-key ConfigMaps that carry them. Then run
    [`deploy/scripts/apply-inter-service-tokens.sh`](../../deploy/scripts/apply-inter-service-tokens.sh)
    for the service-to-service tokens with the same explicit context:
+
    ```bash
    CONTEXT="$KCTX" bash deploy/scripts/apply-inter-service-tokens.sh
    ```
+
    Know these before you run them:
    - `gen-jwt-keys.sh` generates **new** keys on every run. Running it again
      rotates every key, including the OAuth encryption key. Run it once and

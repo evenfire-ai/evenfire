@@ -28,6 +28,7 @@ const {
 
 vi.mock('electron', () => ({
   app: {
+    isReady: vi.fn(() => false),
     getPath: vi.fn(() => '/tmp/clerum-desktop-test'),
   },
   safeStorage: {
@@ -378,6 +379,74 @@ describe('AppService.openForgotPassword', () => {
     expect(result.correlationId).toMatch(/^[0-9a-f-]{36}$/i)
   })
 
+  it('routes Forgot Password through the selected environment authority', async () => {
+    config.desktopProfileUiBaseUrl = 'https://stale-build-profile.example.test'
+    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://saved-profile.example.test')
+    const service = new AppService() as unknown as {
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
+    }
+    const getInvitationProfile = vi.fn()
+    service.memberRegistrationServiceClient = { getInvitationProfile } as never
+
+    await expect(service.openForgotPassword('')).resolves.toMatchObject({
+      profileUiUrl: 'https://saved-profile.example.test/forgot-password',
+    })
+    const { shell } = await import('electron')
+    expect(shell.openExternal).toHaveBeenCalledWith(
+      'https://saved-profile.example.test/forgot-password'
+    )
+    expect(getInvitationProfile).not.toHaveBeenCalled()
+  })
+
+  it('does not report a browser dispatch rejection after its original deadline', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000)
+    const { shell } = await import('electron')
+    vi.mocked(shell.openExternal).mockReturnValue(
+      new Promise((_resolve, reject) => {
+        setTimeout(() => reject(new Error('browser dispatch failed')), 10_001)
+      })
+    )
+    const service = new AppService() as unknown as {
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      openForgotPassword: (
+        email: string,
+        reportLateFailure: (correlationId: string, dispatchDeadline: number) => void
+      ) => Promise<{ dispatchAccepted: true; dispatchDeadline: number; correlationId: string }>
+    }
+    service.memberRegistrationServiceClient = { getInvitationProfile: vi.fn() } as never
+    const reportLateFailure = vi.fn()
+
+    const result = await service.openForgotPassword('', reportLateFailure)
+    expect(result.dispatchDeadline).toBe(11_000)
+    await vi.advanceTimersByTimeAsync(10_001)
+
+    expect(reportLateFailure).not.toHaveBeenCalled()
+    vi.useRealTimers()
+  })
+
+  it('uses the built-in Localhost route without discovery', async () => {
+    mockGetActiveRuntimeConfigOptionId.mockReturnValue('__localhost__')
+    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('http://127.0.0.1:3001')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const service = new AppService() as unknown as {
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
+    }
+    service.memberRegistrationServiceClient = { getInvitationProfile: vi.fn() } as never
+
+    await expect(service.openForgotPassword('')).resolves.toMatchObject({
+      profileUiUrl: 'http://127.0.0.1:3001/forgot-password',
+    })
+    const { shell } = await import('electron')
+    expect(shell.openExternal).toHaveBeenCalledWith('http://127.0.0.1:3001/forgot-password')
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+    mockGetActiveRuntimeConfigOptionId.mockReturnValue('test-profile')
+    mockGetActiveDeploymentProfileUiBaseUrl.mockReturnValue('https://profile.example.com')
+  })
+
   it('opens the configured Profile UI forgot-password page with the login email prefilled', async () => {
     const service = new AppService() as unknown as {
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
@@ -455,6 +524,37 @@ describe('AppService explicit Profile UI browser actions', () => {
       2,
       'https://profile.self-hosted.example/settings/profile?action=password'
     )
+    expect(getInvitationProfile).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed raw operator origin before no-profile Forgot Password dispatch', async () => {
+    const actualConfig = await vi.importActual<typeof import('../config.js')>('../config.js')
+    mockGetActiveRuntimeConfigOptionId.mockReturnValue(null)
+    config.externalRestApiBaseUrl = 'http://127.0.0.1:8091'
+    config.desktopProfileUiBaseUrl = 'http://localhost.:3001/..'
+    config.desktopProfileUiBaseUrlExplicit = true
+    mockGetActiveDeploymentProfileUiBaseUrl.mockImplementation(() => {
+      try {
+        return actualConfig.validateProfileUiOrigin(
+          config.desktopProfileUiBaseUrl,
+          config.externalRestApiBaseUrl
+        )
+      } catch {
+        throw new Error('operator_profile_ui_origin_invalid')
+      }
+    })
+    const service = new AppService() as unknown as {
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
+    }
+    const getInvitationProfile = vi.fn()
+    service.memberRegistrationServiceClient = { getInvitationProfile } as never
+
+    await expect(service.openForgotPassword('user@example.com')).rejects.toThrow(
+      'operator_profile_ui_origin_invalid'
+    )
+    const { shell } = await import('electron')
+    expect(shell.openExternal).not.toHaveBeenCalled()
     expect(getInvitationProfile).not.toHaveBeenCalled()
   })
 

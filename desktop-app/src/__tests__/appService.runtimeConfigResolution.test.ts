@@ -305,10 +305,23 @@ describe('AppService runtime config discovery ownership', () => {
       await add.catch(() => undefined)
     }
     expect(stagedBeforeAdmission).toBe(true)
-    await expect(app.selectRuntimeConfig(optionB.id)).resolves.toBeDefined()
+    let selection!: Promise<unknown>
+    let selectionProgressed = false
+    try {
+      selection = app.selectRuntimeConfig(optionB.id)
+      selectionProgressed = await Promise.race([
+        selection.then(() => true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 1_000)),
+      ])
+    } finally {
+      // Always release a held filesystem write so a failing assertion cannot
+      // leave this test's operation or queue pending.
+      staging.resolve()
+    }
+    expect(selectionProgressed).toBe(true)
+    await expect(selection).resolves.toBeDefined()
     expect(runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(optionB.id)
 
-    staging.resolve()
     await expect(add).rejects.toThrow('stale_session_generation')
     expect(runtimeConfig.getDesktopRuntimeConfigState().activeOptionId).toBe(optionB.id)
   })

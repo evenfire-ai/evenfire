@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
 import {
   type SigningMaterial,
@@ -14,15 +15,104 @@ function boundedIntegerEnv(name: string, fallback: number, min: number, max: num
   return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
 }
 
-export function resolveDesktopProfileUiBaseUrl(): string {
-  const publicSetting = process.env.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL?.trim() || ''
-  const legacySetting = process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL?.trim() || ''
-  if (publicSetting && legacySetting && publicSetting !== legacySetting) {
-    throw new Error(
-      'DESKTOP_PROFILE_UI_PUBLIC_BASE_URL conflicts with CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL'
-    )
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+  return (
+    normalized === 'localhost' ||
+    normalized === '::1' ||
+    (isIP(normalized) === 4 && normalized.startsWith('127.'))
+  )
+}
+
+function isPrivateIpv4(hostname: string): boolean {
+  if (isIP(hostname) !== 4) return false
+  const octets = hostname.split('.').map(Number)
+  return (
+    octets[0] === 0 ||
+    octets[0] === 10 ||
+    octets[0] === 127 ||
+    (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
+    (octets[0] === 169 && octets[1] === 254) ||
+    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+    (octets[0] === 192 && octets[1] === 0 && (octets[2] === 0 || octets[2] === 2)) ||
+    (octets[0] === 192 && octets[1] === 88 && octets[2] === 99) ||
+    (octets[0] === 192 && octets[1] === 168) ||
+    (octets[0] === 198 && (octets[1] === 18 || octets[1] === 19)) ||
+    (octets[0] === 198 && octets[1] === 51 && octets[2] === 100) ||
+    (octets[0] === 203 && octets[1] === 0 && octets[2] === 113) ||
+    octets[0] >= 224
+  )
+}
+
+export function validateDesktopProfileUiBaseUrl(raw: string, externalRestBaseUrl: string): string {
+  const value = raw.trim()
+  const rawOrigin = /^(https?):\/\/([^/?#]+)([^?#]*)(?:\?[^#]*)?(?:#.*)?$/i.exec(value)
+  if (
+    !value ||
+    value !== raw ||
+    value.includes('\\') ||
+    /[\u0000-\u0020\u007f]/.test(value) ||
+    !rawOrigin ||
+    (rawOrigin[3] !== '' && rawOrigin[3] !== '/') ||
+    value.includes('?') ||
+    value.includes('#')
+  ) {
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
   }
-  return publicSetting || legacySetting || 'http://127.0.0.1:3001'
+
+  let profileUrl: URL
+  let restUrl: URL
+  try {
+    profileUrl = new URL(value)
+    restUrl = new URL(externalRestBaseUrl)
+  } catch {
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
+  }
+  if (
+    !['http:', 'https:'].includes(profileUrl.protocol) ||
+    profileUrl.username ||
+    profileUrl.password ||
+    !['http:', 'https:'].includes(restUrl.protocol)
+  ) {
+    throw new Error('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL must be an absolute HTTP(S) origin')
+  }
+
+  const profileHost = profileUrl.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+  const restLoopback = isLoopbackHostname(restUrl.hostname)
+  const profileLoopback = isLoopbackHostname(profileHost)
+  if (profileLoopback && !restLoopback) {
+    throw new Error('Loopback Profile UI origin requires a loopback External REST origin')
+  }
+  if (!profileLoopback && profileUrl.protocol !== 'https:') {
+    throw new Error('Non-loopback Profile UI origins must use HTTPS')
+  }
+  const mappedIpv4 = profileHost.match(/^::ffff:(.+)$/i)?.[1]
+  let mappedPrivateIpv4 = false
+  if (mappedIpv4 && isIP(mappedIpv4) === 4) {
+    mappedPrivateIpv4 = isPrivateIpv4(mappedIpv4)
+  } else if (mappedIpv4 && /^[0-9a-f:]+$/i.test(mappedIpv4)) {
+    const groups = mappedIpv4.split(':').filter(Boolean)
+    const low = Number.parseInt(groups.at(-1) || '0', 16)
+    const high = Number.parseInt(groups.at(-2) || '0', 16)
+    mappedPrivateIpv4 = isPrivateIpv4(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`)
+  }
+  const privateIpv6 =
+    isIP(profileHost) === 6 && (profileHost === '::' || /^(fc|fd|fe[89a-fc]|ff)/i.test(profileHost))
+  if (!profileLoopback && (isPrivateIpv4(profileHost) || mappedPrivateIpv4 || privateIpv6)) {
+    throw new Error('Private IP Profile UI origins are not permitted')
+  }
+  return profileUrl.origin
+}
+
+export function resolveDesktopProfileUiBaseUrl(): string {
+  const configured = process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
+  return configured === undefined ? 'http://127.0.0.1:3001' : configured
 }
 
 type Config = {
@@ -854,7 +944,10 @@ export const config: Config = {
     process.env.CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091',
   desktopRpcProxyBaseUrl:
     process.env.CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094',
-  desktopProfileUiBaseUrl: resolveDesktopProfileUiBaseUrl(),
+  desktopProfileUiBaseUrl: validateDesktopProfileUiBaseUrl(
+    resolveDesktopProfileUiBaseUrl(),
+    process.env.CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091'
+  ),
   desktopAppName: process.env.CONTROL_API_DESKTOP_APP_NAME || 'Evenfire',
   // Narrow, explicit elevation switch. Missing/false is intentionally OFF;
   // this must not inherit registry, password-seeding, or generic deploy mode.

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fc from 'fast-check'
 import fsSync from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
@@ -19,6 +20,40 @@ describe('desktop runtime config', () => {
     expect(() =>
       runtime.validateProfileUiOrigin('http://127.attacker.example', 'http://127.0.0.1:8091')
     ).toThrow()
+  })
+
+  it('treats the absolute localhost DNS name as loopback for pairing checks', async () => {
+    const runtime = await import('../config.js')
+    expect(runtime.validateProfileUiOrigin('http://localhost.:3001', 'http://127.0.0.1:8091')).toBe(
+      'http://localhost.:3001'
+    )
+    expect(() =>
+      runtime.validateProfileUiOrigin('https://localhost.', 'https://api.remote.example.test')
+    ).toThrow()
+  })
+
+  it.each([
+    ['dot segments', 'http://localhost.:3001/..'],
+    ['encoded dot segments', 'http://localhost.:3001/%2e%2e'],
+    ['empty query delimiter', 'http://localhost.:3001/?'],
+    ['empty fragment delimiter', 'http://localhost.:3001/#'],
+    ['trailing backslash', 'http://localhost.:3001\\'],
+  ])('rejects raw Profile UI URL syntax with %s before URL normalization', async (_label, raw) => {
+    const runtime = await import('../config.js')
+    expect(() => runtime.validateProfileUiOrigin(raw, 'http://127.0.0.1:8091')).toThrow()
+  })
+
+  it.each([
+    'https://192.0.2.3',
+    'https://198.51.100.2',
+    'https://203.0.113.3',
+    'https://[::ffff:192.0.2.3]',
+    'https://[fec0::1]',
+    'https://[ff02::1]',
+    'https://[ff05::1]',
+  ])('rejects reserved non-public Profile UI address %s', async origin => {
+    const runtime = await import('../config.js')
+    expect(() => runtime.validateProfileUiOrigin(origin, 'https://api.example.test')).toThrow()
   })
 
   beforeEach(async () => {
@@ -308,9 +343,15 @@ describe('desktop runtime config', () => {
         'Concurrent projection updated'
       )
       await runtime.stagePreparedDesktopRuntimeConfigMutation(rpcProjection)
-      await runtime.commitPreparedDesktopRuntimeConfigMutation(rpcProjection)
+      const rpcCommit = runtime.commitPreparedDesktopRuntimeConfigMutation(rpcProjection)
+      const rpcCommitProgressedBeforeProfileStage = await Promise.race([
+        rpcCommit.then(() => true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 1_000)),
+      ])
 
       releaseStage()
+      await rpcCommit
+      expect(rpcCommitProgressedBeforeProfileStage).toBe(true)
       await expect(profileWrite).resolves.toBe(profile)
       const option = runtime
         .getDesktopRuntimeConfigState()
@@ -560,6 +601,8 @@ describe('desktop runtime config', () => {
     expect(initialState.options).toContainEqual(
       expect.objectContaining({ id: '__localhost__', source: 'localhost', configPath: null })
     )
+    await runtime.selectDesktopRuntimeConfigOption('__localhost__')
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('http://127.0.0.1:3001')
 
     await runtime.saveDesktopRuntimeConfig({
       externalRestApiBaseUrl: rest,
@@ -712,6 +755,437 @@ describe('desktop runtime config', () => {
     expect(() => runtime.getActiveDeploymentProfileUiBaseUrl()).toThrow('profile_ui_origin_missing')
   })
 
+  it('merges only the operation delta into latest surviving profiles', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
+        isPackaged: true,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'https://api-a.example.test',
+      rpcProxyBaseUrl: 'https://rpc-a.example.test',
+      appName: 'A',
+    })
+    const createdA = runtime.getActiveRuntimeConfigProfileIdentity()
+    if (!createdA) throw new Error('profile A identity is unavailable')
+    await runtime.persistProfileUiOrigin(createdA, 'https://profile-a.example.test')
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'https://api-b.example.test',
+      rpcProxyBaseUrl: 'https://rpc-b.example.test',
+      appName: 'B',
+      profileUiBaseUrl: 'https://profile-b.example.test',
+    })
+    const initial = runtime.getDesktopRuntimeConfigState().options
+    const profileA = initial.find(
+      option => option.externalRestApiBaseUrl === 'https://api-a.example.test'
+    )!
+    const profileB = initial.find(
+      option => option.externalRestApiBaseUrl === 'https://api-b.example.test'
+    )!
+    await runtime.selectDesktopRuntimeConfigOption(profileA.id)
+    const identity = runtime.getActiveRuntimeConfigProfileIdentity()!
+    const rpcUpdate = runtime.prepareRuntimeProfileRpcProjection(
+      identity,
+      'https://rpc-a-updated.example.test',
+      'A updated'
+    )
+    await runtime.stagePreparedDesktopRuntimeConfigMutation(rpcUpdate)
+
+    await runtime.deleteDesktopRuntimeConfigOption(profileB.id)
+    await runtime.commitPreparedDesktopRuntimeConfigMutation(rpcUpdate)
+
+    const state = runtime.getDesktopRuntimeConfigState()
+    expect(state.options.map(option => option.id)).toContain(profileA.id)
+    expect(state.options.map(option => option.id)).not.toContain(profileB.id)
+    expect(state.options.find(option => option.id === profileA.id)).toMatchObject({
+      rpcProxyBaseUrl: 'https://rpc-a-updated.example.test',
+      appName: 'A updated',
+    })
+    expect(
+      JSON.parse(
+        await fsp.readFile(path.join(tempUserDataDir, 'runtime-configs', 'index.json'), 'utf8')
+      ).profiles.map((profile: { id: string }) => profile.id)
+    ).not.toContain(profileB.id)
+    const profileAJson = JSON.parse(await fsp.readFile(profileA.configPath!, 'utf8'))
+    expect(profileAJson).toMatchObject({
+      rpcProxyBaseUrl: 'https://rpc-a-updated.example.test',
+      appName: 'A updated',
+      profileUiBaseUrl: 'https://profile-a.example.test',
+    })
+  })
+
+  it('derives selection from the latest profile state without token regression', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
+        isPackaged: true,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+      },
+    }))
+    const runtime = await import('../config.js')
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'https://api-a.example.test',
+      rpcProxyBaseUrl: 'https://rpc-a.example.test',
+      appName: 'A',
+    })
+    const createdA = runtime.getActiveRuntimeConfigProfileIdentity()
+    if (!createdA) throw new Error('profile A identity is unavailable')
+    await runtime.persistProfileUiOrigin(createdA, 'https://profile-a.example.test')
+    const profileA = runtime
+      .getDesktopRuntimeConfigState()
+      .options.find(option => option.externalRestApiBaseUrl === 'https://api-a.example.test')!
+    await runtime.saveDesktopRuntimeConfig({
+      externalRestApiBaseUrl: 'https://api-b.example.test',
+      rpcProxyBaseUrl: 'https://rpc-b.example.test',
+      appName: 'B',
+    })
+    await runtime.selectDesktopRuntimeConfigOption(profileA.id)
+    const profileAIdentity = runtime.getActiveRuntimeConfigProfileIdentity()!
+    await runtime.selectDesktopRuntimeConfigOption(
+      runtime
+        .getDesktopRuntimeConfigState()
+        .options.find(option => option.externalRestApiBaseUrl === 'https://api-b.example.test')!.id
+    )
+
+    const stagedSelection = runtime.prepareDesktopRuntimeConfigSelection(profileA.id)
+    await runtime.stagePreparedDesktopRuntimeConfigMutation(stagedSelection)
+    const rpcUpdate = runtime.prepareRuntimeProfileRpcProjection(
+      profileAIdentity,
+      'https://rpc-a-latest.example.test',
+      'A latest'
+    )
+    await runtime.stagePreparedDesktopRuntimeConfigMutation(rpcUpdate)
+    await runtime.commitPreparedDesktopRuntimeConfigMutation(rpcUpdate)
+    const bindingBeforeSelection = runtime.getActiveEnvKey()
+    await runtime.commitPreparedDesktopRuntimeConfigMutation(stagedSelection)
+
+    expect(runtime.getDesktopRuntimeConfigState()).toMatchObject({
+      activeOptionId: profileA.id,
+      currentConfig: {
+        externalRestApiBaseUrl: 'https://api-a.example.test',
+        rpcProxyBaseUrl: 'https://rpc-a-latest.example.test',
+        appName: 'A latest',
+      },
+    })
+    expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe('https://profile-a.example.test')
+    expect(runtime.getActiveEnvKey()).toBe(
+      runtime.resolveEnvKey('https://api-a.example.test', 'https://rpc-a-latest.example.test')
+    )
+    expect(runtime.getActiveEnvKey()).not.toBe(bindingBeforeSelection)
+  })
+
+  it('preserves latest profile state across generated delta-commit interleavings', async () => {
+    type Model = { deletedB: boolean; addedC: boolean; committedA: boolean }
+    type System = {
+      runtime: typeof import('../config.js')
+      profileA: { id: string; configPath: string }
+      profileB: { id: string }
+      ticket: ReturnType<(typeof import('../config.js'))['prepareRuntimeProfileRpcProjection']>
+      scheduler: fc.Scheduler
+    }
+    class DeleteB implements fc.AsyncCommand<Model, System> {
+      check(model: Readonly<Model>): boolean {
+        return !model.deletedB
+      }
+      async run(model: Model, system: System): Promise<void> {
+        await system.scheduler.waitFor(
+          system.scheduler.schedule(
+            system.runtime.deleteDesktopRuntimeConfigOption(system.profileB.id),
+            'delete-independent-B'
+          )
+        )
+        model.deletedB = true
+      }
+      toString(): string {
+        return 'delete-independent-profile-B()'
+      }
+    }
+    class AddC implements fc.AsyncCommand<Model, System> {
+      check(model: Readonly<Model>): boolean {
+        return !model.addedC
+      }
+      async run(model: Model, system: System): Promise<void> {
+        await system.scheduler.waitFor(
+          system.scheduler.schedule(
+            system.runtime.saveDesktopRuntimeConfig({
+              externalRestApiBaseUrl: 'https://api-c.example.test',
+              rpcProxyBaseUrl: 'https://rpc-c.example.test',
+              appName: 'C',
+            }),
+            'add-independent-C'
+          )
+        )
+        model.addedC = true
+      }
+      toString(): string {
+        return 'add-independent-profile-C()'
+      }
+    }
+    class CommitA implements fc.AsyncCommand<Model, System> {
+      check(model: Readonly<Model>): boolean {
+        return !model.committedA
+      }
+      async run(model: Model, system: System): Promise<void> {
+        await system.scheduler.waitFor(
+          system.scheduler.schedule(
+            system.runtime.commitPreparedDesktopRuntimeConfigMutation(system.ticket),
+            'commit-delta-A'
+          )
+        )
+        model.committedA = true
+      }
+      toString(): string {
+        return 'commit-only-profile-A-delta()'
+      }
+    }
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands(
+          [fc.constant(new DeleteB()), fc.constant(new AddC()), fc.constant(new CommitA())],
+          { maxCommands: 3 }
+        ),
+        async (scheduler, commands) => {
+          tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+          vi.doMock('electron', () => ({
+            app: {
+              getPath: vi.fn((name: string) =>
+                name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+              ),
+              isPackaged: true,
+              isReady: vi.fn(() => true),
+              setName: vi.fn(),
+            },
+          }))
+          vi.resetModules()
+          const runtime = await import('../config.js')
+          await runtime.saveDesktopRuntimeConfig({
+            externalRestApiBaseUrl: 'https://api-a.example.test',
+            rpcProxyBaseUrl: 'https://rpc-a.example.test',
+            appName: 'A',
+          })
+          const identity = runtime.getActiveRuntimeConfigProfileIdentity()!
+          await runtime.persistProfileUiOrigin(identity, 'https://profile-a.example.test')
+          await runtime.saveDesktopRuntimeConfig({
+            externalRestApiBaseUrl: 'https://api-b.example.test',
+            rpcProxyBaseUrl: 'https://rpc-b.example.test',
+            appName: 'B',
+          })
+          const profiles = runtime.getDesktopRuntimeConfigState().options
+          const profileA = profiles.find(
+            option => option.externalRestApiBaseUrl === 'https://api-a.example.test'
+          )!
+          const profileB = profiles.find(
+            option => option.externalRestApiBaseUrl === 'https://api-b.example.test'
+          )!
+          await runtime.selectDesktopRuntimeConfigOption(profileA.id)
+          const activeIdentity = runtime.getActiveRuntimeConfigProfileIdentity()!
+          const ticket = runtime.prepareRuntimeProfileRpcProjection(
+            activeIdentity,
+            'https://rpc-a-updated.example.test',
+            'A updated'
+          )
+          await runtime.stagePreparedDesktopRuntimeConfigMutation(ticket)
+          const model: Model = { deletedB: false, addedC: false, committedA: false }
+          const system: System = { runtime, profileA, profileB, ticket, scheduler }
+          try {
+            await fc.asyncModelRun(() => ({ model, real: system }), commands)
+            for (const command of [new DeleteB(), new AddC(), new CommitA()]) {
+              if (command.check(model)) await command.run(model, system)
+            }
+            await scheduler.waitAll()
+            const state = runtime.getDesktopRuntimeConfigState()
+            expect(state.options.map(option => option.id)).toContain(profileA.id)
+            expect(state.options.find(option => option.id === profileA.id)).toMatchObject({
+              rpcProxyBaseUrl: 'https://rpc-a-updated.example.test',
+              appName: 'A updated',
+            })
+            expect(state.options.map(option => option.id).includes(profileB.id)).toBe(
+              !model.deletedB
+            )
+            expect(
+              state.options.some(
+                option => option.externalRestApiBaseUrl === 'https://api-c.example.test'
+              )
+            ).toBe(model.addedC)
+            const persistedA = JSON.parse(await fsp.readFile(profileA.configPath, 'utf8'))
+            expect(persistedA).toMatchObject({
+              rpcProxyBaseUrl: 'https://rpc-a-updated.example.test',
+              profileUiBaseUrl: 'https://profile-a.example.test',
+            })
+            const index = JSON.parse(
+              await fsp.readFile(
+                path.join(tempUserDataDir, 'runtime-configs', 'index.json'),
+                'utf8'
+              )
+            )
+            expect(
+              index.profiles.map((profile: { id: string }) => profile.id).includes(profileB.id)
+            ).toBe(!model.deletedB)
+          } finally {
+            await fsp.rm(tempUserDataDir, { recursive: true, force: true })
+            tempUserDataDir = null
+            vi.doUnmock('electron')
+            vi.resetModules()
+          }
+        }
+      ),
+      { numRuns: 20 }
+    )
+  })
+
+  it('commits generated selections from the latest surviving profile snapshot', async () => {
+    type Model = { rpcUpdated: boolean; selectionCommitted: boolean }
+    type System = {
+      runtime: typeof import('../config.js')
+      profileA: { id: string; configPath: string }
+      profileB: { id: string }
+      identity: NonNullable<
+        ReturnType<(typeof import('../config.js'))['getActiveRuntimeConfigProfileIdentity']>
+      >
+      selection: ReturnType<(typeof import('../config.js'))['prepareDesktopRuntimeConfigSelection']>
+      scheduler: fc.Scheduler
+    }
+    class UpdateA implements fc.AsyncCommand<Model, System> {
+      check(model: Readonly<Model>): boolean {
+        return !model.rpcUpdated
+      }
+      async run(model: Model, system: System): Promise<void> {
+        const rpc = system.runtime.prepareRuntimeProfileRpcProjection(
+          system.identity,
+          'https://rpc-a-latest.example.test',
+          'A latest'
+        )
+        await system.runtime.stagePreparedDesktopRuntimeConfigMutation(rpc)
+        await system.scheduler.waitFor(
+          system.scheduler.schedule(
+            system.runtime.commitPreparedDesktopRuntimeConfigMutation(rpc),
+            'commit-latest-A-rpc'
+          )
+        )
+        model.rpcUpdated = true
+      }
+      toString(): string {
+        return 'commit-latest-RPC-metadata-for-A()'
+      }
+    }
+    class CommitLatestSelection implements fc.AsyncCommand<Model, System> {
+      check(model: Readonly<Model>): boolean {
+        return model.rpcUpdated && !model.selectionCommitted
+      }
+      async run(model: Model, system: System): Promise<void> {
+        await system.scheduler.waitFor(
+          system.scheduler.schedule(
+            system.runtime.commitPreparedDesktopRuntimeConfigMutation(system.selection),
+            'commit-selection-A'
+          )
+        )
+        model.selectionCommitted = true
+      }
+      toString(): string {
+        return 'commit-selection-from-latest-profile-state()'
+      }
+    }
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.commands([fc.constant(new UpdateA()), fc.constant(new CommitLatestSelection())], {
+          maxCommands: 2,
+        }),
+        async (scheduler, commands) => {
+          tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+          vi.doMock('electron', () => ({
+            app: {
+              getPath: vi.fn((name: string) =>
+                name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+              ),
+              isPackaged: true,
+              isReady: vi.fn(() => true),
+              setName: vi.fn(),
+            },
+          }))
+          vi.resetModules()
+          const runtime = await import('../config.js')
+          await runtime.saveDesktopRuntimeConfig({
+            externalRestApiBaseUrl: 'https://api-a.example.test',
+            rpcProxyBaseUrl: 'https://rpc-a.example.test',
+            appName: 'A',
+          })
+          const identity = runtime.getActiveRuntimeConfigProfileIdentity()!
+          await runtime.persistProfileUiOrigin(identity, 'https://profile-a.example.test')
+          await runtime.saveDesktopRuntimeConfig({
+            externalRestApiBaseUrl: 'https://api-b.example.test',
+            rpcProxyBaseUrl: 'https://rpc-b.example.test',
+            appName: 'B',
+          })
+          const profiles = runtime.getDesktopRuntimeConfigState().options
+          const profileA = profiles.find(
+            option => option.externalRestApiBaseUrl === 'https://api-a.example.test'
+          )!
+          const profileB = profiles.find(
+            option => option.externalRestApiBaseUrl === 'https://api-b.example.test'
+          )!
+          const selection = runtime.prepareDesktopRuntimeConfigSelection(profileA.id)
+          await runtime.stagePreparedDesktopRuntimeConfigMutation(selection)
+          const model: Model = { rpcUpdated: false, selectionCommitted: false }
+          const system: System = { runtime, profileA, profileB, identity, selection, scheduler }
+          try {
+            await fc.asyncModelRun(() => ({ model, real: system }), commands)
+            for (const command of [new UpdateA(), new CommitLatestSelection()]) {
+              if (command.check(model)) await command.run(model, system)
+            }
+            await scheduler.waitAll()
+            expect(runtime.getDesktopRuntimeConfigState()).toMatchObject({
+              activeOptionId: profileA.id,
+              currentConfig: {
+                externalRestApiBaseUrl: 'https://api-a.example.test',
+                rpcProxyBaseUrl: 'https://rpc-a-latest.example.test',
+                appName: 'A latest',
+              },
+            })
+            expect(runtime.getActiveDeploymentProfileUiBaseUrl()).toBe(
+              'https://profile-a.example.test'
+            )
+            expect(runtime.getActiveEnvKey()).toBe(
+              runtime.resolveEnvKey(
+                'https://api-a.example.test',
+                'https://rpc-a-latest.example.test'
+              )
+            )
+            expect(
+              runtime
+                .getDesktopRuntimeConfigState()
+                .options.some(option => option.id === profileB.id)
+            ).toBe(true)
+            expect(JSON.parse(await fsp.readFile(profileA.configPath, 'utf8'))).toMatchObject({
+              rpcProxyBaseUrl: 'https://rpc-a-latest.example.test',
+              profileUiBaseUrl: 'https://profile-a.example.test',
+            })
+          } finally {
+            await fsp.rm(tempUserDataDir, { recursive: true, force: true })
+            tempUserDataDir = null
+            vi.doUnmock('electron')
+            vi.resetModules()
+          }
+        }
+      ),
+      { numRuns: 20 }
+    )
+  })
+
   it('keeps same-named profiles independent when saved in the same millisecond', async () => {
     tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
     vi.doMock('electron', () => ({
@@ -786,8 +1260,12 @@ describe('desktop runtime config', () => {
       },
     }))
 
-    const { config, getDesktopRuntimeConfigState, selectDesktopRuntimeConfigOption } =
-      await import('../config.js')
+    const {
+      config,
+      getActiveDeploymentProfileUiBaseUrl,
+      getDesktopRuntimeConfigState,
+      selectDesktopRuntimeConfigOption,
+    } = await import('../config.js')
 
     expect(config.externalRestApiBaseUrl).toBe('https://example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://example.com')
@@ -812,6 +1290,10 @@ describe('desktop runtime config', () => {
     })
     expect(config.externalRestApiBaseUrl).toBe('http://127.0.0.1:8091')
     expect(config.rpcProxyBaseUrl).toBe('http://127.0.0.1:8094')
+    expect(getActiveDeploymentProfileUiBaseUrl()).toBe('http://127.0.0.1:3001')
+    expect(
+      getDesktopRuntimeConfigState().options.find(option => option.id === '__localhost__')
+    ).toMatchObject({ configPath: null, source: 'localhost' })
   })
 
   it('ignores CLERUM_DESKTOP_CONFIG_PATH in packaged builds', async () => {

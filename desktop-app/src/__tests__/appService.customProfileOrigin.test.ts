@@ -93,9 +93,13 @@ describe('AppService configured custom Profile origin', () => {
         responseUrl: `${rest}/api/v1/desktop/environment`,
       })
 
-    await expect(service.createSandboxUiDeepLink()).rejects.toThrow('saved_profile_origin_invalid')
-
+    const invalidOriginAction = service.createSandboxUiDeepLink()
+    const invalidOriginFailure = await invalidOriginAction.then(
+      () => null,
+      error => error
+    )
     expect(discovery).not.toHaveBeenCalled()
+    expect(invalidOriginFailure).toMatchObject({ message: 'saved_profile_origin_invalid' })
     expect(runtimeConfig.getActiveRuntimeConfigProfileIdentity()).toMatchObject({
       externalRestApiBaseUrl: rest,
       profileUiBaseUrl: invalidSavedOrigin,
@@ -210,6 +214,36 @@ describe('AppService configured custom Profile origin', () => {
     })
   })
 
+  it('fails safely when an older remote server omits the Profile UI origin', async () => {
+    const rest = 'https://api-legacy.example.test'
+    const harness = await createNativeCommitTestHarness({
+      configuredRest: rest,
+      restA: rest,
+    })
+    const option = harness.runtimeConfig
+      .getDesktopRuntimeConfigState()
+      .options.find(candidate => candidate.externalRestApiBaseUrl === rest)
+    if (!option?.configPath) throw new Error('legacy environment JSON is unavailable')
+    const service = await authenticatedLinkService(harness, 'synthetic-session-legacy-remote')
+    const { AuthClient } = await import('../authClient.js')
+    const discovery = vi
+      .spyOn(AuthClient.prototype, 'getDesktopEnvironmentForEndpoint')
+      .mockResolvedValue({
+        externalRestApiBaseUrl: rest,
+        rpcProxyBaseUrl: 'https://rpc-legacy.example.test',
+        appName: 'Legacy remote',
+        responseUrl: `${rest}/api/v1/desktop/environment`,
+      })
+
+    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
+      'profile_ui_origin_unavailable_from_server'
+    )
+    expect(discovery).toHaveBeenCalledOnce()
+    expect(JSON.parse(await fsp.readFile(option.configPath, 'utf8'))).not.toHaveProperty(
+      'profileUiBaseUrl'
+    )
+  })
+
   it('discovers a Profile origin for a REST path and query without changing endpoint identity', async () => {
     const rest = 'https://customer-rest.example.test/api?tenant=one'
     const profileOrigin = 'https://profile.customer.example.test'
@@ -321,13 +355,14 @@ describe('AppService configured custom Profile origin', () => {
       expect(await fsp.readFile(activeOption.configPath, 'utf8')).toBe(before)
 
       stage.resolve()
-      await new Promise(resolve => setTimeout(resolve, 0))
-      expect(await fsp.readFile(activeOption.configPath, 'utf8')).toBe(before)
-      expect(
-        (await fsp.readdir(path.dirname(activeOption.configPath))).filter(name =>
-          name.includes('.runtime-config-stage-')
-        )
-      ).toEqual([])
+      await vi.waitFor(async () => {
+        expect(await fsp.readFile(activeOption.configPath, 'utf8')).toBe(before)
+        expect(
+          (await fsp.readdir(path.dirname(activeOption.configPath))).filter(name =>
+            name.includes('.runtime-config-stage-')
+          )
+        ).toEqual([])
+      })
     } finally {
       stage.resolve()
       writeSpy.mockRestore()

@@ -26,14 +26,14 @@ configurations:
 # Kustomize replacements from a base run before parent-overlay patches. This
 # delayed variable resolves the final source ConfigMap after overlay assembly.
 vars:
-  - name: DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
+  - name: CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
     objref:
       apiVersion: v1
       kind: ConfigMap
-      name: desktop-profile-ui-config
-      namespace: profiles
+      name: control-api-config
+      namespace: control-plane
     fieldref:
-      fieldpath: data.DESKTOP_PROFILE_UI_PUBLIC_BASE_URL
+      fieldpath: data.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
 
 replacements:
   - source:

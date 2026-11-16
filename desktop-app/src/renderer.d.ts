@@ -36,6 +36,7 @@ import {
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
+  ProfileUiDispatchFailure,
   ReplaceChatMessagesOptions,
   RpcAllowedServersResult,
   RpcConnectorsResult,
@@ -99,17 +100,26 @@ declare global {
           appName: string
           dispatchAccepted: true
           correlationId: string
+          dispatchDeadline: number
         }>
         openForgotPassword: (email?: string) => Promise<{
           profileUiUrl: string
           dispatchAccepted: true
           correlationId: string
+          dispatchDeadline: number
         }>
         openProfileSettings: (
           email?: string,
           options?: ProfileSettingsOpenOptions
-        ) => Promise<{ profileUiUrl: string; dispatchAccepted: true; correlationId: string }>
-        onProfileUiDispatchFailed?: (callback: (correlationId: string) => void) => () => void
+        ) => Promise<{
+          profileUiUrl: string
+          dispatchAccepted: true
+          correlationId: string
+          dispatchDeadline: number
+        }>
+        onProfileUiDispatchFailed?: (
+          callback: (failure: ProfileUiDispatchFailure) => void
+        ) => () => void
         completeDesktopSetup: (
           email: string,
           authorizationToken: string

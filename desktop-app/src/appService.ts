@@ -82,6 +82,7 @@ import {
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
+  ProfileUiDispatchBinding,
   RpcAllowedServersResult,
   RpcConnectorsResult,
   RpcScope,
@@ -185,12 +186,12 @@ async function openExternalDataUrl(
   await shell.openExternal(value)
 }
 
-type ProfileUiDispatchFailureReporter = (correlationId: string) => void
+type ProfileUiDispatchFailureReporter = (correlationId: string, dispatchDeadline: number) => void
 
 async function prepareProfileUiExternalDispatch(
   rawUrl: string,
   reportLateFailure?: ProfileUiDispatchFailureReporter
-): Promise<() => { dispatchAccepted: true; correlationId: string }> {
+): Promise<() => { dispatchAccepted: true; correlationId: string; dispatchDeadline: number }> {
   const value = String(rawUrl ?? '')
   let parsed: URL
   try {
@@ -205,17 +206,18 @@ async function prepareProfileUiExternalDispatch(
   return () => {
     const correlationId = randomUUID()
     const dispatchedAt = Date.now()
+    const dispatchDeadline = dispatchedAt + 10_000
     const browserResult = shell.openExternal(value)
     void Promise.resolve(browserResult).catch(() => {
-      if (reportLateFailure && Date.now() - dispatchedAt <= 10_000) {
+      if (reportLateFailure && Date.now() <= dispatchDeadline) {
         try {
-          reportLateFailure(correlationId)
+          reportLateFailure(correlationId, dispatchDeadline)
         } catch {
           // A destroyed initiating document cannot receive the bounded report.
         }
       }
     })
-    return { dispatchAccepted: true, correlationId }
+    return { dispatchAccepted: true, correlationId, dispatchDeadline }
   }
 }
 
@@ -2154,6 +2156,26 @@ export class AppService {
     return this.sessionGeneration
   }
 
+  getProfileUiDispatchBinding(): ProfileUiDispatchBinding {
+    const binding = this.captureAuthEnvironmentBinding()
+    return {
+      sessionGeneration: this.sessionGeneration,
+      profileId: binding.profileId,
+      profileIncarnation: binding.profileIncarnation,
+      restBaseUrl: binding.restBaseUrl,
+    }
+  }
+
+  isProfileUiDispatchBindingCurrent(expected: ProfileUiDispatchBinding): boolean {
+    const current = this.getProfileUiDispatchBinding()
+    return (
+      current.sessionGeneration === expected.sessionGeneration &&
+      current.profileId === expected.profileId &&
+      current.profileIncarnation === expected.profileIncarnation &&
+      current.restBaseUrl === expected.restBaseUrl
+    )
+  }
+
   private assertSessionGeneration(expectedSessionGeneration: number): void {
     if (this.sessionGeneration !== expectedSessionGeneration) {
       throw new Error('stale_session_generation')
@@ -2434,6 +2456,7 @@ export class AppService {
     appName: string
     dispatchAccepted: true
     correlationId: string
+    dispatchDeadline: number
   }> {
     const { sessionGeneration, selectedOptionId } = await this.withNativeAuthEnvironmentCommit(
       async () => {
@@ -2466,8 +2489,8 @@ export class AppService {
       const dispatch = await prepareProfileUiExternalDispatch(
         profileUiUrl.toString(),
         reportLateFailure
-          ? correlationId => {
-              if (!this.shuttingDown) reportLateFailure(correlationId)
+          ? (correlationId, deadline) => {
+              if (!this.shuttingDown) reportLateFailure(correlationId, deadline)
             }
           : undefined
       )
@@ -2509,7 +2532,12 @@ export class AppService {
   async openForgotPassword(
     email: string,
     reportLateFailure?: ProfileUiDispatchFailureReporter
-  ): Promise<{ profileUiUrl: string; dispatchAccepted: true; correlationId: string }> {
+  ): Promise<{
+    profileUiUrl: string
+    dispatchAccepted: true
+    correlationId: string
+    dispatchDeadline: number
+  }> {
     const context = await this.withNativeAuthEnvironmentCommit(async () => ({
       sessionGeneration: this.sessionGeneration,
       binding: this.captureAuthEnvironmentBinding(),
@@ -2521,8 +2549,8 @@ export class AppService {
     const dispatch = await prepareProfileUiExternalDispatch(
       profileUiUrl.toString(),
       reportLateFailure
-        ? correlationId => {
-            if (!this.shuttingDown) reportLateFailure(correlationId)
+        ? (correlationId, deadline) => {
+            if (!this.shuttingDown) reportLateFailure(correlationId, deadline)
           }
         : undefined
     )
@@ -2537,7 +2565,12 @@ export class AppService {
     email: string,
     options: ProfileSettingsOpenOptions = {},
     reportLateFailure?: ProfileUiDispatchFailureReporter
-  ): Promise<{ profileUiUrl: string; dispatchAccepted: true; correlationId: string }> {
+  ): Promise<{
+    profileUiUrl: string
+    dispatchAccepted: true
+    correlationId: string
+    dispatchDeadline: number
+  }> {
     const context = await this.withNativeAuthEnvironmentCommit(async () => ({
       sessionGeneration: this.sessionGeneration,
       binding: this.captureAuthEnvironmentBinding(),
@@ -2557,8 +2590,8 @@ export class AppService {
     const dispatch = await prepareProfileUiExternalDispatch(
       profileUiUrl.toString(),
       reportLateFailure
-        ? correlationId => {
-            if (!this.shuttingDown) reportLateFailure(correlationId)
+        ? (correlationId, deadline) => {
+            if (!this.shuttingDown) reportLateFailure(correlationId, deadline)
           }
         : undefined
     )
@@ -2733,14 +2766,17 @@ export class AppService {
   }
 
   private async resolveProfileUiBaseUrl(): Promise<string> {
-    if (!getActiveRuntimeConfigOptionId()) {
-      throw new Error('profile_ui_environment_not_selected')
-    }
     try {
+      // The exact-paired operator value is an existing deployment authority;
+      // it remains usable for a process-configured REST environment before a
+      // saved profile has been selected.
       return getActiveDeploymentProfileUiBaseUrl()
     } catch (error) {
       const code = error instanceof Error ? error.message : ''
       if (code !== 'profile_ui_origin_missing') throw error
+    }
+    if (!getActiveRuntimeConfigOptionId()) {
+      throw new Error('profile_ui_environment_not_selected')
     }
     const identity = getActiveRuntimeConfigProfileIdentity()
     if (!identity) throw new Error('profile_ui_environment_not_selected')

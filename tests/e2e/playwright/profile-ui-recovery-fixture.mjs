@@ -98,6 +98,7 @@ const externalRestProcess = spawn(
       EXTERNAL_REST_API_JWT_PUBLIC_KEY: publicKey
         .export({ type: 'spki', format: 'pem' })
         .toString(),
+      CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: profileOrigin,
       EXTERNAL_REST_API_CORS_ORIGIN: profileOrigin,
     },
     stdio: ['pipe', 'pipe', 'inherit'],

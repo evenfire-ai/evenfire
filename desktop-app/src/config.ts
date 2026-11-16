@@ -56,6 +56,7 @@ const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
 const LOCALHOST_OPTION_ID = '__localhost__'
 const LOCALHOST_EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
 const LOCALHOST_RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
+const LOCALHOST_PROFILE_UI_BASE_URL = 'http://127.0.0.1:3001'
 // Where onboarding's self-hosted path sends the user. Self-hosting
 // means any cluster the user controls — remote or local — so this must land on
 // documentation that covers both shapes, never on the minikube quickstart
@@ -190,7 +191,10 @@ function requiredOrDefault(name: string, fallback: string): string {
 }
 
 function normalizedHostname(hostname: string): string {
-  return hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  return hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
 }
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -201,7 +205,7 @@ function isLoopbackHostname(hostname: string): boolean {
 function isPrivateIpLiteral(hostname: string): boolean {
   const host = normalizedHostname(hostname)
   if (isIP(host) === 4) {
-    const [a = 0, b = 0] = host.split('.').map(Number)
+    const [a = 0, b = 0, c = 0] = host.split('.').map(Number)
     return (
       a === 0 ||
       a === 10 ||
@@ -209,8 +213,12 @@ function isPrivateIpLiteral(hostname: string): boolean {
       (a === 100 && b >= 64 && b <= 127) ||
       (a === 169 && b === 254) ||
       (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+      (a === 192 && b === 88 && c === 99) ||
       (a === 192 && b === 168) ||
       (a === 198 && (b === 18 || b === 19)) ||
+      (a === 198 && b === 51 && c === 100) ||
+      (a === 203 && b === 0 && c === 113) ||
       a >= 224
     )
   }
@@ -224,13 +232,23 @@ function isPrivateIpLiteral(hostname: string): boolean {
     const mappedDotted = `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`
     if (isIP(mappedDotted) === 4) return isPrivateIpLiteral(mappedDotted)
   }
-  return host === '::' || /^f[cd]/i.test(host) || /^fe[89a-f]/i.test(host)
+  return host === '::' || /^f[cd]/i.test(host) || /^fe[89a-fc]/i.test(host) || /^ff/i.test(host)
 }
 
 export function validateProfileUiOrigin(rawValue: unknown, restEndpoint: string): string {
   if (typeof rawValue !== 'string') throw new Error(PROFILE_UI_BASE_URL_ORIGIN_ERROR)
   const raw = rawValue.trim()
-  if (!raw || raw !== rawValue || /[\u0000-\u0020\u007f]/.test(raw)) {
+  const rawOrigin = /^https?:\/\/([^/?#]+)([^?#]*)(?:\?[^#]*)?(?:#.*)?$/i.exec(raw)
+  if (
+    !raw ||
+    raw !== rawValue ||
+    raw.includes('\\') ||
+    /[\u0000-\u0020\u007f]/.test(raw) ||
+    !rawOrigin ||
+    (rawOrigin[2] !== '' && rawOrigin[2] !== '/') ||
+    raw.includes('?') ||
+    raw.includes('#')
+  ) {
     throw new Error(PROFILE_UI_BASE_URL_ORIGIN_ERROR)
   }
   let profileUrl: URL
@@ -303,6 +321,12 @@ export function getActiveDeploymentProfileUiBaseUrl(): string {
     } catch {
       throw new Error('operator_profile_ui_origin_invalid')
     }
+  }
+  if (
+    activeRuntimeOptionId === LOCALHOST_OPTION_ID &&
+    runtimeEndpointsMatch(config, localhostRuntimeConfig)
+  ) {
+    return LOCALHOST_PROFILE_UI_BASE_URL
   }
   const profileUiBaseUrl = currentRuntimeConfig().profileUiBaseUrl
   if (typeof profileUiBaseUrl === 'string') {
@@ -647,6 +671,7 @@ function buildRuntimeConfigOptions(
     externalRestApiBaseUrl: profile.config.externalRestApiBaseUrl,
     rpcProxyBaseUrl: profile.config.rpcProxyBaseUrl || '',
     appName: profile.config.appName?.trim() || DEFAULT_APP_NAME,
+    profileIncarnation: profileIncarnations.get(profile.id) || null,
   }))
 
   if (includeLocalhostOption) {
@@ -658,6 +683,7 @@ function buildRuntimeConfigOptions(
       externalRestApiBaseUrl: localhostConfig.externalRestApiBaseUrl,
       rpcProxyBaseUrl: localhostConfig.rpcProxyBaseUrl || '',
       appName: localhostConfig.appName?.trim() || DEFAULT_APP_NAME,
+      profileIncarnation: null,
     })
   }
 
@@ -945,8 +971,10 @@ type PreparedRuntimeConfigMutation = {
   expectedIndexRevision: string | null
   expectedFileRevisions: Array<{ filePath: string; revision: string | null }>
   transaction: RuntimeConfigFileTransaction
+  profilesBefore: StoredRuntimeProfile[]
   profilesAfter: StoredRuntimeProfile[]
   activeProfileAfter: string | null
+  fallbackOnMissingActive: boolean
   configAfter?: DesktopRuntimeConfig
   rotateIncarnations: string[]
   removeIncarnations: string[]
@@ -961,6 +989,10 @@ type PreparedRuntimeConfigMutation = {
 }
 
 const preparedRuntimeConfigMutations = new Map<string, PreparedRuntimeConfigMutation>()
+
+function cloneStoredProfiles(profiles: StoredRuntimeProfile[]): StoredRuntimeProfile[] {
+  return profiles.map(profile => ({ ...profile, config: { ...profile.config } }))
+}
 
 function fileRevision(filePath: string): string | null {
   try {
@@ -1094,12 +1126,14 @@ function prepareRuntimeConfigSave(next: DesktopRuntimeConfig): {
     created: !existing || Boolean(existing && !sameRest),
   }
   const mutation: PreparedRuntimeConfigMutation = {
-    checkIndexRevision: !explicitPath,
-    expectedIndexRevision: explicitPath ? null : fileRevision(runtimeConfigIndexPath()),
+    checkIndexRevision: !explicitPath && !existing,
+    expectedIndexRevision: explicitPath || existing ? null : fileRevision(runtimeConfigIndexPath()),
     expectedFileRevisions: [expectedProfile],
     transaction: { version: 1, writes, deletes: [] },
-    profilesAfter,
+    profilesBefore: cloneStoredProfiles(storedProfiles),
+    profilesAfter: cloneStoredProfiles(profilesAfter),
     activeProfileAfter,
+    fallbackOnMissingActive: false,
     configAfter,
     rotateIncarnations,
     removeIncarnations: [],
@@ -1140,6 +1174,7 @@ function prepareIndexMutation(input: {
   expectedProfiles?: RuntimeConfigProfileIdentity[]
   removeIncarnations?: string[]
   activate?: boolean
+  fallbackOnMissingActive?: boolean
 }): PreparedRuntimeConfigSave {
   const explicitPath = Boolean(explicitRuntimeConfigPath())
   const writes = explicitPath
@@ -1160,8 +1195,10 @@ function prepareIndexMutation(input: {
     expectedIndexRevision: explicitPath ? null : fileRevision(runtimeConfigIndexPath()),
     expectedFileRevisions: input.expectedFiles || [],
     transaction: { version: 1, writes, deletes: input.deletes || [] },
-    profilesAfter: input.profilesAfter,
+    profilesBefore: cloneStoredProfiles(storedProfiles),
+    profilesAfter: cloneStoredProfiles(input.profilesAfter),
     activeProfileAfter: input.activeProfileAfter,
+    fallbackOnMissingActive: input.fallbackOnMissingActive ?? false,
     ...(input.configAfter ? { configAfter: input.configAfter } : {}),
     rotateIncarnations: [],
     removeIncarnations: input.removeIncarnations || [],
@@ -1229,10 +1266,12 @@ export function prepareRuntimeProfileRpcProjection(
       ],
       deletes: [],
     },
-    profilesAfter: storedProfiles.map(candidate =>
-      candidate.id === profile.id ? profileAfter : candidate
+    profilesBefore: cloneStoredProfiles(storedProfiles),
+    profilesAfter: cloneStoredProfiles(
+      storedProfiles.map(candidate => (candidate.id === profile.id ? profileAfter : candidate))
     ),
     activeProfileAfter: profile.id,
+    fallbackOnMissingActive: false,
     configAfter: nextConfig,
     rotateIncarnations: [],
     removeIncarnations: [],
@@ -1339,7 +1378,80 @@ export function prepareDeleteDesktopRuntimeConfigOption(
       },
     ],
     removeIncarnations: [selected.id],
+    fallbackOnMissingActive: activeRuntimeOptionId === id,
   })
+}
+
+function recordValueEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function applyRecordDelta<T extends Record<string, unknown>>(
+  latest: T,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>
+): T {
+  const merged: Record<string, unknown> = { ...latest }
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)])
+  for (const key of keys) {
+    const beforeHas = Object.prototype.hasOwnProperty.call(before, key)
+    const afterHas = Object.prototype.hasOwnProperty.call(after, key)
+    const changed = beforeHas !== afterHas || !recordValueEqual(before[key], after[key])
+    if (!changed) continue
+    if (afterHas) merged[key] = after[key]
+    else delete merged[key]
+  }
+  return merged as T
+}
+
+function mergePreparedProfileDelta(
+  latest: StoredRuntimeProfile[],
+  before: StoredRuntimeProfile[],
+  after: StoredRuntimeProfile[],
+  rotateIncarnations: string[],
+  removeIncarnations: string[]
+): StoredRuntimeProfile[] {
+  const beforeById = new Map(before.map(profile => [profile.id, profile]))
+  const afterById = new Map(after.map(profile => [profile.id, profile]))
+  const merged = [...latest]
+
+  for (const profile of before) {
+    if (afterById.has(profile.id)) continue
+    if (removeIncarnations.includes(profile.id)) {
+      const index = merged.findIndex(candidate => candidate.id === profile.id)
+      if (index >= 0) merged.splice(index, 1)
+    }
+  }
+
+  for (const desired of after) {
+    const previous = beforeById.get(desired.id)
+    const index = merged.findIndex(candidate => candidate.id === desired.id)
+    if (!previous) {
+      if (index < 0) merged.push(desired)
+      continue
+    }
+    if (index < 0) {
+      if (rotateIncarnations.includes(desired.id)) merged.push(desired)
+      continue
+    }
+    if (rotateIncarnations.includes(desired.id)) {
+      merged[index] = desired
+      continue
+    }
+    const current = merged[index]!
+    const config = applyRecordDelta(
+      current.config as Record<string, unknown>,
+      previous.config as Record<string, unknown>,
+      desired.config as Record<string, unknown>
+    ) as DesktopRuntimeConfig
+    const next = applyRecordDelta(
+      current as unknown as Record<string, unknown>,
+      previous as unknown as Record<string, unknown>,
+      desired as unknown as Record<string, unknown>
+    ) as unknown as StoredRuntimeProfile
+    merged[index] = { ...next, config }
+  }
+  return merged
 }
 
 export async function commitPreparedDesktopRuntimeConfigMutation(
@@ -1377,7 +1489,30 @@ export async function commitPreparedDesktopRuntimeConfigMutation(
           throw new Error('stale_runtime_profile')
         }
       }
-      let profilesAfter = mutation.profilesAfter
+      let profilesAfter = mergePreparedProfileDelta(
+        storedProfiles,
+        mutation.profilesBefore,
+        mutation.profilesAfter,
+        mutation.rotateIncarnations,
+        mutation.removeIncarnations
+      )
+      let activeProfileAfter = mutation.activeProfileAfter
+      if (
+        activeProfileAfter &&
+        activeProfileAfter !== LOCALHOST_OPTION_ID &&
+        !profilesAfter.some(profile => profile.id === activeProfileAfter)
+      ) {
+        const fallback = resolveActiveProfile(profilesAfter, null)
+        if (fallback) {
+          activeProfileAfter = fallback.id
+        } else if (envRuntimeConfigured) {
+          activeProfileAfter = envMatchesLocalhostOption ? LOCALHOST_OPTION_ID : null
+        } else if (shouldPreferLocalhostByDefault()) {
+          activeProfileAfter = LOCALHOST_OPTION_ID
+        } else {
+          activeProfileAfter = null
+        }
+      }
       for (const filePath of mutation.mergeProfileOriginPaths) {
         const write = mutation.transaction.writes.find(candidate => candidate.filePath === filePath)
         if (!write) throw new Error('runtime_config_stage_invalid')
@@ -1386,32 +1521,37 @@ export async function commitPreparedDesktopRuntimeConfigMutation(
           typeof currentDisk.externalRestApiBaseUrl === 'string'
             ? currentDisk.externalRestApiBaseUrl
             : ''
-        const stagedConfig = JSON.parse(write.contents) as Record<string, unknown>
+        const before = mutation.profilesBefore.find(profile => profile.filePath === filePath)
+        const desired = mutation.profilesAfter.find(profile => profile.filePath === filePath)
+        if (!before || !desired) throw new Error('runtime_config_stage_invalid')
         if (
-          !sameDesktopRestEndpoint(currentRest, String(stagedConfig.externalRestApiBaseUrl || ''))
+          !sameDesktopRestEndpoint(currentRest, before.config.externalRestApiBaseUrl) ||
+          !sameDesktopRestEndpoint(
+            desired.config.externalRestApiBaseUrl,
+            before.config.externalRestApiBaseUrl
+          )
         ) {
           throw new Error('stale_runtime_profile')
         }
-        if (Object.prototype.hasOwnProperty.call(currentDisk, 'profileUiBaseUrl')) {
-          stagedConfig.profileUiBaseUrl = currentDisk.profileUiBaseUrl
-        } else {
-          delete stagedConfig.profileUiBaseUrl
-        }
+        const stagedConfig = applyRecordDelta(
+          currentDisk,
+          before.config as Record<string, unknown>,
+          desired.config as Record<string, unknown>
+        )
         write.contents = JSON.stringify(stagedConfig, null, 2)
-        const profile = profilesAfter.find(candidate => candidate.filePath === filePath)
-        if (profile) {
-          const profileConfig = { ...profile.config }
-          if (Object.prototype.hasOwnProperty.call(currentDisk, 'profileUiBaseUrl')) {
-            profileConfig.profileUiBaseUrl =
-              typeof currentDisk.profileUiBaseUrl === 'string' ? currentDisk.profileUiBaseUrl : null
-          } else {
-            delete profileConfig.profileUiBaseUrl
-          }
-          const updatedProfile = { ...profile, config: profileConfig }
-          profilesAfter = profilesAfter.map(candidate =>
-            candidate.id === profile.id ? updatedProfile : candidate
-          )
-        }
+      }
+      const indexWrite = mutation.transaction.writes.find(
+        write => write.filePath === runtimeConfigIndexPath()
+      )
+      if (indexWrite) {
+        indexWrite.contents = serializeRuntimeConfigIndex(profilesAfter, activeProfileAfter)
+      }
+      let configAfter = mutation.configAfter
+      if (activeProfileAfter && activeProfileAfter !== LOCALHOST_OPTION_ID) {
+        configAfter =
+          profilesAfter.find(profile => profile.id === activeProfileAfter)?.config || configAfter
+      } else if (activeProfileAfter === LOCALHOST_OPTION_ID) {
+        configAfter = localhostRuntimeConfig
       }
       const journalPath = path.join(runtimeConfigDirectoryPath(), RUNTIME_CONFIG_TRANSACTION_FILE)
       if (!mutation.stagePath) throw new Error('runtime_config_stage_missing')
@@ -1433,14 +1573,14 @@ export async function commitPreparedDesktopRuntimeConfigMutation(
         profileIncarnations.set(profileId, randomUUID())
       }
       if (mutation.activate) {
-        activeRuntimeOptionId = mutation.activeProfileAfter
+        activeRuntimeOptionId = activeProfileAfter
       }
       if (
-        mutation.configAfter &&
+        configAfter &&
         (mutation.activate ||
-          (mutation.applyConfigIfActive && activeRuntimeOptionId === mutation.activeProfileAfter))
+          (mutation.applyConfigIfActive && activeRuntimeOptionId === activeProfileAfter))
       ) {
-        applyRuntimeConfig(mutation.configAfter, mutation.markConfigured)
+        applyRuntimeConfig(configAfter, mutation.markConfigured)
       } else if (mutation.activate && !mutation.markConfigured) {
         desktopRuntimeConfigured = false
       }

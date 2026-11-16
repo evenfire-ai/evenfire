@@ -1,7 +1,8 @@
 // This service owns the app import; the parent supplies synthetic configuration only.
 import { createApp } from '../../dist/app.js'
 
-const server = createApp().listen(0, '127.0.0.1', () => {
+const port = Number(process.env.EXTERNAL_REST_API_TEST_PORT || '0')
+const server = createApp().listen(port, '127.0.0.1', () => {
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('No loopback address')
   process.stdout.write(`http://127.0.0.1:${address.port}\n`)

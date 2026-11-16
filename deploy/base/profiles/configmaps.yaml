@@ -17,8 +17,8 @@ metadata:
   name: desktop-profile-ui-config
   namespace: profiles
 data:
-  # This is the one operator-owned Profile UI origin; overlays replace this key.
-  DESKTOP_PROFILE_UI_PUBLIC_BASE_URL: http://127.0.0.1:3001
+  # Root Kustomize projects the final Control API setting here after overlays.
+  CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: $(CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL)
 ---
 apiVersion: v1
 kind: ConfigMap

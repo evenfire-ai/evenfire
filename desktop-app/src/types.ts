@@ -752,6 +752,22 @@ export type DesktopRuntimeConfigOption = {
   externalRestApiBaseUrl: string
   rpcProxyBaseUrl: string
   appName: string
+  /** Non-secret profile incarnation used only to scope transient UI reports. */
+  profileIncarnation?: string | null
+}
+
+export type ProfileUiDispatchBinding = {
+  sessionGeneration: number
+  profileId: string | null
+  profileIncarnation: string | null
+  restBaseUrl: string
+}
+
+export type ProfileUiDispatchFailure = {
+  correlationId: string
+  documentLease: string
+  dispatchDeadline: number
+  binding: ProfileUiDispatchBinding
 }
 
 export type DesktopRuntimeConfigState = {
