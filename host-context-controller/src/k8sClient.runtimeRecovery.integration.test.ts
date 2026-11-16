@@ -1080,6 +1080,147 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       expect(state.unroutedSecretAdditions.size).toBe(0)
     })
 
+    /** Hold one McpServer key's queue until `release` resolves. */
+    function holdKey(state: any, name: string) {
+      const started = deferred()
+      const release = deferred()
+      const blocker = state.enqueueMcpServerReconciliation(
+        { name, namespace: 'mcp-server' },
+        async () => {
+          started.resolve()
+          await release.promise
+        }
+      )
+      return { blocker, started, release }
+    }
+
+    /** Put a peer on the witness Secret, so one Secret event selects two servers. */
+    function shareWitnessInput() {
+      const sibling = structuredClone(fixture.server)
+      sibling.metadata = { ...sibling.metadata, name: peer, uid: `${peer}-uid` }
+      sibling.spec.envSecret = { name: 'witness-input', keys: [] }
+      fixture.peers = [sibling]
+    }
+
+    const count = (names: string[], name: string) => names.filter(entry => entry === name).length
+
+    it('I18d an ADDED dropped while authority came back re-dispatches only its own server', async () => {
+      shareWitnessInput()
+      const state = await startCertified()
+      const warn = vi.spyOn(hccLogger, 'warn')
+      const reconciled = recordReconciledNames(state)
+      const readsBefore = reads('witness-input')
+      const held = [holdKey(state, witness), holdKey(state, peer)]
+      await Promise.all(held.map(entry => entry.started.promise))
+
+      const event = watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      state.retireMcpServerWatch()
+      await state.recoverMcpServerInventoryAndWatch()
+      for (const entry of held) entry.release.resolve()
+      await Promise.all([...held.map(entry => entry.blocker), event])
+      await drain(state)
+
+      // Witness: both queued jobs ran and were dropped by the authority change.
+      for (const name of [witness, peer]) {
+        expect(warn).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({ event: 'secret-reconcile-dropped', serverName: name })
+        )
+      }
+      expect([...reconciled].sort()).toEqual([peer, witness].sort())
+      expect(reads('witness-input')).toBe(readsBefore + 2)
+      expect(state.unroutedSecretAdditions.size).toBe(0)
+    })
+
+    it('I18e an ADDED dropped while authority is still missing is replayed once per server at recovery', async () => {
+      shareWitnessInput()
+      const state = await startCertified()
+      const reconciled = recordReconciledNames(state)
+      const held = [holdKey(state, witness), holdKey(state, peer)]
+      await Promise.all(held.map(entry => entry.started.promise))
+
+      const event = watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      state.retireMcpServerWatch()
+      for (const entry of held) entry.release.resolve()
+      await Promise.all([...held.map(entry => entry.blocker), event])
+      await drain(state)
+      // Witness: the dropped ADDED is held for the next authority gain.
+      expect(reconciled).toEqual([])
+      expect([...state.unroutedSecretAdditions]).toEqual(['mcp-server/witness-input'])
+
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+
+      expect([...reconciled].sort()).toEqual([peer, witness].sort())
+      expect(state.unroutedSecretAdditions.size).toBe(0)
+    })
+
+    it('I18f a server that starts referencing the Secret before authority returns is reconciled by the recovery pass', async () => {
+      const state = await startCertified({ withPeer: true })
+      const info = vi.spyOn(hccLogger, 'info')
+      const reconciled = recordReconciledNames(state)
+      const held = holdKey(state, witness)
+      await held.started.promise
+
+      const event = watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      state.retireMcpServerWatch()
+      // The peer's spec moves onto the Secret; the recovery LIST installs it.
+      fixture.peers[0].spec.envSecret = { name: 'witness-input', keys: [] }
+      fixture.peers[0].metadata.generation = 2
+      await state.recoverMcpServerInventoryAndWatch()
+      held.release.resolve()
+      await Promise.all([held.blocker, event])
+      await drain(state)
+
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        recoveryDecision('relevant-change', 'request')
+      )
+      expect(reconciled).toContain(peer)
+      expect(reconciled).toContain(witness)
+    })
+
+    it('I18g a job dropped after the deferred ADDED was replayed re-dispatches only its own server', async () => {
+      shareWitnessInput()
+      const state = await startCertified()
+      const warn = vi.spyOn(hccLogger, 'warn')
+      const reconciled = recordReconciledNames(state)
+      const witnessHold = holdKey(state, witness)
+      const peerHold = holdKey(state, peer)
+      await Promise.all([witnessHold.started.promise, peerHold.started.promise])
+
+      const event = watcher!.reconcileByEnvSecret('witness-input', 'mcp-server', 'ADDED')
+      state.retireMcpServerWatch()
+      // The witness job runs while authority is missing: dropped, then deferred.
+      witnessHold.release.resolve()
+      await witnessHold.blocker
+      await until(() => state.unroutedSecretAdditions.size === 1)
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ event: 'secret-reconcile-dropped', serverName: witness })
+      )
+      expect(reconciled).toEqual([])
+
+      // The recovery replays the deferred ADDED for both servers; the peer key is still held.
+      await state.recoverMcpServerInventoryAndWatch()
+      expect(state.unroutedSecretAdditions.size).toBe(0)
+      // The peer's original job now runs under a newer generation and is dropped too.
+      peerHold.release.resolve()
+      await Promise.all([peerHold.blocker, event])
+      await drain(state)
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ event: 'secret-reconcile-dropped', serverName: peer })
+      )
+      // The witness: once, by the replay. The peer: by the replay and by its own re-dispatch.
+      expect({ witness: count(reconciled, witness), peer: count(reconciled, peer) }).toEqual({
+        witness: 1,
+        peer: 2,
+      })
+      expect(state.unroutedSecretAdditions.size).toBe(0)
+    })
+
     it('I18c a DELETED event whose read times out publishes not-ready', async () => {
       const state = await startCertified()
       const readsBefore = reads('witness-input')

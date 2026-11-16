@@ -982,9 +982,11 @@ export class McpServerWatcher implements McpServerProvider {
   // Only MODIFIED and DELETED events land here; ADDED is not evidence.
   private readonly unroutedSecretChanges = new Set<string>()
   // `namespace/name` of Secrets first seen while the inventory was not
-  // authoritative. A resume-mode informer emits ADDED once, so a dropped one never
-  // returns. ADDED is not change evidence, so this set stays apart from the one
-  // above: it replays after the recovery decision and cannot change it.
+  // authoritative, or whose queued ADDED job was dropped by an authority change
+  // while authority was still missing. A resume-mode informer emits ADDED once,
+  // so a dropped one never returns. ADDED is not change evidence, so this set
+  // stays apart from the one above: it replays after the recovery decision and
+  // cannot change it.
   private readonly unroutedSecretAdditions = new Set<string>()
   // McpServers whose re-observation found no inventory authority. Replayed at
   // the next authority gain, so an event inside a recovery window is not left
@@ -2954,7 +2956,9 @@ export class McpServerWatcher implements McpServerProvider {
    * inventory is not authoritative, a MODIFIED or DELETED is held unrouted and
    * routed at the next authority gain, whose recovery decision then requests a
    * full convergence; an ADDED is held apart and replayed after that recovery
-   * decision, so it cannot change it.
+   * decision, so it cannot change it. A queued job that an authority change
+   * drops dispatches an ADDED again for its own server only
+   * (`redispatchSecretAddition`), never for the whole Secret.
    */
   async reconcileByEnvSecret(
     secretName: string,
@@ -2962,21 +2966,8 @@ export class McpServerWatcher implements McpServerProvider {
     eventType: SecretEventType
   ): Promise<void> {
     const inventoryGeneration = this.mcpWatchGeneration
-    const authoritative = this.hasMcpServerInventoryAuthority(inventoryGeneration)
-    if (!authoritative) {
-      const deferred =
-        eventType === 'ADDED' ? this.unroutedSecretAdditions : this.unroutedSecretChanges
-      deferred.add(`${secretNamespace}/${secretName}`)
-      // It cannot filter while the inventory is not authoritative, so it would
-      // log every Secret name in the namespace. Only the count is logged.
-      hccLogger.warn(
-        '[K8s] Secret change deferred until the McpServer inventory is authoritative',
-        {
-          event: 'secret-change-deferred',
-          eventType,
-          deferredChanges: this.unroutedSecretChanges.size + this.unroutedSecretAdditions.size,
-        }
-      )
+    if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) {
+      this.deferSecretEvent(secretName, secretNamespace, eventType)
       return
     }
     if (eventType !== 'ADDED') this.recordSecretChangeEvidence(secretNamespace, secretName)
@@ -2985,59 +2976,127 @@ export class McpServerWatcher implements McpServerProvider {
     )
     await Promise.all(
       selected.map(server =>
-        this.enqueueMcpServerReconciliation(server, async () => {
-          if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) {
-            // A MODIFIED or DELETED recorded its evidence at the event; the
-            // recovery that restores authority sees it and requests a full
-            // convergence. An ADDED recorded nothing and is dispatched again.
-            hccLogger.warn(
-              '[K8s] Secret-triggered reconcile dropped: McpServer inventory authority changed',
-              { event: 'secret-reconcile-dropped', serverName: server.name, eventType }
-            )
-            // No evidence stands behind an ADDED. Not awaited: this job holds
-            // the key. It defers if authority is still missing, and runs under
-            // the new generation if not.
-            if (eventType === 'ADDED') {
-              void this.reconcileByEnvSecret(secretName, secretNamespace, eventType).catch(err => {
-                hccLogger.error('[K8s] reconcileByEnvSecret failed', { err })
-              })
-            }
-            return
-          }
-          const current = this.servers.get(server.name)
-          if (
-            !current ||
-            current.namespace !== secretNamespace ||
-            current.spec.envSecret?.name !== secretName
-          ) {
-            return
-          }
-          try {
-            hccLogger.info(
-              `[K8s] Re-reconciling McpServer ${current.name} after Secret ${secretName} ${eventType}`,
-              { serverName: current.name }
-            )
-            await this.reconciler.reconcile(current, {
-              isCurrent: () => {
-                if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) return false
-                const latest = this.servers.get(current.name)
-                return (
-                  latest !== undefined &&
-                  latest.namespace === secretNamespace &&
-                  latest.spec.envSecret?.name === secretName &&
-                  sameMcpServerDesiredRevision(current, latest)
-                )
-              },
-            })
-          } catch (err) {
-            hccLogger.error('[K8s] Secret-triggered reconcile failed', {
-              serverName: current.name,
-              err,
-            })
-          }
-        })
+        this.enqueueSecretTriggeredReconcile(
+          server,
+          secretName,
+          secretNamespace,
+          eventType,
+          inventoryGeneration
+        )
       )
     )
+  }
+
+  /** Hold a Secret event that arrived while the McpServer inventory is not authoritative. */
+  private deferSecretEvent(
+    secretName: string,
+    secretNamespace: string,
+    eventType: SecretEventType
+  ): void {
+    const deferred =
+      eventType === 'ADDED' ? this.unroutedSecretAdditions : this.unroutedSecretChanges
+    deferred.add(`${secretNamespace}/${secretName}`)
+    // It cannot filter while the inventory is not authoritative, so it would
+    // log every Secret name in the namespace. Only the count is logged.
+    hccLogger.warn('[K8s] Secret change deferred until the McpServer inventory is authoritative', {
+      event: 'secret-change-deferred',
+      eventType,
+      deferredChanges: this.unroutedSecretChanges.size + this.unroutedSecretAdditions.size,
+    })
+  }
+
+  /**
+   * Dispatch a dropped ADDED again for the one server whose job dropped it.
+   * Every other server the event selected has its own queued job, which
+   * re-dispatches itself if it is dropped too, so the Secret is not fanned out
+   * again. The job re-checks that the server still references the Secret.
+   */
+  private async redispatchSecretAddition(
+    serverName: string,
+    secretName: string,
+    secretNamespace: string
+  ): Promise<void> {
+    const inventoryGeneration = this.mcpWatchGeneration
+    if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) {
+      this.deferSecretEvent(secretName, secretNamespace, 'ADDED')
+      return
+    }
+    const server = this.servers.get(serverName)
+    if (!server) return
+    await this.enqueueSecretTriggeredReconcile(
+      server,
+      secretName,
+      secretNamespace,
+      'ADDED',
+      inventoryGeneration
+    )
+  }
+
+  /** Queue the Secret-triggered reconcile of one server under one inventory generation. */
+  private enqueueSecretTriggeredReconcile(
+    server: McpServerCRD,
+    secretName: string,
+    secretNamespace: string,
+    eventType: SecretEventType,
+    inventoryGeneration: number
+  ): Promise<void> {
+    return this.enqueueMcpServerReconciliation(server, async () => {
+      if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) {
+        // A MODIFIED or DELETED recorded its evidence at the event; the
+        // recovery that restores authority sees it and requests a full
+        // convergence. An ADDED recorded nothing and is dispatched again, for
+        // this server only.
+        hccLogger.warn(
+          '[K8s] Secret-triggered reconcile dropped: McpServer inventory authority changed',
+          { event: 'secret-reconcile-dropped', serverName: server.name, eventType }
+        )
+        // No evidence stands behind an ADDED. Not awaited: this job holds
+        // the key. It defers if authority is still missing, and runs under
+        // the new generation if not.
+        if (eventType === 'ADDED') {
+          void this.redispatchSecretAddition(server.name, secretName, secretNamespace).catch(
+            err => {
+              hccLogger.error('[K8s] Secret ADDED re-dispatch failed', {
+                serverName: server.name,
+                err,
+              })
+            }
+          )
+        }
+        return
+      }
+      const current = this.servers.get(server.name)
+      if (
+        !current ||
+        current.namespace !== secretNamespace ||
+        current.spec.envSecret?.name !== secretName
+      ) {
+        return
+      }
+      try {
+        hccLogger.info(
+          `[K8s] Re-reconciling McpServer ${current.name} after Secret ${secretName} ${eventType}`,
+          { serverName: current.name }
+        )
+        await this.reconciler.reconcile(current, {
+          isCurrent: () => {
+            if (!this.hasMcpServerInventoryAuthority(inventoryGeneration)) return false
+            const latest = this.servers.get(current.name)
+            return (
+              latest !== undefined &&
+              latest.namespace === secretNamespace &&
+              latest.spec.envSecret?.name === secretName &&
+              sameMcpServerDesiredRevision(current, latest)
+            )
+          },
+        })
+      } catch (err) {
+        hccLogger.error('[K8s] Secret-triggered reconcile failed', {
+          serverName: current.name,
+          err,
+        })
+      }
+    })
   }
 
   /**
