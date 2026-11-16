@@ -66,9 +66,10 @@ function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }) {
  * A user/team subject outside that directory has no name this surface can show.
  * - Inside the caller's own ready home (the home root, or a resource whose
  *   inherited access is sourced at it): the row is listed as "Member outside
- *   your teams", with its role as text and Remove, which acts on the row id.
- *   Its name, email and id are never shown; the caller's own Owner row reads
- *   "Owner".
+ *   your teams", with its role as text and Remove (a direct row is revoked by
+ *   its id; an inherited row calls `onRemoveInherited`, and its Remove is
+ *   disabled where the dialog passes none). Its name, email and id are never
+ *   shown; the caller's own Owner row reads "Owner".
  * - Anywhere else, or while home membership is not known (the ancestor walk is
  *   loading or stopped): the row is filtered and one muted line explains what
  *   isn't listed and why. Another user's Owner row follows the same filter.
