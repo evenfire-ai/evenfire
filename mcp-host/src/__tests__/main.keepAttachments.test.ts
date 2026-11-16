@@ -69,11 +69,12 @@ function uploadsOf(sender: string): string {
 
 function keep(options: {
   write?: boolean
+  gfsWriteScope?: () => boolean
   provider?: ScopedWorkspaceProvider | null
   store?: GfsDownloadStore | null
 }) {
   return admissionKeepAttachments({
-    gfsWriteScope: () => options.write ?? true,
+    gfsWriteScope: options.gfsWriteScope ?? (() => options.write ?? true),
     workspaceProvider: () => (options.provider === undefined ? provider : options.provider),
     store: () => (options.store === undefined ? store : options.store),
   })
@@ -88,8 +89,16 @@ describe('the admission keep', () => {
   })
 
   it('keeps nothing and says nothing without gfs.write', async () => {
-    expect(await keep({ write: false })(message())).toBeUndefined()
+    const gfsWriteScope = vi.fn(() => false)
+    expect(await keep({ gfsWriteScope })(message())).toBeUndefined()
     expect(fs.existsSync(uploadsOf('keep-caller'))).toBe(false)
+    // Witness: the keep read the write scope to decide.
+    expect(gfsWriteScope).toHaveBeenCalledTimes(1)
+    // Witness: the same wiring keeps when the scope allows.
+    const other = message({ sender: 'keep-caller-2', messageId: 'admission-keep-message-2' })
+    expect(await keep({})(other)).toBeUndefined()
+    const bins = fs.readdirSync(uploadsOf('keep-caller-2')).filter(name => name.endsWith('.bin'))
+    expect(bins).toHaveLength(1)
   })
 
   it('refuses a message with no sender', async () => {
@@ -108,7 +117,12 @@ describe('the admission keep', () => {
   })
 
   it('keeps nothing for a message with no attachment bytes', async () => {
-    expect(await keep({})(message({ attachments: [] }))).toBeUndefined()
+    const run = keep({})
+    expect(await run(message({ attachments: [] }))).toBeUndefined()
     expect(fs.existsSync(uploadsOf('keep-caller'))).toBe(false)
+    // Witness: the same keep writes one file for a message with an attachment.
+    expect(await run(message({ messageId: 'admission-keep-message-2' }))).toBeUndefined()
+    const bins = fs.readdirSync(uploadsOf('keep-caller')).filter(name => name.endsWith('.bin'))
+    expect(bins).toHaveLength(1)
   })
 })

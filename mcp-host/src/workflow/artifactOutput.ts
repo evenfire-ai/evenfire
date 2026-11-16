@@ -381,11 +381,11 @@ function reportRemovedQuotaVariable(): void {
  * kept files may still add (GfsDownloadStore.keptRoom, read before the
  * generator ran); a file that needs more is refused with
  * {@link keptBudgetRefusal} and nothing is written, so an earlier file of the
- * same name stays. That check is soft too: two calls of one turn read the same
- * room, and generations of several callers at the same moment each read the
- * room before the others' files exist, so together they can pass the bound by
- * their combined size; the next sweep counts them, and later generations and
- * keeps are refused until the kept bytes are back under the bound.
+ * same name stays. That check is soft too: generations that run at the same
+ * moment, in two conversations of one caller or for several callers, each read
+ * the room before the others' files exist, so together they can pass the bound
+ * by their combined size; the next sweep counts them, and later generations
+ * and keeps are refused until the kept bytes are back under the bound.
  */
 export function enforceQuota(
   outputDir: string,

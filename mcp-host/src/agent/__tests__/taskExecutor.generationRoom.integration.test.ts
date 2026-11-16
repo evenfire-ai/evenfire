@@ -264,4 +264,29 @@ describe('a chat generation checked against the kept bounds of the Host', () => 
     expect(refused.result).toBe(`Error: ${STORE_UNAVAILABLE_FOR_GENERATION}`)
     expect(syncFs.existsSync(refused.notes)).toBe(false)
   }, 60_000)
+
+  it("is refused while the caller's own kept files hold half the budget", async () => {
+    // The caller of turn(): same sender and channel type.
+    const binding = resolveCallerRootBinding(new ScopedWorkspaceProvider(hostRoot), {
+      sender: 'room-caller',
+      channelType: 'rpc',
+    })
+    if (!binding.root) throw new Error(`no caller root: ${binding.failureCode}`)
+    const outputs = path.join(binding.root, '.clerum-outputs')
+    syncFs.mkdirSync(outputs, { recursive: true, mode: 0o700 })
+    // 70 MiB: this caller's half of the 140 MiB budget; the Host bound (105) still has room.
+    const own = path.join(outputs, 'own.md')
+    syncFs.writeFileSync(own, Buffer.alloc(70 * MIB, 0x61))
+    const store = await openStore()
+    const refused = await turn(store)
+    expect(refused.onFail).not.toHaveBeenCalled()
+    expect(refused.result).toContain('Host storage for kept files is full')
+    expect(syncFs.existsSync(refused.notes)).toBe(false)
+    // Witness: without the caller's own file the same turn on the same store
+    // writes the notes, so the refusal came from this caller's bound.
+    syncFs.rmSync(own)
+    const admitted = await turn(store)
+    expect(admitted.result).toContain('File generated: notes.md')
+    expect(syncFs.existsSync(admitted.notes)).toBe(true)
+  }, 60_000)
 })

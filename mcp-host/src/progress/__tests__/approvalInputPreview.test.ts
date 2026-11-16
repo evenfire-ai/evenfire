@@ -41,13 +41,23 @@ describe('approval input preview', () => {
     expect(preview.truncated).toBe(true)
     expect(preview.text).not.toContain('UNI')
     expect(Buffer.byteLength(preview.text)).toBeLessThanOrEqual(APPROVAL_INPUT_PREVIEW_BYTES)
+    // Three bytes per character: the bound (65,536 = 3 × 21,845 + 1) falls
+    // inside a character, so a plain cut ends with a replacement character.
+    const unicodeCommand = '€'.repeat(30_000)
+    expect(
+      Buffer.from(unicodeCommand)
+        .subarray(0, APPROVAL_INPUT_PREVIEW_BYTES)
+        .toString('utf8')
+        .endsWith('\uFFFD')
+    ).toBe(true)
     const unicode = projectApprovalInputPreview(
       'shell_exec',
-      { command: '🌴'.repeat(20_000) },
+      { command: unicodeCommand },
       text => text
     )!
     expect(unicode.truncated).toBe(true)
-    expect(unicode.text).not.toContain('\uFFFD')
+    // No replacement character, and no whole character lost.
+    expect(unicode.text).toBe('€'.repeat(21_845))
     expect(Buffer.byteLength(unicode.text)).toBeLessThanOrEqual(APPROVAL_INPUT_PREVIEW_BYTES)
   })
 

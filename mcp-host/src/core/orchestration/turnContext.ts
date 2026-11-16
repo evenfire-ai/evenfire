@@ -148,6 +148,19 @@ export const CANNOT_FREE_INSTRUCTION =
   "Deleting this user's kept files cannot free enough room. Tell the user the space is held by files with no record, by files in workspaces (the user's own workspace files can be removed with an approved shell command), by other users of this agent or by downloads in use, and that kept files leave after the retention time."
 
 /**
+ * The cannot-free sentence of a generation. A generation's room counts only
+ * kept bytes (this caller's and every caller's), so it names those causes and
+ * not workspace files or downloaded copies.
+ */
+export const CANNOT_FREE_GENERATION_INSTRUCTION =
+  "Deleting this user's kept files cannot free enough room. Tell the user the room for kept files is held by this user's generated files that have no record, by the kept files of other users of this agent, or the file is larger than the room kept files may use, and that kept files leave after the retention time. Deleting workspace files or downloaded copies does not free this room; do not propose it."
+
+const CANNOT_FREE_SENTENCE: Record<KeepOfferSubject, string> = {
+  attachments: CANNOT_FREE_INSTRUCTION,
+  generation: CANNOT_FREE_GENERATION_INSTRUCTION,
+}
+
+/**
  * The no-room offer: the bytes short, then the user's own files that cover
  * them, oldest first (at most ten), or that the user cannot free enough. The
  * first line and the closing sentence follow the subject.
@@ -164,7 +177,7 @@ export function keepOfferLines(
   ]
   if (deletableBytes < offer.neededBytes) {
     lines.push('user_cannot_free_enough')
-    lines.push(CANNOT_FREE_INSTRUCTION)
+    lines.push(CANNOT_FREE_SENTENCE[subject])
     return lines
   }
   let covered = 0
@@ -208,7 +221,7 @@ export type GfsPreparationFailure =
   | 'missing'
   /** The Host workspace disk has no room for the download. */
   | 'disk_full'
-  /** The Host's cache of downloaded files has no room for the download. */
+  /** The Host's storage for downloaded and kept files has no room for the download. */
   | 'quota_exceeded'
   /** The Host volume could not be measured, so no download was admitted. */
   | 'volume_unmeasurable'

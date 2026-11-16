@@ -1655,7 +1655,9 @@ export class AgentStateMachine extends EventEmitter {
       // card text as the Desktop preview (whole lines instead of the cut
       // parameter summary, redacted, escaped and cut at
       // APPROVAL_INPUT_PREVIEW_BYTES), followed by the instruction, which the
-      // cut never reaches.
+      // cut never reaches. A cut card has lost its last lines, the total
+      // among them, so a line between the card and the instruction says the
+      // list is cut and gives the total, as Desktop marks it `truncated`.
       const safety = new BasicSafety(this.secretEntriesProvider)
       const card = keptFilesDeleteApprovalCard(
         approval.parameters,
@@ -1664,6 +1666,9 @@ export class AgentStateMachine extends EventEmitter {
       if (card) {
         return [
           card.text,
+          ...(card.cut
+            ? [`The list above is cut: it is too long to show whole. Total files: ${card.files}.`]
+            : []),
           canApproveViaChannel
             ? channelType === 'slack'
               ? 'Use the approval controls to continue or cancel.'

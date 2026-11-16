@@ -13,6 +13,7 @@ import {
   DELETE_OFFER_CAPPED_INSTRUCTION,
   buildTurnContextBlock,
 } from '../core/orchestration/turnContext'
+import { BasicSafety } from '../core/safety/safety'
 import { MAKE_ROOM_SENTENCE, NativeToolRegistry } from '../core/tools/nativeToolRegistry'
 import { type Conversation, ConversationState, type PendingApproval } from '../core/types'
 import {
@@ -669,7 +670,11 @@ describe('the delete approval names every file', () => {
   function notification(
     files: CardFile[],
     channelType = 'slack',
-    defaultPolicy = 'channel_users'
+    defaultPolicy = 'channel_users',
+    entries = [
+      { name: 'P', value: SECRET },
+      { name: 'L', value: LINE_SECRET },
+    ]
   ): string {
     const proto = AgentStateMachine.prototype as unknown as {
       buildApprovalNotification(a: PendingApproval, u: string, c?: string): string
@@ -677,10 +682,7 @@ describe('the delete approval names every file', () => {
     return proto.buildApprovalNotification.call(
       {
         approvalConfig: { defaultPolicy, channels: {}, tools: {} },
-        secretEntriesProvider: () => [
-          { name: 'P', value: SECRET },
-          { name: 'L', value: LINE_SECRET },
-        ],
+        secretEntriesProvider: () => entries,
       },
       {
         request_id: 'r',
@@ -947,7 +949,7 @@ describe('the delete approval names every file', () => {
     expect(preview([{ kind: 'upload', name: 'a.md' }]).truncated).toBe(false)
   })
 
-  it('cuts the channel card at the Desktop bound and keeps its trailer whole', () => {
+  it('marks a card cut at the Desktop bound and keeps its trailer whole', () => {
     const files = Array.from({ length: 300 }, () => ({ kind: 'upload', name: 'x'.repeat(255) }))
     const desktop = preview(files)
     expect(desktop.truncated).toBe(true)
@@ -957,15 +959,43 @@ describe('the delete approval names every file', () => {
     // Witness: the cut card still opens with the fixed line and lists files.
     expect(desktop.text.split('\n')[0]).toBe('Delete these files permanently:')
     expect(fileLines(desktop.text).length).toBeGreaterThan(0)
+    const marker = 'The list above is cut: it is too long to show whole. Total files: 300.'
     for (const [policy, trailer] of [
       ['channel_users', SLACK_TRAILER],
       ['cli_only', CLI_TRAILER],
     ] as const) {
       const channel = notification(files, 'slack', policy)
-      expect(channel).toBe(`${desktop.text}\n${trailer}`)
-      const card = channel.slice(0, -(trailer.length + 1))
+      expect(channel).toBe(`${desktop.text}\n${marker}\n${trailer}`)
+      // The marker, like the instruction, is outside the bound: the card
+      // without both stays within it.
+      const card = channel.slice(0, -(marker.length + 1 + trailer.length + 1))
       expect(Buffer.byteLength(card, 'utf8')).toBeLessThanOrEqual(APPROVAL_INPUT_PREVIEW_BYTES)
     }
+  })
+
+  it('marks a schema-valid card that redaction pushed past the bound', () => {
+    const value = 'q7Zx'
+    const entry = { name: 'A_VERY_LONG_OPERATOR_SECRET_ENTRY_NAME_FOR_THE_PROBE_0001', value }
+    const safety = new BasicSafety(() => [entry])
+    const files = Array.from({ length: 20 }, (_, n) => ({
+      kind: n % 2 ? 'upload' : 'generated',
+      name: `${value.repeat(63)}abc`,
+    }))
+    const desktop = projectApprovalInputPreview(
+      KEPT_FILES_DELETE_APPROVAL_TOOL,
+      { files: withValues(files) },
+      text => safety.sanitizeOutput(KEPT_FILES_DELETE_APPROVAL_TOOL, text).content
+    )!
+    // Witness: redaction grew the card past the bound and cut its total.
+    expect(desktop.truncated).toBe(true)
+    expect(Buffer.byteLength(desktop.text, 'utf8')).toBe(APPROVAL_INPUT_PREVIEW_BYTES)
+    expect(desktop.text.endsWith('Total files: 20')).toBe(false)
+    const lines = notification(files, 'telegram', 'channel_users', [entry]).split('\n')
+    expect(lines.slice(-2)).toEqual([
+      'The list above is cut: it is too long to show whole. Total files: 20.',
+      REPLY_TRAILER,
+    ])
+    expect(lines.slice(0, -2).join('\n')).toBe(desktop.text)
   })
 
   it('adds no line to a card under the bound, whatever the trailer', () => {
@@ -986,5 +1016,20 @@ describe('the delete approval names every file', () => {
       expect(lines[21]).toBe('Total files: 20')
       expect(lines[22]).toBe(trailer)
     }
+  })
+
+  it('keeps every line of a schema-valid card within one channel message', () => {
+    // The widest schema-valid name: each character escapes to `\u{E0001}`.
+    const files = Array.from({ length: 20 }, () => ({
+      kind: 'generated',
+      name: '\u{E0001}'.repeat(255),
+      sizeBytes: Number.MAX_SAFE_INTEGER,
+    }))
+    const desktop = preview(files)
+    // Witness: the card is whole and lists every file.
+    expect(desktop.truncated).toBe(false)
+    expect(desktop.text.split('\n').filter(line => line.startsWith('generated: '))).toHaveLength(20)
+    const longest = Math.max(...desktop.text.split('\n').map(line => line.length))
+    expect(longest).toBeLessThanOrEqual(2_400)
   })
 })

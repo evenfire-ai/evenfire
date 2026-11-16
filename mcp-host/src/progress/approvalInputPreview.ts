@@ -80,12 +80,13 @@ function shownDate(value: unknown): string {
  * {@link cardValue}; the name quoted), its size and its creation date, and the
  * total. The delete verifies the size and the date against the file before
  * deleting anything, so the card shows the file the call deletes. No id is
- * shown. Undefined when the call carries no file list.
+ * shown. `files` is the length of the call's file list. Undefined when the
+ * call carries no file list.
  */
 function keptFilesDeleteApprovalLines(
   parameters: Record<string, unknown>,
   redact: (text: string) => string
-): { lines: string[]; redacted: boolean } | undefined {
+): { lines: string[]; redacted: boolean; files: number } | undefined {
   const files = parameters.files
   if (!Array.isArray(files)) return undefined
   let redacted = false
@@ -103,25 +104,32 @@ function keptFilesDeleteApprovalLines(
     )
   }
   lines.push(`Total files: ${files.length}`)
-  return { lines, redacted }
+  return { lines, redacted, files: files.length }
 }
 
 /**
  * The text of a delete approval card, the same in Desktop and in channels:
  * the lines of {@link keptFilesDeleteApprovalLines}, joined and cut at
- * {@link APPROVAL_INPUT_PREVIEW_BYTES}. `cut` says the bound was reached and
- * `redacted` that redaction changed a kind or a name. A channel appends its
- * approve or deny instruction after this text, so the bound never cuts it.
- * Undefined when the call carries no file list.
+ * {@link APPROVAL_INPUT_PREVIEW_BYTES}. `cut` says the bound was reached,
+ * `redacted` that redaction changed a kind or a name, and `files` is the
+ * number of files the call lists, which a cut card no longer shows. A channel
+ * appends its approve or deny instruction after this text, and before it, for
+ * a cut card, a line that says the list is cut and gives `files` as the total;
+ * the bound cuts neither. Undefined when the call carries no file list.
  */
 export function keptFilesDeleteApprovalCard(
   parameters: Record<string, unknown>,
   redact: (text: string) => string
-): { text: string; cut: boolean; redacted: boolean } | undefined {
+): { text: string; cut: boolean; redacted: boolean; files: number } | undefined {
   const projected = keptFilesDeleteApprovalLines(parameters, redact)
   if (!projected) return undefined
   const bounded = boundPreviewText(projected.lines.join('\n'))
-  return { text: bounded.text, cut: bounded.cut, redacted: projected.redacted }
+  return {
+    text: bounded.text,
+    cut: bounded.cut,
+    redacted: projected.redacted,
+    files: projected.files,
+  }
 }
 
 export function projectApprovalInputPreview(

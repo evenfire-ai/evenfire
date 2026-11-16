@@ -518,4 +518,27 @@ describe('the kept attachments folder', () => {
     const bin = fs.readdirSync(uploadsOf(root)).find(name => name.endsWith('.bin'))!
     expect(fs.readFileSync(path.join(uploadsOf(root), bin), 'utf8')).toBe('kept bytes')
   })
+
+  it('refuses a 6 MiB upload that holds a value only split by markup', async () => {
+    const root = rootOf('user-a')
+    const store = await openStore()
+    const size = 6 * 1024 * 1024
+    const line = `note ${SYNTHETIC.slice(0, 10)}<b>${SYNTHETIC.slice(10)}</b>\n`
+    const filler = 'plain filler line of a long log\n'
+    const body = filler.repeat(Math.ceil(size / filler.length)).slice(0, size - line.length) + line
+    // Witness: the byte search alone cannot find the value; only the windowed
+    // scan of the text, above the sync scan's 4 MiB bound, can.
+    expect(Buffer.from(body).includes(Buffer.from(SYNTHETIC))).toBe(false)
+    expect(
+      await keepMessageAttachments({ attachments: [file('big.md', body)], callerRoot: root, store })
+    ).toBeUndefined()
+    const [entry] = await listed(root)
+    expect(entry).toBeDefined()
+    const client = recordingClient()
+    const result = await tools(root, client, [{ name: 'P', value: SYNTHETIC }])
+      .get('clerum__gfs_create_file')!
+      .execute({ drive: 'main', parentResourceId: 'f', name: 'x', uploadedFileId: entry!.id }, '')
+    expect(result.error).toBe(FILE_CONTAINS_SECRET)
+    expect(clientCalls(client)).toBe(0)
+  }, 60_000)
 })
