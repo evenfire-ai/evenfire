@@ -1,8 +1,22 @@
 # Live entity-change consumer semantics
 
 Live entity-change delivery is a latest-state convergence signal, not event-history playback.
-Healthy clients should converge to authoritative state within approximately five seconds; clients
-may coalesce intermediate changes while disconnected or under load.
+On a healthy stream, a write to a watched resource should reach the window within approximately
+five seconds; clients may coalesce intermediate changes while disconnected or under load.
+
+Some Desktop paths converge more slowly by design, because they wait for the stream to reopen or
+for the server to let a key in:
+
+- After a reauthorize close, roots and open sharing dialogs re-read at once, but watched previews
+  and folders converge only with the `resync` of the next ready. Main waits the close's
+  `retryAfterMs` (the server spreads a mass close over at most 10 s; main adds up to 20 % jitter,
+  so up to 12 s; a single close without one waits 1–6 s), and the open then takes up to 12 s (the
+  server's open deadline). Until then a preview whose access was revoked stays visible.
+- A deferred key is retried on its own timer: up to 60 s plus 20 % jitter (72 s) per attempt.
+- A 403 on the open or on a PUT that is not `desktop_user_retired` puts the stream in slow mode:
+  main reopens after at least 60 s (or the server's `Retry-After`, if longer) plus jitter, up to
+  72 s. On a refused open the window gets `accessChanged` once and every watched key as `rejected`
+  once, so those resources show as unavailable; no live update arrives until a reopen succeeds.
 
 Two transports carry these signals. Control UI consumes the operator entity-change stream. Desktop
 consumes the per-user GFS watch: main keeps one watch stream per session, each window tells main
