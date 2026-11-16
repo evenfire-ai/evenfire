@@ -185,6 +185,11 @@ before this release.
   model routes, the Host spec validation, the plugin-workload grant gate and
   the allowlist ConfigMap publisher, and the old image's catalog sync.
   mcp-host does not: it reads the published ConfigMap, not the table.
+  If a transaction keeps the table through every attempt (a reader for 0139,
+  or a catalog sync or admin write that outlasts the Job's 10 s for 0140),
+  the Job exhausts its `backoffLimit` with `55P03` and the deploy stops. The
+  migration that timed out is not applied; the ones before it stay committed.
+  Rerun the Job once that transaction ends.
 - `0140_llm_catalog_prune_episodes` never blocks a plain `SELECT` on
   `llm_allowed_models`. It starts by taking `EXCLUSIVE` on the table and holds
   it until it commits. Under that lock it validates the `CHECK`, backfills the
