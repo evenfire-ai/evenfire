@@ -1382,8 +1382,6 @@ jobs:
           kubectl kustomize deploy/overlays/minikube-no-uis-ghcr > /tmp/clerum-minikube-no-uis-ghcr.yaml
 
       - name: Profile UI origin uses one source across rendered deployments
-        env:
-          CODEX_SCRATCH_ROOT: ${{ runner.temp }}
         run: |
           bash scripts/tests/test-desktop-profile-ui-origin-projection.sh
           bash scripts/tests/test-profile-ui-legacy-only-overlay-r2m1.sh

@@ -2,13 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-if [[ -z "${CODEX_SCRATCH_ROOT:-}" ]]; then
-  echo 'CODEX_SCRATCH_ROOT is required for task-owned render artifacts' >&2
-  exit 2
-fi
-TASK_SCRATCH="$CODEX_SCRATCH_ROOT/evenfire/pr-1463-r2-m1-r48-20261115"
-mkdir -p "$TASK_SCRATCH"
-FIXTURE_ROOT="$(mktemp -d "$TASK_SCRATCH/projection-render.XXXXXX")"
+FIXTURE_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$FIXTURE_ROOT"' EXIT
 
 cp -R "$REPO_ROOT/deploy" "$FIXTURE_ROOT/deploy"
