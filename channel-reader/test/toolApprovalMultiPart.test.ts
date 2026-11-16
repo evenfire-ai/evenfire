@@ -1150,3 +1150,104 @@ describe('tool approval over one message, sent as several', () => {
     expectErrorWithIdsOnly(errors, 'approval-task-a25', NAMES_255)
   })
 })
+
+describe('tool approval in a synchronous response, not shown whole', () => {
+  function syncReader(channelType: ChannelKind, card: string, taskId: string) {
+    const rec = recordingAdapter(channelType)
+    const { rpc } = rpcClientFor(taskId, SENDER[channelType], card)
+    rpc.sendMessage.mockResolvedValueOnce({
+      success: true,
+      status: 'waiting_approval' as const,
+      approval: {
+        taskId,
+        requestId: `approval-${taskId}`,
+        userId: `host-user-${taskId}`,
+        notification: card,
+      },
+    })
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      adapters: new Map([[channelType, rec.adapter]]),
+      channels: channelType === 'telegram' ? [telegramChannel()] : [],
+      sleep: async () => undefined,
+    })
+    return { rec, rpc, reader }
+  }
+
+  it('A37 denies a sync approval with a line longer than a Telegram message', async () => {
+    const errors = silenceErrors()
+    const name = 'r'.repeat(5000)
+    const card = deleteCard([name])
+    const s = syncReader('telegram', card, 'task-a37')
+    await s.reader.handleMessages([messageFor('telegram', 'clean up my files')])
+    // Witness: the sync answer was read and the adapter is live.
+    expect(s.rpc.sendMessage).toHaveBeenCalledTimes(1)
+    expect(sentContents(s.rec)).toEqual([DENIED])
+    expect(s.rpc.sendDenial).toHaveBeenCalledTimes(1)
+    expect(s.rpc.sendDenial).toHaveBeenCalledWith(
+      'host-user-task-a37',
+      'approval-task-a37',
+      'telegram',
+      CHANNEL_ID.telegram
+    )
+    expect(s.rec.sendMessage.mock.calls.some(call => call[4]?.telegramInlineKeyboard)).toBe(false)
+    await s.reader.handleMessages([messageFor('telegram', '/approve')])
+    expect(sentContents(s.rec).at(-1)).toBe(NO_PENDING)
+    expect(s.rpc.sendApproval).not.toHaveBeenCalled()
+    expectErrorWithIdsOnly(errors, 'approval-task-a37', [name])
+  })
+
+  it('A38 says a sync request still waits when mcp-host refuses the denial', async () => {
+    silenceErrors()
+    const s = syncReader('telegram', deleteCard(['r'.repeat(5000)]), 'task-a38')
+    s.rpc.sendDenial.mockResolvedValueOnce({ success: false })
+    await s.reader.handleMessages([messageFor('telegram', 'clean up my files')])
+    expect(s.rpc.sendDenial).toHaveBeenCalledTimes(1)
+    expect(sentContents(s.rec)).toEqual([STILL_WAITING])
+    await s.reader.handleMessages([messageFor('telegram', '/approve')])
+    expect(sentContents(s.rec).at(-1)).toBe(NO_PENDING)
+    expect(s.rpc.sendApproval).not.toHaveBeenCalled()
+  })
+
+  it('A39 denies a sync approval when a part is not delivered', async () => {
+    const errors = silenceErrors()
+    const s = syncReader('telegram', CARD_600, 'task-a39')
+    s.rec.hooks.set(2, async () => {
+      throw new Error('provider refused the message')
+    })
+    await s.reader.handleMessages([messageFor('telegram', 'clean up my files')])
+    // Witness: part 1 was sent, without controls, and the refused call was made.
+    expect(s.rec.sendMessage).toHaveBeenCalledTimes(3)
+    expect(CARD_600.startsWith(`${s.rec.sendMessage.mock.calls[0]![1]}\n`)).toBe(true)
+    expect(s.rec.sendMessage.mock.calls.some(call => call[4]?.telegramInlineKeyboard)).toBe(false)
+    expect(s.rpc.sendDenial).toHaveBeenCalledTimes(1)
+    expect(s.rpc.sendDenial).toHaveBeenCalledWith(
+      'host-user-task-a39',
+      'approval-task-a39',
+      'telegram',
+      CHANNEL_ID.telegram
+    )
+    expect(sentContents(s.rec).at(-1)).toBe(DENIED)
+    await s.reader.handleMessages([messageFor('telegram', '/approve')])
+    expect(sentContents(s.rec).at(-1)).toBe(NO_PENDING)
+    expect(s.rpc.sendApproval).not.toHaveBeenCalled()
+    expectErrorWithIdsOnly(errors, 'approval-task-a39', NAMES_600)
+  })
+
+  it('A40 escapes a Slack sync approval before it is split', async () => {
+    const card = deleteCard(Array.from({ length: 20 }, () => '&'.repeat(60)))
+    // Witness: the split depends on the escape. As written the card fits one
+    // Slack message; escaped it does not.
+    expect(card.length).toBeLessThanOrEqual(SLACK_LIMIT)
+    expect(escapeSlack(card).length).toBeGreaterThan(SLACK_LIMIT)
+    const s = syncReader('slack', card, 'task-a40')
+    await s.reader.handleMessages([messageFor('slack', 'clean up my files')])
+    const parts = s.rec.sendMessage.mock.calls
+    expect(parts.length).toBeGreaterThan(1)
+    expect(parts.map(call => call[1]).join('\n')).toBe(escapeSlack(card))
+    for (const call of parts) expect(call[1].length).toBeLessThanOrEqual(SLACK_LIMIT)
+    const withBlocks = parts.filter(call => call[4]?.slackBlocks)
+    expect(withBlocks).toEqual([parts[parts.length - 1]])
+    expect(s.rpc.sendDenial).not.toHaveBeenCalled()
+  })
+})
