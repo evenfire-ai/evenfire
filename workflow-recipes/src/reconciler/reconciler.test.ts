@@ -329,12 +329,15 @@ type LiveManifest = { metadata: { name: string } & Record<string, unknown> } & R
  * (the readiness tests): the object exists in that test's model, so its PUT
  * succeeds.
  *
- * `patch`, when given, merges `metadata.annotations` and the top-level `spec`
- * keys of the body into the stored object, bumps its resourceVersion, and bumps
- * its generation when the body carries `spec`, as the apiserver does. It is not
- * a strategic merge: assertions about what a patch sent read the request body,
- * not the stored object. A patch to an object the store does not hold answers
- * 404, as the apiserver does, whatever `unseenReplace` says.
+ * `patch`, when given, applies what the apiserver applies for the body it gets.
+ * An array body is a JSON Patch (RFC 6902, see {@link applyJsonPatch}): applied
+ * atomically to a copy, resourceVersion +1, generation +1 when an operation path
+ * starts with `/spec/`. An object body is a strategic merge patch: annotations
+ * merge, `spec.template` merges as a pod template does (see
+ * {@link strategicMergePodTemplate}: lists merge by key and entries the patch
+ * omits are kept), every other top-level `spec` key replaces, resourceVersion
+ * +1, generation +1 when the body carries `spec`. A patch to an object the store
+ * does not hold answers 404, as the apiserver does, whatever `unseenReplace` says.
  */
 function installLiveStore(
   api: {
@@ -403,10 +406,12 @@ function installLiveStore(
     }: {
       name: string
       namespace: string
-      body: {
-        metadata?: { annotations?: Record<string, string> }
-        spec?: Record<string, unknown>
-      }
+      body:
+        | JsonPatchOperation[]
+        | {
+            metadata?: { annotations?: Record<string, string> }
+            spec?: Record<string, unknown>
+          }
     }) => {
       const k = key(namespace, name)
       const current = live.get(k)
@@ -416,6 +421,20 @@ function installLiveStore(
         resourceVersion?: string
         generation?: number
       }
+      if (Array.isArray(body)) {
+        const patched = applyJsonPatch(current, body)
+        const patchedMetadata = patched.metadata as typeof metadata
+        patchedMetadata.resourceVersion = String(Number(metadata.resourceVersion ?? '1') + 1)
+        patchedMetadata.generation =
+          (metadata.generation ?? 1) + (body.some(op => op.path.startsWith('/spec/')) ? 1 : 0)
+        live.set(k, patched)
+        return {}
+      }
+      const currentSpec = current.spec as Record<string, unknown>
+      const spec: Record<string, unknown> = { ...currentSpec, ...body.spec }
+      if (body.spec?.template !== undefined) {
+        spec.template = strategicMergePodTemplate(currentSpec.template, body.spec.template)
+      }
       live.set(k, {
         ...current,
         metadata: {
@@ -424,11 +443,110 @@ function installLiveStore(
           resourceVersion: String(Number(metadata.resourceVersion ?? '1') + 1),
           generation: (metadata.generation ?? 1) + (body.spec ? 1 : 0),
         },
-        spec: { ...(current.spec as Record<string, unknown>), ...body.spec },
+        spec,
       })
       return {}
     }
   )
+}
+
+type JsonPatchOperation = { op: string; path: string; value?: unknown }
+
+/**
+ * RFC 6902 on a copy of `target`, returned only when every operation applied
+ * (§5: the document is atomic). Supported: `add` (the parent must exist; sets
+ * the member whether or not it exists), `replace` and `remove` (the target must
+ * exist). Pointer tokens are decoded per RFC 6901 (`~1` → `/`, then `~0` → `~`).
+ * Anything else — another operation, an array parent, a missing parent or
+ * target — throws, as a 422 from the apiserver would fail the call.
+ */
+function applyJsonPatch<T>(target: T, operations: JsonPatchOperation[]): T {
+  const document = structuredClone(target) as Record<string, unknown>
+  for (const operation of operations) {
+    const tokens = operation.path
+      .split('/')
+      .slice(1)
+      .map(token => token.replace(/~1/g, '/').replace(/~0/g, '~'))
+    if (operation.path[0] !== '/' || tokens.length === 0) {
+      throw new Error(`JSON Patch: unsupported path "${operation.path}"`)
+    }
+    let parent: unknown = document
+    for (const token of tokens.slice(0, -1)) {
+      if (!parent || typeof parent !== 'object' || Array.isArray(parent) || !(token in parent)) {
+        throw new Error(`JSON Patch: missing parent for "${operation.path}"`)
+      }
+      parent = (parent as Record<string, unknown>)[token]
+    }
+    if (!parent || typeof parent !== 'object' || Array.isArray(parent)) {
+      throw new Error(`JSON Patch: missing or unsupported parent for "${operation.path}"`)
+    }
+    const member = tokens[tokens.length - 1]
+    const container = parent as Record<string, unknown>
+    if (operation.op === 'add') {
+      container[member] = structuredClone(operation.value)
+    } else if (operation.op === 'replace' || operation.op === 'remove') {
+      if (!(member in container)) {
+        throw new Error(`JSON Patch: ${operation.op} target "${operation.path}" does not exist`)
+      }
+      if (operation.op === 'replace') container[member] = structuredClone(operation.value)
+      else delete container[member]
+    } else {
+      throw new Error(`JSON Patch: unsupported operation "${operation.op}"`)
+    }
+  }
+  return document as T
+}
+
+/** Merge key of the pod-template lists a strategic merge patch merges by key. */
+const POD_TEMPLATE_LIST_MERGE_KEYS: Record<string, string> = {
+  containers: 'name',
+  initContainers: 'name',
+  env: 'name',
+  imagePullSecrets: 'name',
+  volumes: 'name',
+  volumeMounts: 'mountPath',
+  ports: 'containerPort',
+}
+
+/**
+ * The strategic merge of a pod template, as the apiserver applies it: object
+ * members merge recursively; the lists of {@link POD_TEMPLATE_LIST_MERGE_KEYS}
+ * merge entry by entry on their key, and live entries the patch does not name
+ * are kept; any other list, and any scalar, is replaced; a `null` deletes.
+ */
+function strategicMergePodTemplate(live: unknown, patch: unknown, field?: string): unknown {
+  if (patch === null) return undefined
+  if (Array.isArray(patch)) {
+    const mergeKey = field === undefined ? undefined : POD_TEMPLATE_LIST_MERGE_KEYS[field]
+    if (mergeKey === undefined || !Array.isArray(live)) return structuredClone(patch)
+    const merged = structuredClone(live) as Array<Record<string, unknown>>
+    for (const entry of patch as Array<Record<string, unknown>>) {
+      const index = merged.findIndex(existing => existing[mergeKey] === entry[mergeKey])
+      if (index === -1) merged.push(structuredClone(entry))
+      else
+        merged[index] = strategicMergePodTemplate(merged[index], entry) as Record<string, unknown>
+    }
+    return merged
+  }
+  if (patch && typeof patch === 'object') {
+    const base =
+      live && typeof live === 'object' && !Array.isArray(live)
+        ? (structuredClone(live) as Record<string, unknown>)
+        : {}
+    for (const [member, value] of Object.entries(patch as Record<string, unknown>)) {
+      const next = strategicMergePodTemplate(base[member], value, member)
+      if (next === undefined) delete base[member]
+      else base[member] = next
+    }
+    return base
+  }
+  return patch
+}
+
+/** The operation of a JSON Patch request body at `path`; fails unless the body is an array. */
+function jsonPatchOpAt(body: unknown, path: string): JsonPatchOperation | undefined {
+  expect(Array.isArray(body)).toBe(true)
+  return (body as JsonPatchOperation[]).find(operation => operation.path === path)
 }
 
 const LIVE_CLUSTER_IP = '10.0.0.7'
@@ -4262,18 +4380,20 @@ describe('WorkflowRecipeReconciler', () => {
         const desired = createdBody()
         expect(readsOf(read, desired.metadata.name, namespace)).toBe(2)
         expect(patch).toHaveBeenCalledTimes(1)
-        const sent = patch.mock.calls[0][0] as {
-          name: string
-          body: {
-            metadata: { annotations: Record<string, string> }
-            spec?: Record<string, unknown>
-          }
-        }
+        const sent = patch.mock.calls[0][0] as { name: string; body: JsonPatchOperation[] }
         expect(sent.name).toBe(desired.metadata.name)
-        expect(sent.body.metadata.annotations[SPEC_HASH]).toBe(
-          desired.metadata.annotations[SPEC_HASH]
-        )
-        expect(sent.body.spec?.replicas).toBe(desired.spec.replicas)
+        // Issue #1349 (P-1) — the body is a JSON Patch: the other writer's object
+        // has annotations, so the hash is added as one member of them.
+        expect(jsonPatchOpAt(sent.body, '/metadata/annotations/clerum.io~1spec-hash')).toEqual({
+          op: 'add',
+          path: '/metadata/annotations/clerum.io~1spec-hash',
+          value: desired.metadata.annotations[SPEC_HASH],
+        })
+        expect(jsonPatchOpAt(sent.body, '/spec/replicas')).toEqual({
+          op: 'add',
+          path: '/spec/replicas',
+          value: desired.spec.replicas,
+        })
       })
 
       it('S4: a read error other than 404 is rethrown and nothing is created', async () => {
@@ -4382,6 +4502,198 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
+    // Issue #1349 (P-1) — a StatefulSet update replaces the pod template with a
+    // JSON Patch. A strategic merge kept the env entries, pull Secrets and volumes
+    // the new template omits; these tests read the object the store holds after
+    // the patch, through the store's strategic and JSON Patch branches.
+    describe('StatefulSet template replace (issue #1349)', () => {
+      const namespace = 'sandbox-recipes'
+      const recipe = makeRecipe({ spec: { workloads: [] } })
+      type StsWorkload = Parameters<typeof buildStatefulSet>[0]
+      const ensure = (workload: StsWorkload) =>
+        (
+          reconciler as unknown as {
+            ensureStatefulSet: (w: unknown, r: unknown, l: string, s: unknown) => Promise<void>
+          }
+        ).ensureStatefulSet(workload, recipe, 'minimal', {})
+      const stsNameOf = (workload: StsWorkload) =>
+        buildStatefulSet(workload, recipe, 'minimal', undefined).statefulSet.metadata!.name!
+      const stored = async (name: string) =>
+        (await mockAppsApi.readNamespacedStatefulSet({ name, namespace })) as k8s.V1StatefulSet
+
+      it('T-P1-0: the store merges a strategic pod-template patch as the API server does', async () => {
+        // The server-confirmed case (kube-apiserver v1.35.1): a strategic merge
+        // whose template names env [PLAIN] and no imagePullSecrets keeps API_KEY
+        // and the pull Secret; only the annotation changes.
+        await mockAppsApi.createNamespacedStatefulSet({
+          namespace: 'p1-probe',
+          body: {
+            apiVersion: 'apps/v1',
+            kind: 'StatefulSet',
+            metadata: {
+              name: 'p1-probe',
+              namespace: 'p1-probe',
+              annotations: { 'clerum.io/spec-hash': 'old' },
+            },
+            spec: {
+              serviceName: 'p1-probe',
+              replicas: 0,
+              selector: { matchLabels: { app: 'p1-probe' } },
+              template: {
+                metadata: { labels: { app: 'p1-probe' } },
+                spec: {
+                  imagePullSecrets: [{ name: 'foreign-pull' }],
+                  containers: [
+                    {
+                      name: 'app',
+                      image: 'busybox:1.36',
+                      env: [
+                        { name: 'PLAIN', value: '1' },
+                        {
+                          name: 'API_KEY',
+                          valueFrom: { secretKeyRef: { name: 'foreign-creds', key: 'api-key' } },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        })
+
+        await mockAppsApi.patchNamespacedStatefulSet({
+          name: 'p1-probe',
+          namespace: 'p1-probe',
+          body: {
+            metadata: { annotations: { 'clerum.io/spec-hash': 'new' } },
+            spec: {
+              template: {
+                metadata: { labels: { app: 'p1-probe' } },
+                spec: {
+                  containers: [
+                    { name: 'app', image: 'busybox:1.36', env: [{ name: 'PLAIN', value: '1' }] },
+                  ],
+                },
+              },
+            },
+          },
+        })
+
+        const after = (await mockAppsApi.readNamespacedStatefulSet({
+          name: 'p1-probe',
+          namespace: 'p1-probe',
+        })) as k8s.V1StatefulSet
+        expect(after.metadata?.annotations?.['clerum.io/spec-hash']).toBe('new')
+        expect(after.spec?.template.spec?.containers[0].env).toEqual([
+          { name: 'PLAIN', value: '1' },
+          {
+            name: 'API_KEY',
+            valueFrom: { secretKeyRef: { key: 'api-key', name: 'foreign-creds' } },
+          },
+        ])
+        expect(after.spec?.template.spec?.imagePullSecrets).toEqual([{ name: 'foreign-pull' }])
+      })
+
+      it('T-P1-2: an update that drops an env entry and a volume mount removes them from the stored template', async () => {
+        const oldWorkload: StsWorkload = {
+          id: 'db',
+          type: 'statefulset',
+          image: 'postgres:16',
+          env: [
+            { name: 'A', value: '1' },
+            { name: 'B', value: '2' },
+          ],
+          volumeMounts: [{ name: 'scratch', mountPath: '/scratch' }],
+        }
+        const newWorkload: StsWorkload = {
+          id: 'db',
+          type: 'statefulset',
+          image: 'postgres:16',
+          env: [{ name: 'A', value: '1' }],
+        }
+        const name = stsNameOf(oldWorkload)
+        await ensure(oldWorkload)
+        const before = await stored(name)
+        expect(before.spec!.template.spec!.containers[0].env?.map(e => e.name)).toContain('B')
+        expect(before.spec!.template.spec!.volumes?.map(v => v.name)).toContain('scratch')
+        mockAppsApi.patchNamespacedStatefulSet.mockClear()
+
+        await ensure(newWorkload)
+
+        // Witness: the update was sent.
+        expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+        const after = await stored(name)
+        const container = after.spec!.template.spec!.containers[0]
+        expect(container.env?.map(e => e.name)).toContain('A')
+        expect(container.env?.map(e => e.name)).not.toContain('B')
+        expect((container.volumeMounts ?? []).filter(m => m.mountPath === '/scratch')).toEqual([])
+        expect(
+          (after.spec!.template.spec!.volumes ?? []).filter(v => v.name === 'scratch')
+        ).toEqual([])
+      })
+
+      it('T-P1-3: the update is a JSON Patch that replaces the template, sent as application/json-patch+json', async () => {
+        const actual =
+          await vi.importActual<typeof import('@kubernetes/client-node')>('@kubernetes/client-node')
+        const setHeader = vi.mocked(k8s.setHeaderMiddleware)
+        const oldWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:15' }
+        const newWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:16' }
+        await ensure(oldWorkload)
+        mockAppsApi.patchNamespacedStatefulSet.mockClear()
+        setHeader.mockImplementation(actual.setHeaderMiddleware)
+        try {
+          await ensure(newWorkload)
+        } finally {
+          setHeader.mockImplementation(() => ({}) as ReturnType<typeof actual.setHeaderMiddleware>)
+        }
+
+        expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+        const [args, options] = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0] as [
+          { body: unknown },
+          { middleware: Array<{ pre: (context: unknown) => unknown }> },
+        ]
+        const desiredTemplate = buildStatefulSet(newWorkload, recipe, 'minimal', {} as never)
+          .statefulSet.spec!.template
+        expect(jsonPatchOpAt(args.body, '/spec/template')).toEqual({
+          op: 'replace',
+          path: '/spec/template',
+          value: desiredTemplate,
+        })
+        expect(
+          jsonPatchOpAt(args.body, '/metadata/annotations/clerum.io~1spec-hash')?.value
+        ).toEqual(expect.any(String))
+        const paths = (args.body as JsonPatchOperation[]).map(operation => operation.path)
+        for (const field of ['volumeClaimTemplates', 'selector', 'serviceName']) {
+          expect(paths.filter(path => path.startsWith(`/spec/${field}`))).toEqual([])
+        }
+        // The header the middleware sets on the request.
+        const setHeaderParam = vi.fn()
+        expect(options.middleware).toHaveLength(1)
+        options.middleware[0].pre({ setHeaderParam })
+        expect(setHeaderParam).toHaveBeenCalledWith('Content-Type', 'application/json-patch+json')
+      })
+
+      it('T-P1-4: an existing StatefulSet without annotations gets the hash annotation', async () => {
+        const oldWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:15' }
+        const newWorkload: StsWorkload = { id: 'db', type: 'statefulset', image: 'postgres:16' }
+        const name = stsNameOf(oldWorkload)
+        await ensure(oldWorkload)
+        const legacy = await stored(name)
+        delete legacy.metadata!.annotations
+        await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: legacy })
+        expect((await stored(name)).metadata?.annotations).toBeUndefined()
+        mockAppsApi.patchNamespacedStatefulSet.mockClear()
+
+        await ensure(newWorkload)
+
+        expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+        const after = await stored(name)
+        expect(after.metadata?.annotations?.['clerum.io/spec-hash']).toEqual(expect.any(String))
+        expect(after.spec!.template.spec!.containers[0].image).toBe('postgres:16')
+      })
+    })
+
     it('patches only StatefulSet metadata when the desired spec already matches', async () => {
       const workload = { id: 'db', type: 'statefulset' as const, image: 'postgres:16' }
       const recipe = makeRecipe({ spec: { workloads: [workload] } })
@@ -4423,9 +4735,14 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
-      expect(mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body).toEqual({
-        metadata: { annotations: { [SPEC_HASH]: createdBody!.metadata.annotations[SPEC_HASH] } },
-      })
+      // Issue #1349 (P-1) — a JSON Patch with the hash operation only.
+      expect(mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body).toEqual([
+        {
+          op: 'add',
+          path: '/metadata/annotations/clerum.io~1spec-hash',
+          value: createdBody!.metadata.annotations[SPEC_HASH],
+        },
+      ])
     })
 
     it('patches mutable StatefulSet spec fields without full replace', async () => {
@@ -4471,9 +4788,19 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+      // Issue #1349 (P-1) — the template is replaced through a JSON Patch.
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
-      expect(patchBody.spec.template.spec.containers[0].image).toBe('postgres:16')
-      expect(patchBody.spec.volumeClaimTemplates).toBeUndefined()
+      const templateOp = jsonPatchOpAt(patchBody, '/spec/template')
+      expect(templateOp?.op).toBe('replace')
+      expect(
+        (templateOp?.value as { spec: { containers: Array<{ image: string }> } }).spec.containers[0]
+          .image
+      ).toBe('postgres:16')
+      expect(
+        (patchBody as JsonPatchOperation[]).filter(operation =>
+          operation.path.startsWith('/spec/volumeClaimTemplates')
+        )
+      ).toEqual([])
     })
 
     it('treats API-server defaulted StatefulSet volumeClaimTemplates as equivalent', async () => {
@@ -4545,9 +4872,19 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+      // Issue #1349 (P-1) — the template is replaced through a JSON Patch.
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
-      expect(patchBody.spec.template.spec.containers[0].image).toBe('postgres:16')
-      expect(patchBody.spec.volumeClaimTemplates).toBeUndefined()
+      const templateOp = jsonPatchOpAt(patchBody, '/spec/template')
+      expect(templateOp?.op).toBe('replace')
+      expect(
+        (templateOp?.value as { spec: { containers: Array<{ image: string }> } }).spec.containers[0]
+          .image
+      ).toBe('postgres:16')
+      expect(
+        (patchBody as JsonPatchOperation[]).filter(operation =>
+          operation.path.startsWith('/spec/volumeClaimTemplates')
+        )
+      ).toEqual([])
     })
 
     it('patches a legacy scoped StatefulSet with volumeClaimTemplates instead of reporting false drift', async () => {
@@ -4648,12 +4985,22 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+      // Issue #1349 (P-1) — the template is replaced through a JSON Patch.
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
-      expect(patchBody.spec.template.spec.containers[0].env).toContainEqual({
+      const templateOp = jsonPatchOpAt(patchBody, '/spec/template')
+      expect(templateOp?.op).toBe('replace')
+      expect(
+        (templateOp?.value as { spec: { containers: Array<{ env: unknown[] }> } }).spec
+          .containers[0].env
+      ).toContainEqual({
         name: 'ISSUE_690_GENERATION_BUMP',
         value: '1',
       })
-      expect(patchBody.spec.volumeClaimTemplates).toBeUndefined()
+      expect(
+        (patchBody as JsonPatchOperation[]).filter(operation =>
+          operation.path.startsWith('/spec/volumeClaimTemplates')
+        )
+      ).toEqual([])
     })
 
     it('fails StatefulSet reconciliation when volumeClaimTemplate storage drifts', async () => {
@@ -16743,6 +17090,7 @@ describe('WorkflowRecipeReconciler', () => {
                 name: 'db-creds',
                 keys: [{ secretKey: 'db-password', envVar: 'POSTGRES_PASSWORD' }],
               },
+              imagePullSecrets: ['db-pull'],
             },
           ],
         },
@@ -16751,15 +17099,27 @@ describe('WorkflowRecipeReconciler', () => {
           workloadInstances: { db: 'test-recipe-db-live' },
         } as unknown as WorkflowRecipeCRD['status'],
       })
-      // The StatefulSet is live and was rendered while db-creds was accessible:
-      // its template carries the credential.
+      // The StatefulSet is live and was rendered while db-creds and db-pull were
+      // accessible: its template carries the credential and the pull Secret.
       const liveStatefulSet = buildStatefulSet(
         recipe.spec.workloads![0] as Parameters<typeof buildStatefulSet>[0],
         recipe,
         'minimal',
-        new Map([['db-creds', { state: 'accessible', keys: new Set(['db-password']) }]])
+        new Map([
+          ['db-creds', { state: 'accessible', keys: new Set(['db-password']) }],
+          ['db-pull', { state: 'accessible', keys: new Set<string>() }],
+        ])
       ).statefulSet
       expect(JSON.stringify(liveStatefulSet.spec?.template)).toContain('POSTGRES_PASSWORD')
+      expect(liveStatefulSet.spec?.template.spec?.imagePullSecrets).toContainEqual({
+        name: 'db-pull',
+      })
+      const stsName = liveStatefulSet.metadata!.name!
+      const storedStatefulSet = async () =>
+        (await mockAppsApi.readNamespacedStatefulSet({
+          name: stsName,
+          namespace: recipe.metadata.namespace,
+        })) as k8s.V1StatefulSet
       await mockAppsApi.createNamespacedStatefulSet({
         namespace: recipe.metadata.namespace,
         body: liveStatefulSet,
@@ -16777,8 +17137,27 @@ describe('WorkflowRecipeReconciler', () => {
         expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
         expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
         const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
-        expect(patchBody.spec?.template).toBeDefined()
+        expect(jsonPatchOpAt(patchBody, '/spec/template')?.op).toBe('replace')
         expect(JSON.stringify(patchBody)).not.toContain('POSTGRES_PASSWORD')
+        // Issue #1349 (P-1) — the stored object, not only the request, is
+        // credential-free: no foreign secretKeyRef, no denied pull Secret, and the
+        // hash the patch stamped.
+        const stored = await storedStatefulSet()
+        const storedEnv = stored.spec!.template.spec!.containers.flatMap(c => c.env ?? [])
+        expect(storedEnv.filter(e => e.valueFrom?.secretKeyRef?.name === 'db-creds')).toEqual([])
+        expect(
+          (stored.spec!.template.spec!.imagePullSecrets ?? []).filter(s => s.name === 'db-pull')
+        ).toEqual([])
+        const hashOp = (patchBody as JsonPatchOperation[]).find(operation =>
+          operation.path.startsWith('/metadata/annotations')
+        )
+        expect(hashOp).toBeDefined()
+        expect(stored.metadata?.annotations?.['clerum.io/spec-hash']).toEqual(expect.any(String))
+        expect(
+          hashOp!.path === '/metadata/annotations'
+            ? (hashOp!.value as Record<string, string>)['clerum.io/spec-hash']
+            : hashOp!.value
+        ).toBe(stored.metadata?.annotations?.['clerum.io/spec-hash'])
         // ...and ONLY its managed Pods are deleted (forced restart from clean template).
         expect(mockCoreApi.deleteCollectionNamespacedPod).toHaveBeenCalledTimes(1)
         expect(mockCoreApi.deleteCollectionNamespacedPod).toHaveBeenCalledWith(
@@ -16809,6 +17188,124 @@ describe('WorkflowRecipeReconciler', () => {
         // Data-safe on both passes: the StatefulSet object and its PVCs survive.
         expect(mockAppsApi.deleteNamespacedStatefulSet).not.toHaveBeenCalled()
         expect(mockCoreApi.deleteNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+      } finally {
+        mockCustomApi.patchNamespacedCustomObjectStatus
+          .mockReset()
+          .mockImplementation(echoPatchedStatus)
+      }
+    })
+
+    it('T-P1-5: revokes a denied StatefulSet whose stored hash is already the desired one but whose template kept the foreign refs (issue #1349)', async () => {
+      mockCoreApi.deleteCollectionNamespacedPod.mockClear()
+      const denyAt = (resourceVersion: string) =>
+        mockCoreApi.readNamespacedSecret.mockResolvedValue({
+          metadata: { resourceVersion, labels: { 'clerum.io/owner-recipe': 'some-other-recipe' } },
+          data: { 'db-password': 'eA==' },
+        })
+      denyAt('1')
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'db',
+              type: 'statefulset',
+              image: 'postgres:16',
+              port: 5432,
+              envSecret: {
+                name: 'db-creds',
+                keys: [{ secretKey: 'db-password', envVar: 'POSTGRES_PASSWORD' }],
+              },
+              imagePullSecrets: ['db-pull'],
+            },
+          ],
+        },
+        status: {
+          workloadInstances: { db: 'test-recipe-db-live' },
+        } as unknown as WorkflowRecipeCRD['status'],
+      })
+      const credentialed = buildStatefulSet(
+        recipe.spec.workloads![0] as Parameters<typeof buildStatefulSet>[0],
+        recipe,
+        'minimal',
+        new Map([
+          ['db-creds', { state: 'accessible', keys: new Set(['db-password']) }],
+          ['db-pull', { state: 'accessible', keys: new Set<string>() }],
+        ])
+      ).statefulSet
+      const stsName = credentialed.metadata!.name!
+      const namespace = recipe.metadata.namespace!
+      const storedStatefulSet = async () =>
+        (await mockAppsApi.readNamespacedStatefulSet({
+          name: stsName,
+          namespace,
+        })) as k8s.V1StatefulSet
+      const foreignRefs = (sts: k8s.V1StatefulSet) => ({
+        env: sts
+          .spec!.template.spec!.containers.flatMap(c => c.env ?? [])
+          .filter(e => e.valueFrom?.secretKeyRef?.name === 'db-creds'),
+        pull: (sts.spec!.template.spec!.imagePullSecrets ?? []).filter(s => s.name === 'db-pull'),
+      })
+      await mockAppsApi.createNamespacedStatefulSet({ namespace, body: credentialed })
+      const store = installRecipeStore(recipe)
+      const statefulSetPatches = () => mockAppsApi.patchNamespacedStatefulSet.mock.calls.length
+
+      try {
+        // Pass 1 revokes: credential-free template, hash H stamped, entry stored.
+        await reconciler.reconcile(store.current())
+        const revoked = await storedStatefulSet()
+        expect(foreignRefs(revoked)).toEqual({ env: [], pull: [] })
+        const hash = revoked.metadata?.annotations?.['clerum.io/spec-hash']
+        expect(hash).toEqual(expect.any(String))
+        const firstDigest = store.current().status?.secretOwnershipRevocations?.['db']
+        expect(firstDigest).toMatch(/^sha256:/)
+
+        // The state the old strategic-merge patch left: the foreign refs are back
+        // in the stored template while the annotation still says H.
+        const leftover = structuredClone(revoked)
+        leftover.spec!.template = structuredClone(credentialed.spec!.template)
+        await mockAppsApi.replaceNamespacedStatefulSet({
+          name: stsName,
+          namespace,
+          body: leftover,
+        })
+        const reverted = await storedStatefulSet()
+        expect(foreignRefs(reverted).env).toHaveLength(1)
+        expect(foreignRefs(reverted).pull).toHaveLength(1)
+        expect(reverted.metadata?.annotations?.['clerum.io/spec-hash']).toBe(hash)
+
+        // Both Secrets move to a new resourceVersion: a new denial digest.
+        denyAt('2')
+        const patchesBefore = statefulSetPatches()
+
+        await reconciler.reconcile(store.current())
+
+        // Witness: pass 2 sent exactly one StatefulSet patch and restarted the Pods.
+        expect(statefulSetPatches()).toBe(patchesBefore + 1)
+        expect(mockCoreApi.deleteCollectionNamespacedPod).toHaveBeenCalledTimes(2)
+        const pass2Body = mockAppsApi.patchNamespacedStatefulSet.mock.calls[patchesBefore][0].body
+        expect(jsonPatchOpAt(pass2Body, '/spec/template')?.op).toBe('replace')
+        const corrected = await storedStatefulSet()
+        expect(foreignRefs(corrected)).toEqual({ env: [], pull: [] })
+        expect(corrected.metadata?.annotations?.['clerum.io/spec-hash']).toBe(hash)
+        const secondDigest = store.current().status?.secretOwnershipRevocations?.['db']
+        expect(secondDigest).toBe(
+          deniedSecretRevocationDigest(
+            ['db-creds', 'db-pull'],
+            new Map([
+              ['db-creds', { state: 'denied', versions: [`${namespace}/2`] }],
+              ['db-pull', { state: 'denied', versions: [`${namespace}/2`] }],
+            ])
+          )
+        )
+        expect(secondDigest).not.toBe(firstDigest)
+
+        // Pass 3, same versions: the gate skips; no patch, no Pod restart.
+        const secretReads = mockCoreApi.readNamespacedSecret.mock.calls.length
+        await reconciler.reconcile(store.current())
+        // Witness: pass 3 classified the Secrets again.
+        expect(mockCoreApi.readNamespacedSecret.mock.calls.length).toBeGreaterThan(secretReads)
+        expect(statefulSetPatches()).toBe(patchesBefore + 1)
+        expect(mockCoreApi.deleteCollectionNamespacedPod).toHaveBeenCalledTimes(2)
       } finally {
         mockCustomApi.patchNamespacedCustomObjectStatus
           .mockReset()

@@ -204,6 +204,11 @@ export function hasTerminalRunTeardownRecord(recipe: WorkflowRecipeCRD): boolean
   return typeof recipe.status?.terminalRunTeardown?.completedAt === 'string'
 }
 
+/** RFC 6901 — escape one reference token of a JSON Pointer. */
+function jsonPointerToken(key: string): string {
+  return key.replace(/~/g, '~0').replace(/\//g, '~1')
+}
+
 /**
  * The workloads the terminal run teardown deletes: transport runtimes that are
  * neither StatefulSets nor PVC-backed (#558: never delete stateful data here).
@@ -5134,7 +5139,8 @@ export class WorkflowRecipeReconciler {
   private async createOrPatchStatefulSet(
     statefulSet: k8s.V1StatefulSet,
     namespace: string,
-    name: string
+    name: string,
+    options: { ignoreSpecHash?: boolean } = {}
   ): Promise<void> {
     const desiredHash = stampSpecHash(statefulSet)
     let existing = await this.readStatefulSetIfPresent(name, namespace)
@@ -5165,7 +5171,14 @@ export class WorkflowRecipeReconciler {
         }
       }
     }
-    await this.reconcileExistingStatefulSet(statefulSet, existing, desiredHash, namespace, name)
+    await this.reconcileExistingStatefulSet(
+      statefulSet,
+      existing,
+      desiredHash,
+      namespace,
+      name,
+      options
+    )
   }
 
   /** The live StatefulSet, or null on a 404; every other read error is rethrown. */
@@ -5186,9 +5199,17 @@ export class WorkflowRecipeReconciler {
     existing: k8s.V1StatefulSet,
     desiredHash: string,
     namespace: string,
-    name: string
+    name: string,
+    options: { ignoreSpecHash?: boolean } = {}
   ): Promise<void> {
-    if (existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash) {
+    // `ignoreSpecHash` (the Secret-denial teardown only): the hash records which
+    // manifest WRC last sent, not what the API server stored. A template that an
+    // older strategic-merge patch left with leftovers carries the desired hash, so
+    // the revocation compares the templates instead of trusting it.
+    if (
+      !options.ignoreSpecHash &&
+      existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash
+    ) {
       createLogger('wrc', 'workflow-recipes').info(
         'StatefulSet spec hash unchanged; skipping update',
         { name, namespace }
@@ -5201,24 +5222,37 @@ export class WorkflowRecipeReconciler {
       throw this.immutableStatefulSetDriftError(name, namespace, immutableDriftFields)
     }
 
+    // A JSON Patch (RFC 6902), not a strategic merge: `replace /spec/template`
+    // substitutes the whole pod template, so an env entry, pull Secret or volume
+    // the desired template omits is removed. A strategic merge merges those lists
+    // by key and keeps what the patch omits. The patch is applied atomically, so
+    // the hash and the template land together. client-node 1.4.0 already defaults
+    // this operation to application/json-patch+json; the middleware keeps the
+    // content type explicit and independent of the client version.
     const specPatch = this.buildStatefulSetMutableSpecPatch(statefulSet, existing)
-    const patchBody: {
-      metadata: { annotations: Record<string, string> }
-      spec?: Record<string, unknown>
-    } = {
-      metadata: { annotations: { [SPEC_HASH_ANNOTATION]: desiredHash } },
+    const operations: Array<{ op: 'add' | 'replace'; path: string; value: unknown }> = []
+    for (const [key, value] of Object.entries(specPatch)) {
+      operations.push({ op: key === 'template' ? 'replace' : 'add', path: `/spec/${key}`, value })
     }
-    if (Object.keys(specPatch).length > 0) patchBody.spec = specPatch
+    operations.push(
+      existing.metadata?.annotations
+        ? {
+            op: 'add',
+            path: `/metadata/annotations/${jsonPointerToken(SPEC_HASH_ANNOTATION)}`,
+            value: desiredHash,
+          }
+        : {
+            op: 'add',
+            path: '/metadata/annotations',
+            value: { [SPEC_HASH_ANNOTATION]: desiredHash },
+          }
+    )
 
     await this.appsApi.patchNamespacedStatefulSet(
-      { name, namespace, body: patchBody },
-      {
-        middleware: [
-          k8s.setHeaderMiddleware('Content-Type', 'application/strategic-merge-patch+json'),
-        ],
-      }
+      { name, namespace, body: operations },
+      { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/json-patch+json')] }
     )
-    const patchKind = patchBody.spec ? 'metadata+mutable spec' : 'metadata'
+    const patchKind = Object.keys(specPatch).length > 0 ? 'metadata+mutable spec' : 'metadata'
     createLogger('wrc', 'workflow-recipes').info('Patched StatefulSet', {
       name,
       namespace,
@@ -7372,7 +7406,10 @@ export class WorkflowRecipeReconciler {
     // StatefulSet without the denied Secret ref (buildEnvVars drops a 'denied'
     // secretKeyRef) and delete ONLY the managed Pod(s) so they restart from the
     // credential-free template. This stops continued injection; the operator must
-    // still rotate the (potentially compromised) Secret to fully remediate.
+    // still rotate the (potentially compromised) Secret to fully remediate. The
+    // re-render ignores the spec hash: a template an older strategic-merge patch
+    // left with the foreign refs carries the desired hash, so the templates are
+    // compared and the whole template is replaced when they differ.
     if (workload.type === 'statefulset') {
       // Issue #1349 — a StatefulSet that was never deployed has nothing to
       // re-render and no Pod to restart. Read it first: ensureStatefulSet creates
@@ -7384,7 +7421,9 @@ export class WorkflowRecipeReconciler {
       if (!existing) return
       const isolationLevel: SecurityIsolationLevel =
         recipe.spec.security?.isolationLevel ?? 'minimal'
-      await this.ensureStatefulSet(workload as StatefulSetDef, recipe, isolationLevel, secretKeys)
+      await this.ensureStatefulSet(workload as StatefulSetDef, recipe, isolationLevel, secretKeys, {
+        ignoreSpecHash: true,
+      })
       await this.deleteStatefulSetManagedPods(workload as StatefulSetDef, recipe, ns)
       return
     }
@@ -7472,7 +7511,8 @@ export class WorkflowRecipeReconciler {
     w: StatefulSetDef,
     recipe: WorkflowRecipeCRD,
     level: SecurityIsolationLevel,
-    secretKeys?: rb.SecretKeysByName
+    secretKeys?: rb.SecretKeysByName,
+    options: { ignoreSpecHash?: boolean } = {}
   ): Promise<void> {
     const { statefulSet, headlessService } = rb.buildStatefulSet(w, recipe, level, secretKeys, {
       pluginWorkloadSdkEnabled: this.config.pluginWorkloadSdkEnabled,
@@ -7515,9 +7555,10 @@ export class WorkflowRecipeReconciler {
       }
     )
     // Then StatefulSet. StatefulSet immutable fields cannot be full-replaced
-    // safely once PVC-backed workloads exist; patch only mutable fields and
-    // surface immutable drift as status instead of retrying a doomed PUT.
-    await this.createOrPatchStatefulSet(statefulSet, ns, stsName)
+    // safely once PVC-backed workloads exist; patch only mutable fields (the pod
+    // template is replaced whole with a JSON Patch) and surface immutable drift
+    // as status instead of retrying a doomed PUT.
+    await this.createOrPatchStatefulSet(statefulSet, ns, stsName, options)
   }
 
   private statefulSetPvcNames(workload: StatefulSetDef, statefulSetName: string): string[] {
