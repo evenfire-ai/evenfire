@@ -44,22 +44,22 @@ describe('splitToolApprovalText', () => {
   it('never splits inside an entity, a surrogate pair or an escape', () => {
     const head = 'x'.repeat(2998)
     const cases = [
-      { token: '&amp;', witness: (cut: string) => cut.endsWith('&') },
+      { unit: '&amp;', witness: (cut: string) => cut.endsWith('&') },
       {
-        token: '\u{1F600}',
+        unit: '\u{1F600}',
         witness: (cut: string) => {
           const last = cut.charCodeAt(cut.length - 1)
           return last >= 0xd800 && last <= 0xdbff
         },
       },
-      { token: String.raw`\u{E0001}`, witness: (cut: string) => cut.endsWith('\\') },
+      { unit: String.raw`\u{E0001}`, witness: (cut: string) => cut.endsWith('\\') },
     ]
-    for (const { token, witness } of cases) {
-      const content = `${head}\n${token.repeat(10)}\n${'y'.repeat(20)}`
-      // Witness: a cut at the limit would end inside the token.
+    for (const { unit, witness } of cases) {
+      const content = `${head}\n${unit.repeat(10)}\n${'y'.repeat(20)}`
+      // Witness: a cut at the limit would end inside the unit.
       const naive = content.substring(0, 3000)
       expect(witness(naive)).toBe(true)
-      expect(naive.endsWith(token)).toBe(false)
+      expect(naive.endsWith(unit)).toBe(false)
 
       const parts = splitToolApprovalText(content, slack)!
       expect(parts.length).toBeGreaterThan(1)
