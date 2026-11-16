@@ -75,6 +75,8 @@ describe('isTransientInfraError outside the driver', () => {
 
     let typeError: unknown
     try {
+      // A runtime TypeError without a `code`; a property access on undefined would
+      // throw the same error but CodeQL reports it as js/property-access-on-non-object.
       Object.defineProperty(1 as unknown as object, 'x', {})
     } catch (error) {
       typeError = error
