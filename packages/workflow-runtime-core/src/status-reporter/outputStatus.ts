@@ -67,8 +67,8 @@ export function serializeOutputForStatus(value: unknown): string {
  *   object that text is "[object Object]").
  * Throws when the output cannot be converted: JSON cannot serialize it (a
  * BigInt, a throwing `toJSON`), or it has no JSON form and `String()` throws
- * (an object with a null prototype whose `toJSON` returns undefined, an object
- * whose `toString` throws).
+ * (an object whose `toJSON` returns undefined, a function or a symbol, and
+ * that has a null prototype or a `toString` that throws).
  */
 function serializeOutputForReport(output: unknown): string {
   if (typeof output === 'string') return output

@@ -525,6 +525,34 @@ describe('boundStepStatusBody', () => {
     expect(bounded.outputArtifacts).toEqual([artifact(0), artifact(1), artifact(2)])
   })
 
+  it('does not take the artifacts of an output it cut and then halved from the cut', () => {
+    // A JSON document that ends inside the first 65,536 characters: its cut parses on
+    // its own. The 200,000-character modelUsed makes the body need the halving too.
+    const document = JSON.stringify({ artifact: artifact(0) })
+    const report = (output: string) =>
+      boundStepStatusBody({ stepId: 's1', phase: 'completed', output, modelUsed: 'm'.repeat(200_000) })
+    const declaring = `${document}${' '.repeat(70_000)}`
+    const notDeclaring = `${declaring} prose`
+    expect(extractOutputArtifactsForStatus(notDeclaring.slice(0, STATUS_OUTPUT_MAX_CHARS))).toEqual([
+      artifact(0),
+    ])
+    expect(extractOutputArtifactsForStatus(notDeclaring)).toEqual([])
+
+    // Positive control: the whole output declares the artifact, and it is sent.
+    const kept = report(declaring)
+    expect(kept.outputLength).toBe(declaring.length)
+    expect((kept.output as string).length).toBeLessThan(STATUS_OUTPUT_MAX_CHARS)
+    expect(kept.outputArtifacts).toEqual([artifact(0)])
+
+    // The whole output declares none, so none is sent, although the cut declares one.
+    const bounded = report(notDeclaring)
+    // Witness: the output was cut and then halved.
+    expect(bounded.outputLength).toBe(notDeclaring.length)
+    expect((bounded.output as string).length).toBeLessThan(STATUS_OUTPUT_MAX_CHARS)
+    expect(bounded.outputTruncated).toBe(true)
+    expect(bounded).not.toHaveProperty('outputArtifacts')
+  })
+
   it('holds its properties over a table of generated bodies', () => {
     const tableArtifact = (i: number, name = `r-${i}.md`, path = `/output/r-${i}.md`) => ({
       name,
@@ -786,19 +814,35 @@ describe('boundOutputForStatus with a live output value', () => {
     expect(() => boundOutputForStatus(throwing)).toThrow('boom')
   })
 
-  it('throws when an output with no JSON form cannot be converted to a string', () => {
-    // No JSON form, and a null prototype leaves String() no method to call.
-    const nullPrototype = Object.assign(Object.create(null) as object, {
-      toJSON: () => undefined,
-    })
-    expect(() =>
-      boundStepStatusBody({ stepId: 's1', phase: 'completed', output: nullPrototype })
-    ).toThrow(TypeError)
-    // Liveness witness: the same output with a prototype is sent as its String() text.
-    const plain = { toJSON: () => undefined }
-    expect(boundStepStatusBody({ stepId: 's1', phase: 'completed', output: plain }).output).toBe(
-      '[object Object]'
-    )
+  it.each([
+    ['undefined', undefined],
+    ['a function', () => 'f'],
+    ['a symbol', Symbol('s')],
+  ])(
+    'throws when an output whose toJSON returns %s cannot be converted to a string',
+    (_label, toJSONResult) => {
+      // No JSON form, and a null prototype leaves String() no method to call.
+      const nullPrototype = Object.assign(Object.create(null) as object, {
+        toJSON: () => toJSONResult,
+      })
+      expect(() =>
+        boundStepStatusBody({ stepId: 's1', phase: 'completed', output: nullPrototype })
+      ).toThrow(TypeError)
+      // Liveness witness: the same output with a prototype is sent as its String() text.
+      const plain = { toJSON: () => toJSONResult }
+      expect(boundStepStatusBody({ stepId: 's1', phase: 'completed', output: plain }).output).toBe(
+        '[object Object]'
+      )
+    }
+  )
+
+  it('sends an output with a JSON form whose toString throws as its JSON text', () => {
+    const output = {
+      toString: () => {
+        throw new Error('toString')
+      },
+    }
+    expect(boundStepStatusBody({ stepId: 's1', phase: 'completed', output }).output).toBe('{}')
   })
 
   const liveArtifacts = () => [
