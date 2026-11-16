@@ -17,10 +17,10 @@
 //    outlives the HCC budget is precisely the observation slack in which that
 //    correction lands. While that informer is down, the condition stays False
 //    until HCC's next re-read (every 60 s), so a correction that lands after
-//    this timeout reports a failure for a rotation that succeeded.
-//    Latching failure the moment RolloutIncomplete
-//    appears would throw that slack away and report a deterministic false
-//    negative for any rotation converging between 120s and 180s (issue #223).
+//    this timeout reports a failure for a rotation that succeeded. Latching
+//    failure the moment RolloutIncomplete appears would throw that slack away
+//    and report a deterministic false negative for any rotation converging
+//    between 120s and 180s (issue #223).
 //
 // Exported so the tests drive fake timers off THESE values instead of keeping
 // their own copy: a duplicated budget silently stops testing the real one the
