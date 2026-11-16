@@ -157,10 +157,7 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
         } else if (patch.path === '/status') server.status = structuredClone(patch.value)
         else if (patch.path === '/status/conditions')
           server.status.conditions = structuredClone(patch.value)
-        else if (patch.path === '/status/appliedCredentialsRevision') {
-          if (patch.op === 'remove') delete server.status.appliedCredentialsRevision
-          else server.status.appliedCredentialsRevision = patch.value
-        } else throw new Error(`Unexpected status patch ${patch.path}`)
+        else throw new Error(`Unexpected status patch ${patch.path}`)
       }
       server.metadata.resourceVersion = String(++fixture.revision)
       return structuredClone(server)
@@ -1897,6 +1894,89 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
       await vi.advanceTimersByTimeAsync(1)
       await drain(state)
       expect(reads('peer-input')).toBe(before + 2)
+    })
+
+    it('I20b a burst of moving Deployment events reconciles the stuck server once', async () => {
+      const { state, emit } = await startStuckCertified({ withPeer: true })
+      const reconciled = recordReconciledNames(state)
+      const filter = vi.spyOn(state.reconciler, 'rolloutObservationRequiresReconcile')
+      markRolloutReady(witness)
+
+      emit('MODIFIED', witness)
+      emit('MODIFIED', witness)
+      emit('MODIFIED', witness)
+      emit('MODIFIED', witness)
+      await drain(state)
+
+      // Every event passed the filter and queued its own job.
+      expect(filter).toHaveBeenCalledTimes(4)
+      for (const result of filter.mock.results) expect(result.value).toBe(true)
+      expect(reconciled).toEqual([witness])
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+    })
+
+    it('I20c events queued behind a held key reconcile the stuck server once', async () => {
+      const { state, emit } = await startStuckCertified({ withPeer: true })
+      const reconciled = recordReconciledNames(state)
+      const filter = vi.spyOn(state.reconciler, 'rolloutObservationRequiresReconcile')
+      const { blocker, started, release } = holdQueue(state)
+      await started.promise
+      markRolloutReady(witness)
+
+      emit('MODIFIED', witness)
+      emit('MODIFIED', witness)
+      emit('MODIFIED', witness)
+      expect(reconciled).toEqual([])
+      release.resolve()
+      await blocker
+      await drain(state)
+
+      expect(filter).toHaveBeenCalledTimes(3)
+      for (const result of filter.mock.results) expect(result.value).toBe(true)
+      expect(reconciled).toEqual([witness])
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+    })
+
+    it('I20d jobs queued behind a failed wake skip, and the lane retry owns the obligation', async () => {
+      const { state, emit } = await startStuckCertified({ withPeer: true })
+      const reconciled = recordReconciledNames(state)
+      const filter = vi.spyOn(state.reconciler, 'rolloutObservationRequiresReconcile')
+      const outOfPassRetry = vi.spyOn(state, 'scheduleOutOfPassMcpServerRetry')
+      const { blocker, started, release } = holdQueue(state)
+      await started.promise
+      markRolloutReady(witness)
+      let serviceFailures = 0
+      fixture.readService = async name => {
+        if (name !== witness || serviceFailures > 0) return
+        serviceFailures += 1
+        throw new K8sRequestTimeoutError('readNamespacedService', 30_000)
+      }
+
+      emit('MODIFIED', witness)
+      emit('MODIFIED', witness)
+      emit('MODIFIED', witness)
+      emit('MODIFIED', witness)
+      release.resolve()
+      await blocker
+      await drain(state)
+
+      expect(filter).toHaveBeenCalledTimes(4)
+      for (const result of filter.mock.results) expect(result.value).toBe(true)
+      expect(serviceFailures).toBe(1)
+      // The first job reconciled and failed; the three behind it skipped.
+      expect(reconciled).toEqual([witness])
+      expect(outOfPassRetry).toHaveBeenCalledTimes(1)
+      expect(outOfPassRetry).toHaveBeenCalledWith(witness)
+      expect(state.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+
+      expect(reconciled).toEqual([witness, witness])
+      expect(state.reconciler.getStatus(witness).ready).toBe(true)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
     })
 
     it('I21 a stuck server does not force a recovery pass, while a live readiness window still does', async () => {

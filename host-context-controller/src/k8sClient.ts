@@ -2817,6 +2817,14 @@ export class McpServerWatcher implements McpServerProvider {
       // A spec superseded while this job waited has its own queued watch job,
       // which runs external egress before the runtime.
       if (!current || !sameMcpServerDesiredRevision(server, current)) return
+      // Each wake queues its own job, and the reconcile clears the verdict at
+      // its start. A job behind one that already reconciled finds the verdict
+      // gone: it was moved, or the reconcile left an obligation whose retry
+      // the lane owns.
+      const stillAwaiting =
+        this.reconciler.namesAwaitingExternalChange('RolloutIncomplete').includes(name) ||
+        this.reconciler.namesAwaitingExternalChange('SecretAccessDenied').includes(name)
+      if (!stillAwaiting) return
       try {
         await this.reconciler.reconcile(current, {
           isCurrent: () => this.mcpServerWatchEffectIsCurrent(current, generation),

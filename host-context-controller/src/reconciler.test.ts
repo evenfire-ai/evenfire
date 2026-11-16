@@ -198,52 +198,23 @@ function secretResolvedTrue(): StatusConditionFixture {
   }
 }
 
-/**
- * A status subresource that holds the conditions and HCC's applied-credentials
- * record (L1a), as a CRD that declares both fields stores them.
- */
 function installLiveStatus(
   customApi: ReturnType<typeof createMockCustomApi>,
-  initial: StatusConditionFixture[] = [],
-  options: { record?: string; prunesRecord?: boolean } = {}
-): {
-  current: () => StatusConditionFixture[]
-  record: () => string | undefined
-  recordPatches: () => number
-} {
+  initial: StatusConditionFixture[] = []
+): { current: () => StatusConditionFixture[] } {
   let conditions = [...initial]
-  let record = options.record
-  let recordPatches = 0
   customApi.getNamespacedCustomObjectStatus.mockImplementation(async () => ({
     metadata: { resourceVersion: '1' },
-    status: { conditions, ...(record !== undefined && { appliedCredentialsRevision: record }) },
+    status: { conditions },
   }))
   customApi.patchNamespacedCustomObjectStatus.mockImplementation(
     async (req: { body: Array<{ op?: string; path?: string; value?: unknown }> }) => {
-      const recordOp = req.body.find(
-        candidate =>
-          candidate.path === '/status/appliedCredentialsRevision' ||
-          (candidate.path === '/status' &&
-            (candidate.value as { appliedCredentialsRevision?: string })
-              ?.appliedCredentialsRevision !== undefined)
-      )
-      if (recordOp) {
-        recordPatches += 1
-        if (options.prunesRecord) return {}
-        if (recordOp.op === 'remove') record = undefined
-        else if (recordOp.path === '/status')
-          record = (recordOp.value as { appliedCredentialsRevision: string })
-            .appliedCredentialsRevision
-        else record = recordOp.value as string
-        return {}
-      }
       const op = req.body.find(
         candidate =>
           candidate.op === 'add' &&
           (candidate.path === '/status' || candidate.path === '/status/conditions')
       )
       if (!op) throw new Error('status condition add operation was not emitted')
-      if (op.path === '/status') record = undefined
       conditions = (
         op.path === '/status'
           ? ((op.value as { conditions?: StatusConditionFixture[] }).conditions ?? [])
@@ -252,7 +223,7 @@ function installLiveStatus(
       return {}
     }
   )
-  return { current: () => conditions, record: () => record, recordPatches: () => recordPatches }
+  return { current: () => conditions }
 }
 
 function persistReadySeed(server: McpServerCRD): McpServerCRD {
@@ -5267,7 +5238,7 @@ describe('#1338: transient failures of the other managed reconcile calls', () =>
   })
 })
 
-describe('L1a: the applied credentials record in McpServer status (content hash)', () => {
+describe('L1a: the revision the Deployment carries, read after a restart', () => {
   let logs: ReturnType<typeof captureH3Logs>
   beforeEach(() => {
     logs = captureH3Logs()
@@ -5277,7 +5248,7 @@ describe('L1a: the applied credentials record in McpServer status (content hash)
     vi.useRealTimers()
   })
 
-  const RECORD = /^sha256:[0-9a-f]{64}$/
+  const CARRIED = 'clerum.io/credentials-revision'
 
   function rotate(f: ReturnType<typeof h3Cluster>, value = 'rotated-fixture-input-value') {
     f.coreApi.readNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => ({
@@ -5294,7 +5265,7 @@ describe('L1a: the applied credentials record in McpServer status (content hash)
   }
 
   /** A new process on the same cluster, given the object as the watcher caches it. */
-  function restart(f: ReturnType<typeof h3Cluster>, server: McpServerCRD, withRecord = true) {
+  function restart(f: ReturnType<typeof h3Cluster>, server: McpServerCRD) {
     const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(f.appsApi),
@@ -5302,31 +5273,30 @@ describe('L1a: the applied credentials record in McpServer status (content hash)
       customApi: asCustomApi(f.customApi),
     })
     reconciler.setIncompleteReconciliationListener(vi.fn())
-    const record = f.status.record()
-    const persisted = {
-      ...server,
-      status: {
-        conditions: f.status.current(),
-        ...(withRecord && record !== undefined && { appliedCredentialsRevision: record }),
-      },
-    } as McpServerCRD
+    const persisted = { ...server, status: { conditions: f.status.current() } } as McpServerCRD
     return { reconciler, persisted }
   }
 
-  async function readyWithRecord(server = h3Server()) {
-    const f = await h3ReadyCluster(server)
-    // Witness that the writer ran on the first completed reconcile.
-    expect(f.status.record()).toMatch(RECORD)
-    expect(f.status.recordPatches()).toBe(1)
-    return f
+  function remoteH3Server(): McpServerCRD {
+    const base = h3Server()
+    return { ...base, spec: { ...base.spec, remote: { baseUrl: 'https://api.example.com' } } }
   }
 
-  function recordWriteIn(req: any): boolean {
-    return req.body.some(
-      (op: any) =>
-        op.path === '/status/appliedCredentialsRevision' ||
-        op.value?.appliedCredentialsRevision !== undefined
-    )
+  const deploymentReads = (f: ReturnType<typeof h3Cluster>) =>
+    f.appsApi.readNamespacedDeployment.mock.calls.length
+  const serviceReads = (f: ReturnType<typeof h3Cluster>) =>
+    f.coreApi.readNamespacedService.mock.calls.length
+  const forbidden = () => Object.assign(new Error('fixture access denied'), { code: 403 })
+
+  /** The mocked config's allowlist mode; a local h3 image is never on its (empty) list. */
+  async function withEnforcedImageAllowlist(run: () => Promise<void>): Promise<void> {
+    const cfg = (await import('./config')).config as { enforcePluginImageAllowlist?: boolean }
+    cfg.enforcePluginImageAllowlist = true
+    try {
+      await run()
+    } finally {
+      delete cfg.enforcePluginImageAllowlist
+    }
   }
 
   it.each([
@@ -5335,46 +5305,66 @@ describe('L1a: the applied credentials record in McpServer status (content hash)
       (f: ReturnType<typeof h3Cluster>) =>
         f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService')),
     ],
-    [
-      'the Deployment read',
-      (f: ReturnType<typeof h3Cluster>) =>
-        f.appsApi.readNamespacedDeployment.mockRejectedValueOnce(
-          h3Timeout('readNamespacedDeployment')
-        ),
-    ],
   ])(
     'T-A1.1 after a restart, a Secret rotated while HCC was down and a timeout at %s publish not-ready',
     async (_site, fail) => {
       const server = h3Server()
-      const f = await readyWithRecord(server)
+      const f = await h3ReadyCluster(server)
       const { reconciler, persisted } = restart(f, server)
       expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
       rotate(f)
       fail(f)
       const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+      const reads = deploymentReads(f)
 
       await reconciler.reconcile(persisted)
 
+      // Witness: the carried read ran once, before the failing Service read.
+      expect(deploymentReads(f) - reads).toBe(1)
       expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
       expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
       expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
     }
   )
 
-  it('T-A1.1 the same for a remote server whose ConfigMap read times out', async () => {
-    const base = h3Server()
-    const server = {
-      ...base,
-      spec: { ...base.spec, remote: { baseUrl: 'https://api.example.com' } },
-    }
-    const f = await readyWithRecord(server)
+  it('T-A1.1b (accepted limit) a rotated Secret whose carried read times out keeps ready until a read succeeds', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
     const { reconciler, persisted } = restart(f, server)
     rotate(f)
-    f.coreApi.readNamespacedConfigMap.mockRejectedValueOnce(h3Timeout('readNamespacedConfigMap'))
-    const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+    f.appsApi.readNamespacedDeployment.mockRejectedValueOnce(h3Timeout('readNamespacedDeployment'))
+    const kept = await reconcileCallFailures('resource_sync', 'verdict_kept')
 
     await reconciler.reconcile(persisted)
 
+    expect(await reconcileCallFailures('resource_sync', 'verdict_kept')).toBe(kept + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+    expect(serviceReads(f)).toBe(1)
+
+    // The next reconcile reads the carried revision, so a Service timeout publishes.
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const published = await reconcileCallFailures('resource_sync', 'not_ready_published')
+
+    await reconciler.reconcile(persisted)
+
+    expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(published + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+  })
+
+  it('T-A1.1c a carried revision that differs and a timeout at the Deployment sync read publish not-ready', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const { reconciler, persisted } = restart(f, server)
+    rotate(f)
+    f.appsApi.readNamespacedDeployment
+      .mockImplementationOnce(f.readDeployment)
+      .mockRejectedValueOnce(h3Timeout('readNamespacedDeployment'))
+    const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+    const reads = deploymentReads(f)
+
+    await reconciler.reconcile(persisted)
+
+    expect(deploymentReads(f) - reads).toBe(2)
     expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
     expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
     expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
@@ -5382,7 +5372,7 @@ describe('L1a: the applied credentials record in McpServer status (content hash)
 
   it('T-A1.2 (the #1338 property) after a restart with the Secret unchanged, a Service timeout keeps ready', async () => {
     const server = h3Server()
-    const f = await readyWithRecord(server)
+    const f = await h3ReadyCluster(server)
     const { reconciler, persisted } = restart(f, server)
     f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
     const kept = await reconcileCallFailures('resource_sync', 'verdict_kept')
@@ -5393,23 +5383,39 @@ describe('L1a: the applied credentials record in McpServer status (content hash)
     expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
   })
 
-  it('T-A1.3 (migration) a persisted status without the record keeps ready on a rotated Secret, as before', async () => {
+  it('T-A1.2 after a restart with the Secret unchanged, a timeout at the carried read keeps ready', async () => {
     const server = h3Server()
-    const f = await readyWithRecord(server)
-    const { reconciler, persisted } = restart(f, server, false)
-    rotate(f)
-    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const f = await h3ReadyCluster(server)
+    const { reconciler, persisted } = restart(f, server)
+    f.appsApi.readNamespacedDeployment.mockRejectedValueOnce(h3Timeout('readNamespacedDeployment'))
     const kept = await reconcileCallFailures('resource_sync', 'verdict_kept')
+    const reads = deploymentReads(f)
 
     await reconciler.reconcile(persisted)
 
+    expect(deploymentReads(f) - reads).toBe(1)
     expect(await reconcileCallFailures('resource_sync', 'verdict_kept')).toBe(kept + 1)
     expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
   })
 
+  it('T-A1.3 (migration) a Deployment written before this version, with no status record, publishes not-ready on a rotated Secret', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const { reconciler, persisted } = restart(f, server)
+    expect(persisted.status).toEqual({ conditions: f.status.current() })
+    rotate(f)
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+
+    await reconciler.reconcile(persisted)
+
+    expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+  })
+
   it('T-A1.4 (README known limit) a rotated Secret whose first read after a restart times out keeps ready', async () => {
     const server = h3Server()
-    const f = await readyWithRecord(server)
+    const f = await h3ReadyCluster(server)
     const { reconciler, persisted } = restart(f, server)
     rotate(f)
     f.coreApi.readNamespacedSecret.mockRejectedValueOnce(h3Timeout())
@@ -5421,68 +5427,9 @@ describe('L1a: the applied credentials record in McpServer status (content hash)
     expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
   })
 
-  it('T-A1.5 a second reconcile of an unchanged server reads and writes no record', async () => {
-    const server = h3Server()
-    const f = await readyWithRecord(server)
-    const statusReads = f.customApi.getNamespacedCustomObjectStatus.mock.calls.length
-    const secretReads = f.secretReads()
-    const conditionWrites = vi.spyOn(f.reconciler, 'writeStatusCondition')
-
-    await f.reconciler.reconcile(server)
-
-    expect(f.secretReads()).toBe(secretReads + 1)
-    // Each condition write reads the status once; the record adds no read.
-    expect(conditionWrites).toHaveBeenCalled()
-    expect(f.customApi.getNamespacedCustomObjectStatus.mock.calls.length - statusReads).toBe(
-      conditionWrites.mock.calls.length
-    )
-    expect(f.status.recordPatches()).toBe(1)
-  })
-
-  it('T-A1.6 a rotation with HCC running records the new content hash with one patch', async () => {
-    const server = h3Server()
-    const f = await readyWithRecord(server)
-    const first = f.status.record()
-    rotate(f)
-
-    await f.reconciler.reconcile(server)
-
-    expect(f.appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
-    expect(f.status.recordPatches()).toBe(2)
-    expect(f.status.record()).toMatch(RECORD)
-    expect(f.status.record()).not.toBe(first)
-  })
-
-  it('T-A1.7 a failed record write leaves an obligation, and the next reconcile writes it', async () => {
-    const server = h3Server()
-    const f = h3Cluster()
-    const livePatch = f.customApi.patchNamespacedCustomObjectStatus.getMockImplementation()
-    if (!livePatch) throw new Error('h3Cluster installs a status store')
-    let failRecord = true
-    f.customApi.patchNamespacedCustomObjectStatus.mockImplementation(async (req: any) => {
-      if (recordWriteIn(req) && failRecord) {
-        failRecord = false
-        throw Object.assign(new Error('internal error'), { code: 500 })
-      }
-      return livePatch(req)
-    })
-
-    await f.reconciler.reconcile(server)
-
-    expect(failRecord).toBe(false)
-    expect(f.status.record()).toBeUndefined()
-    expect(f.reconciler.hasIncompleteReconciliation()).toBe(true)
-    expect(f.listener).toHaveBeenCalledWith('h3-server')
-
-    await f.reconciler.reconcile(server)
-
-    expect(f.status.record()).toMatch(RECORD)
-    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
-  })
-
   it('T-A1.8 (content hash) a Secret rewritten with the same data while HCC was down still keeps ready', async () => {
     const server = h3Server()
-    const f = await readyWithRecord(server)
+    const f = await h3ReadyCluster(server)
     const { reconciler, persisted } = restart(f, server)
     rewriteSameData(f)
     f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
@@ -5494,86 +5441,222 @@ describe('L1a: the applied credentials record in McpServer status (content hash)
     expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
   })
 
-  it('T-A1.9 a CRD that prunes the field costs one write attempt per process', async () => {
+  it.each([
+    [
+      'deleted while HCC was down',
+      (f: ReturnType<typeof h3Cluster>) => {
+        f.deployments.delete('h3-server')
+      },
+    ],
+    [
+      'without the annotation',
+      (f: ReturnType<typeof h3Cluster>) => {
+        delete f.deployments.get('h3-server').spec.template.metadata.annotations[CARRIED]
+      },
+    ],
+  ])(
+    'T-A1.9b a Deployment %s, Secret unchanged, and a Service timeout publish not-ready',
+    async (_case, alter) => {
+      const server = h3Server()
+      const f = await h3ReadyCluster(server)
+      const { reconciler, persisted } = restart(f, server)
+      alter(f)
+      f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+      const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+      const reads = deploymentReads(f)
+
+      await reconciler.reconcile(persisted)
+
+      expect(deploymentReads(f) - reads).toBe(1)
+      expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
+      expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+    }
+  )
+
+  it('T-A1.10b a server without envSecret is not compared: a stale carried annotation and a Service timeout keep ready', async () => {
     const server = h3Server()
-    const f = h3Cluster()
-    const pruning = installLiveStatus(f.customApi, [], { prunesRecord: true })
-
-    await f.reconciler.reconcile(server)
-    await f.reconciler.reconcile(server)
-    await f.reconciler.reconcile(server)
-
-    expect(f.secretReads()).toBe(3)
-    expect(pruning.recordPatches()).toBe(1)
-    expect(pruning.record()).toBeUndefined()
-    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
-  })
-
-  it('T-A1.10 removing envSecret from the spec removes the record after the sync', async () => {
-    const server = h3Server()
-    const f = await readyWithRecord(server)
+    const f = await h3ReadyCluster(server)
     const withoutSecret = { ...server, spec: { ...server.spec, envSecret: undefined } }
-
     await f.reconciler.reconcile(withoutSecret)
-
-    expect(f.status.recordPatches()).toBe(2)
-    expect(f.status.record()).toBeUndefined()
-  })
-
-  it('T-A1.11 the record is the content hash the Deployment carries, and no Secret value', async () => {
-    const server = h3Server()
-    const f = await readyWithRecord(server)
-    const record = f.status.record() ?? ''
-
-    expect(record).toMatch(RECORD)
-    expect(record).not.toContain('fixture-input-value')
-    expect(record).not.toContain(storedSecret('fixture-input-value'))
-    const deployment = f.deployments.get('h3-server')
-    expect(record).toBe(
-      `sha256:${deployment.spec.template.metadata.annotations['clerum.io/credentials-revision']}`
+    expect(f.reconciler.getStatus(withoutSecret)).toMatchObject({ ready: true })
+    // Precondition: the Deployment still carries the revision of the removed Secret.
+    expect(f.deployments.get('h3-server').spec.template.metadata.annotations?.[CARRIED]).toMatch(
+      /^[0-9a-f]{64}$/
     )
-  })
-
-  it('T-A1.14 a stale record whose Deployment is already up to date is cleared, so a rollout read timeout keeps ready', async () => {
-    const server = h3Server()
-    const f = await readyWithRecord(server)
-    const stale = f.status.record()
-    const livePatch = f.customApi.patchNamespacedCustomObjectStatus.getMockImplementation()
-    if (!livePatch) throw new Error('h3Cluster installs a status store')
-    // HCC applies a rotation, but the record write fails before a restart.
-    rotate(f)
-    f.customApi.patchNamespacedCustomObjectStatus.mockImplementation(async (req: any) => {
-      if (recordWriteIn(req)) throw Object.assign(new Error('internal error'), { code: 500 })
-      return livePatch(req)
-    })
-    await f.reconciler.reconcile(server)
-    expect(f.appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
-    expect(f.status.record()).toBe(stale)
-    f.customApi.patchNamespacedCustomObjectStatus.mockImplementation(livePatch)
-    const { reconciler, persisted } = restart(f, server)
-    const kept = await reconcileCallFailures('rollout_read', 'verdict_kept')
-    f.appsApi.readNamespacedDeployment
-      .mockImplementationOnce(f.readDeployment)
-      .mockRejectedValueOnce(h3Timeout('readNamespacedDeployment'))
+    const { reconciler, persisted } = restart(f, withoutSecret)
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const kept = await reconcileCallFailures('resource_sync', 'verdict_kept')
+    const reads = deploymentReads(f)
+    const services = serviceReads(f)
 
     await reconciler.reconcile(persisted)
 
-    expect(f.appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
-    expect(await reconcileCallFailures('rollout_read', 'verdict_kept')).toBe(kept + 1)
+    expect(serviceReads(f) - services).toBe(1)
+    expect(deploymentReads(f) - reads).toBe(0)
+    expect(await reconcileCallFailures('resource_sync', 'verdict_kept')).toBe(kept + 1)
     expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
-    expect(f.status.record()).toMatch(RECORD)
-    expect(f.status.record()).not.toBe(stale)
   })
 
-  it('T-A1.15 a pre-deploy server writes the record and completes the handshake on its first reconcile', async () => {
-    const server = h3Server({ annotations: { [PRE_DEPLOY_ANNOTATION]: 'true' } })
-    const f = h3Cluster()
+  it('T-A1.16 a persisted Ready=False verdict makes no carried read and is published as before', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const { reconciler, persisted } = restart(f, server)
+    persisted.status = {
+      conditions: f.status
+        .current()
+        .map(condition =>
+          condition.type === 'Ready'
+            ? { ...condition, status: 'False', reason: 'ReconcileError', message: 'fixture' }
+            : condition
+        ),
+    } as McpServerCRD['status']
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+    const reads = deploymentReads(f)
+    const services = serviceReads(f)
 
+    await reconciler.reconcile(persisted)
+
+    expect(serviceReads(f) - services).toBe(1)
+    expect(deploymentReads(f) - reads).toBe(0)
+    expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+  })
+
+  it('T-A1.17 after the first completed sync a failing reconcile makes no carried read', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const { reconciler, persisted } = restart(f, server)
+    const firstReads = deploymentReads(f)
+    await reconciler.reconcile(persisted)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+    // The first reconcile after the restart made the carried read, plus
+    // ensureDeployment's read and the rollout read.
+    expect(deploymentReads(f) - firstReads).toBe(3)
+    f.coreApi.readNamespacedService.mockRejectedValueOnce(h3Timeout('readNamespacedService'))
+    const kept = await reconcileCallFailures('resource_sync', 'verdict_kept')
+    const reads = deploymentReads(f)
+    const services = serviceReads(f)
+
+    await reconciler.reconcile(persisted)
+
+    expect(serviceReads(f) - services).toBe(1)
+    expect(deploymentReads(f) - reads).toBe(0)
+    expect(await reconcileCallFailures('resource_sync', 'verdict_kept')).toBe(kept + 1)
+  })
+
+  it.each([
+    ['T-A1.18a', 'a timeout', () => h3Timeout('readNamespacedDeployment')],
+    ['T-A1.18b', 'a 403', forbidden],
+  ])(
+    '%s enforce mode: a disallowed local image publishes ImageNotAllowed after a restart, and a Deployment read that would fail with %s is not made',
+    async (_id, _case, failure) => {
+      const server = h3Server()
+      const f = await h3ReadyCluster(server)
+      const { reconciler, persisted } = restart(f, server)
+      f.appsApi.readNamespacedDeployment.mockRejectedValueOnce(failure())
+      const reads = deploymentReads(f)
+
+      await withEnforcedImageAllowlist(() => reconciler.reconcile(persisted))
+
+      expect(f.condition('Ready')).toMatchObject({ status: 'False', reason: 'ImageNotAllowed' })
+      expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+      expect(reconciler.getStatus(persisted).message).toContain('plugin image allowlist')
+      expect(deploymentReads(f) - reads).toBe(0)
+    }
+  )
+
+  it('T-A1.18c a remote server reads the carried revision before its ConfigMap: a rotated Secret and a ConfigMap timeout publish not-ready', async () => {
+    const server = remoteH3Server()
+    const f = await h3ReadyCluster(server)
+    const { reconciler, persisted } = restart(f, server)
+    rotate(f)
+    f.coreApi.readNamespacedConfigMap.mockRejectedValueOnce(h3Timeout('readNamespacedConfigMap'))
+    const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+    const reads = deploymentReads(f)
+
+    await reconciler.reconcile(persisted)
+
+    expect(deploymentReads(f) - reads).toBe(1)
+    expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+    expect(f.appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['T-A1.19', 'local', h3Server, 'readNamespacedService' as const],
+    ['T-A1.19r', 'remote', remoteH3Server, 'readNamespacedConfigMap' as const],
+  ])(
+    '%s a %s reconcile superseded while the carried read is pending writes nothing and reads no runtime object',
+    async (_id, _kind, build, firstRuntimeRead) => {
+      const server = build()
+      const f = await h3ReadyCluster(server)
+      const { reconciler, persisted } = restart(f, server)
+      let current: McpServerCRD = persisted
+      reconciler.setInventoryAuthority(() => ({ known: true, generation: 1 }))
+      reconciler.setResolveCurrentServer(name => (name === persisted.name ? current : undefined))
+      rotate(f)
+      const readStarted = deferred()
+      const releaseRead = deferred()
+      f.appsApi.readNamespacedDeployment.mockImplementationOnce(async (request: any) => {
+        readStarted.resolve()
+        await releaseRead.promise
+        return f.readDeployment(request)
+      })
+      const reads = deploymentReads(f)
+      const runtimeReads = f.coreApi[firstRuntimeRead].mock.calls.length
+      const patches = f.patches()
+      const statusBefore = structuredClone((reconciler as any).statusMap.get(persisted.name))
+
+      const reconcile = reconciler.reconcile(persisted)
+      await readStarted.promise
+      current = { ...persisted, generation: (persisted.generation ?? 1) + 1 }
+      releaseRead.resolve()
+      await reconcile
+
+      expect(deploymentReads(f) - reads).toBe(1)
+      expect(f.coreApi[firstRuntimeRead].mock.calls.length - runtimeReads).toBe(0)
+      expect(f.patches() - patches).toBe(0)
+      expect((reconciler as any).statusMap.get(persisted.name)).toEqual(statusBefore)
+    }
+  )
+
+  it('T-A1.20 a 403 on the carried read publishes not-ready as a failed resource sync', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const { reconciler, persisted } = restart(f, server)
+    f.appsApi.readNamespacedDeployment.mockRejectedValueOnce(forbidden())
+    const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+    const reads = deploymentReads(f)
+    const services = serviceReads(f)
+
+    await reconciler.reconcile(persisted)
+
+    expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
+    expect(reconciler.getStatus(persisted).message).toContain('Resource sync failed')
+    // Witness: the failing read was the carried one; the reconcile stopped
+    // before the Service ensure of this attempt.
+    expect(deploymentReads(f) - reads).toBe(1)
+    expect(serviceReads(f) - services).toBe(0)
+  })
+
+  it('T-A1.20b a remote server makes one carried read per reconcile, before its ConfigMap', async () => {
+    const server = remoteH3Server()
+    const f = await h3ReadyCluster(server)
+    // Baseline: a completed reconcile in the running process reads the
+    // Deployment twice (ensureDeployment and the rollout read).
+    const baseline = deploymentReads(f)
     await f.reconciler.reconcile(server)
+    expect(deploymentReads(f) - baseline).toBe(2)
+    const { reconciler, persisted } = restart(f, server)
+    const reads = deploymentReads(f)
 
-    expect(f.status.record()).toMatch(RECORD)
-    expect(f.customApi.patchNamespacedCustomObject).toHaveBeenCalledTimes(1)
-    expect(f.reconciler.getStatus(server)).toMatchObject({ ready: true })
-    expect(f.reconciler.hasIncompleteReconciliation()).toBe(false)
+    await reconciler.reconcile(persisted)
+
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+    // The same two reads plus exactly one carried read.
+    expect(deploymentReads(f) - reads).toBe(3)
   })
 })
