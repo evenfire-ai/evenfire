@@ -19,6 +19,13 @@ import type { NotificationDeliveryClient } from './notificationDeliveryClient'
 import { createProgressStream } from './progressClient'
 import { formatFinalMessage, formatProgressUpdate } from './progressFormatter'
 import { type ChannelReaderRuntimeSource, MessageResponse, RPCClient } from './rpcClient'
+import {
+  TOOL_APPROVAL_MAX_PARTS,
+  TOOL_APPROVAL_NOT_SHOWN_DENIED,
+  TOOL_APPROVAL_NOT_SHOWN_STILL_WAITING,
+  TOOL_APPROVAL_PART_LIMIT,
+  splitToolApprovalText,
+} from './toolApprovalParts'
 import { type TraceContextV1, mintChannelTraceContext } from './traceContext'
 import {
   Attachment,
@@ -85,6 +92,29 @@ interface PendingApprovalState {
   actionToken: string
   startResultPollingFallback?: () => void
   updateStatusAfterDecision?: (content: string) => Promise<void>
+  /**
+   * Removes the controls of an approval sent as several messages, which sit
+   * on its last message rather than on the status bubble. Never rejects.
+   */
+  clearControls?: () => Promise<void>
+}
+
+/** The last message of an approval sent in parts: the one with the controls. */
+interface ToolApprovalLastPart {
+  messageId: string
+  text: string
+}
+
+/** A part of a tool approval that the channel did not deliver. */
+class ToolApprovalPartError extends Error {
+  constructor(
+    readonly partIndex: number,
+    readonly partCount: number,
+    reason: string
+  ) {
+    super(reason)
+    this.name = 'ToolApprovalPartError'
+  }
 }
 
 interface ProcessedProviderEvent {
@@ -1769,6 +1799,8 @@ export class ChannelReader {
         this.pendingApprovalChannelScope(pending.originalMessage) === channelScope
       ) {
         this.pendingApprovals.delete(key)
+        // The clearer never rejects, so the detached call cannot go unhandled.
+        void pending.clearControls?.()
       }
     }
   }
@@ -1805,8 +1837,13 @@ export class ChannelReader {
   }
 
   /**
-   * Offer a tool approval that mcp-host returned in a synchronous response:
-   * register it, then send it as a reply with the channel's approval controls.
+   * Offer a tool approval that mcp-host returned in a synchronous response.
+   *
+   * One message (the approval fits, the channel has no limit, or there is no
+   * adapter): register it, then send it as a reply with the channel's approval
+   * controls. Longer: send it as several messages, the controls on the last,
+   * and register it only after the last one was sent; if it cannot be shown
+   * whole, deny the request and tell the user.
    */
   private async deliverSyncToolApproval(
     msg: Message,
@@ -1816,6 +1853,39 @@ export class ChannelReader {
     console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
     const approvalKey = this.pendingApprovalKey(msg)
     const actionToken = newToolApprovalActionToken()
+    const delivery = toolApprovalDelivery(msg.channelType, notification, actionToken)
+    const adapter = this.adapterForMessage(msg)
+    const limit = TOOL_APPROVAL_PART_LIMIT[msg.channelType]
+    const parts = adapter && limit ? splitToolApprovalText(delivery.content, limit) : null
+    if (!adapter || !limit || parts?.length === 1) {
+      this.pendingApprovals.set(approvalKey, {
+        taskId,
+        requestId,
+        userId,
+        channelType: msg.channelType,
+        channelId: msg.channelId,
+        originalMessage: msg,
+        createdAt: new Date(),
+        actionToken,
+      })
+      await this.sendReply(msg, delivery.content, undefined, delivery.options)
+      return
+    }
+
+    const ids = { taskId, requestId, channelType: msg.channelType }
+    if (!parts) {
+      this.logToolApprovalNotShown(ids, null)
+      await this.denyUnshownToolApproval(msg, userId, requestId)
+      return
+    }
+    let last: ToolApprovalLastPart
+    try {
+      ;({ last } = await this.sendToolApprovalParts(msg, adapter, parts, actionToken))
+    } catch (err) {
+      this.logToolApprovalNotShown(ids, err)
+      await this.denyUnshownToolApproval(msg, userId, requestId)
+      return
+    }
     this.pendingApprovals.set(approvalKey, {
       taskId,
       requestId,
@@ -1825,9 +1895,138 @@ export class ChannelReader {
       originalMessage: msg,
       createdAt: new Date(),
       actionToken,
+      clearControls: this.toolApprovalControlsClearer(adapter, this.replyChannelId(msg), last, ids),
     })
-    const delivery = toolApprovalDelivery(msg.channelType, notification, actionToken)
-    await this.sendReply(msg, delivery.content, undefined, delivery.options)
+  }
+
+  /**
+   * Sends the parts of a tool approval in order, the controls on the last.
+   * Throws a ToolApprovalPartError when a part is not delivered (the adapter
+   * throws or returns no message id); nothing after it is sent. `stop` is
+   * checked before each send: when it returns true no further part is sent and
+   * the result has `stopped: true` and no `last`.
+   */
+  private sendToolApprovalParts(
+    msg: Message,
+    adapter: ChannelAdapter,
+    parts: string[],
+    actionToken: string
+  ): Promise<{ stopped: false; last: ToolApprovalLastPart }>
+  private sendToolApprovalParts(
+    msg: Message,
+    adapter: ChannelAdapter,
+    parts: string[],
+    actionToken: string,
+    stop: () => boolean
+  ): Promise<{ stopped: false; last: ToolApprovalLastPart } | { stopped: true }>
+  private async sendToolApprovalParts(
+    msg: Message,
+    adapter: ChannelAdapter,
+    parts: string[],
+    actionToken: string,
+    stop?: () => boolean
+  ): Promise<{ stopped: false; last: ToolApprovalLastPart } | { stopped: true }> {
+    const channelId = this.replyChannelId(msg)
+    const replyTo = this.replyTargetMessageId(msg)
+    const send = async (
+      index: number,
+      options: SendMessageOptions | undefined
+    ): Promise<string> => {
+      let messageId: string | undefined
+      try {
+        messageId = await adapter.sendMessage(channelId, parts[index], replyTo, undefined, options)
+      } catch (err) {
+        throw new ToolApprovalPartError(
+          index + 1,
+          parts.length,
+          err instanceof Error ? err.message : String(err)
+        )
+      }
+      if (!messageId) {
+        throw new ToolApprovalPartError(
+          index + 1,
+          parts.length,
+          'the channel returned no message id'
+        )
+      }
+      return messageId
+    }
+
+    const lastIndex = parts.length - 1
+    for (let index = 0; index < lastIndex; index++) {
+      if (stop?.()) return { stopped: true }
+      await send(index, undefined)
+    }
+    if (stop?.()) return { stopped: true }
+    const lastText = parts[lastIndex]
+    const messageId = await send(
+      lastIndex,
+      toolApprovalMessageOptions(msg.channelType, lastText, actionToken)
+    )
+    return { stopped: false, last: { messageId, text: lastText } }
+  }
+
+  /** Removes the controls of a multi-part approval's last message. Never rejects: a failure is logged. */
+  private toolApprovalControlsClearer(
+    adapter: ChannelAdapter,
+    channelId: string,
+    last: ToolApprovalLastPart,
+    ids: { taskId: string; requestId: string; channelType: Message['channelType'] }
+  ): () => Promise<void> {
+    return async () => {
+      try {
+        await adapter.editMessage(channelId, last.messageId, last.text)
+      } catch (err) {
+        console.error(
+          `[Main] Failed to remove the approval controls for task ${ids.taskId} (request ${ids.requestId}, ${ids.channelType}): ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        )
+      }
+    }
+  }
+
+  /**
+   * Logs a tool approval that was not shown, with ids only: the approval text
+   * carries tool parameters such as file names. `err` is null when the text
+   * cannot be split into the channel's messages.
+   */
+  private logToolApprovalNotShown(
+    ids: { taskId: string; requestId: string; channelType: Message['channelType'] },
+    err: unknown
+  ): void {
+    const detail =
+      err === null
+        ? `it does not fit the channel's messages (a line over the limit, a part with no visible text, or more than ${TOOL_APPROVAL_MAX_PARTS} parts)`
+        : err instanceof ToolApprovalPartError
+          ? `part ${err.partIndex} of ${err.partCount} was not delivered: ${err.message}`
+          : `${err instanceof Error ? err.message : String(err)}`
+    console.error(
+      `[Main] Tool approval for task ${ids.taskId} (request ${ids.requestId}, ${ids.channelType}) was not shown: ${detail}`
+    )
+  }
+
+  /**
+   * Denies at mcp-host a tool approval that could not be shown, and tells the
+   * user which outcome it had. Never rejects: sendDenial and sendReply catch.
+   */
+  private async denyUnshownToolApproval(
+    msg: Message,
+    userId: string,
+    requestId: string
+  ): Promise<'denied' | 'denial_rejected'> {
+    const denial = await this.rpcClient.sendDenial(
+      userId,
+      requestId,
+      msg.channelType,
+      msg.channelId
+    )
+    if (denial.success) {
+      await this.sendReply(msg, TOOL_APPROVAL_NOT_SHOWN_DENIED)
+      return 'denied'
+    }
+    await this.sendReply(msg, TOOL_APPROVAL_NOT_SHOWN_STILL_WAITING)
+    return 'denial_rejected'
   }
 
   /**
@@ -1847,7 +2046,11 @@ export class ChannelReader {
    * - On `suspended`: register pending approval, edit bubble with the
    *   notification (fetched once from getTaskResult; falls back to a generic
    *   message if the cache hasn't been written yet — the sub-millisecond
-   *   micro-race in mcp-host's taskExecutor.ts:472-485).
+   *   micro-race in mcp-host's taskExecutor.ts:472-485). An approval longer
+   *   than one message of the channel is sent instead as several messages
+   *   below the bubble, the controls on the last, and registered only after
+   *   the last one was sent; the controls are removed from that message when
+   *   the approval is decided, the task ends or the entry expires.
    * - On `tool_start`/`tool_complete` after approval: keeps editing the
    *   bubble with progress.
    * - On `terminal`: fetch final response via getTaskResult, edit bubble.
@@ -1936,6 +2139,11 @@ export class ChannelReader {
       let finalDeliveryInFlight: Promise<boolean> | null = null
       let resultPollingFallbackStarted = false
       let approvalPromptDelivered = false
+      // The request this task attempted to send in parts. Set before the first
+      // await and never cleared: the Slack and Teams result poll asks again every
+      // two seconds, and a multi-part approval has no entry until its last part
+      // was sent, so the entry alone cannot stop a second attempt.
+      let multiPartRequestId: string | undefined
 
       const deliverApprovalPrompt = async (params: {
         requestId: string
@@ -1944,16 +2152,89 @@ export class ChannelReader {
       }): Promise<void> => {
         const approvalKey = this.pendingApprovalKey(msg)
         const existing = this.pendingApprovals.get(approvalKey)
-        if (approvalPromptDelivered && existing?.requestId === params.requestId) return
+        if (
+          (approvalPromptDelivered && existing?.requestId === params.requestId) ||
+          multiPartRequestId === params.requestId
+        ) {
+          return
+        }
 
-        approvalPromptDelivered = true
-        acceptProgressUpdates = false
         const actionToken =
           existing?.requestId === params.requestId
             ? existing.actionToken
             : newToolApprovalActionToken()
+        const delivery = toolApprovalDelivery(msg.channelType, params.notification, actionToken)
+        const limit = TOOL_APPROVAL_PART_LIMIT[msg.channelType]
+        const parts = limit ? splitToolApprovalText(delivery.content, limit) : [delivery.content]
 
+        if (parts?.length === 1) {
+          // Fits in one message: the status bubble becomes the approval.
+          approvalPromptDelivered = true
+          acceptProgressUpdates = false
+          console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${params.requestId})`)
+          this.pendingApprovals.set(approvalKey, {
+            taskId,
+            requestId: params.requestId,
+            userId: params.userId,
+            channelType: msg.channelType,
+            channelId: msg.channelId,
+            originalMessage: msg,
+            createdAt: new Date(),
+            actionToken,
+            startResultPollingFallback,
+            updateStatusAfterDecision: content => {
+              acceptProgressUpdates = true
+              return editStatus(content)
+            },
+          })
+          await editStatus(delivery.content, false, delivery.options)
+          return
+        }
+
+        // Longer than one message: the parts go below the bubble, the controls
+        // on the last, and the entry is registered only after the last was sent.
+        multiPartRequestId = params.requestId
+        approvalPromptDelivered = true
+        acceptProgressUpdates = false
         console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${params.requestId})`)
+        const ids = { taskId, requestId: params.requestId, channelType: msg.channelType }
+        const notShown = async (err: unknown): Promise<void> => {
+          this.logToolApprovalNotShown(ids, err)
+          // The task ended during the delivery: the bubble already shows the
+          // outcome, so there is nothing to deny and nothing to tell.
+          if (finalDelivered) return
+          await this.denyUnshownToolApproval(msg, params.userId, params.requestId)
+          acceptProgressUpdates = true
+          approvalPromptDelivered = false
+        }
+        if (!parts) {
+          await notShown(null)
+          return
+        }
+
+        await editStatus('Approval needed. The request is in the messages below.')
+        let outcome: { stopped: false; last: ToolApprovalLastPart } | { stopped: true }
+        try {
+          outcome = await this.sendToolApprovalParts(
+            msg,
+            adapter,
+            parts,
+            actionToken,
+            () => finalDelivered
+          )
+        } catch (err) {
+          await notShown(err)
+          return
+        }
+        const clearControls = outcome.stopped
+          ? undefined
+          : this.toolApprovalControlsClearer(adapter, responseChannelId, outcome.last, ids)
+        if (outcome.stopped || finalDelivered) {
+          // A terminal event or the final result overtook the delivery: register
+          // nothing and remove the controls if they were sent.
+          await clearControls?.()
+          return
+        }
         this.pendingApprovals.set(approvalKey, {
           taskId,
           requestId: params.requestId,
@@ -1968,9 +2249,8 @@ export class ChannelReader {
             acceptProgressUpdates = true
             return editStatus(content)
           },
+          clearControls,
         })
-        const delivery = toolApprovalDelivery(msg.channelType, params.notification, actionToken)
-        await editStatus(delivery.content, false, delivery.options)
       }
 
       const deliverFinalResult = async (): Promise<boolean> => {
@@ -2259,6 +2539,8 @@ export class ChannelReader {
         this.pendingApprovals.delete(approvalKey)
         await pending.updateStatusAfterDecision?.('Denied. The tool will not be executed.')
         await this.sendReply(msg, 'Denied. The tool will not be executed.')
+        // Last step: removing the controls never rejects and nothing above waits on it.
+        await pending.clearControls?.()
       } else {
         await this.sendReply(msg, `Failed to send denial: ${result.error ?? 'unknown error'}`)
       }
@@ -2292,6 +2574,8 @@ export class ChannelReader {
     // delivery path. The fallback starts only after approval, so a stream that
     // closes before terminal cannot strand a completed task result.
     pending.startResultPollingFallback?.()
+    // Last step: removing the controls never rejects and nothing above waits on it.
+    await pending.clearControls?.()
   }
 
   /**
@@ -2339,6 +2623,8 @@ export class ChannelReader {
       if (now - state.createdAt.getTime() > PENDING_APPROVAL_TTL_MS) {
         console.log(`[Main] Cleaning up stale approval: ${key}`)
         this.pendingApprovals.delete(key)
+        // The clearer never rejects, so the detached call cannot go unhandled.
+        void state.clearControls?.()
       }
     }
     for (const [key, processed] of this.processedProviderEvents) {
