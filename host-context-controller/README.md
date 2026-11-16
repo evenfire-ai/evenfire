@@ -519,7 +519,8 @@ treat an empty string as unset. `HCC_HOST_K8S_REQUEST_TIMEOUT_MS`,
 `HCC_HOST_FULL_RECONCILE_CONCURRENCY` accept plain decimal digits only: unset or `""` means the default, and any other spelling
 fails startup, including the ones JavaScript `Number()` would read as a number
 (`3e4`, `0x7530`, `+30000`, `030000`, `30000.0`, or a value with surrounding
-white space).
+white space). `CONTEXT_MAPPER_HEARTBEAT_POLL_MS` must also be at most
+`2147483647`, the largest delay a timer holds.
 
 **Removed variable.** `CLERUM_STATELESS_COMMUNICATION_CHANNEL_POLICY` is no
 longer supported. Any non-empty value fails startup; CommunicationChannel-connected
@@ -591,14 +592,14 @@ Hosts are always kept active.
 
 Only used for Hosts with `spec.lifecycle.stateless: true`. See [Stateless lifecycle](#stateless-lifecycle). `deploy/base` sets the first four to their code defaults.
 
-| Variable                                      | Default    | Description                                                                                                                                     |
-| --------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CONTEXT_MAPPER_STATELESS_IDLE_MINUTES`       | `30`       | Idle time before a Host may drain.                                                                                                              |
-| `CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES` | `15`       | Platform floor. The effective idle window is `max(idle, floor)`.                                                                                |
-| `CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS`     | `60000`    | After a drain verdict, how long HCC waits for a `drained` report before suspending anyway (only if the pod acknowledged or went silent).        |
-| `CONTEXT_MAPPER_HEARTBEAT_POLL_MS`            | `10000`    | How often HCC polls control-api for heartbeats. Positive integer in plain digits; unset or `""` means the default, anything else fails startup. |
-| `CONTEXT_MAPPER_STATELESS_MAX_UPTIME_HOURS`   | `72`       | A pod older than this drains regardless of activity.                                                                                            |
-| `CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY`  | `` (empty) | Pull policy for stateless pods. Empty inherits `CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY`.                                                         |
+| Variable                                      | Default    | Description                                                                                                                                                                                        |
+| --------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_STATELESS_IDLE_MINUTES`       | `30`       | Idle time before a Host may drain.                                                                                                                                                                 |
+| `CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES` | `15`       | Platform floor. The effective idle window is `max(idle, floor)`.                                                                                                                                   |
+| `CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS`     | `60000`    | After a drain verdict, how long HCC waits for a `drained` report before suspending anyway (only if the pod acknowledged or went silent).                                                           |
+| `CONTEXT_MAPPER_HEARTBEAT_POLL_MS`            | `10000`    | How often HCC polls control-api for heartbeats. Positive integer of at most `2147483647` in plain digits; unset or `""` means the default, anything else, including a larger value, fails startup. |
+| `CONTEXT_MAPPER_STATELESS_MAX_UPTIME_HOURS`   | `72`       | A pod older than this drains regardless of activity.                                                                                                                                               |
+| `CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY`  | `` (empty) | Pull policy for stateless pods. Empty inherits `CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY`.                                                                                                            |
 
 ### LlmHook
 

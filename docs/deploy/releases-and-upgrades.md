@@ -569,8 +569,15 @@ filter or report on the signals they name.
   the reconnects and running metrics, one per event `type` for the events
   metric. A query or alert on the bare name now returns one series per
   namespace for each of those: select a namespace or aggregate with
-  `sum by (namespace)` (or `sum by (type)` for the events metric). `clerum_hcc_secret_informer_reconnects_total` is exposed
-  at 0 per namespace from start.
+  `sum by (namespace)` (or `sum by (type)` for the events metric).
+  `clerum_hcc_secret_informer_events_total` now counts events delivered to the
+  consumer, where it used to count events received from the watch. Each
+  informer namespace exposes `clerum_hcc_secret_informer_reconnects_total` at 0,
+  `clerum_hcc_secret_informer_events_total` at 0 for `ADDED`, `MODIFIED` and
+  `DELETED`, and `clerum_hcc_secret_informer_running` at 0 from the informer's
+  construction. `clerum_hcc_deployment_informer_running` is also exposed at 0
+  from construction, so a watch that never connects reads 0 instead of having
+  no series.
 - **Structured HCC watcher and dev-mode configuration logs.** HCC's watcher and
   dev-mode configuration lines are now structured JSON lines like the rest of
   HCC's log. The fixed part of the old text is the `msg` field. An error that
@@ -601,6 +608,9 @@ variables and `CLERUM_DYNAMIC_TOOLS_THRESHOLD` also a fraction such as `2000.5`
 `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`, `CLERUM_DYNAMIC_TOOLS_THRESHOLD` and
 the catalog-bootstrap variables also used to accept a value above
 9007199254740991 (for example `99999999999999999999`); it now stops the pod.
+`CONTEXT_MAPPER_HEARTBEAT_POLL_MS` also stops the pod above 2147483647, the
+largest delay a timer holds; a larger value used to make the poll fire after
+about 1 ms.
 A value of only white space used to
 mean the default for the HCC variables and `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`;
 it now stops the pod. `deploy/base` sets the three HCC variables in plain
