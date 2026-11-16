@@ -546,8 +546,8 @@ export function recipeReferencesNamedSecrets(recipe: WorkflowRecipeCRD): boolean
  * workflow was revoked solely by the event-driven SecretWatcher, with no
  * deterministic timer fallback if a watch event was delayed or coalesced. This gate
  * lets such workflow recipes through to an OWNERSHIP-ONLY re-reconcile (no workload
- * status patch), reusing the already-hardened steady-state revocation path
- * (`revokeOrRequeueSteadyWorkflow`).
+ * status patch). Every steady short-circuit of that reconcile runs the steady
+ * ownership enforcer (`enforceActiveWorkflowSecretOwnership`).
  */
 export function workflowNeedsOwnershipBackstop(recipe: WorkflowRecipeCRD): boolean {
   if (recipe.metadata.deletionTimestamp) return false
@@ -995,7 +995,8 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     if (!recipe) return
     // Issue #637 — a Secret re-label does NOT bump the recipe's metadata.generation,
     // so a plain 'MODIFIED' event is classified status-only and short-circuits BEFORE
-    // reconcile() (and thus before the ownership gate `revokeOrRequeueSteadyWorkflow`).
+    // reconcile() (and thus before the steady ownership enforcer
+    // `enforceActiveWorkflowSecretOwnership`, which every steady short-circuit runs).
     // forceReconcile makes the event-driven revocation actually re-evaluate ownership;
     // without it a foreign re-label is only caught by the slower 30s periodic backstop,
     // not the ~10s watcher debounce this path exists to provide.

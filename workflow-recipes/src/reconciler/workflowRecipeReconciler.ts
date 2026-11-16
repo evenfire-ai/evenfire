@@ -263,7 +263,10 @@ interface SteadyOwnershipOutcome {
    * record was not stored: the denial is published and the pass requeues.
    */
   revocationRecordPending: boolean
-  /** Workloads denied in this pass (all torn down when `hadDenied`); empty otherwise. */
+  /**
+   * Workloads denied in this pass. When `hadDenied`, each was torn down in this
+   * pass or under a recorded revocation of the same denial. Empty otherwise.
+   */
   deniedWorkloadIds: ReadonlySet<string>
 }
 
@@ -4440,8 +4443,11 @@ export class WorkflowRecipeReconciler {
    * pluginWorkloadSdk hosts, trigger infrastructure, classic non-run recipes —
    * never carry that label and are left untouched.
    *
-   * Best-effort and idempotent: deleting already-gone pods is a 404 no-op, and
-   * any failure is logged + swallowed so the terminal status patch still lands.
+   * Idempotent: deleting already-gone pods is a 404 no-op. A failed step is
+   * logged and does not skip the others; the function then returns false and
+   * writes no record, so the caller requeues and the next pass repeats every
+   * step, while the terminal status patch still lands. A transport Deployment
+   * delete that fails with anything but a 404 throws, which fails its step.
    * NEVER deletes the artifact-reader, the PVC, the CR, or the DB run row — the
    * CR's finalizer cascade (reconcileDelete) at archive-cron TTL owns those.
    */
@@ -7411,9 +7417,10 @@ export class WorkflowRecipeReconciler {
    * Issue #637 — run steady-state ownership enforcement at a reconcile
    * short-circuit and convert the outcome into a `ReconcileResult` the caller
    * returns directly, or `null` to let the caller fall through to its normal
-   * (cheap) steady return. Centralizes the requeue/denial result shaping so all
-   * four steady short-circuits (awaiting-trigger, in-progress, active, terminal)
-   * stay fail-closed-consistent.
+   * (cheap) steady return. The result shaping is in `steadyOwnershipResult`: the
+   * awaiting-trigger, in-progress and active short-circuits call this wrapper,
+   * and the terminal block calls the enforcer and that function directly, so
+   * all four stay fail-closed-consistent.
    */
   private async revokeOrRequeueSteadyWorkflow(
     recipe: WorkflowRecipeCRD,
