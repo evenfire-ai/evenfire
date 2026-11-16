@@ -87,6 +87,40 @@ describe('useGfsWatchSubscription', () => {
     expect(h.server.current()?.keys).toEqual(new Set([K1, K2, K3]))
   })
 
+  it('a list main did not take is sent again when the state settles back on it', async () => {
+    await h.login(USER_A)
+    // The IPC invoke fails once (main's handler threw, or the frame was torn
+    // down mid-call); every later call reaches the real client.
+    const open = watch.bridge.open
+    let failNext = true
+    watch.bridge.open = async (onEvent, initial) => {
+      const handle = await open(onEvent, initial)
+      const setSubscriptions = handle.setSubscriptions
+      handle.setSubscriptions = request => {
+        if (!failNext) return setSubscriptions(request)
+        failNext = false
+        return Promise.reject(new Error('ipc invoke failed'))
+      }
+      return handle
+    }
+    const onEvent = vi.fn()
+    const view = render(
+      <Subscriber keys={[K1]} userId={USER_A} sessionKey="s1" onEvent={onEvent} />
+    )
+    await wait(0)
+    view.rerender(<Subscriber keys={[K2]} userId={USER_A} sessionKey="s1" onEvent={onEvent} />)
+    await wait(GFS_WATCH_DEBOUNCE_MS * 2)
+    expect(failNext).toBe(false)
+
+    // Away and back within one debounce: the settled list equals the rejected one.
+    view.rerender(<Subscriber keys={[K3]} userId={USER_A} sessionKey="s1" onEvent={onEvent} />)
+    view.rerender(<Subscriber keys={[K2]} userId={USER_A} sessionKey="s1" onEvent={onEvent} />)
+    await wait(GFS_WATCH_DEBOUNCE_MS * 2)
+    expect(watch.requests.slice(1)).toEqual([{ keys: [K2], userId: USER_A }])
+    await act(() => h.settle())
+    expect(h.server.current()?.keys).toEqual(new Set([K2]))
+  })
+
   it('H-B91: after a session change with the same list, main gets the list again and the stream carries it', async () => {
     await h.login(USER_A)
     const onEvent = vi.fn()
