@@ -35,6 +35,7 @@ const harness = vi.hoisted(() => ({
   onPreclearCancelled: null as ((notice: SessionPreclearNotice) => void) | null,
   onSessionCleared: null as (() => void) | null,
   acknowledge: async (_notice: SessionPreclearNotice) => true,
+  restoreAuthBridge: null as null | (() => void),
 }))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
@@ -322,11 +323,18 @@ function installAuthBridge(overrides: Record<string, unknown> = {}) {
       },
     } as unknown as Window['clerum'],
   })
-  return () => Object.defineProperty(window, 'clerum', { configurable: true, value: previous })
+  const restore = () => {
+    Object.defineProperty(window, 'clerum', { configurable: true, value: previous })
+    if (harness.restoreAuthBridge === restore) harness.restoreAuthBridge = null
+  }
+  harness.restoreAuthBridge = restore
+  return restore
 }
 
 afterEach(() => {
   cleanup()
+  harness.restoreAuthBridge?.()
+  harness.restoreAuthBridge = null
   harness.controller?.markdownDraftOwner.quit()
   harness.controller = null as unknown as AppController
   harness.onPreclear = null
@@ -550,6 +558,94 @@ describe('App Markdown close recovery', () => {
         tab => tab.id === tabId && tab.kind === 'preview' && tab.preview?.gfsUri === reboundUri
       )
     ).toBe(true)
+    restoreBridge()
+  })
+
+  it('retries a lost terminal acknowledgement without repeating the owner action', async () => {
+    let acknowledgementAttempts = 0
+    const acceptedTerminalAcks: Array<{
+      binding: Record<string, unknown>
+      nextSequence: number
+    }> = []
+    const acknowledgementBindings: Array<Record<string, unknown>> = []
+    const authCalls = {
+      authorizeMarkdownTabClose: vi.fn(async () => 'granted'),
+      getMarkdownTabClosePermitStatus: vi.fn(async () => 'granted'),
+      cancelMarkdownTabClosePermit: vi.fn(async () => 'cancelled'),
+      consumeMarkdownTabClosePermit: vi.fn(async () => 'consumed'),
+      acknowledgeMarkdownTabClose: vi.fn(async (binding: Record<string, unknown>) => {
+        acknowledgementAttempts += 1
+        acknowledgementBindings.push(structuredClone(binding))
+        if (acknowledgementAttempts === 1) {
+          acceptedTerminalAcks.push({
+            binding: structuredClone(binding),
+            nextSequence: Number(binding.sequence) + 1,
+          })
+          throw new Error('terminal acknowledgement response lost after server acceptance')
+        }
+        const acceptedTerminalAck = acceptedTerminalAcks[0]
+        if (
+          !acceptedTerminalAck ||
+          JSON.stringify(binding) !== JSON.stringify(acceptedTerminalAck.binding)
+        ) {
+          return null
+        }
+        return acceptedTerminalAck.nextSequence
+      }),
+    }
+    const restoreBridge = installAuthBridge(authCalls)
+    const tabId = 'markdown-lost-ack-tab'
+    const gfsUri = 'gfs://main/markdown-lost-ack'
+    const tabs = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: tabId,
+      title: 'lost-ack.md',
+      gfsUri,
+      fileKind: 'markdown',
+      byteLength: 32,
+    })
+    harness.controller = makeController(tabs)
+    const owner = harness.controller.markdownDraftOwner
+    const binding = {
+      principalOwner: harness.controller.markdownPrincipalOwner!,
+      scopeKey: 'integration-principal-owner/team-a/default',
+      tabId,
+      gfsUri,
+    }
+    owner.open(binding, { sessionGeneration: 1 })
+    const terminalOwnerAction = vi.spyOn(owner, 'commitCloseRequest')
+    const read = owner.beginStableRead(binding)!
+    owner.completeStableRead(read, { content: 'saved', version: 1, stable: true })
+    const capability = owner.beginCapabilityRefresh(binding)!
+    owner.completeCapabilityRefresh(capability, true)
+    owner.beginEdit(binding)
+    owner.type(binding, 'discarded exactly once')
+
+    render(
+      <QueryClientProvider client={desktopQueryClient}>
+        <App />
+      </QueryClientProvider>
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Close lost-ack.md' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Discard and Close' }))
+
+    await waitFor(() => expect(authCalls.acknowledgeMarkdownTabClose).toHaveBeenCalledTimes(2))
+    expect(authCalls.authorizeMarkdownTabClose).toHaveBeenCalledOnce()
+    expect(authCalls.consumeMarkdownTabClosePermit).toHaveBeenCalledOnce()
+    expect(acknowledgementBindings[0]).toMatchObject({
+      sequence: 1,
+      tabId,
+      sessionGeneration: 1,
+      ownerIdentities: [expect.stringMatching(/integration-principal-owner/)],
+    })
+    expect(acknowledgementBindings[0]?.requestId).toMatch(/^markdown-lost-ack-tab:/)
+    expect(acknowledgementBindings[0]?.documentEpoch).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    )
+    expect(acknowledgementBindings[1]).toEqual(acknowledgementBindings[0])
+    expect(acceptedTerminalAcks[0]?.binding).toEqual(acknowledgementBindings[0])
+    expect(terminalOwnerAction).toHaveBeenCalledOnce()
+    expect(owner.get(binding)).toBeNull()
+    expect(harness.controller.workspaceTabs.tabs.some(tab => tab.id === tabId)).toBe(false)
     restoreBridge()
   })
 

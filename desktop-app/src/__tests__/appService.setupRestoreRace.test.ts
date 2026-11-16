@@ -33,6 +33,7 @@ describe('AppService setup and saved-session ownership', () => {
       authenticated: false,
       me: null,
       sessionGeneration: 0,
+      authorityBinding: service.getSessionAuthorityBinding(),
     })
     expect(app.getSessionGeneration()).toBe(0)
   })
@@ -85,6 +86,7 @@ describe('AppService setup and saved-session ownership', () => {
         authenticated: false,
         me: null,
         sessionGeneration: 1,
+        authorityBinding: service.getSessionAuthorityBinding(),
       })
       expect(app.authClient.getMe).not.toHaveBeenCalled()
 
@@ -212,6 +214,7 @@ describe('AppService setup and saved-session ownership', () => {
       authenticated: false,
       me: null,
       sessionGeneration: 2,
+      authorityBinding: service.getSessionAuthorityBinding(),
     })
     expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restB)
     expect(app.sessionToken).toBeNull()

@@ -20,10 +20,10 @@ describe('AppService Markdown close retention', () => {
       expect(service.consumeMarkdownTabClosePermit(42, binding)).toBe('consumed')
       expect(service.acknowledgeMarkdownTabClose(42, binding)).toBe(sequence + 1)
       expect(service.markdownTabCloseDocuments.size).toBe(1)
-      expect(service.markdownTabCloseDocuments.get(42).slot.kind).toBe('ack')
-      expect(
-        service.markdownTabCloseDocuments.get(42).slot.receipt.binding.ownerIdentities
-      ).toBeUndefined()
+      const document = service.markdownTabCloseDocuments.get(42)
+      expect(document.slot.kind).toBe('ack')
+      expect(Object.keys(document).sort()).toEqual(['epoch', 'nextSequence', 'slot'])
+      expect(document.slot.receipt.binding.ownerIdentities).toBeUndefined()
     }
 
     expect(service.markdownTabCloseDocuments.get(42).slot.receipt.nextSequence).toBe(501)

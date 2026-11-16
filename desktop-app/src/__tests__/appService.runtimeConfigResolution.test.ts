@@ -4,6 +4,7 @@ import {
   createNativeCommitTestHarness,
   deferred,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
+import type { NativeCommitTestService } from '../../testSupport/appService.nativeCommitTestHarness.js'
 import { testLoginResult, testSessionMe } from '../../testSupport/authTestFixtures.js'
 
 afterEach(cleanupNativeCommitTestHarness)
@@ -53,7 +54,27 @@ describe('AppService runtime config discovery ownership', () => {
   })
 
   it('uses late RPC discovery for the active session without rebinding its durable identity', async () => {
-    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness()
+    let recoveryNotice: import('../appService.js').SessionPreclearNotice | null = null
+    let recoveryService: NativeCommitTestService | null = null
+    let resolveReceipt!: (accepted: boolean) => void
+    const receiptAccepted = new Promise<boolean>(resolve => {
+      resolveReceipt = resolve
+    })
+    const { service, runtimeConfig, restA } = await createNativeCommitTestHarness({
+      onSessionPreclear: () => false,
+      onSessionPreclearRecoveryRequired: notice => {
+        recoveryNotice = notice
+      },
+      onSessionPreclearAwaitingReceipt: () => {
+        if (!recoveryService) throw new Error('test recovery service is not initialized')
+        resolveReceipt(
+          recoveryService.completeSessionPreclearRendererReceipt(
+            recoveryService.getSessionAuthorityBinding()
+          )
+        )
+      },
+    })
+    recoveryService = service
     await runtimeConfig.saveDesktopRuntimeConfig({
       externalRestApiBaseUrl: restA,
       rpcProxyBaseUrl: '',
@@ -73,6 +94,7 @@ describe('AppService runtime config discovery ownership', () => {
       authClient: {
         getDesktopEnvironment: typeof getDesktopEnvironment
         googleLogin: ReturnType<typeof vi.fn>
+        getMe: ReturnType<typeof vi.fn>
         health: ReturnType<typeof vi.fn>
       }
       rpcClient: { health: ReturnType<typeof vi.fn> }
@@ -91,6 +113,7 @@ describe('AppService runtime config discovery ownership', () => {
         .fn()
         .mockResolvedValueOnce(testLoginResult('session-token-a', me))
         .mockResolvedValueOnce(testLoginResult('session-token-b', me)),
+      getMe: vi.fn().mockResolvedValue(me),
       health: vi.fn().mockResolvedValue({ status: 'ok' }),
     }
     const { AuthClient } = await import('../authClient.js')
@@ -120,6 +143,10 @@ describe('AppService runtime config discovery ownership', () => {
     expect(runtimeConfig.getDesktopRuntimeConfigState().envKey).toBe(restOnlyEnvKey)
     expect(runtimeConfig.config.rpcProxyBaseUrl).toBe('')
     expect(app.getEffectiveRpcProxyBaseUrl()).toBe('https://rpc-discovered.example.test')
+    expect(() => app.getChatDeletionFenceAuthority()).toThrow('session_clear_pending')
+    expect(recoveryNotice).not.toBeNull()
+    expect(service.retrySessionPreclearRecovery(recoveryNotice!)).toBe(true)
+    await expect(receiptAccepted).resolves.toBe(true)
     expect(getDesktopEnvironment).toHaveBeenCalledTimes(2)
     expect(service.tokenStore.setSessionToken).toHaveBeenCalledTimes(1)
     expect(vi.mocked(bindChatStoreForUser)).toHaveBeenCalledTimes(activeBindingCount)

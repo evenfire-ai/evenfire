@@ -28,7 +28,7 @@ afterEach(async () => {
   if (directory) await fs.rm(directory, { recursive: true, force: true })
 })
 
-async function fixture() {
+async function fixture(options: { acceptDiscoveredRpcPreclear?: boolean } = {}) {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-discovery-lifecycle-'))
   const configPath = path.join(directory, 'runtime.json')
   process.env.CLERUM_DESKTOP_CONFIG_PATH = configPath
@@ -58,7 +58,27 @@ async function fixture() {
   const rpc = 'https://rpc-discovered.example.test'
   await config.saveDesktopRuntimeConfig({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: '' })
   const store = new TokenStore({ isolatedUserDataPath: directory })
-  const service = new AppService()
+  let service!: InstanceType<typeof AppService>
+  let preclearNotice: import('../appService.js').SessionPreclearNotice | null = null
+  let resolvePreclearReceipt!: (accepted: boolean) => void
+  const preclearReceipt = new Promise<boolean>(resolve => {
+    resolvePreclearReceipt = resolve
+  })
+  service = new AppService(
+    options.acceptDiscoveredRpcPreclear
+      ? {
+          onSessionPreclear: () => false,
+          onSessionPreclearRecoveryRequired: notice => {
+            preclearNotice = notice
+          },
+          onSessionPreclearAwaitingReceipt: () => {
+            resolvePreclearReceipt(
+              service.completeSessionPreclearRendererReceipt(service.getSessionAuthorityBinding())
+            )
+          },
+        }
+      : undefined
+  )
   ;(service as unknown as { tokenStore: InstanceType<typeof TokenStore> }).tokenStore = store
   const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment')
   discovery.mockRejectedValueOnce(new Error('initial discovery unavailable'))
@@ -68,14 +88,37 @@ async function fixture() {
   )
   vi.spyOn(AuthClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
   const rpcHealth = vi.spyOn(RpcProxyClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
-  return { service, config, configPath, store, chat, rest, rpc, AuthClient, discovery, rpcHealth }
+  async function acceptCurrentPreclear(): Promise<void> {
+    if (!preclearNotice) throw new Error('effective-RPC preclear was not requested')
+    vi.spyOn(AuthClient.prototype, 'getMe').mockResolvedValue(testSessionMe())
+    if (!service.retrySessionPreclearRecovery(preclearNotice)) {
+      throw new Error('effective-RPC preclear Retry was not accepted')
+    }
+    if (!(await preclearReceipt)) throw new Error('current document receipt was rejected')
+  }
+  return {
+    service,
+    config,
+    configPath,
+    store,
+    chat,
+    rest,
+    rpc,
+    AuthClient,
+    discovery,
+    rpcHealth,
+    acceptCurrentPreclear,
+  }
 }
 
 describe('RPC discovery lifecycle through native producers', () => {
   it('retires pending A metadata when native setup saves B after a failed team transition', async () => {
-    const { service, config, AuthClient, discovery } = await fixture()
+    const { service, config, AuthClient, discovery, acceptCurrentPreclear } = await fixture({
+      acceptDiscoveredRpcPreclear: true,
+    })
     await service.googleLogin('synthetic-google-token')
     await service.getDependenciesHealth()
+    await acceptCurrentPreclear()
     vi.spyOn(AuthClient.prototype, 'switchTeam').mockResolvedValue({
       token: 'synthetic-team-b',
       team: { id: 'team-b', name: 'B', role: 'member' },
@@ -263,10 +306,12 @@ describe('RPC discovery lifecycle through native producers', () => {
   })
 
   it('recovers discovery after a team switch clears its partially replaced session', async () => {
-    const { service, config, store, rpc, AuthClient, discovery } = await fixture()
+    const { service, config, store, rpc, AuthClient, discovery, acceptCurrentPreclear } =
+      await fixture({ acceptDiscoveredRpcPreclear: true })
     await service.googleLogin('synthetic-google-token')
     const oldKey = config.getActiveEnvKey()
     await service.getDependenciesHealth()
+    await acceptCurrentPreclear()
     vi.spyOn(AuthClient.prototype, 'switchTeam').mockResolvedValue({
       token: 'synthetic-team-b',
       team: { id: 'team-b', name: 'B', role: 'member' },
