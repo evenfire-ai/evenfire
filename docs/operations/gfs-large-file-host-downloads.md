@@ -485,17 +485,29 @@ room. The user approves the delete on a card that shows each file's name, size
 and creation date. Desktop shows the card of any call the delete accepts, with
 a note when the 64 KiB bound cut it. A channel shows a card longer than one
 message as several messages, split between its lines (Telegram 4096
-characters, Slack 3000 characters, Teams 12,000 bytes), with the approval
-buttons on the last one; the approval can be given, by button or by
-`/approve`, only after the last message was sent. If a message cannot be sent,
-if one line is longer than a message, if the card would need more than 24
-messages, or if channel-reader cannot read the card from the Host when the
-approval is asked, the request is denied and the user is told. The buttons are
-removed from the last message when the approval is decided, when the task ends
-and when this channel stops offering the approval, 10 minutes after it was
-sent. If a removal fails, the buttons stay visible but no longer act: a press
-is answered with 'No pending approval found'. A card cut at 64 KiB says so
-before the instruction and gives the total.
+characters, Slack 3000 characters, Teams 12,000 bytes of the JSON-encoded
+text), with the approval buttons on the last one; the approval can be given,
+by button or by `/approve`, only after the last message was sent. The card is
+not offered when a message cannot be sent, when one line is longer than a
+message (a card the delete accepts reaches this only when redaction lengthens
+a name; Telegram and Slack then refuse it and Teams shows it), when a message
+would have no visible text, when the card would need more than 24 messages, or
+when channel-reader cannot read the card from the Host. channel-reader then
+denies the request at the Host and tells the user. If the Host does not accept
+the denial, the user is told that the request is still waiting on the Host and
+that an operator must deny it. On the progress stream, nothing is sent for a
+task that has already ended; if the task ends while the denial is on its way,
+the denial is sent and no message follows it; and when the Host holds no
+stored approval for the request and rejects the denial, that is only logged.
+The buttons are removed from the last message when the approval is decided,
+when another approval replaces it and when this channel stops offering it, 10
+minutes after it was sent. A task followed on the progress stream also loses
+them when it ends; an approval delivered in a synchronous response has no
+stream, so it keeps them until one of the first three. If a removal fails, the
+buttons stay visible but no longer act: a press is answered with 'No pending
+approval found'. On Teams the messages before the last, and the last one once
+its buttons are removed, are plain text. A card cut at 64 KiB says so before
+the instruction and gives the total.
 While the download store is closed or not initialized, no file is
 generated. When the volume cannot be measured, the Host reads it once more and
 then generates without this check (the folder quota and the free-space floor
@@ -529,8 +541,10 @@ is at most 64 Ki characters. The result says `scanned` only for UTF-8 text or
 an Office package in which nothing was found. Every other file in which nothing
 was found (a PDF, an image, an archive, text in UTF-16 or a legacy encoding, a
 file with a zero byte), a file above the GFS file limit other than an Office
-package, and a file whose scan fails, are saved with `secretScan: not_scanned`,
-and the model tells the user. The scan does not find: a value written in
+package, and a file whose scan fails, are saved with `secretScan: not_scanned`.
+The model is told to tell the user when the file came from a workspace path, a
+kept attachment or a generated file saved by name, and that a generated file
+saved with its Save id needs no such notice. The scan does not find: a value written in
 UTF-16; a value in a legacy encoding whose bytes are neither its UTF-8 nor its
 Latin-1 spelling (a euro sign in Windows-1252, Shift_JIS); a split value or a
 separated number in a file with a zero byte or one of those signatures; a

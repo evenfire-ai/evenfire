@@ -346,7 +346,8 @@ The value is `tool:<a|l|d>:<16-char token>`
 Three properties of that token that produce confusing failures:
 
 - It lives in `channel-reader`'s memory with a 10-minute TTL
-  (`main.ts:95`). Clicking later returns "No pending approval found".
+  (`PENDING_APPROVAL_TTL_MS` in `channel-reader/src/main.ts`). Clicking later
+  returns "No pending approval found".
 - Any `channel-reader` restart wipes it, and **saving an edit to the channel in
   the Control UI restarts that pod**. Approve after such a save and the click is
   already dead.
