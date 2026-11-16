@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createPublicKey, generateKeyPairSync } from 'node:crypto'
 import { access } from 'node:fs/promises'
-import { createServer } from 'node:net'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import request from 'supertest'
