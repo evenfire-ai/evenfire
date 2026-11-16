@@ -136,7 +136,7 @@ export function normalizeArtifactForStatus(value: Record<string, unknown>): Stat
   }
 }
 
-function parseArtifactToolResult(result: unknown): Record<string, unknown> | null {
+export function parseArtifactToolResult(result: unknown): Record<string, unknown> | null {
   try {
     const parsed = typeof result === 'object' ? result : JSON.parse(String(result ?? '{}'))
     return isRecord(parsed) && parsed.success === true && isRecord(parsed.artifact)
