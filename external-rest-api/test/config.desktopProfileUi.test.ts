@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 
 const originalProfileUiUrl = process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
@@ -13,6 +13,38 @@ afterAll(() => {
 })
 
 describe('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL validation for External REST', () => {
+  it('uses the local Profile UI origin by default in development and preserves an override', async () => {
+    const originalNodeEnv = process.env.NODE_ENV
+    const originalDevMode = process.env.CLERUM_DEV_MODE
+    const originalProfileUiBaseUrl = process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
+
+    process.env.NODE_ENV = 'development'
+    process.env.CLERUM_DEV_MODE = 'true'
+    delete process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
+    vi.resetModules()
+
+    try {
+      const { config } = await import('../src/config.js')
+      expect(config.desktopProfileUiBaseUrl).toBe('http://127.0.0.1:3001')
+
+      process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL = 'https://profile.example.test'
+      vi.resetModules()
+      const explicitConfig = await import('../src/config.js')
+      expect(explicitConfig.config.desktopProfileUiBaseUrl).toBe('https://profile.example.test')
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV
+      else process.env.NODE_ENV = originalNodeEnv
+      if (originalDevMode === undefined) delete process.env.CLERUM_DEV_MODE
+      else process.env.CLERUM_DEV_MODE = originalDevMode
+      if (originalProfileUiBaseUrl === undefined) {
+        delete process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL
+      } else {
+        process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL = originalProfileUiBaseUrl
+      }
+      vi.resetModules()
+    }
+  })
+
   it('defaults the standalone local dev target without overriding an explicit origin', () => {
     const makefile = readFileSync(new URL('../Makefile', import.meta.url), 'utf8')
     expect(makefile).toContain(

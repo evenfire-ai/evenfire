@@ -299,7 +299,10 @@ export const config: Config = {
     'http://127.0.0.1:8094'
   ).replace(/\/+$/, ''),
   desktopProfileUiBaseUrl: validateDesktopProfileUiBaseUrl(
-    required('CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL'),
+    requiredOrDevDefault(
+      'CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL',
+      'http://127.0.0.1:3001'
+    ),
     requiredOrDevDefault('EXTERNAL_REST_API_PUBLIC_BASE_URL', 'http://127.0.0.1:8091')
   ),
   desktopAppName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME || 'Evenfire',
