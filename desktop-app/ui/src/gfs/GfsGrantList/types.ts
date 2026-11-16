@@ -28,10 +28,11 @@ export interface GfsGrantListProps {
   items: GfsGrantListItem[]
   shares?: GfsShareListItem[]
   /**
-   * Client-derived rows inherited from ancestor folders. Ignored unless
+   * Client-derived rows inherited from ancestor folders. Rendered only when
    * `mergeInherited` is set (file dialogs): they merge into one normal,
    * toggleable row per member whose edits route through the parent-folder
-   * confirmation.
+   * confirmation. Their sources are read whatever that flag is, to decide
+   * whether the list is inside the caller's own home.
    */
   inheritedItems?: GfsInheritedAccessItem[]
   /** File-dialog mode: dedupe members across direct and inherited access. */
