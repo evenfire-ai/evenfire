@@ -21,7 +21,6 @@ import {
   getPermissionErrorsForOwner,
   installPermissionErrorTracking,
   isPermissionErrorAcknowledged,
-  isPermissionRetryFailure,
   permissionErrorToken,
   usePermissionErrorAcknowledgementSnapshot,
 } from '../permissionErrorAcknowledgement'

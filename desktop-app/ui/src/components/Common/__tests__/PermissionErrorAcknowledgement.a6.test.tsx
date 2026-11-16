@@ -18,7 +18,6 @@ import {
   deactivatePermissionQueryBinding,
   getPermissionErrorsForOwner,
   installPermissionErrorTracking,
-  requestPermissionErrorRecovery,
   usePermissionErrorAcknowledgementSnapshot,
 } from '../permissionErrorAcknowledgement'
 

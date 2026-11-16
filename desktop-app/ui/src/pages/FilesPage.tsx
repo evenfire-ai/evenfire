@@ -36,7 +36,6 @@ import {
   getPermissionErrorsForOwner,
   installPermissionErrorTracking,
   isPermissionRetryFailure,
-  isSilentPermissionRetryCancellation,
   preservePermissionQueryBinding,
   usePermissionErrorAcknowledgementSnapshot,
 } from '@components/Common/permissionErrorAcknowledgement'
