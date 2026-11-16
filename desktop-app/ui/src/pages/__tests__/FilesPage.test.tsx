@@ -8721,6 +8721,281 @@ describe('FilesPage', () => {
       expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
     })
 
+    describe('the name of the open location', () => {
+      // A link opens the home root through `openUri`, which leaves the storage
+      // folder name in controller state; the overview card leaves the label.
+      const HOME_STORAGE_NAME = 'fixture-user'
+      const SESSION_SCOPE = 'env-1:user-1:team-1'
+      const readyHome = { state: 'ready', drive: 'main', resourceId: 'home-1' }
+      const conflictHome = {
+        state: 'conflict',
+        drive: 'main',
+        resourceId: 'home-1',
+        path: '/Users/fixture',
+      }
+      const managerAuthority = {
+        held: ['read', 'write', 'share', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'share', 'write'],
+        canCreateShare: false,
+      }
+
+      type Location = {
+        home: Record<string, unknown>
+        crumbs: ReturnType<typeof folderCrumb>[]
+      }
+      type SinkContext = {
+        name: string
+        resourceId: string
+        pushToast: ReturnType<typeof vi.fn>
+        queryClient: QueryClient
+      }
+      type NameSink = {
+        controller?: (resourceId: string) => Record<string, unknown>
+        /** Drives the page to the sink; returns the text that carries the name. */
+        read: (context: SinkContext) => Promise<string>
+      }
+
+      const replaceGfsBridge = (gfs: Record<string, unknown>) => {
+        const clerum = window.clerum as unknown as Record<string, unknown>
+        Object.defineProperty(window, 'clerum', {
+          configurable: true,
+          value: { ...clerum, gfs: { ...(clerum.gfs as Record<string, unknown>), ...gfs } },
+        })
+      }
+
+      // Each render starts from the bridge the suite installs, so a sink that
+      // replaced part of it does not leak into the next render.
+      let suiteClerum: Record<string, unknown> = {}
+      beforeEach(() => {
+        suiteClerum = window.clerum as unknown as Record<string, unknown>
+      })
+
+      const renderLocation = (location: Location, sink?: NameSink) => {
+        const open = location.crumbs[location.crumbs.length - 1]!
+        Object.defineProperty(window, 'clerum', {
+          configurable: true,
+          value: {
+            ...suiteClerum,
+            auth: { getSessionGeneration: vi.fn(async () => 0) },
+            agents: { listMine: vi.fn(async () => []) },
+            team: {
+              directory: vi.fn(async () => ({
+                currentTeamId: 'team-1',
+                items: [
+                  {
+                    team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+                    members: [
+                      {
+                        id: 'user-2',
+                        email: 'test2@clerum.io',
+                        name: 'Test Two',
+                        role: 'member',
+                        status: 'active',
+                      },
+                    ],
+                    contextIds: [],
+                    agentNames: [],
+                  },
+                ],
+              })),
+            },
+          },
+        })
+        hookMock.useGfsBrowserController.mockReturnValue({
+          ...baseController(),
+          home: location.home,
+          current: open,
+          crumbs: location.crumbs,
+          affordances: managerAuthority,
+          ...sink?.controller?.(open.resourceId),
+        })
+        const pushToast = vi.fn()
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        render(
+          <QueryClientProvider client={queryClient}>
+            <FilesPage pushToast={pushToast} />
+          </QueryClientProvider>
+        )
+        return { pushToast, queryClient, resourceId: open.resourceId }
+      }
+
+      // One site per way the name travels: direct interpolation (overlay,
+      // permission check), a helper's argument (role-change toast), state
+      // copied from the name (New folder dialog, ZIP strip) and a child's prop
+      // (location menu).
+      const nameSinks: Record<string, NameSink> = {
+        'the drop overlay': {
+          read: async () => {
+            fireEvent.dragEnter(screen.getByRole('region', { name: 'EvenDrive browser' }), {
+              dataTransfer: {
+                dropEffect: 'none',
+                files: [new File(['notes'], 'notes.txt', { type: 'text/plain' })],
+                types: ['Files'],
+              },
+            })
+            const overlay = document.querySelector('.da-gfs-drop-overlay')
+            expect(overlay).not.toBeNull()
+            return overlay!.textContent ?? ''
+          },
+        },
+        'the permission check': {
+          controller: () => ({ loadingAffordances: true }),
+          read: async () => screen.getByText(/^Checking permissions for /).textContent ?? '',
+        },
+        'the role-change toast': {
+          controller: resourceId => ({
+            grants: [
+              {
+                id: 'grant-1',
+                drive: 'main',
+                resourceId,
+                subject: { type: 'user', id: 'user-2' },
+                permissions: ['read'],
+                inherit: true,
+              },
+            ],
+          }),
+          read: async ({ name, resourceId, pushToast, queryClient }) => {
+            let manageHeld = true
+            let freshReads = 0
+            const affordances = vi.fn(async () => {
+              if (!manageHeld) freshReads += 1
+              return delegationAffordances(
+                new Set(manageHeld ? managerAuthority.held : ['read', 'write', 'share']),
+                false
+              )
+            })
+            replaceGfsBridge({ affordances })
+            await openManageDialog(name)
+            const dialog = await screen.findByRole('dialog', { name: `Share folder ${name}` })
+            const row = await within(dialog).findByTestId('gfs-access-row-grant-grant-1')
+            // The member's role changes after manage access was lost: the
+            // fresh read the handler makes no longer holds manage_acl.
+            manageHeld = false
+            queryClient.removeQueries({
+              queryKey: desktopQueryKeys.gfsAffordances(SESSION_SCOPE, resourceId, 'main', 0),
+            })
+            await act(async () => {
+              fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+            })
+            await act(async () => {
+              fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+            })
+            // Witness: the handler made its fresh read.
+            await waitFor(() => expect(freshReads).toBe(1))
+            const toast = await waitFor(() => {
+              const call = pushToast.mock.calls.find(([message]) =>
+                String(message).startsWith('You do not have manage access to ')
+              )
+              expect(call, JSON.stringify(pushToast.mock.calls)).toBeDefined()
+              return call!
+            })
+            expect(toast[1]).toBe('error')
+            return String(toast[0])
+          },
+        },
+        'the New folder dialog': {
+          read: async ({ name }) => {
+            await chooseResourceAction(name, 'New folder')
+            const dialog = screen.getByRole('dialog', { name: 'New folder' })
+            return within(dialog).getByText(/^Create a new folder in /).textContent ?? ''
+          },
+        },
+        'the ZIP progress strip': {
+          read: async ({ name }) => {
+            // The walk never settles, so the strip stays on its first phase.
+            replaceGfsBridge({
+              listChildren: vi.fn(() => new Promise(() => {})),
+              zipStream: {
+                start: vi.fn(() => new Promise(() => {})),
+                appendFromUri: vi.fn(),
+                finish: vi.fn(),
+                abort: vi.fn(async () => ({ aborted: true })),
+              },
+            })
+            await act(async () => {
+              fireEvent.click(screen.getByRole('button', { name: `Options for ${name}` }))
+            })
+            await act(async () => {
+              fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+            })
+            return screen.getByTestId('gfs-zip-progress').textContent ?? ''
+          },
+        },
+        'the location menu': {
+          read: async () => {
+            const triggers = screen.getAllByRole('button', { name: /^Options for / })
+            expect(triggers).toHaveLength(1)
+            return triggers[0]!.getAttribute('aria-label') ?? ''
+          },
+        },
+      }
+
+      const readSink = async (location: Location, sinkName: string, name: string) => {
+        const sink = nameSinks[sinkName]!
+        const rendered = renderLocation(location, sink)
+        return sink.read({ ...rendered, name })
+      }
+
+      it.each(['the overview card', 'a link'] as const)(
+        'names the home My home in the Share dialog when it was opened from %s',
+        async from => {
+          const storedName = from === 'a link' ? HOME_STORAGE_NAME : 'My home'
+          renderLocation({ home: readyHome, crumbs: [folderCrumb('home-1', storedName)] })
+          await openManageDialog('My home')
+          const dialog = await screen.findByRole('dialog', { name: 'Share folder My home' })
+          expect(within(dialog).getByRole('heading', { name: 'Share “My home”' })).toBeTruthy()
+          expect(within(dialog).queryByText(new RegExp(HOME_STORAGE_NAME))).toBeNull()
+        }
+      )
+
+      it.each(Object.keys(nameSinks))(
+        'says My home in %s when the home was opened from a link',
+        async sinkName => {
+          const text = await readSink(
+            { home: readyHome, crumbs: [folderCrumb('home-1', HOME_STORAGE_NAME)] },
+            sinkName,
+            'My home'
+          )
+          expect(text).toContain('My home')
+          expect(text).not.toContain(HOME_STORAGE_NAME)
+        }
+      )
+
+      it.each([
+        [
+          'a folder inside the home',
+          {
+            home: readyHome,
+            crumbs: [folderCrumb('home-1', HOME_STORAGE_NAME), folderCrumb('proj-1', 'Projects')],
+          },
+          'Projects',
+        ],
+        [
+          'a shared folder',
+          { home: readyHome, crumbs: [folderCrumb('alpha-1', 'Alpha shared')] },
+          'Alpha shared',
+        ],
+        [
+          'a home in conflict opened from a link',
+          { home: conflictHome, crumbs: [folderCrumb('home-1', HOME_STORAGE_NAME)] },
+          HOME_STORAGE_NAME,
+        ],
+      ] as const)('keeps the stored name of %s', async (_where, location, storedName) => {
+        for (const sinkName of Object.keys(nameSinks)) {
+          const text = await readSink(
+            { home: location.home, crumbs: [...location.crumbs] },
+            sinkName,
+            storedName
+          )
+          expect(text, sinkName).toContain(storedName)
+          expect(text, sinkName).not.toContain('My home')
+          cleanup()
+        }
+      })
+    })
+
     describe('My home card for a home that is not ready', () => {
       const renderHome = (
         overrides: Record<string, unknown>,

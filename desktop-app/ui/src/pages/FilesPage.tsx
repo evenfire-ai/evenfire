@@ -97,7 +97,12 @@ import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
 import { GfsHomeStateNotice } from '@/gfs/GfsHomeStateNotice'
 import { GfsInheritedAccessDialog } from '@/gfs/GfsInheritedAccessDialog'
 import type { GfsInheritedAccessDialogRequest } from '@/gfs/GfsInheritedAccessDialog/types'
-import { callerHomeNotice, callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
+import {
+  callerHomeDisplayName,
+  callerHomeNotice,
+  callerHomeRootNode,
+  isCallerHomeRoot,
+} from '@/gfs/callerHome'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
@@ -539,7 +544,7 @@ export function FilesPage({
     }
   }, [])
   const {
-    current,
+    current: locationCurrent,
     crumbs,
     sessionScope,
     accessibleResources,
@@ -555,6 +560,17 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+  // The open location as this page names it: the caller's ready home root is
+  // "My home" on every entry path. Controller state keeps the name it stored.
+  const current = useMemo(() => {
+    if (!locationCurrent) return null
+    const name = callerHomeDisplayName(ctrl.home, {
+      resourceId: locationCurrent.resourceId,
+      drive: ctrl.drive,
+      name: locationCurrent.name,
+    })
+    return name === locationCurrent.name ? locationCurrent : { ...locationCurrent, name }
+  }, [ctrl.drive, ctrl.home, locationCurrent])
   const accessibleRootResourceIds = useMemo(
     () => new Set(accessibleResources.map(resource => resource.resourceId)),
     [accessibleResources]
@@ -1883,14 +1899,11 @@ export function FilesPage({
   // `null` is the virtual root. Deps track the primitive fields so a re-render
   // that leaves the location unchanged does not re-emit.
   const currentGfsUri = current?.gfsUri ?? null
-  // D-5: at the caller's own ready home root the Files tab reads "My home",
-  // not the storage folder name. `current` is the top of the breadcrumb stack;
-  // the effect below re-emits when the home becomes ready because the label,
-  // not the resource, is the reported name.
-  const currentName =
-    current && isCallerHomeRoot(ctrl.home, { resourceId: current.resourceId, drive: ctrl.drive })
-      ? GFS_MY_HOME_LABEL
-      : (current?.name ?? null)
+  // `current` already carries the page's name for the open location, so at the
+  // caller's own ready home root the Files tab reads "My home", not the storage
+  // folder name. The effect below re-emits when the home becomes ready because
+  // the label, not the resource, is the reported name.
+  const currentName = current?.name ?? null
   useEffect(() => {
     if (seedPendingRef.current) {
       // Seed still resolving: suppress the pre-seed root (null) that would clobber
