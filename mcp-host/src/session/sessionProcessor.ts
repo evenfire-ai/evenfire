@@ -33,6 +33,9 @@ export interface SessionProcessorConfig {
   onBudgetDenied?: (task: Task, reason?: string) => void
 }
 
+/** How long a cancelled or failed executor may keep its session slot. */
+const SESSION_RELEASE_GRACE_MS = 10_000
+
 /**
  * Per-session task queues with concurrency-limited processing.
  *
@@ -207,28 +210,70 @@ export class SessionProcessor extends EventEmitter {
 
   /** Dispatch the executor and wire its completion/suspension/failure handling. */
   private runExecutor(sessionKey: string, task: Task): void {
+    let released = false
+    let grace: ReturnType<typeof setTimeout> | undefined
+
+    const release = (mode: 'completed' | 'suspended' | 'failed' | 'timeout') => {
+      if (released) return
+      released = true
+      if (grace) clearTimeout(grace)
+      this.config.lifecycle.off('transition', onTransition)
+      this.activeSessions.delete(sessionKey)
+      if (mode === 'suspended') {
+        this.suspendedSessions.add(sessionKey)
+        this.emit('task:suspended', { sessionKey, task })
+      } else if (mode === 'timeout') {
+        this.suspendedSessions.delete(sessionKey)
+        this.emit('task:timeout', { sessionKey, task })
+      } else if (mode === 'completed') {
+        this.emit('task:completed', { sessionKey, task })
+      }
+      this.tryProcessNext()
+    }
+
+    // A cancel or failure should let the executor promise settle and release
+    // the slot in the handlers below. If that promise never settles, this
+    // grace is the finally: the conversation queue cannot stay closed.
+    const onTransition = (ev: { taskId?: string; to?: string }) => {
+      if (released || ev.taskId !== task.id) return
+      if (ev.to !== 'cancelled' && ev.to !== 'failed') return
+      if (grace) return
+      grace = setTimeout(() => {
+        logger.warn(
+          { taskId: task.id, sessionKey },
+          'Releasing conversation queue; the run did not settle after it ended'
+        )
+        release('timeout')
+      }, SESSION_RELEASE_GRACE_MS)
+      grace.unref?.()
+    }
+    this.config.lifecycle.on('transition', onTransition)
+
     this.config
       .executor(task)
       .then(suspended => {
         // TaskLifecycle is now authoritative — removed task.status === 'cancelled' band-aid (spec §4.3)
+        if (released) return
         if (suspended) {
           // Task is awaiting approval — keep session locked so no new tasks
           // can corrupt the conversation. Move from active to suspended.
-          this.activeSessions.delete(sessionKey)
-          this.suspendedSessions.add(sessionKey)
-          this.emit('task:suspended', { sessionKey, task })
+          release('suspended')
         } else {
-          this.activeSessions.delete(sessionKey)
-          this.emit('task:completed', { sessionKey, task })
+          release('completed')
         }
-        this.tryProcessNext()
       })
       .catch(error => {
-        this.activeSessions.delete(sessionKey)
+        if (released) {
+          logger.error(
+            { taskId: task.id, err: error },
+            'Session task failed after the queue was released'
+          )
+          return
+        }
         // TaskLifecycle is now authoritative — removed task.status === 'cancelled' band-aid (spec §4.3)
         logger.error({ taskId: task.id, err: error }, 'Session task failed')
         this.emit('task:failed', { sessionKey, task, error })
-        this.tryProcessNext()
+        release('failed')
       })
   }
 

@@ -2924,7 +2924,13 @@ async function startRPCServer(): Promise<void> {
     const unsubscribe = reporter.subscribe(onEvent)
     return { unsubscribe }
   })
-  rpcServer.onCancel((taskId, requesterUserId) => {
+  rpcServer.onCancel((taskId, requesterUserId, caller) => {
+    if (
+      caller?.caller === 'channel-reader' &&
+      !runtimeCallerCanReadTask(taskId, caller, 'task_cancel')
+    ) {
+      return 'not_found'
+    }
     logger.info(
       {
         event: 'cancel_requested',

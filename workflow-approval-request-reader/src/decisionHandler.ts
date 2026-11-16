@@ -36,9 +36,18 @@ export type ReaderEnrollmentCommand = {
   serviceUrl?: string | null
 }
 
+export type SlackSharedFile = {
+  id: string
+  name: string
+  mimetype?: string
+  size?: number
+  urlPrivateDownload?: string
+}
+
 export type ReaderMessageCommand = {
   content: string
   workflowRunId?: string
+  slackFiles?: SlackSharedFile[]
   mcpHostRef?: string | null
   communicationChannelRef?: string | null
   medium: 'slack' | 'teams'
@@ -281,11 +290,34 @@ function teamsMessageIdentity(payload: unknown): {
   }
 }
 
+function slackSharedFiles(event: Record<string, unknown>): SlackSharedFile[] {
+  if (!Array.isArray(event.files)) return []
+  const files: SlackSharedFile[] = []
+  for (const item of event.files) {
+    const file = asRecord(item)
+    const id = asString(file.id)
+    const name = asString(file.name) || asString(file.title) || id
+    if (!id || !name) continue
+    const url = asString(file.url_private_download) || asString(file.url_private)
+    const mimetype = asString(file.mimetype)
+    const size = typeof file.size === 'number' && Number.isFinite(file.size) ? file.size : undefined
+    files.push({
+      id,
+      name,
+      ...(mimetype ? { mimetype } : {}),
+      ...(size !== undefined ? { size } : {}),
+      ...(url ? { urlPrivateDownload: url } : {}),
+    })
+  }
+  return files
+}
+
 function slackMessageIdentity(payload: unknown): {
   teamId: string
   userId: string
   channelId: string
   text: string
+  files: SlackSharedFile[]
   eventId: string
   threadTs?: string | null
   ts: string
@@ -295,20 +327,28 @@ function slackMessageIdentity(payload: unknown): {
   const event = slackEvent(payload)
   const eventType = asString(event.type)
   if (eventType !== 'message' && eventType !== 'app_mention') return null
-  if (asString(event.subtype) || asString(event.bot_id)) return null
+  // file_share is how Slack delivers a user upload. Other subtypes (edits,
+  // deletes, bot echoes) are still ignored. Dropping file_share made an upload
+  // sent while another run was in flight look like a swallowed event.
+  const subtype = asString(event.subtype)
+  if (asString(event.bot_id)) return null
+  if (subtype && subtype !== 'file_share') return null
 
   const teamId = asString(body.team_id) || asString(event.team)
   const userId = asString(event.user)
   const channelId = asString(event.channel)
   const text = asString(event.text)
+  const files = slackSharedFiles(event)
   const ts = asString(event.ts)
   const eventId = asString(event.client_msg_id) || ts || asString(body.event_id)
-  if (!teamId || !userId || !channelId || !text || !eventId) return null
+  if (!teamId || !userId || !channelId || !eventId || !ts) return null
+  if (!text && files.length === 0) return null
   return {
     teamId,
     userId,
     channelId,
     text,
+    files,
     eventId,
     ts,
     threadTs: asString(event.thread_ts) || null,
@@ -644,11 +684,17 @@ export function normalizeSlackMessage(
   const message = slackMessageIdentity(payload)
   if (!message) return null
   if (/^(?:<@[A-Z0-9]+>\s*)?\/?verify\s+\d{6}$/i.test(message.text)) return null
-  const content = slackMessageContent(payload, message.text, options)
+  const written = slackMessageContent(payload, message.text, options)
+  const content =
+    written ||
+    (message.files.length > 0
+      ? `Review the attached file: ${message.files.map(file => file.name).join(', ')}`
+      : '')
   if (!content) return null
   return {
     medium: 'slack',
     content,
+    ...(message.files.length > 0 ? { slackFiles: message.files } : {}),
     providerUserId: message.userId,
     providerWorkspaceId: message.teamId,
     providerChannelId: message.channelId,

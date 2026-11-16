@@ -26,6 +26,7 @@ send to link your account.
    | `app_mentions:read`                                                | receiving `app_mention` events                                      |
    | `channels:history`, `groups:history`, `im:history`, `mpim:history` | receiving `message` events from channels, private channels, and DMs |
    | `chat:write`                                                       | posting and editing replies (`chat.postMessage`, `chat.update`)     |
+   | `files:read`                                                       | reading files a user attaches in a DM or channel                    |
    | `files:write`                                                      | delivering workflow result documents (`files.uploadV2`)             |
    | `channels:read`, `groups:read`, `im:read`, `mpim:read`             | reading conversation metadata at link time (`conversations.info`)   |
    | `users:read`                                                       | naming DM conversations at link time (`users.info`)                 |
@@ -52,14 +53,14 @@ For reference, the manifest the Control UI generates looks like this:
 
 ```yaml
 display_information:
-  name: "Evenfire"
+  name: 'Evenfire'
 features:
   app_home:
     home_tab_enabled: false
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
   bot_user:
-    display_name: "Evenfire"
+    display_name: 'Evenfire'
     always_online: false
 oauth_config:
   scopes:
@@ -91,8 +92,8 @@ logs.
 
 `app_home.messages_tab_enabled` matters more than it looks. Slack defaults it to
 **false**, and an app installed from a manifest that says nothing about
-`app_home` refuses direct messages with *"Sending messages to this app has been
-turned off."* That breaks [Confirm your Slack identity](#confirm-your-slack-identity),
+`app_home` refuses direct messages with _"Sending messages to this app has been
+turned off."_ That breaks [Confirm your Slack identity](#confirm-your-slack-identity),
 which asks you to DM the app. **If your app was created before this was added,
 switch it on by hand: Features → App Home → Show Tabs → Messages Tab, and tick
 "Allow users to send Slash commands and messages from the messages tab".**

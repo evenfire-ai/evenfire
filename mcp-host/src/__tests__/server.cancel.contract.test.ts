@@ -174,6 +174,30 @@ describe('POST /v1/runtime/tasks/:taskId/cancel', () => {
     }
   })
 
+  it('lets channel-reader cancel its own task and passes the sender', async () => {
+    let captured: { taskId: string; userId?: string; caller?: string } | undefined
+    const { server, baseUrl } = await startServerWithHandler((taskId, requesterUserId, caller) => {
+      captured = { taskId, userId: requesterUserId, caller: caller?.caller }
+      return 'cancelled'
+    })
+    try {
+      const res = await fetch(`${baseUrl}/v1/runtime/tasks/task-long/cancel`, {
+        method: 'POST',
+        headers: {
+          'x-clerum-edge-caller': 'channel-reader',
+          'x-clerum-edge-host-ref': 'chatllm',
+          'x-clerum-edge-channel-type': 'slack',
+          'x-clerum-edge-channel-id': 'D123',
+          'x-clerum-edge-sender': 'U123',
+        },
+      })
+      expect(res.status).toBe(204)
+      expect(captured).toEqual({ taskId: 'task-long', userId: 'U123', caller: 'channel-reader' })
+    } finally {
+      await server.stop()
+    }
+  })
+
   it('returns 404 (not 403) when handler returns not_found due to ownership mismatch', async () => {
     // Simulates the main.ts handler returning 'not_found' on mismatch.
     // The HTTP layer collapses both 'not_found' and ownership_mismatch to 404.

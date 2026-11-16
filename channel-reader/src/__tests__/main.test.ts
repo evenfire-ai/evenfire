@@ -892,7 +892,7 @@ describe('ChannelReader Teams final delivery', () => {
         'conversation-1',
         'teams-status-message',
         'Final answer',
-        undefined
+        { runId: 'teams-task-1' }
       )
       expect(sendMessage).toHaveBeenLastCalledWith('conversation-1', 'Final answer', 'activity-1')
       expect(closeStream).toHaveBeenCalledOnce()

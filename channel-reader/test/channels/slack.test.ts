@@ -859,6 +859,28 @@ describe('SlackAdapter — sendMessage()', () => {
     })
   })
 
+  it('logs a Slack API error with the run id and rejects the edit', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const client = slackState.instances[0]!
+    client.chat.update.mockRejectedValueOnce(
+      Object.assign(new Error('msg_too_long'), { data: { error: 'msg_too_long' } })
+    )
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    try {
+      await expect(
+        adapter.editMessage('C12345', '1234567890.000001', 'x'.repeat(5000), { runId: 'task-long' })
+      ).rejects.toThrow('msg_too_long')
+      const logged = consoleError.mock.calls.map(call => String(call[0])).join('\n')
+      expect(logged).toContain('task-long')
+      expect(logged).toContain('msg_too_long')
+      expect(logged).toContain('chat.update')
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
   it('uploads workflow result documents to Slack files', async () => {
     const adapter = new SlackAdapter()
     await adapter.connect({ slackBotToken: TEST_TOKEN })

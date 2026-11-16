@@ -236,6 +236,31 @@ export class RPCClient {
     }
   }
 
+  async cancelTask(taskId: string, message: Message): Promise<void> {
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/v1/runtime/tasks/${encodeURIComponent(taskId)}/cancel`,
+        {
+          method: 'POST',
+          headers: this.runtimeHeaders(message),
+          signal: AbortSignal.timeout(15_000),
+        }
+      )
+      if (response.status === 204 || response.status === 404) return
+      throw new Error(`HTTP ${response.status}`)
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          msg: 'task_cancel_failed',
+          taskId,
+          code: error instanceof Error ? error.message : 'unknown',
+        })
+      )
+      throw error
+    }
+  }
+
   async authorizeProviderMessage(
     identity: ProviderIdentity
   ): Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }> {

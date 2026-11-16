@@ -53,6 +53,14 @@ export interface Config {
   // provider signature verification. Empty token disables the listener.
   channelReaderHandoffPort: number
   channelReaderHandoffToken: string
+
+  /**
+   * Hard cap for one Slack, Telegram, Teams, or email run. When it fires, the
+   * reader edits the acknowledgement to an error and asks mcp-host to cancel
+   * the task so the per-conversation queue slot is released.
+   * Override with CLERUM_CHANNEL_RUN_TIMEOUT_MS. Default is 5 minutes.
+   */
+  channelRunTimeoutMs: number
 }
 
 function getEnv(key: string, defaultValue?: string): string | undefined {
@@ -83,6 +91,19 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+function requireBoundedInt(key: string, defaultValue: number): number {
+  const raw = process.env[key]
+  if (raw === undefined) return defaultValue
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${key} must be a positive integer up to 2147483647`)
+  }
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
+    throw new Error(`${key} must be a positive integer up to 2147483647`)
+  }
+  return value
 }
 
 /**
@@ -169,4 +190,5 @@ export const config: Config = {
   attachmentMaxBytes: getEnvInt('CLERUM_ATTACHMENT_MAX_BYTES', 52_428_800),
   channelReaderHandoffPort: getEnvInt('CLERUM_CHANNEL_READER_HANDOFF_PORT', 8099),
   channelReaderHandoffToken: getEnv('CLERUM_CHANNEL_READER_HANDOFF_TOKEN', '')!,
+  channelRunTimeoutMs: requireBoundedInt('CLERUM_CHANNEL_RUN_TIMEOUT_MS', 5 * 60 * 1000),
 }

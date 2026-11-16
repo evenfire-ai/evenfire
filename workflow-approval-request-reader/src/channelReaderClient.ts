@@ -107,6 +107,9 @@ export async function handoffSlackMessageToChannelReader(
     providerChannelId: command.providerChannelId,
     providerEventId: command.providerEventId,
     providerMessageTs: command.providerMessageTs,
+    ...(command.slackFiles && command.slackFiles.length > 0
+      ? { slackFiles: command.slackFiles }
+      : {}),
     responseThreadTs,
     providerTarget: {
       hostRef: target.hostRef,

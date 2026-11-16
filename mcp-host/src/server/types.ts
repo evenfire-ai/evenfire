@@ -453,7 +453,8 @@ export type CancelResult = 'cancelled' | 'already_terminal' | 'not_found'
  */
 export type CancelHandler = (
   taskId: string,
-  requesterUserId?: string
+  requesterUserId?: string,
+  caller?: RuntimeCallerContext
 ) => CancelResult | Promise<CancelResult>
 
 /**
