@@ -2,8 +2,6 @@
 
 This runbook applies after the complete per-user home release is deployed.
 The schema alone does not provide the reconciler, operator routes, or UI.
-Code references below are relative to the public repository at the S7 starting
-commit `1f2d5352e`.
 
 ## What the feature does
 
@@ -40,17 +38,20 @@ teams include the owner; other viewers do not see it. Only an operator can
 change it.
 
 The `/Users` directory and bound home roots cannot be moved, renamed, or
-deleted; the guard is in `control-api/src/db.ts:3251`. Contents inside a home
-can still be managed according to their permissions.
+deleted; the guard is the `gfs_governed_root_guard` trigger function in
+`control-api/src/db.ts`. Contents inside a home can still be managed according
+to their permissions.
 
 ## Drive requirements
 
 `GFS_HOME_DRIVE` must be `main` for this rollout. The host-context-controller
-(HCC) default drive must also remain `main`; its default is defined at
-`host-context-controller/src/gfsConfig.ts:90`. Do not set
-`CONTEXT_MAPPER_GFS_DRIVE_NAME`. Control UI's file browser uses `main`
-(`control-ui/components/GfsBrowser.tsx:233`), so operator home management
-depends on this alignment. Desktop carries the drive returned by the server.
+(HCC) default drive must also remain `main`; its default is the
+`CONTEXT_MAPPER_GFS_DRIVE_NAME` fallback in
+`host-context-controller/src/gfsConfig.ts`. Do not set
+`CONTEXT_MAPPER_GFS_DRIVE_NAME`. Control UI's file browser uses `main` (the
+`DRIVE` constant in `control-ui/components/GfsBrowser.tsx`), so operator home
+management depends on this alignment. Desktop carries the drive returned by the
+server.
 
 The release places `GFS_HOME_DRIVE` in the public base Control API ConfigMap
 and the Minikube override. A missing value disables the reconciler and leaves
@@ -145,12 +146,12 @@ Use the user detail block as an operator. Never delete a foreign item or adopt
 it as the home to make a conflict disappear; renaming or moving it out of the
 reserved path in the Control UI GFS browser is allowed.
 
-| Conflict                              | Cause                                                                                                                                                      | Operator action                                                                                                                                                                                                    |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `path_conflict`, home not yet created | Another item occupies `/Users/<name>`.                                                                                                                     | Rename or move that item in the GFS browser and select **Retry**, or enter a different valid folder name and select **Retry**. The item and its contents are never changed by the reconciler.                      |
-| `path_conflict`, home already bound   | The bound home is no longer at `/Users/<name>`. This happens only through a manual database change.                                                        | A bound home root cannot be moved or renamed, even by an operator. An administrator with cluster access corrects the path in the database; move any item occupying the reserved path first, then select **Retry**. |
-| `ancestor_grant_conflict`             | A user, team, agent, or context grant or share on the drive root or `/Users` is inheritable (created before this release, or by a direct database change). | Remove the entry or make it non-inheritable with operator authority, then select **Retry**.                                                                                                                        |
-| `ownership_conflict`                  | A bound home's owner grant is missing, narrowed, or no longer inheritable.                                                                                 | Select **Restore owner access**, or re-grant the owner all five permissions with inheritance in the grant panel. Retry cannot restore this grant.                                                                  |
+| Conflict                              | Cause                                                                                                                                                                                                                                            | Operator action                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path_conflict`, home not yet created | Another item occupies `/Users/<name>`.                                                                                                                                                                                                           | Rename or move that item in the GFS browser and select **Retry**, or enter a different valid folder name and select **Retry**. The item and its contents are never changed by the reconciler.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `path_conflict`, home already bound   | The bound home is no longer at `/Users/<name>`. This happens only through a manual database change.                                                                                                                                              | A bound home root cannot be moved or renamed, even by an operator. An administrator with cluster access corrects the path in the database; move any item occupying the reserved path first, then select **Retry**.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `ancestor_grant_conflict`             | A user, team, agent, or context grant or share exists on the drive root or `/Users`, whether or not it includes descendants (created before this release, on a folder renamed to `Users` before the first home, or by a direct database change). | Remove the entry with operator authority through the operator API, then select **Retry**. `GET /api/v1/gfs/grants?drive=main&resourceId=<resource id>` (or `/api/v1/gfs/shares`) lists the entries on that folder with their ids, and `DELETE /api/v1/gfs/grants/<entry id>` (or `/api/v1/gfs/shares/<entry id>`) removes one. The member's Home folder field lists each entry with its path and subject; `conflictDetail` in `GET /api/v1/gfs/user-homes/:userId` also gives its `resourceId`. An entry cannot be edited: a grant or share update for a user, team, agent, or context on these two folders returns 409 `ancestor_home_exposure`, including one that only removes inheritance. |
+| `ownership_conflict`                  | A bound home's owner grant is missing, narrowed, or no longer inheritable.                                                                                                                                                                       | Select **Restore owner access**, or re-grant the owner all five permissions with inheritance in the grant panel. Retry cannot restore this grant.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 A `ready` home is not re-checked against its path. Whoever changes a bound
 home's resource or path by hand in the database must also set its
@@ -185,9 +186,10 @@ Only operator-subject grants and shares may be created on the drive root or
 access there to a user, team, agent, or context return 409
 `ancestor_home_exposure`, and Control UI explains it in the grant panel.
 Operators retain intrinsic access everywhere and can grant or share access on
-sub-folders, including individual homes. Existing inheritable non-operator
-entries on the root or `/Users` block provisioning as
-`ancestor_grant_conflict` until an operator removes them.
+sub-folders, including individual homes. Existing non-operator entries on the
+root or `/Users`, inheritable or not, block provisioning as
+`ancestor_grant_conflict` until an operator removes them. The rule is checked
+when a home is provisioned: homes that are already `ready` are not re-checked.
 
 Permissions do not cascade when their grantor loses access. If A gives B
 `manage_acl`, B grants C access, and A revokes B, C's entry remains until an
@@ -237,23 +239,30 @@ grant. Do not reset the data or automatically re-grant owner access.
 An older Control API also ignores the `X-Evenfire-Gfs-Authority` header that
 Desktop sends, so during the rollback window the linked initial admin using the
 new Desktop has operator authority in Files again. An older Control API has no
-`/me/gfs/home`: the new Desktop shows My home as unavailable, while Shared with
-me and its row actions keep working with the drive each row reports.
+`/external/gfs/home`, the route behind Desktop's `/me/gfs/home` request to the
+External REST API: the new Desktop cannot load the home, so the sidebar and the
+Files page overview show a disabled **My home** with the load error, while
+Shared with me and its row actions keep working with the drive each row
+reports.
 
-After roll-forward, each Control API process runs one full startup repair
-pass. It runs at the start of the first reconciler tick in which that process
-holds the reconciler lock, before the tick provisions homes, and reads the
-home registry in batches of 50. For ready or conflict rows, it cleans home
+After roll-forward, each Control API process runs a full startup repair pass
+until one completes. It runs at the start of a reconciler tick in which that
+process holds the reconciler lock, before the tick provisions homes, and reads
+the home registry in batches of 50. For ready or conflict rows, it cleans home
 entries for users retired or deleted during the window. It marks a ready home
 with a missing or narrowed owner grant as `ownership_conflict`. An operator
 restores it as described under conflicts; the repair does not re-grant it.
 
-The full pass does not repeat. A row whose repair fails is logged as
-`user_home_startup_repair_failed` and kept in a retry list. Each later tick
-(every 60 seconds) retries only the rows in that list and drops the ones that
-succeed. A row that keeps failing therefore logs
-`user_home_startup_repair_failed` once a minute until its cause is fixed or the
-process restarts, and a restart runs a new full pass.
+A completed full pass does not repeat. An interrupted pass (a failed registry
+query, a lost lock session, or shutdown) does not count as completed: the next
+tick that holds the lock starts the full pass again. A row whose repair fails
+in a completed pass is logged as `user_home_startup_repair_failed` and kept in
+a retry list. Each later tick in which this process holds the reconciler lock
+retries only the rows in that list and drops the ones that succeed; with
+several replicas, a process may not hold the lock on every 60-second tick. A
+row that keeps failing therefore logs `user_home_startup_repair_failed` on each
+of those ticks until its cause is fixed or the process restarts, and a restart
+runs a new full pass.
 
 The pass uses index scans only: the real-PostgreSQL suite
 `control-api/test/gfs.userHomeStartupCost.realPostgres.integration.test.ts`
@@ -261,10 +270,10 @@ scans 10,000 ready homes with nothing to repair in under five seconds and fails
 on any sequential scan.
 
 A hard delete during rollback can also remove the user's agent associations
-before repair runs: the `user_agents` foreign key cascades on deletion
-(`control-api/src/db.ts:321`). The repair may therefore lack the information
-needed to identify that user's agent grants outside the home. The repair still
-removes the home entries and the user's own grants and shares; review that
-user's agent grants outside the home separately using available records, and
-do not assume startup repair removed them. Releases before this one leave the
-same rows when a user is deleted.
+before repair runs: the `user_agents.user_id` foreign key in
+`control-api/src/db.ts` cascades on deletion. The repair may therefore lack the
+information needed to identify that user's agent grants outside the home. The
+repair still removes the home entries and the user's own grants and shares;
+review that user's agent grants outside the home separately using available
+records, and do not assume startup repair removed them. Releases before this
+one leave the same rows when a user is deleted.
