@@ -258,7 +258,11 @@ export function GfsUserHomeBlock({ userId }: { userId: string }) {
           .catch(caught => {
             if (controller.signal.aborted) return
             if (isHomeNotFound(caught)) showMissing()
-            else setError(errorMessage(caught))
+            else {
+              setError(errorMessage(caught))
+              // Polling stops here, so the line must not keep saying "Being created…".
+              setStillPending(true)
+            }
             setPolling(false)
           })
       }, POLL_INTERVAL_MS)
