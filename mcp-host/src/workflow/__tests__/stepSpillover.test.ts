@@ -200,6 +200,25 @@ describe('createStepSpillover', () => {
       expect(await run(make({ budgetBytes: 10000 }))).toEqual([true, false, false])
       expect(budgetWarnings()).toHaveLength(2)
     })
+
+    it('counts the stored string against the budget, not the inline size', async () => {
+      const spillover = make({ budgetBytes: 10000 })
+      const outcomes: boolean[] = []
+      for (const callId of ['c1', 'c2', 'c3']) {
+        // 4500 stored bytes per result, 6000 inline: two fit by stored size (9000),
+        // only one would fit by inline size (12000 > 10000).
+        const res = await spillover.persist({
+          callId,
+          toolName: 't',
+          content: 'b'.repeat(4500),
+          inlineBytes: 6000,
+          isError: false,
+        })
+        outcomes.push(res.spilled)
+      }
+      // The third result (13500 stored bytes in all) shows the budget is applied.
+      expect(outcomes).toEqual([true, true, false])
+    })
   })
 
   describe('readTool', () => {
