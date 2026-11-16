@@ -26,8 +26,9 @@ describe('0139_gfs_user_homes migration', () => {
     expect(versions[index - 1]).toBe('0138_legacy_password_security_epoch_backfill')
     expect(index).toBe(versions.length - 1)
     expect(versions.filter(version => version === VERSION)).toHaveLength(1)
-    // The earlier names (0130/0131_gfs_user_homes) never reached a merged branch
-    // or a deployed database, so no receipt under them is accepted.
+    // The earlier names (0130/0131_gfs_user_homes) ran only on this branch's own
+    // Minikube profiles and local databases. Those are recreated, so no receipt
+    // under them is accepted.
     expect(CONTROL_API_MIGRATIONS[index].legacyVersions).toBeUndefined()
   })
 

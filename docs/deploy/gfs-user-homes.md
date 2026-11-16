@@ -20,16 +20,22 @@ homes appear as ordinary folders under `/Users` in EvenDrive, where the existing
 ACL management applies, and each member's Contact tab shows the home folder with
 its recovery actions.
 
-The owner manages entries throughout their own home tree for the people and
-teams in their teams and for their own agents. Access lists in a home follow
-the same rule as every other EvenDrive folder: grant and share lists return no
-names or email addresses, Desktop names subjects from the viewer's team
-directory and the viewer's own agents, and rows for people and teams outside the
-viewer's teams are not listed. One notice says that such members exist
-("Members outside your teams aren't listed here. Access can also follow from
-parent folders you cannot see."). To remove an entry for a person or team
-outside the owner's teams, an operator opens the folder in Control UI EvenDrive,
-where every entry is listed with Remove. Grant rows keep their role-change and
+Grant and share lists return no names or email addresses, in a home as in every
+other EvenDrive folder, and Desktop names subjects from the viewer's team
+directory and the viewer's own agents. Inside their own home (the home root and
+everything under it), the owner sees an entry for a person or team outside their
+teams as **Member outside your teams**, with its role as text and
+**Remove access**, and without a name or email address; Desktop does not offer
+a role change for such an entry. In every other folder, Desktop does not list
+entries for people and teams outside the viewer's teams, and one notice says
+that such members exist ("Members outside your teams aren't listed here. Access
+can also follow from parent folders you cannot see."); an operator removes such
+an entry in Control UI EvenDrive, where every entry is listed with Remove. Two
+limits apply to the Share dialog of a file's preview: it lists access inherited
+from a parent folder but cannot remove it, for named and unnamed members alike
+(the owner removes it from the folder's Share dialog in Files), and if it could
+not read the parent folders, it shows that notice instead of the unnamed
+entries until its access list is reloaded. Grant rows keep their role-change and
 remove actions. Share rows keep their remove action, and an Editor share can be
 lowered to Read in Desktop; lowering never adds a permission the share did not
 have, and a share is never raised. The home owner's own grant is shown as
@@ -82,14 +88,23 @@ parent of the homes.
    and the services restart. During the migration, old binaries can continue
    serving; enrollment can create pending rows, but the old Control API does
    not provision homes. The governed-root guard is active after migration.
-3. When the new Control API starts, it creates `/Users` as needed under the
+3. A database that ran an earlier head of this branch (a branch Minikube
+   profile or a local database) recorded this migration as
+   `0130_gfs_user_homes` or `0131_gfs_user_homes`. On it the migration job
+   fails with `relation "gfs_user_homes" already exists`. Delete and recreate
+   that database; for a branch profile:
+   `CONFIRM_DELETE=<profile> make -f scripts/minikube-profiles/branch.mk branch-profile-delete`.
+   It is not migrated in place because it also holds objects of migrations this
+   branch later removed. Shared clusters are not affected: their images are
+   built by the build-publish workflow, which has never run on this branch.
+4. When the new Control API starts, it creates `/Users` as needed under the
    drive structure lock, then enrolls and provisions homes. Do not add
    `/Users` to a GFS layout. Backfill and provisioning run automatically; a
    60-second tick is a scheduling interval, not a completion deadline. Each
    tick enrolls up to 200 existing users and provisions up to 50 pending homes
    (`control-api/src/services/gfsUserHomeReconciler.ts`), so 10,000 users take
    about 50 minutes to enroll and about 3.3 hours to provision.
-4. In each cluster, read the home inventory API (below) and watch the overall
+5. In each cluster, read the home inventory API (below) and watch the overall
    `pending` count fall to zero. Review all `conflict` entries separately.
    Production follows dev through the existing promotion.
 
