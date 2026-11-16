@@ -1570,22 +1570,7 @@ export class ChannelReader {
           // Fall back to synchronous
           const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
           if (response.success && response.status === 'waiting_approval' && response.approval) {
-            const { taskId, requestId, userId, notification } = response.approval
-            console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
-            const approvalKey = this.pendingApprovalKey(msg)
-            const actionToken = newToolApprovalActionToken()
-            this.pendingApprovals.set(approvalKey, {
-              taskId,
-              requestId,
-              userId,
-              channelType: msg.channelType,
-              channelId: msg.channelId,
-              originalMessage: msg,
-              createdAt: new Date(),
-              actionToken,
-            })
-            const delivery = toolApprovalDelivery(msg.channelType, notification, actionToken)
-            await this.sendReply(msg, delivery.content, undefined, delivery.options)
+            await this.deliverSyncToolApproval(msg, response.approval)
           } else if (response.success && response.response) {
             console.log('[Main] mcp-host response:')
             console.log(`[Main]   Model: ${response.model}`)
@@ -1607,22 +1592,7 @@ export class ChannelReader {
         const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
 
         if (response.success && response.status === 'waiting_approval' && response.approval) {
-          const { taskId, requestId, userId, notification } = response.approval
-          console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
-          const approvalKey = this.pendingApprovalKey(msg)
-          const actionToken = newToolApprovalActionToken()
-          this.pendingApprovals.set(approvalKey, {
-            taskId,
-            requestId,
-            userId,
-            channelType: msg.channelType,
-            channelId: msg.channelId,
-            originalMessage: msg,
-            createdAt: new Date(),
-            actionToken,
-          })
-          const delivery = toolApprovalDelivery(msg.channelType, notification, actionToken)
-          await this.sendReply(msg, delivery.content, undefined, delivery.options)
+          await this.deliverSyncToolApproval(msg, response.approval)
         } else if (response.success && response.response) {
           console.log('[Main] mcp-host response:')
           console.log(`[Main]   Model: ${response.model}`)
@@ -1835,6 +1805,32 @@ export class ChannelReader {
   }
 
   /**
+   * Offer a tool approval that mcp-host returned in a synchronous response:
+   * register it, then send it as a reply with the channel's approval controls.
+   */
+  private async deliverSyncToolApproval(
+    msg: Message,
+    approval: NonNullable<MessageResponse['approval']>
+  ): Promise<void> {
+    const { taskId, requestId, userId, notification } = approval
+    console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
+    const approvalKey = this.pendingApprovalKey(msg)
+    const actionToken = newToolApprovalActionToken()
+    this.pendingApprovals.set(approvalKey, {
+      taskId,
+      requestId,
+      userId,
+      channelType: msg.channelType,
+      channelId: msg.channelId,
+      originalMessage: msg,
+      createdAt: new Date(),
+      actionToken,
+    })
+    const delivery = toolApprovalDelivery(msg.channelType, notification, actionToken)
+    await this.sendReply(msg, delivery.content, undefined, delivery.options)
+  }
+
+  /**
    * Handle a message using the async progress flow.
    * Sends the message with async=true, opens an SSE progress stream that stays
    * open for the entire task lifecycle, and edits a status message in-place as
@@ -1870,22 +1866,7 @@ export class ChannelReader {
     if (!response.taskId) {
       console.log('[Main] No taskId returned from async send, falling back to sync')
       if (response.success && response.status === 'waiting_approval' && response.approval) {
-        const { taskId, requestId, userId, notification } = response.approval
-        console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
-        const approvalKey = this.pendingApprovalKey(msg)
-        const actionToken = newToolApprovalActionToken()
-        this.pendingApprovals.set(approvalKey, {
-          taskId,
-          requestId,
-          userId,
-          channelType: msg.channelType,
-          channelId: msg.channelId,
-          originalMessage: msg,
-          createdAt: new Date(),
-          actionToken,
-        })
-        const delivery = toolApprovalDelivery(msg.channelType, notification, actionToken)
-        await this.sendReply(msg, delivery.content, undefined, delivery.options)
+        await this.deliverSyncToolApproval(msg, response.approval)
       } else if (response.success && response.response) {
         await this.sendReply(msg, response.response, response.attachments)
       } else if (response.error) {
