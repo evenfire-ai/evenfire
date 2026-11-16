@@ -73,15 +73,9 @@ describe('isTransientInfraError outside the driver', () => {
     expect((nodeError as { code?: string }).code).toMatch(/^ERR_/)
     expect(isTransientInfraError(nodeError)).toBe(false)
 
-    let typeError: unknown
-    try {
-      // A runtime TypeError without a `code`; a property access on undefined would
-      // throw the same error but CodeQL reports it as js/property-access-on-non-object.
-      Object.defineProperty(1 as unknown as object, 'x', {})
-    } catch (error) {
-      typeError = error
-    }
-    expect(typeError).toBeInstanceOf(TypeError)
+    // The classifier reads only constructor, name, code and message, so a constructed
+    // TypeError is indistinguishable from a thrown one; provoking it at runtime trips CodeQL.
+    const typeError = new TypeError("Cannot read properties of undefined (reading 'rows')")
     expect(isTransientInfraError(typeError)).toBe(false)
   })
 
