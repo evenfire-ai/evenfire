@@ -3,10 +3,12 @@
 // model never carries the content. Every refusal sends nothing to GFS.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'child_process'
+import { createHash } from 'crypto'
 import * as fs from 'fs'
 import JSZip from 'jszip'
 import * as os from 'os'
 import * as path from 'path'
+import { redactArtifactForDelivery } from '../artifacts/artifactBytes'
 import { gfsWorkspaceFileGuidanceText } from '../core/reasoning/promptBuilder'
 import { NativeToolRegistry } from '../core/tools/nativeToolRegistry'
 import { ShellTool } from '../core/tools/shell'
@@ -1171,4 +1173,56 @@ describe('texts of the kept-files listing and of a withheld file', () => {
     expect(description).not.toContain('the newest file is the last entry')
     expect(description).not.toContain('canSave false means it cannot be saved (reason)')
   })
+})
+
+describe('a large generated file that holds a value only split by markup', () => {
+  const size = 6 * 1024 * 1024
+  const line = `note ${SYNTHETIC.slice(0, 10)}<b>${SYNTHETIC.slice(10)}</b>\n`
+  const filler = 'plain filler line of a long log\n'
+  const body = filler.repeat(Math.ceil(size / filler.length)).slice(0, size - line.length) + line
+
+  it('refuses a 6 MiB file with no record that holds a value only split by markup', async () => {
+    const root = rootOf('user-a')
+    const out = outputsOf(root)
+    fs.mkdirSync(out, { mode: 0o700 })
+    fs.writeFileSync(path.join(out, 'big.md'), body)
+    // Witness: the byte search alone cannot find the value; only the windowed
+    // scan of the text, above the sync scan's 4 MiB bound, can.
+    expect(Buffer.from(body).includes(Buffer.from(SYNTHETIC))).toBe(false)
+    const client = recordingClient()
+    const tools = writeTools(root, client, [{ name: 'P', value: SYNTHETIC }])
+    expect((await create(tools, { name: 'big.md', generatedFile: 'big.md' })).error).toBe(
+      FILE_CONTAINS_SECRET
+    )
+    expect(calls(client)).toBe(0)
+  }, 60_000)
+
+  it('refuses a 6 MiB file saved by its Save id that holds a value only split by markup', async () => {
+    const root = rootOf('user-a')
+    const out = outputsOf(root)
+    fs.mkdirSync(out, { recursive: true, mode: 0o700 })
+    const bytes = Buffer.from(body)
+    expect(bytes.includes(Buffer.from(SYNTHETIC))).toBe(false)
+    fs.writeFileSync(path.join(out, 'big.md'), bytes)
+    const secrets = [{ name: 'P', value: SYNTHETIC }]
+    const delivered = redactArtifactForDelivery('md', bytes, secrets).buffer
+    // Witness: redaction for delivery leaves the split value in the bytes.
+    expect(delivered.equals(bytes)).toBe(true)
+    writeSaveLedgerRecord(out, {
+      id: 'abcabcabcabc',
+      name: 'big.md',
+      format: 'md',
+      outcome: 'delivered',
+      deliveredSha256: createHash('sha256').update(delivered).digest('hex'),
+      createdAt: new Date().toISOString(),
+    })
+    const client = recordingClient()
+    const result = await create(writeTools(root, client, secrets), {
+      name: 'big.md',
+      generatedFile: 'big.md',
+      generatedFileId: 'abcabcabcabc',
+    })
+    expect(result.error).toBe(FILE_CONTAINS_SECRET)
+    expect(calls(client)).toBe(0)
+  }, 60_000)
 })
