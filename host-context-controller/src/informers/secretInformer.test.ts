@@ -438,14 +438,20 @@ describe('SecretInformer resume mode (#1338)', () => {
     expect(api.watchFn).toHaveBeenCalledTimes(watchesBefore)
   })
 
-  it('an ADDED for a cached name with a new uid is delivered as MODIFIED', async () => {
+  it('defensive: an ADDED for a cached name with a new uid, which a resumed watch never sends, is logged and delivered as MODIFIED', async () => {
     await startQuiet(['alpha'])
+    const warn = vi.spyOn(hccLogger, 'warn')
 
+    // Hand-built: the fake apiserver, like a real one, sends DELETED first.
     api.watchCalls.at(-1)!.cb('ADDED', {
       metadata: { name: 'alpha', namespace: NS, uid: 'recreated-uid', resourceVersion: '900' },
     })
 
     expect(events).toEqual([{ type: 'MODIFIED', name: 'alpha', namespace: NS }])
+    expect(warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ event: 'secret-informer-unexpected-added', namespace: NS })
+    )
   })
 
   it('B10 the initial list emits one ADDED per Secret, once, then watches from its resourceVersion', async () => {

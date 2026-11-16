@@ -345,7 +345,17 @@ export class SecretInformer {
       })
       return
     }
-    // A cached name with another uid or resourceVersion changed since it was seen.
+    // Defensive: a watch resumed from a resourceVersion delivers the DELETED of
+    // a recreated Secret before its ADDED, so a cached name with another uid or
+    // resourceVersion means the resume contract was broken. MODIFIED is the
+    // fail-safe: it is change evidence, so the McpServer converges again.
+    hccLogger.warn(
+      '[SecretInformer] ADDED for a cached Secret that changed delivered as MODIFIED',
+      {
+        event: 'secret-informer-unexpected-added',
+        namespace: this.namespace,
+      }
+    )
     this.emit({ type: 'MODIFIED', name, namespace })
   }
 

@@ -231,6 +231,8 @@ export const bindingReconciliationsTotal = counter({
   labelNames: ['result'] as const,
 })
 
+export const SECRET_INFORMER_EVENT_TYPES = ['ADDED', 'MODIFIED', 'DELETED'] as const
+
 export const secretInformerEventsTotal = counter({
   name: 'clerum_hcc_secret_informer_events_total',
   help: 'Secret informer events delivered to the consumer, by informer namespace and event type',
@@ -269,13 +271,18 @@ const secretInformerResumesTotal = counter({
 })
 
 /**
- * Exposes the reconnect counter of one SecretInformer at 0, in every mode, so
- * the first reconnect of its namespace is visible to increase(). The
- * namespaces are known only where the informer is built, so its constructor
- * calls this.
+ * Exposes the reconnect and event counters of one SecretInformer at 0, and its
+ * running gauge at 0, in every mode, so the first reconnect or event of its
+ * namespace is visible to increase() and a watch that never starts still
+ * reads 0. The namespaces are known only where the informer is built, so its
+ * constructor calls this.
  */
 export function exposeSecretInformerSeries(namespace: string): void {
   secretInformerReconnectsTotal.inc({ namespace }, 0)
+  for (const type of SECRET_INFORMER_EVENT_TYPES) {
+    secretInformerEventsTotal.inc({ namespace, type }, 0)
+  }
+  secretInformerRunning.set({ namespace }, 0)
 }
 
 /**

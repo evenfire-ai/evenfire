@@ -367,15 +367,17 @@ function getExternalEgressEnvInt(key: string, defaultValue: number): number {
 
 /**
  * CONTEXT_MAPPER_HEARTBEAT_POLL_MS — cadence of HCC's control-api heartbeat
- * poll. Unset or "" means the default; anything else must be plain digits.
+ * poll. Unset or "" means the default; anything else must be plain digits and
+ * at most MAX_TIMER_DELAY_MS, the largest delay setTimeout holds.
  * Fails config load loudly on any other value: a silent default over garbage
- * would hide a typo'd cadence in production.
+ * would hide a typo'd cadence in production, and a clamped value would make
+ * the poll fire continuously.
  */
 export function parseHeartbeatPollMs(raw: string | undefined): number {
   const parsed = plainPositiveIntegerOrDefault(raw, 10_000)
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
     throw new Error(
-      `CONTEXT_MAPPER_HEARTBEAT_POLL_MS must be a positive integer (milliseconds) in plain digits, got '${raw}'`
+      `CONTEXT_MAPPER_HEARTBEAT_POLL_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds in plain digits, got '${raw}'`
     )
   }
   return parsed

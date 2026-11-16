@@ -264,21 +264,18 @@ describe.each([
     read: (c: Record<string, unknown>) => c.externalEgressDnsResolveTimeoutMs,
     defaultValue: 5_000,
     valid: ['5000', 5_000] as const,
-    spellings: ['5000'],
   },
   {
     name: 'CONTEXT_MAPPER_HEARTBEAT_POLL_MS',
     read: (c: Record<string, unknown>) => c.heartbeatPollMs,
     defaultValue: 10_000,
     valid: ['5000', 5_000] as const,
-    spellings: ['5000'],
   },
   {
     name: 'HCC_HOST_FULL_RECONCILE_CONCURRENCY',
     read: (c: Record<string, unknown>) => c.hostFullReconcileConcurrency,
     defaultValue: 2,
     valid: ['4', 4] as const,
-    spellings: ['4'],
   },
 ])('#1493: plain digits only for $name', ({ name, read, defaultValue, valid }) => {
   it.each([undefined, ''])('means the default for %s', async raw => {
@@ -307,4 +304,25 @@ describe.each([
   ])("refuses '%s' and names the variable", async raw => {
     await expect(loadConfigWith({ [name]: raw })).rejects.toThrow(name)
   })
+})
+
+describe('CONTEXT_MAPPER_HEARTBEAT_POLL_MS timer bound', () => {
+  const NAME = 'CONTEXT_MAPPER_HEARTBEAT_POLL_MS'
+
+  // HB-T1
+  it('accepts the largest delay a timer can hold', async () => {
+    const { config } = await loadConfig(NAME, '2147483647')
+    expect(config.heartbeatPollMs).toBe(2_147_483_647)
+  })
+
+  // HB-T2: HB-T1 shows the parser ran on the neighbouring value, so the
+  // refusal below is the bound and not a load that never reached the parser.
+  it.each(['2147483648', '9007199254740991'])(
+    "refuses '%s' and names the bound, because a timer would fire after about 1 ms",
+    async raw => {
+      await expect(loadConfig(NAME, raw)).rejects.toThrow(
+        new RegExp(`${NAME} must be a positive integer of at most 2147483647 milliseconds`)
+      )
+    }
+  )
 })

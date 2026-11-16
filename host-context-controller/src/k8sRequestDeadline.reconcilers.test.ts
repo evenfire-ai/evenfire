@@ -225,7 +225,7 @@ describe('#1338 request deadlines on the NetworkPolicy pass path', () => {
  * the real `@kubernetes/client-node` produces for each transport class, instead
  * of hand-built fixtures.
  */
-type SecretAnswer = 'status-500' | 'status-429' | 'reset' | 'status-400'
+type SecretAnswer = 'status-500' | 'status-429' | 'reset' | 'status-400' | 'status-403'
 
 async function secretApiServer(answer: SecretAnswer): Promise<k8s.KubeConfig> {
   const server = http.createServer((req, res) => {
@@ -334,5 +334,26 @@ describe('#1492 transient classification of real client errors on the Secret rea
     expect(seenPaths.some(path => path.includes('/secrets/real-client-input'))).toBe(true)
     expect(await secretReadFailures('not_ready_published')).toBe(published + 1)
     expect(reconciler.getStatus(server)).toMatchObject({ ready: false })
+  })
+
+  it('T10.5 an apiserver 403 fails closed as SecretAccessDenied', async () => {
+    const reconciler = new McpServerReconciler(await secretApiServer('status-403'), {
+      assumeInventoryAuthorityWhenUnconfigured: true,
+    })
+    const server = persistedReadyServer()
+    const kept = await secretReadFailures('verdict_kept')
+
+    await reconciler.reconcile(server)
+
+    expect(seenPaths.some(path => path.includes('/secrets/real-client-input'))).toBe(true)
+    // Only the SecretAccessDenied branch builds this message. This server answers
+    // 404 for the McpServer itself, so the retract declines and the verdict is
+    // not registered for the access probe; the classification is what is pinned.
+    expect(reconciler.getStatus(server)).toMatchObject({
+      ready: false,
+      message: expect.stringContaining('Access denied reading Secret "real-client-input"'),
+    })
+    expect(reconciler.getStatus(server).message).toContain('(K8s API 403)')
+    expect(await secretReadFailures('verdict_kept')).toBe(kept)
   })
 })
