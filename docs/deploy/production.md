@@ -178,7 +178,16 @@ the root Kustomization project it into `desktop-profile-ui-config`. Both
 Deployments read these ConfigMap values as environment variables. If an overlay
 replaces either ConfigMap, preserve the keys referenced by the base Deployment
 and keep the canonical value in `control-api-config`; missing keys prevent the
-affected service from starting.
+affected service from starting. Applying an updated ConfigMap does not change
+environment variables in existing Pods. After changing this origin, apply the
+complete overlay, then restart and wait for both backend Deployments:
+
+```sh
+kubectl --context "$KCTX" -n control-plane rollout restart deploy/control-api
+kubectl --context "$KCTX" -n profiles rollout restart deploy/external-rest-api
+kubectl --context "$KCTX" -n control-plane rollout status deploy/control-api
+kubectl --context "$KCTX" -n profiles rollout status deploy/external-rest-api
+```
 
 **Images.** Base refers to images by local `clerum/<name>` names. Add the
 [`deploy/components/ghcr-images`](../../deploy/components/ghcr-images/kustomization.yaml)
