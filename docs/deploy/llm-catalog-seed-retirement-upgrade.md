@@ -40,10 +40,11 @@ enabled: a pair whose price is disabled or deleted, with no other enabled
 price, is unpriced (budgets count its usage as $0 and the per-task cost brake
 has no price for it) until an admin prices it.
 
-### 28 seeded pairs become catalog-managed
+### 28 seeded pairs become catalog-tracked
 
 The seeded pairs that models.dev lists change from `source='manual'` to
-`source='discovery'`. Nothing is deleted or disabled, and the enabled state is
+`source='discovery'`, so the sync tracks them; whether they are on or off stays
+the operator's decision (see below). Nothing is deleted or disabled, and the enabled state is
 never changed. On an enabled pair the display name and context window are left
 as they are; on a disabled one the sync fills them from the catalog if they are
 empty. From the first live sync on,

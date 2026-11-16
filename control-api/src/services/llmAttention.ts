@@ -1,7 +1,7 @@
 /**
- * Operator-attention feed (`GET /admin/attention`). The catalog sync never
- * disables a model on its own when the catalog drops or deprecates it, so the
- * operator is told — but only about models somebody uses: an item is a decision
+ * Operator-attention feed (`GET /admin/attention`). The catalog sync disables a
+ * model the catalog dropped only when nobody uses it (the prune), and never one
+ * it deprecates, so the operator is told — but only about models somebody uses: an item is a decision
  * to make, and a model without consumers has none.
  *
  *   - `stale_model_referenced` — an enabled model the catalog no longer lists,

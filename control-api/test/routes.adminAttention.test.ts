@@ -322,7 +322,7 @@ describe('GET /admin/attention', () => {
   })
 
   it('preserves the stable stale-list order (provider, model) with ≥2 referenced items', async () => {
-    // `listStaleAllowedModels` sorts ORDER BY provider, model; the feed must
+    // `listAttentionCandidates` sorts ORDER BY provider, model; the feed must
     // carry that order through unchanged. Both providers are `claude`, so model
     // decides: `claude-haiku-4-5` < `claude-opus-legacy`. The UI relies on it.
     installPool({

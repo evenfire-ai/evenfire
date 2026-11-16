@@ -139,8 +139,10 @@ unusable and is flagged in the wizard.
 **Discovery review.** `/llm-models` (Catalog) and `/llm-models/discovery`
 (Discovery Review) are two tabs of the same screen. Models that disappear from
 the latest live catalog stay in Catalog with a **Stale** marker and a
-per-provider stale count. Only a live, plausible run marks a model stale or
-clears the marker; a `vendored` run leaves it as it is.
+per-provider stale count. Only a live, plausible run marks a model stale, and
+any live run that lists the model again clears the marker (on a model the
+prune turned off, only the re-enable clears it); a `vendored` run leaves it as
+it is.
 
 **Pruning stale models nobody uses.** After each live, plausible run commits,
 the sync disables the models that have been stale for longer than
