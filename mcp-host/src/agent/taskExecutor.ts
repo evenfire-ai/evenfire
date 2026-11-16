@@ -129,6 +129,7 @@ import type { Task, TaskError, TaskSource } from '../queue/types'
 import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
+import type { MemoryWriteLog } from '../workspace/memoryWriteLog'
 import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
@@ -280,6 +281,13 @@ export interface TaskExecutorDeps {
    * flag `CLERUM_SESSION_SEARCH_ENABLED` is OFF.
    */
   sessionSearchService?: SessionSearchService
+
+  /**
+   * Record of successful `memory_write` calls (migration 018), passed to the
+   * native registry. Absent when the Host has no session database (memory
+   * mode): memory writes are then not recorded.
+   */
+  memoryWriteLog?: MemoryWriteLog
 
   /**
    * R5 — provider-fallback support for THIS task. When present with a non-empty
@@ -2309,7 +2317,8 @@ export class TaskExecutor {
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
       gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined,
-      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath)
+      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath),
+      this.deps.memoryWriteLog
     )
     await registerDesktopTools(nativeRegistry)
     // Eagerly open this caller's remote OAuth partitions before the catalog is

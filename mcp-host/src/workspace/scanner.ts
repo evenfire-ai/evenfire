@@ -9,6 +9,7 @@
  * is `daily/*`, scanned separately via `scanWriteContent`; see F3.) The scanner
  * rejects writes that match patterns of prompt injection, exfiltration,
  * invisible Unicode, sensitive paths, or that would push the file past its cap.
+ * Named notes under a person's `memory/` folder are not scanned.
  *
  * Rejection is structured (MemoryScanRejectionError) and reaches the agent
  * via the memory_write tool result so it can paraphrase and retry. The

@@ -52,6 +52,12 @@ export const playwrightLanes = {
     grep: 'attachment-gfs-save fixture: ',
     minimumExpected: 3,
   },
+  'memory-notes': {
+    config: 'desktop-app/test/e2e-playwright/playwright.memory-notes.config.ts',
+    label: 'memory-notes-playwright',
+    grep: 'memory-notes fixture: ',
+    minimumExpected: 3,
+  },
 }
 
 export function playwrightLaneConfig(env) {
@@ -251,6 +257,66 @@ export function controlApiFetch(url, init = {}) {
   const headers = new Headers(init.headers)
   headers.set('connection', 'close')
   return fetch(url, { ...init, headers })
+}
+
+/** The account the Desktop journeys sign in with. */
+export const desktopLoginEmail = 'admin@evenfire.local'
+
+/**
+ * The id of the account whose email is exactly `email`, from the body of
+ * `GET /admin/users?q=<email>`. That search matches substrings of the email,
+ * the name and the id, so the body can hold other accounts; exactly one item
+ * must match the email itself.
+ */
+export function desktopUserIdFromAdminUsers(body, email) {
+  const items = Array.isArray(body?.items) ? body.items : []
+  const matches = items.filter(item => item?.email === email)
+  if (matches.length !== 1)
+    throw new Error(`Expected one admin user with the login email, found ${matches.length}`)
+  const id = matches[0].id
+  if (typeof id !== 'string' || id.length === 0)
+    throw new Error('The admin user with the login email has no id')
+  return id
+}
+
+/**
+ * The environment Playwright runs with. The memory-notes lane also gets the
+ * signed-in account's id, from which its spec computes the expected user key.
+ */
+export function laneEnvironment({
+  lane,
+  base,
+  runId,
+  evidence,
+  profile,
+  urls,
+  models,
+  adminPassword,
+  desktopUserId,
+}) {
+  const environment = {
+    ...base,
+    NODE_ENV: 'test',
+    IMAGE_CAPABILITIES_RUN_ID: runId,
+    IMAGE_CAPABILITIES_RUN_DIR: evidence,
+    E2E_HOST_REF: 'chatllm',
+    E2E_DEV_LOGIN_EMAIL: desktopLoginEmail,
+    E2E_DESKTOP_PASSWORD: adminPassword,
+    // SQL fixtures read this name. The shell context is shared across sessions,
+    // so the owned profile has to win over anything `process.env` already set.
+    E2E_K8S_CONTEXT: profile,
+    EXTERNAL_REST_API_BASE_URL: urls.externalRestApi,
+    RPC_PROXY_BASE_URL: urls.rpcProxy,
+    QA_RECORDER_CONFIRM_CHAT: '1',
+    QA_RECORDER_IMAGE_MODEL_SUPPORTED: 'glm-5.3-flash',
+    QA_RECORDER_IMAGE_MODEL_UNSUPPORTED: 'glm-5.3',
+    QA_RECORDER_IMAGE_MODEL_UNKNOWN: models[2].model,
+    QA_RECORDER_ROOT: evidence,
+  }
+  if (lane !== 'memory-notes') return environment
+  if (typeof desktopUserId !== 'string' || desktopUserId.length === 0)
+    throw new Error('The memory-notes lane needs the signed-in account id')
+  return { ...environment, E2E_DESKTOP_USER_ID: desktopUserId }
 }
 
 function command(binary, args, { input, timeout = 60_000, env = process.env } = {}) {
@@ -848,25 +914,27 @@ async function main() {
     )
     if (wire.runId !== state.runId || wire.profile !== profile)
       throw new Error('Fixture runtime marker mismatch')
-    const environment = {
-      ...process.env,
-      NODE_ENV: 'test',
-      IMAGE_CAPABILITIES_RUN_ID: state.runId,
-      IMAGE_CAPABILITIES_RUN_DIR: evidence,
-      E2E_HOST_REF: 'chatllm',
-      E2E_DEV_LOGIN_EMAIL: 'admin@evenfire.local',
-      E2E_DESKTOP_PASSWORD: ADMIN_PASSWORD,
-      // SQL fixtures read this name. The shell context is shared across sessions,
-      // so the owned profile has to win over anything `process.env` already set.
-      E2E_K8S_CONTEXT: profile,
-      EXTERNAL_REST_API_BASE_URL: urlFor('external-rest-api'),
-      RPC_PROXY_BASE_URL: urlFor('rpc-proxy'),
-      QA_RECORDER_CONFIRM_CHAT: '1',
-      QA_RECORDER_IMAGE_MODEL_SUPPORTED: 'glm-5.3-flash',
-      QA_RECORDER_IMAGE_MODEL_UNSUPPORTED: 'glm-5.3',
-      QA_RECORDER_IMAGE_MODEL_UNKNOWN: models[2].model,
-      QA_RECORDER_ROOT: evidence,
-    }
+    const desktopUserId =
+      lane === 'memory-notes'
+        ? desktopUserIdFromAdminUsers(
+            await admin('GET', `users?q=${encodeURIComponent(desktopLoginEmail)}`),
+            desktopLoginEmail
+          )
+        : undefined
+    const environment = laneEnvironment({
+      lane,
+      base: process.env,
+      runId: state.runId,
+      evidence,
+      profile,
+      urls: {
+        externalRestApi: urlFor('external-rest-api'),
+        rpcProxy: urlFor('rpc-proxy'),
+      },
+      models,
+      adminPassword: ADMIN_PASSWORD,
+      desktopUserId,
+    })
     // Bounded pre-flight: never pay the Electron runtime download here.
     command('npm', ['--prefix', 'desktop-app', 'run', 'verify:electron', '--', '--check-only'])
     process.stdout.write(`Image capability fixture ready: ${state.runId} (lane ${lane})\n`)

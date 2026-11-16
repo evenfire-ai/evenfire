@@ -54,6 +54,7 @@ import { parseSessionKey } from '../session/types'
 import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClient.js'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveCallerRootBinding } from '../workspace/callerRootBinding'
+import type { MemoryWriteLog } from '../workspace/memoryWriteLog'
 import type { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
 import { CronScheduler } from './cronScheduler'
 import { TaskExecutor, resolveTaskSessionKey } from './taskExecutor'
@@ -262,6 +263,7 @@ export class AgentStateMachine extends EventEmitter {
   // feature flag `CLERUM_SESSION_SEARCH_ENABLED` is false; populated from
   // main.ts and forwarded into each TaskExecutor.
   private sessionSearchService: SessionSearchService | undefined
+  private memoryWriteLog: MemoryWriteLog | undefined
 
   // ConfigStore snapshot getter, merged into shell-tool spawn env
   private dynamicEnvProvider: (() => Record<string, string>) | undefined
@@ -478,6 +480,15 @@ export class AgentStateMachine extends EventEmitter {
   setSessionSearchService(service: SessionSearchService | undefined): void {
     this.sessionSearchService = service
     logger.info({ configured: Boolean(service) }, 'Session search configured')
+  }
+
+  /**
+   * Inject the record of successful `memory_write` calls (migration 018).
+   * Each TaskExecutor hands it to the memory_write tool. Absent when the Host
+   * has no session database: memory writes are then not recorded.
+   */
+  setMemoryWriteLog(log: MemoryWriteLog | undefined): void {
+    this.memoryWriteLog = log
   }
 
   /**
@@ -1553,6 +1564,7 @@ export class AgentStateMachine extends EventEmitter {
       spilloverStorage: this.spilloverStorage,
       promptCache: this.promptCache,
       sessionSearchService: this.sessionSearchService,
+      memoryWriteLog: this.memoryWriteLog,
       // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
       // no failover.
       failover: this.failoverSupportProvider?.() ?? undefined,

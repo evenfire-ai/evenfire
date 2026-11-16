@@ -1,8 +1,15 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { Worker } from 'node:worker_threads'
 import type { WorkerMessage, WorkerOp, WorkerReply } from '../../../../db/worker/protocol'
+import { logger } from '../../../../logger'
 import { PersistQueue, type WorkerLike } from '../persistQueue'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+const codeOf = (err: unknown) => (err as { code?: unknown }).code
 
 class FakeWorker extends EventEmitter implements WorkerLike {
   public sent: WorkerMessage[] = []
@@ -203,6 +210,7 @@ describe('PersistQueue', () => {
   })
 
   it('fails the next write on the same queue after an async write failed', async () => {
+    const errorSpy = vi.spyOn(logger, 'error')
     const worker = new FakeWorker()
     const q = new PersistQueue(worker, {
       syncTimeoutMs: 500,
@@ -227,10 +235,113 @@ describe('PersistQueue', () => {
     } satisfies WorkerReply)
     await new Promise(r => setImmediate(r))
 
-    await expect(q.enqueueSync({ kind: 'ping' })).rejects.toThrow(
-      /async write failed \(sessionKey=s1\): database or disk is full/
+    // Witness: the failure path ran and its log line still names the session.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionKey: 's1' }),
+      '[PersistQueue] async write failed'
     )
+
+    // Another session's write gets the stored failure, which names no session.
+    const rejection = await q.enqueueSync({ kind: 'ping' }, 's2').then(
+      () => {
+        throw new Error('expected the write to reject')
+      },
+      (err: Error) => err
+    )
+    expect(rejection.message).toBe('async write failed: database or disk is full')
+    expect(rejection.message).not.toContain('s1')
+    expect(rejection.message).not.toContain('sessionKey')
+    expect(codeOf(rejection)).toBe('PERSIST_ASYNC_WRITE_FAILED')
     expect(() => q.enqueueAsync('s2', { kind: 'ping' })).toThrow(/database or disk is full/)
+  })
+
+  describe('codes of the errors the queue creates', () => {
+    const newQueue = (opts: Partial<{ syncTimeoutMs: number; stallTimeoutMs: number }> = {}) => {
+      const worker = new FakeWorker()
+      const q = new PersistQueue(worker, {
+        syncTimeoutMs: opts.syncTimeoutMs ?? 500,
+        asyncTimeoutMs: 500,
+        stallTimeoutMs: opts.stallTimeoutMs ?? 30_000,
+      })
+      return { worker, q }
+    }
+    const rejectionOf = (p: Promise<unknown>) =>
+      p.then(
+        () => {
+          throw new Error('expected a rejection')
+        },
+        (err: Error) => err
+      )
+
+    it('PERSIST_WORKER_EXIT for a pending write and for a write after the exit', async () => {
+      const { worker, q } = newQueue()
+      const pending = rejectionOf(q.enqueueSync({ kind: 'ping' }))
+      worker.emit('exit', 137)
+      const err = await pending
+      expect(err.message).toMatch(/db worker exited \(code=137\) while op=ping was pending/)
+      expect(codeOf(err)).toBe('PERSIST_WORKER_EXIT')
+      const later = await rejectionOf(q.enqueueSync({ kind: 'ping' }))
+      expect(later.message).toBe('db worker exited (code=137)')
+      expect(codeOf(later)).toBe('PERSIST_WORKER_EXIT')
+    })
+
+    it('PERSIST_QUEUE_CLOSED for a write after close()', async () => {
+      const { worker, q } = newQueue()
+      const closing = q.close()
+      await new Promise(r => setImmediate(r))
+      const shutdown = worker.sent.find(m => m.op.kind === 'shutdown')
+      // Witness: close() reached the worker shutdown.
+      expect(shutdown).toBeDefined()
+      worker.emit('message', { id: shutdown!.id, ok: true, result: null } satisfies WorkerReply)
+      await closing
+      const err = await rejectionOf(q.enqueueSync({ kind: 'ping' }))
+      expect(err.message).toBe('PersistQueue is closed')
+      expect(codeOf(err)).toBe('PERSIST_QUEUE_CLOSED')
+    })
+
+    it('PERSIST_WORKER_STALLED for a write in flight on a wedged worker', async () => {
+      const { worker, q } = newQueue({ syncTimeoutMs: 5000, stallTimeoutMs: 50 })
+      const open = q.awaitOpen()
+      worker.emit('message', {
+        id: worker.sent[0].id,
+        ok: true,
+        result: null,
+      } satisfies WorkerReply)
+      await open
+      const err = await rejectionOf(q.enqueueSync({ kind: 'ping' }))
+      expect(err.message).toMatch(/db worker made no progress for 50ms/)
+      expect(codeOf(err)).toBe('PERSIST_WORKER_STALLED')
+    })
+
+    it('PERSIST_SYNC_TIMEOUT for a sync write past syncTimeoutMs', async () => {
+      const { q } = newQueue({ syncTimeoutMs: 30 })
+      const err = await rejectionOf(q.enqueueSync({ kind: 'ping' }))
+      expect(err.message).toBe('db worker timeout (30ms) for op=ping')
+      expect(codeOf(err)).toBe('PERSIST_SYNC_TIMEOUT')
+    })
+
+    it("passes a worker reply error's own code through", async () => {
+      const { worker, q } = newQueue()
+      const pending = rejectionOf(q.enqueueSync({ kind: 'ping' }))
+      worker.emit('message', {
+        id: worker.sent[0].id,
+        ok: false,
+        error: { code: 'SQLITE_BUSY', message: 'database is locked' },
+      } satisfies WorkerReply)
+      const err = await pending
+      expect(err.message).toBe('database is locked')
+      expect(codeOf(err)).toBe('SQLITE_BUSY')
+    })
+
+    it('gives no code to a worker reply without an error object', async () => {
+      const { worker, q } = newQueue()
+      const pending = rejectionOf(q.enqueueSync({ kind: 'ping' }))
+      worker.emit('message', { id: worker.sent[0].id, ok: false } as WorkerReply)
+      const err = await pending
+      // Witness: the rejection came from the reply.
+      expect(err.message).toBe('unknown worker error')
+      expect(codeOf(err)).toBeUndefined()
+    })
   })
 
   it('calls onExit and onFailure once when the worker exits unexpectedly', async () => {
@@ -292,9 +403,7 @@ describe('PersistQueue', () => {
       error: { code: 'SQLITE_FULL', message: 'database or disk is full' },
     } satisfies WorkerReply)
     await new Promise(r => setImmediate(r))
-    expect(failures.map(e => e.message)).toEqual([
-      'async write failed (sessionKey=s2): database or disk is full',
-    ])
+    expect(failures.map(e => e.message)).toEqual(['async write failed: database or disk is full'])
 
     // A worker exit after the failure does not report a second one.
     worker.emit('exit', 1)
@@ -427,9 +536,7 @@ describe('PersistQueue', () => {
       ok: false,
       error: { code: 'SQLITE_FULL', message: 'database or disk is full' },
     } satisfies WorkerReply)
-    await expect(chainedSync).rejects.toThrow(
-      /async write failed \(sessionKey=s1\): database or disk is full/
-    )
+    await expect(chainedSync).rejects.toThrow('async write failed: database or disk is full')
     await new Promise(r => setImmediate(r))
     expect(worker.sent).toHaveLength(1)
   })

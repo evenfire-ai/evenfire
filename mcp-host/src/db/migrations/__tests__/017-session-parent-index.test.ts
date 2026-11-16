@@ -14,9 +14,10 @@ function indexedColumns(db: Database.Database, table: string): string[][] {
 }
 
 describe('migration 017 — index on sessions(parent_session_id)', () => {
-  it('is registered last and indexes the self-referencing parent key', () => {
+  it('is registered before 018 and indexes the self-referencing parent key', () => {
     const names = migrations.map(m => m.name)
-    expect(names.at(-1)).toBe(NAME)
+    expect(names.indexOf(NAME)).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf(NAME)).toBe(names.indexOf('018-memory-writes') - 1)
     const migration = migrations.find(m => m.name === NAME)!
 
     const db = new Database(':memory:')

@@ -1549,6 +1549,11 @@ const EXPECTED_REJECTION_REASONS = [
   'image-png-malformed',
   'image-png-unsupported-form',
   'image-tile-grid-mismatch',
+  'memory-directive-malformed',
+  'memory-recall-prompt-leak',
+  'memory-tool-output-malformed',
+  'memory-tool-result-count',
+  'memory-tools-missing',
   'provider-auth-mismatch',
   'provider-body-invalid',
   'provider-body-unsupported',
@@ -1689,4 +1694,335 @@ test('every rejected row records its closed-set reason and no request content', 
   assert.equal(accepted.getEvidence().attempts.length, 1)
   assert.equal(accepted.getEvidence().attempts[0].responseKind, 'text-only')
   assert.equal(Object.hasOwn(accepted.getEvidence().attempts[0], 'reason'), false)
+})
+
+// ─── Memory-notes journey ─────────────────────────────────────────────────────
+
+const MEMORY_RUN = 'a1b2c3d4e5f6'
+const MEMORY_NONCE_A = 'memnonce0123456789ab'
+const MEMORY_NONCE_B = 'memnoncecdef01234567'
+const MEMORY_NOTE_NAME = 'release-checklist'
+const memoryToolDefinitions = ['memory_write', 'memory_search', 'memory_read'].map(functionTool)
+const memoryTurnContext = '<turn-context>\ndate: 2026-11-12T00:00:00.000Z\n</turn-context>\n'
+const rememberText = `Remember that my deploy window is Tuesday 14:00. memnote${MEMORY_RUN} ${MEMORY_NONCE_A}`
+const noteText = `Save this in your memory as a note called ${MEMORY_NOTE_NAME}: memnote${MEMORY_RUN} ${MEMORY_NONCE_B} ship the build`
+const rememberDirective = `MEMORY_NOTES remember run=${MEMORY_RUN}`
+const noteDirective = `MEMORY_NOTES note run=${MEMORY_RUN} name=${MEMORY_NOTE_NAME}`
+const recallDirective = `MEMORY_NOTES recall run=${MEMORY_RUN} name=${MEMORY_NOTE_NAME}`
+const recallText = 'What is on my release checklist, and when is my deploy window?'
+
+function memoryUser(text, directive) {
+  return { role: 'user', content: `${memoryTurnContext}${text}\n${directive}` }
+}
+
+/** The user message followed by one assistant call and its raw tool result per entry. */
+function memoryTurn(user, results) {
+  const messages = [user]
+  results.forEach(({ name, content }, index) => {
+    const id = `call-memory-${index}`
+    messages.push({
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id, type: 'function', function: { name, arguments: '{}' } }],
+    })
+    messages.push({ role: 'tool', tool_call_id: id, content })
+  })
+  return messages
+}
+
+function searchResult(results) {
+  return JSON.stringify({ query: `memnote${MEMORY_RUN}`, results, result_count: results.length })
+}
+
+const recallSearch = searchResult([
+  { path: 'MEMORY.md', content: rememberText, score: 1 },
+  { path: `memory/${MEMORY_NOTE_NAME}.md`, content: noteText, score: 1 },
+])
+const recallRead = JSON.stringify({
+  path: `memory/${MEMORY_NOTE_NAME}.md`,
+  content: noteText,
+  word_count: 9,
+})
+
+async function memoryCall(h, messages, tools = memoryToolDefinitions) {
+  const response = await call(h, chatBody(VISUAL_MODEL, messages, { tools }))
+  return { response, body: await response.json() }
+}
+
+function onlyToolCall(body) {
+  assert.equal(body.choices[0].finish_reason, 'tool_calls')
+  const [toolCall] = body.choices[0].message.tool_calls
+  return { name: toolCall.function.name, args: JSON.parse(toolCall.function.arguments) }
+}
+
+test('memory remember: asks memory_write for private memory with the typed text only', async () => {
+  const h = harness()
+  const { response, body } = await memoryCall(h, [memoryUser(rememberText, rememberDirective)])
+  assert.equal(response.status, 200)
+  assert.deepEqual(onlyToolCall(body), {
+    name: 'memory_write',
+    args: { target: 'memory_private', content: rememberText },
+  })
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'memory-write-requested',
+      memoryJourney: 'remember',
+    },
+  ])
+
+  // The directive may also follow the text on the same line, after a space.
+  const sameLine = harness()
+  const inline = await memoryCall(sameLine, [
+    { role: 'user', content: `${memoryTurnContext}${rememberText} ${rememberDirective}` },
+  ])
+  assert.deepEqual(onlyToolCall(inline.body).args, {
+    target: 'memory_private',
+    content: rememberText,
+  })
+})
+
+test('memory remember: answers once the Host reports the private write', async () => {
+  const h = harness()
+  const messages = memoryTurn(memoryUser(rememberText, rememberDirective), [
+    { name: 'memory_write', content: 'Written to private memory (append)' },
+  ])
+  const { body } = await memoryCall(h, messages)
+  assert.equal(providerModule.MEMORY_NOTES_ANSWER_MARKER, 'MEMORY-ANSWER')
+  assert.equal(body.choices[0].message.content, 'MEMORY-ANSWER saved')
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'memory-write-answer',
+      memoryJourney: 'remember',
+      memoryToolResult: 'Written to private memory (append)',
+    },
+  ])
+})
+
+test('memory note: writes the named note and answers from the memory/ result', async () => {
+  const first = harness()
+  const asked = await memoryCall(first, [memoryUser(noteText, noteDirective)])
+  assert.deepEqual(onlyToolCall(asked.body), {
+    name: 'memory_write',
+    args: { target: MEMORY_NOTE_NAME, content: noteText },
+  })
+  assert.equal(first.getEvidence().attempts[0].memoryJourney, 'note')
+
+  const second = harness()
+  const messages = memoryTurn(memoryUser(noteText, noteDirective), [
+    { name: 'memory_write', content: `Written to memory/${MEMORY_NOTE_NAME}.md (append)` },
+  ])
+  const { body } = await memoryCall(second, messages)
+  assert.equal(body.choices[0].message.content, 'MEMORY-ANSWER saved')
+  assert.deepEqual(second.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'memory-write-answer',
+      memoryJourney: 'note',
+      memoryToolResult: `Written to memory/${MEMORY_NOTE_NAME}.md (append)`,
+    },
+  ])
+})
+
+test('memory note: a write result outside the closed set is malformed', async () => {
+  const h = harness()
+  const messages = memoryTurn(memoryUser(noteText, noteDirective), [
+    { name: 'memory_write', content: `Written to ${MEMORY_NOTE_NAME} (append)` },
+  ])
+  const { response } = await memoryCall(h, messages)
+  assert.ok(response.status >= 400)
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'rejected',
+      reason: 'memory-tool-output-malformed',
+    },
+  ])
+})
+
+test('memory recall: searches by the run token, then reads the note by its name', async () => {
+  const first = harness()
+  const searched = await memoryCall(first, [memoryUser(recallText, recallDirective)])
+  assert.deepEqual(onlyToolCall(searched.body), {
+    name: 'memory_search',
+    args: { query: `memnote${MEMORY_RUN}`, limit: 10 },
+  })
+  assert.deepEqual(first.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'memory-search-requested',
+      memoryJourney: 'recall',
+      userMessages: 1,
+    },
+  ])
+
+  for (const [results, hit] of [
+    [recallSearch, true],
+    [searchResult([{ path: 'MEMORY.md', content: rememberText, score: 1 }]), false],
+  ]) {
+    const h = harness()
+    const messages = memoryTurn(memoryUser(recallText, recallDirective), [
+      { name: 'memory_search', content: results },
+    ])
+    const { body } = await memoryCall(h, messages)
+    assert.deepEqual(onlyToolCall(body), {
+      name: 'memory_read',
+      args: { path: MEMORY_NOTE_NAME },
+    })
+    assert.deepEqual(h.getEvidence().attempts, [
+      {
+        model: VISUAL_MODEL,
+        imageSha256: null,
+        responseKind: 'memory-read-requested',
+        memoryJourney: 'recall',
+        userMessages: 1,
+        searchHitNotePath: hit,
+      },
+    ])
+  }
+})
+
+test('memory recall: answers with the nonces the two tool results returned', async () => {
+  const h = harness()
+  const messages = memoryTurn(memoryUser(recallText, recallDirective), [
+    { name: 'memory_search', content: recallSearch },
+    { name: 'memory_read', content: recallRead },
+  ])
+  const { body } = await memoryCall(h, messages)
+  assert.equal(
+    body.choices[0].message.content,
+    `MEMORY-ANSWER recall ${[MEMORY_NONCE_A, MEMORY_NONCE_B].sort().join(' ')}`
+  )
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'memory-recall-answer',
+      memoryJourney: 'recall',
+      userMessages: 1,
+      readFoundNote: true,
+    },
+  ])
+})
+
+test('memory recall: a second user message in the request is counted', async () => {
+  const h = harness()
+  const earlier = { role: 'user', content: 'An earlier turn of another conversation.' }
+  const messages = [
+    earlier,
+    { role: 'assistant', content: 'ok' },
+    ...memoryTurn(memoryUser(recallText, recallDirective), [
+      { name: 'memory_search', content: recallSearch },
+      { name: 'memory_read', content: recallRead },
+    ]),
+  ]
+  await memoryCall(h, messages)
+  // Witness: the row is the answer row, so the count was taken on an accepted turn.
+  const [row] = h.getEvidence().attempts
+  assert.equal(row.responseKind, 'memory-recall-answer')
+  assert.equal(row.userMessages, 2)
+})
+
+/** Each case is one request that must be refused with the named closed-set reason. */
+const memoryRejections = [
+  [
+    'a read that found nothing is not JSON',
+    () =>
+      memoryTurn(memoryUser(recallText, recallDirective), [
+        { name: 'memory_search', content: recallSearch },
+        { name: 'memory_read', content: `File not found: memory/${MEMORY_NOTE_NAME}.md` },
+      ]),
+    memoryToolDefinitions,
+    'memory-tool-output-malformed',
+  ],
+  [
+    'a recalled nonce typed in the prompt',
+    () =>
+      memoryTurn(memoryUser(`${recallText} ${MEMORY_NONCE_A}`, recallDirective), [
+        { name: 'memory_search', content: recallSearch },
+        { name: 'memory_read', content: recallRead },
+      ]),
+    memoryToolDefinitions,
+    'memory-recall-prompt-leak',
+  ],
+  [
+    'the memory tools are not offered',
+    () => [memoryUser(rememberText, rememberDirective)],
+    [functionTool('file_read')],
+    'memory-tools-missing',
+  ],
+  [
+    'a recall without memory_read offered',
+    () => [memoryUser(recallText, recallDirective)],
+    [functionTool('memory_write'), functionTool('memory_search')],
+    'memory-tools-missing',
+  ],
+  [
+    'a remember directive with a name',
+    () => [memoryUser(rememberText, `${rememberDirective} name=${MEMORY_NOTE_NAME}`)],
+    memoryToolDefinitions,
+    'memory-directive-malformed',
+  ],
+  [
+    'a note whose text lacks the run token',
+    () => [memoryUser('Save this: ship the build', noteDirective)],
+    memoryToolDefinitions,
+    'memory-directive-malformed',
+  ],
+  [
+    'a write turn with two tool results',
+    () =>
+      memoryTurn(memoryUser(rememberText, rememberDirective), [
+        { name: 'memory_write', content: 'Written to private memory (append)' },
+        { name: 'memory_write', content: 'Written to private memory (append)' },
+      ]),
+    memoryToolDefinitions,
+    'memory-tool-result-count',
+  ],
+  [
+    'a result that answers another tool',
+    () =>
+      memoryTurn(memoryUser(recallText, recallDirective), [
+        { name: 'memory_read', content: recallRead },
+      ]),
+    memoryToolDefinitions,
+    'memory-tool-output-malformed',
+  ],
+]
+
+test('memory rejections: each malformed turn is refused with its closed-set reason', async () => {
+  for (const [label, messages, tools, reason] of memoryRejections) {
+    const h = harness()
+    const { response } = await memoryCall(h, messages(), tools)
+    assert.ok(response.status >= 400, label)
+    assert.deepEqual(
+      h.getEvidence().attempts,
+      [{ model: VISUAL_MODEL, imageSha256: null, responseKind: 'rejected', reason }],
+      label
+    )
+  }
+  // Witness: the same harness shape accepts a well-formed memory turn.
+  const accepted = harness()
+  const { response } = await memoryCall(accepted, [memoryUser(rememberText, rememberDirective)])
+  assert.equal(response.status, 200)
+  assert.equal(accepted.getEvidence().attempts[0].responseKind, 'memory-write-requested')
+})
+
+test('memory neighbour: a text turn without the directive still answers the text marker', async () => {
+  const h = harness()
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, [{ role: 'user', content: rememberText }], {
+      tools: memoryToolDefinitions,
+    })
+  )
+  const body = await response.json()
+  assert.equal(body.choices[0].message.content, TEXT_ONLY_CONTENT)
+  assert.equal(h.getEvidence().attempts[0].responseKind, 'text-only')
 })

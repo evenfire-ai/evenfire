@@ -4,7 +4,13 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 import { NativeToolRegistry } from '../../core/tools/nativeToolRegistry'
-import { CrossUserAccessError, ScopedWorkspaceProvider, isCollectivePath } from '../scopedWorkspace'
+import {
+  CrossUserAccessError,
+  MemoryFolderPathError,
+  ScopedWorkspaceProvider,
+  isCollectivePath,
+  memoryFolderAt,
+} from '../scopedWorkspace'
 import { WorkspaceService } from '../service'
 import { SYSTEM_USER_KEY } from '../userKey'
 
@@ -259,6 +265,20 @@ describe('private memory (F5)', () => {
     expect(await provider.forUser('bob').search('zzprivatemarker', 10)).toHaveLength(0)
   })
 
+  it('write, append and the private memory methods resolve with the content in the routed file', async () => {
+    const alice = provider.forUser('alice')
+    await expect(alice.write('memory/a.md', 'first')).resolves.toBe('first')
+    await expect(alice.append('memory/a.md', 'second')).resolves.toBe('first\nsecond')
+    await expect(alice.appendMemory('team')).resolves.toBe('team')
+    await expect(alice.appendPrivateMemory('mine')).resolves.toBe('mine')
+    await expect(alice.appendPrivateMemory('again')).resolves.toBe('mine\nagain')
+    await expect(alice.writePrivateMemory('replaced')).resolves.toBe('replaced')
+    await expect(
+      fs.readFile(path.join(baseRoot, 'users', 'alice', 'MEMORY.md'), 'utf-8')
+    ).resolves.toBe('replaced')
+    await expect(fs.readFile(path.join(baseRoot, 'MEMORY.md'), 'utf-8')).resolves.toBe('team')
+  })
+
   it('memory_write target:memory_private + memory_read scope:private via the registry', async () => {
     const config = makeNativeConfig(baseRoot)
     const reg = new NativeToolRegistry(config, 'c', undefined, undefined, provider.forUser('alice'))
@@ -274,6 +294,10 @@ describe('private memory (F5)', () => {
     // The collective memory_read by path does NOT see the private entry.
     await provider.forUser('alice').appendMemory('collective note')
     const rc = await reg.get('memory_read')!.execute({ path: 'MEMORY.md' })
+    // Positive witness: the read found the collective file, so the negative
+    // assertion below cannot pass on a read that found nothing.
+    expect(rc.is_error).toBe(false)
+    expect(rc.content).toContain('collective note')
     expect(rc.content).not.toContain('alice is the PM')
   })
 
@@ -286,4 +310,140 @@ describe('private memory (F5)', () => {
     expect(res.is_error).toBe(true)
     expect(res.content).toContain('rejected')
   })
+})
+
+describe('memoryFolderAt — exact memory folder paths by location', () => {
+  it.each(['memories', 'memories/', 'memories/.', './memories', 'memories//'])(
+    '%s names the Host folder memories only',
+    p => {
+      expect(memoryFolderAt(p, 'host')).toBe('memories')
+      expect(memoryFolderAt(p, 'caller')).toBeNull()
+    }
+  )
+
+  it.each([
+    ['memory', 'memory'],
+    ['memory/', 'memory'],
+    ['memory/./', 'memory'],
+    ['memory//', 'memory'],
+    ['./memory', 'memory'],
+    ['daily', 'daily'],
+    ['daily/', 'daily'],
+  ])('%s names the caller folder %s only', (p, name) => {
+    expect(memoryFolderAt(p, 'caller')).toBe(name)
+    expect(memoryFolderAt(p, 'host')).toBeNull()
+  })
+
+  it.each([
+    'memory/x.md',
+    'memories/x.md',
+    'daily/2026-01-02.md',
+    'memory.md',
+    'mymemory',
+    'a/memory',
+    'Memory',
+    'Daily',
+  ])('%s is not a memory folder path', p => {
+    expect(memoryFolderAt(p, 'caller')).toBeNull()
+    expect(memoryFolderAt(p, 'host')).toBeNull()
+  })
+
+  it.each([
+    '/memory',
+    '/daily',
+    '/memories',
+    '//memories',
+    'a/../memory',
+    'a/../daily',
+    'x/../memories',
+    'memory\0',
+  ])('%s is refused by its text, so it names no memory folder', p => {
+    expect(memoryFolderAt(p, 'caller')).toBeNull()
+    expect(memoryFolderAt(p, 'host')).toBeNull()
+  })
+})
+
+describe('ScopedWorkspace.write/append — paths refused by their text keep that refusal', () => {
+  it.each([
+    ['/memory', 'Absolute paths not allowed'],
+    ['/daily', 'Absolute paths not allowed'],
+    ['/memories', 'Absolute paths not allowed'],
+    ['//memories', 'Absolute paths not allowed'],
+    ['a/../memory', 'Directory traversal (..) not allowed'],
+    ['a/../daily', 'Directory traversal (..) not allowed'],
+    ['x/../memories', 'Directory traversal (..) not allowed'],
+  ])('%s: %s, nothing created', async (p, message) => {
+    const ws = provider.forUser('alice')
+    for (const op of ['write', 'append'] as const) {
+      const err = await ws[op](p, 'x').then(
+        () => null,
+        (e: unknown) => e
+      )
+      expect(err).toBeInstanceOf(Error)
+      expect(err).not.toBeInstanceOf(MemoryFolderPathError)
+      expect((err as Error).message).toBe(message)
+    }
+    for (const name of ['memory', 'daily', 'memories']) {
+      await expect(fs.stat(path.join(baseRoot, name))).rejects.toThrow(/ENOENT/)
+      await expect(fs.stat(path.join(baseRoot, 'users', 'alice', name))).rejects.toThrow(/ENOENT/)
+    }
+  })
+})
+
+describe('ScopedWorkspace.write/append — memory folder paths are reserved', () => {
+  type State = 'absent' | 'folder' | 'file'
+  async function place(abs: string, state: State): Promise<void> {
+    if (state === 'folder') await fs.mkdir(abs, { recursive: true })
+    if (state === 'file') {
+      await fs.mkdir(path.dirname(abs), { recursive: true })
+      await fs.writeFile(abs, 'pre-existing', 'utf-8')
+    }
+  }
+  async function kind(abs: string): Promise<State> {
+    try {
+      return (await fs.stat(abs)).isDirectory() ? 'folder' : 'file'
+    } catch {
+      return 'absent'
+    }
+  }
+  const states: State[] = ['absent', 'folder', 'file']
+
+  for (const state of states) {
+    for (const p of ['memories', 'memories/.']) {
+      it(`write and append of ${p} with the Host folder ${state}: MemoryFolderPathError, nothing changed`, async () => {
+        const abs = path.join(baseRoot, 'memories')
+        await place(abs, state)
+        const ws = provider.forUser('alice')
+        await expect(ws.write(p, 'x')).rejects.toBeInstanceOf(MemoryFolderPathError)
+        await expect(ws.append(p, 'x')).rejects.toThrow(
+          "'memories' is a memory folder, not a file. Write inside it: memories/<file>.md."
+        )
+        expect(await kind(abs)).toBe(state)
+        if (state === 'file') {
+          await expect(fs.readFile(abs, 'utf-8')).resolves.toBe('pre-existing')
+        } else {
+          // Witness: the workspace writes inside the folder in the same state.
+          await ws.write('memories/x.md', 'inside')
+          await expect(fs.readFile(path.join(abs, 'x.md'), 'utf-8')).resolves.toBe('inside')
+        }
+      })
+    }
+
+    for (const p of ['memory', 'daily']) {
+      it(`write and append of ${p} in the caller folder with the folder ${state}: MemoryFolderPathError, nothing changed`, async () => {
+        const abs = path.join(baseRoot, 'users', 'alice', p)
+        await place(abs, state)
+        const ws = provider.forUser('alice')
+        await expect(ws.write(p, 'x')).rejects.toBeInstanceOf(MemoryFolderPathError)
+        await expect(ws.append(`${p}/`, 'x')).rejects.toBeInstanceOf(MemoryFolderPathError)
+        expect(await kind(abs)).toBe(state)
+        if (state === 'file') {
+          await expect(fs.readFile(abs, 'utf-8')).resolves.toBe('pre-existing')
+        } else {
+          await ws.write(`${p}/x.md`, 'inside')
+          await expect(fs.readFile(path.join(abs, 'x.md'), 'utf-8')).resolves.toBe('inside')
+        }
+      })
+    }
+  }
 })

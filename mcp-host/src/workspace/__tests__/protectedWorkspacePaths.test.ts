@@ -132,7 +132,7 @@ describe('protected workspace paths', () => {
     expect(aliased.is_error).toBe(true)
     expect(aliased.content).toContain('Reserved workspace path')
 
-    const write = new FileWriteTool(root)
+    const write = new FileWriteTool(root, new Set())
     const blockedWrite = await write.execute({
       path: 'alias.md',
       content: 'replacement',
@@ -150,6 +150,18 @@ describe('protected workspace paths', () => {
     const search = new MemorySearchTool(workspace)
     const tree = new MemoryTreeTool(workspace)
 
+    // memory_read resolves a free path into the memory/ notes folder (PR C,
+    // D71/D82), so the root-level alias is not a memory path any more.
+    await expect(read.execute({ path: 'alias.md' })).resolves.toMatchObject({
+      is_error: true,
+      content: 'File not found: memory/alias.md',
+    })
+    // The same symlink placed where a note is read is still refused.
+    fs.mkdirSync(path.join(root, 'memory'))
+    fs.symlinkSync(
+      path.join(root, '.gfs-downloads', 'input-1', 'source.md'),
+      path.join(root, 'memory', 'alias.md')
+    )
     await expect(read.execute({ path: 'alias.md' })).resolves.toMatchObject({
       is_error: true,
       content: expect.stringContaining('governed GFS download'),

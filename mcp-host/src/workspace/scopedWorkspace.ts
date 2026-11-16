@@ -55,7 +55,8 @@ function isSurfacedCollective(relativePath: string): boolean {
   return n === 'MEMORY.md' || n === 'memories' || n.startsWith('memories/')
 }
 
-function normalizeRel(relativePath: string): string {
+/** Canonical relative form: posix-normalized, without leading `./` or `/` and trailing `/`. */
+export function normalizeRel(relativePath: string): string {
   let n = path.posix.normalize(relativePath || '')
   if (n.startsWith('./')) n = n.slice(2)
   if (n.startsWith('/')) n = n.slice(1)
@@ -73,6 +74,39 @@ export function isCollectivePath(relativePath: string): boolean {
   if (COLLECTIVE_FILES.has(n)) return true
   if (n.startsWith('memories/')) return true
   return false
+}
+
+/** Memory folders of a caller's folder: named notes and the daily log. */
+export const CALLER_MEMORY_FOLDERS: ReadonlySet<string> = new Set(['memory', 'daily'])
+
+/** Memory folder at the Host root: shared notes. */
+const HOST_MEMORY_FOLDERS: ReadonlySet<string> = new Set(['memories'])
+
+/**
+ * The memory folder that `relativePath` names exactly, or null. `caller` is a
+ * person's folder (`memory`, `daily`); `host` is the Host root (`memories`).
+ * Case-sensitive, like the locked names.
+ *
+ * Null for a path the workspace refuses by its text (a NUL byte, an absolute
+ * path, `..`; the same checks as `WorkspaceService`'s path resolution), so
+ * such a path keeps the workspace's own refusal even when it normalizes to a
+ * folder name (`/memories`, `a/../memory`).
+ */
+export function memoryFolderAt(relativePath: string, location: 'caller' | 'host'): string | null {
+  if (relativePath.includes('\0') || path.isAbsolute(relativePath) || relativePath.includes('..')) {
+    return null
+  }
+  const n = normalizeRel(relativePath)
+  const folders = location === 'caller' ? CALLER_MEMORY_FOLDERS : HOST_MEMORY_FOLDERS
+  return folders.has(n) ? n : null
+}
+
+/** Thrown when a write names a memory folder itself: the path is reserved for the folder. */
+export class MemoryFolderPathError extends Error {
+  constructor(folder: string) {
+    super(`'${folder}' is a memory folder, not a file. Write inside it: ${folder}/<file>.md.`)
+    this.name = 'MemoryFolderPathError'
+  }
 }
 
 /**
@@ -106,6 +140,20 @@ export class ScopedWorkspace implements Workspace {
   }
 
   /**
+   * `route()` for a write: the exact path of a memory folder is reserved, so a
+   * write never creates a file where the folder must be. `memories` is
+   * reserved at the Host root. The user-side reservation (`memory`, `daily`)
+   * has no production caller today, because `memory_write` maps both names to
+   * notes first; it is kept by the owner's L4 decision.
+   */
+  private routeWrite(relativePath: string): WorkspaceService {
+    const target = this.route(relativePath)
+    const folder = memoryFolderAt(relativePath, target === this.collective ? 'host' : 'caller')
+    if (folder !== null) throw new MemoryFolderPathError(folder)
+    return target
+  }
+
+  /**
    * Absolute per-user root, used to scope the raw file tools (`file_read`/
    * `file_write`) which operate on a path string rather than this interface.
    * Not on the `Workspace` interface — it is ScopedWorkspace-specific.
@@ -120,11 +168,11 @@ export class ScopedWorkspace implements Workspace {
   async read(relativePath: string): Promise<string | null> {
     return this.route(relativePath).read(relativePath)
   }
-  async write(relativePath: string, content: string): Promise<void> {
-    return this.route(relativePath).write(relativePath, content)
+  async write(relativePath: string, content: string): Promise<string> {
+    return this.routeWrite(relativePath).write(relativePath, content)
   }
-  async append(relativePath: string, content: string): Promise<void> {
-    return this.route(relativePath).append(relativePath, content)
+  async append(relativePath: string, content: string): Promise<string> {
+    return this.routeWrite(relativePath).append(relativePath, content)
   }
   async delete(relativePath: string): Promise<void> {
     return this.route(relativePath).delete(relativePath)
@@ -137,7 +185,7 @@ export class ScopedWorkspace implements Workspace {
   readMemory(): Promise<string> {
     return this.collective.readMemory()
   }
-  appendMemory(entry: string): Promise<void> {
+  appendMemory(entry: string): Promise<string> {
     return this.collective.appendMemory(entry)
   }
   // Private memory (F5) → the per-user instance's MEMORY.md. Bypasses route()
@@ -148,10 +196,10 @@ export class ScopedWorkspace implements Workspace {
   readPrivateMemory(): Promise<string> {
     return this.user.readMemory()
   }
-  appendPrivateMemory(entry: string): Promise<void> {
+  appendPrivateMemory(entry: string): Promise<string> {
     return this.user.appendMemory(entry)
   }
-  writePrivateMemory(content: string): Promise<void> {
+  writePrivateMemory(content: string): Promise<string> {
     return this.user.write('MEMORY.md', content)
   }
   readHeartbeatChecklist(): Promise<string | null> {

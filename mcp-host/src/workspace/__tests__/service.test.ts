@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
-import { WorkspaceService } from '../service'
+import { ProtectedWorkspacePathError } from '../protectedPaths'
+import { WorkspacePathBlockedError, WorkspaceService } from '../service'
 
 async function makeTempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), 'clerum-workspace-test-'))
@@ -40,6 +41,22 @@ describe('WorkspaceService', () => {
     await workspace.write('MEMORY.md', 'hello world')
     const content = await workspace.read('MEMORY.md')
     expect(content).toBe('hello world')
+  })
+
+  it('write and append resolve with the full content now in the file (D73)', async () => {
+    await expect(workspace.write('notes/a.md', 'first')).resolves.toBe('first')
+    await expect(workspace.append('notes/a.md', 'second')).resolves.toBe('first\nsecond')
+    await expect(workspace.append('notes/b.md', 'only')).resolves.toBe('only')
+    await expect(fs.readFile(path.join(workspaceDir, 'notes/a.md'), 'utf-8')).resolves.toBe(
+      'first\nsecond'
+    )
+  })
+
+  it('appendMemory and the private memory methods resolve with the MEMORY.md content', async () => {
+    await expect(workspace.appendMemory('one')).resolves.toBe('one')
+    await expect(workspace.appendPrivateMemory('two')).resolves.toBe('one\ntwo')
+    await expect(workspace.writePrivateMemory('three')).resolves.toBe('three')
+    await expect(workspace.readMemory()).resolves.toBe('three')
   })
 
   it('read returns null for missing file', async () => {
@@ -372,9 +389,9 @@ describe('WorkspaceService', () => {
   })
 
   it('locked-file check is case-sensitive and does not match sub-paths', async () => {
-    await expect(workspace.write('agents.md', 'ok')).resolves.toBeUndefined()
-    await expect(workspace.write('daily/AGENTS.md', 'ok')).resolves.toBeUndefined()
-    await expect(workspace.write('AGENTS.md.bak', 'ok')).resolves.toBeUndefined()
+    await expect(workspace.write('agents.md', 'ok')).resolves.toBe('ok')
+    await expect(workspace.write('daily/AGENTS.md', 'ok')).resolves.toBe('ok')
+    await expect(workspace.write('AGENTS.md.bak', 'ok')).resolves.toBe('ok')
   })
 
   it('write/append/delete still works for non-locked files', async () => {
@@ -444,13 +461,15 @@ describe('WorkspaceService', () => {
     ).rejects.toMatchObject({ name: 'MemoryScanRejectionError', reason: 'sensitive_path' })
 
     const big = 'a'.repeat(9000) // > MEMORY.md cap, fine for a daily log
-    await expect(workspace.write('daily/2026-05-23.md', big)).resolves.toBeUndefined()
+    await expect(workspace.write('daily/2026-05-23.md', big)).resolves.toBe(big)
   })
 
   it('does NOT scan arbitrary (non-prompt-feeding) paths', async () => {
     // Arbitrary files (not MEMORY/memories/daily) never reach the prompt, so
     // they are not scanned.
-    await expect(workspace.write('notes.md', 'see credentials.json')).resolves.toBeUndefined()
+    await expect(workspace.write('notes.md', 'see credentials.json')).resolves.toBe(
+      'see credentials.json'
+    )
   })
 
   it('does NOT scan the compaction-archive path (appendDailyLog) — F3', async () => {
@@ -483,5 +502,87 @@ describe('WorkspaceService', () => {
     const entries = await fs.readdir(workspaceDir)
     const tempfiles = entries.filter(name => /^\.MEMORY\.md\..+\.tmp$/.test(name))
     expect(tempfiles).toEqual([])
+  })
+})
+
+describe('WorkspaceService — a path below a regular file', () => {
+  let root: string
+  let outside: string
+  let workspace: WorkspaceService
+
+  beforeEach(async () => {
+    root = await makeTempDir()
+    outside = await makeTempDir()
+    workspace = new WorkspaceService(root)
+  })
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(outside, { recursive: true, force: true })
+  })
+
+  async function expectBlocked(op: Promise<unknown>, blocker: string): Promise<void> {
+    const err = await op.then(
+      () => {
+        throw new Error('expected a rejection')
+      },
+      (e: unknown) => e
+    )
+    expect(err).toBeInstanceOf(WorkspacePathBlockedError)
+    expect((err as WorkspacePathBlockedError).blocker).toBe(blocker)
+    expect((err as Error).message).toBe(`'${blocker}' is a file where a folder is needed.`)
+    expect((err as Error).message).not.toContain(root)
+    expect((err as Error).message).not.toContain('/')
+  }
+
+  it('read, write, append, delete and list below a file at memory reject with the blocked error', async () => {
+    await seedRaw(root, 'memory', 'a file')
+    expect((await fs.stat(path.join(root, 'memory'))).isFile()).toBe(true)
+    await expectBlocked(workspace.read('memory/notes.md'), 'memory')
+    await expectBlocked(workspace.write('memory/notes.md', 'x'), 'memory')
+    await expectBlocked(workspace.append('memory/notes.md', 'x'), 'memory')
+    await expectBlocked(workspace.delete('memory/notes.md'), 'memory')
+    await expectBlocked(workspace.list('memory/a'), 'memory')
+    await expectBlocked(workspace.write('memory/a/b/c.md', 'x'), 'memory')
+    expect(await workspace.exists('memory/notes.md')).toBe(false)
+    await expect(fs.readFile(path.join(root, 'memory'), 'utf-8')).resolves.toBe('a file')
+  })
+
+  it('a file at memory/a blocks memory/a/x.md with blocker memory/a', async () => {
+    await seedRaw(root, 'memory/a', 'a file')
+    expect((await fs.stat(path.join(root, 'memory/a'))).isFile()).toBe(true)
+    const err = await workspace.write('memory/a/x.md', 'x').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(WorkspacePathBlockedError)
+    expect((err as WorkspacePathBlockedError).blocker).toBe('memory/a')
+    expect((err as Error).message).not.toContain(root)
+  })
+
+  it('a symlink to a file inside the root reports the link name as the blocker', async () => {
+    await seedRaw(root, 'target.md', 'target')
+    await fs.symlink(path.join(root, 'target.md'), path.join(root, 'link'))
+    await expectBlocked(workspace.write('link/x.md', 'x'), 'link')
+    await expect(fs.readFile(path.join(root, 'target.md'), 'utf-8')).resolves.toBe('target')
+  })
+
+  it('a symlink to a file outside the root is refused as outside the workspace', async () => {
+    await fs.writeFile(path.join(outside, 'f'), 'outside', 'utf-8')
+    await fs.symlink(path.join(outside, 'f'), path.join(root, 'link'))
+    await expect(workspace.write('link/x.md', 'x')).rejects.toThrow(
+      'Path resolves outside workspace'
+    )
+  })
+
+  it('a symlink to a file in protected storage gets the protected error', async () => {
+    await seedRaw(root, '.clerum-state/f', 'state')
+    await fs.symlink(path.join(root, '.clerum-state', 'f'), path.join(root, 'link'))
+    await expect(workspace.write('link/x.md', 'x')).rejects.toBeInstanceOf(
+      ProtectedWorkspacePathError
+    )
+  })
+
+  it('a file named Memory in a root without a memory folder is written as a file', async () => {
+    await workspace.write('Memory', 'capital')
+    expect((await fs.stat(path.join(root, 'Memory'))).isFile()).toBe(true)
+    await expect(workspace.read('Memory')).resolves.toBe('capital')
   })
 })

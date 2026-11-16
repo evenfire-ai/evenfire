@@ -35,6 +35,23 @@ import type {
 import { HEARTBEAT_ID } from '../../../db/worker/protocol'
 import { logger } from '../../../logger'
 
+/**
+ * Codes of the errors the queue creates itself. A worker reply error keeps the
+ * worker's own code instead. Callers log the code; the message is free text.
+ */
+type PersistQueueErrorCode =
+  | 'PERSIST_WORKER_EXIT'
+  | 'PERSIST_ASYNC_WRITE_FAILED'
+  | 'PERSIST_QUEUE_CLOSED'
+  | 'PERSIST_WORKER_STALLED'
+  | 'PERSIST_SYNC_TIMEOUT'
+
+function queueError(message: string, code: PersistQueueErrorCode): Error {
+  const err = new Error(message) as Error & { code: PersistQueueErrorCode }
+  err.code = code
+  return err
+}
+
 export interface WorkerLike {
   postMessage(msg: WorkerMessage): void
   on(event: 'message', listener: (reply: WorkerReply) => void): void
@@ -121,14 +138,17 @@ export class PersistQueue {
       for (const entry of this.pending.values()) {
         clearTimeout(entry.timeoutHandle)
         entry.reject(
-          new Error(`db worker exited (code=${code}) while op=${entry.op.kind} was pending`)
+          queueError(
+            `db worker exited (code=${code}) while op=${entry.op.kind} was pending`,
+            'PERSIST_WORKER_EXIT'
+          )
         )
       }
       this.pending.clear()
       this.settleInFlight()
       if (this.shutdownAcked) return
       if (this.opts.onExit) this.opts.onExit(code)
-      this.recordFailure(new Error(`db worker exited (code=${code})`))
+      this.recordFailure(queueError(`db worker exited (code=${code})`, 'PERSIST_WORKER_EXIT'))
     })
   }
 
@@ -150,8 +170,11 @@ export class PersistQueue {
       .catch((err: Error) => {
         // An earlier failure already recorded and logged.
         if (err === this.failure) return
-        const failure = new Error(
-          `async write failed (sessionKey=${sessionKey}): ${err.message ?? String(err)}`
+        // The stored failure is rethrown to later writes of every session, so
+        // its message names no session; the log line below keeps the key.
+        const failure = queueError(
+          `async write failed: ${err.message ?? String(err)}`,
+          'PERSIST_ASYNC_WRITE_FAILED'
         )
         logger.error({ sessionKey, err }, '[PersistQueue] async write failed')
         this.recordFailure(failure)
@@ -325,7 +348,7 @@ export class PersistQueue {
     }
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timeoutHandle)
-      entry.reject(new Error('PersistQueue closed'))
+      entry.reject(queueError('PersistQueue closed', 'PERSIST_QUEUE_CLOSED'))
     }
     this.pending.clear()
     if (this.failure) throw this.failure
@@ -382,10 +405,12 @@ export class PersistQueue {
     }
     const count = this.inFlight.size
     this.stalled = true
-    const failure = new Error(
-      `db worker made no progress for ${this.opts.stallTimeoutMs}ms with ${count} operation(s) in flight`
+    const failure = queueError(
+      `db worker made no progress for ${this.opts.stallTimeoutMs}ms with ${count} operation(s) in flight`,
+      'PERSIST_WORKER_STALLED'
     )
-    // The logger keeps only an error's name, so the cause is logged as fields.
+    // The logger keeps an error's name and code, not its message, so the cause
+    // is logged as fields.
     logger.error(
       { stallTimeoutMs: this.opts.stallTimeoutMs, inFlight: count },
       '[PersistQueue] db worker made no progress; terminating it'
@@ -415,7 +440,7 @@ export class PersistQueue {
 
   private assertAdmissible(): void {
     if (this.failure) throw this.failure
-    if (this.closed) throw new Error('PersistQueue is closed')
+    if (this.closed) throw queueError('PersistQueue is closed', 'PERSIST_QUEUE_CLOSED')
   }
 
   /**
@@ -454,7 +479,12 @@ export class PersistQueue {
                   )
                 }
               } else if (this.pending.delete(id)) {
-                reject(new Error(`db worker timeout (${timeoutMs}ms) for op=${op.kind}`))
+                reject(
+                  queueError(
+                    `db worker timeout (${timeoutMs}ms) for op=${op.kind}`,
+                    'PERSIST_SYNC_TIMEOUT'
+                  )
+                )
               }
             }, timeoutMs)
       const entry: PendingEntry = {

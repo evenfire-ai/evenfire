@@ -45,6 +45,19 @@ export class LockedFileError extends Error {
 }
 
 /**
+ * A path runs below a regular file: a folder is needed where a file exists
+ * (`ENOTDIR`). `blocker` is that file's path relative to the workspace root, as
+ * the caller named it (a symlink reports the link name, not its target). The
+ * message holds no absolute path.
+ */
+export class WorkspacePathBlockedError extends Error {
+  constructor(readonly blocker: string) {
+    super(`'${blocker}' is a file where a folder is needed.`)
+    this.name = 'WorkspacePathBlockedError'
+  }
+}
+
+/**
  * Normalize a relative path to its canonical root-level form so we can compare
  * against LOCKED_IDENTITY_FILES exactly. Rejects anything that — after
  * normalization — is the bare basename of a locked file at workspace root.
@@ -81,17 +94,19 @@ export {
  */
 export interface Workspace {
   read(relativePath: string): Promise<string | null>
-  write(relativePath: string, content: string): Promise<void>
-  append(relativePath: string, content: string): Promise<void>
+  /** Resolves with the full content now in the file. */
+  write(relativePath: string, content: string): Promise<string>
+  /** Resolves with the full content now in the file (existing + separator + new). */
+  append(relativePath: string, content: string): Promise<string>
   delete(relativePath: string): Promise<void>
   exists(relativePath: string): Promise<boolean>
   list(directory?: string): Promise<WorkspaceEntry[]>
   search(query: string, limit?: number): Promise<SearchResult[]>
   readMemory(): Promise<string>
-  appendMemory(entry: string): Promise<void>
+  appendMemory(entry: string): Promise<string>
   readPrivateMemory(): Promise<string>
-  appendPrivateMemory(entry: string): Promise<void>
-  writePrivateMemory(content: string): Promise<void>
+  appendPrivateMemory(entry: string): Promise<string>
+  writePrivateMemory(content: string): Promise<string>
   readTodayLog(): Promise<string>
   appendDailyLog(entry: string): Promise<void>
   readHeartbeatChecklist(): Promise<string | null>
@@ -157,6 +172,10 @@ export class WorkspaceService implements Workspace {
     const resolved = this.resolvePath(relativePath)
     const realWorkspaceRoot = await fs.realpath(this.workspacePath)
     let current = resolved
+    // ENOTDIR: some ancestor of `current` is a regular file. The walk goes on to
+    // the nearest existing ancestor, which gets the containment and protected
+    // checks like any other; if it passes, that ancestor is the blocking file.
+    let belowFile = false
     while (current !== path.dirname(current)) {
       try {
         const realPath = await fs.realpath(current)
@@ -169,9 +188,14 @@ export class WorkspaceService implements Workspace {
             ? new GfsDownloadPathError(path.relative(realWorkspaceRoot, realPath))
             : protectedWorkspacePathError(path.relative(realWorkspaceRoot, realPath))
         }
+        if (belowFile) {
+          throw new WorkspacePathBlockedError(path.relative(this.workspacePath, current))
+        }
         break
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+        const code = (err as NodeJS.ErrnoException).code
+        if (code === 'ENOTDIR') belowFile = true
+        else if (code !== 'ENOENT') throw err
         current = path.dirname(current)
       }
     }
@@ -198,7 +222,7 @@ export class WorkspaceService implements Workspace {
     }
   }
 
-  async write(relativePath: string, content: string): Promise<void> {
+  async write(relativePath: string, content: string): Promise<string> {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
     }
@@ -207,6 +231,7 @@ export class WorkspaceService implements Workspace {
     await this.mutexFor(resolved).runExclusive(async () => {
       await this._atomicWrite(resolved, content)
     })
+    return content
   }
 
   /**
@@ -218,12 +243,14 @@ export class WorkspaceService implements Workspace {
    * archives. Deliberate agent writes to `daily/*` (memory_write) use the
    * default-scanned path.
    */
-  async append(relativePath: string, content: string, opts?: { scan?: boolean }): Promise<void> {
+  async append(relativePath: string, content: string, opts?: { scan?: boolean }): Promise<string> {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
     }
     const resolved = await this.resolveAccessiblePath(relativePath)
-    await this.mutexFor(resolved).runExclusive(async () => {
+    // The resulting content is built under the per-file mutex and returned, so
+    // a caller can hash exactly what this append left in the file.
+    return this.mutexFor(resolved).runExclusive(async () => {
       let existing: string | null
       try {
         existing = await fs.readFile(resolved, 'utf-8')
@@ -236,6 +263,7 @@ export class WorkspaceService implements Workspace {
         scanWriteContent(relativePath, next, Buffer.byteLength(next, 'utf-8'))
       }
       await this._atomicWrite(resolved, next)
+      return next
     })
   }
 
@@ -386,8 +414,8 @@ export class WorkspaceService implements Workspace {
     return (await this.read('MEMORY.md')) ?? ''
   }
 
-  async appendMemory(entry: string): Promise<void> {
-    await this.append('MEMORY.md', entry)
+  async appendMemory(entry: string): Promise<string> {
+    return this.append('MEMORY.md', entry)
   }
 
   // ── Private (per-user) memory (F5) ──────────────────────────────────────────
@@ -400,12 +428,12 @@ export class WorkspaceService implements Workspace {
     return this.readMemory()
   }
 
-  async appendPrivateMemory(entry: string): Promise<void> {
-    await this.appendMemory(entry)
+  async appendPrivateMemory(entry: string): Promise<string> {
+    return this.appendMemory(entry)
   }
 
-  async writePrivateMemory(content: string): Promise<void> {
-    await this.write('MEMORY.md', content)
+  async writePrivateMemory(content: string): Promise<string> {
+    return this.write('MEMORY.md', content)
   }
 
   async readTodayLog(): Promise<string> {

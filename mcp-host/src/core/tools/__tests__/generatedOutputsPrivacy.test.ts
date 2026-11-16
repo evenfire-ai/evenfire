@@ -325,7 +325,7 @@ describe('generated documents are private to their caller', () => {
     const a = rootOf('user-a')
     await markdown(a, 'report.md', '# A\n')
     fs.symlinkSync(outputsOf(a), path.join(a, 'alias'))
-    const write = new FileWriteTool(a)
+    const write = new FileWriteTool(a, new Set())
 
     for (const target of [`${CALLER_OUTPUTS_DIR}/report.md`, 'alias/report.md']) {
       const result = await write.execute({ path: target, content: 'overwritten' })
