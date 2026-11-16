@@ -983,6 +983,12 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         [result.row.run_id]
       )
       expect(succeeded.rows).toEqual([{ phase: 'Succeeded', failure_reason: null }])
+      // Witness: the resume revalidation statement ran on PostgreSQL and found the run.
+      expect(
+        checkpointResponses.some(
+          entry => entry.startsWith('workflow.run.manage:') && entry.includes('"status":"allowed"')
+        )
+      ).toBe(true)
     } finally {
       if (!resumed) {
         await databasePool.query(

@@ -16,6 +16,7 @@ import {
   isAuthorityDependencyUnavailable,
 } from '../access/authorityDependency.js'
 import { type LogicalSessionCheckpointAuthority } from '../access/principalAuthoritySnapshot.js'
+import { canonicalWorkflowRunId } from '../access/workflowRunId.js'
 
 type StoredWorkflowBinding = Readonly<{
   id: string
@@ -139,7 +140,7 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
   } else {
     runId = String(target.runId ?? '')
     if (
-      !runId ||
+      !canonicalWorkflowRunId(runId) ||
       target.action !== 'resume' ||
       Object.keys(target).length !== 2 ||
       request.resource.logicalId !== runId
@@ -223,8 +224,9 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
                   run.recipe_namespace,
                   run.recipe_name
              FROM workflow_authority_bindings binding
+             -- $12 is $1 again: one parameter cannot be both the text entity_id and a uuid.
              JOIN workflow_runs run
-               ON run.run_id::text = binding.entity_id
+               ON run.run_id = $12::uuid
              JOIN workflow_authority_bindings initiating
                ON initiating.id = run.initiating_authority_binding_id
             WHERE binding.binding_kind = 'run_management'
@@ -279,6 +281,7 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
             request.accessPathId,
             request.authorizationRevision,
             request.behaviorBindingHash,
+            runId,
           ],
           { onDatabaseFailure: authorityDatabaseFailure }
         )

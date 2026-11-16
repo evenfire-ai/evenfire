@@ -248,3 +248,90 @@ describe('workflow trigger checkpoint revalidation failures (C12 Q7 siblings)', 
     }
   )
 })
+
+describe('workflow run resume checkpoint revalidation: the run id', () => {
+  // Hex letters, so the upper-case row differs from the canonical id.
+  const runId = '4000000a-000b-4000-8000-00000000000c'
+  let budget: AccessExecutionBudget
+  let query: Query
+
+  function resumeRequest(id: string) {
+    return {
+      ...request,
+      operationId: 'workflow.run.manage',
+      resource: {
+        environmentId: 'development:local',
+        type: 'workflow_run',
+        canonicalId: `workflow_run:development:local:${id}`,
+        logicalId: id,
+        displayName: id,
+      },
+      target: { runId: id, action: 'resume' },
+    }
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    budget = AccessExecutionBudget.create('action')
+    query = {
+      stored: vi.fn(async () => ({
+        rows: [
+          {
+            ...storedRow,
+            binding_kind: 'run_management',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'nightly',
+          },
+        ],
+        rowCount: 1,
+      })),
+      expiry: vi.fn(async () => ({ rows: [{ current: true }], rowCount: 1 })),
+    }
+    deps.authorizeActionV2.mockResolvedValue(allowed)
+    deps.resolveActionDestination.mockResolvedValue({ status: 'resolved', destination: null })
+  })
+
+  afterEach(() => {
+    budget.close()
+  })
+
+  function revalidate(id: string) {
+    return revalidateWorkflowTriggerCheckpoint({
+      request: resumeRequest(id) as never,
+      caller,
+      gateway: {} as never,
+      budget,
+      db: database(query),
+    })
+  }
+
+  it('joins the run by its uuid primary key, passing the run id as the twelfth value', async () => {
+    await revalidate(runId)
+
+    expect(query.stored).toHaveBeenCalledTimes(1)
+    const [text, values] = query.stored.mock.calls[0] as [string, unknown[]]
+    expect(text).toContain('run.run_id = $12::uuid')
+    expect(text).not.toContain('run_id::text =')
+    expect(values).toHaveLength(12)
+    expect(values[0]).toBe(runId)
+    expect(values[11]).toBe(runId)
+  })
+
+  it.each([
+    ['not a uuid', 'not-a-uuid'],
+    ['upper-case', runId.toUpperCase()],
+    ['braced', `{${runId}}`],
+    ['unhyphenated', runId.replaceAll('-', '')],
+    ['padded', ` ${runId} `],
+  ])('run id %s: answers invalid_binding without sending the statement', async (_shape, id) => {
+    // Liveness witness: the canonical id reaches the stored-binding statement.
+    await revalidate(runId)
+    expect(query.stored).toHaveBeenCalledTimes(1)
+    query.stored.mockClear()
+
+    const result = await revalidate(id)
+
+    expect(result).toEqual({ version: 2, status: 'invalid_binding', code: 'invalid_binding' })
+    expect(query.stored).not.toHaveBeenCalled()
+  })
+})
