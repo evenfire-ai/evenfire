@@ -1,33 +1,13 @@
-import { _electron as electron } from '@playwright/test'
+import { chromium } from '@playwright/test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 
 const appRoot = path.resolve(import.meta.dirname, '../..')
-const scratchRoot = process.env.CODEX_SCRATCH_ROOT
-if (!scratchRoot) throw new Error('CODEX_SCRATCH_ROOT is required for isolated Electron data')
-
-const taskScratch = path.join(scratchRoot, 'evenfire/pr-1463-r2-m1-r48-20261115')
-fs.mkdirSync(taskScratch, { recursive: true })
-const fixtureApp = fs.mkdtempSync(path.join(taskScratch, 'electron-layout-app-'))
-const userDataDir = path.join(fixtureApp, 'user-data')
-fs.mkdirSync(userDataDir)
-fs.writeFileSync(
-  path.join(fixtureApp, 'package.json'),
-  JSON.stringify({ name: 'profile-ui-layout-fixture', version: '1.0.0', main: 'main.cjs' })
-)
-fs.writeFileSync(
-  path.join(fixtureApp, 'main.cjs'),
-  "const { app, BrowserWindow } = require('electron'); app.whenReady().then(() => { const window = new BrowserWindow({ width: 1280, height: 800 }); window.loadURL('about:blank') })"
-)
-const electronApp = await electron.launch({
-  args: [`--user-data-dir=${userDataDir}`, fixtureApp],
-})
+const browser = await chromium.launch({ headless: true })
 
 try {
-  const page = await electronApp.firstWindow()
-  await page.waitForLoadState('load')
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
   const tokens = fs.readFileSync(path.join(appRoot, 'ui/src/styles/tokens.css'), 'utf8')
   const styles = fs.readFileSync(path.join(appRoot, 'ui/src/styles.css'), 'utf8')
   await page.setContent(`
@@ -67,6 +47,5 @@ try {
     `PASS profile UI dispatch status preserves viewport layout: ${JSON.stringify(layout)}\n`
   )
 } finally {
-  await electronApp.close()
-  fs.rmSync(fixtureApp, { recursive: true })
+  await browser.close()
 }
