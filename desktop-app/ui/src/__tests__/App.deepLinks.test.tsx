@@ -5600,6 +5600,18 @@ describe('App deep-link orchestration', () => {
         throw new Error('the production GFS deep-link parser rejected the Preview fixture')
       const link = gfsQueue.enqueue(target, window.clerum.gfs.getUserNavigationGeneration?.() ?? 0)
       act(() => emitGfsDeepLink?.(link))
+      await waitFor(() => {
+        expect(
+          confirmDialogHarness.props?.title === 'Open EvenDrive link?' ||
+            getController().activeWorkspaceTab?.kind === 'preview'
+        ).toBe(true)
+      })
+      if (confirmDialogHarness.props?.title === 'Open EvenDrive link?') {
+        await act(async () => {
+          confirmDialogHarness.props?.onConfirm()
+          await Promise.resolve()
+        })
+      }
       await waitFor(() => expect(getController().activeWorkspaceTab?.kind).toBe('preview'))
       await waitFor(() => expect(previewReads).toBeGreaterThan(0))
 
