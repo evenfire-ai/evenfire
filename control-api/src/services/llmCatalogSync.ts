@@ -543,7 +543,8 @@ async function reenablePrunedRow(
   counters: RunCounters,
   providerCount: CatalogSyncProviderCount
 ): Promise<void> {
-  const allowed = policyOn && autoEnableRejection(model) === null
+  const rejection = policyOn ? autoEnableRejection(model) : 'auto_enable_off'
+  const allowed = rejection === null
   if (allowed && capReached(providerCount, counters, decision)) {
     providerCount.reEnableDeferredByCap += 1
     log.info(
@@ -571,7 +572,21 @@ async function reenablePrunedRow(
     RETURNING t.id`,
     [id, provider, model.model_id, allowed]
   )
-  if (res.rowCount !== 1 || !allowed) return
+  if (res.rowCount !== 1) return
+  if (!allowed) {
+    // The token is gone, so no later run re-enables this row: unlike a cap
+    // deferral it stays off until an operator enables it.
+    log.info(
+      {
+        event: 'llm_catalog_pruned_model_retired',
+        provider,
+        model: model.model_id,
+        reason: rejection,
+      },
+      'a pruned model the catalog lists again is not auto-enabled and stays disabled'
+    )
+    return
+  }
   counters.reEnabled += 1
   providerCount.reEnabled += 1
   await writeCatalogSyncAudit(client, { action: 'auto_enable', provider, model: model.model_id })
