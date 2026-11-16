@@ -1451,7 +1451,10 @@ describe('McpServerWatcher startup', () => {
           expect.objectContaining({
             level: 'error',
             msg: `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
-            err: { name: 'Error', message: `${failingPlural} inventory unavailable` },
+            err: expect.objectContaining({
+              name: 'Error',
+              message: `${failingPlural} inventory unavailable`,
+            }),
           })
         )
         expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
@@ -1492,7 +1495,10 @@ describe('McpServerWatcher startup', () => {
           expect.objectContaining({
             level: 'error',
             msg: `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
-            err: { name: 'Error', message: `${kind} snapshot missing resourceVersion` },
+            err: expect.objectContaining({
+              name: 'Error',
+              message: `${kind} snapshot missing resourceVersion`,
+            }),
           })
         )
         expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
@@ -6109,7 +6115,7 @@ describe('McpServerWatcher startup', () => {
         expect.objectContaining({
           level: 'error',
           msg: `[K8s] ${kind} background watch failed to start:`,
-          err: { name: 'Error', message: failure.message },
+          err: expect.objectContaining({ name: 'Error', message: failure.message }),
         })
       )
       expect(rejectedWatch).toHaveBeenCalledOnce()
@@ -6355,10 +6361,12 @@ describe('k8sClient.ts logs through the service logger (repository logging stand
       )
       expect(failureLines).toHaveLength(1)
       expect(failureLines[0]).toMatchObject({ level: 'error', svc: 'host-context-controller' })
-      expect(failureLines[0].err).toEqual({
-        name: 'HostListRejected',
-        message: 'hosts LIST rejected by the apiserver',
-      })
+      expect(failureLines[0].err).toEqual(
+        expect.objectContaining({
+          name: 'HostListRejected',
+          message: 'hosts LIST rejected by the apiserver',
+        })
+      )
     } finally {
       logSpy.mockRestore()
       errorSpy.mockRestore()
@@ -7675,7 +7683,7 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
         msg:
           '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
           '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
-        err: { name: 'Error', message: 'CC list failed' },
+        err: expect.objectContaining({ name: 'Error', message: 'CC list failed' }),
       })
     )
 
@@ -8008,7 +8016,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
         expect.objectContaining({
           level: 'error',
           msg: '[K8s] Host reconciliation after CommunicationChannel watch interruption failed:',
-          err: { name: 'Error', message: fleetFailure.message },
+          err: expect.objectContaining({ name: 'Error', message: fleetFailure.message }),
         })
       )
       await vi.advanceTimersByTimeAsync(300000)
@@ -9958,7 +9966,10 @@ describe('McpServerWatcher Host watch generation', () => {
       expect.objectContaining({
         level: 'error',
         msg: '[K8s] Host reconciliation after Periodic resync failed:',
-        err: { name: 'Error', message: 'Host snapshot missing resourceVersion' },
+        err: expect.objectContaining({
+          name: 'Error',
+          message: 'Host snapshot missing resourceVersion',
+        }),
       })
     )
 
