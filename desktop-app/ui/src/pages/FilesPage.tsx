@@ -17,7 +17,15 @@ import {
   normalizeGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
 import { isEditorGfsPermissions, planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
-import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  Field,
+  IconButton,
+  StatusBanner,
+  TextInput,
+} from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
@@ -4239,10 +4247,8 @@ export function FilesPage({
                 void handleCreateFolder()
               }}
             >
-              <label className="da-gfs-new-folder-dialog__field" htmlFor={createFolderInputId}>
-                <span>Folder name</span>
+              <Field label="Folder name" htmlFor={createFolderInputId}>
                 <TextInput
-                  aria-label="Folder name"
                   autoComplete="off"
                   autoFocus
                   disabled={ctrl.mutating}
@@ -4252,7 +4258,7 @@ export function FilesPage({
                   value={createFolderName}
                   onChange={event => setCreateFolderName(event.currentTarget.value)}
                 />
-              </label>
+              </Field>
               {createFolderError ? <StatusBanner tone="error" text={createFolderError} /> : null}
               <footer className="da-gfs-new-folder-dialog__actions">
                 <Button

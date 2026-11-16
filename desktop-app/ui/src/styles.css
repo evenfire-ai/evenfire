@@ -14827,32 +14827,13 @@ pre {
   font-weight: var(--font-weight-semibold);
 }
 
-.da-gfs-workspace-card {
-  display: grid;
-  min-width: 0;
-  align-content: start;
-  gap: var(--space-3);
-}
-
-.da-gfs-workspace-card .page-card__header .muted {
-  margin: var(--space-1) 0 0;
-  max-width: 64ch;
-}
-
 .da-gfs-eyebrow {
   margin: 0 0 var(--space-0-5);
   color: var(--text-muted);
   font-size: var(--font-size-xs);
-  font-weight: 700;
-  letter-spacing: 0;
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-caps);
   text-transform: uppercase;
-}
-
-.da-gfs-open-link {
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3);
-  background: var(--surface-soft);
 }
 
 .da-gfs-file-picker__row {
@@ -14900,21 +14881,6 @@ pre {
   box-shadow: none;
 }
 
-.da-gfs-current-copy {
-  min-width: 0;
-}
-
-.da-gfs-current-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--space-2);
-}
-
-.da-gfs-file-action {
-  cursor: pointer;
-}
-
 .da-gfs-inline-form {
   display: flex;
   align-items: end;
@@ -14927,50 +14893,10 @@ pre {
   background: var(--surface-soft);
 }
 
-.da-gfs-inline-form__field {
-  display: grid;
-  min-width: min(22rem, 100%);
-  gap: var(--space-1);
-}
-
-.da-gfs-inline-form__field span,
 .da-gfs-inline-form__copy {
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-semibold);
-}
-
-.da-gfs-inline-form__field input {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-}
-
-.da-gfs-inline-form__field input:focus-visible {
-  border-color: var(--focus-ring);
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
-
-.da-gfs-breadcrumb {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-  min-height: calc(var(--space-5) + var(--space-1));
-}
-
-.da-gfs-breadcrumb__item {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.da-gfs-breadcrumb__sep {
-  color: var(--text-muted);
 }
 
 .da-gfs-list__icon {
@@ -14997,7 +14923,7 @@ pre {
 .da-gfs-list__name .ui-button {
   min-width: 0;
   color: var(--text);
-  font-weight: 700;
+  font-weight: var(--font-weight-bold);
 }
 
 .da-gfs-inline-rename {
@@ -15073,22 +14999,6 @@ pre {
 .da-gfs-drive__grid .da-gfs-list__actions > .ui-icon-button:focus-visible {
   opacity: 1;
   pointer-events: auto;
-}
-
-.da-gfs-list__rid {
-  max-width: 8rem;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.da-gfs-section-title {
-  font-size: var(--font-size-lg);
-  margin: 0;
 }
 
 .da-gfs-delegation {
@@ -15253,7 +15163,7 @@ pre {
   flex: 0 0 28px;
   display: grid;
   place-items: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(var(--accent-rgb), 0.18);
   color: var(--accent-strong);
   font-size: var(--font-size-sm);
@@ -15481,44 +15391,6 @@ pre {
   display: none;
 }
 
-.da-gfs-upload-status {
-  display: grid;
-  gap: var(--space-2);
-  margin: var(--space-3) var(--space-4) 0;
-  padding: var(--space-3);
-  border: 1px solid rgba(var(--accent-rgb), 0.28);
-  border-radius: var(--radius-md);
-  background: rgba(var(--accent-rgb), 0.06);
-}
-
-.da-gfs-upload-status__head,
-.da-gfs-upload-status__actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.da-gfs-upload-status__head {
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.da-gfs-upload-status__head strong {
-  color: var(--text);
-}
-
-.da-gfs-upload-status progress {
-  width: 100%;
-  height: 0.5rem;
-  accent-color: var(--accent-strong);
-}
-
-.da-gfs-upload-status__actions {
-  justify-content: flex-end;
-}
-
 .da-gfs-drive > .empty-state,
 .da-gfs-drive > [role='status'] > .empty-state {
   margin: var(--space-3) var(--space-4);
@@ -15560,7 +15432,7 @@ pre {
   flex: 0 0 auto;
   width: var(--space-1);
   height: var(--space-1);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   margin-right: var(--space-1-5);
   display: inline-block;
@@ -15633,9 +15505,8 @@ pre {
   cursor: grabbing;
 }
 
-.da-gfs-drive__grid .da-grid__row--clickable:hover:enabled {
-  background: var(--grid-card-bg-hover);
-  border-color: var(--grid-card-border);
+.da-gfs-drive__grid .da-grid__row--clickable:hover {
+  background: var(--table-row-hover-bg);
 }
 
 /* ── Files-grid drop-verdict tints (refusal UX matrix §5) ──────────────────
@@ -15753,10 +15624,10 @@ pre {
 }
 
 .da-gfs-resource-menu__trigger.ui-icon-button {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
+  width: var(--control-height-lg);
+  height: var(--control-height-lg);
+  min-width: var(--control-height-lg);
+  min-height: var(--control-height-lg);
   color: var(--text-muted);
 }
 
@@ -16042,14 +15913,14 @@ pre {
   min-width: 2.25rem;
   height: 2.25rem;
   padding: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .da-gfs-image-preview-dialog__copy.ui-button,
 .da-gfs-markdown-preview-dialog__copy.ui-button {
   height: 2.25rem;
   padding-inline: var(--space-3);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--text-muted);
 }
 
@@ -16432,136 +16303,6 @@ pre {
   font-size: var(--font-size-sm);
 }
 
-.da-gfs-manage-resource-link {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-2-5);
-  border: 1px solid rgba(var(--edge-rgb), 0.24);
-  border-radius: var(--radius-md);
-  background: rgba(var(--overlay-rgb), 0.12);
-}
-
-.da-gfs-manage-resource-link__copy {
-  min-width: 0;
-  flex: 1 1 auto;
-  display: grid;
-  gap: var(--space-0-5);
-}
-
-.da-gfs-manage-resource-link__copy > span {
-  color: var(--text-dim);
-  font-size: var(--font-size-2xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-caps);
-  text-transform: uppercase;
-}
-
-.da-gfs-manage-resource-link__copy code {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-family: var(--font-family-mono);
-  font-size: var(--font-size-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.da-gfs-current-actions--manage {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.da-gfs-manage-action.ui-button {
-  min-width: 0;
-  min-height: 66px;
-  justify-content: flex-start;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid rgba(var(--edge-rgb), 0.24);
-  border-radius: var(--radius-md);
-  background: rgba(var(--edge-rgb), 0.06);
-  color: var(--text);
-  white-space: normal;
-}
-
-.da-gfs-manage-action.ui-button:hover:enabled,
-.da-gfs-manage-action.da-gfs-file-action:hover,
-.da-gfs-manage-action.da-gfs-file-action:focus-within {
-  border-color: rgba(var(--accent-rgb), 0.42);
-  background: rgba(var(--accent-rgb), 0.1);
-  box-shadow: inset 3px 0 0 rgba(var(--accent-rgb), 0.58);
-}
-
-.da-gfs-manage-action.ui-button:focus-visible,
-.da-gfs-manage-action.da-gfs-file-action:focus-within {
-  outline: 2px solid rgba(var(--focus-rgb), 0.66);
-  outline-offset: 2px;
-}
-
-.da-gfs-manage-action__icon {
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(var(--accent-rgb), 0.24);
-  border-radius: var(--radius-sm);
-  background: rgba(var(--accent-rgb), 0.1);
-  color: var(--accent-strong);
-}
-
-.da-gfs-manage-action__icon svg {
-  width: var(--space-4);
-  height: var(--space-4);
-}
-
-.da-gfs-manage-action__copy {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-0-5);
-  text-align: left;
-}
-
-.da-gfs-manage-action__copy strong {
-  color: var(--text);
-  font-size: var(--font-size-md);
-  font-weight: var(--font-weight-semibold);
-}
-
-.da-gfs-manage-action__copy small {
-  color: var(--text-dim);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-regular);
-  line-height: var(--line-height-normal);
-}
-
-.da-gfs-manage-action--danger.ui-button {
-  color: var(--danger);
-}
-
-.da-gfs-manage-action--danger .da-gfs-manage-action__icon {
-  border-color: rgba(var(--danger-rgb), 0.24);
-  background: rgba(var(--danger-rgb), 0.09);
-  color: var(--danger);
-}
-
-.da-gfs-manage-action--danger.ui-button:hover:enabled {
-  border-color: rgba(var(--danger-rgb), 0.4);
-  background: rgba(var(--danger-rgb), 0.09);
-  box-shadow: inset 3px 0 0 rgba(var(--danger-rgb), 0.6);
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: end;
-  margin: 0;
-  border-color: rgba(var(--accent-rgb), 0.3);
-  background: rgba(var(--accent-rgb), 0.07);
-}
-
 .da-gfs-manage-dialog__body > .da-gfs-inline-form {
   margin: 0;
   border: 0;
@@ -16600,17 +16341,10 @@ pre {
   font-size: var(--font-size-sm);
 }
 
-.da-gfs-new-folder-dialog__form,
-.da-gfs-new-folder-dialog__field {
+.da-gfs-new-folder-dialog__form {
   min-width: 0;
   display: grid;
   gap: var(--space-2);
-}
-
-.da-gfs-new-folder-dialog__field > span {
-  color: var(--text);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
 }
 
 .da-gfs-new-folder-dialog__actions {
@@ -16727,7 +16461,7 @@ pre {
 }
 
 .da-gfs-move-dialog__tree-group {
-  margin-left: 28px;
+  margin-left: var(--control-height);
   padding-left: var(--space-1);
   border-left: 1px solid rgba(var(--edge-rgb), 0.24);
 }
@@ -16893,15 +16627,7 @@ pre {
 }
 
 .da-gfs-move-dialog__action-buttons .ui-button {
-  border-radius: 999px;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__field {
-  min-width: 0;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__copy {
-  align-self: center;
+  border-radius: var(--radius-pill);
 }
 
 .da-gfs-manage-section--access .da-gfs-delegation__empty {
@@ -16981,7 +16707,7 @@ pre {
   flex: 0 0 30px;
   display: grid;
   place-items: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(var(--accent-rgb), 0.18);
   color: var(--accent-strong);
 }
@@ -17199,17 +16925,12 @@ pre {
   /* `.page-card__header` stacks via its own `max-width: 900px` rule, and the
      `da-grid` listings keep their inline `--da-grid-cols` (the flexible name
      column shrinks); neither needs a bespoke reflow here anymore. */
-  .da-gfs-current-actions,
   .da-gfs-file-picker__row {
     display: grid;
   }
 
   .da-gfs-delegation__composer {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .da-gfs-current-copy {
-    max-width: 100%;
   }
 
   .da-gfs-drive__header.page-card__header {
@@ -17326,10 +17047,6 @@ pre {
 
   .da-gfs-move-dialog__action-buttons {
     justify-content: flex-end;
-  }
-
-  .da-gfs-manage-section--actions .da-gfs-inline-form {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

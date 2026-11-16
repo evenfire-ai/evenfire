@@ -1097,6 +1097,13 @@ describe('FilesPage', () => {
     const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
     expect(within(newFolderDialog).getByRole('heading', { name: 'New folder' })).toBeTruthy()
     expect(newFolderDialog.classList.contains('da-gfs-new-folder-dialog')).toBe(true)
+    // E2E page objects fill this field with getByLabel('Folder name'): the label must name exactly
+    // one element, and that element is the dialog's text input.
+    const folderNameInput = within(createFolderForm).getByRole('textbox')
+    expect(folderNameInput.tagName).toBe('INPUT')
+    const folderNameFields = screen.getAllByLabelText('Folder name')
+    expect(folderNameFields).toHaveLength(1)
+    expect(folderNameFields.at(0)).toBe(folderNameInput)
     expect(within(newFolderDialog).queryByText('People with access')).toBeNull()
     expect(createFolderForm.querySelector('.da-gfs-new-folder-dialog__actions')).not.toBeNull()
     fireEvent.click(within(createFolderForm).getByRole('button', { name: 'Cancel' }))
