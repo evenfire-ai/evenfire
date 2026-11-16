@@ -604,6 +604,34 @@ describe('mcp-host admission limit answers', () => {
     }
   )
 
+  // Control row: the same hand-built answer with a valid wait is recognised, so
+  // this file fails on its own if the client stops recognising the refusal.
+  it('reports the wait when the header and the body both give 7 seconds', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async () =>
+        hostAnswer(429, { error: 'runtime_service_admission_limited', retryAfterSeconds: 7 }, '7')
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const decision = await submitMcpHostDecision(cfg, decisionCommand)
+    const enrollment = await submitMcpHostEnrollment(cfg, enrollmentCommand)
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(decision).toEqual({
+      ok: false,
+      status: 429,
+      error: 'runtime_service_admission_limited',
+      retryAfterSeconds: 7,
+    })
+    expect(enrollment).toEqual({
+      ok: false,
+      status: 429,
+      error: 'runtime_service_admission_limited',
+      retryAfterSeconds: 7,
+    })
+  })
+
   it('keeps the generic result for a 429 with another error code', async () => {
     const fetchMock = vi
       .fn()

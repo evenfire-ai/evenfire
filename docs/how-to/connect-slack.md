@@ -312,7 +312,7 @@ posts the reply back with the bot token.
 **Threads are not exempt from the mention rule.** With **Reply in threads** on,
 the agent answers inside a thread, but a reply you write in that thread still
 needs a mention while **Only reply when mentioned** is set. The gate
-(`workflow-approval-request-reader/src/server.ts:295-307`) accepts only
+(`workflow-approval-request-reader/src/server.ts:307-319`) accepts only
 `app_mention` events, messages whose text starts with a mention, and
 `/approve` / `/deny`. Thread identity is used to decide where to post a reply,
 never whether to accept one. If threaded back-and-forth without tagging is what
@@ -324,7 +324,7 @@ sees every message in that conversation. DMs never need a mention either way.
 **Enable Interactivity & Shortcuts with the same Request URL as Event
 Subscriptions, and press its own Save Changes button.** The reader serves both
 on one route, `POST /webhooks/{medium}/{targetId}`
-(`workflow-approval-request-reader/src/server.ts:709-721`), so the URL is
+(`workflow-approval-request-reader/src/server.ts:720-732`), so the URL is
 identical. If Interactivity is unset, Slack refuses to deliver `block_actions`
 at all: the click dies in Slack, nothing reaches the cluster, and every service
 log stays silent. Slack marks the buttons with a warning tooltip reading "This

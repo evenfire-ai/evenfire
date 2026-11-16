@@ -20,12 +20,7 @@ import {
   updateTeamsTargetMessage,
   verifySlackTargetSignature,
 } from './controlApiClient.js'
-import { decisionAdmissionRetries, hostAdmissionRetryAfter } from './decisionAdmissionRetry.js'
-import {
-  type DecisionFeedbackInput,
-  decisionAlreadySentText,
-  planDecisionFeedback,
-} from './decisionFeedback.js'
+import { planDecisionFeedback } from './decisionFeedback.js'
 import {
   normalizeProviderDecision,
   normalizeProviderEnrollment,
@@ -385,81 +380,6 @@ async function logSlackDecisionFeedbackFailure(
 }
 
 type ProviderDecisionCommand = NonNullable<ReturnType<typeof normalizeProviderDecision>>
-type DecisionAttempt = DecisionFeedbackInput['attempt']
-type DecisionArming = DecisionFeedbackInput['armed']
-
-function sameUserClick(
-  command: ProviderDecisionCommand,
-  holder: { providerUserId: string; decision: 'approve' | 'deny' } | undefined
-): boolean {
-  return holder !== undefined && holder.providerUserId === command.providerUserId
-}
-
-/**
- * Arms the one background retry of a Slack or Teams decision refused by the
- * Host's admission limit. Returns `scheduled` when this call armed it, `held`
- * when a decision of the same user is already armed (the armed decision is
- * the one sent; nothing more to say), and `not_scheduled` otherwise (the
- * caller reports the wait).
- */
-function armDecisionAdmissionRetry(
-  command: ProviderDecisionCommand,
-  approvalRequestId: string,
-  decision: 'approve' | 'deny',
-  retryAfterSeconds: number,
-  run: () => void
-): 'scheduled' | 'held' | 'not_scheduled' {
-  const outcome = decisionAdmissionRetries.schedule(
-    approvalRequestId,
-    { providerUserId: command.providerUserId, decision },
-    retryAfterSeconds,
-    run
-  )
-  const fields = {
-    medium: command.medium,
-    approvalRequestId: command.approvalRequestId,
-    providerEventId: command.providerEventId,
-    retryAfterSeconds,
-    pending: decisionAdmissionRetries.size,
-  }
-  if (outcome === 'scheduled') {
-    log.warn('provider decision retry scheduled after the host admission limit', fields)
-    return 'scheduled'
-  }
-  log.warn('provider decision retry not scheduled', { ...fields, reason: outcome })
-  return outcome === 'already_pending' &&
-    sameUserClick(command, decisionAdmissionRetries.pending(approvalRequestId))
-    ? 'held'
-    : 'not_scheduled'
-}
-
-/**
- * Once a user's decision is armed for its one retry, any later click of that
- * provider user (same or other decision) is not submitted; the armed decision
- * is the one sent. A click that arrives before the first one was refused is
- * submitted like any other. Returns `same` for a repeated click, `other` for
- * the other decision, `none` when the click is submitted. A click from another
- * user is submitted at once; control-api decides who may decide (the target
- * user; for a team approval the recorded requester, or any active team member
- * with the team's workflow trigger permission when none was recorded).
- */
-function holdClickWhileOwnRetryPending(
-  command: ProviderDecisionCommand
-): 'same' | 'other' | 'none' {
-  const holder = command.approvalRequestId
-    ? decisionAdmissionRetries.pending(command.approvalRequestId)
-    : undefined
-  if (!holder || !sameUserClick(command, holder)) return 'none'
-  const held = holder.decision === command.decision ? 'same' : 'other'
-  log.info('provider decision click held while its retry is pending', {
-    medium: command.medium,
-    approvalRequestId: command.approvalRequestId,
-    providerEventId: command.providerEventId,
-    pending: decisionAdmissionRetries.size,
-    held,
-  })
-  return held
-}
 
 function logDecisionSubmissionCrash(command: ProviderDecisionCommand, err: unknown): void {
   log.error('provider decision submission crashed after acknowledgement', {
@@ -549,19 +469,8 @@ function submitSlackDecisionInBackground(
   command: ProviderDecisionCommand,
   feedback: SlackDecisionFeedbackContext | null
 ): void {
-  const held = holdClickWhileOwnRetryPending(command)
-  if (held === 'other' && feedback) {
-    void sendSlackDecisionNotice(
-      cfg,
-      command,
-      feedback,
-      decisionAlreadySentText(),
-      'send_held'
-    ).catch(err => logDecisionSubmissionCrash(command, err))
-  }
-  if (held !== 'none') return
   void submitMcpHostDecision(cfg, command)
-    .then(result => handleSlackDecisionResult(cfg, command, feedback, result, 'first'))
+    .then(result => handleSlackDecisionResult(cfg, command, feedback, result))
     .catch(err => logDecisionSubmissionCrash(command, err))
 }
 
@@ -569,42 +478,15 @@ async function handleSlackDecisionResult(
   cfg: typeof config,
   command: ProviderDecisionCommand,
   feedback: SlackDecisionFeedbackContext | null,
-  result: McpHostDecisionResult,
-  attempt: DecisionAttempt
+  result: McpHostDecisionResult
 ): Promise<void> {
-  if (attempt === 'retry') logDecisionRetryCompleted(command, result)
-  let armed: DecisionArming = null
-  if (!result.ok) {
-    logDecisionSubmissionFailure(command, result)
-    const retryAfterSeconds = hostAdmissionRetryAfter(result)
-    // A Host answer implies submitMcpHostDecision accepted the id and decision.
-    if (
-      attempt === 'first' &&
-      retryAfterSeconds !== undefined &&
-      command.approvalRequestId &&
-      command.decision
-    ) {
-      armed = armDecisionAdmissionRetry(
-        command,
-        command.approvalRequestId,
-        command.decision,
-        retryAfterSeconds,
-        () => {
-          void submitMcpHostDecision(cfg, command)
-            .then(retried => handleSlackDecisionResult(cfg, command, feedback, retried, 'retry'))
-            .catch(err => logDecisionSubmissionCrash(command, err))
-        }
-      )
-    }
-  }
+  if (!result.ok) logDecisionSubmissionFailure(command, result)
   if (!feedback) return
 
   const plan = planDecisionFeedback({
     medium: 'slack',
     decision: feedbackDecision(command),
-    attempt,
     result,
-    armed,
   })
   if (plan.shared) {
     const updateResult = await updateSlackTargetMessage(cfg, {
@@ -619,26 +501,9 @@ async function handleSlackDecisionResult(
       providerEventId: command.providerEventId,
       action: plan.shared.action,
     })
+    return
   }
-  if (plan.notice) {
-    await sendSlackDecisionNotice(cfg, command, feedback, plan.notice.text, plan.notice.action)
-  }
-}
-
-function logDecisionRetryCompleted(
-  command: ProviderDecisionCommand,
-  result: McpHostDecisionResult
-): void {
-  const fields = {
-    medium: command.medium,
-    approvalRequestId: command.approvalRequestId,
-    providerEventId: command.providerEventId,
-    status: result.status,
-    error: result.error,
-    retryAfterSeconds: result.retryAfterSeconds,
-  }
-  if (result.ok) log.info('provider decision retry completed', fields)
-  else log.warn('provider decision retry completed', fields)
+  await sendSlackDecisionNotice(cfg, command, feedback, plan.notice.text, plan.notice.action)
 }
 
 function submitTeamsDecisionInBackground(
@@ -646,19 +511,8 @@ function submitTeamsDecisionInBackground(
   command: ProviderDecisionCommand,
   feedback: TeamsDecisionFeedbackContext | null
 ): void {
-  const held = holdClickWhileOwnRetryPending(command)
-  if (held === 'other' && feedback) {
-    void sendTeamsDecisionNotice(
-      cfg,
-      command,
-      feedback,
-      decisionAlreadySentText(),
-      'send_held'
-    ).catch(err => logDecisionSubmissionCrash(command, err))
-  }
-  if (held !== 'none') return
   void submitMcpHostDecision(cfg, command)
-    .then(result => handleTeamsDecisionResult(cfg, command, feedback, result, 'first'))
+    .then(result => handleTeamsDecisionResult(cfg, command, feedback, result))
     .catch(err => logDecisionSubmissionCrash(command, err))
 }
 
@@ -666,46 +520,19 @@ async function handleTeamsDecisionResult(
   cfg: typeof config,
   command: ProviderDecisionCommand,
   feedback: TeamsDecisionFeedbackContext | null,
-  result: McpHostDecisionResult,
-  attempt: DecisionAttempt
+  result: McpHostDecisionResult
 ): Promise<void> {
-  if (attempt === 'retry') logDecisionRetryCompleted(command, result)
-  let armed: DecisionArming = null
-  if (!result.ok) {
-    logDecisionSubmissionFailure(command, result)
-    const retryAfterSeconds = hostAdmissionRetryAfter(result)
-    // A Host answer implies submitMcpHostDecision accepted the id and decision.
-    if (
-      attempt === 'first' &&
-      retryAfterSeconds !== undefined &&
-      command.approvalRequestId &&
-      command.decision
-    ) {
-      armed = armDecisionAdmissionRetry(
-        command,
-        command.approvalRequestId,
-        command.decision,
-        retryAfterSeconds,
-        () => {
-          void submitMcpHostDecision(cfg, command)
-            .then(retried => handleTeamsDecisionResult(cfg, command, feedback, retried, 'retry'))
-            .catch(err => logDecisionSubmissionCrash(command, err))
-        }
-      )
-    }
-  }
+  if (!result.ok) logDecisionSubmissionFailure(command, result)
   if (!feedback) return
 
   const plan = planDecisionFeedback({
     medium: 'teams',
     decision: feedbackDecision(command),
-    attempt,
     result,
-    armed,
   })
   if (plan.shared) {
     // Replacing the card removes its buttons: only on a recorded decision or
-    // a first attempt that finds the approval no longer pending.
+    // an approval that is no longer pending.
     const updateResult = await updateTeamsTargetMessage(cfg, {
       targetId: feedback.targetId,
       conversationId: feedback.conversationId,
@@ -718,10 +545,9 @@ async function handleTeamsDecisionResult(
       providerEventId: command.providerEventId,
       action: plan.shared.action,
     })
+    return
   }
-  if (plan.notice) {
-    await sendTeamsDecisionNotice(cfg, command, feedback, plan.notice.text, plan.notice.action)
-  }
+  await sendTeamsDecisionNotice(cfg, command, feedback, plan.notice.text, plan.notice.action)
 }
 
 async function providerAuthorized(
@@ -1178,8 +1004,7 @@ export function createServer(cfg = config): http.Server {
 
       stage = 'mcp_host'
       const result = await submitMcpHostDecision(cfg, routedCommand)
-      // Synchronous callers get the Host's wait as `Retry-After`; this path
-      // is not retried in the background.
+      // Synchronous callers get the Host's wait as `Retry-After`.
       const { status, retryAfterSeconds, ...body } = result
       if (retryAfterSeconds !== undefined) res.setHeader('Retry-After', String(retryAfterSeconds))
       writeJson(res, result.ok ? 200 : (status ?? 409), body)

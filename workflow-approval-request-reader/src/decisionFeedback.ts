@@ -1,4 +1,4 @@
-import { hostAdmissionRetryAfter } from './decisionAdmissionRetry.js'
+import { hostAdmissionRetryAfter } from './hostAdmission.js'
 import type { McpHostDecisionResult } from './mcpHostClient.js'
 
 /**
@@ -6,33 +6,24 @@ import type { McpHostDecisionResult } from './mcpHostClient.js'
  * background. `shared` rewrites the approval message everyone sees (and removes
  * its buttons); `notice` is a new message about one user's click.
  *
- * Rules: the approval message changes only when the decision is recorded, or
- * when a first attempt finds the approval no longer pending. A background retry
- * changes it only when it succeeds; every other retry result is a notice.
+ * Rules: the approval message changes only when the decision is recorded or
+ * the approval is no longer pending. Every other result is a notice, and the
+ * approval message keeps its buttons. A decision is submitted once; the
+ * reader does not send it again.
  */
-export type DecisionFeedbackPlan = {
-  shared: null | { action: 'update_success' | 'update_stale'; text: string }
-  notice: null | {
-    action: 'send_retry_scheduled' | 'send_failure' | 'send_retry_stale'
-    text: string
-  }
-}
+export type DecisionFeedbackPlan =
+  | { shared: { action: 'update_success' | 'update_stale'; text: string }; notice: null }
+  | { shared: null; notice: { action: 'send_failure'; text: string } }
 
 export type DecisionFeedbackMedium = 'slack' | 'teams'
 
 export type DecisionFeedbackInput = {
   medium: DecisionFeedbackMedium
   decision: 'approve' | 'deny'
-  attempt: 'first' | 'retry'
   result: McpHostDecisionResult
-  /** Outcome of arming the background retry; null when no arming was attempted. */
-  armed: 'scheduled' | 'held' | 'not_scheduled' | null
 }
 
 export const DECISION_STALE_TEXT = 'This workflow approval is no longer pending.'
-
-export const DECISION_RETRY_STALE_TEXT =
-  'Your earlier decision was not recorded: this workflow approval is no longer pending.'
 
 export function decisionRecordedText(decision: 'approve' | 'deny'): string {
   return `${decision === 'deny' ? 'Denied' : 'Approved'}. Workflow approval recorded.`
@@ -40,14 +31,6 @@ export function decisionRecordedText(decision: 'approve' | 'deny'): string {
 
 export function assistantBusyText(retryAfterSeconds: number): string {
   return `The assistant is busy. Try again in ${retryAfterSeconds} seconds.`
-}
-
-export function decisionRetryScheduledText(retryAfterSeconds: number): string {
-  return `The assistant is busy. Your decision will be sent again in ${retryAfterSeconds} seconds. If the approval message has not changed a minute from now, choose again.`
-}
-
-export function decisionAlreadySentText(): string {
-  return 'Your earlier decision for this workflow approval is still being sent. Its result will appear on the approval message, or in a message here if it is not recorded.'
 }
 
 /**
@@ -80,24 +63,8 @@ export function planDecisionFeedback(input: DecisionFeedbackInput): DecisionFeed
       notice: null,
     }
   }
-  if (input.armed === 'held') return { shared: null, notice: null }
-  if (input.armed === 'scheduled') {
-    const retryAfterSeconds = hostAdmissionRetryAfter(result)
-    if (retryAfterSeconds === undefined) {
-      throw new Error('a scheduled decision retry needs the Host admission wait')
-    }
-    return {
-      shared: null,
-      notice: {
-        action: 'send_retry_scheduled',
-        text: decisionRetryScheduledText(retryAfterSeconds),
-      },
-    }
-  }
   if (isStaleDecisionResult(result)) {
-    return input.attempt === 'first'
-      ? { shared: { action: 'update_stale', text: DECISION_STALE_TEXT }, notice: null }
-      : { shared: null, notice: { action: 'send_retry_stale', text: DECISION_RETRY_STALE_TEXT } }
+    return { shared: { action: 'update_stale', text: DECISION_STALE_TEXT }, notice: null }
   }
   return {
     shared: null,
