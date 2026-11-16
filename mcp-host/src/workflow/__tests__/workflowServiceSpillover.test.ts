@@ -214,6 +214,9 @@ describe('WorkflowService step spillover — default (enabled)', () => {
   })
 
   it('makes the read tool callable under an allowlist only after a spill', async () => {
+    const stepReads = (withRange: 'true' | 'false'): Promise<number> =>
+      metricTotal('clerum_workflow_step_spillover_reads_total', { with_range: withRange })
+    const before = { whole: await stepReads('false'), ranged: await stepReads('true') }
     const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(big(192 * 1024)) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: READ_TOOL, arguments: { ref: FIRST_REF } }] },
@@ -258,6 +261,75 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     // An internal tool the allowlist does not name stays rejected.
     expect(records[3]?.toolName).toBe('generate_markdown')
     expect(JSON.stringify(records[3]?.result)).toContain('is not allowed in this step')
+    // Only the read made after the read tool was offered is counted.
+    expect(await stepReads('false')).toBe(before.whole + 1)
+    expect(await stepReads('true')).toBe(before.ranged)
+  })
+
+  it('counts and rewrites a read made in the same response as the first stored result', async () => {
+    const payload = Array.from({ length: 150 * 1024 }, (_, i) =>
+      String.fromCharCode(97 + (i % 26))
+    ).join('')
+    const before = await metricTotal('clerum_workflow_step_spillover_reads_total', {
+      with_range: 'true',
+    })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(payload) } })
+    const llm = mockLlmProvider([
+      {
+        content: null,
+        tool_calls: [
+          { name: 'srv__read', arguments: {} },
+          { name: READ_TOOL, arguments: { ref: FIRST_REF, range: { start: 26, end: 36 } } },
+        ],
+      },
+      { content: 'done', tool_calls: null },
+    ])
+
+    const res = await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    const slice = payload.slice(26, 36)
+    expect(slice).toBe('abcdefghij')
+    // Witness: the read tool served the slice in the same response.
+    const [stored, readResult] = toolResultMessages(llm)
+    expect(stored).toContain(`"spillover_ref":"${FIRST_REF}"`)
+    expect(readResult).toContain(`server="${READ_TOOL}"`)
+    expect(readResult).toContain(slice)
+    expect(res.toolsCalled?.[1]?.result).toEqual({ success: true, ref: FIRST_REF, bytes: 10 })
+    expect(JSON.stringify(res.toolsCalled?.[1])).not.toContain(slice)
+    expect(
+      await metricTotal('clerum_workflow_step_spillover_reads_total', { with_range: 'true' })
+    ).toBe(before + 1)
+  })
+
+  it('decides on UTF-8 bytes: a result under the threshold in characters is stored', async () => {
+    // The serialized block array is 60027 characters and 180027 bytes; the
+    // threshold is 131072 bytes.
+    const payload = '€'.repeat(60000)
+    const serialized = JSON.stringify(sdk(payload))
+    expect(serialized.length).toBeLessThan(131072)
+    expect(Buffer.byteLength(serialized, 'utf8')).toBeGreaterThanOrEqual(131072)
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(payload) } })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: 'done', tool_calls: null },
+    ])
+
+    const res = await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    const [toolResult] = toolResultMessages(llm)
+    expect(toolResult).toContain('[Result stored outside the prompt (180000 bytes)')
+    expect(toolResult).toContain(`"spillover_ref":"${FIRST_REF}"`)
+    expect(offeredTools(llm)[1]).toContain(READ_TOOL)
   })
 
   it('returns a byte range and records only ref and size', async () => {
@@ -875,6 +947,9 @@ describe('WorkflowService step spillover — metrics', () => {
       stepReads: await metricTotal('clerum_workflow_step_spillover_reads_total', {
         with_range: 'true',
       }),
+      stepWholeReads: await metricTotal('clerum_workflow_step_spillover_reads_total', {
+        with_range: 'false',
+      }),
       persisted: await metricTotal('clerum_spillover_persisted_total'),
       reads: await metricTotal('clerum_spillover_reads_total'),
       outputBytes: await metricTotal('clerum_tool_output_bytes'),
@@ -887,6 +962,10 @@ describe('WorkflowService step spillover — metrics', () => {
         content: null,
         tool_calls: [
           { name: READ_TOOL, arguments: { ref: FIRST_REF, range: { start: 0, end: 10 } } },
+          // Rejected by the router's argument check before the read tool runs.
+          { name: READ_TOOL, arguments: { ref: FIRST_REF, range: { start: 'a', end: 1 } } },
+          // Rejected by the read tool: a whole read of a 300 KiB result.
+          { name: READ_TOOL, arguments: { ref: FIRST_REF } },
         ],
       },
       { content: 'done', tool_calls: null },
@@ -900,12 +979,18 @@ describe('WorkflowService step spillover — metrics', () => {
     expect(res.status).toBe('completed')
     expect(toolResultMessages(llm)[0]).toContain(`"spillover_ref":"${FIRST_REF}"`)
     expect(res.toolsCalled?.[1]?.result).toEqual({ success: true, ref: FIRST_REF, bytes: 10 })
+    expect(res.toolsCalled?.[2]?.result).toMatchObject({ success: false, ref: FIRST_REF })
+    expect(JSON.stringify(res.toolsCalled?.[2]?.result)).toContain('Invalid arguments')
+    expect(JSON.stringify(res.toolsCalled?.[3]?.result)).toContain('pass range')
     expect(
       await metricTotal('clerum_workflow_step_spillover_persisted_total', { tool: 'srv__read' })
     ).toBe(before.stepPersisted + 1)
     expect(
       await metricTotal('clerum_workflow_step_spillover_reads_total', { with_range: 'true' })
-    ).toBe(before.stepReads + 1)
+    ).toBe(before.stepReads + 2)
+    expect(
+      await metricTotal('clerum_workflow_step_spillover_reads_total', { with_range: 'false' })
+    ).toBe(before.stepWholeReads + 1)
     expect(await metricTotal('clerum_spillover_persisted_total')).toBe(before.persisted)
     expect(await metricTotal('clerum_spillover_reads_total')).toBe(before.reads)
     expect(await metricTotal('clerum_tool_output_bytes')).toBe(before.outputBytes)

@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { register } from 'prom-client'
 import { clerumSpilloverReadsTotal } from '../../core/spillover'
+import { SpilloverReadTool } from '../../core/tools/spilloverRead'
 import { logger } from '../../logger'
 import {
   STEP_SPILLOVER_READ_TOOL_NAME,
   type StepSpillover,
   clerumWorkflowStepSpilloverReadsTotal,
+  countStepSpilloverRead,
   createStepSpillover,
   resolveStepSpilloverConfig,
   storableToolText,
@@ -219,6 +221,37 @@ describe('createStepSpillover', () => {
       // The third result (13500 stored bytes in all) shows the budget is applied.
       expect(outcomes).toEqual([true, true, false])
     })
+
+    it('measures the stored result in UTF-8 bytes, not characters', async () => {
+      const spillover = make()
+      // 2000 characters, 6000 bytes: under the threshold by characters, over it by bytes.
+      const content = '€'.repeat(2000)
+      const res = await spillover.persist({
+        callId: 'c1',
+        toolName: 't',
+        content,
+        inlineBytes: bytes(content),
+        isError: false,
+      })
+      expect(res.spilled).toBe(true)
+      expect(res.text).toContain('(6000 bytes)')
+      expect(res.text).toContain('"byte_size":6000')
+      // A whole read is refused because the stored result is 6000 bytes.
+      const whole = await spillover.readTool.execute(
+        { ref: 'spillover://review-step/c1.json' },
+        WORKSPACE
+      )
+      expect(whole).toEqual({
+        success: false,
+        error: `blob is 6000 bytes; pass range {start,end} with end-start <= ${THRESHOLD}`,
+      })
+      // Witness: a range read of the same blob is served.
+      const part = await spillover.readTool.execute(
+        { ref: 'spillover://review-step/c1.json', range: { start: 0, end: 30 } },
+        WORKSPACE
+      )
+      expect(part).toEqual({ success: true, content: '€'.repeat(10) })
+    })
   })
 
   describe('readTool', () => {
@@ -341,14 +374,37 @@ describe('createStepSpillover', () => {
       expect(res).toEqual({ success: false, error: 'spillover blob not found' })
     })
 
-    it('describes the read limit and keeps the first-party schema', () => {
+    it('describes the read limit in the tool and in its range parameter', () => {
       const tool = make().readTool
       expect(tool.name).toBe('clerum__spillover_read')
       expect(tool.description).toContain(`Reads are limited to ${THRESHOLD} bytes`)
       // Its own wording: results are stored in memory, not on disk.
       expect(tool.description).toContain('stored outside the prompt')
       expect(tool.description).not.toContain('disk')
-      expect(tool.parameters).toMatchObject({ required: ['ref'] })
+
+      const firstParty = new SpilloverReadTool(
+        { load: () => Promise.resolve(null) },
+        {}
+      ).parametersSchema() as {
+        properties: { range: Record<string, unknown> } & Record<string, unknown>
+      }
+      // The first-party text is true for the first-party reader, which serves whole reads.
+      expect(firstParty.properties.range.description).toBe(
+        'Optional byte range [start, end). If omitted, returns the full content.'
+      )
+      const schema = tool.parameters as typeof firstParty
+      expect(schema.properties.range.description).toBe(
+        `Optional byte range [start, end), at most ${THRESHOLD} bytes wide; required when the ` +
+          `stored result is larger than ${THRESHOLD} bytes; if omitted, the whole result is returned.`
+      )
+      // Everything else is the reader's schema, unchanged.
+      const { description: _step, ...stepRange } = schema.properties.range
+      const { description: _firstParty, ...firstPartyRange } = firstParty.properties.range
+      expect(stepRange).toEqual(firstPartyRange)
+      expect({ ...schema, properties: { ...schema.properties, range: null } }).toEqual({
+        ...firstParty,
+        properties: { ...firstParty.properties, range: null },
+      })
     })
   })
 })
@@ -426,7 +482,7 @@ async function metricTotal(name: string, labels: Record<string, string> = {}): P
 }
 
 describe('step read tool counter', () => {
-  it('counts every read call once, by with_range, whatever its outcome', async () => {
+  it('counts a read call by with_range in countStepSpilloverRead, not in the read tool', async () => {
     // The module exports are the instruments the registry serves, so the
     // first-party delta of 0 below is read from the counter a first-party
     // read would move.
@@ -463,22 +519,35 @@ describe('step read tool counter', () => {
       isError: false,
     })
     const ref = (id: string, stepId = 'review'): string => `spillover://${stepId}/${id}.json`
+    const calls: Array<Record<string, unknown>> = [
+      { ref: ref('big', 'other') },
+      { ref: ref('missing'), range: { start: 0, end: 1 } },
+      { ref: ref('big') },
+      { ref: ref('big'), range: { start: 0, end: THRESHOLD + 1 } },
+      { ref: ref('big'), range: { start: 9, end: 3 } },
+      { ref: ref('big'), range: { start: 0, end: 4 } },
+      { ref: ref('fit') },
+    ]
+    for (const args of calls) countStepSpilloverRead(args)
+    expect(await metricTotal(stepCounter, { with_range: 'true' })).toBe(before.ranged + 4)
+    expect(await metricTotal(stepCounter, { with_range: 'false' })).toBe(before.whole + 3)
+
+    // The read tool itself counts nothing, on any counter, whatever its outcome.
+    const counted = {
+      ranged: await metricTotal(stepCounter, { with_range: 'true' }),
+      whole: await metricTotal(stepCounter, { with_range: 'false' }),
+    }
     const read = spillover.readTool
     const outcomes = [
-      // Rejected by the step tool before any blob is loaded.
-      await read.execute({ ref: ref('big', 'other') }, WORKSPACE),
-      await read.execute({ ref: ref('missing'), range: { start: 0, end: 1 } }, WORKSPACE),
-      await read.execute({ ref: ref('big') }, WORKSPACE),
-      await read.execute({ ref: ref('big'), range: { start: 0, end: THRESHOLD + 1 } }, WORKSPACE),
-      // Rejected by the reader.
+      // Rejected by the reader: the only outcome that reaches its own counting.
       await read.execute({ ref: ref('big'), range: { start: 9, end: 3 } }, WORKSPACE),
       // Served.
       await read.execute({ ref: ref('big'), range: { start: 0, end: 4 } }, WORKSPACE),
       await read.execute({ ref: ref('fit') }, WORKSPACE),
     ]
-    expect(outcomes.map(o => o.success)).toEqual([false, false, false, false, false, true, true])
-    expect(await metricTotal(stepCounter, { with_range: 'true' })).toBe(before.ranged + 4)
-    expect(await metricTotal(stepCounter, { with_range: 'false' })).toBe(before.whole + 3)
+    expect(outcomes.map(o => o.success)).toEqual([false, true, true])
+    expect(await metricTotal(stepCounter, { with_range: 'true' })).toBe(counted.ranged)
+    expect(await metricTotal(stepCounter, { with_range: 'false' })).toBe(counted.whole)
     expect(await metricTotal('clerum_spillover_reads_total')).toBe(before.firstParty)
   })
 })

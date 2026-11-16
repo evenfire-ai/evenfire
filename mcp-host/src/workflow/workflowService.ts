@@ -39,6 +39,7 @@ import { McpClientFactory, StepMcpRouter } from './stepRouter'
 import {
   STEP_SPILLOVER_READ_TOOL_NAME,
   type StepSpillover,
+  countStepSpilloverRead,
   createStepSpillover,
   resolveStepSpilloverConfig,
   storableToolText,
@@ -1334,11 +1335,14 @@ export class WorkflowService {
                 signal: abortController.signal,
               })
               if (spilloverReadOffered && call.name === STEP_SPILLOVER_READ_TOOL_NAME) {
-                // Record the ref and byte count, never the blob content, but only
-                // for calls the step read tool handled. `spilloverReadOffered` is
-                // set further down when a result is stored, so a read made later
-                // in the same response is rewritten too; before any stored result
-                // the router's own record is kept.
+                // Count the call once, whatever its outcome (the router may have
+                // rejected its arguments before the read tool ran). Record the ref
+                // and byte count, never the blob content, but only for calls made
+                // after the read tool was offered. `spilloverReadOffered` is set
+                // further down when a result is stored, so a read made later in
+                // the same response is counted and rewritten too; before any
+                // stored result the router's own record is kept.
+                countStepSpilloverRead(call.arguments ?? {})
                 record.result = summarizeSpilloverReadForRecord(
                   call.arguments ?? {},
                   result.content as InternalToolResult
@@ -1355,7 +1359,7 @@ export class WorkflowService {
               // iteration no call follows, and the store is consulted as before.
               const nextCallHasNoTools = i + 1 < MAX_ITERATIONS && forcesFinalText(i + 1)
               // JSON.stringify(undefined) is not a string; such a result stays
-              // inline, as persist() leaves any non-string content inline.
+              // inline and is never passed to persist().
               if (stepSpillover && !nextCallHasNoTools && typeof serialized === 'string') {
                 // The store keeps the tool text of an MCP text result (so the
                 // summary and the byte ranges index that text) and the

@@ -80,7 +80,7 @@ export const clerumWorkflowStepSpilloverReadsTotal = (() => {
   try {
     return new Counter({
       name: 'clerum_workflow_step_spillover_reads_total',
-      help: 'Count of clerum__spillover_read calls handled by a workflow step read tool, rejected reads included.',
+      help: 'Count of clerum__spillover_read calls a workflow step dispatched after offering the read tool, calls rejected at the argument check included.',
       labelNames: ['with_range'] as const,
     })
   } catch {
@@ -222,6 +222,32 @@ export function storableToolText(content: unknown): string | null {
   return texts.join('\n')
 }
 
+/**
+ * The reader's schema with a `range` description that states the step read
+ * cap. The first-party text ("If omitted, returns the full content") is true
+ * for the first-party reader only; the step tool refuses a whole read of a
+ * result larger than `thresholdBytes`.
+ */
+function stepReadParameters(
+  schema: Record<string, unknown>,
+  thresholdBytes: number
+): Record<string, unknown> {
+  const properties = schema.properties as Record<string, Record<string, unknown>>
+  return {
+    ...schema,
+    properties: {
+      ...properties,
+      range: {
+        ...properties.range,
+        description:
+          `Optional byte range [start, end), at most ${thresholdBytes} bytes wide; required when ` +
+          `the stored result is larger than ${thresholdBytes} bytes; if omitted, the whole result ` +
+          'is returned.',
+      },
+    },
+  }
+}
+
 /** Synchronous. Returns null when `stepId` is not a valid ref segment. */
 export function createStepSpillover(opts: {
   stepId: string
@@ -240,9 +266,10 @@ export function createStepSpillover(opts: {
   // The spilled results of this execution, by ref. `release` empties the map,
   // after which the read tool finds nothing.
   const blobs = new Map<string, SpilloverBlob>()
-  // The step read tool counts its own calls, rejected ones included, so the
-  // reader gets an empty instrument set: its default is the first-party
-  // counter, and counting there too would count a step read twice.
+  // The step counts its read calls where it dispatches them
+  // (`countStepSpilloverRead`), so the reader gets an empty instrument set: its
+  // default is the first-party counter, and counting there too would count a
+  // step read twice.
   const reader = new SpilloverReadTool(
     { load: (ref: string) => Promise.resolve(blobs.get(ref) ?? null) },
     {}
@@ -258,14 +285,12 @@ export function createStepSpillover(opts: {
       '`spillover_ref` from the summary that replaced the result. Pass `range: { start, end }` ' +
       'to read the `[start, end)` byte window of the stored result. ' +
       `Reads are limited to ${thresholdBytes} bytes; pass range for larger results.`,
-    parameters: reader.parametersSchema(),
+    parameters: stepReadParameters(reader.parametersSchema(), thresholdBytes),
     async execute(args: Record<string, unknown>): Promise<InternalToolResult> {
       const range =
         args.range && typeof args.range === 'object'
           ? (args.range as { start?: unknown; end?: unknown })
           : null
-      clerumWorkflowStepSpilloverReadsTotal?.inc({ with_range: range === null ? 'false' : 'true' })
-
       const parsed = parseSpilloverRef(args.ref)
       if (!parsed || parsed.taskId !== stepId) {
         return readError('spillover ref is not available to this step')
@@ -302,7 +327,6 @@ export function createStepSpillover(opts: {
     if (args.isError || args.toolName === STEP_SPILLOVER_READ_TOOL_NAME) {
       return Promise.resolve(inline)
     }
-    if (typeof args.content !== 'string') return Promise.resolve(inline)
     // The decision is taken on the inline size; everything stored (budget,
     // summary, blob, read cap) is measured on the stored string.
     if (args.inlineBytes < thresholdBytes) return Promise.resolve(inline)
@@ -377,6 +401,18 @@ export function createStepSpillover(opts: {
   }
 
   return { readTool, persist, release }
+}
+
+/**
+ * Counts one read call a step dispatched after offering the read tool, by
+ * whether it passed a `range` object. The step calls it once per call, before
+ * the outcome is known, so calls rejected at the argument check, by the step
+ * read tool or by the reader are counted too.
+ */
+export function countStepSpilloverRead(args: Record<string, unknown>): void {
+  // The same test the read tool uses to tell a range read from a whole read.
+  const withRange = Boolean(args.range) && typeof args.range === 'object'
+  clerumWorkflowStepSpilloverReadsTotal?.inc({ with_range: withRange ? 'true' : 'false' })
 }
 
 /** What `toolsCalled` records for a read call: never the blob content. */
