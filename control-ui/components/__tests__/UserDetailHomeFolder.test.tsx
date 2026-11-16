@@ -181,4 +181,20 @@ describe('Member Contact tab home folder', () => {
     expect(screen.queryByRole('region', { name: 'Home folder' })).not.toBeInTheDocument()
     expect(screen.getByText('not found')).toBeVisible()
   })
+
+  it('keeps the Home folder field when another request of the page fails', async () => {
+    vi.mocked(api.getAdminUserContext).mockResolvedValue(memberContext(userId))
+    vi.mocked(api.getGfsUserHome).mockResolvedValue(readyHome)
+    mockMemberSections()
+    vi.mocked(api.getHosts).mockRejectedValue(
+      Object.assign(new Error('500 Internal Server Error'), { status: 500 })
+    )
+    render(<UserDetailsPage />)
+
+    // Witness: the failing request ran and its error is the page error.
+    expect(await screen.findByText('500 Internal Server Error')).toHaveAttribute('role', 'alert')
+    expect(api.getHosts).toHaveBeenCalledTimes(1)
+    expect(await screen.findByRole('region', { name: 'Home folder' })).toBeVisible()
+    expect(api.getGfsUserHome).toHaveBeenCalledWith(userId, expect.any(AbortSignal))
+  })
 })

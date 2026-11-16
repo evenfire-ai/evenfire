@@ -658,7 +658,9 @@ describe('Home folder field', () => {
     const pending: GfsUserHomeDetail = { ...baseHome, state: 'pending' }
     vi.mocked(getGfsUserHome)
       .mockResolvedValueOnce({ home: pending })
-      .mockRejectedValueOnce(new Error('Could not read the home folder.'))
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Could not read the home folder.'), { status: 500 })
+      )
     vi.useFakeTimers()
     render(<GfsUserHomeBlock userId={baseHome.userId} />)
     await act(async () => {})
@@ -667,6 +669,11 @@ describe('Home folder field', () => {
     expect(getGfsUserHome).toHaveBeenCalledTimes(2)
     expect(screen.getByRole('alert')).toHaveTextContent('Could not read the home folder.')
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+    // Polling stopped with the error, so the status line must not claim it is still checking.
+    expect(screen.queryByText('Being created…')).not.toBeInTheDocument()
+    expect(screen.getByText('Still pending')).toBeVisible()
+    await act(async () => vi.advanceTimersByTimeAsync(60_000))
+    expect(getGfsUserHome).toHaveBeenCalledTimes(2)
   })
 
   it('starts a new polling window when Refresh finds a pending home', async () => {

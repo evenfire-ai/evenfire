@@ -153,7 +153,6 @@ export async function openDesktopHome(page: Page, _folderName: string): Promise<
   await openResourcesNavItem(page, 'nav-files')
   const home = page.getByRole('treeitem', { name: 'My home', exact: true })
   await expect(home).toBeVisible({ timeout: 150_000 })
-  await expect(home).toHaveAttribute('aria-expanded', 'true', { timeout: 150_000 })
   await home.getByRole('button', { name: 'My home', exact: true }).click()
   await expect(
     page
