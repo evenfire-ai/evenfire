@@ -152,9 +152,12 @@ export function resolveStepSpilloverConfig(
 }
 
 export interface StepSpilloverResult {
-  /** Text to place in the prompt. */
+  /**
+   * The summary to place in the prompt when `spilled`; otherwise `content`
+   * unchanged, and the caller keeps its own inline text.
+   */
   text: string
-  /** True when `text` is a summary and the original was persisted. */
+  /** True when `text` is a summary and the original was stored. */
   spilled: boolean
 }
 
