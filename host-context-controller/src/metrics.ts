@@ -106,6 +106,8 @@ export const initialConvergenceSwallowedTotal = counter({
   help: 'Initial background convergence requests that returned without certifying.',
   labelNames: ['lane', 'sink'] as const,
 })
+// The sink this release introduced is exposed at 0 so its first pass is visible to increase().
+initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'inventory-changed' }, 0)
 
 export const initialConvergenceEffectsDroppedTotal = counter({
   name: 'clerum_hcc_initial_convergence_effects_dropped_total',
@@ -265,6 +267,16 @@ const secretInformerResumesTotal = counter({
   help: 'Secret watches of a resume-mode SecretInformer reopened from the last resourceVersion seen',
   labelNames: ['namespace'] as const,
 })
+
+/**
+ * Exposes the reconnect counter of one SecretInformer at 0, in every mode, so
+ * the first reconnect of its namespace is visible to increase(). The
+ * namespaces are known only where the informer is built, so its constructor
+ * calls this.
+ */
+export function exposeSecretInformerSeries(namespace: string): void {
+  secretInformerReconnectsTotal.inc({ namespace }, 0)
+}
 
 /**
  * Exposes the list and resume series of one resume-mode SecretInformer at 0.

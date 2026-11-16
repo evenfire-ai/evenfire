@@ -62,6 +62,25 @@ function statusCodeOf(error: unknown): unknown {
   return (error as { statusCode?: unknown } | null | undefined)?.statusCode
 }
 
+const HTTP_UNAUTHORIZED = 401
+const HTTP_FORBIDDEN = 403
+
+/**
+ * The error line for a watch the API server refused, or null when the end is
+ * not a refusal. A refusal does not clear by itself: the informer keeps
+ * retrying, but only an operator change (the Role or the ServiceAccount token)
+ * ends it.
+ */
+function refusedWatchMessage(statusCode: unknown): string | null {
+  if (statusCode === HTTP_FORBIDDEN) {
+    return '[DeploymentInformer] the API server forbade the Deployment watch; apply the Role that grants watch on deployments'
+  }
+  if (statusCode === HTTP_UNAUTHORIZED) {
+    return "[DeploymentInformer] the API server rejected HCC's credentials for the Deployment watch; check the ServiceAccount token"
+  }
+  return null
+}
+
 export class ManagedDeploymentInformer {
   private abortController: AbortController | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -132,12 +151,7 @@ export class ManagedDeploymentInformer {
       if (this.stopped || watchEnded) return
       watchEnded = true
       if (isGone(err)) this.expireResumeVersion('the watch request answered HTTP 410')
-      hccLogger.warn('[DeploymentInformer] watch ended, reconnecting', {
-        event: 'deployment-informer-watch-ended',
-        namespace: this.namespace,
-        statusCode: statusCodeOf(err),
-        err,
-      })
+      this.reportWatchEnd(err, true)
       deploymentInformerRunning.set({ namespace: this.namespace }, 0)
       this.scheduleReconnect()
     }
@@ -173,15 +187,45 @@ export class ManagedDeploymentInformer {
       if (this.stopped) return false
       if (isGone(err)) this.expireResumeVersion('the watch request answered HTTP 410')
       deploymentInformerRunning.set({ namespace: this.namespace }, 0)
-      hccLogger.warn('[DeploymentInformer] failed to start watch', {
-        event: 'deployment-informer-watch-failed',
-        namespace: this.namespace,
-        statusCode: statusCodeOf(err),
-        err,
-      })
+      this.reportWatchEnd(err, false)
       this.scheduleReconnect()
       return false
     }
+  }
+
+  /**
+   * Logs the end of one watch attempt. `started` is true when the watch request
+   * was made and its done callback reported the end, false when `watch()`
+   * itself threw. A 401 or 403 is logged as an error on both paths; any other
+   * end keeps the warning of its path.
+   */
+  private reportWatchEnd(err: unknown, started: boolean): void {
+    const statusCode = statusCodeOf(err)
+    const refused = refusedWatchMessage(statusCode)
+    if (refused !== null) {
+      hccLogger.error(refused, {
+        event: 'deployment-informer-watch-forbidden',
+        namespace: this.namespace,
+        statusCode,
+        err,
+      })
+      return
+    }
+    if (started) {
+      hccLogger.warn('[DeploymentInformer] watch ended, reconnecting', {
+        event: 'deployment-informer-watch-ended',
+        namespace: this.namespace,
+        statusCode,
+        err,
+      })
+      return
+    }
+    hccLogger.warn('[DeploymentInformer] failed to start watch', {
+      event: 'deployment-informer-watch-failed',
+      namespace: this.namespace,
+      statusCode,
+      err,
+    })
   }
 
   /** Returns false when the list failed; nothing was delivered then. */

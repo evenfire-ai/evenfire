@@ -31,6 +31,7 @@ import {
   countSecretInformerList,
   countSecretInformerResume,
   exposeSecretInformerResumeSeries,
+  exposeSecretInformerSeries,
   secretInformerEventsTotal,
   secretInformerReconnectsTotal,
   secretInformerRunning,
@@ -145,6 +146,7 @@ export class SecretInformer {
     deps?: SecretInformerDeps
   ) {
     this.list = mode.mode === 'resume' ? mode.list : null
+    exposeSecretInformerSeries(namespace)
     if (mode.mode === 'resume') exposeSecretInformerResumeSeries(namespace)
     if (deps?.watch) {
       this.watch = deps.watch

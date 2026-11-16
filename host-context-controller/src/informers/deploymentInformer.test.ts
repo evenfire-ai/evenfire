@@ -13,6 +13,10 @@ import {
 
 const NAMESPACE = 'mcp-server'
 const SELECTOR = 'clerum.io/managed-by=host-context-controller'
+const FORBIDDEN_MESSAGE =
+  '[DeploymentInformer] the API server forbade the Deployment watch; apply the Role that grants watch on deployments'
+const UNAUTHORIZED_MESSAGE =
+  "[DeploymentInformer] the API server rejected HCC's credentials for the Deployment watch; check the ServiceAccount token"
 
 async function runningGauge(): Promise<number | undefined> {
   const metric = registry.getSingleMetric('clerum_hcc_deployment_informer_running')
@@ -176,9 +180,10 @@ describe('ManagedDeploymentInformer', () => {
     expect(observations).toEqual([])
   })
 
-  it('DI5 a watch that answers 403 keeps climbing the backoff with the gauge at 0', async () => {
+  it('DI5 a watch that answers 403 logs an error per attempt and keeps climbing the backoff with the gauge at 0', async () => {
     const api = fakeDeploymentApiserver(NAMESPACE, { stuck: { generation: 3, ready: false } })
     const warn = vi.spyOn(hccLogger, 'warn')
+    const error = vi.spyOn(hccLogger, 'error')
     api.failWatches(() => Object.assign(new Error('forbidden'), { statusCode: 403 }))
     const startedAt = Date.now()
     const callTimes: number[] = []
@@ -201,11 +206,120 @@ describe('ManagedDeploymentInformer', () => {
     expect(callTimes).toEqual([0, 1000, 3000, 7000])
     expect(await runningGauge()).toBe(0)
     expect(api.list).toHaveBeenCalledTimes(1)
-    expect(warn).toHaveBeenCalledWith(
+    expect(error).toHaveBeenCalledTimes(4)
+    for (const call of error.mock.calls) {
+      expect(call).toEqual([
+        FORBIDDEN_MESSAGE,
+        expect.objectContaining({
+          event: 'deployment-informer-watch-forbidden',
+          namespace: NAMESPACE,
+          statusCode: 403,
+        }),
+      ])
+    }
+    // The four error lines above witness that each watch end was reported.
+    expect(warn).not.toHaveBeenCalledWith(
       expect.any(String),
-      expect.objectContaining({ event: 'deployment-informer-watch-ended', statusCode: 403 })
+      expect.objectContaining({ event: 'deployment-informer-watch-ended' })
     )
   })
+
+  it('DI5b a watch that answers 401 logs the credentials error, not the Role hint', async () => {
+    const api = fakeDeploymentApiserver(NAMESPACE, { stuck: { generation: 3, ready: false } })
+    const warn = vi.spyOn(hccLogger, 'warn')
+    const error = vi.spyOn(hccLogger, 'error')
+    api.failWatches(() => Object.assign(new Error('unauthorized'), { statusCode: 401 }))
+
+    await expect(start(api)).resolves.toBe(false)
+
+    expect(api.watchCalls).toHaveLength(1)
+    expect(await runningGauge()).toBe(0)
+    expect(error).toHaveBeenCalledTimes(1)
+    expect(error).toHaveBeenCalledWith(
+      UNAUTHORIZED_MESSAGE,
+      expect.objectContaining({
+        event: 'deployment-informer-watch-forbidden',
+        namespace: NAMESPACE,
+        statusCode: 401,
+      })
+    )
+    expect(error.mock.calls[0][0]).not.toContain('apply the Role')
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ event: 'deployment-informer-watch-ended' })
+    )
+  })
+
+  it.each([
+    [403, FORBIDDEN_MESSAGE],
+    [401, UNAUTHORIZED_MESSAGE],
+  ] as const)(
+    'DI5c a watch() that throws %i logs the same error and reconnects on the backoff',
+    async (statusCode, message) => {
+      const api = fakeDeploymentApiserver(NAMESPACE, { stuck: { generation: 3, ready: false } })
+      const warn = vi.spyOn(hccLogger, 'warn')
+      const error = vi.spyOn(hccLogger, 'error')
+      api.watchFn.mockRejectedValueOnce(Object.assign(new Error('refused'), { statusCode }))
+
+      await expect(start(api)).resolves.toBe(false)
+
+      expect(api.watchFn).toHaveBeenCalledTimes(1)
+      expect(await runningGauge()).toBe(0)
+      expect(error).toHaveBeenCalledTimes(1)
+      expect(error).toHaveBeenCalledWith(
+        message,
+        expect.objectContaining({
+          event: 'deployment-informer-watch-forbidden',
+          namespace: NAMESPACE,
+          statusCode,
+        })
+      )
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ event: 'deployment-informer-watch-failed' })
+      )
+
+      await vi.advanceTimersByTimeAsync(1000)
+
+      expect(api.watchFn).toHaveBeenCalledTimes(2)
+      expect(await runningGauge()).toBe(1)
+    }
+  )
+
+  it.each([
+    ['the done callback', 'no status code', undefined],
+    ['the done callback', 'HTTP 500', 500],
+    ['a watch() that throws', 'no status code', undefined],
+    ['a watch() that throws', 'HTTP 500', 500],
+  ] as const)(
+    'DI5d a watch end from %s with %s keeps its warning and logs no error',
+    async (path, _label, statusCode) => {
+      const api = fakeDeploymentApiserver(NAMESPACE, { stuck: { generation: 3, ready: false } })
+      const warn = vi.spyOn(hccLogger, 'warn')
+      const error = vi.spyOn(hccLogger, 'error')
+      const failure =
+        statusCode === undefined
+          ? new Error('Premature close')
+          : Object.assign(new Error('internal error'), { statusCode })
+      let event: string
+      if (path === 'the done callback') {
+        await expect(start(api)).resolves.toBe(true)
+        api.disconnect(failure)
+        event = 'deployment-informer-watch-ended'
+      } else {
+        api.watchFn.mockRejectedValueOnce(failure)
+        await expect(start(api)).resolves.toBe(false)
+        event = 'deployment-informer-watch-failed'
+      }
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ event, namespace: NAMESPACE, statusCode })
+      )
+      expect(await runningGauge()).toBe(0)
+      expect(error).not.toHaveBeenCalled()
+    }
+  )
 
   it('DI6 stop during a pending list delivers nothing and opens no watch', async () => {
     const api = fakeDeploymentApiserver(NAMESPACE, { stuck: { generation: 3, ready: false } })
