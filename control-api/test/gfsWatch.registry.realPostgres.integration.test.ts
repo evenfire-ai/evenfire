@@ -954,6 +954,20 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     await ready(user, [])
   })
 
+  it('admits against injected process and per-user caps with the same 429', async () => {
+    b = await h.build({ maxConnections: 2, maxConnectionsPerPrincipal: 1 })
+    const full = { kind: 'reply', status: 429, code: 'admission_full', retryAfterSec: 5 }
+    const alice = await h.createUser()
+    const bob = await h.createUser()
+    const carol = await h.createUser()
+    const first = await ready(alice, [])
+    expect(await b.open(alice, []).outcome).toEqual(full)
+    await ready(bob, [])
+    expect(await b.open(carol, []).outcome).toEqual(full)
+    first.socket.emitGone()
+    await ready(carol, [])
+  })
+
   it('caps reads in flight per process and leaves no permit or waiter behind (T-SB83, I42)', async () => {
     const { createReadSlots } = await import('../src/services/gfsWatch/readSlots.js')
     const clockless = { now: () => 0 }
@@ -982,5 +996,20 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     b.gates.read.mode = 'pass'
     await b.settle()
     expect([slots.free, slots.waiters, slots.demand]).toEqual([3, 0, 0])
+  })
+})
+
+describe('GFS watch registry construction', () => {
+  it('refuses to build with a cap that is not a positive integer', async () => {
+    const { createGfsWatchRegistry } = await import('../src/services/gfsWatch/registry.js')
+    for (const bad of [{ maxConnections: Number.NaN }, { maxConnectionsPerPrincipal: 0 }]) {
+      expect(() =>
+        createGfsWatchRegistry({
+          listenConnectionString: 'postgres://unused',
+          watchPool: {} as never,
+          ...bad,
+        })
+      ).toThrow(/must be a positive integer/)
+    }
   })
 })

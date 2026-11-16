@@ -260,6 +260,8 @@ export type GfsWatchRegistryDeps = {
   log?: Logger
   heartbeatMs?: number
   maxLifetimeMs?: number
+  maxConnections?: number
+  maxConnectionsPerPrincipal?: number
   authBudget?: AuthBudget
   readSlots?: ReadSlots
   recentDirty?: RecentDirty
@@ -325,6 +327,18 @@ function removeFromIndex<K>(
 export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   const heartbeatMs = deps.heartbeatMs ?? GFS_WATCH_DEFAULT_HEARTBEAT_MS
   const maxLifetimeMs = deps.maxLifetimeMs ?? GFS_WATCH_DEFAULT_MAX_LIFETIME_MS
+  const maxConnections = deps.maxConnections ?? GFS_WATCH_MAX_CONNECTIONS
+  const maxConnectionsPerPrincipal =
+    deps.maxConnectionsPerPrincipal ?? GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL
+  // A NaN cap makes both admission comparisons false and admits without limit.
+  for (const [name, v] of [
+    ['maxConnections', maxConnections],
+    ['maxConnectionsPerPrincipal', maxConnectionsPerPrincipal],
+  ] as const) {
+    if (!Number.isSafeInteger(v) || v < 1) {
+      throw new Error(`gfs watch ${name} must be a positive integer`)
+    }
+  }
   const mintReadToken = deps.mintReadToken ?? mintExternalGfsReadToken
   const readGfscFn = deps.readGfsc ?? readGfsc
   const resolveAuthority = deps.resolveAuthority ?? resolveExternalGfsAuthorityForSession
@@ -1034,8 +1048,8 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
         return reply(503, 'watch_listener_unavailable', DEFAULT_CLOSE_RETRY_AFTER_SEC)
       }
       if (
-        byConnId.size >= GFS_WATCH_MAX_CONNECTIONS ||
-        (admittedPerPrincipal.get(uid) ?? 0) >= GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL
+        byConnId.size >= maxConnections ||
+        (admittedPerPrincipal.get(uid) ?? 0) >= maxConnectionsPerPrincipal
       ) {
         return reply(429, 'admission_full', ADMISSION_RETRY_AFTER_SEC)
       }
