@@ -13291,6 +13291,113 @@ describe('WorkflowRecipeReconciler', () => {
           new Set()
         )
       ).toBe(false)
+      // Issue #1349 (B-L1) — a denied workload counts only when the denial
+      // teardown deletes it. A denied StatefulSet is kept and re-rendered with
+      // its accessible refs, transport or not.
+      expect(
+        noSecretBearingWorkloadsRemain(
+          withWorkloads([{ ...api, type: 'statefulset' } as WorkloadDef]),
+          new Set(['api'])
+        )
+      ).toBe(false)
+      expect(
+        noSecretBearingWorkloadsRemain(
+          withWorkloads([{ ...api, type: 'statefulset', transport } as WorkloadDef]),
+          new Set(['api'])
+        )
+      ).toBe(false)
+      // A denied Deployment that declares volumeClaimTemplates is deleted by it.
+      expect(
+        noSecretBearingWorkloadsRemain(
+          withWorkloads([
+            {
+              ...api,
+              volumeClaimTemplates: [
+                {
+                  name: 'data',
+                  storageClass: 'standard',
+                  accessMode: 'ReadWriteOnce',
+                  size: '1Gi',
+                },
+              ],
+            } as WorkloadDef,
+          ]),
+          new Set(['api'])
+        )
+      ).toBe(true)
+      // A denied Deployment is deleted by it.
+      expect(noSecretBearingWorkloadsRemain(withWorkloads([api]), new Set(['api']))).toBe(true)
+    })
+
+    it('T-BL1-2 the terminal pass does not record the fact for a denied StatefulSet that keeps an accessible Secret (issue #1349)', async () => {
+      stubWorkflowReconciler()
+      const recipe = makeTerminalRunRecipe({ name: 'wf-run-mixed', phase: 'completed' })
+      recipe.spec.workloads = [
+        {
+          id: 'db',
+          type: 'statefulset',
+          image: 'postgres:16',
+          port: 5432,
+          envSecret: { name: 'own-creds', keys: [{ secretKey: 'token', envVar: 'TOKEN' }] },
+          imagePullSecrets: ['foreign-pull'],
+        } as WorkloadDef,
+      ]
+      recipe.status = {
+        ...recipe.status,
+        workloadInstances: { db: 'wf-run-mixed-db-live' },
+      } as WorkflowRecipeCRD['status']
+      // own-creds is labeled for the run (accessible); foreign-pull for another
+      // recipe (denied).
+      mockCoreApi.readNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => ({
+        metadata: {
+          resourceVersion: '7',
+          labels: {
+            'clerum.io/owner-recipe': name === 'own-creds' ? 'wf-run-mixed' : 'other-recipe',
+          },
+        },
+        data: { token: 'eA==' },
+      }))
+      // The StatefulSet is live, rendered while both Secrets were accessible.
+      const liveStatefulSet = buildStatefulSet(
+        recipe.spec.workloads[0] as Parameters<typeof buildStatefulSet>[0],
+        recipe,
+        'minimal',
+        new Map([
+          ['own-creds', { state: 'accessible', keys: new Set(['token']) }],
+          ['foreign-pull', { state: 'accessible', keys: new Set<string>() }],
+        ])
+      ).statefulSet
+      await mockAppsApi.createNamespacedStatefulSet({
+        namespace: recipe.metadata.namespace,
+        body: liveStatefulSet,
+      })
+      mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      const store = installRecipeStore(recipe)
+
+      await reconciler.reconcile(store.current())
+
+      // Witness: the terminal block ran, the denied StatefulSet was re-rendered
+      // and its revocation was recorded.
+      expect(store.current().status?.terminalRunTeardown?.completedAt).toEqual(expect.any(String))
+      expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
+      expect(store.current().status?.secretOwnershipRevocations?.['db']).toMatch(
+        /^sha256:[0-9a-f]{64}$/
+      )
+      // The re-rendered StatefulSet still reads own-creds, so the fact is not recorded.
+      const stored = (await mockAppsApi.readNamespacedStatefulSet({
+        name: liveStatefulSet.metadata!.name!,
+        namespace: recipe.metadata.namespace,
+      })) as k8s.V1StatefulSet
+      expect(JSON.stringify(stored.spec?.template)).toContain('own-creds')
+      expect(store.current().status?.terminalRunTeardown).not.toHaveProperty(
+        'noSecretBearingWorkloads'
+      )
+      expect(
+        mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
+          ([arg]) => arg.body?.status?.terminalRunTeardown?.noSecretBearingWorkloads !== undefined
+        )
+      ).toHaveLength(0)
+      expect(workflowNeedsOwnershipBackstop(store.current())).toBe(true)
     })
 
     it('T4.2 the terminal pass records the no-Secret-bearing fact only when every Secret-bearing workload is denied (issue #1349)', async () => {

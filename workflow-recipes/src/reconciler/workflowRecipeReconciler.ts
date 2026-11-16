@@ -232,9 +232,12 @@ export function isDeletedBySecretDenialTeardown(workload: WorkloadDef): boolean 
 /**
  * Issue #1349 — true when no workload that names a Secret (`envSecret` or
  * `imagePullSecrets`) is left deployed with it after the terminal teardown: each
- * one is denied (revoked, and its gate skips it until the Secret changes) or is
- * deleted by the teardown. A workload whose Secret is accessible or missing and
- * that the teardown keeps makes it false.
+ * one is deleted by the terminal teardown ({@link isRemovedByTerminalRunTeardown})
+ * or is denied and deleted by the Secret-denial teardown
+ * ({@link isDeletedBySecretDenialTeardown}). A denied StatefulSet does not count:
+ * the denial teardown keeps it and re-renders it with its accessible refs. A
+ * workload whose Secret is accessible or missing and that the terminal teardown
+ * keeps makes it false.
  */
 export function noSecretBearingWorkloadsRemain(
   recipe: WorkflowRecipeCRD,
@@ -242,7 +245,11 @@ export function noSecretBearingWorkloadsRemain(
 ): boolean {
   return (recipe.spec.workloads ?? [])
     .filter(w => Boolean(w.envSecret?.name) || (w.imagePullSecrets?.length ?? 0) > 0)
-    .every(w => deniedWorkloadIds.has(w.id) || isRemovedByTerminalRunTeardown(w))
+    .every(
+      w =>
+        isRemovedByTerminalRunTeardown(w) ||
+        (deniedWorkloadIds.has(w.id) && isDeletedBySecretDenialTeardown(w))
+    )
 }
 
 /** Issue #637 — outcome of the steady-state Secret ownership enforcer. */
