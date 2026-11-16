@@ -4663,6 +4663,17 @@ describe('#1338: out-of-pass obligations reach the incomplete-reconciliation lis
     expect(pollOf(f).timer).toBeDefined()
     expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
 
+    // The next reconcile finds the recreated Deployment up to date (no create,
+    // no replace) and must not inherit the deleted Deployment's verdict.
+    const replacesBefore = f.appsApi.replaceNamespacedDeployment.mock.calls.length
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(f.appsApi.replaceNamespacedDeployment.mock.calls.length).toBe(replacesBefore)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+    expect(pollOf(f).timer).toBeDefined()
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+
     await vi.advanceTimersByTimeAsync(24 * 5000)
 
     expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'RolloutIncomplete' })
@@ -4671,6 +4682,151 @@ describe('#1338: out-of-pass obligations reach the incomplete-reconciliation lis
     f.reconciler.setResolveCurrentServer(() => undefined)
     expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
     expect((f.reconciler as any).verdictsAwaitingExternalChange.size).toBe(0)
+  })
+
+  it('U33b a recreate clears the verdict of a live window that holds an exhausted verdict', async () => {
+    const { f, server } = await stuckCluster()
+    f.appsApi.readNamespacedDeployment
+      .mockImplementationOnce(f.readDeployment)
+      .mockRejectedValueOnce(Object.assign(new Error('forbidden'), { code: 403 }))
+    await f.reconciler.reconcile(server)
+    const window = pollOf(f)
+    expect(window.timer).toBeDefined()
+    expect(window.exhausted).toBe(true)
+    f.deployments.delete('h3-server')
+    f.appsApi.createNamespacedDeployment.mockClear()
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(pollOf(f)).toBe(window)
+    expect(pollOf(f).exhausted).toBe(false)
+    expect(pollOf(f).attempts).toBe(0)
+    expect(pollOf(f).generation).toBeNull()
+    expect(pollOf(f).timer).toBeDefined()
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+  })
+
+  it('U33c a Deployment recreated at generation 1 after an exhausted generation 2 reports WaitingForReplicas', async () => {
+    const { f, server } = await stuckCluster()
+    f.deployments.get('h3-server').metadata.generation = 2
+    await f.reconciler.reconcile(server)
+    await vi.advanceTimersByTimeAsync(24 * 5000)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'RolloutIncomplete' })
+    expect(pollOf(f).generation).toBe(2)
+    expect(pollOf(f).exhausted).toBe(true)
+    f.deployments.delete('h3-server')
+    f.appsApi.createNamespacedDeployment.mockClear()
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(f.deployments.get('h3-server').metadata.generation).toBe(1)
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+  })
+
+  it('U33d a recreate during a live window gives the recreated Deployment the full budget', async () => {
+    vi.useFakeTimers()
+    const f = h3Cluster({ rolloutReady: false })
+    const server = h3Server()
+    await f.reconciler.reconcile(server)
+    await vi.advanceTimersByTimeAsync(23 * 5000)
+    expect(pollOf(f).attempts).toBe(23)
+    expect(pollOf(f).timer).toBeDefined()
+    f.deployments.delete('h3-server')
+    f.appsApi.createNamespacedDeployment.mockClear()
+    await f.reconciler.reconcile(server)
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    // A failed read never resets the window, so only the recreate can have
+    // returned the budget the deleted Deployment spent.
+    const readsBefore = deploymentReads(f)
+    f.appsApi.readNamespacedDeployment.mockRejectedValueOnce(h3Timeout('readNamespacedDeployment'))
+
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(deploymentReads(f)).toBe(readsBefore + 1)
+    expect(pollOf(f).attempts).toBe(1)
+    expect(pollOf(f).exhausted).toBe(false)
+    expect(pollOf(f).timer).toBeDefined()
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+  })
+
+  it('U33e a create that the apiserver stored but the client deadline rejected: the next reconcile reports WaitingForReplicas', async () => {
+    const { f, server } = await stuckCluster()
+    f.deployments.delete('h3-server')
+    const create = f.appsApi.createNamespacedDeployment.getMockImplementation()!
+    f.appsApi.createNamespacedDeployment.mockImplementationOnce(async (request: any) => {
+      await create(request)
+      throw h3Timeout('createNamespacedDeployment')
+    })
+    await f.reconciler.reconcile(server)
+    expect(f.deployments.has('h3-server')).toBe(true)
+    expect(f.reconciler.getStatus(server)).toMatchObject({ deployed: false, ready: false })
+    const createsBefore = f.appsApi.createNamespacedDeployment.mock.calls.length
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment.mock.calls.length).toBe(createsBefore)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+  })
+
+  it('U33f a create answered 409 for an object created after HCC saw it absent reports WaitingForReplicas', async () => {
+    const { f, server } = await stuckCluster()
+    f.deployments.delete('h3-server')
+    const create = f.appsApi.createNamespacedDeployment.getMockImplementation()!
+    f.appsApi.createNamespacedDeployment.mockImplementationOnce(async (request: any) => {
+      await create(request)
+      throw Object.assign(new Error('already exists'), { code: 409 })
+    })
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalled()
+    expect(f.deployments.has('h3-server')).toBe(true)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
+  })
+
+  it('U33g a create rejected with nothing stored, then a create that succeeds, reports WaitingForReplicas on both later reconciles', async () => {
+    const { f, server } = await stuckCluster()
+    f.deployments.delete('h3-server')
+    f.appsApi.createNamespacedDeployment.mockClear()
+    f.appsApi.createNamespacedDeployment.mockRejectedValueOnce(
+      Object.assign(new Error('invalid'), { code: 422 })
+    )
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(f.deployments.has('h3-server')).toBe(false)
+    expect(f.reconciler.getStatus(server)).toMatchObject({
+      deployed: false,
+      ready: false,
+      message: expect.stringContaining('Resource sync failed'),
+    })
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(2)
+    expect(f.deployments.has('h3-server')).toBe(true)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+
+    await f.reconciler.reconcile(server)
+
+    expect(f.appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(2)
+    expect(f.condition('DeploymentReady')).toMatchObject({ reason: 'WaitingForReplicas' })
+    expect(f.reconciler.namesAwaitingExternalChange('RolloutIncomplete')).toEqual([])
   })
 
   it('U36 a failed read on the last tick is left to the lane, and the next reconcile reads the truth', async () => {

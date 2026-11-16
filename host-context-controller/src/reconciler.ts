@@ -358,7 +358,10 @@ interface ReadinessPollState {
    * Deployment generation the current window is watching; null until the
    * first tick reads it. A change means a NEW rollout (e.g. another
    * credential rotation), which resets the window so the new rollout gets
-   * its own full budget.
+   * its own full budget. A Deployment HCC recreates starts at generation 1
+   * again, so the generation alone cannot tell it from the deleted one:
+   * forgetRolloutVerdict() sets this back to null (with `attempts` and
+   * `exhausted`) when HCC posts the new Deployment.
    */
   generation: number | null
   /** Ticks consumed by the current window. */
@@ -377,8 +380,8 @@ interface ReadinessPollState {
    * sticks forever for a healthy rollout (the #223 rotation-timeout symptom,
    * reintroduced under a routine reconnect).
    *
-   * Two ORTHOGONAL supersession guards protect this window; do not assume one
-   * covers the other (that assumption is exactly how the F1 race was born):
+   * Three ORTHOGONAL supersession guards protect this window; do not assume one
+   * covers another (that assumption is exactly how the F1 race was born):
    *   - Identity retirement: beginStatusTracking()/clearStatus() retire the
    *     window on any CRD uid or CRD-generation change (spec edit, recreate),
    *     so a surviving window always has the caller's status identity — a
@@ -389,8 +392,15 @@ interface ReadinessPollState {
    *     rotation is instead guarded by the tick's live Deployment read (a new
    *     generation resets attempts/exhausted) and by recheckRequested deferring
    *     a mid-flight tick's terminal verdict past the rotation's write.
+   *   - Recreate reset: deleting the Deployment and having HCC recreate it
+   *     changes neither CRD uid nor CRD generation, and the new Deployment's
+   *     metadata.generation starts at 1 again, so it can match the deleted
+   *     one's generation and the in-tick reset does not fire. ensureDeployment's create callback
+   *     calls forgetRolloutVerdict(), which clears generation/attempts/exhausted
+   *     of this window, live or idle, before the POST.
    * A rebind never touches the budget fields (generation/attempts/exhausted)
-   * above.
+   * above. Within a window, they are reset only by the in-tick generation
+   * reset and by forgetRolloutVerdict().
    */
   isCurrent: () => boolean
   server: McpServerCRD
@@ -443,7 +453,11 @@ export class McpServerReconciler {
    * terminal RolloutIncomplete verdict was never written to the CRD. This map
    * lets pollReadiness() detect a live window and leave it alone, and lets
    * reconcile() keep an exhausted verdict sticky for the same Deployment
-   * generation. A status-only McpServer write does not start a reconcile: the
+   * generation. A Deployment that HCC recreates starts at generation 1 again,
+   * so HCC clears the window's budget and verdict when it posts the new
+   * Deployment (forgetRolloutVerdict(), live window or idle entry), and the
+   * recreated Deployment is not held to the deleted one's verdict. A
+   * status-only McpServer write does not start a reconcile: the
    * McpServer watch handler in k8sClient.ts only refreshes discovery for it.
    */
   private readonly readinessPolls: Map<string, ReadinessPollState> = new Map()
@@ -702,6 +716,26 @@ export class McpServerReconciler {
     this.readinessPolls.delete(name)
   }
 
+  /**
+   * Clear the rollout budget and terminal verdict of a name whose Deployment
+   * HCC is about to create. Called from ensureDeployment's create callback,
+   * which runs only after the existence read returned 404, so the Deployment
+   * these fields describe is gone. The new one starts at generation 1 again,
+   * and a generation match alone cannot tell it from the deleted one. The
+   * reset holds whatever the POST then returns: the object behind a create
+   * the apiserver stored but the client deadline rejected, or behind one
+   * answered 409, is still not the Deployment that spent the budget. The entry, its timer and its owner are kept, so a live window
+   * goes on ticking and counts from 0; its next successful read sets the
+   * generation.
+   */
+  private forgetRolloutVerdict(name: string): void {
+    const poll = this.readinessPolls.get(name)
+    if (poll === undefined) return
+    poll.generation = null
+    poll.exhausted = false
+    poll.attempts = 0
+  }
+
   constructor(kc: k8s.KubeConfig, deps?: McpServerReconcilerDeps) {
     // McpServer runtime work shares its keyed effect queue with the
     // authoritative NetworkPolicy pass, so a request that never settles here
@@ -899,6 +933,11 @@ export class McpServerReconciler {
    * maxAttempts × intervalMs. A NEW rollout (bumped Deployment generation,
    * e.g. another credential rotation) is detected inside the poll tick
    * itself, which resets the window so the new rollout gets its own budget.
+   * The tick cannot detect a Deployment that HCC recreates, because its
+   * generation starts at 1 again; ensureDeployment's create callback resets
+   * the budget and verdict instead (forgetRolloutVerdict(), before the POST),
+   * so a live window counts the recreated Deployment from 0 and a fresh
+   * window carries nothing from the deleted one.
    *
    * A call that lands while a tick is EXECUTING (mid-await) is not silently
    * dropped either: it flags `recheckRequested` so the tick defers any
@@ -940,7 +979,9 @@ export class McpServerReconciler {
     // Fresh window. Carry over the generation and terminal verdict of a
     // previous exhausted window: if the Deployment has NOT changed since,
     // the new window must not mistake it for a new rollout, and reconcile()
-    // keeps reporting the sticky RolloutIncomplete meanwhile.
+    // keeps reporting the sticky RolloutIncomplete meanwhile. A Deployment HCC
+    // recreated had both cleared by forgetRolloutVerdict(), so nothing is
+    // carried for it.
     const state: ReadinessPollState = {
       timer: undefined,
       ticking: false,
@@ -2207,6 +2248,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         ),
       create: async () => {
         onWriteAttempt?.()
+        this.forgetRolloutVerdict(server.name)
         await observeCreate('Deployment', () =>
           this.appsApi.createNamespacedDeployment({
             namespace: server.namespace,
@@ -3456,6 +3498,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // downgrade the published rollout failure before the operator (or the E2
     // scenario) could observe it. A NEW rollout (different generation) or a
     // Deployment this reconcile created drops the stickiness and reports fresh.
+    // So does a Deployment HCC posted in an earlier reconcile, whatever that
+    // POST returned: the create callback cleared the verdict
+    // (forgetRolloutVerdict()), so `exhausted` stays false until the recreated
+    // Deployment's own window spends its budget.
     const exhaustedDetail =
       !ready &&
       deploymentApply !== 'created' &&
