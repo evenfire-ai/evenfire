@@ -2325,7 +2325,8 @@ describe('postStepStatus — output bounded by the coordinator', () => {
     expect(result.status).toBe(200)
     expect(storedArtifacts(api)).toEqual([customArtifact(0)])
 
-    // Liveness witness: the same entries are stored when the report says the output was cut.
+    // Liveness witness: when the report says the output was cut, the same
+    // entries are stored in place of the artifact the received prefix declares.
     const cutApi = makeEmitApi()
     const cutHandlers = createWorkflowEndpointHandlers(cutApi, 'sandbox-recipes')
     const cutResult = await cutHandlers.postStepStatus('my-recipe', makeClaims(), {
@@ -2334,11 +2335,7 @@ describe('postStepStatus — output bounded by the coordinator', () => {
       outputLength: 1_000,
     } as Parameters<typeof h.postStepStatus>[2])
     expect(cutResult.status).toBe(200)
-    expect(storedArtifacts(cutApi)).toEqual([
-      customArtifact(0),
-      customArtifact(5),
-      customArtifact(6),
-    ])
+    expect(storedArtifacts(cutApi)).toEqual([customArtifact(5), customArtifact(6)])
   })
 
   it('stores the original length of an output the coordinator cut', async () => {
@@ -2363,7 +2360,7 @@ describe('postStepStatus — output bounded by the coordinator', () => {
     expect(step.outputLength).toBe(original.length)
     expect(step.outputTruncated).toBe(true)
     expect(step).not.toHaveProperty('outputArtifacts')
-    // The cut output no longer parses, so the artifact comes from outputArtifacts.
+    // The coordinator cut the output, so the artifact comes from outputArtifacts.
     expect(storedArtifacts(api)).toEqual([customArtifact(0)])
   })
 
@@ -2564,6 +2561,112 @@ describe('postStepStatus — output bounded by the coordinator', () => {
     expect(withTrue.step.outputTruncated).toBe(true)
   })
 
+  it.each([
+    ['equal to the length received', (received: number) => received],
+    ['shorter than the length received', () => 1],
+    ['missing', () => undefined],
+    ['a string', (received: number) => String(received + 100)],
+    ['not an integer', (received: number) => received + 0.5],
+    ['not a safe integer', () => 2 ** 53],
+  ])(
+    'stores the artifacts of the output it received when outputLength is %s',
+    async (_label, lengthFor) => {
+      const output = JSON.stringify({ artifact: customArtifact(1) })
+      const report = {
+        stepId: 'emit',
+        phase: 'completed',
+        executor: 'custom',
+        output,
+        outputTruncated: true,
+        outputArtifacts: [customArtifact(5)],
+      }
+
+      const rejected = await stored({ ...report, outputLength: lengthFor(output.length) })
+      const accepted = await stored({ ...report, outputLength: 200_000 })
+
+      // WRC does not accept the cut, so the output is complete and declares its own artifact.
+      expect(rejected.status).toBe(200)
+      expect(rejected.step.outputTruncated).toBe(false)
+      expect(rejected.artifacts).toEqual([customArtifact(1)])
+      // Liveness witness: with a length WRC accepts, the declared entries are stored instead.
+      expect(accepted.status).toBe(200)
+      expect(accepted.step.outputTruncated).toBe(true)
+      expect(accepted.artifacts).toEqual([customArtifact(5)])
+    }
+  )
+
+  it.each([
+    ['absent', undefined],
+    ['null', null],
+  ])('ignores outputArtifacts when the output is %s', async (_label, output) => {
+    const report = {
+      stepId: 'emit',
+      phase: 'completed',
+      executor: 'custom',
+      outputTruncated: true,
+      outputLength: 200_000,
+      outputArtifacts: [customArtifact(5)],
+    }
+
+    const withoutOutput = await stored({ ...report, output })
+    const withOutput = await stored({ ...report, output: 'abc' })
+
+    expect(withoutOutput.status).toBe(200)
+    expect(withoutOutput.artifacts).toEqual([])
+    // Liveness witness: the same report with an output stores the entry.
+    expect(withOutput.status).toBe(200)
+    expect(withOutput.artifacts).toEqual([customArtifact(5)])
+  })
+
+  it.each([
+    [
+      'cut to 65,536 characters',
+      (tail: string): Record<string, unknown> => ({
+        output: `${JSON.stringify({ artifact: customArtifact(0) })}${' '.repeat(70_000)}${tail}`,
+      }),
+    ],
+    [
+      'halved to fit the body ceiling',
+      (tail: string): Record<string, unknown> => ({
+        output: `${JSON.stringify({ artifact: customArtifact(0) })}${'\n'.repeat(60_000)}${tail}`,
+        // Never reduced, so the reporter halves the output.
+        modelUsed: 'm'.repeat(200_000),
+      }),
+    ],
+  ])(
+    'registers no artifact from a prefix that parses on its own, for an output %s',
+    async (_label, fields) => {
+      process.env.WRC_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = '65536'
+      const raw: Record<string, unknown> = {
+        stepId: 'emit',
+        phase: 'completed',
+        executor: 'custom',
+        ...fields(' prose'),
+      }
+      const bounded = boundStepStatusBody(raw)
+
+      // Witnesses: the whole output does not parse, the reporter shortened it,
+      // and the prefix it sends parses to an artifact.
+      expect(() => JSON.parse(raw.output as string)).toThrow(SyntaxError)
+      expect(bounded.outputTruncated).toBe(true)
+      expect((bounded.output as string).length).toBeLessThan((raw.output as string).length)
+      expect(JSON.parse(bounded.output as string)).toEqual({ artifact: customArtifact(0) })
+
+      const fromRaw = await stored(raw)
+      const fromBounded = await stored(bounded)
+      expect(fromRaw.status).toBe(200)
+      expect(fromBounded.status).toBe(200)
+      expect(fromRaw.artifacts).toEqual([])
+      expect(fromBounded.artifacts).toEqual([])
+
+      // Positive control: without the trailing text the whole output declares
+      // the artifact, and WRC stores it from both reports.
+      const declaring = { stepId: 'emit', phase: 'completed', executor: 'custom', ...fields('') }
+      expect((await stored(declaring)).artifacts).toEqual([customArtifact(0)])
+      expect((await stored(boundStepStatusBody(declaring))).artifacts).toEqual([customArtifact(0)])
+    }
+  )
+
   it('stores the artifacts of every generated body as for the raw report', async () => {
     process.env.WRC_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = '32768'
     const tableArtifact = (i: number, name = `r-${i}.md`, path = `/output/r-${i}.md`) => ({
@@ -2617,6 +2720,7 @@ describe('postStepStatus — output bounded by the coordinator', () => {
           success: true,
           content: 'File generated: tool-a.md (md).',
           artifact: tableArtifact(100, 'tool-a.md'),
+          writtenSha256: 'a'.repeat(64),
         },
         durationMs: 1,
       },
@@ -2628,6 +2732,7 @@ describe('postStepStatus — output bounded by the coordinator', () => {
           success: true,
           content: 'File generated: tool-b.md (md).',
           artifact: tableArtifact(101, 'tool-b.md'),
+          writtenSha256: 'b'.repeat(64),
         }),
         durationMs: 1,
       },
@@ -2670,12 +2775,13 @@ describe('postStepStatus — output bounded by the coordinator', () => {
 
   it('keeps the artifacts of the last calls when the reduction removes their previews', async () => {
     // The result mcp-host records for its artifact tools
-    // (mcp-host/src/workflow/artifactOutput.ts:265-275); written out because
+    // (mcp-host/src/workflow/artifactOutput.ts:265-276); written out because
     // mcp-host is not a dependency of this package.
     const mcpHostResult = (n: number) => ({
       success: true,
       content: `File generated: result-${n}.json (json).`,
       artifact: customArtifact(n),
+      writtenSha256: String(n).repeat(64),
     })
     const raw = {
       stepId: 'emit',

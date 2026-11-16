@@ -31,7 +31,7 @@ import {
   buildMcpHostUrl as buildWorkflowMcpHostUrl,
 } from './resourceNames'
 import { drainSignals } from './signalStore'
-import { buildStatusOutputPreview } from './statusOutputPreview'
+import { buildStatusOutputPreview, outputCutByCoordinator } from './statusOutputPreview'
 import { StepPhase, WorkflowPhase, isTerminalStepPhase, isTerminalWorkflowPhase } from './types'
 import { type AuthenticatedRequest, CONTROL_API_ISSUER } from './workflowAuth'
 import { workflowStatusMessage } from './workflowStatusMessage'
@@ -159,11 +159,16 @@ function extractArtifactsFromStepStatus(body: StepStatusUpdate): ArtifactStatus[
     if (parsed) artifacts.push(parsed)
   }
 
-  artifacts.push(...extractOutputArtifactsForStatus(body.output))
+  if (!outputCutByCoordinator(body.output, body)) {
+    artifacts.push(...extractOutputArtifactsForStatus(body.output))
+    return artifacts
+  }
 
-  // A coordinator that cut the output sends the artifacts the whole output
-  // declared. They are handled like the ones WRC extracts from an uncut output.
-  if (body.outputTruncated === true && Array.isArray(body.outputArtifacts)) {
+  // The coordinator cut the output, so `output` is a prefix that may parse to
+  // artifacts the whole output does not declare. The coordinator sends the
+  // artifacts the whole output declared; they are handled like the ones WRC
+  // extracts from an uncut output.
+  if (Array.isArray(body.outputArtifacts)) {
     for (const item of body.outputArtifacts.slice(0, MAX_REPORTED_OUTPUT_ARTIFACTS)) {
       if (!isRecord(item)) continue
       const artifact = normalizeArtifactForStatus(item)
