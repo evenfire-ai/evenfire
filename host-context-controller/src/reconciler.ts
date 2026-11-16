@@ -359,9 +359,10 @@ interface ReadinessPollState {
    * first tick reads it. A change means a NEW rollout (e.g. another
    * credential rotation), which resets the window so the new rollout gets
    * its own full budget. A Deployment HCC recreates starts at generation 1
-   * again, so the generation alone cannot tell it from the deleted one:
-   * forgetRolloutVerdict() sets this back to null (with `attempts` and
-   * `exhausted`) when HCC posts the new Deployment.
+   * again, which can equal the deleted one's generation, so a generation
+   * match does not prove the same Deployment: forgetRolloutVerdict() sets
+   * this back to null (with `attempts` and `exhausted`) when HCC posts the
+   * new Deployment.
    */
   generation: number | null
   /** Ticks consumed by the current window. */
@@ -933,8 +934,9 @@ export class McpServerReconciler {
    * maxAttempts × intervalMs. A NEW rollout (bumped Deployment generation,
    * e.g. another credential rotation) is detected inside the poll tick
    * itself, which resets the window so the new rollout gets its own budget.
-   * The tick cannot detect a Deployment that HCC recreates, because its
-   * generation starts at 1 again; ensureDeployment's create callback resets
+   * The tick cannot be relied on for a Deployment that HCC recreates: its
+   * generation starts at 1 again and can equal the deleted one's, which the
+   * tick reads as the same rollout. ensureDeployment's create callback resets
    * the budget and verdict instead (forgetRolloutVerdict(), before the POST),
    * so a live window counts the recreated Deployment from 0 and a fresh
    * window carries nothing from the deleted one.
@@ -3501,8 +3503,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // downgrade the published rollout failure before the operator (or the E2
     // scenario) could observe it. A NEW rollout (different generation) or a
     // Deployment this reconcile created drops the stickiness and reports fresh.
-    // So does a Deployment HCC posted in an earlier reconcile, whatever that
-    // POST returned: the create callback cleared the verdict
+    // So does a Deployment HCC posted in this or an earlier reconcile, whatever
+    // that POST returned (a 409 here converges to replaced or up_to_date): the
+    // create callback cleared the verdict
     // (forgetRolloutVerdict()), so `exhausted` stays false until the recreated
     // Deployment's own window spends its budget.
     const exhaustedDetail =
