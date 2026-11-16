@@ -20,6 +20,7 @@ import {
 
 const OVERRUNS = 'clerum_hcc_networkpolicy_pass_overruns_total'
 const CALL_FAILURES = 'clerum_hcc_mcpserver_reconcile_call_failures_total'
+const SWALLOWED = 'clerum_hcc_initial_convergence_swallowed_total'
 
 /** Every exposed series of one counter, as "label=value,…" → value. */
 async function series(name: string): Promise<Map<string, number>> {
@@ -80,6 +81,13 @@ describe('labelled counters exposed at zero from start (#1338)', () => {
       value => value === 0
     ).length
     expect(stillZero).toBe(22)
+  })
+
+  it('exposes only the inventory-changed swallowed sink at 0 from import (BR-11)', async () => {
+    const swallowed = await series(SWALLOWED)
+    expect(swallowed.get('lane=NetworkPolicy,sink=inventory-changed')).toBe(0)
+    // The sinks that were not exposed at 0 before this release stay absent.
+    expect([...swallowed.keys()]).toEqual(['lane=NetworkPolicy,sink=inventory-changed'])
   })
 })
 

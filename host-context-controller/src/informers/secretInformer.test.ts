@@ -293,6 +293,78 @@ async function metricValue(name: string, labels: Record<string, string>): Promis
   )
 }
 
+/** The reconnect sample of one namespace, or undefined when the series is not exposed. */
+async function reconnectSample(namespace: string): Promise<number | undefined> {
+  const metric = registry.getSingleMetric('clerum_hcc_secret_informer_reconnects_total')
+  if (!metric) throw new Error('clerum_hcc_secret_informer_reconnects_total is not registered')
+  const snapshot = await metric.get()
+  return snapshot.values.find(entry => entry.labels.namespace === namespace)?.value
+}
+
+describe('SecretInformer reconnect counter exposed at zero (BR-03)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('a replay-mode informer exposes its namespace at 0 from construction, and one watch end counts 1', async () => {
+    const namespace = 'br03-replay'
+    const { watchFn, calls } = createWatchStub()
+    // The namespace is fresh, so the 0 below comes from this construction.
+    expect(await reconnectSample(namespace)).toBeUndefined()
+
+    const replay = new SecretInformer(
+      {} as k8s.KubeConfig,
+      namespace,
+      () => undefined,
+      { mode: 'replay' },
+      { watch: { watch: watchFn } }
+    )
+    try {
+      expect(await reconnectSample(namespace)).toBe(0)
+
+      await expect(replay.start()).resolves.toBe(true)
+      expect(watchFn).toHaveBeenCalledTimes(1)
+      expect(await reconnectSample(namespace)).toBe(0)
+
+      calls[0].done(new Error('Premature close'))
+      expect(await reconnectSample(namespace)).toBe(1)
+    } finally {
+      replay.stop()
+    }
+  })
+
+  it('a resume-mode informer exposes its namespace at 0 from construction, and one watch end counts 1', async () => {
+    const namespace = 'br03-resume'
+    const api = fakeSecretApiserver(namespace, ['alpha'])
+    expect(await reconnectSample(namespace)).toBeUndefined()
+
+    const resume = new SecretInformer(
+      {} as k8s.KubeConfig,
+      namespace,
+      () => undefined,
+      { mode: 'resume', list: api.list },
+      { watch: { watch: api.watch } }
+    )
+    try {
+      expect(await reconnectSample(namespace)).toBe(0)
+
+      await expect(resume.start()).resolves.toBe(true)
+      expect(api.watchFn).toHaveBeenCalledTimes(1)
+      expect(await reconnectSample(namespace)).toBe(0)
+
+      api.disconnect()
+      expect(await reconnectSample(namespace)).toBe(1)
+    } finally {
+      resume.stop()
+    }
+  })
+})
+
 describe('SecretInformer resume mode (#1338)', () => {
   const NS = 'mcp-server'
   let api: ReturnType<typeof fakeSecretApiserver>
