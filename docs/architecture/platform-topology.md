@@ -371,14 +371,13 @@ and have a reference page under [docs/crds/](../crds/).
 
 ### 4.2 McpServer CRD Status
 
-The shipped `McpServer` CRD status has exactly three fields. There is no `status.phase`
+The shipped `McpServer` CRD status has exactly two fields. There is no `status.phase`
 and no `status.sanitization` — reconciliation state is reported through `conditions[]`.
 
 | Field                               | Type   | Description                                                                                                        |
 | ----------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------ |
 | `status.resolvedEgressIPs`          | array  | Resolved IPs for DNS-based egress bindings (for auditability)                                                      |
 | `status.conditions`                 | array  | Standard K8s conditions (`type`, `status`, `reason`, `message`) — e.g. `Ready`                                     |
-| `status.appliedCredentialsRevision` | string | `sha256:<hex>` of the `envSecret` data host-context-controller last applied to the Deployment; never Secret values |
 
 ---
 
