@@ -232,6 +232,11 @@ export interface SendMessageOptions {
     value: string
     style?: 'positive' | 'destructive'
   }>
+  /**
+   * Teams only: send a message without a card as raw text, with no Markdown or
+   * HTML rendering. Ignored when `teamsActions` makes the message a card.
+   */
+  teamsTextFormat?: 'plain'
 }
 
 /**

@@ -316,6 +316,17 @@ function toolApprovalMessageOptions(
   return undefined
 }
 
+/**
+ * Options for an approval message that carries text without controls: a part
+ * before the last, or the last part once its controls are removed. Teams shows
+ * that text as written, with no Markdown or HTML rendering.
+ */
+function toolApprovalTextOptions(
+  channelType: Message['channelType']
+): SendMessageOptions | undefined {
+  return channelType === 'teams' ? { teamsTextFormat: 'plain' } : undefined
+}
+
 function supportedTelegramOperationalChatType(value: unknown): TelegramProviderChatType | null {
   return value === 'private' || value === 'group' || value === 'supergroup' ? value : null
 }
@@ -1973,7 +1984,7 @@ export class ChannelReader {
     const lastIndex = parts.length - 1
     for (let index = 0; index < lastIndex; index++) {
       if (stop?.()) return { stopped: true }
-      await send(index, undefined)
+      await send(index, toolApprovalTextOptions(msg.channelType))
     }
     if (stop?.()) return { stopped: true }
     const lastText = parts[lastIndex]
@@ -1993,7 +2004,12 @@ export class ChannelReader {
   ): () => Promise<void> {
     return async () => {
       try {
-        await adapter.editMessage(channelId, last.messageId, last.text)
+        await adapter.editMessage(
+          channelId,
+          last.messageId,
+          last.text,
+          toolApprovalTextOptions(ids.channelType)
+        )
       } catch (err) {
         console.error(
           `[Main] Failed to remove the approval controls for task ${ids.taskId} (request ${ids.requestId}, ${ids.channelType}): ${

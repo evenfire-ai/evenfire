@@ -1660,3 +1660,28 @@ describe('a pending approval that another one replaces', () => {
     for (const id of keyboardIds) expect(clearEditsOf(h.rec, id)).toHaveLength(1)
   })
 })
+
+describe('tool approval text parts on Teams', () => {
+  it('A48 sends the parts and the cleared last part as plain text, the card with its controls', async () => {
+    const h = await startAsync('teams', CARD_TAG, 'task-a48')
+    await h.suspend()
+    await settle()
+    const parts = partCalls(h.rec)
+    // Witness: the card went out as five parts, the controls on the last.
+    expect(parts).toHaveLength(5)
+    for (const call of parts.slice(0, -1)) expect(call[4]).toEqual({ teamsTextFormat: 'plain' })
+    const last = parts.at(-1)!
+    expect(last[4]?.teamsActions).toBeDefined()
+    expect(last[4]).not.toHaveProperty('teamsTextFormat')
+
+    const lastId = lastCallId(h.rec, 'teams')
+    await h.send('/approve')
+    await settle()
+    expect(h.rpc.sendApproval).toHaveBeenCalledTimes(1)
+    const clears = clearEditsOf(h.rec, lastId)
+    expect(clears).toHaveLength(1)
+    expect(clears[0]![2]).toBe(last[1])
+    expect(clears[0]![3]).toEqual({ teamsTextFormat: 'plain' })
+    await h.end()
+  })
+})

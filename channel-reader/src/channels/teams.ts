@@ -297,6 +297,7 @@ export class TeamsAdapter implements ChannelAdapter {
       : {
           type: 'message',
           text: content || ' ',
+          ...(options?.teamsTextFormat ? { textFormat: options.teamsTextFormat } : {}),
         }
     if (replyToMessageId) {
       activity.replyToId = replyToMessageId
@@ -443,7 +444,12 @@ export class TeamsAdapter implements ChannelAdapter {
               summary: content || ' ',
               attachments: [card],
             }
-          : { type: 'message', text: content || ' ', attachments: [] }
+          : {
+              type: 'message',
+              text: content || ' ',
+              attachments: [],
+              ...(options?.teamsTextFormat ? { textFormat: options.teamsTextFormat } : {}),
+            }
       ),
       signal: AbortSignal.timeout(MICROSOFT_REQUEST_TIMEOUT_MS),
     })
