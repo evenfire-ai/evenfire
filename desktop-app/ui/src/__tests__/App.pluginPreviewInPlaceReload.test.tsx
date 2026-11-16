@@ -122,6 +122,13 @@ function installBridge() {
         await watchEvents.changed([mainDriveKey('file', RID)])
       })
     },
+    // The session the watch stream was opened with expires on the server.
+    expireSession: async () => {
+      await waitFor(() => expect(watch.opens).toBe(1))
+      await act(async () => {
+        await watchEvents.sessionExpired()
+      })
+    },
   }
 }
 
@@ -274,6 +281,16 @@ describe('App plugin GFS image overlay in-place reload', () => {
       401
     )
     await act(async () => bridge.pending[1]!.reject(new Error(sessionRejected)))
+
+    await waitFor(() => expect(screen.queryByAltText(ALT)).toBeNull())
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:plugin-preview-1')
+  })
+
+  it('drops the visible image when the watch reports the session expired', async () => {
+    const bridge = await renderWithOpenOverlay()
+    expect(screen.getByAltText(ALT).getAttribute('src')).toBe('blob:plugin-preview-1')
+
+    await bridge.expireSession()
 
     await waitFor(() => expect(screen.queryByAltText(ALT)).toBeNull())
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:plugin-preview-1')
