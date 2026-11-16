@@ -193,12 +193,13 @@ describe('boundStepStatusBody', () => {
 
   it('removes tool-call previews when needed and keeps the artifact metadata WRC would register', () => {
     // The result mcp-host records for its artifact tools
-    // (mcp-host/src/workflow/artifactOutput.ts:265-275). mcp-host is not a
+    // (mcp-host/src/workflow/artifactOutput.ts:265-276). mcp-host is not a
     // dependency of this package, so the shape is written out.
     const mcpHostResult = (n: number) => ({
       success: true,
       artifact: artifact(n),
       content: `File generated: report-${n}.md (md).`,
+      writtenSha256: String(n % 10).repeat(64),
     })
     const body = {
       stepId: 's1',
@@ -576,6 +577,7 @@ describe('boundStepStatusBody', () => {
           success: true,
           content: 'File generated: tool-a.md (md).',
           artifact: tableArtifact(100, 'tool-a.md'),
+          writtenSha256: 'a'.repeat(64),
         },
         durationMs: 1,
       },
@@ -587,20 +589,30 @@ describe('boundStepStatusBody', () => {
           success: true,
           content: 'File generated: tool-b.md (md).',
           artifact: tableArtifact(101, 'tool-b.md'),
+          writtenSha256: 'b'.repeat(64),
         }),
         durationMs: 1,
       },
     ]
-    const toolArtifactNames = (calls: unknown): string[] =>
+    // Artifacts are compared as whole objects, so a change to their metadata is caught.
+    const toolArtifacts = (calls: unknown): string[] =>
       (Array.isArray(calls) ? calls : []).slice(0, 100).flatMap(call => {
         const found = parseArtifactToolResult((call as Record<string, unknown>).result)
         const accepted = found ? normalizeArtifactForStatus(found) : null
-        return accepted ? [accepted.name] : []
+        return accepted ? [JSON.stringify(accepted)] : []
       })
-    const outputArtifactNames = (body: Record<string, unknown>): string[] => [
-      ...extractOutputArtifactsForStatus(body.output).map(a => a.name),
-      ...((body.outputArtifacts as Array<{ name: string }> | undefined) ?? []).map(a => a.name),
-    ]
+    // The output artifacts WRC registers: the declared entries when the reporter
+    // cut the output (a longer original length), otherwise the output's own.
+    const outputArtifacts = (body: Record<string, unknown>): string[] => {
+      const cut =
+        body.outputTruncated === true &&
+        typeof body.outputLength === 'number' &&
+        body.outputLength > (body.output as string).length
+      const found = cut
+        ? ((body.outputArtifacts as unknown[] | undefined) ?? [])
+        : extractOutputArtifactsForStatus(body.output)
+      return found.map(a => JSON.stringify(a))
+    }
 
     const counts = { firstPass: 0, errorCut: 0, previews: 0, halved: 0 }
     let total = 0
@@ -627,13 +639,10 @@ describe('boundStepStatusBody', () => {
               if (result.outputTruncated === false) {
                 expect(boundStepStatusBody(result)).toEqual(result)
               }
-              const keptOutputArtifacts = new Set(outputArtifactNames(result))
-              for (const found of extractOutputArtifactsForStatus(raw.output)) {
-                expect(keptOutputArtifacts.has(found.name)).toBe(true)
-              }
-              const keptToolArtifacts = new Set(toolArtifactNames(result.toolsCalled))
-              for (const name of toolArtifactNames(raw.toolsCalled)) {
-                expect(keptToolArtifacts.has(name)).toBe(true)
+              expect(outputArtifacts(result)).toEqual(outputArtifacts(raw))
+              const keptToolArtifacts = new Set(toolArtifacts(result.toolsCalled))
+              for (const kept of toolArtifacts(raw.toolsCalled)) {
+                expect(keptToolArtifacts.has(kept)).toBe(true)
               }
 
               // Which branch produced the result.
@@ -775,6 +784,21 @@ describe('boundOutputForStatus with a live output value', () => {
       },
     }
     expect(() => boundOutputForStatus(throwing)).toThrow('boom')
+  })
+
+  it('throws when an output with no JSON form cannot be converted to a string', () => {
+    // No JSON form, and a null prototype leaves String() no method to call.
+    const nullPrototype = Object.assign(Object.create(null) as object, {
+      toJSON: () => undefined,
+    })
+    expect(() =>
+      boundStepStatusBody({ stepId: 's1', phase: 'completed', output: nullPrototype })
+    ).toThrow(TypeError)
+    // Liveness witness: the same output with a prototype is sent as its String() text.
+    const plain = { toJSON: () => undefined }
+    expect(boundStepStatusBody({ stepId: 's1', phase: 'completed', output: plain }).output).toBe(
+      '[object Object]'
+    )
   })
 
   const liveArtifacts = () => [
