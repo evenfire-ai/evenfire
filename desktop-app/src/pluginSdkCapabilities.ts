@@ -93,7 +93,7 @@ export interface PluginSdkDataSource {
     title: string
     body?: string
     ref?: string
-  }): Promise<{ delivered: boolean; reason?: 'suppressed' | 'unsupported' }>
+  }): Promise<{ delivered: boolean; reason?: 'suppressed' | 'unsupported' | 'failed' }>
 }
 
 export type ProviderContext = {

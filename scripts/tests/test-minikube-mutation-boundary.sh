@@ -3,15 +3,38 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd -P)"
 MUTATION_WRAPPER="${ROOT}/scripts/minikube/with-t2-mutation-lock.sh"
+# The lease owner must trap HUP like INT/TERM: an untrapped HUP kills the
+# wrapper and its EXIT cleanup releases the lease while a HUP-ignoring child
+# can still mutate the profile.
+for signal_trap in "trap 'exit 130' INT" "trap 'exit 143' TERM" "trap 'exit 129' HUP" 'trap - EXIT INT TERM HUP'; do
+  grep -Fq "$signal_trap" "$MUTATION_WRAPPER" || {
+    echo "FAIL: mutation wrapper is missing signal contract: $signal_trap" >&2
+    exit 1
+  }
+done
 TMP_DIR="$(mktemp -d)"
 source "${ROOT}/scripts/tests/lib/minikube-fixture-repo.sh"
 
 MINIKUBE_TEST_PROFILE="clerum-boundary-1234abcd"
 MINIKUBE_TEST_CONTEXT="${MINIKUBE_TEST_PROFILE}"
 minikube_test_fixture_repo_init "${ROOT}" "${TMP_DIR}"
+# PIDs of the behavioral HUP case, so a failure exit can still stop the
+# wrapper and its HUP-ignoring child instead of leaking both processes.
+HUP_WRAPPER_PID=""
+HUP_CHILD_PID=""
+HUP_SYNC_DIR=""
 cleanup() {
   local status=$?
   trap - EXIT
+  if [[ -n "${HUP_SYNC_DIR}" && -d "${HUP_SYNC_DIR}" ]]; then
+    : >"${HUP_SYNC_DIR}/release" 2>/dev/null || true
+  fi
+  if [[ -n "${HUP_CHILD_PID}" ]]; then
+    kill -TERM "${HUP_CHILD_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${HUP_WRAPPER_PID}" ]]; then
+    kill -TERM "${HUP_WRAPPER_PID}" 2>/dev/null || true
+  fi
   if ! minikube_test_assert_host_unchanged; then
     status=1
   fi
@@ -268,6 +291,144 @@ NODE
   printf 'PASS: WRC direct entry, pending journal and dedicated recovery enforce the real inherited lease\n'
 }
 
+# Behavioral HUP case: the grep at the top only proves the trap text exists;
+# a no-op carrying the same text would pass it. This case acquires a real
+# lease through the fixture wrapper (T2_SKIP_LOCK=false, fresh lock root,
+# dedicated profile so the WRC journal of the inherited-lease case cannot
+# interfere) and proves SIGHUP sent only to the wrapper neither kills it nor
+# releases the lease while a HUP-ignoring child is still running. Like
+# assert_wrc_admission, only runtime discovery/health is stubbed; Git
+# admission, lease acquire/release and the signal traps execute real code.
+assert_hup_lease_survival() {
+  local fixture_scripts="${MINIKUBE_TEST_PROJECT_DIR}/scripts"
+  local fixture_wrapper="${fixture_scripts}/minikube/with-t2-mutation-lock.sh"
+  local hup_profile="clerum-boundary-hup-1234"
+  local hup_lock_root="${TMP_DIR}/hup-locks"
+  local hup_lock_dir="${hup_lock_root}/${hup_profile}.lock"
+  local hup_sync="${TMP_DIR}/hup-sync"
+  local hup_child="${TMP_DIR}/hup-child.sh"
+  local hup_output="${TMP_DIR}/hup-wrapper.out"
+  local owner_pid status attempt state
+
+  mkdir -p "${fixture_scripts}/minikube" "${hup_lock_root}" "${hup_sync}" \
+    "${TMP_DIR}/hup-profiles"
+  # Keep the fixture repository clean for the real wrapper's Git admission.
+  # No Git operation or exclusion is applied to the host checkout.
+  grep -qx '/scripts/' "${MINIKUBE_TEST_PROJECT_DIR}/.git/info/exclude" 2>/dev/null \
+    || printf '/scripts/\n' >>"${MINIKUBE_TEST_PROJECT_DIR}/.git/info/exclude"
+  grep -qx '/.local-notes/' "${MINIKUBE_TEST_PROJECT_DIR}/.git/info/exclude" 2>/dev/null \
+    || printf '/.local-notes/\n' >>"${MINIKUBE_TEST_PROJECT_DIR}/.git/info/exclude"
+  # Manual mutation evidence may point this at a temporary wrapper copy; the
+  # default is the real wrapper and the cheap grep always checks that one.
+  cp "${HUP_MUTATION_WRAPPER:-${MUTATION_WRAPPER}}" "${fixture_wrapper}"
+  cp "${ROOT}/scripts/minikube/t2-common.sh" "${fixture_scripts}/minikube/t2-common.sh"
+  cat >>"${fixture_scripts}/minikube/t2-common.sh" <<'SH'
+t2_require_commands() { :; }
+t2_profile_scope() { :; }
+t2_profile_status() { T2_BOOTSTRAP_REQUIRED=false; }
+t2_context_check() { :; }
+t2_profile_context_identity_check() { :; }
+SH
+  # File-synchronized child: the HUP trap is installed before `started`
+  # exists, so a wrapper signal can never race an unprotected child.
+  cat >"${hup_child}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+trap '' HUP
+sync_dir="$1"
+printf '%s\n' "$$" >"${sync_dir}/child.pid"
+: >"${sync_dir}/started"
+while [[ ! -e "${sync_dir}/release" ]]; do sleep 0.05; done
+: >"${sync_dir}/done"
+SH
+
+  hup_fail() {
+    printf 'FAIL: HUP lease survival: %s\n' "$1" >&2
+    cat "${hup_output}" >&2 || true
+    exit 1
+  }
+  hup_wrapper_alive() {
+    kill -0 "${HUP_WRAPPER_PID}" 2>/dev/null || return 1
+    state="$(ps -p "${HUP_WRAPPER_PID}" -o state= 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "${state}" != Z* ]]
+  }
+  hup_wait_for_file() {
+    local file="$1" description="$2" attempts="$3"
+    attempt=0
+    while [[ ! -e "${file}" ]]; do
+      attempt=$((attempt + 1))
+      [[ "${attempt}" -le "${attempts}" ]] \
+        || hup_fail "timed out waiting for ${description}"
+      sleep 0.05
+    done
+  }
+
+  HUP_SYNC_DIR="${hup_sync}"
+  # The lease owner must not inherit T2_PINNED_ORIGIN_DEV (exported above for
+  # inherited-lease children): the owner pins origin/dev itself.
+  MAKEFLAGS='' T2_PROJECT_DIR="${MINIKUBE_TEST_PROJECT_DIR}" \
+    T2_SCRIPT_DIR="${ROOT}/scripts/minikube" \
+    T2_PROFILE="${hup_profile}" T2_CONTEXT="${hup_profile}" \
+    MINIKUBE_PROFILE="${hup_profile}" \
+    CONTROL_API_REAL_PG_CONTEXT="${hup_profile}" \
+    KUBECONTEXT="${hup_profile}" T2_LOCK_ROOT="${hup_lock_root}" \
+    T2_LOCK_TOKEN='' T2_SKIP_LOCK=false T2_MUTATION_LOCK_WRAPPED=false \
+    T2_PINNED_ORIGIN_DEV='' T2_PROFILE_ROOT="${TMP_DIR}/hup-profiles" \
+    T2_GATE_ID=hup-lease-survival \
+    bash "${fixture_wrapper}" -- bash "${hup_child}" "${hup_sync}" \
+    >"${hup_output}" 2>&1 &
+  HUP_WRAPPER_PID=$!
+
+  hup_wait_for_file "${hup_sync}/started" \
+    'the HUP-ignoring child to start under an acquired lease' 300
+  HUP_CHILD_PID="$(cat "${hup_sync}/child.pid")"
+  [[ -f "${hup_lock_dir}/owner.env" ]] \
+    || hup_fail 'child started without an acquired lease owner record'
+  owner_pid="$(sed -n 's/^PID=//p' "${hup_lock_dir}/owner.env" | head -1)"
+  [[ "${owner_pid}" == "${HUP_WRAPPER_PID}" ]] \
+    || hup_fail "lease owner PID ${owner_pid} is not the wrapper PID ${HUP_WRAPPER_PID}"
+
+  kill -HUP "${HUP_WRAPPER_PID}" \
+    || hup_fail 'could not deliver SIGHUP to the wrapper'
+  # Bounded hold window: the child stays blocked on `release`, so a wrapper
+  # that dies on HUP releases the lease inside this loop. The started marker
+  # and the live child PID are the life witnesses for the negative claims.
+  attempt=0
+  while [[ "${attempt}" -lt 40 ]]; do
+    attempt=$((attempt + 1))
+    hup_wrapper_alive \
+      || hup_fail 'wrapper exited on SIGHUP while its child was still running'
+    [[ -d "${hup_lock_dir}" && -f "${hup_lock_dir}/owner.env" ]] \
+      || hup_fail 'lease was released on SIGHUP while its child was still running'
+    [[ -f "${hup_sync}/started" ]] \
+      || hup_fail 'life witness lost: child started marker disappeared'
+    kill -0 "${HUP_CHILD_PID}" 2>/dev/null \
+      || hup_fail 'life witness lost: HUP-ignoring child is not running'
+    [[ ! -e "${hup_sync}/done" ]] \
+      || hup_fail 'child finished before release; the hold window proves nothing'
+    sleep 0.05
+  done
+
+  : >"${hup_sync}/release"
+  hup_wait_for_file "${hup_sync}/done" 'the child to finish after release' 200
+  attempt=0
+  while hup_wrapper_alive; do
+    attempt=$((attempt + 1))
+    [[ "${attempt}" -le 200 ]] \
+      || hup_fail 'wrapper did not exit after its child finished'
+    sleep 0.05
+  done
+  status=0
+  wait "${HUP_WRAPPER_PID}" || status=$?
+  [[ "${status}" -eq 129 ]] \
+    || hup_fail "wrapper exited ${status} after SIGHUP, expected 129"
+  [[ ! -e "${hup_lock_dir}" ]] \
+    || hup_fail 'lease was not released after the wrapper exited'
+  HUP_WRAPPER_PID=""
+  HUP_CHILD_PID=""
+  printf 'PASS: an acquired mutation lease and its wrapper survive SIGHUP until the HUP-ignoring child finishes, then exit 129 and release\n'
+}
+
 # The #627 real-tool and approved-tools targets must forward the same explicit
 # profile/context/lease passthrough as every sibling target; without it a
 # makefile-variable profile (`MINIKUBE_PROFILE ?=`, never exported) never
@@ -345,6 +506,7 @@ fi
 }
 
 assert_wrc_admission
+assert_hup_lease_survival
 assert_627_targets_forward_the_profile_and_lease
 
 full_plan="$(dry_run_make minikube-build-images 2>&1)"

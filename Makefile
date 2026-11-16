@@ -309,6 +309,7 @@ minikube-build-image-capabilities-fixture-body:
 
 .PHONY: minikube-run-image-capabilities minikube-restore-image-capabilities
 minikube-run-image-capabilities: ## Run the visible image journey with an isolated external-provider fixture and restore the Host
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		IMAGE_CAPABILITIES_LANE=image \
@@ -316,9 +317,18 @@ minikube-run-image-capabilities: ## Run the visible image journey with an isolat
 
 .PHONY: minikube-run-document-upload
 minikube-run-document-upload: ## Run the visible Desktop document-upload journey (issue #678) with the isolated external-provider fixture and restore the Host
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		IMAGE_CAPABILITIES_LANE=document-upload \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
+
+.PHONY: minikube-run-attachment-gfs-save
+minikube-run-attachment-gfs-save: ## Run the visible Desktop attachment GFS-save journey with the isolated external-provider fixture and restore the Host
+	@npm --prefix desktop-app run verify:electron
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		IMAGE_CAPABILITIES_LANE=attachment-gfs-save \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
 
 minikube-restore-image-capabilities: ## Resume restoration of a recorded image fixture run (IMAGE_CAPABILITIES_RUN_DIR=<dir printed by minikube-run-image-capabilities>)
@@ -347,11 +357,13 @@ minikube-build-codex-approved-tools-fixtures-body:
 
 .PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools
 minikube-prepare-codex-approved-tools: ## Prepare isolated deterministic tools fixtures; requires prior image acquisition and fresh run directory
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
 
 minikube-run-codex-approved-tools: ## Prepare, run visible deterministic E2E and restore production proxy image in owned Minikube
+	@npm --prefix desktop-app run verify:electron
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
@@ -479,6 +491,14 @@ minikube-deploy-all-body:
 	@# rpc-proxy-secrets after each full overlay apply so Desktop/rpc-proxy/mcp-host
 	@# stay on the same JWT validation key.
 	@MINIKUBE_GFS_MUTATION="$(MINIKUBE_GFS_MUTATION)" $(MAKE) --no-print-directory minikube-sync-auth-key
+	@# external-rest-api's browser mutation guard compares the request Origin with
+	@# EXTERNAL_REST_API_CORS_ORIGIN, and the base manifest pins localhost:3001. A
+	@# branch profile serves Profile UI on a generated port, so the overlay apply
+	@# above would otherwise leave every profile UI login on a 403 (review C-8,
+	@# OD-8). Re-assert the profile-owned origin after the apply; the script is a
+	@# no-op without a branch profile ports.env. Plain bash, not $(MAKE), so a
+	@# dry run never executes it.
+	@bash scripts/minikube/sync-external-rest-api-cors-origin.sh --context=$(MINIKUBE_PROFILE)
 	@# The pre-overlay helper migrates legacy last-applied ownership without
 	@# removing the provisioning-owned connection-string. When the GFS stack is
 	@# deployed AND control-api is Ready (migration 0048 applied), re-provision
@@ -723,6 +743,10 @@ minikube-sync-auth-key-if-present: ## Sync JWT public key only when minikube aut
 .PHONY: minikube-sync-codex-subscription-url
 minikube-sync-codex-subscription-url: ## Resolve branch Control UI URL and sync CONTROL_API_CONTROL_UI_BASE_URL for Codex OAuth
 	@bash scripts/minikube/sync-codex-subscription-control-ui-url.sh --context=$(MINIKUBE_PROFILE)
+
+.PHONY: minikube-sync-external-rest-api-cors-origin
+minikube-sync-external-rest-api-cors-origin: ## Align profiles/external-rest-api EXTERNAL_REST_API_CORS_ORIGIN with a branch profile's Profile UI
+	@bash scripts/minikube/sync-external-rest-api-cors-origin.sh --context=$(MINIKUBE_PROFILE)
 
 # ── Minikube Port Forwards ──────────────────────────────────────────
 .PHONY: minikube-pf-control-ui
@@ -1543,8 +1567,10 @@ test-playwright-desktop: ## Run Playwright tests for Desktop App only (requires:
 
 .PHONY: test-playwright-profile-ui-recovery
 test-playwright-profile-ui-recovery: ## Audit and run the Profile UI password-recovery browser journey
-	@python3 tools/e2e_static_audit.py tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts
-	@python3 tools/e2e_static_audit.py tests/e2e/playwright/profile-ui-recovery/ordinary-invitation-onboarding.spec.ts
+	@for spec in tests/e2e/playwright/profile-ui-recovery/*.spec.ts; do \
+		python3 tools/e2e_static_audit.py "$$spec" || exit $$?; \
+	done
+	@npm --prefix external-rest-api run build
 	@cd tests/e2e/playwright && node run-profile-ui-recovery.mjs
 
 .PHONY: test-playwright-headed

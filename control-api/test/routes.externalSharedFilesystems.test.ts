@@ -1,13 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { DatabaseError } from 'pg'
 import request from 'supertest'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
+import { rootLogger } from '../src/observability/logger.js'
 import { createExternalSharedFilesystemsRouter } from '../src/routes/external/sharedFilesystems.js'
+import { externalSessionDatabaseFailure } from '../src/services/auth/sessionDatabaseFailure.js'
 import { K8sNotFoundError } from '../src/services/resourceService.js'
 
 const mockVerifyExternalSessionToken = vi.fn()
 const mockGetUserContexts = vi.fn()
 const mockGetTeamContexts = vi.fn()
+const mockGetLiveTeamMembership = vi.fn()
 const mockSignWfcBrowsingCredential = vi.hoisted(() => vi.fn())
+const rateLimitMock = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 const mockPoolQuery = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/db.js', () => ({
@@ -17,16 +23,28 @@ vi.mock('../src/db.js', () => ({
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...args: unknown[]) => mockVerifyExternalSessionToken(...args),
 }))
+vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
+  return {
+    ...actual,
+    validateLegacyUserSession: vi.fn(async () => ({ status: 'valid', identity: {} })),
+  }
+})
 
 vi.mock('../src/services/directory/index.js', () => ({
   getUserContexts: (...args: unknown[]) => mockGetUserContexts(...args),
   getTeamContexts: (...args: unknown[]) => mockGetTeamContexts(...args),
 }))
 
+vi.mock('../src/services/access/liveTeamAuthorization.js', () => ({
+  getLiveTeamMembership: (...args: unknown[]) => mockGetLiveTeamMembership(...args),
+}))
+
 vi.mock('../src/utils/auth/wfcBrowsingToken.js', () => ({
   WFC_BROWSING_READ_SCOPE: 'files:read',
   signWfcBrowsingToken: (...args: unknown[]) => mockSignWfcBrowsingCredential(...args),
 }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimitMock)
 
 vi.mock('../src/config.js', () => ({
   config: {
@@ -68,21 +86,92 @@ function buildApp(gateway: GatewayStub) {
       ),
   }
   app.use(createExternalSharedFilesystemsRouter(gatewayWithCatalog as never))
+  app.use(clerumErrorHandler)
   return app
 }
 
+const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
+
+// team_members.user_id and team_id are UUID columns: the real live-membership
+// read only queries the pool for UUID ids.
+const UUID_USER_ID = '1d2e3f4a-5b6c-4d7e-8f9a-0b1c2d3e4f5a'
+const UUID_TEAM_ID = '7e6d5c4b-3a29-4f18-8e7d-6c5b4a392817'
+
+/** A server-side error as pg raises it: a DatabaseError carrying a SQLSTATE. */
+function databaseError(sqlstate: string): DatabaseError {
+  const error = new DatabaseError(`synthetic database failure ${sqlstate}`, 0, 'error')
+  error.code = sqlstate
+  return error
+}
+
+/**
+ * Runs the real live-membership read against the mocked pool, so the route's
+ * own database-failure classifier decides, and makes only the team_members
+ * query fail with `failure`.
+ */
+async function failLiveMembershipRead(failure: Error): Promise<void> {
+  const actual = await vi.importActual<
+    typeof import('../src/services/access/liveTeamAuthorization.js')
+  >('../src/services/access/liveTeamAuthorization.js')
+  mockGetLiveTeamMembership.mockImplementation(actual.getLiveTeamMembership)
+  mockVerifyExternalSessionToken.mockReturnValue({
+    ...SESSION,
+    userId: UUID_USER_ID,
+    teamId: UUID_TEAM_ID,
+  })
+  mockPoolQuery.mockImplementation(async (text: string) => {
+    if (text.includes('team_members')) throw failure
+    return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }] }
+  })
+}
+
+function expectLiveMembershipReadOnce(): void {
+  const membershipReads = mockPoolQuery.mock.calls.filter(([text]) =>
+    String(text).includes('team_members')
+  )
+  expect(membershipReads).toEqual([[expect.any(String), [UUID_USER_ID, UUID_TEAM_ID]]])
+}
+
+/** Both outage headers and one warn log naming the event with the outage cause. */
+function expectMarkedUnavailable(
+  res: request.Response,
+  event: string,
+  cause: Record<string, unknown>
+): void {
+  expect(res.headers['retry-after']).toBe('2')
+  expect(res.headers['cache-control']).toBe('no-store')
+  expect(warn).toHaveBeenCalledOnce()
+  expect(warn).toHaveBeenCalledWith(
+    expect.objectContaining({ event, err: expect.objectContaining(cause) }),
+    'external authority is unavailable'
+  )
+}
+
 beforeEach(() => {
+  warn.mockClear()
   mockVerifyExternalSessionToken.mockReset()
   mockGetUserContexts.mockReset()
   mockGetTeamContexts.mockReset()
+  mockGetLiveTeamMembership.mockReset()
+  mockGetLiveTeamMembership.mockResolvedValue({ teamId: 'team-1', role: 'member' })
   mockSignWfcBrowsingCredential.mockReset()
   mockPoolQuery.mockReset()
   mockPoolQuery.mockResolvedValue({ rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }] })
   mockSignWfcBrowsingCredential.mockReturnValue({ token: 'browsing-token', expiresInSeconds: 60 })
+  rateLimitMock.checkAndIncrement.mockReset()
+  rateLimitMock.checkAndIncrement.mockResolvedValue({
+    allowed: true,
+    count: 1,
+    remaining: 29,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    backendAvailable: true,
+  })
 })
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
 })
 
 const validAuth = () => {
@@ -90,6 +179,18 @@ const validAuth = () => {
 }
 
 describe('GET /external/contexts/:contextId/shared-filesystems', () => {
+  it('preserves context authorization without an added user quota', async () => {
+    validAuth()
+    mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    mockGetTeamContexts.mockResolvedValue({ teamId: 'team-1', contextIds: [] })
+    await request(buildApp({ getResource: vi.fn() }))
+      .get('/external/contexts/ctx-a/shared-filesystems')
+      .set('x-user-session-token', 'synthetic-session')
+      .expect(403)
+    expect(mockGetUserContexts).toHaveBeenCalled()
+    expect(rateLimitMock.checkAndIncrement).not.toHaveBeenCalled()
+  })
+
   it('returns merged spec+status for an accessible context', async () => {
     validAuth()
     mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: ['ctx-a'] })
@@ -153,6 +254,66 @@ describe('GET /external/contexts/:contextId/shared-filesystems', () => {
       .set('x-user-session-token', 'dummy')
     expect(res.status).toBe(200)
     expect(res.body.items).toEqual([])
+    expect(mockGetLiveTeamMembership).toHaveBeenCalledWith('user-1', 'team-1', {
+      onDatabaseFailure: externalSessionDatabaseFailure,
+    })
+  })
+
+  it('does not trust a stale v1 team claim after membership revocation', async () => {
+    validAuth()
+    mockGetUserContexts.mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    mockGetLiveTeamMembership.mockResolvedValue(null)
+    const getResource = vi.fn()
+    const app = buildApp({ getResource })
+
+    await request(app)
+      .get('/external/contexts/ctx-team/shared-filesystems')
+      .set('x-user-session-token', 'stale-team-token')
+      .expect(403)
+
+    expect(mockGetTeamContexts).not.toHaveBeenCalled()
+    expect(getResource).not.toHaveBeenCalled()
+  })
+
+  it('returns unavailable when a live membership read hits a database outage', async () => {
+    const outage = databaseError('08006')
+    await failLiveMembershipRead(outage)
+    mockGetUserContexts.mockResolvedValue({ userId: UUID_USER_ID, contextIds: [] })
+    const getResource = vi.fn()
+    const app = buildApp({ getResource })
+
+    const res = await request(app)
+      .get('/external/contexts/ctx-team/shared-filesystems')
+      .set('x-user-session-token', 'stale-team-token')
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'authority_unavailable' })
+    expectMarkedUnavailable(res, 'external_shared_filesystems_authority_unavailable', {
+      name: 'ExternalSessionBackendUnavailableError',
+    })
+    // The logged cause is the classified outage, which carries the pg error.
+    expect(warn.mock.calls[0]?.[0]).toMatchObject({ err: { cause: outage } })
+    expectLiveMembershipReadOnce()
+    expect(getResource).not.toHaveBeenCalled()
+  })
+
+  it('keeps a programmer error from the live membership read on the sanitized 500 path', async () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    await failLiveMembershipRead(new TypeError('synthetic membership read defect'))
+    mockGetUserContexts.mockResolvedValue({ userId: UUID_USER_ID, contextIds: [] })
+    const getResource = vi.fn()
+    const app = buildApp({ getResource })
+
+    const res = await request(app)
+      .get('/external/contexts/ctx-team/shared-filesystems')
+      .set('x-user-session-token', 'stale-team-token')
+
+    expect(res.status).toBe(500)
+    expect(res.body).toMatchObject({ error: 'Internal Server Error' })
+    expect(JSON.stringify(res.body)).not.toContain('synthetic membership read defect')
+    expect(res.headers['retry-after']).toBeUndefined()
+    expectLiveMembershipReadOnce()
+    expect(getResource).not.toHaveBeenCalled()
   })
 
   it('returns 403 when caller has no access to the context', async () => {
@@ -185,6 +346,9 @@ describe('GET /external/contexts/:contextId/shared-filesystems', () => {
 
     expect(res.status).toBe(503)
     expect(res.body).toEqual({ error: 'context_reconciliation_unavailable' })
+    expectMarkedUnavailable(res, 'external_shared_filesystems_context_reconciliation_failed', {
+      message: 'k8s unavailable',
+    })
     expect(getResource).not.toHaveBeenCalled()
   })
 

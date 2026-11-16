@@ -81,6 +81,24 @@ run_t1_local_preflight() {
     "Node/package/Docker prerequisites passed in ${REAL_PG_PREFLIGHT_DURATION_SECONDS}s; T1 workers=1"
 }
 
+run_certification_inputs_preflight() {
+  local scope
+  if [ "$T2_RUN_T1" = true ]; then
+    scope=t2
+  elif [ "$T2_RUN_T0" = true ]; then
+    scope=t0
+  else
+    return 0
+  fi
+  if ! node "$SCRIPT_DIR/../ci/certification-inputs.mjs" check \
+    --root "$T2_PROJECT_DIR" --scope "$scope" --base "$T2_ORIGIN_DEV" --head "$T2_HEAD"; then
+    T2_NEXT_COMMAND='prepare the reported local inputs explicitly (pinned producers: docs/testing/minikube-t2-runbook.md "Pinned producer inputs"), then re-run the canonical gate'
+    t2_evidence_write local-preflight FAIL 'certification inputs are incomplete'
+    t2_fail LOCAL_DEPENDENCY_MISSING 'certification input preflight failed before T0'
+    return 1
+  fi
+}
+
 run_t0() {
   local phase_started_seconds="$SECONDS"
   if [ "$T2_RUN_T0" != true ]; then
@@ -306,7 +324,7 @@ run_t1() {
     fi
     T2_T1_STATUS=PASS
     T2_T1_COUNTS="$(awk -F= '/^T1_TESTS=|^T1_PASSED_TESTS=|^T1_PENDING_TESTS=|^T1_EXPECTED_FILES=|^T1_REPORTED_FILES=/{printf "%s%s", (n++ ? "," : ""), $0}' "$T2_T1_OUTPUT")"
-    t2_evidence_write T1 PASS "Real PostgreSQL suites executed with exact file identity and no skips; $T2_T1_COUNTS; duration=${t1_duration}s; orchestratorDuration=$((SECONDS - phase_started_seconds))s"
+    t2_evidence_write T1 PASS "Real PostgreSQL suites executed with exact file identity and no skips; $T2_T1_COUNTS; duration=${t1_duration}s; orchestratorDuration=$((SECONDS - phase_started_seconds))s; t1Evidence=${t1_evidence}"
   else
     cat "$T2_T1_OUTPUT" >&2 || true
     T2_T1_STATUS=FAIL
@@ -551,6 +569,7 @@ main() {
   t2_evidence_init
 
   run_t1_local_preflight
+  run_certification_inputs_preflight
   run_t0
   if [ "$T2_RUN_T0" = true ] && ! t2_lane_completed "$T2_T0_STATUS"; then
     T2_NEXT_COMMAND='re-run make minikube-t2 with T2_RUN_T0=true so the static lane is executed'

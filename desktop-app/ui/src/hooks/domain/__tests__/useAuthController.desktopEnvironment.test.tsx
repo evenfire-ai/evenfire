@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   onDesktopEnvironmentSetup: vi.fn(),
   onDesktopSetupToken: vi.fn(),
   onExternalLogout: vi.fn(),
+  onSessionCleared: vi.fn(),
   onSessionEnded: vi.fn(),
   saveRuntimeConfig: vi.fn(),
   selectRuntimeConfig: vi.fn(),
@@ -207,6 +208,7 @@ beforeEach(async () => {
     return () => undefined
   })
   mocks.onExternalLogout.mockReturnValue(() => undefined)
+  mocks.onSessionCleared.mockReturnValue(() => undefined)
   mocks.onDesktopEnvironmentSetup.mockImplementation(
     (listener: (payload: DesktopEnvironmentSetupPayload) => void | Promise<void>) => {
       desktopEnvironmentSetupListener = listener
@@ -226,6 +228,7 @@ beforeEach(async () => {
       onDesktopSetupToken: mocks.onDesktopSetupToken,
       completeDesktopSetup: mocks.completeDesktopSetup,
       onExternalLogout: mocks.onExternalLogout,
+      onSessionCleared: mocks.onSessionCleared,
     },
   }
 })

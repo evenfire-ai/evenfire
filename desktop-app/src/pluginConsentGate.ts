@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto'
 import type { ConsentGrant, ConsentStore } from './pluginConsentStore.js'
 import { getCapability, sortCapabilitiesForPrompt } from './pluginSdkCapabilities.js'
 import type { PluginConsentRequest, PluginConsentRow } from './pluginSdkProtocol.js'
+import type { PinnedPluginSurface } from './pluginSurfaceRegistry.js'
 
 export const CONSENT_PROMPT_TIMEOUT_MS = 120_000
 export const CONSENT_PROMPT_COOLDOWN_MS = 10_000
@@ -44,8 +45,10 @@ export type ConsentGateDeps = {
   presentPrompt: (request: PluginConsentRequest) => void
   /** Withdraw a prompt the user never answered (timeout, embed died). */
   cancelPrompt: (promptId: string) => void
-  /** Hide/show the active plugin surface around the modal. */
-  setSurfaceVisible: (visible: boolean) => Promise<void>
+  /** Whether the exact pinned surface that originated this request is still mounted. */
+  isMountCurrent: (mount: PinnedPluginSurface) => boolean
+  /** Hide the request's surface before presenting the modal; false means it was replaced. */
+  setSurfaceVisible: (visible: false, mount: PinnedPluginSurface) => Promise<boolean>
   /** True when a Desktop window is visible and focused. */
   isWindowReady: () => boolean
   now?: () => number
@@ -60,6 +63,7 @@ export type ConsentGateDeps = {
 type PendingPrompt = {
   promptId: string
   pluginId: string
+  mount: PinnedPluginSurface
   capabilities: Set<string>
   resolve: (allowed: Set<string>) => void
   timer: ReturnType<typeof setTimeout> | null
@@ -89,6 +93,20 @@ export class PluginConsentGate {
     const created: PluginSessionState = { denials: new Set(), promptCount: 0, lastPromptAt: 0 }
     this.sessions.set(pluginId, created)
     return created
+  }
+
+  private mountIsCurrent(mount: PinnedPluginSurface): boolean {
+    return this.deps.isMountCurrent(mount)
+  }
+
+  private deniedOutcome(capabilities: string[]): ConsentOutcome {
+    const granted: Record<string, boolean> = {}
+    const source: Record<string, ConsentDecisionSource> = {}
+    for (const capability of capabilities) {
+      granted[capability] = false
+      source[capability] = 'prompt_denied'
+    }
+    return { granted, source }
   }
 
   /** Called on unmount: denials and the prompt budget are per-mount state. */
@@ -137,8 +155,12 @@ export class PluginConsentGate {
     userId: string
     pluginId: string
     pluginTitle: string
+    mount: PinnedPluginSurface
     capabilities: string[]
   }): Promise<ConsentOutcome> {
+    if (input.mount.pluginId !== input.pluginId || !this.mountIsCurrent(input.mount)) {
+      return this.deniedOutcome(input.capabilities)
+    }
     const granted: Record<string, boolean> = {}
     const source: Record<string, ConsentDecisionSource> = {}
     const session = this.session(input.pluginId)
@@ -170,9 +192,14 @@ export class PluginConsentGate {
       toPrompt.push(capability)
     }
 
-    if (toPrompt.length === 0) return { granted, source }
+    if (toPrompt.length === 0) {
+      return this.mountIsCurrent(input.mount)
+        ? { granted, source }
+        : this.deniedOutcome(input.capabilities)
+    }
 
     const allowed = await this.promptFor(input, toPrompt)
+    if (!this.mountIsCurrent(input.mount)) return this.deniedOutcome(input.capabilities)
     for (const capability of toPrompt) {
       const isAllowed = allowed.has(capability)
       granted[capability] = isAllowed
@@ -183,7 +210,13 @@ export class PluginConsentGate {
   }
 
   private async promptFor(
-    input: { envKey: string; userId: string; pluginId: string; pluginTitle: string },
+    input: {
+      envKey: string
+      userId: string
+      pluginId: string
+      pluginTitle: string
+      mount: PinnedPluginSurface
+    },
     capabilities: string[]
   ): Promise<Set<string>> {
     // Serialize: one modal at a time, globally. A second request whose rows are
@@ -200,9 +233,16 @@ export class PluginConsentGate {
   }
 
   private async runPrompt(
-    input: { envKey: string; userId: string; pluginId: string; pluginTitle: string },
+    input: {
+      envKey: string
+      userId: string
+      pluginId: string
+      pluginTitle: string
+      mount: PinnedPluginSurface
+    },
     capabilities: string[]
   ): Promise<Set<string>> {
+    if (!this.mountIsCurrent(input.mount)) return new Set()
     const session = this.session(input.pluginId)
 
     // Re-check: a queued request may have been answered by the prompt ahead of
@@ -210,13 +250,17 @@ export class PluginConsentGate {
     const stillNeeded: string[] = []
     for (const capability of capabilities) {
       if (session.denials.has(capability)) continue
-      if (await this.isGranted({ ...input, capability })) continue
+      const isGranted = await this.isGranted({ ...input, capability })
+      if (!this.mountIsCurrent(input.mount)) return new Set()
+      if (isGranted) continue
       stillNeeded.push(capability)
     }
     if (stillNeeded.length === 0) {
       const resolved = new Set<string>()
       for (const capability of capabilities) {
-        if (await this.isGranted({ ...input, capability })) resolved.add(capability)
+        const isGranted = await this.isGranted({ ...input, capability })
+        if (!this.mountIsCurrent(input.mount)) return new Set()
+        if (isGranted) resolved.add(capability)
       }
       return resolved
     }
@@ -230,6 +274,7 @@ export class PluginConsentGate {
     const cooldownRemaining = CONSENT_PROMPT_COOLDOWN_MS - (this.now() - session.lastPromptAt)
     if (session.lastPromptAt > 0 && cooldownRemaining > 0) {
       await this.sleep(cooldownRemaining)
+      if (!this.mountIsCurrent(input.mount)) return new Set()
     }
 
     const ready = await this.waitForWindow()
@@ -258,6 +303,7 @@ export class PluginConsentGate {
       priorPromptCount: session.promptCount,
     }
 
+    if (!this.mountIsCurrent(input.mount)) return new Set()
     session.promptCount += 1
     session.lastPromptAt = this.now()
 
@@ -280,6 +326,7 @@ export class PluginConsentGate {
     this.pending = {
       promptId,
       pluginId: input.pluginId,
+      mount: input.mount,
       capabilities: new Set(stillNeeded),
       resolve: resolvePrompt,
       timer,
@@ -287,11 +334,16 @@ export class PluginConsentGate {
 
     let allowed = new Set<string>()
     try {
-      await this.deps.setSurfaceVisible(false)
+      const hidden = await this.deps.setSurfaceVisible(false, input.mount)
       // If the plugin unmounted during the await, resetPlugin already cleared
       // `this.pending` and resolved the prompt as a denial — never present it.
-      if (this.pending?.promptId === promptId) {
+      if (hidden && this.mountIsCurrent(input.mount) && this.pending?.promptId === promptId) {
         this.deps.presentPrompt(request)
+      } else if (this.pending?.promptId === promptId) {
+        clearTimeout(timer)
+        this.pending = null
+        this.deps.cancelPrompt(promptId)
+        resolvePrompt(new Set())
       }
       allowed = await promptResult
     } catch (err) {
@@ -307,9 +359,9 @@ export class PluginConsentGate {
         this.deps.cancelPrompt(promptId)
       }
       throw err
-    } finally {
-      await this.deps.setSurfaceVisible(true).catch(() => undefined)
     }
+
+    if (!this.mountIsCurrent(input.mount)) return new Set()
 
     const grantedNow = new Set<string>()
     for (const capability of stillNeeded) {

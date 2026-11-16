@@ -1,10 +1,12 @@
 import { useContext, useLayoutEffect, useRef, useState } from 'react'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListContext } from '@contexts/ChatListContext'
-import { Button } from '@components/Common'
+import { Button, IconButton } from '@components/Common'
+import { IconChevronLeft, IconChevronRight } from '@components/SidebarNav/icons'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import type { WorkspaceTabStripProps } from './types'
+import { useWorkspaceTabOverflow } from './useWorkspaceTabOverflow'
 
 type DropSide = 'before' | 'after'
 type DropTarget = { id: string; side: DropSide }
@@ -40,6 +42,11 @@ export function WorkspaceTabStrip({
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const stripRef = useRef<HTMLDivElement | null>(null)
+  const { scrollerRef, hasOverflow, leftButtonProps, rightButtonProps } = useWorkspaceTabOverflow({
+    tabs,
+    activeTabId,
+    stripRef,
+  })
   // Set when a KEYBOARD close removes the active tab's control: the close, unlike a
   // reorder, drops the keyed node the user was on, so focus would fall to <body>.
   // Consumed by the layout effect once the neighbour becomes active this commit.
@@ -114,7 +121,18 @@ export function WorkspaceTabStrip({
       ref={stripRef}
       tabIndex={-1}
     >
-      <div className="chat-view-tabs__scroller">
+      {hasOverflow && (
+        <IconButton
+          aria-label="Scroll tabs left"
+          className="chat-view-tabs__scroll-button"
+          {...leftButtonProps}
+          label="Scroll tabs left"
+          size="xs"
+        >
+          <IconChevronLeft />
+        </IconButton>
+      )}
+      <div className="chat-view-tabs__scroller" ref={scrollerRef}>
         <div className="chat-view-tabs__list">
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId
@@ -131,6 +149,7 @@ export function WorkspaceTabStrip({
             return (
               <div
                 className={className}
+                data-workspace-tab-id={tab.id}
                 draggable
                 key={tab.id}
                 onDragEnd={clearDrag}
@@ -185,6 +204,17 @@ export function WorkspaceTabStrip({
           })}
         </div>
       </div>
+      {hasOverflow && (
+        <IconButton
+          aria-label="Scroll tabs right"
+          className="chat-view-tabs__scroll-button"
+          {...rightButtonProps}
+          label="Scroll tabs right"
+          size="xs"
+        >
+          <IconChevronRight />
+        </IconButton>
+      )}
     </div>
   )
 }

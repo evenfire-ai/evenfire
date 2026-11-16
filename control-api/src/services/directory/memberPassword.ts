@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs'
 import { type DbClient, pool } from '../../db.js'
 import { type MemberPasswordWorkLease, runPasswordMutation } from '../auth/passwordWorkOwnership.js'
+import { revokeAllUserSessions } from '../auth/userSessionService.js'
 import {
   type InvitationUserRow,
   ensureInvitationUser,
@@ -8,26 +9,33 @@ import {
   invitationResponse,
   invitationUserIsRetired,
   loadInvitationTeams,
+  lockInvitationUserForPasswordSetup,
   lockPasswordResetUser,
 } from './invitationStore.js'
-import { getMemberSessionContext } from './login.js'
 
 async function updateActivePasswordHash(
   db: Pick<DbClient, 'query'>,
   userId: string,
   passwordHash: string
-): Promise<boolean> {
+): Promise<string | number | null> {
   const update = await db.query(
     `UPDATE users
         SET password_hash = $2,
+            lifecycle_version = lifecycle_version + 1,
             password_set_at = NOW(),
             updated_at = NOW()
       WHERE id = $1
         AND lifecycle_state = 'active'
-      RETURNING id`,
+      RETURNING lifecycle_version`,
     [userId, passwordHash]
   )
-  return update.rows.length === 1
+  if (update.rows.length !== 1) return null
+  const lifecycleVersion = (update.rows[0] as { lifecycle_version?: string | number })
+    .lifecycle_version
+  if (lifecycleVersion === undefined) {
+    throw new Error('password setup did not return its lifecycle generation')
+  }
+  return lifecycleVersion
 }
 
 async function loadInvitationPasswordResponse(
@@ -60,12 +68,22 @@ async function revokeSiblingPasswordResets(
   )
 }
 
+export type SetInvitationPasswordOptions = {
+  /**
+   * Only the external session password route is first-password-only. The admin
+   * finalization and the password-reset branch keep their existing overwrite
+   * semantics, so they never pass this option.
+   */
+  rejectIfPasswordAlreadySet?: boolean
+}
+
 export async function setInvitationPasswordForUser(
   userId: string,
   email: string,
   invitationId: string,
   password: string,
-  passwordWorkLease?: MemberPasswordWorkLease
+  passwordWorkLease?: MemberPasswordWorkLease,
+  options?: SetInvitationPasswordOptions
 ) {
   const trimmedUserId = userId.trim()
   const normalizedEmail = email.trim().toLowerCase()
@@ -92,8 +110,7 @@ export async function setInvitationPasswordForUser(
       passwordWorkLease
     )
     if ('error' in result) return result
-    const { sessionContext: _sessionContext, ...data } = result.data
-    return { data }
+    return { data: result.data }
   }
   if (candidate.purpose !== 'member_invitation' && candidate.purpose !== 'admin_desktop_access') {
     return { error: 'not_found' as const }
@@ -114,13 +131,30 @@ export async function setInvitationPasswordForUser(
         return { error: 'not_found' as const }
       }
       if (invitation.status !== 'accepted') return { error: 'not_accepted' as const }
+      if (options?.rejectIfPasswordAlreadySet) {
+        // The first-password decision must precede ensureInvitationUser, which
+        // can insert the invitee's users and profiles rows: deciding after it
+        // would write on a refused call. Lock the session user
+        // row inside the writing transaction and decide from the authoritative
+        // hash, so a concurrent first set either commits before this lock (and
+        // this request sees its hash) or waits behind it.
+        const lockedUser = await lockInvitationUserForPasswordSetup(db, trimmedUserId)
+        if (!lockedUser) return { error: 'not_found' as const }
+        if (invitationUserIsRetired(lockedUser)) return { error: 'user_retired' as const }
+        if (lockedUser.email.toLowerCase() !== invitation.email.toLowerCase()) {
+          return { error: 'forbidden' as const }
+        }
+        if (lockedUser.password_hash) return { error: 'password_already_set' as const }
+      }
       const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
       if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
       if (user.id !== trimmedUserId) return { error: 'forbidden' as const }
       const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-      if (!(await updateActivePasswordHash(db, user.id, passwordHash))) {
+      const lifecycleVersion = await updateActivePasswordHash(db, user.id, passwordHash)
+      if (lifecycleVersion === null) {
         return { error: 'user_retired' as const }
       }
+      await revokeAllUserSessions(user.id, 'password_changed', db, undefined, lifecycleVersion)
 
       if (!invitation.accepted_user_id) {
         await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
@@ -175,7 +209,7 @@ export async function setInvitationPasswordForEmail(
       if (expectedUserId && user.id !== expectedUserId.trim()) {
         return { error: 'forbidden' as const }
       }
-      const invitation = await getInvitationRecordById(db, trimmedInvitationId, true)
+      const invitation = await getInvitationRecordById(db, trimmedInvitationId, { lock: true })
       if (!invitation || invitation.purpose !== 'password_reset') {
         return { error: 'not_found' as const }
       }
@@ -189,9 +223,11 @@ export async function setInvitationPasswordForEmail(
       }
 
       const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-      if (!(await updateActivePasswordHash(db, user.id, passwordHash))) {
+      const lifecycleVersion = await updateActivePasswordHash(db, user.id, passwordHash)
+      if (lifecycleVersion === null) {
         return { error: 'user_retired' as const }
       }
+      await revokeAllUserSessions(user.id, 'password_changed', db, undefined, lifecycleVersion)
 
       const redeemed = await db.query(
         `UPDATE invitations
@@ -207,11 +243,9 @@ export async function setInvitationPasswordForEmail(
 
       const response = await loadInvitationPasswordResponse(db, invitation.id, user, passwordHash)
       if (!response) return { error: 'not_found' as const }
-      const sessionContext = await getMemberSessionContext(db, user)
       return {
         data: {
           passwordUpdated: true,
-          sessionContext,
           ...response,
         },
       }
@@ -264,12 +298,13 @@ export async function updateUserPassword(
       const update = await db.query(
         `UPDATE users
             SET password_hash = $3,
+                lifecycle_version = lifecycle_version + 1,
                 password_set_at = NOW(),
                 updated_at = NOW()
           WHERE id = $1
             AND password_auth_generation = $2
             AND password_hash = $4
-          RETURNING id`,
+          RETURNING lifecycle_version`,
         [
           normalizedUserId,
           user.password_auth_generation,
@@ -278,6 +313,18 @@ export async function updateUserPassword(
         ]
       )
       if (update.rows.length !== 1) return { error: 'credential_changed' as const }
+      const lifecycleVersion = (update.rows[0] as { lifecycle_version?: string | number })
+        .lifecycle_version
+      if (lifecycleVersion === undefined) {
+        throw new Error('password update did not return its lifecycle generation')
+      }
+      await revokeAllUserSessions(
+        normalizedUserId,
+        'password_changed',
+        db,
+        undefined,
+        lifecycleVersion
+      )
       return { updated: true as const }
     },
     { mode: 'standard' }

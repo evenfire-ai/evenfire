@@ -76,6 +76,16 @@ describe('buildPropagatedEnv', () => {
       'CLERUM_MCP_TOOL_TIMEOUT_MS',
       'CLERUM_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS',
       'MCP_HOST_WORKFLOW_MAX_OUTPUT_TOKENS',
+      'CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED',
+      'CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD',
+      'CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES',
+      'CLERUM_WORKFLOW_STEP_ENGINE',
+    ])
+  })
+
+  it('forwards a false spillover kill switch to mcp-host pods instead of dropping it', () => {
+    expect(buildPropagatedEnv({ CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED: 'false' })).toEqual([
+      { name: 'CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED', value: 'false' },
     ])
   })
 

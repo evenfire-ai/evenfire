@@ -740,6 +740,8 @@ test('runner image uses only staged explicit copies, locked sfw installs and the
   assert.match(dockerfile, /apt-get install -y --no-install-recommends/)
   assert.match(dockerfile, /sfw npm ci --prefix desktop-app/)
   assert.match(dockerfile, /sfw npm ci --prefix mcp-host/)
+  assert.match(dockerfile, /sfw npm --prefix desktop-app run verify:electron/)
+  assert.match(dockerfile, /sfw npm --prefix desktop-app run build/)
   assert.match(dockerfile, /USER 10001:10001/)
   assert.match(dockerfile, /verifyInputSource/)
 })

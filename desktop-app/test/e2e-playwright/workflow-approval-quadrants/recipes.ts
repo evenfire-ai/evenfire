@@ -90,7 +90,7 @@ export async function adminCreateTeamForUser(name: string, userId: string): Prom
   const response = await adminFetch(`${CONTROL_API}/api/v1/admin/teams`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ name, userId }),
+    body: JSON.stringify({ name }),
   })
   const result = await readResponse(response)
   expect(result.status, result.body).toBe(200)
@@ -98,7 +98,46 @@ export async function adminCreateTeamForUser(name: string, userId: string): Prom
   const body = parseResponseEnvelope(result.body)
   const id = String(body.id || '').trim()
   expect(id, result.body).toMatch(/^[0-9a-f-]{36}$/i)
+
+  // POST /admin/teams creates the team only; membership is a separate call.
+  const memberResponse = await adminFetch(`${CONTROL_API}/api/v1/admin/teams/${id}/members`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ userId, role: 'admin' }),
+  })
+  const memberResult = await readResponse(memberResponse)
+  expect(memberResult.status, memberResult.body).toBe(200)
   return id
+}
+
+/**
+ * Removes a team made by adminCreateTeamForUser. The membership goes in its own call: psql
+ * runs one -c string as one transaction, so a failure deleting the team would otherwise
+ * roll it back and leave a permanent membership on the shared E2E user.
+ */
+export function cleanupTeam(teamId: string | undefined): void {
+  if (!teamId) return
+  if (!/^[0-9a-f-]{36}$/i.test(teamId)) {
+    throw new Error(`refusing to clean non-E2E team id ${teamId}`)
+  }
+  try {
+    const team = sqlLiteral(teamId)
+    profilesSql(`DELETE FROM team_members WHERE team_id = ${team};`)
+    profilesSql(`
+      DELETE FROM team_workflow_grants_audit
+       WHERE target_team_id = ${team};
+      DELETE FROM workflow_recipe_allowed_teams_audit
+       WHERE target_team_id = ${team};
+      DELETE FROM team_workflow_triggers
+       WHERE team_id = ${team};
+      DELETE FROM workflow_recipe_allowed_teams
+       WHERE team_id = ${team};
+      DELETE FROM teams
+       WHERE id = ${team};
+    `)
+  } catch {
+    // Preserve the original test failure; all team rows are scoped to this E2E.
+  }
 }
 
 export async function grantTeamThroughAdminRoute(
@@ -230,7 +269,7 @@ ${inputContractYaml}
 ${allowedActorsYaml}
   steps:
     - id: approval-contract
-      instruction: "${instruction.replace(/"/g, '\\"')}"
+      instruction: ${JSON.stringify(instruction)}
       timeoutSeconds: 60
 `
   kubectlOut(['apply', '-f', '-'], yaml, 30_000)

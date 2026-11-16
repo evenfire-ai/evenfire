@@ -34,7 +34,6 @@ describe('snippet worker security guards', () => {
     const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-worker-'))
     const previousOutputDir = process.env.CLERUM_WORKFLOW_OUTPUT_DIR
     process.env.CLERUM_WORKFLOW_OUTPUT_DIR = outputDir
-    process.env.CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS = 'true'
     try {
       const request: SnippetExecuteRequest = {
         workflowName: 'wf',
@@ -65,7 +64,6 @@ describe('snippet worker security guards', () => {
     } finally {
       if (previousOutputDir === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_DIR
       else process.env.CLERUM_WORKFLOW_OUTPUT_DIR = previousOutputDir
-      delete process.env.CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS
       await fs.rm(outputDir, { recursive: true, force: true })
     }
   })
@@ -74,7 +72,6 @@ describe('snippet worker security guards', () => {
     const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-worker-'))
     const previousOutputDir = process.env.CLERUM_WORKFLOW_OUTPUT_DIR
     process.env.CLERUM_WORKFLOW_OUTPUT_DIR = outputDir
-    process.env.CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS = 'true'
     try {
       const request: SnippetExecuteRequest = {
         workflowName: 'wf',
@@ -105,7 +102,6 @@ describe('snippet worker security guards', () => {
     } finally {
       if (previousOutputDir === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_DIR
       else process.env.CLERUM_WORKFLOW_OUTPUT_DIR = previousOutputDir
-      delete process.env.CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS
       await fs.rm(outputDir, { recursive: true, force: true })
     }
   })
@@ -241,6 +237,61 @@ describe('snippet worker security guards', () => {
           env: {},
         })
       ).rejects.toThrow(/snippet artifact limit exceeded/)
+    } finally {
+      await fs.rm(outputDir, { recursive: true, force: true })
+    }
+  })
+
+  // Artifact bodies are strings only (the SDK types them as `string`). The boxed string and
+  // the byte array were written before the body check, with no secret configured.
+  it.each([
+    // JSON.stringify(undefined) is undefined, so writeJson passes no string body.
+    [
+      'writeJson of undefined',
+      'report.json',
+      'sdk.artifacts.writeJson("report.json", sdk.previousOutputs.missing)',
+    ],
+    [
+      'writeMarkdown of a boxed string',
+      'report.md',
+      'sdk.artifacts.writeMarkdown("report.md", new String("so"))',
+    ],
+    [
+      'writeMarkdown of a byte array',
+      'report.md',
+      'sdk.artifacts.writeMarkdown("report.md", new Uint8Array([104, 105]))',
+    ],
+  ])('rejects %s without truncating the existing artifact', async (_label, name, write) => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-worker-'))
+    const existing = '{\n  "previous": true\n}'
+    await fs.writeFile(path.join(outputDir, name), existing, 'utf8')
+    try {
+      const request: SnippetExecuteRequest = {
+        workflowName: 'wf',
+        stepId: 'report',
+        run: {
+          type: 'snippet',
+          language: 'typescript',
+          code: `
+            await ${write}
+            return { ok: true }
+          `,
+        },
+        previousOutputs: {},
+        resolvedWorkloads: [],
+        resolvedMcpServers: [],
+      }
+
+      // Liveness witness: the write was attempted and refused for its body.
+      await expect(
+        executeSnippetPayload({
+          request,
+          outputDir,
+          timeoutMs: 5_000,
+          env: {},
+        })
+      ).rejects.toThrow(`artifact body must be a string: ${name}`)
+      await expect(fs.readFile(path.join(outputDir, name), 'utf8')).resolves.toBe(existing)
     } finally {
       await fs.rm(outputDir, { recursive: true, force: true })
     }

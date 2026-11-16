@@ -26,7 +26,8 @@
         "packages/jwt-key-policy/**",
         "packages/display-field/**",
         "packages/llm-provider-attempt-contract/**",
-        "packages/grok-provider-attempt-contract/**"
+        "packages/grok-provider-attempt-contract/**",
+        "packages/llm-providers/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -40,7 +41,9 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/display-field/**",
         "packages/frontend-components/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "packages/llm-providers/**",
+        "scripts/qa-recorder/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -62,7 +65,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
-        "packages/codex-catalog-projection/**"
+        "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -76,7 +80,8 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "packages/llm-providers/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -91,7 +96,8 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "packages/llm-providers/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -106,7 +112,8 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "packages/llm-providers/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -121,7 +128,8 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "packages/llm-providers/**"
       ],
       "published": true,
       "deployed_to_minikube": false
@@ -181,6 +189,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
+        "packages/llm-providers/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -202,6 +211,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
+        "packages/llm-providers/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -222,6 +232,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
+        "packages/llm-providers/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -243,6 +254,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
+        "packages/llm-providers/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],

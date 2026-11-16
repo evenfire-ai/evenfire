@@ -89,7 +89,9 @@ export const networkPoliciesTotal = gauge({
 
 export const initialConvergenceRetriesTotal = counter({
   name: 'clerum_hcc_initial_convergence_retries_total',
-  help: 'Initial background convergence retries scheduled after a failed fleet pass.',
+  help:
+    'Background convergence retries scheduled after a failed fleet pass or, for the McpServer ' +
+    'lane, after a reconcile outside a fleet pass left an incomplete obligation.',
   labelNames: ['lane'] as const,
 })
 
@@ -123,6 +125,48 @@ export const initialConvergencePassDurationSeconds = histogram({
   labelNames: ['lane', 'result'] as const,
   buckets: NETWORKPOLICY_PASS_DURATION_BUCKETS,
 })
+
+/**
+ * Ordered stages of one full NetworkPolicy reconciliation. The owner records
+ * the current stage so a pass that overruns its bound can say where it stopped.
+ */
+export const NETWORKPOLICY_PASS_PHASES = [
+  'ensure-defaults',
+  'inventory-list',
+  'context-orphan-cleanup',
+  'context-revocation',
+  'server-orphan-cleanup',
+  'server-revocation',
+  'additive',
+] as const
+export type NetworkPolicyPassPhase = (typeof NETWORKPOLICY_PASS_PHASES)[number]
+// 'starting' is the stage before the first phase is recorded.
+export const NETWORKPOLICY_PASS_OVERRUN_PHASES = ['starting', ...NETWORKPOLICY_PASS_PHASES] as const
+export type NetworkPolicyPassOverrunPhase = (typeof NETWORKPOLICY_PASS_OVERRUN_PHASES)[number]
+export const NETWORKPOLICY_PASS_OVERRUN_SEVERITIES = ['warn', 'fatal'] as const
+export type NetworkPolicyPassOverrunSeverity =
+  (typeof NETWORKPOLICY_PASS_OVERRUN_SEVERITIES)[number]
+
+const networkPolicyPassOverrunsTotal = counter({
+  name: 'clerum_hcc_networkpolicy_pass_overruns_total',
+  help: 'NetworkPolicy passes still running at an overrun mark (warn) or at the hard limit (fatal), by the stage they were in.',
+  labelNames: ['severity', 'phase'] as const,
+})
+// Every label set exists at 0 from start, so the first overrun is visible to
+// increase() and an alert on it.
+for (const severity of NETWORKPOLICY_PASS_OVERRUN_SEVERITIES) {
+  for (const phase of NETWORKPOLICY_PASS_OVERRUN_PHASES) {
+    networkPolicyPassOverrunsTotal.inc({ severity, phase }, 0)
+  }
+}
+
+/** Counts one overrun mark; the counter is reachable only through this typed helper. */
+export function countNetworkPolicyPassOverrun(
+  severity: NetworkPolicyPassOverrunSeverity,
+  phase: NetworkPolicyPassOverrunPhase
+): void {
+  networkPolicyPassOverrunsTotal.inc({ severity, phase })
+}
 
 export const networkPolicySafetyPassDurationSeconds = histogram({
   name: 'clerum_hcc_networkpolicy_safety_pass_duration_seconds',
@@ -206,6 +250,45 @@ export const mcpserverMissingSecret = gauge({
   help: '1 when an McpServer references a non-existent Secret',
   labelNames: ['namespace', 'name', 'secret_name'] as const,
 })
+
+/**
+ * The reconcile steps whose failed Kubernetes call can decide the published
+ * readiness verdict, and what happened to the verdict.
+ */
+export const MCPSERVER_VERDICT_CALL_SITES = [
+  'secret_read',
+  'resource_sync',
+  'pre_deploy_handshake',
+  'rollout_read',
+] as const
+export type VerdictCallSite = (typeof MCPSERVER_VERDICT_CALL_SITES)[number]
+export const MCPSERVER_VERDICT_CALL_OUTCOMES = ['verdict_kept', 'not_ready_published'] as const
+export type VerdictCallOutcome = (typeof MCPSERVER_VERDICT_CALL_OUTCOMES)[number]
+
+const mcpserverReconcileCallFailuresTotal = counter({
+  name: 'clerum_hcc_mcpserver_reconcile_call_failures_total',
+  help:
+    'Failed Kubernetes calls in an McpServer reconcile that decide its published readiness, ' +
+    'by step (site) and by whether the authoritative verdict was kept or not-ready was published.',
+  labelNames: ['site', 'outcome'] as const,
+})
+// Every label set exists at 0 from start (see the overrun counter above).
+for (const site of MCPSERVER_VERDICT_CALL_SITES) {
+  for (const outcome of MCPSERVER_VERDICT_CALL_OUTCOMES) {
+    mcpserverReconcileCallFailuresTotal.inc({ site, outcome }, 0)
+  }
+}
+
+/**
+ * Counts one failed verdict-deciding call. The counter is reachable only through
+ * this typed helper, so every label set it can emit is one the init above exposes.
+ */
+export function countMcpServerVerdictCallFailure(
+  site: VerdictCallSite,
+  outcome: VerdictCallOutcome
+): void {
+  mcpserverReconcileCallFailuresTotal.inc({ site, outcome })
+}
 
 export const infrastructureTelemetryEnqueuedTotal = counter({
   name: 'clerum_hcc_infrastructure_telemetry_enqueued_total',

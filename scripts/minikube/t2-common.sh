@@ -325,9 +325,17 @@ t2_repo_metadata() {
     T2_NEXT_COMMAND='rebase or merge the current origin/dev, then re-run the preflight'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'merge-base is not the current origin/dev'
   fi
-  if [ -n "$(git -C "$T2_PROJECT_DIR" status --porcelain=v1)" ]; then
+  local status_out
+  if ! status_out="$(git -C "$T2_PROJECT_DIR" status --porcelain=v1)"; then
+    T2_NEXT_COMMAND='repair the Git worktree so git status succeeds, then re-run'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'git status failed; the worktree state is unknown'
+    return 1
+  fi
+  if [ -n "$status_out" ]; then
+    printf '[minikube-t2] dirty worktree entries:\n%s\n' "$status_out" >&2
     T2_NEXT_COMMAND='commit or restore the worktree before invoking Minikube validation'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'worktree is dirty'
+    return 1
   fi
   T2_WORKTREE_ID="$(t2_worktree_id "$T2_PROJECT_DIR")"
 }

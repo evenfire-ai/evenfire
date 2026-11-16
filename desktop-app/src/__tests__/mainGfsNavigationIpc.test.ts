@@ -20,12 +20,14 @@ const harness = vi.hoisted(() => {
     logout: vi.fn(async () => 7),
     sessionGeneration: 0,
     invalidateSandboxUiSession: null as null | (() => void),
+    sessionCleared: null as null | (() => void),
     parseSandboxUiDeepLink: vi.fn(() => null),
     registeredLogout: null as null | (() => Promise<unknown>),
-    createWindow: null as null | (() => Record<string, any>),
+    createWindow: null as null | ((options?: Record<string, unknown>) => Record<string, any>),
   }
-  state.createWindow = () => {
+  state.createWindow = (options: Record<string, unknown> = {}) => {
     const window = {
+      options,
       webContents: {
         id: 41,
         on: vi.fn(),
@@ -60,8 +62,8 @@ const harness = vi.hoisted(() => {
 
 vi.mock('electron', () => ({
   BrowserWindow: class {
-    constructor() {
-      return harness.createWindow?.()
+    constructor(options?: Record<string, unknown>) {
+      return harness.createWindow?.(options)
     }
     static getAllWindows() {
       return harness.windows
@@ -106,8 +108,12 @@ vi.mock('electron', () => ({
 
 vi.mock('../appService.js', () => ({
   AppService: class {
-    constructor(options?: { onSandboxUiSessionInvalidated?: () => void }) {
+    constructor(options?: {
+      onSandboxUiSessionInvalidated?: () => void
+      onSessionCleared?: () => void
+    }) {
       harness.invalidateSandboxUiSession = options?.onSandboxUiSessionInvalidated ?? null
+      harness.sessionCleared = options?.onSessionCleared ?? null
     }
     initialize = harness.initialize
     logout = harness.logout
@@ -144,10 +150,10 @@ vi.mock('../ipc.js', async importOriginal => {
 })
 vi.mock('../mainWindowReadiness.js', () => ({ wireMainWindowRendererReadiness: vi.fn() }))
 vi.mock('../pluginSdkRuntime.js', () => ({ initPluginSdkRuntime: vi.fn() }))
-vi.mock('../protocolLaunchArgs.js', () => ({
-  collectInitialProtocolUrls: vi.fn(() => ({ evenfireUrls: [], clerumUrls: [] })),
-  shouldRegisterOsProtocols: vi.fn(() => false),
-}))
+vi.mock('../protocolLaunchArgs.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../protocolLaunchArgs.js')>()
+  return { ...original, shouldRegisterOsProtocols: vi.fn(() => false) }
+})
 vi.mock('../sandboxUiDeepLinks.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../sandboxUiDeepLinks.js')>()
   return { ...actual, parseSandboxUiDeepLink: harness.parseSandboxUiDeepLink }
@@ -186,6 +192,15 @@ describe('main.ts GFS navigation-generation composition', () => {
       expect(harness.registeredLogout).toBeTypeOf('function')
       expect(harness.windows).toHaveLength(1)
     })
+  })
+
+  it('keeps the frameless custom chrome square on Linux only', () => {
+    expect(harness.windows[0]?.options).toEqual(
+      expect.objectContaining({
+        frame: false,
+        roundedCorners: process.platform !== 'linux',
+      })
+    )
   })
 
   it('returns null for denied sync IPC without changing the generation', () => {
@@ -257,6 +272,20 @@ describe('main.ts GFS navigation-generation composition', () => {
     await expect(harness.registeredLogout?.()).resolves.toBe(7)
     expect(harness.logout).toHaveBeenCalledTimes(2)
     expect(listPending(ipcEvent(ownContents)).links).toEqual([])
+  })
+
+  it('tells the main window when main ends the committed session', () => {
+    const ownContents = harness.windows[0]?.webContents
+    if (!ownContents) throw new Error('main.ts did not create the owning BrowserWindow')
+    if (!harness.sessionCleared) throw new Error('main.ts did not pass onSessionCleared')
+    ownContents.send.mockClear()
+
+    harness.sessionCleared()
+
+    const notices = ownContents.send.mock.calls.filter(
+      ([channel]) => channel === 'auth:sessionCleared'
+    )
+    expect(notices).toEqual([['auth:sessionCleared']])
   })
 
   it('keeps post-invalidation App and resource links above the main queue reset floors', () => {
@@ -409,4 +438,99 @@ describe('main.ts GFS navigation-generation composition', () => {
       harness.sessionGeneration = 0
     }
   )
+
+  it('retains a cold-start OS resource link until renderer readiness', async () => {
+    vi.resetModules()
+    harness.windows.length = 0
+    harness.appListeners.clear()
+    harness.onHandlers.clear()
+    harness.handleHandlers.clear()
+    harness.readyResolver = null
+    harness.sessionGeneration = 0
+    const uri = 'gfs://main/abcdef0123456789abcdef0123456789'
+    const protocolUrl = buildGfsResourceDeepLink(uri)
+    const originalArgv = process.argv
+    process.argv = [...originalArgv, protocolUrl]
+
+    try {
+      await import('../main.js')
+      harness.readyResolver?.()
+      await vi.waitFor(() => {
+        expect(harness.registeredLogout).toBeTypeOf('function')
+        expect(harness.windows).toHaveLength(1)
+      })
+      const ownContents = harness.windows[0]?.webContents
+      if (!ownContents) throw new Error('cold startup did not create its main BrowserWindow')
+      const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
+      await rendererReady(ipcEvent(ownContents))
+
+      const list = registeredHandler(harness.handleHandlers, 'gfs:listPendingDeepLinks') as (
+        event: MainEvent
+      ) => { links: Array<{ id: number; uri: string }> }
+      expect(list(ipcEvent(ownContents)).links).toEqual([
+        { id: 1, uri, userNavigationGenerationAtActivation: 0 },
+      ])
+      expect(
+        ownContents.send.mock.calls.filter(([channel]) => channel === 'gfs:deepLink')
+      ).toHaveLength(1)
+    } finally {
+      process.argv = originalArgv
+    }
+  })
+
+  it('retains a cold-start App link until renderer readiness', async () => {
+    vi.resetModules()
+    harness.windows.length = 0
+    harness.appListeners.clear()
+    harness.onHandlers.clear()
+    harness.handleHandlers.clear()
+    harness.readyResolver = null
+    harness.sessionGeneration = 0
+    harness.parseSandboxUiDeepLink.mockImplementation(parseSandboxUiDeepLink)
+    const protocolUrl = buildSandboxUiDeepLink({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+      path: '/tasks/42',
+    })
+    const originalArgv = process.argv
+    process.argv = [...originalArgv, protocolUrl]
+
+    try {
+      await import('../main.js')
+      harness.readyResolver?.()
+      await vi.waitFor(() => {
+        expect(harness.registeredLogout).toBeTypeOf('function')
+        expect(harness.windows).toHaveLength(1)
+      })
+      const ownContents = harness.windows[0]?.webContents
+      if (!ownContents) throw new Error('cold startup did not create its main BrowserWindow')
+      const rendererReady = registeredHandler(harness.handleHandlers, 'app:rendererReady')
+      await rendererReady(ipcEvent(ownContents))
+
+      const list = registeredHandler(harness.handleHandlers, 'sandboxUi:listPendingDeepLinks') as (
+        event: MainEvent
+      ) => {
+        links: Array<{
+          id: number
+          appRef: string
+          path: string
+          userNavigationGenerationAtActivation: number
+        }>
+      }
+      expect(list(ipcEvent(ownContents)).links).toEqual([
+        {
+          id: 1,
+          appRef: 'sandbox-recipes/task-board',
+          path: '/tasks/42',
+          userNavigationGenerationAtActivation: 0,
+        },
+      ])
+      expect(
+        ownContents.send.mock.calls.filter(([channel]) => channel === 'sandboxUi:deepLink')
+      ).toHaveLength(1)
+    } finally {
+      process.argv = originalArgv
+      harness.parseSandboxUiDeepLink.mockReturnValue(null)
+    }
+  })
 })

@@ -7,9 +7,12 @@ const SNIPPET_WORKER_TIMEOUT_ENV_PASSTHROUGH = new Set([
   'CLERUM_MCP_TOOL_TIMEOUT_MS',
   'CLERUM_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS',
 ])
-let nodePermissionArgsSupported: boolean | undefined
-let nodePermissionArgsWarningLogged = false
-let nodePermissionArgsProbeError: string | undefined
+const NODE_PERMISSION_MODEL_CHECK_SCRIPT = 'process.exit(process.permission ? 0 : 3)'
+const NODE_PERMISSION_MODEL_CHECK_TIMEOUT_MS = 10_000
+
+export function resolveSnippetOutputDir(): string {
+  return process.env.CLERUM_WORKFLOW_OUTPUT_DIR || '/output'
+}
 
 export function executeSnippetInWorker(
   request: SnippetExecuteRequest,
@@ -17,7 +20,7 @@ export function executeSnippetInWorker(
 ): Promise<SnippetExecuteResponse> {
   return new Promise(resolve => {
     let settled = false
-    const outputDir = process.env.CLERUM_WORKFLOW_OUTPUT_DIR || '/output'
+    const outputDir = resolveSnippetOutputDir()
     const workerPath = path.join(__dirname, 'snippetWorker.js')
     const child = fork(workerPath, [], {
       execArgv: buildPermissionArgs(outputDir),
@@ -85,42 +88,46 @@ function filterSnippetWorkerEnv(env: NodeJS.ProcessEnv): Record<string, string> 
   )
 }
 
+// Node permission model grants for the forked snippet worker. Each path takes its own
+// flag: a comma-separated value is one literal path.
+// - outputDir is write-only. Other workloads share the output volume and can place
+//   symlinks in it; Node follows a symlink inside a granted directory, so a read grant
+//   would let a snippet read whatever such a link points at.
+// - Node adds the implicit "/*" to a directory grant only when the directory exists at
+//   process start. The runner Pod mounts outputDir when the recipe has an output volume;
+//   without one the path does not exist, the worker still starts, and artifact writes fail.
+// - Modules are read at their realpath. node_modules/@clerum/* are symlinks to
+//   ../packages/*, outside these grants: a runtime import of an @clerum package from
+//   snippetWorker needs its own --allow-fs-read for that package directory.
+// - Node 24 does not gate network access under --permission. Node 25 and later do and
+//   need --allow-net, which Node 24 rejects: a Node major bump of this image must add it.
 export function buildPermissionArgs(outputDir: string): string[] {
-  if (process.env.CLERUM_SNIPPET_DISABLE_NODE_PERMISSIONS === 'true') return []
-  if (!supportsNodePermissionArgs()) {
-    if (!nodePermissionArgsWarningLogged) {
-      nodePermissionArgsWarningLogged = true
-      const reason = nodePermissionArgsProbeError
-        ? `probe failed to launch: ${nodePermissionArgsProbeError}`
-        : 'not supported by this Node runtime'
-      console.warn(
-        `[SnippetRunner] Node permission flags are unavailable (${reason}); continuing with pod, VM, SDK, and NetworkPolicy sandbox controls`
-      )
-    }
-    return []
-  }
   const distRoot = path.resolve(__dirname, '..')
   const nodeModules = path.resolve(__dirname, '..', '..', 'node_modules')
   return [
-    '--experimental-permission',
-    `--allow-fs-read=${distRoot},${nodeModules}`,
+    '--permission',
+    `--allow-fs-read=${distRoot}`,
+    `--allow-fs-read=${nodeModules}`,
     `--allow-fs-write=${outputDir}`,
   ]
 }
 
-function supportsNodePermissionArgs(): boolean {
-  if (nodePermissionArgsSupported !== undefined) return nodePermissionArgsSupported
-  const result = spawnSync(process.execPath, ['--experimental-permission', '--eval', ''], {
-    env: { ...process.env, NODE_OPTIONS: '' },
-    stdio: 'ignore',
-  })
-  nodePermissionArgsProbeError = result.error instanceof Error ? result.error.message : undefined
-  nodePermissionArgsSupported = result.status === 0
-  return nodePermissionArgsSupported
-}
-
-export function resetSnippetPermissionProbeForTests(): void {
-  nodePermissionArgsSupported = undefined
-  nodePermissionArgsWarningLogged = false
-  nodePermissionArgsProbeError = undefined
+export function assertNodePermissionModel(outputDir: string): void {
+  const result = spawnSync(
+    process.execPath,
+    [...buildPermissionArgs(outputDir), '-e', NODE_PERMISSION_MODEL_CHECK_SCRIPT],
+    {
+      env: { ...process.env, NODE_OPTIONS: '' },
+      stdio: ['ignore', 'ignore', 'pipe'],
+      // A hung check must fail with the message below (status, signal, stderr) instead
+      // of leaving the runner alive but never listening.
+      timeout: NODE_PERMISSION_MODEL_CHECK_TIMEOUT_MS,
+    }
+  )
+  if (result.status === 0) return
+  const launchError = result.error ? `, error ${result.error.message}` : ''
+  const stderrLine = result.stderr ? result.stderr.toString('utf8').split('\n', 1)[0] : ''
+  throw new Error(
+    `snippet runner refuses to start: Node permission model check failed (status ${result.status}, signal ${result.signal}${launchError}): ${stderrLine}`
+  )
 }

@@ -4,7 +4,6 @@ import { Pool } from 'pg'
 import { config } from '../src/config.js'
 import { initDb, pool } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
-import { rootLogger } from '../src/observability/logger.js'
 import type { RpcAccessClaims } from '../src/profileTypes.js'
 import { authorizeRpcHostAccess } from '../src/services/access/rpcHostAccessAuthorizer.js'
 import {
@@ -221,7 +220,7 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     )
     if ('error' in controlAdminInvitation) throw new Error(controlAdminInvitation.error)
 
-    // This matches the pre-0131 writer's INSERT columns, which rely on the table default.
+    // This matches the pre-0137 writer's INSERT columns, which rely on the table default.
     const legacyControlAdminInvitation = await testPool.query(
       `INSERT INTO control_admin_invitations (email, invited_by_admin_id, replace_inviter)
        VALUES ($1, $2, false)

@@ -164,7 +164,7 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
         </div>
       ) : null}
       {activeTab === 'catalog' ? (
-        <CatalogAttentionBanner refreshSignal={attentionRefreshKey} />
+        <CatalogAttentionBanner refreshSignal={attentionRefreshKey} models={models} />
       ) : null}
       {activeTab === 'catalog' ? (
         <LlmModelTable

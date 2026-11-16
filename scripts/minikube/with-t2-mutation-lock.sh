@@ -78,7 +78,7 @@ export T2_SKIP_LOCK=true T2_MUTATION_LOCK_WRAPPED=true
 
 cleanup_wrapper() {
   local status=$? cleanup_status=0
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM HUP
   t2_lock_release "${status}" || cleanup_status=$?
   if [[ "${status}" -eq 0 && "${cleanup_status}" -ne 0 ]]; then
     status="${cleanup_status}"
@@ -88,6 +88,12 @@ cleanup_wrapper() {
 trap cleanup_wrapper EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# Bash runs a trapped signal handler only after the foreground command ends,
+# so trapping HUP like INT/TERM keeps this wrapper (and the lease it owns)
+# alive until a child that ignores HUP during its own cleanup has finished.
+# Untrapped, HUP kills the wrapper at once and EXIT releases the lease while
+# that child can still mutate the profile.
+trap 'exit 129' HUP
 
 run_status=0
 if [[ "$WRC_RECOVERY_ONLY" == true ]]; then

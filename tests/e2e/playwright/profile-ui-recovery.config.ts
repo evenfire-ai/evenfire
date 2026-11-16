@@ -3,6 +3,7 @@ import path from 'node:path'
 
 const port = Number(process.env.PROFILE_UI_RECOVERY_PORT || 31873)
 const baseURL = `http://127.0.0.1:${port}`
+const metricsPort = Number(process.env.PROFILE_UI_RECOVERY_METRICS_PORT || 31874)
 
 export default defineConfig({
   testDir: path.join(__dirname, 'profile-ui-recovery'),
@@ -25,6 +26,9 @@ export default defineConfig({
     url: `${baseURL}/invitations/synthetic-reset-proof`,
     reuseExistingServer: false,
     timeout: 120_000,
-    env: { PROFILE_UI_RECOVERY_PORT: String(port) },
+    env: {
+      PROFILE_UI_RECOVERY_PORT: String(port),
+      PROFILE_UI_RECOVERY_METRICS_PORT: String(metricsPort),
+    },
   },
 })

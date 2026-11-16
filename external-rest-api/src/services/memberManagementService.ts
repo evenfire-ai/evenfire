@@ -37,11 +37,6 @@ export type ManagedPendingInvitation = {
   canResend: boolean
 }
 
-export type MemberInvitationAssignment = {
-  teamId: string
-  role: TeamRole
-}
-
 export async function listManageableTeams(sessionToken: string) {
   return controlApiRequest<{ items: ManageableTeam[] }>(
     'GET',
@@ -59,9 +54,13 @@ export async function listManagedMembers(sessionToken: string) {
 }
 
 export async function getManagedMember(userId: string, sessionToken: string) {
-  return controlApiRequest<ManagedMember>('GET', `/external/members/${userId}`, {
-    userSessionToken: sessionToken,
-  })
+  return controlApiRequest<ManagedMember>(
+    'GET',
+    `/external/members/${encodeURIComponent(userId)}`,
+    {
+      userSessionToken: sessionToken,
+    }
+  )
 }
 
 export async function listManagedInvitations(sessionToken: string) {
@@ -76,8 +75,8 @@ export async function listManagedInvitations(sessionToken: string) {
 
 export async function inviteManagedMember(
   email: string,
-  name: string,
-  teams: MemberInvitationAssignment[],
+  name: unknown,
+  teams: unknown,
   sessionToken: string
 ) {
   return controlApiRequest<unknown>('POST', '/external/members/invitations', {
@@ -96,16 +95,24 @@ export async function updateManagedMemberRole(
   role: TeamRole,
   sessionToken: string
 ) {
-  return controlApiRequest<unknown>('PATCH', `/external/members/${userId}/teams/${teamId}/role`, {
-    body: { role },
-    userSessionToken: sessionToken,
-  })
+  return controlApiRequest<unknown>(
+    'PATCH',
+    `/external/members/${encodeURIComponent(userId)}/teams/${encodeURIComponent(teamId)}/role`,
+    {
+      body: { role },
+      userSessionToken: sessionToken,
+    }
+  )
 }
 
 export async function deleteManagedMember(userId: string, teamId: string, sessionToken: string) {
-  return controlApiRequest<unknown>('DELETE', `/external/members/${userId}/teams/${teamId}`, {
-    userSessionToken: sessionToken,
-  })
+  return controlApiRequest<unknown>(
+    'DELETE',
+    `/external/members/${encodeURIComponent(userId)}/teams/${encodeURIComponent(teamId)}`,
+    {
+      userSessionToken: sessionToken,
+    }
+  )
 }
 
 export type ManagedUserRetirementRequest = {
@@ -132,7 +139,7 @@ export async function deleteManagedUser(
 export async function resendManagedInvitation(invitationId: string, sessionToken: string) {
   return controlApiRequest<unknown>(
     'POST',
-    `/external/members/invitations/${invitationId}/resend`,
+    `/external/members/invitations/${encodeURIComponent(invitationId)}/resend`,
     {
       userSessionToken: sessionToken,
     }
@@ -140,7 +147,11 @@ export async function resendManagedInvitation(invitationId: string, sessionToken
 }
 
 export async function cancelManagedInvitation(invitationId: string, sessionToken: string) {
-  return controlApiRequest<unknown>('DELETE', `/external/members/invitations/${invitationId}`, {
-    userSessionToken: sessionToken,
-  })
+  return controlApiRequest<unknown>(
+    'DELETE',
+    `/external/members/invitations/${encodeURIComponent(invitationId)}`,
+    {
+      userSessionToken: sessionToken,
+    }
+  )
 }

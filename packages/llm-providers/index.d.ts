@@ -143,6 +143,15 @@ export interface ProviderDescriptor {
 export declare const PROVIDER_AUTH_MODE: Record<LlmProviderId, ProviderAuthMode>
 export declare const PROVIDER_MODEL_CATALOG_MODE: Record<LlmProviderId, ProviderModelCatalogMode>
 export declare const OAUTH_BROKER_IDS: readonly ['codex-subscription', 'grok-subscription']
+/** Providers whose models come from the public catalog (static catalog mode). */
+export type StaticCatalogProviderId = Exclude<LlmProviderId, (typeof OAUTH_BROKER_IDS)[number]>
+/**
+ * Code default for whether newly discovered catalog models start enabled, per
+ * provider. Oauth-broker providers are absent: their catalogs are dynamic.
+ */
+export declare const PROVIDER_CATALOG_AUTO_ENABLE_DEFAULT: Readonly<
+  Record<StaticCatalogProviderId, boolean>
+>
 export declare function buildProviderMaps(
   ids: readonly string[],
   brokerIds: readonly string[]

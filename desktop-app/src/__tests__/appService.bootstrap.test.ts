@@ -593,7 +593,20 @@ describe('AppService invitation configuration lookup', () => {
     }
 
     service.authClient = {
-      getMe: vi.fn().mockRejectedValue(new ApiError('401 Unauthorized', 401, '')),
+      getMe: vi.fn().mockRejectedValue(
+        new ApiError(
+          '401 Unauthorized: invalid_session',
+          401,
+          JSON.stringify({
+            error: {
+              code: 'invalid_session',
+              message: 'The session is not valid.',
+              correlationId: 'synthetic-correlation',
+              retryable: false,
+            },
+          })
+        )
+      ),
     } as never
     service.tokenStore = {
       getSessionToken: vi.fn().mockResolvedValue('stored-token'),
@@ -617,8 +630,11 @@ describe('AppService invitation configuration lookup', () => {
     )
   })
 
-  it('clears a saved token when startup session restore is forbidden', async () => {
-    const configPath = await createTempConfigPath('clerum-desktop-restore-forbidden')
+  async function restoreWithMeAnswer(
+    configPrefix: string,
+    answer: (apiError: { new (message: string, status: number, bodyText: string): Error }) => Error
+  ) {
+    const configPath = await createTempConfigPath(configPrefix)
     await fs.writeFile(
       configPath,
       JSON.stringify({
@@ -638,6 +654,7 @@ describe('AppService invitation configuration lookup', () => {
       import('../httpClient.js'),
     ])
     const clearSessionToken = vi.fn().mockResolvedValue(undefined)
+    const getMe = vi.fn().mockRejectedValue(answer(ApiError))
     const service = new AppService() as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
       tokenStore: {
@@ -648,9 +665,7 @@ describe('AppService invitation configuration lookup', () => {
       initialize: () => Promise<unknown>
     }
 
-    service.authClient = {
-      getMe: vi.fn().mockRejectedValue(new ApiError('403 Forbidden', 403, '')),
-    } as never
+    service.authClient = { getMe } as never
     service.tokenStore = {
       getSessionToken: vi.fn().mockResolvedValue('stored-token'),
       clearSessionToken,
@@ -664,8 +679,37 @@ describe('AppService invitation configuration lookup', () => {
       me: null,
       sessionGeneration: 0,
     })
+    // The restore asked /me with the saved token.
+    expect(getMe).toHaveBeenCalledTimes(1)
+    expect(getMe).toHaveBeenCalledWith('stored-token')
+    return { clearSessionToken }
+  }
 
-    expect(clearSessionToken).toHaveBeenCalled()
+  it.each([
+    ['a bare 401 (an earlier edge)', 401, '{"error":"Unauthorized"}'],
+    ['a 403', 403, ''],
+    ['a 410', 410, ''],
+  ])(
+    'clears a saved token when /me ends startup session restore with %s',
+    async (_name, status, bodyText) => {
+      const { clearSessionToken } = await restoreWithMeAnswer(
+        'clerum-desktop-restore-ended',
+        ApiError => new ApiError(`${status} ended`, status, bodyText)
+      )
+
+      expect(clearSessionToken).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('keeps a saved token when /me gives startup session restore no verdict', async () => {
+    // A 503 is an outage, not a verdict on the session: this start signs out but
+    // keeps the saved token for the next one.
+    const { clearSessionToken } = await restoreWithMeAnswer(
+      'clerum-desktop-restore-unavailable',
+      ApiError => new ApiError('503 Service Unavailable', 503, '')
+    )
+
+    expect(clearSessionToken).not.toHaveBeenCalled()
   })
 
   it('persists a manually saved runtime environment', async () => {

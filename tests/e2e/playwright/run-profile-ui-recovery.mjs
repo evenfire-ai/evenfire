@@ -5,27 +5,18 @@ import { fileURLToPath } from 'node:url'
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url))
 const config = path.join(scriptDirectory, 'profile-ui-recovery.config.ts')
 const playwrightCli = path.join(scriptDirectory, 'node_modules/@playwright/test/cli.js')
-const requiredResetErrorCodes = [
-  'invalid_password',
-  'invalid_invitation',
-  'forbidden',
-  'expired',
-  'not_pending',
-  'rate_limited',
-  'authority_unavailable',
-  'recovery_outcome_unknown',
-  'internal_error',
-  'unknown_500',
-]
 const requiredTestTitles = [
-  'member accepts the prepared invitation and establishes its own password',
-  'accepted admin desktop invitation uses the token fallback without a prior session',
-  'reset-only producer rejects an ordinary invitation without creating a session',
-  'retries session hydration after committed reset without resubmitting the reset proof',
-  'trimmed-too-short password gets password guidance without dispatching a reset',
-  ...requiredResetErrorCodes.map(
-    errorCode => `real reset route response ${errorCode} reaches Profile UI apiSend`
-  ),
+  'J1 invitation onboarding ends in guided sign-in and a real login',
+  'J2 recovery link clears the logout fence, revokes the prior session, and leads to login',
+  'J3 logout returns to login and the previous session is rejected',
+  'negative routes show an explicit error and never issue a session',
+  'direct access to the authenticated home without login shows the login form',
+]
+const requiredSpecFiles = [
+  'j1-invitation-onboarding.spec.ts',
+  'j2-password-recovery.spec.ts',
+  'j3-logout.spec.ts',
+  'negative-routes.spec.ts',
 ]
 
 function assertRequiredCases(output, phase) {
@@ -48,11 +39,10 @@ const listingOutput = `${listing.stdout || ''}${listing.stderr || ''}`
 process.stdout.write(listingOutput)
 if (listing.error) throw listing.error
 if (listing.status !== 0) process.exit(listing.status || 1)
-if (!listingOutput.includes('reset-session-hydration.spec.ts')) {
-  throw new Error('Profile UI recovery runner did not collect the recovery spec')
-}
-if (!listingOutput.includes('ordinary-invitation-onboarding.spec.ts')) {
-  throw new Error('Profile UI recovery runner did not collect ordinary invitation onboarding')
+for (const spec of requiredSpecFiles) {
+  if (!listingOutput.includes(spec)) {
+    throw new Error(`Profile UI recovery runner did not collect ${spec}`)
+  }
 }
 assertRequiredCases(listingOutput, 'did not collect')
 
@@ -64,10 +54,7 @@ if (run.status !== 0) process.exit(run.status || 1)
 if (!/[1-9]\d* passed/.test(runOutput)) {
   throw new Error('Profile UI recovery runner did not report a passing test')
 }
-for (const requiredSuite of [
-  'reset-session-hydration.spec.ts',
-  'ordinary-invitation-onboarding.spec.ts',
-]) {
+for (const requiredSuite of requiredSpecFiles) {
   if (!runOutput.includes(requiredSuite)) {
     throw new Error(`Profile UI recovery runner did not execute ${requiredSuite}`)
   }

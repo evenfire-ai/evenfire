@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { attentionWireBody } from '../../test/fixtures/llmAttention'
 import {
   createLlmModel,
   deleteLlmModel,
@@ -236,7 +237,7 @@ describe('disable/delete impact gate (?force)', () => {
 })
 
 describe('getAdminAttention', () => {
-  it('GETs the feed and normalizes items, keeping an unknown kind', async () => {
+  it('GETs the feed and normalizes items, dropping an unknown kind', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       jsonResponse({
         items: [
@@ -248,8 +249,7 @@ describe('getAdminAttention', () => {
             hostsAffected: [{ namespace: 'mcp-host', name: 'agent-a', roles: ['primary'] }],
             grantsAffected: [],
           },
-          // A kind the current UI does not know: it must survive normalization
-          // (the banner decides what to render) and never throw here.
+          // A kind the current UI does not know: dropped here, never thrown.
           { kind: 'future_kind', provider: 'openai', model: 'gpt-5' },
           // Malformed item (no model) is dropped rather than tumbling the feed.
           { kind: 'stale_model_referenced', provider: 'openai' },
@@ -260,11 +260,34 @@ describe('getAdminAttention', () => {
     const report = await getAdminAttention()
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toContain('/api/v1/admin/attention')
-    expect(report.items).toHaveLength(2)
-    expect(report.items[0].displayName).toBe('Claude Haiku')
-    expect(report.items[0].hostsAffected[0].name).toBe('agent-a')
-    expect(report.items[1].kind).toBe('future_kind')
+    expect(report.items).toHaveLength(1)
+    const [item] = report.items
+    expect(item.kind).toBe('stale_model_referenced')
+    expect(item.displayName).toBe('Claude Haiku')
+    if (item.kind !== 'stale_model_referenced') throw new Error('unreachable')
+    expect(item.hostsAffected[0].name).toBe('agent-a')
     expect(report.generatedAt).toBe('2026-08-12T00:00:00.000Z')
+  })
+
+  it('parses every kind of the producer-generated body', async () => {
+    const wire = attentionWireBody()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(wire))
+    const report = await getAdminAttention()
+    expect(report.items.map(item => item.kind)).toEqual(wire.items.map(item => item.kind))
+    for (const [index, item] of report.items.entries()) {
+      const raw = wire.items[index]
+      expect(item.provider).toBe(raw.provider)
+      expect(item.model).toBe(raw.model)
+      expect(item.displayName).toBe(raw.displayName)
+      if (item.kind === 'stale_model_referenced') {
+        expect(item.hostsAffected).toEqual(raw.hostsAffected)
+        expect(item.grantsAffected).toEqual(raw.grantsAffected)
+      } else {
+        // The catalog-flagged kinds carry no references on the wire or here.
+        expect(raw).not.toHaveProperty('hostsAffected')
+        expect(item).not.toHaveProperty('hostsAffected')
+      }
+    }
   })
 
   it('returns an empty feed when items is missing/empty', async () => {

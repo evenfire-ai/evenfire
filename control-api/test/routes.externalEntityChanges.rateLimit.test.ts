@@ -21,7 +21,6 @@ vi.mock('../src/middleware/externalClientIdentity.js', () => ({
   createExternalClientRateLimiters: () => [],
 }))
 vi.mock('../src/middleware/externalSessionAuth.js', () => ({
-  isCurrentExternalSession: vi.fn(),
   requireValidExternalSessionToken: (_req: unknown, _res: unknown, next: () => void) => next(),
 }))
 vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
