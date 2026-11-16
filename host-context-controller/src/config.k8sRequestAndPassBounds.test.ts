@@ -264,21 +264,18 @@ describe.each([
     read: (c: Record<string, unknown>) => c.externalEgressDnsResolveTimeoutMs,
     defaultValue: 5_000,
     valid: ['5000', 5_000] as const,
-    spellings: ['5000'],
   },
   {
     name: 'CONTEXT_MAPPER_HEARTBEAT_POLL_MS',
     read: (c: Record<string, unknown>) => c.heartbeatPollMs,
     defaultValue: 10_000,
     valid: ['5000', 5_000] as const,
-    spellings: ['5000'],
   },
   {
     name: 'HCC_HOST_FULL_RECONCILE_CONCURRENCY',
     read: (c: Record<string, unknown>) => c.hostFullReconcileConcurrency,
     defaultValue: 2,
     valid: ['4', 4] as const,
-    spellings: ['4'],
   },
 ])('#1493: plain digits only for $name', ({ name, read, defaultValue, valid }) => {
   it.each([undefined, ''])('means the default for %s', async raw => {
