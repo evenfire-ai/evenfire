@@ -119,11 +119,10 @@ describe('FilePreviewPage Query removal lifecycle', () => {
         collectGarbage()
         await new Promise<void>(resolve => setImmediate(resolve))
       }
-      if (!resourceReference)
-        throw new Error('Expected a weak reference to the retained Preview resource')
-      expect(resourceReference.deref()).toBeUndefined()
-      if (!reference) throw new Error('Expected a weak reference to the production Query')
-      expect(reference.deref()).toBeUndefined()
+      expect(resourceReference).toBeDefined()
+      expect(resourceReference!.deref()).toBeUndefined()
+      expect(reference).toBeDefined()
+      expect(reference!.deref()).toBeUndefined()
     } finally {
       unmount?.()
       client.clear()
