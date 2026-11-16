@@ -446,6 +446,21 @@ describe('the room a generation has under the kept bounds', () => {
     const host = await refusal(store.reserveKept({ callerIdentity: C, sizeBytes: 10 * MIB }))
     expect([host.code, host.neededBytes]).toEqual(['host_quota_exceeded', 5 * MIB])
   })
+
+  it('counts only kept bytes: workspace files and download copies leave it as it was', async () => {
+    const store = await openStore()
+    const rootA = callerDirectory(hostRoot, A)
+    const room = await store.keptRoom({ callerIdentity: A })
+    // A regular file in the caller's workspace, outside its kept folder.
+    syncFs.mkdirSync(rootA, { recursive: true, mode: 0o700 })
+    syncFs.writeFileSync(path.join(rootA, 'workspace.bin'), Buffer.alloc(20 * MIB, 0x61))
+    expect(await store.keptRoom({ callerIdentity: A })).toBe(room)
+    await completedCopy(store, rootA, A, 1, 15 * MIB)
+    expect(await store.keptRoom({ callerIdentity: A })).toBe(room)
+    // Witness: the reading is live, a kept file lowers it by its size.
+    keepFile(A, 'k.md', 5 * MIB)
+    expect(await store.keptRoom({ callerIdentity: A })).toBe(room - 5 * MIB)
+  })
 })
 
 describe('kept files expire after the retention period', () => {

@@ -18,6 +18,7 @@ import { CALLER_OUTPUTS_DIR } from '../../../workspace/callerOutputs'
 import { resolveCallerRootBinding } from '../../../workspace/callerRootBinding'
 import { ScopedWorkspaceProvider } from '../../../workspace/scopedWorkspace'
 import type { NativeToolConfig } from '../../interfaces'
+import { CANNOT_FREE_GENERATION_INSTRUCTION } from '../../orchestration/turnContext'
 import {
   KEPT_STORAGE_FULL_NO_DELETE,
   NativeToolRegistry,
@@ -167,6 +168,8 @@ describe('generation against the kept-files room', () => {
     const refused = await generate(registry(async () => 0))
     expect(refused.content).toContain('user_cannot_free_enough')
     expect(refused.content).not.toContain('deletable_file:')
+    // The refusal closes with the sentence of a generation's room.
+    expect(refused.content.split('\n').at(-1)).toBe(CANNOT_FREE_GENERATION_INSTRUCTION)
   })
 
   it('caps the generation offer and still closes it by generating again', async () => {

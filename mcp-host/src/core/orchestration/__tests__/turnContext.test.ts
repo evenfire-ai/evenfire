@@ -11,6 +11,8 @@ import type { Attachment } from '../../types'
 import {
   ATTACHED_FILES_INSTRUCTION,
   ATTACHMENT_SAVE_INSTRUCTION,
+  CANNOT_FREE_GENERATION_INSTRUCTION,
+  CANNOT_FREE_INSTRUCTION,
   type GfsPreparationFailure,
   PREPARED_GFS_FILES_INSTRUCTION,
   type PreparedGfsFile,
@@ -20,6 +22,7 @@ import {
   attachedFilesForTurnContext,
   attachedImagesForTurnContext,
   buildTurnContextBlock,
+  keepOfferLines,
 } from '../turnContext'
 
 describe('prepared GFS receipts', () => {
@@ -736,5 +739,26 @@ describe('referenced_file lines (issue #666)', () => {
       expect(block).not.toContain('referenced_file')
       expect(block).not.toContain('clerum__gfs_read')
     }
+  })
+})
+
+describe('keepOfferLines', () => {
+  it("says what holds a generation's room when the user cannot free enough", () => {
+    const offer = { neededBytes: 100, deletable: [] }
+    expect(keepOfferLines('host_quota_exceeded', offer, 'generation')).toEqual([
+      'file_not_generated: code=host_quota_exceeded needed_bytes=100 your_deletable_bytes=0',
+      'user_cannot_free_enough',
+      CANNOT_FREE_GENERATION_INSTRUCTION,
+    ])
+    expect(keepOfferLines('host_quota_exceeded', offer, 'attachments')).toEqual([
+      'attachments_not_kept: code=host_quota_exceeded needed_bytes=100 your_deletable_bytes=0',
+      'user_cannot_free_enough',
+      CANNOT_FREE_INSTRUCTION,
+    ])
+    // The attachments sentence keeps its text: their admission counts the
+    // store budget and the free space, where workspace files and downloads count.
+    expect(CANNOT_FREE_INSTRUCTION).toBe(
+      "Deleting this user's kept files cannot free enough room. Tell the user the space is held by files with no record, by files in workspaces (the user's own workspace files can be removed with an approved shell command), by other users of this agent or by downloads in use, and that kept files leave after the retention time."
+    )
   })
 })
