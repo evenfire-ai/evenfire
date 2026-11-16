@@ -5628,13 +5628,18 @@ describe('L1a: the revision the Deployment carries, read after a restart', () =>
     const { reconciler, persisted } = restart(f, server)
     f.appsApi.readNamespacedDeployment.mockRejectedValueOnce(forbidden())
     const before = await reconcileCallFailures('resource_sync', 'not_ready_published')
+    const reads = deploymentReads(f)
+    const services = serviceReads(f)
 
     await reconciler.reconcile(persisted)
 
     expect(await reconcileCallFailures('resource_sync', 'not_ready_published')).toBe(before + 1)
     expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
     expect(reconciler.getStatus(persisted).message).toContain('Resource sync failed')
-    expect(serviceReads(f)).toBe(1)
+    // Witness: the failing read was the carried one; the reconcile stopped
+    // before the Service ensure of this attempt.
+    expect(deploymentReads(f) - reads).toBe(1)
+    expect(serviceReads(f) - services).toBe(0)
   })
 
   it('T-A1.20b a remote server makes one carried read per reconcile, before its ConfigMap', async () => {
