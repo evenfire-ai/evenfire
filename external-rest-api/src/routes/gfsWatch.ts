@@ -5,6 +5,7 @@ import type { ReadableStream as WebReadableStream } from 'node:stream/web'
 import { config } from '../config.js'
 import {
   ControlApiError,
+  ControlApiNonJsonResponseError,
   ControlApiTransportError,
   controlApiRequestWithStatus,
   controlApiStreamRequest,
@@ -66,6 +67,12 @@ function answerControlApiFailure(
   res: Response,
   isTransport: (error: unknown) => boolean
 ): boolean {
+  // A body that is not JSON was not written by the watch route (an HTML error
+  // page of the funnel, a redirect), so its synthetic 502 is not relayed.
+  if (error instanceof ControlApiNonJsonResponseError) {
+    watchReopen(req, res)
+    return true
+  }
   if (error instanceof ControlApiError) {
     if (isPropagated(error.status)) {
       if (!res.headersSent && !clientGone(req, res)) relayControlApiError(error, res)

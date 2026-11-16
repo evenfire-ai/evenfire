@@ -450,8 +450,8 @@ Step fields (`spec.steps[]`, max 100 steps):
 | `dependsOn`              | string[] | --      | Step ids that must complete first. Max 100.                                                                                                                  |
 | `mcpServers`             | string[] | --      | MCP server ids available during this step. Max 20.                                                                                                           |
 | `timeoutSeconds`         | integer  | `300`   | Min 1. Step execution timeout.                                                                                                                               |
-| `maxRetries`             | integer  | `2`     | 1–5. Retry attempts for transient failures (connection reset, timeout).                                                                                      |
-| `backoffSeconds`         | integer  | `30`    | 1–3600. Base delay before retrying a failed step.                                                                                                            |
+| `maxRetries`             | integer  | `2`     | 1–5. Total attempts for the step, including the first; `1` disables retries. Retry n waits `min(backoffSeconds × 2^(n-1), 300)` seconds.                     |
+| `backoffSeconds`         | integer  | `30`    | 1–3600. Base delay of the `maxRetries` formula. Each wait is capped at 300 s, so a value above 300 waits 300 s.                                              |
 | `allowedTools.include`   | string[] | --      | Tool allowlist in `serverName__toolName` form. Only listed tools are presented to the LLM. Max 100.                                                          |
 | `toolChoice`             | string   | --      | `auto` \| `none` \| `required`. LLM tool-choice policy for this step.                                                                                       |
 | `maxIterations`          | integer  | `50`    | 1–100. Maximum LLM tool-calling iterations for this step.                                                                                                    |
