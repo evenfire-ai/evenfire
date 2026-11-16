@@ -183,6 +183,8 @@ environment variables in existing Pods. After changing this origin, apply the
 complete overlay, then restart and wait for both backend Deployments:
 
 ```sh
+KCTX=<your-context>
+kubectl --context "$KCTX" cluster-info
 kubectl --context "$KCTX" -n control-plane rollout restart deploy/control-api
 kubectl --context "$KCTX" -n profiles rollout restart deploy/external-rest-api
 kubectl --context "$KCTX" -n control-plane rollout status deploy/control-api
