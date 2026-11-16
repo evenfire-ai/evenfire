@@ -36,6 +36,11 @@ MOCK_LOG_LINES=0
 MOCK_OLDEST_mcp_host=''
 MOCK_OLDEST_sidecar=''
 MOCK_FAIL_TIMESTAMPS=0
+# BR-14: once the window (--since-time) read has been served, every
+# --timestamps read returns this first line instead (a rotation that lands
+# after the window read began). The state lives in $CALLS because the helper
+# runs in a command substitution, where a shell variable set here is lost.
+MOCK_OLDEST_AFTER_WINDOW_READ=''
 
 # Stub: serves fixture JSON and logs, records every call.
 kctl() {
@@ -61,7 +66,10 @@ kctl() {
             [ "$arg" = "-c" ] && next=1
           done
           oldest_var="MOCK_OLDEST_${container_name//-/_}"
-          if [ -n "${!oldest_var:-}" ]; then
+          if [ -n "$MOCK_OLDEST_AFTER_WINDOW_READ" ] && grep -q -- "--since-time" "$CALLS"; then
+            printf '%s\n' "$MOCK_OLDEST_AFTER_WINDOW_READ"
+            echo "2026-01-01T00:09:00.000000000Z a later line"
+          elif [ -n "${!oldest_var:-}" ]; then
             printf '%s\n' "${!oldest_var}"
             echo "2026-01-01T00:09:00.000000000Z a later line"
           fi
@@ -229,8 +237,9 @@ MOCK_OLDEST_mcp_host='2026-01-01T00:01:00.123456789Z first line after a rotation
 run_case
 MOCK_OLDEST_mcp_host=''
 if [ "$STATUS" != 0 ] && grep -q "container mcp-host starts at 2026-01-01T00:01:00Z, inside the window" "${WORK}/stderr" &&
-   [ -s "${EVIDENCE_DIR}/host-host-a-mcp-host-oldest.log" ] && ! grep -q -- "--since-time" "$CALLS"; then
-  pass "(m) a log file that starts inside the window fails, the oldest line is saved, and no window read happens"
+   [ -s "${EVIDENCE_DIR}/host-host-a-mcp-host-oldest.log" ] && grep -q -- "--since-time" "$CALLS" &&
+   [ "$(grep -n -- "--since-time" "$CALLS" | cut -d: -f1)" -lt "$(grep -n -- "--timestamps" "$CALLS" | cut -d: -f1)" ]; then
+  pass "(m) a log file that starts inside the window fails and the oldest line is saved; the window read came first"
 else
   fail "(m) rotated log: status=${STATUS} calls=$(tr '\n' ';' <"$CALLS") stderr=$(cat "${WORK}/stderr")"
 fi
@@ -240,9 +249,9 @@ MOCK_OLDEST_mcp_host='2025-12-31T22:00:00.5Z boot line'
 run_case
 MOCK_OLDEST_mcp_host=''
 if [ "$STATUS" = 0 ] && [ "$(grep -c -- "--timestamps" "$CALLS")" = 1 ] &&
-   [ "$(grep -n -- "--timestamps" "$CALLS" | cut -d: -f1)" -lt "$(grep -n -- "--since-time" "$CALLS" | cut -d: -f1)" ] &&
+   [ "$(grep -n -- "--since-time" "$CALLS" | cut -d: -f1)" -lt "$(grep -n -- "--timestamps" "$CALLS" | cut -d: -f1)" ] &&
    [ ! -e "${EVIDENCE_DIR}/host-host-a-mcp-host-oldest.log" ]; then
-  pass "(n) a log file older than the window is covered: one --timestamps read, then the window read"
+  pass "(n) a log file older than the window is covered: the window read, then one --timestamps read"
 else
   fail "(n) old log file: status=${STATUS} calls=$(tr '\n' ';' <"$CALLS") stderr=$(cat "${WORK}/stderr")"
 fi
@@ -259,7 +268,7 @@ fi
 MOCK_OLDEST_mcp_host='garbage without a timestamp'
 run_case
 MOCK_OLDEST_mcp_host=''
-if [ "$STATUS" != 0 ] && grep -q "has no parsable timestamp" "${WORK}/stderr" && ! grep -q -- "--since-time" "$CALLS"; then
+if [ "$STATUS" != 0 ] && grep -q "has no parsable timestamp" "${WORK}/stderr" && grep -q -- "--since-time" "$CALLS"; then
   pass "(p) an unparsable first timestamp fails"
 else
   fail "(p) unparsable timestamp: status=${STATUS} stderr=$(cat "${WORK}/stderr")"
@@ -270,7 +279,7 @@ MOCK_FAIL_TIMESTAMPS=1
 run_case
 MOCK_FAIL_TIMESTAMPS=0
 if [ "$STATUS" != 0 ] && grep -q "could not read the log of container mcp-host" "${WORK}/stderr" &&
-   grep -q -- "--timestamps" "$CALLS" && ! grep -q -- "--since-time" "$CALLS"; then
+   grep -q -- "--timestamps" "$CALLS" && grep -q -- "--since-time" "$CALLS"; then
   pass "(q) a failed per-container read fails"
 else
   fail "(q) failed per-container read: status=${STATUS} stderr=$(cat "${WORK}/stderr")"
@@ -290,8 +299,25 @@ else
   fail "(r) second container rotated: status=${STATUS} calls=$(tr '\n' ';' <"$CALLS") stderr=$(cat "${WORK}/stderr")"
 fi
 
-if [ "$TOTAL" -lt 19 ]; then
-  echo "FAIL: expected at least 19 checks, ran ${TOTAL}"
+# (s) BR-14: the log file rotates once the window read has begun. A check run
+# before the window read sees the old file and passes; the check must run after
+# it, so the rotation is seen and the window fails.
+MOCK_PODS="{\"items\":[$(pod host-a-1 "$BEFORE" 0)]}"
+MOCK_OLDEST_mcp_host='2025-12-31T22:00:00Z boot line'
+MOCK_OLDEST_AFTER_WINDOW_READ='2026-01-01T00:03:00Z first line after a rotation'
+run_case
+MOCK_OLDEST_mcp_host=''
+MOCK_OLDEST_AFTER_WINDOW_READ=''
+if [ "$STATUS" != 0 ] && grep -q "log rotation" "${WORK}/stderr" &&
+   grep -q -- "--since-time" "$CALLS" && [ "$(grep -c -- "--timestamps" "$CALLS")" -ge 1 ] &&
+   [ -s "${EVIDENCE_DIR}/host-host-a-mcp-host-oldest.log" ]; then
+  pass "(s) a rotation after the window read began fails the window: the oldest-line check runs after the read"
+else
+  fail "(s) rotation during the window read: status=${STATUS} calls=$(tr '\n' ';' <"$CALLS") stderr=$(cat "${WORK}/stderr")"
+fi
+
+if [ "$TOTAL" -lt 20 ]; then
+  echo "FAIL: expected at least 20 checks, ran ${TOTAL}"
   exit 1
 fi
 if [ "$FAIL" != 0 ]; then

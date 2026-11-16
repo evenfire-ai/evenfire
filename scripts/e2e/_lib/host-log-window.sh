@@ -30,12 +30,15 @@
 #
 #   A process that ran across the window is not enough: `kubectl logs` serves
 #   the container's current log file, so a kubelet rotation inside the window
-#   hides the earlier lines (#1489). Between the two fingerprints, each
-#   container's current log is read with --timestamps, and the window fails
-#   when its first line is later than the window start (the oldest-line file is
-#   kept in EVIDENCE_DIR). A container that has logged nothing cannot be
-#   missing a line. Residual: a rotation followed by silence cannot be told
-#   from a container that never logged.
+#   hides the earlier lines (#1489). Between the two fingerprints the window
+#   is read first; then each container's current log is read with
+#   --timestamps, and the window fails when that log's first line is later
+#   than the window start (the oldest-line file is kept in EVIDENCE_DIR). A
+#   rotation before or during the window read is therefore caught. A rotation
+#   after the window read and before this check also fails the window,
+#   although the read was complete. A container that has logged nothing
+#   cannot be missing a line. Residual: a rotation followed by silence cannot
+#   be told from a container that never logged.
 #
 # Contract (globals owned by the sourcing gate):
 #   HOST_NS       namespace of the Host runtimes
@@ -142,7 +145,13 @@ read_host_log_window() {
     echo "host-log-window: could not fingerprint the pod of ${host}" >&2
     return 1
   }
-  # #1489: each container's current log file must reach back to the window start.
+  if ! kctl logs "pod/${pod}" -n "$HOST_NS" --all-containers=true --since-time="$since_iso" >"$out"; then
+    echo "host-log-window: could not read the log of ${pod} (${host})" >&2
+    return 1
+  fi
+  # #1489: each container's current log file must reach back to the window
+  # start. Checked after the window read, so a rotation before or during that
+  # read leaves a first line later than the window start.
   if ! container_names="$(jq -er '.[].name' <<<"$containers_json")"; then
     echo "host-log-window: could not list the containers of ${pod}" >&2
     return 1
@@ -175,10 +184,6 @@ read_host_log_window() {
     rm -f "$oldest_file"
   done <<<"$container_names"
 
-  if ! kctl logs "pod/${pod}" -n "$HOST_NS" --all-containers=true --since-time="$since_iso" >"$out"; then
-    echo "host-log-window: could not read the log of ${pod} (${host})" >&2
-    return 1
-  fi
   if ! pods_after="$(kctl get pods -n "$HOST_NS" -l "$selector" -o json)" ||
       ! fingerprint_after="$(host_pod_fingerprint "$pods_after")"; then
     echo "host-log-window: could not re-read the pod of ${host} after its log" >&2
