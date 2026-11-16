@@ -173,6 +173,13 @@ The root Kustomization projects the final value into External REST's
 `desktop-profile-ui-config` after overlay patches are applied. Do not configure
 a second Profile UI URL in the `profiles` namespace.
 
+Keep `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` in `control-api-config` and let
+the root Kustomization project it into `desktop-profile-ui-config`. Both
+Deployments read these ConfigMap values as environment variables. If an overlay
+replaces either ConfigMap, preserve the keys referenced by the base Deployment
+and keep the canonical value in `control-api-config`; missing keys prevent the
+affected service from starting.
+
 **Images.** Base refers to images by local `clerum/<name>` names. Add the
 [`deploy/components/ghcr-images`](../../deploy/components/ghcr-images/kustomization.yaml)
 component, which rewrites them to `ghcr.io/evenfire-ai/<name>` at the release
