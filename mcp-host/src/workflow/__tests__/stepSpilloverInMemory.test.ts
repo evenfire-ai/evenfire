@@ -280,6 +280,43 @@ describe('WorkflowService step spillover — results are kept in memory', () => 
     expect(overWrapped!.line_count).toBe(stepSummary.line_count + 2)
   })
 
+  it('does not use the first-party spillover store during a step that stores a result', async () => {
+    const persistSpy = vi.spyOn(SpilloverStorage.prototype, 'maybePersist')
+    const loadSpy = vi.spyOn(SpilloverStorage.prototype, 'load')
+    const llm = provider([{ tool: { name: 'srv__read', arguments: {} } }, { tool: READ }, {}])
+
+    const res = await service(llm, client(sdkResult('L'.repeat(300 * 1024)))).executeStep({
+      stepId: 'review',
+      instruction: 'go',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    // Witness: the step stored the result and read it back.
+    expect(llm.prompts[1]!.some(m => m.includes(`"spillover_ref":"${REF}"`))).toBe(true)
+    expect(res.toolsCalled?.[1]?.result).toEqual({ success: true, ref: REF, bytes: 10 })
+    expect(persistSpy).not.toHaveBeenCalled()
+    expect(loadSpy).not.toHaveBeenCalled()
+
+    // Witness: the spies do observe a first-party store at work.
+    const firstParty = new SpilloverStorage({
+      workspacePath: outputDir,
+      thresholdBytes: THRESHOLD,
+      ttlMs: 0,
+      gcIntervalMs: 0,
+    })
+    await firstParty.maybePersist({
+      taskId: 'review',
+      toolCallId: 'c1',
+      toolName: 't',
+      content: 'z'.repeat(THRESHOLD),
+      isError: false,
+    })
+    await firstParty.load('spillover://review/c1.json')
+    expect(persistSpy).toHaveBeenCalledTimes(1)
+    expect(loadSpy).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     [
       'completes',
