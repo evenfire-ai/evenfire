@@ -88,14 +88,23 @@ parent of the homes.
    and the services restart. During the migration, old binaries can continue
    serving; enrollment can create pending rows, but the old Control API does
    not provision homes. The governed-root guard is active after migration.
-3. When the new Control API starts, it creates `/Users` as needed under the
+3. A database that ran an earlier head of this branch (a branch Minikube
+   profile or a local database) recorded this migration as
+   `0130_gfs_user_homes` or `0131_gfs_user_homes`. On it the migration job
+   fails with `relation "gfs_user_homes" already exists`. Delete and recreate
+   that database; for a branch profile:
+   `CONFIRM_DELETE=<profile> make -f scripts/minikube-profiles/branch.mk branch-profile-delete`.
+   It is not migrated in place because it also holds objects of migrations this
+   branch later removed. Shared clusters are not affected: their images are
+   built by the build-publish workflow, which has never run on this branch.
+4. When the new Control API starts, it creates `/Users` as needed under the
    drive structure lock, then enrolls and provisions homes. Do not add
    `/Users` to a GFS layout. Backfill and provisioning run automatically; a
    60-second tick is a scheduling interval, not a completion deadline. Each
    tick enrolls up to 200 existing users and provisions up to 50 pending homes
    (`control-api/src/services/gfsUserHomeReconciler.ts`), so 10,000 users take
    about 50 minutes to enroll and about 3.3 hours to provision.
-4. In each cluster, read the home inventory API (below) and watch the overall
+5. In each cluster, read the home inventory API (below) and watch the overall
    `pending` count fall to zero. Review all `conflict` entries separately.
    Production follows dev through the existing promotion.
 
