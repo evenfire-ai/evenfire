@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { ManagedDeploymentInformer } from './informers/deploymentInformer'
 import { SecretInformer } from './informers/secretInformer'
 import {
   MCPSERVER_ROLLOUT_REREAD_OUTCOMES,
@@ -8,6 +9,7 @@ import {
   NETWORKPOLICY_PASS_OVERRUN_PHASES,
   NETWORKPOLICY_PASS_OVERRUN_SEVERITIES,
   SECRET_ACCESS_PROBE_OUTCOMES,
+  SECRET_INFORMER_EVENT_TYPES,
   SECRET_INFORMER_LIST_OUTCOMES,
   countMcpServerRolloutReread,
   countMcpServerVerdictCallFailure,
@@ -148,6 +150,27 @@ describe('PR-2 labelled counters exposed at zero (zach88 R1-L12 class)', () => {
     expect(seriesFor(await series(LISTS), 't13-resume')).toHaveLength(3)
     expect(seriesFor(await series(LISTS), 't13-replay')).toEqual([])
     expect(seriesFor(await series(RESUMES), 't13-replay')).toEqual([])
+  })
+
+  it('T1.5 an informer that is built and never started exposes its running gauge and event series at 0', async () => {
+    const EVENTS = 'clerum_hcc_secret_informer_events_total'
+    const DEPLOYMENT_RUNNING = 'clerum_hcc_deployment_informer_running'
+    expect(seriesFor(await series(RUNNING), 't15')).toEqual([])
+    expect(seriesFor(await series(EVENTS), 't15')).toEqual([])
+    expect(seriesFor(await series(DEPLOYMENT_RUNNING), 't15')).toEqual([])
+
+    informer('t15', 'replay')
+    new ManagedDeploymentInformer({} as k8s.KubeConfig, 't15', () => undefined, vi.fn(), {
+      watch: { watch: vi.fn() },
+    })
+
+    expect((await series(RUNNING)).get('namespace=t15')).toBe(0)
+    const events = await series(EVENTS)
+    for (const type of SECRET_INFORMER_EVENT_TYPES) {
+      expect(events.get(`namespace=t15,type=${type}`)).toBe(0)
+    }
+    expect(seriesFor(events, 't15')).toHaveLength(3)
+    expect((await series(DEPLOYMENT_RUNNING)).get('namespace=t15')).toBe(0)
   })
 
   it('T1.4 one increment through each helper moves exactly its own series by 1', async () => {

@@ -97,6 +97,9 @@ export class ManagedDeploymentInformer {
     deps?: ManagedDeploymentInformerDeps
   ) {
     this.watch = deps?.watch ?? new k8s.Watch(kc)
+    // Exposed at 0 before the first connect: start() is not awaited, so a
+    // watch that never resolves would otherwise leave the series absent.
+    deploymentInformerRunning.set({ namespace }, 0)
   }
 
   /** Resolves true once the watch is established. Reconnects continue in the background. */
