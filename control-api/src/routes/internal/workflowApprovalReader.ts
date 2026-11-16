@@ -298,9 +298,10 @@ const TEAMS_SERVICE_HOST = 'smba.trafficmanager.net'
  * The base URL for Bot Connector calls, rebuilt from a Teams `serviceUrl`, or
  * null when the value is not an accepted one. Accepted: https, host exactly
  * TEAMS_SERVICE_HOST, no credentials, no port other than 443, no `?` or `#`,
- * and path segments that percent-encoding leaves unchanged. The result is
- * built from the constant host and the encoded segments, never from the input
- * string, and has no trailing slash.
+ * and path segments that percent-encoding leaves unchanged. The scheme and
+ * host of the result are the constant; its path segments are the caller's,
+ * taken after the URL parser has resolved `.` and `..`, so the caller still
+ * chooses the path prefix under that host. The result has no trailing slash.
  */
 function teamsServiceBase(serviceUrl: string): string | null {
   // A bare `?` or `#` leaves `url.search` and `url.hash` empty.
