@@ -6407,21 +6407,38 @@ describe('FilesPage', () => {
     })
   })
 
-  it('keeps a session-lost drop persistently visible after the probe revoked the session (A11)', async () => {
-    // The probe 401 refuses the drop AND revokes the session; the revocation
-    // invalidates the gesture's ownership before the drop continuation
-    // resumes. The refused drop must still explain itself — as a persistent
-    // banner, not a one-shot toast.
-    const pushToast = vi.fn()
+  const SESSION_ENDED_SENTENCE = 'Your session ended. Sign in again to continue moving files.'
+
+  /**
+   * Drops a file on a folder whose permission probe answers 401, and lets the
+   * controller report the revoked session before the drop continuation resumes:
+   * the order the real controller produces, since the probe's 401 is what revokes
+   * the session. The page ends revoked with the drop's refusal painted.
+   * `showController` re-renders the same page instance with another controller
+   * state.
+   */
+  async function renderSessionLostDropAfterRevocation(pushToast: (...args: unknown[]) => void) {
     const moveResource = vi.fn(async () => ({}))
     const affordances = vi.fn(async () => {
       throw new Error('401 Unauthorized httpStatus=401')
     })
+    let releaseSessionRead!: () => void
+    const sessionReadGate = new Promise<void>(resolve => {
+      releaseSessionRead = resolve
+    })
+    let sessionReads = 0
+    // The drop's first session read parks, so the revocation lands while the
+    // drop continuation is in flight.
+    const getSessionGeneration = vi.fn(async () => {
+      sessionReads += 1
+      if (sessionReads === 1) await sessionReadGate
+      return 0
+    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { affordances } },
+      value: { gfs: { affordances }, auth: { getSessionGeneration } },
     })
-    hookMock.useGfsBrowserController.mockReturnValue({
+    const controller = {
       ...baseController(),
       current: {
         resourceId: 'folder-1',
@@ -6457,8 +6474,19 @@ describe('FilesPage', () => {
         },
       ],
       moveResource,
-    })
-    renderFilesPage(pushToast)
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controller)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const page = () => (
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+    const view = render(page())
+    const showController = (next: Record<string, unknown>) => {
+      hookMock.useGfsBrowserController.mockReturnValue(next)
+      view.rerender(page())
+    }
 
     const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
     const destinationRow = screen.getByRole('button', { name: 'Open Private' })
@@ -6474,26 +6502,89 @@ describe('FilesPage', () => {
     fireEvent.dragEnter(destinationRow, { dataTransfer })
     await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
     fireEvent.drop(destinationRow, { dataTransfer })
-
-    // Both refusal surfaces carry it: the persistent banner AND the SR live
-    // region (the spoken refusal). A one-shot toast was NOT used.
-    const sessionLostSurfaces = await screen.findAllByText(
-      'Your session ended. Sign in again to continue moving files.'
+    await waitFor(() => expect(getSessionGeneration).toHaveBeenCalledTimes(1))
+    showController({ ...controller, accessState: 'revoked' })
+    await act(async () => {
+      releaseSessionRead()
+    })
+    // The drop continuation finished: its refusal is spoken in the polite region.
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByText(SESSION_ENDED_SENTENCE)
+          .some(element => element.closest('[aria-live="polite"]') !== null)
+      ).toBe(true)
     )
+    return { controller, moveResource, showController }
+  }
+
+  const sessionEndedAlertsIn = (container: HTMLElement) =>
+    within(container)
+      .queryAllByRole('alert')
+      .filter(alert => alert.textContent?.includes(SESSION_ENDED_SENTENCE))
+
+  it('keeps a session-lost drop persistently visible after the probe revoked the session (A11)', async () => {
+    // The probe 401 refuses the drop AND revokes the session; the revocation
+    // invalidates the gesture's ownership before the drop continuation
+    // resumes. The refused drop must still explain itself — persistently, not
+    // as a one-shot toast — and say it once: the revoked surface carries the
+    // sentence, so the drop's own banner does not repeat it.
+    const pushToast = vi.fn()
+    const { moveResource } = await renderSessionLostDropAfterRevocation(pushToast)
+
+    const sessionLostSurfaces = screen.getAllByText(SESSION_ENDED_SENTENCE)
     expect(sessionLostSurfaces.some(element => element.closest('.status-banner') !== null)).toBe(
       true
     )
-    // The persistent banner is announced: an alert inside the browser region.
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
-    expect(
-      within(browser)
-        .getAllByRole('alert')
-        .some(alert =>
-          alert.textContent?.includes('Your session ended. Sign in again to continue moving files.')
-        )
-    ).toBe(true)
+    // Witness: the revoked surface is on screen.
+    expect(within(browser).getByText('File access is not authorized')).toBeTruthy()
+    // Exactly one alert inside the browser region announces the sentence, and
+    // it is the revoked surface's (the state that follows it).
+    const alerts = sessionEndedAlertsIn(browser)
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]!.nextElementSibling?.textContent).toContain('File access is not authorized')
     expect(pushToast).not.toHaveBeenCalled()
     expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('announces nothing when file access returns after a session-lost drop', async () => {
+    const pushToast = vi.fn()
+    const { controller, showController } = await renderSessionLostDropAfterRevocation(pushToast)
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    // Witness: the revoked surface is on screen before access returns.
+    expect(within(browser).getByText('File access is not authorized')).toBeTruthy()
+
+    const added: Node[] = []
+    const observer = new MutationObserver(records => {
+      for (const record of records) added.push(...record.addedNodes)
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    fireEvent.click(within(browser).getByRole('button', { name: 'Retry file access' }))
+    expect(controller.retryAccess).toHaveBeenCalledTimes(1)
+    // The retry succeeds: the controller reports the session active again.
+    showController({ ...controller, accessState: 'active' })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    for (const record of observer.takeRecords()) added.push(...record.addedNodes)
+    observer.disconnect()
+
+    // Witness: the revoked surface is gone and the listing came back, so the
+    // observer saw the re-render's insertions.
+    expect(within(browser).queryByText('File access is not authorized')).toBeNull()
+    expect(
+      added.some(node => node instanceof Element && node.textContent?.includes('notes.txt'))
+    ).toBe(true)
+    const insertedSessionEndedAlerts = added
+      .filter((node): node is Element => node instanceof Element)
+      .flatMap(element => [element, ...element.querySelectorAll('[role="alert"]')])
+      .filter(
+        element =>
+          element.getAttribute('role') === 'alert' &&
+          element.textContent?.includes(SESSION_ENDED_SENTENCE)
+      )
+    expect(insertedSessionEndedAlerts).toEqual([])
   })
 
   it('renders the session-ended sentence on the revoked surface with no gesture at all (A11)', async () => {

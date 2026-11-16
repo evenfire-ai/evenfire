@@ -3524,9 +3524,14 @@ export function FilesPage({
             </div>
           ) : null}
 
-          {dropSessionLost ? (
-            // Persistent (A11): the refusal outlives the dead gesture and the
-            // revoked surface below — it is not a one-shot toast.
+          {dropSessionLost && !accessRevoked && previousDragScopeRef.current === liveDragScope ? (
+            // Persistent, not a one-shot toast: explains a drop refused because
+            // the session ended while the revoked surface is not on screen. Once
+            // it is, that surface carries the sentence and this banner would
+            // announce it a second time. The scope check keeps it out of the
+            // render in which access returns: the scope effect has not cleared
+            // the flag yet, and inserting the alert there would announce the
+            // ended session right after access came back.
             <div className="da-gfs-alert" role="alert">
               <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
             </div>
