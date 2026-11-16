@@ -441,11 +441,12 @@ marker_bindings=(
   "$LOG_HELPER" 'Listing all Hosts in namespace '
   "$HCC_K8S_CLIENT" 'Listing all Hosts in namespace ${config.hostNamespace}'
 
-  # The Completed line is formatted over three lines; its opening line exists
-  # only while the line carries a field object, and G-K1 in k8sClient.test.ts
-  # pins the two fields themselves.
+  # The Completed statement is formatted over four lines; its message text is
+  # bound by the readiness pairs below, and this pair pins the generation field
+  # line the helper reads off it (indented as formatted; the other
+  # `ccLifecycleGeneration,` line in k8sClient.ts is indented less).
   "$LOG_HELPER" '/"msg":"\[K8s\] Completed Host reconciliation after /'
-  "$HCC_K8S_CLIENT" 'hccLogger.info(`[K8s] Completed Host reconciliation after ${reason}`, {'
+  "$HCC_K8S_CLIENT" '          ccLifecycleGeneration,'
 
   "$LOG_HELPER" '"ccLifecycleGeneration":'
   "$HCC_K8S_CLIENT" 'ccLifecycleGeneration: lifecycleGeneration'
@@ -1625,6 +1626,17 @@ assert_fleet_pass_count() {
 assert_fleet_pass_count 2 "two cycles that each applied their recovered generation count 2"
 fx_completed 'Periodic resync' full >>"$MOCK_LOG_FILE"
 assert_fleet_pass_count 2 "a Periodic resync completion is not counted"
+{
+  fx_ended
+  fx_listed
+  fx_recovered 2 2
+  fx_reconciling '6 Host(s) after Periodic resync'
+  fx_completed 'Periodic resync' full
+  fx_reconciling '6 Host(s) for lifecycle after CommunicationChannel recovery'
+  fx_completed 'CommunicationChannel recovery' lifecycle 1
+  context_recovery_cycle 3
+} >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 1 "a cycle whose completions carry no generation or an older one counts 0"
 
 {
   context_recovery_cycle 1 2
