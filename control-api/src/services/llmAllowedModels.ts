@@ -404,6 +404,21 @@ const MAX_ATTENTION_CONSUMER_KEY_LENGTH = 400
 // int4 upper bound: the episode columns are `integer`.
 const MAX_EPISODE = 2_147_483_647
 
+// The three shapes `explicitConsumerKeys` (llmModelConsumers.ts) emits: a
+// Host or WorkflowRecipe as `<namespace>/<name>` from its K8s metadata
+// (namespace is a DNS label, name a DNS subdomain) and a grant by its
+// `plugin_workload_sdk_grants.id`, a UUID Postgres renders lowercase. A
+// subdomain caps only its total length (253), not each dot-separated part:
+// the apiserver accepts a 64+ character name with no dot, and refusing its key
+// would leave that item impossible to acknowledge. The keys are stored and
+// audited as sent, so anything else is refused.
+const DNS_LABEL = '[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?'
+const DNS_SUBDOMAIN = '[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?'
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const ATTENTION_CONSUMER_KEY_RE = new RegExp(
+  `^(?:(?:host|recipe):${DNS_LABEL}/${DNS_SUBDOMAIN}|grant:${UUID})$`
+)
+
 const attentionPairShape = {
   provider: z.string().trim().min(1).max(200),
   model: z.string().trim().min(1).max(400),
@@ -415,7 +430,12 @@ export const attentionAckSchema = z
     ...attentionPairShape,
     episode: z.number().int().min(0).max(MAX_EPISODE),
     consumerKeys: z
-      .array(z.string().min(1).max(MAX_ATTENTION_CONSUMER_KEY_LENGTH))
+      .array(
+        z
+          .string()
+          .max(MAX_ATTENTION_CONSUMER_KEY_LENGTH)
+          .regex(ATTENTION_CONSUMER_KEY_RE, 'not a host:, grant: or recipe: consumer key')
+      )
       .max(MAX_ATTENTION_CONSUMER_KEYS),
   })
   .strict()

@@ -869,6 +869,73 @@ describeRealPostgres('attention feed, acknowledgement and consumers (real Postgr
       expect(audit.rows).toEqual([{ action: 'attention_ack' }])
     })
 
+    it('S-39c: only consumer keys of a shape the feed produces are accepted', async () => {
+      const s = pick(0)
+      await sync(FULL)
+      // The apiserver accepts a name with a 64+ character segment (written by
+      // kubectl or GitOps; the admin route caps names at 63).
+      const longName = `uses-s-${'l'.repeat(70)}`
+      await subsetHost('uses-s', s)
+      await gateway.createResource(
+        'hosts',
+        {
+          metadata: { name: longName },
+          spec: {
+            model: { provider: PROVIDER, name: s },
+            allowedModels: [{ provider: PROVIDER, model: s }],
+          },
+        },
+        hostNs
+      )
+      await agentRecipe('uses-s-recipe', s)
+      const grantId = await promptTargetGrant('uses-s-grant', s)
+      await sync(catalogWith({ gone: [s] }))
+      const item = await itemOf(STALE_KIND, s)
+      expect(item.consumerKeys).toEqual(
+        [
+          hostKey('uses-s'),
+          hostKey(longName),
+          `grant:${grantId}`,
+          `recipe:${recipeNs}/uses-s-recipe`,
+        ].sort()
+      )
+
+      for (const key of [
+        'foo',
+        'host:',
+        'host:ns',
+        `host:${hostNs}/`,
+        `host:${hostNs}/Upper`,
+        'grant:not-a-uuid',
+        `grant:${grantId.toUpperCase()}`,
+        `recipe:/${s}`,
+        `user:${hostNs}/uses-s`,
+        `${hostKey('uses-s')} `,
+      ]) {
+        const res = await request(app())
+          .post(ACK_PATH)
+          .set('Cookie', COOKIE)
+          .send({
+            provider: item.provider,
+            model: item.model,
+            kind: item.kind,
+            episode: item.episode,
+            consumerKeys: [...item.consumerKeys, key],
+          })
+        expect(res.status, key).toBe(400)
+      }
+      expect(
+        (
+          await corePool.query(
+            `SELECT 1 FROM llm_allowed_models_audit WHERE action = 'attention_ack'`
+          )
+        ).rows
+      ).toEqual([])
+
+      await ack(item).expect(200)
+      expect(await itemsFor(s)).toEqual([])
+    })
+
     it('the ack routes require the admin session', async () => {
       await request(app()).post(ACK_PATH).send({}).expect(401)
       await request(app()).delete(ACK_PATH).send({}).expect(401)
