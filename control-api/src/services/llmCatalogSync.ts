@@ -113,6 +113,7 @@ import { safeErrorLogMessage } from '../http/errorHandler.js'
 import { rootLogger } from '../observability/logger.js'
 import {
   llmAllowlistConfigMapWriteFailuresTotal,
+  llmCatalogPruneRunRecordFailuresTotal,
   llmCatalogPruneRunsTotal,
 } from '../observability/metrics.js'
 import { MAX_CONTEXT_WINDOW_TOKENS, writeCatalogSyncAudit } from './llmAllowedModels.js'
@@ -1158,6 +1159,7 @@ async function recordEscapedPrune(
   try {
     client = await connector.connect()
   } catch (err) {
+    llmCatalogPruneRunRecordFailuresTotal.inc()
     log.error(
       { event: 'llm_catalog_prune_run_record_failed', err: safeErrorLogMessage(err) },
       'llm catalog prune: could not record the escaped prune in llm_catalog_prune_runs'

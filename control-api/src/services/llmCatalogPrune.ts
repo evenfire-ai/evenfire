@@ -50,7 +50,11 @@ import {
 } from '../db.js'
 import { safeErrorLogMessage } from '../http/errorHandler.js'
 import { rootLogger } from '../observability/logger.js'
-import { llmCatalogPruneRunsTotal, llmCatalogPrunedModelsTotal } from '../observability/metrics.js'
+import {
+  llmCatalogPruneRunRecordFailuresTotal,
+  llmCatalogPruneRunsTotal,
+  llmCatalogPrunedModelsTotal,
+} from '../observability/metrics.js'
 import { CATALOG_PROVIDERS, writeCatalogSyncAudit } from './llmAllowedModels.js'
 import {
   type ConsumerGateway,
@@ -232,6 +236,7 @@ export async function recordCatalogPruneRun(
       ]
     )
   } catch (err) {
+    llmCatalogPruneRunRecordFailuresTotal.inc()
     log.error(
       { event: 'llm_catalog_prune_run_record_failed', err: safeErrorLogMessage(err) },
       'llm catalog prune: could not record the run in llm_catalog_prune_runs'

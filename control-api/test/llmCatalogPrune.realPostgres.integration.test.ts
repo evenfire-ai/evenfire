@@ -1098,6 +1098,44 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       ])
     })
 
+    // Read by the scraped name, as an alert would.
+    const recordFailures = async () => {
+      const { registry } = await import('../src/observability/metrics.js')
+      const metric = registry.getSingleMetric('clerum_llm_catalog_prune_run_record_failures_total')
+      return ((await metric?.get())?.values[0]?.value as number | undefined) ?? 0
+    }
+
+    it('a prune run whose INSERT is rejected is counted as a record failure and does not throw', async () => {
+      const { recordCatalogPruneRun } = await import('../src/services/llmCatalogPrune.js')
+      const rejecting = new Proxy(corePool, {
+        get(target, prop) {
+          if (prop === 'query') {
+            return () => Promise.reject(new Error('permission denied for table'))
+          }
+          const value = Reflect.get(target, prop, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+      const before = await recordFailures()
+      await expect(
+        recordCatalogPruneRun(
+          rejecting,
+          { decidable: true, syncRanAt: new Date().toISOString() },
+          {
+            skipped: false,
+            candidates: 0,
+            prefiltered: 0,
+            examinedLocked: 0,
+            pruned: 0,
+            aborted: false,
+            abortReason: null,
+          }
+        )
+      ).resolves.toBeUndefined()
+      expect((await recordFailures()) - before).toBe(1)
+      expect(await pruneRuns()).toEqual([])
+    })
+
     it.each([
       ['its INSERT is rejected', 'insert'],
       ['no connection is available', 'connect'],
@@ -1141,6 +1179,7 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
             })
           },
         }
+        const before = await recordFailures()
         const res = await sync(gone(m), {
           connector: connector as unknown as Pool,
           wrapPrune: () => async () => {
@@ -1150,6 +1189,7 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
         })
         expect(res).toMatchObject({ pruneAborted: true, pruned: 0 })
         expect(attempts).toBe(1)
+        expect((await recordFailures()) - before).toBe(1)
         expect((await row(m)).enabled).toBe(true)
         expect(await pruneRuns()).toEqual([])
       }
