@@ -498,14 +498,31 @@ describe('GFS watch through external-rest-api', () => {
       })
     }
 
-    it('PUT: a redirect with a non-JSON body is the client’s 502, never a 500 or a 200', async () => {
-      scenario.raw = {
-        status: 302,
-        headers: { location: `${urlOf(upstream)}/redirect-target`, 'content-type': 'text/plain' },
-        body: 'Found. Redirecting to /redirect-target',
+    it('PUT: any answer with a non-JSON body is 503 watch_reopen, never a 502, 500 or 200', async () => {
+      const html = { 'content-type': 'text/html' }
+      const nonJson: Array<[string, RawUpstream]> = [
+        [
+          '302 with a text body',
+          {
+            status: 302,
+            headers: {
+              location: `${urlOf(upstream)}/redirect-target`,
+              'content-type': 'text/plain',
+            },
+            body: 'Found. Redirecting to /redirect-target',
+          },
+        ],
+        ['413 HTML page', { status: 413, headers: html, body: '<html>Too Large</html>' }],
+        ['404 HTML page', { status: 404, headers: html, body: '<html>Not Found</html>' }],
+        ['503 HTML page', { status: 503, headers: html, body: '<html>Unavailable</html>' }],
+        ['200 text', { status: 200, headers: { 'content-type': 'text/plain' }, body: 'ok' }],
+      ]
+      for (const [name, raw] of nonJson) {
+        scenario.raw = raw
+        const r = await call(watchUrl(), 'PUT', { headers: bearer(), body: putBody })
+        expect(watchError(r), name).toEqual(reopen)
+        expect(r.headers['retry-after'], name).toBe('2')
       }
-      const r = await call(watchUrl(), 'PUT', { headers: bearer(), body: putBody })
-      expect(r.status).toBe(502)
       expect(redirectTargetHits).toBe(0)
     })
 

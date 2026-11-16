@@ -43,6 +43,26 @@ export class ControlApiError extends Error {
 }
 
 /**
+ * The 502 this client answers when an upstream body does not parse as JSON. A
+ * 502 control-api itself sends parses, so callers that give a meaning to the
+ * status can tell the two apart; `upstreamStatus` is the status that came back.
+ */
+export class ControlApiNonJsonResponseError extends ControlApiError {
+  constructor(
+    message: string,
+    readonly upstreamStatus: number,
+    responseHeaders: Record<string, string>
+  ) {
+    super(
+      message,
+      502,
+      { error: 'Upstream returned non-JSON body', status: upstreamStatus },
+      responseHeaders
+    )
+  }
+}
+
+/**
  * control-api sends the public `401 {error:{code:'invalid_session'}}` envelope from
  * `/external/users/:id/me` and the `/external/auth/*` session routes; `/external/auth/verify`
  * is the exception and answers a bare 401. Every route behind
@@ -280,10 +300,9 @@ export async function controlApiRequestWithStatus<T>(
   }
 
   if (parseError) {
-    throw new ControlApiError(
+    throw new ControlApiNonJsonResponseError(
       `Control API ${method} ${path} returned non-JSON body (status=${response.status})`,
-      502,
-      { error: 'Upstream returned non-JSON body', status: response.status },
+      response.status,
       forwardableResponseHeaders(response.headers, 502)
     )
   }
