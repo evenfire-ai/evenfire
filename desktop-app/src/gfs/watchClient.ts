@@ -665,6 +665,11 @@ export function createGfsWatchClient(deps: GfsWatchClientDeps) {
     ready: Ready,
     f: Extract<GfsWatchFrame, { type: 'subscriptions' }>
   ): void {
+    // Hardening: the server writes these in seq order on one connection and
+    // drops a command whose seq it already applied, and a new connection is a
+    // new Ready at 0. The guard keeps a replayed or reordered frame from
+    // rolling `accepted` back to an older decision and re-emitting resync or
+    // rejected for keys a newer decision already settled.
     if (f.seq <= ready.appliedSeq) return
     const accepted = new Set(f.accepted)
     const rejected = new Set(f.rejected)

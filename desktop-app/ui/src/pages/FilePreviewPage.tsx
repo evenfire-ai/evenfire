@@ -348,10 +348,11 @@ export function FilePreviewPage({
     return () => window.removeEventListener('focus', onFocus)
   }, [revalidateAccess])
 
-  // A manual refresh, a revoke, or an unavailable verdict remounts the body so no
-  // stale bytes survive (fail-closed). A newer server version only changes
-  // `contentVersion`, which the body re-downloads in place without remounting.
-  const bodyKey = `${gfsUri}:${reloadToken}:${unavailable}`
+  // A manual refresh or a revoke remounts the body so no stale bytes survive
+  // (fail-closed); an unavailable verdict needs no key of its own, because the
+  // empty state below replaces the body and unmounts it. A newer server version
+  // only changes `contentVersion`, which the body re-downloads in place.
+  const bodyKey = `${gfsUri}:${reloadToken}`
 
   return (
     <section className="page">
