@@ -75,7 +75,7 @@ describe('isTransientInfraError outside the driver', () => {
 
     let typeError: unknown
     try {
-      ;(undefined as unknown as { x: () => void }).x()
+      Object.defineProperty(1 as unknown as object, 'x', {})
     } catch (error) {
       typeError = error
     }
