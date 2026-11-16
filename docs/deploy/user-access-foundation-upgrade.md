@@ -105,6 +105,14 @@ pruned (disabled because the catalog dropped it and nobody used it) stays
 disabled under the old image, which has no re-enable: turn it on by hand if
 it returns to the catalog while the old image runs.
 
+A model turned on under the old image after the new one pruned it (by hand,
+or by old pods during the rollout) keeps `auto_disabled_at` and stays
+catalog-managed, a state the new image never produces. After rolling forward
+again the prune can turn it off once more, and if the catalog lists it, its
+`stale` marker does not clear. Re-pin each such model as the operator's choice
+(`PUT /admin/llm-models/:id` with `enabled: true` and `pinEnabled: true`); they
+are the rows with `enabled AND auto_disabled_at IS NOT NULL`.
+
 Logout revokes only the token it receives. A V1 token issued before a team
 switch stays valid until its own expiry (at most 7 days, 604800 s), as on `dev`. A new
 Desktop build against the old External REST removes a rejected stored token as
