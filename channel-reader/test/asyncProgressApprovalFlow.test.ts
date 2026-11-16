@@ -854,6 +854,46 @@ describe('tool approval text and Slack markup', () => {
     })
   })
 
+  it('escapes Slack markup in an approval sent after the progress flow failed', async () => {
+    streamCalls.length = 0
+    const parts = adapterFor('slack')
+    const sendMessage = vi
+      .fn<() => Promise<unknown>>()
+      .mockRejectedValueOnce(new Error('async submit failed'))
+      .mockResolvedValueOnce({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-slack-fallback-escape-1',
+          requestId: 'approval-task-slack-fallback-escape-1',
+          userId: 'U123',
+          notification: NOTIFICATION,
+        },
+      })
+    const rpcClient = approvalRpcClient(sendMessage, 'task-slack-fallback-escape-1')
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['slack', parts.adapter]]),
+      channels: [],
+      sleep: async () => undefined,
+    })
+    await reader.handleMessages([makeSlackMessage('<@U999> clean up')])
+
+    // Witness: the progress flow was tried (async) and failed, then the sync
+    // fallback ran; no progress stream was opened.
+    expect(rpcClient.sendMessage).toHaveBeenCalledTimes(2)
+    expect(rpcClient.sendMessage.mock.calls[0]?.[1]).toMatchObject({ async: true })
+    expect(streamCalls).toHaveLength(0)
+    const approvalSends = parts.sendMessage.mock.calls.filter(call => call[4]?.slackBlocks)
+    expect(approvalSends).toHaveLength(1)
+    const [, content, , , options] = approvalSends[0]!
+    expect(content).toBe(ESCAPED)
+    expect(options!.slackBlocks![0]).toEqual({
+      type: 'section',
+      text: { type: 'mrkdwn', text: ESCAPED },
+    })
+  })
+
   it('keeps a Telegram approval as written, with no Slack blocks', async () => {
     const { editMessage } = await suspendOnProgress('telegram', 'task-telegram-raw-1')
     const approvalEdits = editMessage.mock.calls.filter(call => call[3]?.telegramInlineKeyboard)
