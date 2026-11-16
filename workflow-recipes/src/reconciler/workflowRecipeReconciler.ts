@@ -258,6 +258,11 @@ interface SteadyOwnershipOutcome {
   hadDenied: boolean
   needsRequeue: boolean
   requeueReason?: string
+  /**
+   * Issue #1349 — the denied workloads were torn down, but this pass's revocation
+   * record was not stored: the denial is published and the pass requeues.
+   */
+  revocationRecordPending: boolean
   /** Workloads denied in this pass (all torn down when `hadDenied`); empty otherwise. */
   deniedWorkloadIds: ReadonlySet<string>
 }
@@ -288,6 +293,7 @@ function steadyOwnershipResult(
       message: 'EnvSecretOwnershipDenied: foreign Secret ref revoked on steady workflow',
       workloadStatuses: [],
       secretOwnershipConditions: outcome.conditions,
+      ...(outcome.revocationRecordPending ? { requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS } : {}),
     }
   }
   return null
@@ -7300,7 +7306,9 @@ export class WorkflowRecipeReconciler {
    * rather than silently skipping or — worse — reporting `hadDenied` (which would
    * write `EnvSecretOwnershipDenied=True` while the foreign credential is still
    * live because the delete actually failed). `hadDenied` is returned ONLY when
-   * every denied workload was torn down successfully.
+   * every denied workload was torn down successfully. Issue #1349 — when only the
+   * revocation record was not stored, `hadDenied` is returned with
+   * `revocationRecordPending`, so the denial is published and the pass requeues.
    */
   private async enforceActiveWorkflowSecretOwnership(
     recipe: WorkflowRecipeCRD
@@ -7309,6 +7317,7 @@ export class WorkflowRecipeReconciler {
       conditions: [],
       hadDenied: false,
       needsRequeue: false,
+      revocationRecordPending: false,
       deniedWorkloadIds: new Set(),
     }
     const hasSecretRefs = (recipe.spec.workloads ?? []).some(
@@ -7389,13 +7398,11 @@ export class WorkflowRecipeReconciler {
         requeueReason: `teardown failed for ${failedTeardowns.join(', ')}`,
       }
     }
-    if (!revocationRecordStored) {
-      return { ...clean, needsRequeue: true, requeueReason: 'Secret revocation record not stored' }
-    }
     return {
       conditions: secretOwnership.conditions,
       hadDenied: true,
       needsRequeue: false,
+      revocationRecordPending: !revocationRecordStored,
       deniedWorkloadIds: secretOwnership.deniedWorkloadIds,
     }
   }
@@ -7427,7 +7434,13 @@ export class WorkflowRecipeReconciler {
     outcome: SteadyOwnershipOutcome
   ): Promise<boolean> {
     if (!recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()) return true
-    if (!hasTerminalRunTeardownRecord(recipe) || outcome.needsRequeue) return true
+    if (
+      !hasTerminalRunTeardownRecord(recipe) ||
+      outcome.needsRequeue ||
+      outcome.revocationRecordPending
+    ) {
+      return true
+    }
     if (recipe.status?.terminalRunTeardown?.noSecretBearingWorkloads === true) return true
     const workloads = recipe.spec.workloads ?? []
     if (!workloads.some(w => !!w.envSecret?.name || (w.imagePullSecrets ?? []).length > 0)) {

@@ -12773,10 +12773,59 @@ describe('WorkflowRecipeReconciler', () => {
       expect(recipe.status?.secretOwnershipRevocations).toBeUndefined()
       expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
       expect(deploymentDeletes('qa-api')).toBe(1)
+      // Issue #1349 (B-L2) — the workload was revoked, so the denial is published.
+      expect(deniedCondition(result)).toBe('True')
+      expect(result.skipStatusPatch).not.toBe(true)
+      expect(result.message).toBe(
+        'EnvSecretOwnershipDenied: foreign Secret ref revoked on steady workflow'
+      )
 
       await reconciler.reconcile(store.current())
 
       expect(deploymentDeletes('qa-api')).toBe(2)
+    })
+
+    it('T-BL2-2 a revocation record rejected once still publishes the denial, then is stored', async () => {
+      stubInner()
+      denySecrets({ 'qa-creds': '7' })
+      const store = installRecipeStore(
+        runChild([deniedDeployment('qa-api', 'qa-creds')], {
+          phase: 'active',
+          workflowExecution: { phase: 'running' },
+        })
+      )
+      const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+      let rejectedRecords = 0
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(
+        async (arg: { body?: { status?: { secretOwnershipRevocations?: object } } }) => {
+          if (rejectedRecords === 0 && arg.body?.status?.secretOwnershipRevocations) {
+            rejectedRecords += 1
+            throw { code: 500, message: 'apiserver boom' }
+          }
+          return storePatch(arg)
+        }
+      )
+      const errorLog = captureLogger('error')
+
+      const first = await reconciler.reconcile(store.current())
+      errorLog.mockRestore()
+
+      // Witness: the record write was attempted and the workload was deleted.
+      expect(rejectedRecords).toBe(1)
+      expect(deploymentDeletes('qa-api')).toBe(1)
+      expect(deniedCondition(first)).toBe('True')
+      expect(first.skipStatusPatch).not.toBe(true)
+      expect(first.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(store.current().status?.secretOwnershipRevocations).toBeUndefined()
+
+      const second = await reconciler.reconcile(store.current())
+
+      expect(deploymentDeletes('qa-api')).toBe(2)
+      expect(store.current().status?.secretOwnershipRevocations?.['qa-api']).toMatch(
+        /^sha256:[0-9a-f]{64}$/
+      )
+      expect(second.requeueAfterMs).toBeUndefined()
+      expect(deniedCondition(second)).toBe('True')
     })
 
     /**
@@ -13738,6 +13787,48 @@ describe('WorkflowRecipeReconciler', () => {
         )
       ).toHaveLength(0)
       expect(accessibleResult.requeueAfterMs).toBeUndefined()
+    })
+
+    it('T-BL2-3 a terminal pass whose revocation record is not stored publishes the denial and does not record the fact (issue #1349)', async () => {
+      stubWorkflowReconciler()
+      mockAppsApi.deleteNamespacedDeployment.mockClear()
+      // app-creds is labeled for the parent recipe, so the run child is denied.
+      const store = installRecipeStore(secretBearingTerminalRun('wf-run-unstored', 'parent-recipe'))
+      const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(
+        async (arg: { body?: { status?: { secretOwnershipRevocations?: object } } }) => {
+          if (arg.body?.status?.secretOwnershipRevocations) {
+            throw { code: 500, message: 'apiserver boom' }
+          }
+          return storePatch(arg)
+        }
+      )
+      const errorLog = captureLogger('error')
+
+      const result = await reconciler.reconcile(store.current())
+      errorLog.mockRestore()
+
+      // Witness: the terminal teardown was recorded and the Deployment delete sent.
+      expect(store.current().status?.terminalRunTeardown?.completedAt).toEqual(expect.any(String))
+      expect(
+        mockAppsApi.deleteNamespacedDeployment.mock.calls.filter(([arg]) =>
+          String(arg.name).includes('-api-')
+        )
+      ).toHaveLength(1)
+      expect(
+        (result.secretOwnershipConditions ?? []).find(c => c.type === 'EnvSecretOwnershipDenied')
+          ?.status
+      ).toBe('True')
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(store.current().status?.secretOwnershipRevocations).toBeUndefined()
+      expect(store.current().status?.terminalRunTeardown).not.toHaveProperty(
+        'noSecretBearingWorkloads'
+      )
+      expect(
+        mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
+          ([arg]) => arg.body?.status?.terminalRunTeardown?.noSecretBearingWorkloads !== undefined
+        )
+      ).toHaveLength(0)
     })
 
     it('T4.6 a terminal pass whose ownership recheck is deferred does not record the fact (issue #1349)', async () => {
