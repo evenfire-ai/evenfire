@@ -4,7 +4,7 @@ import type { RuntimeTokenProvider } from '../runtime-token-provider/provider'
 import { requireRuntimeToken } from '../runtime-token-provider/provider'
 import { sendWithAuthRetryOn401 } from './authRetry'
 import { emitLog } from './logger'
-import { boundToolsCalledForStatus } from './toolCallStatus'
+import { STATUS_REPORT_MAX_BYTES, boundStepStatusBody } from './outputStatus'
 
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY_MS = 200
@@ -31,6 +31,10 @@ export class StatusReporter {
   private async report(path: string, body: Record<string, unknown>, label: string): Promise<void> {
     const payload = JSON.stringify(body)
     const bodyBytes = Buffer.byteLength(payload)
+    if (bodyBytes > STATUS_REPORT_MAX_BYTES) {
+      // Structural fields only; WRC decides whether to accept the body.
+      emitLog('warn', 'Status report exceeds the size ceiling', { label, bodyBytes })
+    }
     let lastErr: Error | undefined
     // True only when the latest attempt was answered 503 with the run-store code;
     // the last attempt decides which error the caller receives.
@@ -130,8 +134,7 @@ export class StatusReporter {
       approvalBindingSha256?: string
     }
   ): Promise<void> {
-    const body: Record<string, unknown> = { stepId, phase, ...meta }
-    if (meta?.toolsCalled) body.toolsCalled = boundToolsCalledForStatus(meta.toolsCalled)
+    const body = boundStepStatusBody({ stepId, phase, ...meta })
     await this.report('/status', body, 'step status')
   }
 
