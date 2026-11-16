@@ -110,6 +110,24 @@ describe('planSlackReply', () => {
     )
   })
 
+  it('does not emit a blank piece between two long fences', () => {
+    const fence = (label: string) => '```\n' + label.repeat(5_400) + '\n```'
+    const text = `${fence('x')}\n\n${fence('y')}`
+    const parts = splitSlackText(text, SLACK_CHAT_UPDATE_TEXT_LIMIT)
+    expect(parts.every(part => part.trim().length > 0)).toBe(true)
+    expect(parts.join('')).toBe(text)
+    const plan = planSlackReply(text)
+    expect(plan.followUps.every(part => part.text.trim().length > 0)).toBe(true)
+    expect(plan.followUps.filter(part => part.kind === 'message')).toEqual([])
+  })
+
+  it('keeps a trailing blank line on the previous piece', () => {
+    const text = `${'a'.repeat(3_999)}\n\n\n`
+    const parts = splitSlackText(text, SLACK_CHAT_UPDATE_TEXT_LIMIT)
+    expect(parts.some(part => part.trim().length === 0)).toBe(false)
+    expect(parts.join('')).toBe(text)
+  })
+
   it('uploads a code block that cannot fit in an edit', () => {
     const fence = '```\n' + 'x'.repeat(5_000) + '\n```'
     const plan = planSlackReply(`Intro\n\n${fence}`)

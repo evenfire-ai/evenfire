@@ -92,7 +92,32 @@ export function splitSlackText(text: string, limit: number): string[] {
     }
   }
   emit()
-  return chunks
+  return absorbBlankPieces(chunks)
+}
+
+/**
+ * A whitespace-only piece cannot be posted: Slack treats it as an empty
+ * message, and the delivery then stops before the rest of the answer.
+ * Fold that separator into a neighbour so join('') still restores `text`.
+ */
+function absorbBlankPieces(chunks: string[]): string[] {
+  const out: string[] = []
+  let leading = ''
+  for (const chunk of chunks) {
+    if (chunk.length === 0) continue
+    if (chunk.trim().length === 0) {
+      if (out.length === 0) leading += chunk
+      else out[out.length - 1] += chunk
+      continue
+    }
+    out.push(leading + chunk)
+    leading = ''
+  }
+  if (leading.length > 0) {
+    if (out.length === 0) out.push(leading)
+    else out[out.length - 1] += leading
+  }
+  return out
 }
 
 export function planSlackReply(text: string): SlackReplyPlan {

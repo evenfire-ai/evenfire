@@ -172,12 +172,64 @@ describe('Slack long replies', () => {
     }
   })
 
-  it('edits a timeout error and cancels the task when the run does not finish', async () => {
+  it('does not cancel a run the host still reports as pending', async () => {
+    vi.useFakeTimers()
+    const runTimeoutMs = 5_000
+    const { instance, editMessage, cancelTask, adapter } = reader({
+      pending: true,
+      runTimeoutMs,
+    })
+    const handle = progressHandle(instance)
+
+    await handle.handleMessageWithProgress(slackMessage('still working'), adapter)
+    await vi.advanceTimersByTimeAsync(runTimeoutMs * 4)
+
+    expect(editMessage.mock.calls.map(call => String(call[2])).join('\n')).not.toContain(
+      "couldn't finish this request (timed out)"
+    )
+    expect(cancelTask).not.toHaveBeenCalled()
+  })
+
+  it('retries a Teams answer when the first send throws', async () => {
+    vi.useFakeTimers()
+    let answerEdits = 0
+    const editMessage = vi.fn(async (_channelId: string, _messageId: string, content: string) => {
+      if (content !== 'Teams answer') return
+      answerEdits += 1
+      if (answerEdits === 1) throw new Error('teams_activity_edit_failed_500')
+    })
+    const sendMessage = vi.fn(async (_channelId: string, content: string) => {
+      if (content === 'Teams answer') throw new Error('teams_activity_failed_500')
+      return 'status-1'
+    })
+    const { instance, cancelTask, adapter } = reader({
+      response: 'Teams answer',
+      edit: editMessage,
+      send: sendMessage,
+      runTimeoutMs: 60_000,
+    })
+    const handle = progressHandle(instance)
+    const message = slackMessage('hello')
+    message.channelType = 'teams'
+
+    await handle.handleMessageWithProgress(message, adapter)
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    const posted = editMessage.mock.calls.map(call => String(call[2]))
+    expect(posted.filter(text => text === 'Teams answer').length).toBeGreaterThan(1)
+    expect(posted.at(-1)).toBe('Teams answer')
+    expect(posted.some(text => text.includes("couldn't finish"))).toBe(false)
+    expect(cancelTask).not.toHaveBeenCalled()
+  })
+
+  it('edits a timeout error and cancels the task when the host stops answering', async () => {
     vi.useFakeTimers()
     const runTimeoutMs = 5_000
     const { instance, editMessage, sendMessage, cancelTask, adapter } = reader({
-      pending: true,
       runTimeoutMs,
+      getTaskResult: async () => {
+        throw new Error('host_unreachable')
+      },
     })
     const handle = progressHandle(instance)
 
@@ -205,19 +257,23 @@ describe('Slack long replies', () => {
   it('does not time out or cancel while an approval is outstanding', async () => {
     vi.useFakeTimers()
     const runTimeoutMs = 5 * 60 * 1000
+    let hostDown = false
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const { instance, editMessage, cancelTask, adapter } = reader({
       runTimeoutMs,
-      getTaskResult: async () => ({
-        success: true,
-        status: 'waiting_approval' as const,
-        approval: {
-          taskId: 'task-long',
-          requestId: 'approval-1',
-          userId: 'U123',
-          notification: 'Tool `shell_exec` requires approval.',
-        },
-      }),
+      getTaskResult: async () => {
+        if (hostDown) throw new Error('host_unreachable')
+        return {
+          success: true,
+          status: 'waiting_approval' as const,
+          approval: {
+            taskId: 'task-long',
+            requestId: 'approval-1',
+            userId: 'U123',
+            notification: 'Tool `shell_exec` requires approval.',
+          },
+        }
+      },
     })
     const handle = progressHandle(instance)
 
@@ -256,6 +312,7 @@ describe('Slack long replies', () => {
       ][0]
       expect(pending?.updateStatusAfterDecision).toEqual(expect.any(Function))
       await pending!.updateStatusAfterDecision!('Approved. Processing...')
+      hostDown = true
       await vi.advanceTimersByTimeAsync(runTimeoutMs + 1_000)
 
       expect(editMessage.mock.calls.map(call => String(call[2])).at(-1)).toContain(
@@ -287,7 +344,7 @@ describe('Slack long replies', () => {
         "couldn't finish this request (timed out)"
       )
       expect(cancelTask).not.toHaveBeenCalled()
-      expect(warn.mock.calls.map(call => String(call[0])).join('\n')).toContain(
+      expect(warn.mock.calls.map(call => String(call[0])).join('\n')).not.toContain(
         'Result polling fallback timed out for task task-long'
       )
     } finally {
@@ -402,10 +459,6 @@ describe('Slack long replies', () => {
     const terminal = streamCalls.at(-1)!.onTerminal({ taskId: 'task-long', status: 'completed' })
     await vi.advanceTimersByTimeAsync(80)
 
-    const apology = editMessage.mock.calls.filter(call => call[1] === processingId)
-    expect(String(apology.at(-1)?.[2])).toContain("couldn't finish this request (timed out)")
-    expect(cancelTask).toHaveBeenCalled()
-
     resolveResult({ success: true, status: 'completed', response: 'late answer' })
     await terminal
     await vi.advanceTimersByTimeAsync(50)
@@ -413,8 +466,9 @@ describe('Slack long replies', () => {
     const edits = editMessage.mock.calls
       .filter(call => call[1] === processingId)
       .map(call => String(call[2]))
-    expect(edits.at(-1)).toContain("couldn't finish this request (timed out)")
-    expect(edits.some(text => text.includes('late answer'))).toBe(false)
+    expect(edits.at(-1)).toBe('late answer')
+    expect(edits.some(text => text.includes("couldn't finish"))).toBe(false)
+    expect(cancelTask).not.toHaveBeenCalled()
   })
 
   it('cancels when a follow-up post returns no ts and keeps the first chunk', async () => {

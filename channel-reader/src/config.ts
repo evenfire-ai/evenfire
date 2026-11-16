@@ -55,10 +55,12 @@ export interface Config {
   channelReaderHandoffToken: string
 
   /**
-   * Hard cap for one Slack, Telegram, Teams, or email run. When it fires, the
-   * reader edits the acknowledgement to an error and asks mcp-host to cancel
-   * the task so the per-conversation queue slot is released.
-   * Override with CLERUM_CHANNEL_RUN_TIMEOUT_MS. Default is 5 minutes.
+   * Silence cap for one Slack, Telegram, or Teams progress run. It resets
+   * while mcp-host still reports the task pending or waiting for approval,
+   * and while progress events arrive. It does not cover email. When it fires,
+   * the reader edits the acknowledgement to an error and asks mcp-host to
+   * cancel. Cancel does not free the conversation if that executor never
+   * settles. Override with CLERUM_CHANNEL_RUN_TIMEOUT_MS. Default is 5 minutes.
    */
   channelRunTimeoutMs: number
 }
