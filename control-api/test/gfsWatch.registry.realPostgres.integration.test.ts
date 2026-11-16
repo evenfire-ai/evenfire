@@ -597,7 +597,7 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
 
   it('closes with internal when gfsc refuses the read token, without deferring (T-SB46)', async () => {
     b = await h.build({
-      mintReadToken: async () => ({ token: 'not-a-token', expiresInSeconds: 60 }),
+      mintReadToken: async () => ({ token: 'fake-refused-read-token', expiresInSeconds: 60 }),
     })
     const user = await h.createUser()
     const f = await h.tree.add('file')
