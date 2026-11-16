@@ -1589,7 +1589,9 @@ describeRealPostgres('catalog prune and re-enable (real PostgreSQL)', () => {
       const res = await sync(gone(m), {
         hooks: {
           beforeCommit: onceFor(m, async () => {
-            // The edit form loaded `enabled: true` and saves it again.
+            // An explicit `enabled: true`, sent before the prune commits. The
+            // server cannot tell it from a value a stale page resends, which is
+            // why clients must send `enabled` only when the operator changed it.
             edit = Promise.resolve(put(id, { enabled: true, display_name: 'Edited' }))
             await untilBlocked(1, 'row')
           }),

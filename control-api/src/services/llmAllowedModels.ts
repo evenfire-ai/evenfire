@@ -682,8 +682,12 @@ export async function updateAllowedModel(
   // Authority over `enabled`, decided on the locked row: the route's earlier
   // read is unlocked, and the catalog prune or re-enable can commit in
   // between. Only a real change of the value, or an explicit pin, is an
-  // operator decision. The edit form resends `enabled` unchanged with every
-  // save, and that must not take the row away from the catalog. A rename
+  // operator decision: resending the current value must not take the row away
+  // from the catalog. The server cannot tell a value the operator chose from
+  // one a client loaded before a prune and resent, so a client must send
+  // `enabled` only when the operator changed it; one that resends the loaded
+  // value (the control-ui edit form still does) turns a model pruned while the
+  // page was open back on for good. A rename
   // also hands the row to the operator and drops the prune token and the
   // acknowledgements: both belong to the old pair.
   const operatorDecidesEnabled =
