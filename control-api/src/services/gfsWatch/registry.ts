@@ -260,6 +260,8 @@ export type GfsWatchRegistryDeps = {
   log?: Logger
   heartbeatMs?: number
   maxLifetimeMs?: number
+  maxConnections?: number
+  maxConnectionsPerPrincipal?: number
   authBudget?: AuthBudget
   readSlots?: ReadSlots
   recentDirty?: RecentDirty
@@ -325,6 +327,18 @@ function removeFromIndex<K>(
 export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   const heartbeatMs = deps.heartbeatMs ?? GFS_WATCH_DEFAULT_HEARTBEAT_MS
   const maxLifetimeMs = deps.maxLifetimeMs ?? GFS_WATCH_DEFAULT_MAX_LIFETIME_MS
+  const maxConnections = deps.maxConnections ?? GFS_WATCH_MAX_CONNECTIONS
+  const maxConnectionsPerPrincipal =
+    deps.maxConnectionsPerPrincipal ?? GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL
+  // A NaN cap makes both admission comparisons false and admits without limit.
+  for (const [name, v] of [
+    ['maxConnections', maxConnections],
+    ['maxConnectionsPerPrincipal', maxConnectionsPerPrincipal],
+  ] as const) {
+    if (!Number.isSafeInteger(v) || v < 1) {
+      throw new Error(`gfs watch ${name} must be a positive integer`)
+    }
+  }
   const mintReadToken = deps.mintReadToken ?? mintExternalGfsReadToken
   const readGfscFn = deps.readGfsc ?? readGfsc
   const resolveAuthority = deps.resolveAuthority ?? resolveExternalGfsAuthorityForSession
@@ -353,7 +367,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   const admittedPerPrincipal = new Map<Uuid, number>()
 
   // Retention and the authorization/roots windows. Nothing here fills them
-  // yet, but every reader (`retenida`, the open's admission, `closeConn`)
+  // yet, but every reader (`connHeld`, the open's admission, `closeConn`)
   // already honours them, so a retained user can neither receive a decision
   // nor open a stream.
   const holdUsers = new Map<Uuid, number>()
@@ -386,12 +400,12 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
     else holdUsers.set(uid, n - 1)
   }
 
-  function usuarioRetenido(uid: Uuid): boolean {
+  function userHeld(uid: Uuid): boolean {
     return reauthPending.users.has(uid) || (holdUsers.get(uid) ?? 0) > 0
   }
 
-  function retenida(conn: WatchConnection): boolean {
-    return reauthPending.conns.has(conn) || usuarioRetenido(conn.binding.userId)
+  function connHeld(conn: WatchConnection): boolean {
+    return reauthPending.conns.has(conn) || userHeld(conn.binding.userId)
   }
 
   function resetWindows(): void {
@@ -410,7 +424,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   /** The only writer after `ready`. Returns whether the frame was written. */
   function send(conn: WatchConnection, frame: WatchFrame, opts = { final: false }): boolean {
     if (conn.phase !== 'ready') return false
-    if (frame.type === 'roots_changed' && retenida(conn)) return false
+    if (frame.type === 'roots_changed' && connHeld(conn)) return false
     const line = ndjson({ schemaVersion: 1, ...frame })
     if (conn.socket.writableLength + Buffer.byteLength(line) > MAX_BUFFERED_BYTES) {
       // A final frame with a full buffer is dropped: the client sees EOF.
@@ -475,7 +489,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
 
   function onFlush(conn: WatchConnection): void {
     conn.timers.flush = null
-    if (retenida(conn)) {
+    if (connHeld(conn)) {
       // Resumed, not dropped: a change has no resync to cover it, so if the
       // hold was a false hint it must still go out once the user is released.
       if (conn.pending.size > 0) {
@@ -777,6 +791,12 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
         'gfsc-read',
         GFSC_READ_TRANSIENT_NO_RESPONSE
       )
+      // Not observable today and kept on purpose: a close aborts op.signal, so
+      // readGfsc answers transient and the default branch only defers a key of
+      // a connection already gone. Without this gate, a read that resolved
+      // with a real status after the close (a reader that does not honour the
+      // abort, or a cached answer) would accept keys or log a refused token on
+      // a closed connection.
       if (!gate(conn, op)) return
       if (!stillAuthorizing(conn, k)) return
       const rec = conn.keys.get(k)!
@@ -821,6 +841,11 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   }
 
   function onAuthDeadline(conn: WatchConnection, op: WatchOp): void {
+    // Not observable today and kept on purpose: every path that ends or
+    // replaces the op (endOp, closeConn) clears tAuth first, so this timer
+    // cannot fire for a dead op. If a new path ever drops the op without
+    // clearing it, this stops a stale deadline from deferring the keys of
+    // the op that replaced it.
     if (!gate(conn, op)) return
     for (const k of op.added) {
       if (stillAuthorizing(conn, k)) {
@@ -869,7 +894,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       }
     }
     // A retained user gets no decision frame.
-    if (retenida(conn)) {
+    if (connHeld(conn)) {
       if (op.kind === 'open') closeConn(conn, 'reauthorize')
       else {
         conn.nextCmd = null
@@ -1034,14 +1059,14 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
         return reply(503, 'watch_listener_unavailable', DEFAULT_CLOSE_RETRY_AFTER_SEC)
       }
       if (
-        byConnId.size >= GFS_WATCH_MAX_CONNECTIONS ||
-        (admittedPerPrincipal.get(uid) ?? 0) >= GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL
+        byConnId.size >= maxConnections ||
+        (admittedPerPrincipal.get(uid) ?? 0) >= maxConnectionsPerPrincipal
       ) {
         return reply(429, 'admission_full', ADMISSION_RETRY_AFTER_SEC)
       }
       // Same answer the op's final gate would give, without spending the
       // authorization budget, the ancestry query and up to 64 reads.
-      if (usuarioRetenido(uid)) {
+      if (userHeld(uid)) {
         return reply(503, 'watch_reauthorize', DEFAULT_CLOSE_RETRY_AFTER_SEC)
       }
       const c: WatchConnection = {

@@ -562,6 +562,56 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(restInvariantViolations(b, [conn])).toEqual([])
   })
 
+  it('spends no more budget and runs no ancestry query after a close during the budget check', async () => {
+    let hits = 0
+    let releaseFirst: () => void = () => {}
+    const firstHeld = new Promise<void>(resolve => (releaseFirst = resolve))
+    const budget = new ProcessMemoryRateLimiter(240)
+    b = await h.build({
+      authBudget: {
+        hit: async k => {
+          hits += 1
+          if (hits === 1) await firstHeld
+          return budget.hit(k)
+        },
+      },
+    })
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    const { conn, socket } = await ready(user, [])
+    const hitsBefore = hits
+    const cteBefore = b.gates.cte.calls
+    await put(conn, [h.key('file', f), h.key('file', g)])
+    await until(() => hits === hitsBefore + 1)
+    socket.emitGone()
+    releaseFirst()
+    await b.settle()
+    await sleep(50)
+    expect([hits - hitsBefore, b.gates.cte.calls - cteBefore]).toEqual([1, 0])
+    expect(restInvariantViolations(b, [conn])).toEqual([])
+  })
+
+  it('mints nothing for the second drive after a close during the mint of the first', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    const { conn, socket } = await ready(user, [])
+    b.gates.mint.mode = 'hold'
+    await put(conn, [h.key('file', f), `file:gfs://other/${h.toRid(g)}` as GfsKey])
+    await until(() => b.gates.mint.held.length === 1)
+    const mintsBefore = b.gates.mint.calls
+    socket.emitGone()
+    await b.settle()
+    await sleep(50)
+    expect(b.gates.mint.calls).toBe(mintsBefore)
+    b.gates.mint.mode = 'pass'
+    b.gates.mint.releaseAll()
+    await b.settle()
+    expect(restInvariantViolations(b, [conn])).toEqual([])
+  })
+
   it('closes with reauthorize before any read when the mint refuses a revoked session (T-SB108 a2)', async () => {
     b = await h.build()
     const user = await h.createUser()
@@ -954,6 +1004,20 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     await ready(user, [])
   })
 
+  it('admits against injected process and per-user caps with the same 429', async () => {
+    b = await h.build({ maxConnections: 2, maxConnectionsPerPrincipal: 1 })
+    const full = { kind: 'reply', status: 429, code: 'admission_full', retryAfterSec: 5 }
+    const alice = await h.createUser()
+    const bob = await h.createUser()
+    const carol = await h.createUser()
+    const first = await ready(alice, [])
+    expect(await b.open(alice, []).outcome).toEqual(full)
+    await ready(bob, [])
+    expect(await b.open(carol, []).outcome).toEqual(full)
+    first.socket.emitGone()
+    await ready(carol, [])
+  })
+
   it('caps reads in flight per process and leaves no permit or waiter behind (T-SB83, I42)', async () => {
     const { createReadSlots } = await import('../src/services/gfsWatch/readSlots.js')
     const clockless = { now: () => 0 }
@@ -982,5 +1046,20 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     b.gates.read.mode = 'pass'
     await b.settle()
     expect([slots.free, slots.waiters, slots.demand]).toEqual([3, 0, 0])
+  })
+})
+
+describe('GFS watch registry construction', () => {
+  it('refuses to build with a cap that is not a positive integer', async () => {
+    const { createGfsWatchRegistry } = await import('../src/services/gfsWatch/registry.js')
+    for (const bad of [{ maxConnections: Number.NaN }, { maxConnectionsPerPrincipal: 0 }]) {
+      expect(() =>
+        createGfsWatchRegistry({
+          listenConnectionString: 'postgres://unused',
+          watchPool: {} as never,
+          ...bad,
+        })
+      ).toThrow(/must be a positive integer/)
+    }
   })
 })
