@@ -150,8 +150,18 @@ function mergeStatusPatch(
  * GET answers from it, so pass 2 of a test reads what pass 1 stored. `prune`
  * drops status keys as an API server with an older CRD does; a dotted key
  * (`terminalRunTeardown.noSecretBearingWorkloads`) drops one field of a record.
+ * `onGet` is called with a copy of the stored recipe on every GET of it: it
+ * returns the object to answer with, returns undefined to answer with the
+ * stored one, or throws to fail the read (an object with `code`, as the client
+ * throws).
  */
-function installRecipeStore(recipe: WorkflowRecipeCRD, options: { prune?: string[] } = {}) {
+function installRecipeStore(
+  recipe: WorkflowRecipeCRD,
+  options: {
+    prune?: string[]
+    onGet?: (stored: WorkflowRecipeCRD) => WorkflowRecipeCRD | undefined
+  } = {}
+) {
   const live = structuredClone(recipe)
   live.metadata.resourceVersion ??= '1'
   const previousGet = mockCustomApi.getNamespacedCustomObject.getMockImplementation()!
@@ -159,7 +169,7 @@ function installRecipeStore(recipe: WorkflowRecipeCRD, options: { prune?: string
     if (args.plural !== 'workflowrecipes' || args.name !== live.metadata.name) {
       return previousGet(args)
     }
-    return structuredClone(live)
+    return options.onGet?.(structuredClone(live)) ?? structuredClone(live)
   })
   mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }) => {
     if (body.metadata?.uid && body.metadata.uid !== live.metadata.uid) throw { code: 409 }
@@ -13129,6 +13139,160 @@ describe('WorkflowRecipeReconciler', () => {
 
       expect(deploymentDeletes('api-a')).toBe(1)
     })
+
+    /** True once the pass has read `secretName` to classify it. */
+    const secretWasRead = (secretName: string) =>
+      mockCoreApi.readNamespacedSecret.mock.calls.some(([arg]) => arg.name === secretName)
+
+    for (const path of ['non-workflow', 'workflow'] as const) {
+      it(`T-R2-${path === 'workflow' ? '2' : '1'} the ${path} deploy path renders nothing and requeues when the live read of the revocation clear fails`, async () => {
+        const inner = path === 'workflow' ? stubInner() : undefined
+        classifySecrets({}, { 'own-creds': '9' })
+        const workloads = [deniedDeployment('qa-api', 'own-creds')]
+        const readError = { code: 503, message: 'apiserver unavailable' }
+        let failedReads = 0
+        let readsAfterClassification = 0
+        const store = installRecipeStore(
+          withRevocations(
+            path === 'workflow'
+              ? runChild(workloads, { phase: 'candidate' })
+              : makeRecipe({ spec: { workloads } }),
+            { 'qa-api': STORED_DIGEST }
+          ),
+          {
+            // The clear's live read is the first recipe read after the pass
+            // classified the Secret; that read fails once.
+            onGet: () => {
+              if (!secretWasRead('own-creds')) return undefined
+              readsAfterClassification += 1
+              if (failedReads === 0) {
+                failedReads += 1
+                throw readError
+              }
+              return undefined
+            },
+          }
+        )
+
+        const failed = await reconciler.reconcile(store.current())
+
+        // Witness: the read after the classification failed once.
+        expect(failedReads).toBe(1)
+        expect(failed.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(deploymentRenders('qa-api')).toBe(0)
+        expect(revocationRemovals()).toHaveLength(0)
+        expect(store.current().status?.secretOwnershipRevocations?.['qa-api']).toBe(STORED_DIGEST)
+        if (inner) expect(inner.reconcile).not.toHaveBeenCalled()
+
+        // Pass 2 (healthy): the clear's read is the first recipe read after the
+        // Secret classification, so its removal patch follows exactly one such read.
+        mockCoreApi.readNamespacedSecret.mockClear()
+        readsAfterClassification = 0
+        let readsAtRemovalPatch: number | undefined
+        const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(
+          async (arg: { body?: { status?: { secretOwnershipRevocations?: object } } }) => {
+            const entries = arg.body?.status?.secretOwnershipRevocations
+            if (entries && Object.values(entries).some(value => value === null)) {
+              readsAtRemovalPatch ??= readsAfterClassification
+            }
+            return storePatch(arg)
+          }
+        )
+
+        await reconciler.reconcile(store.current())
+
+        expect(readsAtRemovalPatch).toBe(1)
+        expect(store.current().status?.secretOwnershipRevocations).not.toHaveProperty('qa-api')
+        expect(deploymentRenders('qa-api')).toBeGreaterThanOrEqual(1)
+      })
+    }
+
+    for (const row of [
+      {
+        id: 'T-R2-4',
+        state: 'was replaced under the same name (another uid)',
+        answer: (stored: WorkflowRecipeCRD) => {
+          stored.metadata.uid = 'uid-of-the-replacement'
+          return stored
+        },
+      },
+      {
+        id: 'T-R2-5',
+        state: 'is being deleted',
+        answer: (stored: WorkflowRecipeCRD) => {
+          stored.metadata.deletionTimestamp = '2026-11-16T10:00:00.000Z'
+          return stored
+        },
+      },
+    ]) {
+      it(`${row.id} the revocation clear removes nothing when the live recipe ${row.state}`, async () => {
+        classifySecrets({}, { 'own-creds': '9' })
+        let answered = 0
+        const store = installRecipeStore(
+          withRevocations(
+            makeRecipe({ spec: { workloads: [deniedDeployment('qa-api', 'own-creds')] } }),
+            { 'qa-api': STORED_DIGEST }
+          ),
+          {
+            // From the Secret classification on, the API server answers with the
+            // other object: the clear's read and the liveness check after it.
+            onGet: stored => {
+              if (!secretWasRead('own-creds')) return undefined
+              answered += 1
+              return row.answer(stored)
+            },
+          }
+        )
+        const passObject = store.current()
+
+        const result = await reconciler.reconcile(passObject)
+
+        // Witness: the clear's read and the later liveness check got that answer,
+        // and the pass stopped at that check.
+        expect(answered).toBeGreaterThanOrEqual(2)
+        expect(result.message).toContain('Recipe deleted during reconcile')
+        expect(revocationRemovals()).toHaveLength(0)
+        expect(store.current().status?.secretOwnershipRevocations?.['qa-api']).toBe(STORED_DIGEST)
+        expect(passObject.status?.secretOwnershipRevocations?.['qa-api']).toBe(STORED_DIGEST)
+        expect(deploymentRenders('qa-api')).toBe(0)
+      })
+    }
+
+    it('T-R2-6 the object the pass ran on loses the entry the clear removed from the store', async () => {
+      classifySecrets({}, { 'own-creds': '9' })
+      const store = installRecipeStore(
+        withRevocations(
+          makeRecipe({ spec: { workloads: [deniedDeployment('qa-api', 'own-creds')] } }),
+          { 'qa-api': STORED_DIGEST }
+        )
+      )
+      const passObject = store.current()
+      expect(passObject.status?.secretOwnershipRevocations?.['qa-api']).toBe(STORED_DIGEST)
+
+      await reconciler.reconcile(passObject)
+
+      // Witness: the stored entry was removed and the workload rendered.
+      expect(revocationRemovals()).toEqual([{ 'qa-api': null }])
+      expect(deploymentRenders('qa-api')).toBeGreaterThanOrEqual(1)
+      expect(passObject.status?.secretOwnershipRevocations).not.toHaveProperty('qa-api')
+    })
+
+    it('T-R2-7 the object the pass ran on loses a stale entry when the store holds none, and no patch is sent', async () => {
+      classifySecrets({}, { 'own-creds': '9' })
+      const store = installRecipeStore(
+        makeRecipe({ spec: { workloads: [deniedDeployment('qa-api', 'own-creds')] } })
+      )
+      // The object the pass runs on still carries an entry the store no longer has.
+      const passObject = withRevocations(store.current(), { 'qa-api': STORED_DIGEST })
+
+      await reconciler.reconcile(passObject)
+
+      // Witness: the workload was rendered, so the clear ran before it.
+      expect(deploymentRenders('qa-api')).toBeGreaterThanOrEqual(1)
+      expect(revocationPatches()).toHaveLength(0)
+      expect(passObject.status?.secretOwnershipRevocations).not.toHaveProperty('qa-api')
+    })
   })
 
   describe('terminal-run compute teardown (CPU-starvation fix)', () => {
@@ -13565,6 +13729,197 @@ describe('WorkflowRecipeReconciler', () => {
       expect(store.current().status?.terminalRunTeardown).toBeUndefined()
       expect(stub.teardownComputePodsForTerminalRun).not.toHaveBeenCalled()
     })
+
+    it('T-R2-3 a deploy pass creates nothing and rejects when the live read of the terminal record clear fails', async () => {
+      const stub = stubWorkflowReconciler()
+      const recorded = makeTerminalRunRecipe({ name: 'wf-run-read-fails', phase: 'failed' })
+      recorded.status = {
+        ...recorded.status,
+        terminalRunTeardown: {
+          completedAt: '2026-11-12T10:00:00.000Z',
+          noSecretBearingWorkloads: true,
+        },
+      } as WorkflowRecipeCRD['status']
+      const readError = { code: 503, message: 'apiserver unavailable' }
+      let unavailable = true
+      let readsInPass = 0
+      let failedReads = 0
+      const store = installRecipeStore(recorded, {
+        // The API server stops answering after the pass's first recipe read (its
+        // initial liveness check).
+        onGet: () => {
+          readsInPass += 1
+          if (unavailable && readsInPass > 1) {
+            failedReads += 1
+            throw readError
+          }
+          return undefined
+        },
+      })
+      // Captured while the run was still initializing: only the live object has
+      // the record.
+      const stale = makeTerminalRunRecipe({ name: 'wf-run-read-fails', phase: 'failed' })
+      stale.status = {
+        ...stale.status,
+        phase: 'deploying',
+        message: 'Workflow initializing',
+        workflowExecution: { phase: 'initializing' },
+      } as WorkflowRecipeCRD['status']
+      const clearPatches = () =>
+        mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
+          ([arg]) => arg.body?.status?.terminalRunTeardown === null
+        ).length
+      let storedAtInnerReconcile: unknown = 'not-called'
+      stub.reconcile.mockImplementation(async () => {
+        storedAtInnerReconcile = store.current().status?.terminalRunTeardown
+        return {
+          phase: 'deploying',
+          message: 'Workflow infrastructure recreated',
+          workflowPhase: 'initializing',
+        }
+      })
+
+      await expect(reconciler.reconcile(stale)).rejects.toBe(readError)
+
+      // Witness: one read failed, the second of the pass.
+      expect(failedReads).toBe(1)
+      expect(stub.reconcile).not.toHaveBeenCalled()
+      expect(clearPatches()).toBe(0)
+      expect(store.current().status?.terminalRunTeardown?.completedAt).toBe(
+        '2026-11-12T10:00:00.000Z'
+      )
+
+      // The API server answers again. The second recipe read of a pass is the
+      // clear's: it is the last one before the clear's patch.
+      unavailable = false
+      readsInPass = 0
+      let readsAtClearPatch: number | undefined
+      const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(
+        async (arg: { body?: { status?: { terminalRunTeardown?: unknown } } }) => {
+          if (arg.body?.status?.terminalRunTeardown === null) readsAtClearPatch ??= readsInPass
+          return storePatch(arg)
+        }
+      )
+
+      await reconciler.reconcile(stale)
+
+      expect(readsAtClearPatch).toBe(2)
+      expect(stub.reconcile).toHaveBeenCalledTimes(1)
+      expect(storedAtInnerReconcile).toBeUndefined()
+    })
+
+    it('T-R2-3b a deploy pass creates nothing and rejects when the terminal record clear cannot be patched', async () => {
+      const stub = stubWorkflowReconciler()
+      const recorded = makeTerminalRunRecipe({ name: 'wf-run-patch-fails', phase: 'failed' })
+      recorded.status = {
+        ...recorded.status,
+        terminalRunTeardown: {
+          completedAt: '2026-11-12T10:00:00.000Z',
+          noSecretBearingWorkloads: true,
+        },
+      } as WorkflowRecipeCRD['status']
+      const store = installRecipeStore(recorded)
+      const patchError = { code: 500, message: 'apiserver boom' }
+      const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+      let rejectedClears = 0
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(
+        async (arg: { body?: { status?: { terminalRunTeardown?: unknown } } }) => {
+          if (rejectedClears === 0 && arg.body?.status?.terminalRunTeardown === null) {
+            rejectedClears += 1
+            throw patchError
+          }
+          return storePatch(arg)
+        }
+      )
+      const stale = makeTerminalRunRecipe({ name: 'wf-run-patch-fails', phase: 'failed' })
+      stale.status = {
+        ...stale.status,
+        phase: 'deploying',
+        message: 'Workflow initializing',
+        workflowExecution: { phase: 'initializing' },
+      } as WorkflowRecipeCRD['status']
+
+      await expect(reconciler.reconcile(stale)).rejects.toBe(patchError)
+
+      // Witness: the clear's patch was sent once and rejected.
+      expect(rejectedClears).toBe(1)
+      expect(stub.reconcile).not.toHaveBeenCalled()
+      expect(store.current().status?.terminalRunTeardown?.completedAt).toBe(
+        '2026-11-12T10:00:00.000Z'
+      )
+
+      await reconciler.reconcile(stale)
+
+      expect(store.current().status?.terminalRunTeardown).toBeUndefined()
+      expect(stub.reconcile).toHaveBeenCalledTimes(1)
+    })
+
+    for (const row of [
+      {
+        state: 'was replaced under the same name (another uid)',
+        answer: (stored: WorkflowRecipeCRD) => {
+          stored.metadata.uid = 'uid-of-the-replacement'
+          return stored
+        },
+      },
+      {
+        state: 'is being deleted',
+        answer: (stored: WorkflowRecipeCRD) => {
+          stored.metadata.deletionTimestamp = '2026-11-16T10:00:00.000Z'
+          return stored
+        },
+      },
+    ]) {
+      it(`T-R2-3c the terminal record clear removes nothing when the live recipe ${row.state}`, async () => {
+        stubWorkflowReconciler()
+        const latched = makeTerminalRunRecipe({ name: 'wf-run-latched-other', phase: 'failed' })
+        latched.status = {
+          ...latched.status,
+          phase: 'failed',
+          message: 'Workflow failed',
+          workflowExecution: {
+            phase: 'failed',
+            message:
+              'FetchError: request to https://10.96.0.1/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 10.96.0.1:443',
+          },
+          terminalRunTeardown: {
+            completedAt: '2026-11-12T10:00:00.000Z',
+            noSecretBearingWorkloads: true,
+          },
+        } as WorkflowRecipeCRD['status']
+        let readsInPass = 0
+        let otherAnswers = 0
+        const store = installRecipeStore(latched, {
+          // The pass's first recipe read sees the run; every later read sees the
+          // other object.
+          onGet: stored => {
+            readsInPass += 1
+            if (readsInPass === 1) return undefined
+            otherAnswers += 1
+            return row.answer(stored)
+          },
+        })
+        const clearPatches = () =>
+          mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.filter(
+            ([arg]) => arg.body?.status?.terminalRunTeardown === null
+          ).length
+        // The pass object carries the record, as a latched run does.
+        const passObject = store.current()
+
+        await reconciler.reconcile(passObject)
+
+        // Witness: two recipe reads, the pass's first one and the clear's own
+        // read, which got the other object. The exact count also pins that no
+        // recipe read follows the clear.
+        expect(readsInPass).toBe(2)
+        expect(otherAnswers).toBe(1)
+        expect(clearPatches()).toBe(0)
+        expect(store.current().status?.terminalRunTeardown?.completedAt).toBe(
+          '2026-11-12T10:00:00.000Z'
+        )
+      })
+    }
 
     /** A non-transport Deployment that reads `secretName` (kept by the terminal teardown). */
     function secretBearingApi(secretName: string): WorkloadDef {
