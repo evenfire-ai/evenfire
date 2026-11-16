@@ -149,6 +149,55 @@ describe('access and roots reactions', () => {
   })
 })
 
+describe('access and roots reactions during "load more" (real TanStack)', () => {
+  for (const [name, react] of [
+    ['accessChanged', refetchGfsAccess],
+    ['roots_changed', refetchGfsRoots],
+  ] as const) {
+    it(`${name} during fetchNextPage of the roots lets the page land, then re-reads`, async () => {
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const pending: Array<ReturnType<typeof gate<Page>>> = []
+      const reads: Array<string | undefined> = []
+      const observer = new InfiniteQueryObserver(client, {
+        queryKey: desktopQueryKeys.gfsAccessible(SCOPE, 'main', 3),
+        queryFn: ({ pageParam }: { pageParam: string | undefined }) => {
+          reads.push(pageParam)
+          const g = gate<Page>()
+          pending.push(g)
+          return g.promise
+        },
+        initialPageParam: undefined as string | undefined,
+        getNextPageParam: (last: Page) => last.nextCursor ?? undefined,
+      })
+      unsubscribers.push(observer.subscribe(() => undefined))
+      pending.shift()!.resolve(await page(['root-a'], 'page-2'))
+      await expect.poll(() => names(observer.getCurrentResult().data)).toEqual(['root-a'])
+
+      const next = observer.fetchNextPage()
+      await expect.poll(() => pending.length).toBe(1)
+      const reaction = react(client, AUTHORITY)
+
+      pending.shift()!.resolve(await page(['root-b'], null))
+      // Polled, not awaited: a cancelled fetchNextPage settles only with the
+      // refetch that replaced it, which this test never answers.
+      await expect
+        .poll(() => names(observer.getCurrentResult().data), { timeout: 1_000 })
+        .toEqual(['root-a', 'root-b'])
+      await next
+      expect(observer.getCurrentResult().isFetchNextPageError).toBe(false)
+
+      // The joined page may predate the change: one more pass reads what is current.
+      await expect.poll(() => pending.length).toBe(1)
+      pending.shift()!.resolve(await page(['root-a2'], 'page-2'))
+      await expect.poll(() => pending.length).toBe(1)
+      pending.shift()!.resolve(await page(['root-b2'], null))
+      await reaction
+      expect(names(observer.getCurrentResult().data)).toEqual(['root-a2', 'root-b2'])
+      expect(reads).toEqual([undefined, 'page-2', undefined, 'page-2'])
+    })
+  }
+})
+
 describe('purgeGfsSessionCache', () => {
   it('drops every GFS query and revokes access for the session, with nothing mounted', () => {
     const client = new QueryClient()

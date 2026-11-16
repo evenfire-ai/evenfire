@@ -40,27 +40,16 @@ function ownsSession(authority: GfsWatchAuthority): boolean {
 }
 
 /**
- * Re-reads the cached listings of one folder. A read already in flight (a
+ * Re-reads the active queries `filters` selects. A read already in flight (a
  * navigation, or the page chain of `fetchNextPage`) is joined instead of
  * cancelled — TanStack's default `cancelRefetch: true` would abort it on every
- * change while an agent writes into the open folder. The joined read may have
- * started before the change, so it is followed by one more pass.
+ * change, so a "load more" never lands while changes keep arriving. The joined
+ * read may have started before the change, so it is followed by one more pass.
  */
-export async function refetchWatchedFolder(
+async function refetchActiveJoining(
   queryClient: QueryClient,
-  authority: GfsWatchAuthority,
-  drive: string,
-  rid: string
+  filters: ReturnType<typeof sessionFilter>
 ): Promise<void> {
-  if (!ownsSession(authority)) return
-  const filters = sessionFilter(
-    authority,
-    key =>
-      key[3] === 'children' &&
-      key[4] === drive &&
-      typeof key[5] === 'string' &&
-      gfsRidOfResourceId(key[5]) === rid
-  )
   const joinedRead = queryClient.isFetching(filters) > 0
   await queryClient.invalidateQueries(
     { ...filters, refetchType: 'active' },
@@ -72,6 +61,27 @@ export async function refetchWatchedFolder(
       { cancelRefetch: false }
     )
   }
+}
+
+/** Re-reads the cached listings of one folder. */
+export async function refetchWatchedFolder(
+  queryClient: QueryClient,
+  authority: GfsWatchAuthority,
+  drive: string,
+  rid: string
+): Promise<void> {
+  if (!ownsSession(authority)) return
+  await refetchActiveJoining(
+    queryClient,
+    sessionFilter(
+      authority,
+      key =>
+        key[3] === 'children' &&
+        key[4] === drive &&
+        typeof key[5] === 'string' &&
+        gfsRidOfResourceId(key[5]) === rid
+    )
+  )
 }
 
 /**
@@ -86,10 +96,10 @@ export async function refetchGfsAccess(
 ): Promise<void> {
   if (!ownsSession(authority)) return
   await Promise.all([
-    queryClient.invalidateQueries({
-      ...sessionFilter(authority, key => ACCESS_FAMILIES.has(String(key[3]))),
-      refetchType: 'active',
-    }),
+    refetchActiveJoining(
+      queryClient,
+      sessionFilter(authority, key => ACCESS_FAMILIES.has(String(key[3])))
+    ),
     queryClient.invalidateQueries({
       ...sessionFilter(authority, key => key[3] === 'children'),
       refetchType: 'none',
@@ -102,10 +112,10 @@ export async function refetchGfsRoots(
   authority: GfsWatchAuthority
 ): Promise<void> {
   if (!ownsSession(authority)) return
-  await queryClient.invalidateQueries({
-    ...sessionFilter(authority, key => key[3] === 'accessible'),
-    refetchType: 'active',
-  })
+  await refetchActiveJoining(
+    queryClient,
+    sessionFilter(authority, key => key[3] === 'accessible')
+  )
 }
 
 /**
