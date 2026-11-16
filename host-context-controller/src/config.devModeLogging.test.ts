@@ -47,24 +47,35 @@ describe('config.ts logs through the service logger (repository logging standard
   })
 
   it('logs a CLERUM_MCP_AUTH parse failure with the error name and no part of the input', async () => {
-    const input = '{"dev-a": "tok-input-value-123"'
+    // An unquoted value: the JSON.parse message quotes the input around it.
+    // V8 truncates the quote, so the fragments asserted are the quoted ones.
+    const input = '{"dev-a": tok-input-value-123}'
+    // Witness: the parse error's message quotes the input, so logging that
+    // message would put these fragments in the output.
+    expect(() => JSON.parse(input)).toThrow(/tok-input/)
+    expect(() => JSON.parse(input)).toThrow(/dev-a/)
     const { lines, raw } = await loadDevConfig({ CLERUM_MCP_AUTH: input })
 
     const failure = lines.find(line => line.msg === '[Config] Failed to parse CLERUM_MCP_AUTH:')
     // Witness: the line was emitted.
     expect(failure).toMatchObject({ level: 'error', errorName: 'SyntaxError' })
-    expect(raw.join('\n')).not.toContain('tok-input-value-123')
+    expect(raw.join('\n')).not.toContain('tok-input')
     expect(raw.join('\n')).not.toContain('dev-a')
   })
 
   it.each(['CLERUM_MCP_SERVERS', 'CLERUM_CONTEXTS'])(
     'logs a %s parse failure with the error name only',
     async name => {
-      const { lines, raw } = await loadDevConfig({ [name]: '[{"name": "quoted-input-value"' })
+      // An unquoted value: the JSON.parse message quotes the input around it.
+      const input = '[{"name": quoted-input-value}]'
+      // Witness: the parse error's message quotes the input.
+      expect(() => JSON.parse(input)).toThrow(/quoted-inp/)
+      const { lines, raw } = await loadDevConfig({ [name]: input })
 
       const failure = lines.find(line => line.msg === `[Config] Failed to parse ${name}:`)
+      // Witness: the line was emitted.
       expect(failure).toMatchObject({ level: 'error', errorName: 'SyntaxError' })
-      expect(raw.join('\n')).not.toContain('quoted-input-value')
+      expect(raw.join('\n')).not.toContain('quoted-inp')
     }
   )
 })
