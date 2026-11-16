@@ -4660,8 +4660,11 @@ export class WorkflowRecipeReconciler {
    *
    * Reads the LIVE object: the pass can run on an object whose in-memory status
    * lacks an entry that is stored. A failed read or patch ends the pass with a
-   * requeue before anything is rendered. The in-memory entries of every rendered
-   * id are removed too, so a stale in-memory entry cannot outlive the pass.
+   * requeue before anything is rendered. Whenever the live read returns the recipe
+   * and no patch failed, the in-memory entries of every rendered id are removed
+   * too, also when no stored entry needed a patch, so a stale in-memory entry
+   * cannot outlive the pass. When the live read finds the recipe gone, replaced or
+   * being deleted, nothing is cleared, in memory or stored.
    */
   private async clearSecretRevocationsBeforeRender(
     recipe: WorkflowRecipeCRD,

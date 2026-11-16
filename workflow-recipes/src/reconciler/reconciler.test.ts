@@ -330,7 +330,8 @@ type LiveManifest = { metadata: { name: string } & Record<string, unknown> } & R
  * succeeds.
  *
  * `patch`, when given, applies what the apiserver applies for the body it gets.
- * An array body is a JSON Patch (RFC 6902, see {@link applyJsonPatch}): applied
+ * The body is first serialized as the client sends it, so a member whose value
+ * is `undefined` is absent from the request, never a deletion. An array body is a JSON Patch (RFC 6902, see {@link applyJsonPatch}): applied
  * atomically to a copy, resourceVersion +1, generation +1 when an operation path
  * starts with `/spec/`. An object body is a strategic merge patch: annotations
  * merge, `spec.template` merges as a pod template does (see
@@ -402,7 +403,7 @@ function installLiveStore(
     async ({
       name,
       namespace,
-      body,
+      body: requestBody,
     }: {
       name: string
       namespace: string
@@ -413,6 +414,7 @@ function installLiveStore(
             spec?: Record<string, unknown>
           }
     }) => {
+      const body = JSON.parse(JSON.stringify(requestBody)) as typeof requestBody
       const k = key(namespace, name)
       const current = live.get(k)
       if (!current) throw { code: 404 }
@@ -13585,7 +13587,7 @@ describe('WorkflowRecipeReconciler', () => {
       return recipe
     }
 
-    it('T4.1 noSecretBearingWorkloadsRemain: only denied or torn-down Secret-bearing workloads make it true (issue #1349)', () => {
+    it('T4.1 noSecretBearingWorkloadsRemain: true only when every Secret-bearing workload is denied and not a StatefulSet, or torn down (issue #1349)', () => {
       const transport = { type: 'streamableHttp', path: '/mcp' } as WorkloadDef['transport']
       const withWorkloads = (workloads: WorkloadDef[]) => {
         const recipe = makeTerminalRunRecipe({ name: 'wf-run-fact' })
