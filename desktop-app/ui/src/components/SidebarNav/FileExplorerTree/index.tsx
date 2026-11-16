@@ -608,8 +608,8 @@ export function FileExplorerTree({
     setMoveDialogTarget(null)
     setMovePermissionStatus(null)
     // A NEW live session makes any session-ended refusal stale. A transition
-    // TO revoked (scope null) must NOT clear it: that is exactly when the
-    // message has to survive (A11), and the revoked surface below carries it.
+    // TO revoked (scope null) does not clear it; while revoked, the revoked
+    // surface below carries the sentence and the refusal banner is not shown.
     if (liveDragScope !== null) setDropSessionLost(false)
   }, [adjudication.endDragSession, ctrl.sessionGeneration, liveDragScope])
 
@@ -1290,9 +1290,16 @@ export function FileExplorerTree({
       <p aria-live="polite" className="visually-hidden">
         {dropVerdictAnnouncement}
       </p>
-      {dropSessionLost ? (
-        // Persistent (A11): the refusal outlives the dead gesture and the
-        // revoked tree surface below — it is not a one-shot toast.
+      {dropSessionLost &&
+      ctrl.accessState !== 'revoked' &&
+      previousDragAuthorityRef.current.scope === liveDragScope ? (
+        // Persistent, not a one-shot toast: it explains a drop refused because
+        // the session ended while the revoked surface is not on screen. Once
+        // that surface is shown it carries the sentence, so the banner yields
+        // to it and the sentence is announced once. The drag scope must also
+        // be settled: when access returns, the first render still has the flag
+        // set until the scope effect above clears it, and mounting the banner
+        // for that one commit would announce the sentence again.
         <div role="alert">
           <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} compact />
         </div>

@@ -1019,6 +1019,20 @@ function installDndClerum(producers: DndProducers) {
   })
 }
 
+const SESSION_ENDED_SENTENCE = 'Your session ended. Sign in again to continue moving files.'
+
+/** The polite live region that speaks the tree's drop verdict. */
+function dropVerdictRegion() {
+  return document.querySelector('.da-file-explorer [aria-live="polite"]')
+}
+
+/** Every `role="alert"` element whose text carries the session-ended sentence. */
+function sessionEndedAlerts() {
+  return screen
+    .queryAllByRole('alert')
+    .filter(element => (element.textContent ?? '').includes(SESSION_ENDED_SENTENCE))
+}
+
 function dragTypes() {
   return {
     types: ['application/x-evenfire-gfs-resource'],
@@ -2872,9 +2886,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
   it('keeps a session-lost drop persistently visible after revocation invalidates the gesture (A11)', async () => {
     // The probe 401 both refuses the drop AND revokes the session; the
     // revocation invalidates the gesture's ownership before the drop
-    // continuation resumes. The refused drop must still explain itself — as a
-    // persistent banner, not a toast — and stay visible next to the revoked
-    // surface.
+    // continuation resumes. The refused drop must still explain itself
+    // persistently, not as a toast. The revoked surface owns that sentence, so
+    // it is announced once: the refusal banner is not rendered next to it.
     const moveResource = vi.fn()
     const affordances = vi.fn(async () => {
       throw new Error(
@@ -2903,30 +2917,83 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     fireEvent.dragOver(bRow, { dataTransfer })
     fireEvent.drop(bRow, { dataTransfer })
 
-    // The sentence appears on BOTH refusal surfaces: the gated
-    // callback-local banner AND the revoked tree surface, which owns it
-    // unconditionally and outlives the dead gesture's ownership (A11).
-    const sessionEnded = await screen.findAllByText(
-      'Your session ended. Sign in again to continue moving files.'
-    )
-    expect(sessionEnded.length).toBeGreaterThanOrEqual(2)
-    expect(
-      sessionEnded.some(element => element.closest('.da-file-explorer__revoked') !== null)
-    ).toBe(true)
-    // The refusal banner outside the revoked surface is announced on its own.
-    expect(
-      sessionEnded.some(
-        element =>
-          element.closest('.status-banner') !== null &&
-          element.closest('[role="alert"]') !== null &&
-          element.closest('.da-file-explorer__revoked') === null
-      )
-    ).toBe(true)
-    // The revoked surface stays visible alongside the refusal banner.
+    // Witness: the refusal was recorded (the polite region speaks the drop
+    // verdict) and the revoked surface is shown.
+    await waitFor(() => expect(dropVerdictRegion()?.textContent).toBe(SESSION_ENDED_SENTENCE))
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    // Exactly one alert carries the sentence, and it is the revoked surface.
+    const alerts = sessionEndedAlerts()
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]!.classList.contains('da-file-explorer__revoked')).toBe(true)
     // A dead session is not a one-shot toast.
     expect(pushToast).not.toHaveBeenCalled()
     expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('announces nothing in the sidebar when file access returns after a session-lost drop', async () => {
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('folder-a', 'A', 'directory'),
+          accessibleResource('folder-b', 'B', 'directory'),
+        ])
+      ),
+      affordances: vi.fn(async () => {
+        throw new Error(
+          "Error invoking remote method 'gfs:affordances': Error: 401 Unauthorized httpStatus=401"
+        )
+      }),
+      resolve: vi.fn(async () => ({ parentResourceId: 'grand', kind: 'directory', version: 1 })),
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+    fireEvent.drop(bRow, { dataTransfer })
+
+    // The session-lost drop is refused and the session is revoked.
+    await waitFor(() => expect(dropVerdictRegion()?.textContent).toBe(SESSION_ENDED_SENTENCE))
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+
+    // Record every node the retry inserts, including one that a later commit
+    // removes again: an alert inserted for a single commit is still announced.
+    const root = document.querySelector('.da-file-explorer')!
+    const added: Node[] = []
+    const observer = new MutationObserver(records => {
+      for (const record of records) added.push(...record.addedNodes)
+    })
+    observer.observe(root, { childList: true, subtree: true })
+    try {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Retry file access' }))
+      })
+      // Witness: access returned, so the revoked surface is gone and the tree
+      // is back.
+      await waitFor(() => expect(screen.queryByText('File access is not authorized')).toBeNull())
+      expect(await screen.findByRole('tree', { name: 'File destinations' })).toBeTruthy()
+      await act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+    } finally {
+      for (const record of observer.takeRecords()) added.push(...record.addedNodes)
+      observer.disconnect()
+    }
+    expect(added.length).toBeGreaterThan(0)
+    const announced = added.filter(
+      node =>
+        node instanceof Element &&
+        [node, ...node.querySelectorAll('[role="alert"]')].some(
+          element =>
+            element.getAttribute('role') === 'alert' &&
+            (element.textContent ?? '').includes(SESSION_ENDED_SENTENCE)
+        )
+    )
+    expect(announced).toEqual([])
+    expect(sessionEndedAlerts()).toHaveLength(0)
   })
 
   it('dragstart cancels the deferred folder toggle (no expansion after a drag)', async () => {
