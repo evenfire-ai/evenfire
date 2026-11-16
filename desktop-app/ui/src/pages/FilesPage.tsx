@@ -45,6 +45,7 @@ import {
 import {
   GFS_ACCESS_REVOKED_BODY,
   GFS_DEFAULT_DISCOVERY_DRIVE,
+  GFS_EVENDRIVE_ROOT_LABEL,
   GFS_MY_HOME_DETAIL,
   GFS_MY_HOME_LABEL,
   GFS_RESOURCE_DRAG_TYPE,
@@ -96,7 +97,12 @@ import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
 import { GfsHomeStateNotice } from '@/gfs/GfsHomeStateNotice'
 import { GfsInheritedAccessDialog } from '@/gfs/GfsInheritedAccessDialog'
 import type { GfsInheritedAccessDialogRequest } from '@/gfs/GfsInheritedAccessDialog/types'
-import { callerHomeNotice, callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
+import {
+  callerHomeDisplayName,
+  callerHomeNotice,
+  callerHomeRootNode,
+  isCallerHomeRoot,
+} from '@/gfs/callerHome'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
@@ -538,7 +544,7 @@ export function FilesPage({
     }
   }, [])
   const {
-    current,
+    current: locationCurrent,
     crumbs,
     sessionScope,
     accessibleResources,
@@ -554,6 +560,17 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+  // The open location as this page names it: the caller's ready home root is
+  // "My home" on every entry path. Controller state keeps the name it stored.
+  const current = useMemo(() => {
+    if (!locationCurrent) return null
+    const name = callerHomeDisplayName(ctrl.home, {
+      resourceId: locationCurrent.resourceId,
+      drive: ctrl.drive,
+      name: locationCurrent.name,
+    })
+    return name === locationCurrent.name ? locationCurrent : { ...locationCurrent, name }
+  }, [ctrl.drive, ctrl.home, locationCurrent])
   const accessibleRootResourceIds = useMemo(
     () => new Set(accessibleResources.map(resource => resource.resourceId)),
     [accessibleResources]
@@ -1073,9 +1090,9 @@ export function FilesPage({
   )
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
-  // Inside the caller's own home the trail starts at "My home" instead of
-  // "Shared with me › <home folder>". The ancestor walk stops at the home, so
-  // only the first crumb can be the home root.
+  // Inside the caller's own home the trail reads "EvenDrive › My home" instead
+  // of "EvenDrive › Shared with me › <home folder>". The ancestor walk stops at
+  // the home, so only the first crumb can be the home root.
   const homeTrail =
     crumbs.length > 0 &&
     isCallerHomeRoot(ctrl.home, { resourceId: crumbs[0]!.resourceId, drive: ctrl.drive })
@@ -1882,14 +1899,11 @@ export function FilesPage({
   // `null` is the virtual root. Deps track the primitive fields so a re-render
   // that leaves the location unchanged does not re-emit.
   const currentGfsUri = current?.gfsUri ?? null
-  // D-5: at the caller's own ready home root the Files tab reads "My home",
-  // not the storage folder name. `current` is the top of the breadcrumb stack;
-  // the effect below re-emits when the home becomes ready because the label,
-  // not the resource, is the reported name.
-  const currentName =
-    current && isCallerHomeRoot(ctrl.home, { resourceId: current.resourceId, drive: ctrl.drive })
-      ? GFS_MY_HOME_LABEL
-      : (current?.name ?? null)
+  // `current` already carries the page's name for the open location, so at the
+  // caller's own ready home root the Files tab reads "My home", not the storage
+  // folder name. The effect below re-emits when the home becomes ready because
+  // the label, not the resource, is the reported name.
+  const currentName = current?.name ?? null
   useEffect(() => {
     if (seedPendingRef.current) {
       // Seed still resolving: suppress the pre-seed root (null) that would clobber
@@ -3342,7 +3356,34 @@ export function FilesPage({
 
       <div className="page-layout da-gfs-layout">
         {myHome ? (
-          <section className="page-card da-gfs-my-home" aria-label="My home">
+          // A ready home is a move destination: the card takes a dragged row or
+          // tree node like any folder target, and paints the verdict on itself.
+          <section
+            className="page-card da-gfs-my-home"
+            aria-label="My home"
+            title={
+              gfsDropVerdictReason(dropStatesById[myHome.resourceId]) !== undefined
+                ? gfsDropVerdictLiveAnnouncement(
+                    dropStatesById[myHome.resourceId]!,
+                    GFS_MY_HOME_LABEL,
+                    dragSourceName ?? undefined
+                  )
+                : undefined
+            }
+            data-drop-state={dropStatesById[myHome.resourceId]?.state}
+            data-drop-reason={gfsDropVerdictReason(dropStatesById[myHome.resourceId])}
+            onDragEnter={event => handleFolderDragOver(event, myHome)}
+            onDragOver={event => handleFolderDragOver(event, myHome)}
+            onDragLeave={handleFolderDragLeave}
+            onDrop={event =>
+              void handleFolderDrop(event, {
+                resourceId: myHome.resourceId,
+                name: GFS_MY_HOME_LABEL,
+                drive: myHome.drive,
+                kind: 'directory',
+              })
+            }
+          >
             <Button
               align="start"
               className="da-gfs-my-home__open"
@@ -3383,6 +3424,31 @@ export function FilesPage({
           <div className="page-card__header da-gfs-drive__header">
             <div className="da-gfs-drive__title-row">
               <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
+                <Button
+                  className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
+                  color="neutral"
+                  // Every trail starts here; it returns to the overview (My home
+                  // and Shared with me). A view, not a folder: it takes no drops.
+                  // At the overview it is the active crumb, inert but not
+                  // disabled, like "Shared with me" in its own view.
+                  aria-current={!current && rootView === 'overview' ? 'page' : undefined}
+                  disabled={!current && accessRevoked}
+                  onClick={
+                    !current && rootView === 'overview'
+                      ? undefined
+                      : () => {
+                          manageReturnCrumbsRef.current = null
+                          setManageOpen(false)
+                          beginExplicitFilesNavigation()
+                          setRootView('overview')
+                          ctrl.reset()
+                        }
+                  }
+                  variant="text"
+                >
+                  {GFS_EVENDRIVE_ROOT_LABEL}
+                </Button>
+                {homeTrail ? null : <IconChevronRight aria-hidden="true" />}
                 {homeTrail ? null : (
                   <Button
                     className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
@@ -3411,7 +3477,7 @@ export function FilesPage({
                 )}
                 {crumbs.map((crumb, index) => (
                   <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
-                    {homeTrail && index === 0 ? null : <IconChevronRight aria-hidden="true" />}
+                    <IconChevronRight aria-hidden="true" />
                     {renameTarget?.resourceId === crumb.resourceId ? (
                       <GfsInlineRename
                         className="da-gfs-drive__inline-rename"
@@ -3524,9 +3590,14 @@ export function FilesPage({
             </div>
           ) : null}
 
-          {dropSessionLost ? (
-            // Persistent (A11): the refusal outlives the dead gesture and the
-            // revoked surface below — it is not a one-shot toast.
+          {dropSessionLost && !accessRevoked && previousDragScopeRef.current === liveDragScope ? (
+            // Persistent, not a one-shot toast: explains a drop refused because
+            // the session ended while the revoked surface is not on screen. Once
+            // it is, that surface carries the sentence and this banner would
+            // announce it a second time. The scope check keeps it out of the
+            // render in which access returns: the scope effect has not cleared
+            // the flag yet, and inserting the alert there would announce the
+            // ended session right after access came back.
             <div className="da-gfs-alert" role="alert">
               <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
             </div>
@@ -3779,7 +3850,9 @@ export function FilesPage({
                           dragSourceName ?? undefined
                         )
                       : undefined
-                  // The governed home root never moves; it stays a drop destination.
+                  // A bound home root never moves. While it is still listed (a home
+                  // that is not ready) its row stays a drop destination; a ready
+                  // home takes drops on its card and on its crumb.
                   const canDragResource =
                     resource.readable !== false &&
                     movingResourceId === null &&

@@ -159,6 +159,14 @@ function renderFilesPage(
   )
 }
 
+/** The trail's crumbs, in order, by their visible label. */
+function trailButtonNames(trail: HTMLElement): string[] {
+  return within(trail)
+    .getAllByRole('button')
+    .filter(button => button.classList.contains('da-gfs-drive__breadcrumb'))
+    .map(button => button.textContent ?? '')
+}
+
 function uploadInput(): HTMLInputElement {
   const input = document.querySelector<HTMLInputElement>('input[aria-label="Upload file"]')
   if (!input) throw new Error('Upload file input is unavailable')
@@ -4377,6 +4385,87 @@ describe('FilesPage', () => {
     ).toBeNull()
   })
 
+  it('lets the home owner remove a member outside their teams from a folder inside the home', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const revokeGrant = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1', path: '/Users/owner' },
+      current: {
+        resourceId: 'sub-1',
+        gfsUri: 'gfs://main/sub',
+        name: 'Subfolder',
+        kind: 'directory',
+      },
+      crumbs: [{ resourceId: 'sub-1', gfsUri: 'gfs://main/sub', name: 'Subfolder' }],
+      affordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read'],
+        canCreateShare: false,
+      },
+      inheritedAccess: [
+        {
+          subject: { type: 'user', id: 'owner-1' },
+          homeOwner: true,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+          inheritedFrom: ['My home'],
+          sources: [
+            {
+              resourceId: 'home-1',
+              name: 'My home',
+              permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+              grantId: 'owner-grant',
+              shareIds: [],
+              grantPermissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+              grantInherit: true,
+              shareEntries: [],
+            },
+          ],
+        },
+      ],
+      // A member of no team the owner belongs to, granted on the subfolder.
+      grants: [
+        {
+          id: 'grant-outside',
+          drive: 'main',
+          resourceId: 'sub-1',
+          subject: { type: 'user', id: 'user-outside' },
+          permissions: ['read'],
+          inherit: true,
+        },
+      ],
+      revokeGrant,
+    })
+
+    renderFilesPage(pushToast)
+    await openManageDialog('Subfolder')
+
+    const row = await screen.findByTestId('gfs-access-row-grant-grant-outside')
+    expect(row.textContent).toContain('Member outside your teams')
+    expect(row.textContent).toContain('Read')
+    expect(row.textContent).not.toContain('user-outside')
+    fireEvent.click(
+      within(row).getByRole('button', { name: 'Actions for Member outside your teams' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+
+    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('grant-outside'))
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'Access revoked for Member outside your teams',
+        'success'
+      )
+    )
+  })
+
   it('lists direct shares in the who-has-access list and revokes them', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -6407,21 +6496,38 @@ describe('FilesPage', () => {
     })
   })
 
-  it('keeps a session-lost drop persistently visible after the probe revoked the session (A11)', async () => {
-    // The probe 401 refuses the drop AND revokes the session; the revocation
-    // invalidates the gesture's ownership before the drop continuation
-    // resumes. The refused drop must still explain itself — as a persistent
-    // banner, not a one-shot toast.
-    const pushToast = vi.fn()
+  const SESSION_ENDED_SENTENCE = 'Your session ended. Sign in again to continue moving files.'
+
+  /**
+   * Drops a file on a folder whose permission probe answers 401, and lets the
+   * controller report the revoked session before the drop continuation resumes:
+   * the order the real controller produces, since the probe's 401 is what revokes
+   * the session. The page ends revoked with the drop's refusal painted.
+   * `showController` re-renders the same page instance with another controller
+   * state.
+   */
+  async function renderSessionLostDropAfterRevocation(pushToast: (...args: unknown[]) => void) {
     const moveResource = vi.fn(async () => ({}))
     const affordances = vi.fn(async () => {
       throw new Error('401 Unauthorized httpStatus=401')
     })
+    let releaseSessionRead!: () => void
+    const sessionReadGate = new Promise<void>(resolve => {
+      releaseSessionRead = resolve
+    })
+    let sessionReads = 0
+    // The drop's first session read parks, so the revocation lands while the
+    // drop continuation is in flight.
+    const getSessionGeneration = vi.fn(async () => {
+      sessionReads += 1
+      if (sessionReads === 1) await sessionReadGate
+      return 0
+    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { affordances } },
+      value: { gfs: { affordances }, auth: { getSessionGeneration } },
     })
-    hookMock.useGfsBrowserController.mockReturnValue({
+    const controller = {
       ...baseController(),
       current: {
         resourceId: 'folder-1',
@@ -6457,8 +6563,19 @@ describe('FilesPage', () => {
         },
       ],
       moveResource,
-    })
-    renderFilesPage(pushToast)
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controller)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const page = () => (
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+    const view = render(page())
+    const showController = (next: Record<string, unknown>) => {
+      hookMock.useGfsBrowserController.mockReturnValue(next)
+      view.rerender(page())
+    }
 
     const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
     const destinationRow = screen.getByRole('button', { name: 'Open Private' })
@@ -6474,26 +6591,89 @@ describe('FilesPage', () => {
     fireEvent.dragEnter(destinationRow, { dataTransfer })
     await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
     fireEvent.drop(destinationRow, { dataTransfer })
-
-    // Both refusal surfaces carry it: the persistent banner AND the SR live
-    // region (the spoken refusal). A one-shot toast was NOT used.
-    const sessionLostSurfaces = await screen.findAllByText(
-      'Your session ended. Sign in again to continue moving files.'
+    await waitFor(() => expect(getSessionGeneration).toHaveBeenCalledTimes(1))
+    showController({ ...controller, accessState: 'revoked' })
+    await act(async () => {
+      releaseSessionRead()
+    })
+    // The drop continuation finished: its refusal is spoken in the polite region.
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByText(SESSION_ENDED_SENTENCE)
+          .some(element => element.closest('[aria-live="polite"]') !== null)
+      ).toBe(true)
     )
+    return { controller, moveResource, showController }
+  }
+
+  const sessionEndedAlertsIn = (container: HTMLElement) =>
+    within(container)
+      .queryAllByRole('alert')
+      .filter(alert => alert.textContent?.includes(SESSION_ENDED_SENTENCE))
+
+  it('keeps a session-lost drop persistently visible after the probe revoked the session (A11)', async () => {
+    // The probe 401 refuses the drop AND revokes the session; the revocation
+    // invalidates the gesture's ownership before the drop continuation
+    // resumes. The refused drop must still explain itself — persistently, not
+    // as a one-shot toast — and say it once: the revoked surface carries the
+    // sentence, so the drop's own banner does not repeat it.
+    const pushToast = vi.fn()
+    const { moveResource } = await renderSessionLostDropAfterRevocation(pushToast)
+
+    const sessionLostSurfaces = screen.getAllByText(SESSION_ENDED_SENTENCE)
     expect(sessionLostSurfaces.some(element => element.closest('.status-banner') !== null)).toBe(
       true
     )
-    // The persistent banner is announced: an alert inside the browser region.
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
-    expect(
-      within(browser)
-        .getAllByRole('alert')
-        .some(alert =>
-          alert.textContent?.includes('Your session ended. Sign in again to continue moving files.')
-        )
-    ).toBe(true)
+    // Witness: the revoked surface is on screen.
+    expect(within(browser).getByText('File access is not authorized')).toBeTruthy()
+    // Exactly one alert inside the browser region announces the sentence, and
+    // it is the revoked surface's (the state that follows it).
+    const alerts = sessionEndedAlertsIn(browser)
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]!.nextElementSibling?.textContent).toContain('File access is not authorized')
     expect(pushToast).not.toHaveBeenCalled()
     expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('announces nothing when file access returns after a session-lost drop', async () => {
+    const pushToast = vi.fn()
+    const { controller, showController } = await renderSessionLostDropAfterRevocation(pushToast)
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    // Witness: the revoked surface is on screen before access returns.
+    expect(within(browser).getByText('File access is not authorized')).toBeTruthy()
+
+    const added: Node[] = []
+    const observer = new MutationObserver(records => {
+      for (const record of records) added.push(...record.addedNodes)
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    fireEvent.click(within(browser).getByRole('button', { name: 'Retry file access' }))
+    expect(controller.retryAccess).toHaveBeenCalledTimes(1)
+    // The retry succeeds: the controller reports the session active again.
+    showController({ ...controller, accessState: 'active' })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    for (const record of observer.takeRecords()) added.push(...record.addedNodes)
+    observer.disconnect()
+
+    // Witness: the revoked surface is gone and the listing came back, so the
+    // observer saw the re-render's insertions.
+    expect(within(browser).queryByText('File access is not authorized')).toBeNull()
+    expect(
+      added.some(node => node instanceof Element && node.textContent?.includes('notes.txt'))
+    ).toBe(true)
+    const insertedSessionEndedAlerts = added
+      .filter((node): node is Element => node instanceof Element)
+      .flatMap(element => [element, ...element.querySelectorAll('[role="alert"]')])
+      .filter(
+        element =>
+          element.getAttribute('role') === 'alert' &&
+          element.textContent?.includes(SESSION_ENDED_SENTENCE)
+      )
+    expect(insertedSessionEndedAlerts).toEqual([])
   })
 
   it('renders the session-ended sentence on the revoked surface with no gesture at all (A11)', async () => {
@@ -7050,6 +7230,12 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     const breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
+    expect(trailButtonNames(breadcrumbs)).toEqual([
+      'EvenDrive',
+      'Shared with me',
+      'Product',
+      'Nested',
+    ])
     fireEvent.click(within(breadcrumbs).getByRole('button', { name: 'Product' }))
     expect(goToCrumb).toHaveBeenCalledWith(0)
     fireEvent.click(within(breadcrumbs).getByRole('button', { name: 'Shared with me' }))
@@ -8347,7 +8533,7 @@ describe('FilesPage', () => {
     expect(crumbItems).toContain('Download as zip')
   })
 
-  it('starts the trail at My home inside the caller home and at Shared with me elsewhere', () => {
+  it('starts the trail at EvenDrive, then My home inside the caller home and Shared with me elsewhere', () => {
     const homeCrumb = {
       resourceId: 'home-1',
       gfsUri: 'gfs://main/home-1',
@@ -8365,6 +8551,7 @@ describe('FilesPage', () => {
     })
     renderFilesPage()
     const trail = screen.getByRole('navigation', { name: 'File location' })
+    expect(trailButtonNames(trail)).toEqual(['EvenDrive', 'My home', 'Projects'])
     const homeRootCrumb = within(trail).getByRole('button', { name: 'My home' })
     // The home is the view root; the open folder below it is the highlighted crumb.
     expect(homeRootCrumb.classList.contains('da-gfs-drive__breadcrumb--view-root')).toBe(true)
@@ -8392,6 +8579,7 @@ describe('FilesPage', () => {
     })
     renderFilesPage()
     const otherTrail = screen.getByRole('navigation', { name: 'File location' })
+    expect(trailButtonNames(otherTrail)).toEqual(['EvenDrive', 'Shared with me', 'Team folder'])
     expect(within(otherTrail).getByRole('button', { name: 'Shared with me' })).toBeTruthy()
     expect(within(otherTrail).getByRole('button', { name: 'Team folder' })).toBeTruthy()
     expect(within(otherTrail).queryByRole('button', { name: 'My home' })).toBeNull()
@@ -8493,8 +8681,11 @@ describe('FilesPage', () => {
       expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
       expect(onLocationChange).toHaveBeenLastCalledWith(null, null)
       const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
+      const trail = within(shared).getByRole('navigation', { name: 'File location' })
+      expect(trailButtonNames(trail)).toEqual(['EvenDrive', 'Shared with me'])
       fireEvent.click(within(shared).getByRole('button', { name: 'Shared with me' }))
       expect(controller.reset).toHaveBeenCalledTimes(1)
+      expect(trailButtonNames(trail)).toEqual(['EvenDrive', 'Shared with me'])
       expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
       expect(within(shared).getAllByText('Alpha shared').length).toBeGreaterThan(0)
       expect(onLocationChange).toHaveBeenLastCalledWith(
@@ -8514,12 +8705,376 @@ describe('FilesPage', () => {
         'Shared with me'
       )
       const rootCrumb = within(shared).getByRole('button', { name: 'Shared with me' })
+      expect(
+        trailButtonNames(within(shared).getByRole('navigation', { name: 'File location' }))
+      ).toEqual(['EvenDrive', 'Shared with me'])
       expect(rootCrumb.getAttribute('aria-current')).toBe('page')
       expect(rootCrumb.hasAttribute('disabled')).toBe(false)
       const locationCalls = onLocationChange.mock.calls.length
       fireEvent.click(rootCrumb)
       expect(controller.reset).toHaveBeenCalledTimes(1)
       expect(onLocationChange).toHaveBeenCalledTimes(locationCalls)
+    })
+
+    const folderCrumb = (resourceId: string, name: string) => ({
+      resourceId,
+      gfsUri: `gfs://main/${resourceId}`,
+      name,
+      kind: 'directory' as const,
+      version: 1,
+      bytes: 0,
+    })
+
+    it.each([
+      ['My home', null, [folderCrumb('home-1', 'fixture')]],
+      ['the Shared with me view', GFS_SHARED_WITH_ME_LOCATION, []],
+      ['a shared folder', null, [folderCrumb('alpha-1', 'Alpha shared')]],
+    ] as const)(
+      'returns to the overview from the EvenDrive crumb in %s',
+      (_where, pendingGfsUri, crumbs) => {
+        const atRoot = {
+          ...baseController(),
+          home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+          accessibleResources: [
+            sharedRow('alpha-1', 'Alpha shared'),
+            sharedRow('home-1', 'fixture'),
+          ],
+        }
+        // The controller goes back to the root when the page resets it.
+        const reset = vi.fn(() => {
+          hookMock.useGfsBrowserController.mockReturnValue(atRoot)
+        })
+        hookMock.useGfsBrowserController.mockReturnValue({
+          ...atRoot,
+          current: crumbs.length > 0 ? crumbs[crumbs.length - 1] : null,
+          crumbs: [...crumbs],
+          reset,
+        })
+        const onLocationChange = vi.fn()
+        const queryClient = new QueryClient()
+        const onPendingGfsUriHandled = vi.fn()
+        const page = () => (
+          <QueryClientProvider client={queryClient}>
+            <FilesPage
+              pendingGfsUri={pendingGfsUri}
+              onLocationChange={onLocationChange}
+              onPendingGfsUriHandled={onPendingGfsUriHandled}
+            />
+          </QueryClientProvider>
+        )
+        const { rerender } = render(page())
+        expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
+        const trail = screen.getByRole('navigation', { name: 'File location' })
+        const evenDrive = within(trail).getAllByRole('button')[0]!
+        expect(evenDrive.textContent).toBe('EvenDrive')
+        expect(evenDrive.getAttribute('aria-current')).toBeNull()
+
+        fireEvent.click(evenDrive)
+        expect(reset).toHaveBeenCalledTimes(1)
+        // The real controller re-renders the page when reset changes its state.
+        rerender(page())
+
+        // Witness that the overview rendered: the home card is back.
+        expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
+        expect(
+          within(screen.getByRole('navigation', { name: 'File location' }))
+            .getByRole('button', { name: 'EvenDrive' })
+            .getAttribute('aria-current')
+        ).toBe('page')
+        expect(onLocationChange).toHaveBeenLastCalledWith(null, null)
+      }
+    )
+
+    it('keeps the EvenDrive crumb inert at the overview', () => {
+      const { controller, onLocationChange } = renderAt(null)
+      const trail = screen.getByRole('navigation', { name: 'File location' })
+      const evenDrive = within(trail).getByRole('button', { name: 'EvenDrive' })
+      expect(evenDrive.getAttribute('aria-current')).toBe('page')
+      expect(evenDrive.hasAttribute('disabled')).toBe(false)
+      const locationCalls = onLocationChange.mock.calls.length
+      fireEvent.click(evenDrive)
+      expect(controller.reset).not.toHaveBeenCalled()
+      expect(onLocationChange).toHaveBeenCalledTimes(locationCalls)
+      expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
+      // Liveness witness: the Shared with me crumb beside it still opens its view.
+      fireEvent.click(within(trail).getByRole('button', { name: 'Shared with me' }))
+      expect(controller.reset).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
+    })
+
+    describe('the name of the open location', () => {
+      // A link opens the home root through `openUri`, which leaves the storage
+      // folder name in controller state; the overview card leaves the label.
+      const HOME_STORAGE_NAME = 'fixture-user'
+      const SESSION_SCOPE = 'env-1:user-1:team-1'
+      const readyHome = { state: 'ready', drive: 'main', resourceId: 'home-1' }
+      const conflictHome = {
+        state: 'conflict',
+        drive: 'main',
+        resourceId: 'home-1',
+        path: '/Users/fixture',
+      }
+      const managerAuthority = {
+        held: ['read', 'write', 'share', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'share', 'write'],
+        canCreateShare: false,
+      }
+
+      type Location = {
+        home: Record<string, unknown>
+        crumbs: ReturnType<typeof folderCrumb>[]
+      }
+      type SinkContext = {
+        name: string
+        resourceId: string
+        pushToast: ReturnType<typeof vi.fn>
+        queryClient: QueryClient
+      }
+      type NameSink = {
+        controller?: (resourceId: string) => Record<string, unknown>
+        /** Drives the page to the sink; returns the text that carries the name. */
+        read: (context: SinkContext) => Promise<string>
+      }
+
+      const replaceGfsBridge = (gfs: Record<string, unknown>) => {
+        const clerum = window.clerum as unknown as Record<string, unknown>
+        Object.defineProperty(window, 'clerum', {
+          configurable: true,
+          value: { ...clerum, gfs: { ...(clerum.gfs as Record<string, unknown>), ...gfs } },
+        })
+      }
+
+      // Each render starts from the bridge the suite installs, so a sink that
+      // replaced part of it does not leak into the next render.
+      let suiteClerum: Record<string, unknown> = {}
+      beforeEach(() => {
+        suiteClerum = window.clerum as unknown as Record<string, unknown>
+      })
+
+      const renderLocation = (location: Location, sink?: NameSink) => {
+        const open = location.crumbs[location.crumbs.length - 1]!
+        Object.defineProperty(window, 'clerum', {
+          configurable: true,
+          value: {
+            ...suiteClerum,
+            auth: { getSessionGeneration: vi.fn(async () => 0) },
+            agents: { listMine: vi.fn(async () => []) },
+            team: {
+              directory: vi.fn(async () => ({
+                currentTeamId: 'team-1',
+                items: [
+                  {
+                    team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+                    members: [
+                      {
+                        id: 'user-2',
+                        email: 'test2@clerum.io',
+                        name: 'Test Two',
+                        role: 'member',
+                        status: 'active',
+                      },
+                    ],
+                    contextIds: [],
+                    agentNames: [],
+                  },
+                ],
+              })),
+            },
+          },
+        })
+        hookMock.useGfsBrowserController.mockReturnValue({
+          ...baseController(),
+          home: location.home,
+          current: open,
+          crumbs: location.crumbs,
+          affordances: managerAuthority,
+          ...sink?.controller?.(open.resourceId),
+        })
+        const pushToast = vi.fn()
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        render(
+          <QueryClientProvider client={queryClient}>
+            <FilesPage pushToast={pushToast} />
+          </QueryClientProvider>
+        )
+        return { pushToast, queryClient, resourceId: open.resourceId }
+      }
+
+      // One site per way the name travels: direct interpolation (overlay,
+      // permission check), a helper's argument (role-change toast), state
+      // copied from the name (New folder dialog, ZIP strip) and a child's prop
+      // (location menu).
+      const nameSinks: Record<string, NameSink> = {
+        'the drop overlay': {
+          read: async () => {
+            fireEvent.dragEnter(screen.getByRole('region', { name: 'EvenDrive browser' }), {
+              dataTransfer: {
+                dropEffect: 'none',
+                files: [new File(['notes'], 'notes.txt', { type: 'text/plain' })],
+                types: ['Files'],
+              },
+            })
+            const overlay = document.querySelector('.da-gfs-drop-overlay')
+            expect(overlay).not.toBeNull()
+            return overlay!.textContent ?? ''
+          },
+        },
+        'the permission check': {
+          controller: () => ({ loadingAffordances: true }),
+          read: async () => screen.getByText(/^Checking permissions for /).textContent ?? '',
+        },
+        'the role-change toast': {
+          controller: resourceId => ({
+            grants: [
+              {
+                id: 'grant-1',
+                drive: 'main',
+                resourceId,
+                subject: { type: 'user', id: 'user-2' },
+                permissions: ['read'],
+                inherit: true,
+              },
+            ],
+          }),
+          read: async ({ name, resourceId, pushToast, queryClient }) => {
+            let manageHeld = true
+            let freshReads = 0
+            const affordances = vi.fn(async () => {
+              if (!manageHeld) freshReads += 1
+              return delegationAffordances(
+                new Set(manageHeld ? managerAuthority.held : ['read', 'write', 'share']),
+                false
+              )
+            })
+            replaceGfsBridge({ affordances })
+            await openManageDialog(name)
+            const dialog = await screen.findByRole('dialog', { name: `Share folder ${name}` })
+            const row = await within(dialog).findByTestId('gfs-access-row-grant-grant-1')
+            // The member's role changes after manage access was lost: the
+            // fresh read the handler makes no longer holds manage_acl.
+            manageHeld = false
+            queryClient.removeQueries({
+              queryKey: desktopQueryKeys.gfsAffordances(SESSION_SCOPE, resourceId, 'main', 0),
+            })
+            await act(async () => {
+              fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+            })
+            await act(async () => {
+              fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+            })
+            // Witness: the handler made its fresh read.
+            await waitFor(() => expect(freshReads).toBe(1))
+            const toast = await waitFor(() => {
+              const call = pushToast.mock.calls.find(([message]) =>
+                String(message).startsWith('You do not have manage access to ')
+              )
+              expect(call, JSON.stringify(pushToast.mock.calls)).toBeDefined()
+              return call!
+            })
+            expect(toast[1]).toBe('error')
+            return String(toast[0])
+          },
+        },
+        'the New folder dialog': {
+          read: async ({ name }) => {
+            await chooseResourceAction(name, 'New folder')
+            const dialog = screen.getByRole('dialog', { name: 'New folder' })
+            return within(dialog).getByText(/^Create a new folder in /).textContent ?? ''
+          },
+        },
+        'the ZIP progress strip': {
+          read: async ({ name }) => {
+            // The walk never settles, so the strip stays on its first phase.
+            replaceGfsBridge({
+              listChildren: vi.fn(() => new Promise(() => {})),
+              zipStream: {
+                start: vi.fn(() => new Promise(() => {})),
+                appendFromUri: vi.fn(),
+                finish: vi.fn(),
+                abort: vi.fn(async () => ({ aborted: true })),
+              },
+            })
+            await act(async () => {
+              fireEvent.click(screen.getByRole('button', { name: `Options for ${name}` }))
+            })
+            await act(async () => {
+              fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+            })
+            return screen.getByTestId('gfs-zip-progress').textContent ?? ''
+          },
+        },
+        'the location menu': {
+          read: async () => {
+            const triggers = screen.getAllByRole('button', { name: /^Options for / })
+            expect(triggers).toHaveLength(1)
+            return triggers[0]!.getAttribute('aria-label') ?? ''
+          },
+        },
+      }
+
+      const readSink = async (location: Location, sinkName: string, name: string) => {
+        const sink = nameSinks[sinkName]!
+        const rendered = renderLocation(location, sink)
+        return sink.read({ ...rendered, name })
+      }
+
+      it.each(['the overview card', 'a link'] as const)(
+        'names the home My home in the Share dialog when it was opened from %s',
+        async from => {
+          const storedName = from === 'a link' ? HOME_STORAGE_NAME : 'My home'
+          renderLocation({ home: readyHome, crumbs: [folderCrumb('home-1', storedName)] })
+          await openManageDialog('My home')
+          const dialog = await screen.findByRole('dialog', { name: 'Share folder My home' })
+          expect(within(dialog).getByRole('heading', { name: 'Share “My home”' })).toBeTruthy()
+          expect(within(dialog).queryByText(new RegExp(HOME_STORAGE_NAME))).toBeNull()
+        }
+      )
+
+      it.each(Object.keys(nameSinks))(
+        'says My home in %s when the home was opened from a link',
+        async sinkName => {
+          const text = await readSink(
+            { home: readyHome, crumbs: [folderCrumb('home-1', HOME_STORAGE_NAME)] },
+            sinkName,
+            'My home'
+          )
+          expect(text).toContain('My home')
+          expect(text).not.toContain(HOME_STORAGE_NAME)
+        }
+      )
+
+      it.each([
+        [
+          'a folder inside the home',
+          {
+            home: readyHome,
+            crumbs: [folderCrumb('home-1', HOME_STORAGE_NAME), folderCrumb('proj-1', 'Projects')],
+          },
+          'Projects',
+        ],
+        [
+          'a shared folder',
+          { home: readyHome, crumbs: [folderCrumb('alpha-1', 'Alpha shared')] },
+          'Alpha shared',
+        ],
+        [
+          'a home in conflict opened from a link',
+          { home: conflictHome, crumbs: [folderCrumb('home-1', HOME_STORAGE_NAME)] },
+          HOME_STORAGE_NAME,
+        ],
+      ] as const)('keeps the stored name of %s', async (_where, location, storedName) => {
+        for (const sinkName of Object.keys(nameSinks)) {
+          const text = await readSink(
+            { home: location.home, crumbs: [...location.crumbs] },
+            sinkName,
+            storedName
+          )
+          expect(text, sinkName).toContain(storedName)
+          expect(text, sinkName).not.toContain('My home')
+          cleanup()
+        }
+      })
     })
 
     describe('My home card for a home that is not ready', () => {
@@ -9254,5 +9809,198 @@ describe('FilesPage — folder drag-and-drop', () => {
       .closest('.da-grid__row') as HTMLElement
     expect(folderRow.getAttribute('draggable')).toBe('true')
     expect(folderRow.getAttribute('title')).toBe('Drag Projects into a folder to move it')
+  })
+
+  /** The overview: a ready home on its card and a movable shared folder
+   *  `Projects` (parent `folder-1`) listed beside it. */
+  function homeCardDragHarness(options: { sourceParentHeld?: string[] } = {}) {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({ resourceId: 'folder-src', version: 5 }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return { held: options.sourceParentHeld ?? ['read', 'write', 'delete'] }
+      }
+      if (resourceId === 'folder-src') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'folder-src',
+      parentResourceId: 'folder-1',
+      rid: 'foldersrc',
+      gfsUri: 'gfs://main/foldersrc',
+      name: 'Projects',
+      kind: 'directory',
+      pathCache: '/Product/Projects',
+      version: 4,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances, resolve } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+      accessibleResources: [
+        {
+          resourceId: 'folder-src',
+          rid: 'folder-src',
+          gfsUri: 'gfs://main/folder-src',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Projects',
+          kind: 'directory',
+          path: '/Product/Projects',
+          version: 4,
+          bytes: 0,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+        },
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+        },
+        {
+          resourceId: 'home-1',
+          rid: 'home-1',
+          gfsUri: 'gfs://main/home-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'fixture',
+          kind: 'directory',
+          path: '/Users/fixture',
+          version: 1,
+          bytes: 0,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+    return { pushToast, moveResource, affordances }
+  }
+
+  function gfsDragDataTransfer() {
+    return {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+  }
+
+  it('moves a dragged folder into the home when it is dropped on the My home card', async () => {
+    const { pushToast, moveResource } = homeCardDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const homeCard = screen.getByRole('region', { name: 'My home' })
+    const dataTransfer = gfsDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(homeCard, { dataTransfer })
+    fireEvent.dragOver(homeCard, { dataTransfer })
+    fireEvent.drop(homeCard, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to My home' })
+    expect(moveResource).not.toHaveBeenCalled()
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+    await waitFor(() => {
+      expect(moveResource).toHaveBeenCalledWith(
+        'folder-src',
+        'home-1',
+        'main',
+        4,
+        undefined,
+        'folder-1',
+        'env-1:user-1:team-1',
+        true,
+        0
+      )
+    })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Moved Projects to My home', 'success')
+    )
+  })
+
+  it('paints the drop verdict on the My home card while a folder is dragged over it', async () => {
+    const permitted = homeCardDragHarness()
+    const card = screen.getByRole('region', { name: 'My home' })
+    // On the overview no folder is open, so the card's ancestor chain is
+    // unobserved: a dragged folder stays "checking" (the drop asks the
+    // server whether the home lies inside it), as over any overview row.
+    const folderTransfer = gfsDragDataTransfer()
+    fireEvent.dragStart(screen.getByRole('button', { name: 'Open Projects' }), {
+      dataTransfer: folderTransfer,
+    })
+    fireEvent.dragEnter(card, { dataTransfer: folderTransfer })
+    // Witness: the cold check probed the home's and the source parent's bits.
+    await waitFor(() => {
+      expect(permitted.affordances).toHaveBeenCalledWith('home-1', 'main')
+      expect(permitted.affordances).toHaveBeenCalledWith('folder-1', 'main')
+    })
+    fireEvent.dragOver(card, { dataTransfer: folderTransfer })
+    expect(card.getAttribute('data-drop-state')).toBe('checking')
+    fireEvent.dragEnd(screen.getByRole('button', { name: 'Open Projects' }), {
+      dataTransfer: folderTransfer,
+    })
+    expect(card.getAttribute('data-drop-state')).toBeNull()
+
+    // A file needs no ancestor proof: with the same bits the card paints "allowed".
+    const fileTransfer = gfsDragDataTransfer()
+    fireEvent.dragStart(screen.getByRole('button', { name: 'Open notes.txt' }), {
+      dataTransfer: fileTransfer,
+    })
+    fireEvent.dragEnter(card, { dataTransfer: fileTransfer })
+    await waitFor(() => expect(card.getAttribute('data-drop-state')).toBe('allowed'))
+    expect(permitted.moveResource).not.toHaveBeenCalled()
+    cleanup()
+
+    homeCardDragHarness({ sourceParentHeld: ['read', 'write'] })
+    const deniedCard = screen.getByRole('region', { name: 'My home' })
+    const deniedTransfer = gfsDragDataTransfer()
+    fireEvent.dragStart(screen.getByRole('button', { name: 'Open Projects' }), {
+      dataTransfer: deniedTransfer,
+    })
+    fireEvent.dragEnter(deniedCard, { dataTransfer: deniedTransfer })
+    await waitFor(() => expect(deniedCard.getAttribute('data-drop-state')).toBe('denied'))
+    expect(deniedCard.getAttribute('data-drop-reason')).toBe('source-delete')
+  })
+
+  it('ignores a file dragged from the desktop over the My home card', async () => {
+    const { pushToast, moveResource } = homeCardDragHarness()
+    const homeCard = screen.getByRole('region', { name: 'My home' })
+    const osFileTransfer = {
+      types: ['Files'],
+      files: [new File(['hello'], 'notes.txt', { type: 'text/plain' })],
+      effectAllowed: 'all',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+    fireEvent.dragEnter(homeCard, { dataTransfer: osFileTransfer })
+    fireEvent.dragOver(homeCard, { dataTransfer: osFileTransfer })
+    expect(homeCard.getAttribute('data-drop-state')).toBeNull()
+    fireEvent.drop(homeCard, { dataTransfer: osFileTransfer })
+    expect(homeCard.getAttribute('data-drop-state')).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(pushToast).not.toHaveBeenCalled()
+    expect(moveResource).not.toHaveBeenCalled()
+
+    // Liveness witness: an EvenDrive drag over the same card is adjudicated.
+    const gfsTransfer = gfsDragDataTransfer()
+    fireEvent.dragStart(screen.getByRole('button', { name: 'Open Projects' }), {
+      dataTransfer: gfsTransfer,
+    })
+    fireEvent.dragEnter(homeCard, { dataTransfer: gfsTransfer })
+    await waitFor(() => expect(homeCard.getAttribute('data-drop-state')).not.toBeNull())
   })
 })

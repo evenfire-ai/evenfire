@@ -1265,6 +1265,42 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(screen.queryByText('This resource was deleted.')).toBeNull()
   })
 
+  it('reports the root location when EvenDrive is opened from a seeded Shared with me tab', async () => {
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const resolve = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+    renderHarness({ pendingGfsUri: 'evendrive:shared-with-me' })
+    const tab = () => screen.getByTestId('tab-files-1').textContent
+    // Witness: the seeded view reported itself before the crumb is used.
+    await waitFor(() => expect(tab()).toBe('evendrive:shared-with-me|Shared with me'))
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'EvenDrive' }).click()
+    })
+
+    // A root tab has no path, and setFilesTabPath titles a nameless location "Files".
+    await waitFor(() => expect(tab()).toBe('null|Files'))
+    expect(screen.getByRole('button', { name: 'EvenDrive' }).getAttribute('aria-current')).toBe(
+      'page'
+    )
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
   it('does not open a late resolve after its pending deep link is cleared', async () => {
     const producerResource = await resolveResource(
       resolvedFile('0123456789abcdef0123456789abcdef', 'linked-note.md')
@@ -1610,7 +1646,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
 
     await waitFor(() => {
       expect(screen.getByRole('navigation', { name: 'File location' }).textContent).toBe(
-        'Shared with me'
+        'EvenDriveShared with me'
       )
       expect(screen.queryByText('private-notes.md')).toBeNull()
     })
