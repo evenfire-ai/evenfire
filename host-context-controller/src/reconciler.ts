@@ -3151,8 +3151,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   private async performReconcile(server: McpServerCRD, isCurrent: () => boolean): Promise<boolean> {
     if (!isCurrent()) return false
     this.beginStatusTracking(server)
-    // A later branch re-adds the name. A failed reconcile keeps the obligation
-    // from reconcile(), so the name is always in one of the two states.
+    // A later branch re-adds the name when it publishes a verdict only an
+    // external change can move. Until this reconcile completes, the obligation
+    // reconcile() registered stays (a failed reconcile keeps it), so clearing
+    // the name here loses no wake. A poll tick may re-add it during the awaits
+    // below; the name is then in both maps, which costs a redundant reconcile.
     this.verdictsAwaitingExternalChange.delete(server.name)
 
     // G7: Enforce managed field immutability — once set, cannot change
@@ -3510,9 +3513,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       pollState.generation === rollout.generation
         ? rollout.detail
         : undefined
-    // Registered before the status writes, which await API calls: a Deployment
-    // event during them must find the name, or it would be ignored until the
-    // watcher's next periodic re-read (every 60 s).
+    // Registered before the status writes, which await API calls, so a
+    // Deployment event during them queues a reconcile. An event that lands
+    // after this reconcile cleared the name at its start and before this line
+    // (the rollout read above included) is dropped; the watcher's 60 s re-read
+    // of awaiting rollouts corrects a verdict that event would have moved.
     if (exhaustedDetail !== undefined && !pollLive()) {
       this.verdictsAwaitingExternalChange.set(server.name, 'RolloutIncomplete')
       hccLogger.warn('McpServer rollout still incomplete', {
