@@ -43,21 +43,32 @@ function ownsSession(authority: GfsWatchAuthority): boolean {
  * Re-reads the active queries `filters` selects. A read already in flight (a
  * navigation, or the page chain of `fetchNextPage`) is joined instead of
  * cancelled — TanStack's default `cancelRefetch: true` would abort it on every
- * change, so a "load more" never lands while changes keep arriving. The joined
- * read may have started before the change, so it is followed by one more pass.
+ * change, so a "load more" never lands while changes keep arriving. A joined
+ * read may have started before the change, so the queries that were in flight
+ * get one more pass; only those, since the first pass already read every idle
+ * one, and an unrelated read in flight must not double the whole set.
  */
 async function refetchActiveJoining(
   queryClient: QueryClient,
   filters: ReturnType<typeof sessionFilter>
 ): Promise<void> {
-  const joinedRead = queryClient.isFetching(filters) > 0
+  const joined = new Set(
+    queryClient
+      .getQueryCache()
+      .findAll({ ...filters, fetchStatus: 'fetching' })
+      .map(query => query.queryHash)
+  )
   await queryClient.invalidateQueries(
     { ...filters, refetchType: 'active' },
     { cancelRefetch: false }
   )
-  if (joinedRead) {
+  if (joined.size > 0) {
     await queryClient.invalidateQueries(
-      { ...filters, refetchType: 'active' },
+      {
+        queryKey: filters.queryKey,
+        predicate: query => joined.has(query.queryHash) && filters.predicate(query),
+        refetchType: 'active',
+      },
       { cancelRefetch: false }
     )
   }

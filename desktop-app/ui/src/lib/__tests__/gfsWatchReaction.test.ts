@@ -198,6 +198,37 @@ describe('access and roots reactions during "load more" (real TanStack)', () => 
   }
 })
 
+describe('access reaction cost', () => {
+  it('an unrelated read in flight does not make the access change read idle queries twice', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const grantsReads: number[] = []
+    const grants = new QueryObserver(client, {
+      queryKey: desktopQueryKeys.gfsGrants(SCOPE, FOLDER, 'main', 3),
+      queryFn: async () => {
+        grantsReads.push(grantsReads.length)
+        return { ok: true }
+      },
+    })
+    unsubscribers.push(grants.subscribe(() => undefined))
+    await expect.poll(() => grantsReads.length).toBe(1)
+    grantsReads.length = 0
+
+    // A use-time check (as a drag adjudication runs) with no observer, in flight.
+    const affordances = gate<{ ok: boolean }>()
+    const check = client.fetchQuery({
+      queryKey: desktopQueryKeys.gfsAffordances(SCOPE, OTHER_FOLDER, 'main', 3),
+      queryFn: () => affordances.promise,
+    })
+    await expect.poll(() => client.isFetching()).toBe(1)
+
+    const reaction = refetchGfsAccess(client, AUTHORITY)
+    affordances.resolve({ ok: true })
+    await check
+    await reaction
+    expect(grantsReads).toHaveLength(1)
+  })
+})
+
 describe('purgeGfsSessionCache', () => {
   it('drops every GFS query and revokes access for the session, with nothing mounted', () => {
     const client = new QueryClient()
