@@ -227,8 +227,13 @@ export function useFilePreviewResourceActions({
     resourceQuery.error,
     resourceQuery.isError,
   ])
+  const terminalResolverDenial =
+    resourceQuery.isError &&
+    (isGfsSessionAuthorityFailure(errorMessage(resourceQuery.error), 'operation') ||
+      [401, 403, 404].includes(httpErrorStatus(resourceQuery.error) ?? 0))
   const resource = resourceQuery.isError ? undefined : resourceQuery.data
-  const presentationResource = resource ?? retainedPresentationResource
+  const presentationResource =
+    resource ?? (terminalResolverDenial ? undefined : retainedPresentationResource)
   const previewNoticeContextKey = JSON.stringify([
     gfsUri,
     sessionScope,
