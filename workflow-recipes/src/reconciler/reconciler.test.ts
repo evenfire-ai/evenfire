@@ -13134,9 +13134,15 @@ describe('WorkflowRecipeReconciler', () => {
       expect(deploymentRenders('api-b')).toBeGreaterThanOrEqual(1)
       expect(store.current().status?.secretOwnershipRevocations?.['api-a']).toBe(entryA)
       expect(store.current().status?.secretOwnershipRevocations).not.toHaveProperty('api-b')
+      const secretReadsBeforePass3 = mockCoreApi.readNamespacedSecret.mock.calls.length
 
-      await reconciler.reconcile(store.current())
+      const third = await reconciler.reconcile(store.current())
 
+      // Witness: pass 3 classified the Secrets again and published the denial.
+      expect(mockCoreApi.readNamespacedSecret.mock.calls.length).toBeGreaterThan(
+        secretReadsBeforePass3
+      )
+      expect(deniedCondition(third)).toBe('True')
       expect(deploymentDeletes('api-a')).toBe(1)
     })
 
@@ -14109,7 +14115,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(workflowNeedsOwnershipBackstop(store.current())).toBe(true)
     })
 
-    it('T4.2 the terminal pass records the no-Secret-bearing fact only when every Secret-bearing workload is denied (issue #1349)', async () => {
+    it('T4.2 the terminal pass records the no-Secret-bearing fact for a denied Deployment and not for one whose Secret is accessible (issue #1349)', async () => {
       stubWorkflowReconciler()
       const denied = installRecipeStore(secretBearingTerminalRun('wf-run-denied', 'parent-recipe'))
 
