@@ -2621,21 +2621,31 @@ describe('postStepStatus — output bounded by the coordinator', () => {
   it.each([
     [
       'cut to 65,536 characters',
+      { cut: true, halved: false },
       (tail: string): Record<string, unknown> => ({
         output: `${JSON.stringify({ artifact: customArtifact(0) })}${' '.repeat(70_000)}${tail}`,
       }),
     ],
     [
       'halved to fit the body ceiling',
+      { cut: false, halved: true },
       (tail: string): Record<string, unknown> => ({
         output: `${JSON.stringify({ artifact: customArtifact(0) })}${'\n'.repeat(60_000)}${tail}`,
         // Never reduced, so the reporter halves the output.
         modelUsed: 'm'.repeat(200_000),
       }),
     ],
+    [
+      'cut to 65,536 characters and then halved',
+      { cut: true, halved: true },
+      (tail: string): Record<string, unknown> => ({
+        output: `${JSON.stringify({ artifact: customArtifact(0) })}${'\n'.repeat(70_000)}${tail}`,
+        modelUsed: 'm'.repeat(200_000),
+      }),
+    ],
   ])(
     'registers no artifact from a prefix that parses on its own, for an output %s',
-    async (_label, fields) => {
+    async (_label, path, fields) => {
       process.env.WRC_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS = '65536'
       const raw: Record<string, unknown> = {
         stepId: 'emit',
@@ -2651,6 +2661,10 @@ describe('postStepStatus — output bounded by the coordinator', () => {
       expect(bounded.outputTruncated).toBe(true)
       expect((bounded.output as string).length).toBeLessThan((raw.output as string).length)
       expect(JSON.parse(bounded.output as string)).toEqual({ artifact: customArtifact(0) })
+      expect(bounded.outputLength).toBe((raw.output as string).length)
+      // Which path shortened it: the cut to 65,536 characters, the halving, or both.
+      expect((raw.output as string).length > 65_536).toBe(path.cut)
+      expect((bounded.output as string).length < 65_536).toBe(path.halved)
 
       const fromRaw = await stored(raw)
       const fromBounded = await stored(bounded)
