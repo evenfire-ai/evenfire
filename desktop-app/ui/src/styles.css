@@ -15171,13 +15171,13 @@ pre {
 }
 
 .da-gfs-subject-picker__avatar--team {
-  background: rgba(var(--warning-rgb), 0.15);
-  color: var(--warning);
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent-strong);
 }
 
 .da-gfs-subject-picker__avatar--host {
-  background: rgba(var(--success-rgb), 0.16);
-  color: var(--success);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
 .da-gfs-subject-picker__avatar svg {
@@ -15742,17 +15742,6 @@ pre {
   background: rgba(var(--edge-rgb), 0.32);
 }
 
-.da-gfs-link-modal {
-  position: fixed;
-  inset: 0;
-  z-index: calc(var(--layer-chat-overlay) + 2);
-  display: grid;
-  place-items: center;
-  padding: var(--space-4);
-  background: rgba(var(--overlay-rgb), 0.18);
-  backdrop-filter: blur(10px);
-}
-
 .da-gfs-link-dialog {
   width: min(520px, 94vw);
   overflow: hidden;
@@ -16143,14 +16132,6 @@ pre {
 }
 
 .da-gfs-manage-dialog {
-  /* Keep every Share-dialog accent in the blue family while preserving the
-     global semantic palette used by the rest of Desktop. */
-  --success: var(--accent);
-  --success-rgb: var(--accent-rgb);
-  --warning: var(--accent-strong);
-  --warning-rgb: var(--accent-rgb);
-  --danger: var(--accent-strong);
-  --danger-rgb: var(--accent-rgb);
   width: min(720px, 96vw);
   max-height: min(760px, 92vh);
   display: grid;
@@ -16199,7 +16180,7 @@ pre {
   overflow: hidden;
   overflow-wrap: anywhere;
   color: var(--text);
-  font-size: var(--font-size-2xl);
+  font-size: var(--font-size-xl);
   font-weight: var(--font-weight-semibold);
   line-height: var(--line-height-tight);
   text-overflow: ellipsis;
@@ -16256,7 +16237,7 @@ pre {
 }
 
 .da-gfs-move-confirm-dialog .da-gfs-manage-dialog__heading h3 {
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size-xl);
 }
 
 .da-gfs-move-confirm-dialog .da-gfs-manage-dialog__body {
@@ -16551,7 +16532,7 @@ pre {
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--warning);
+  color: var(--accent-strong);
 }
 
 .da-gfs-move-dialog__tree-folder-icon svg {
@@ -16713,14 +16694,14 @@ pre {
 }
 
 .da-gfs-grant-list__avatar--team {
-  background: rgba(var(--warning-rgb), 0.15);
-  color: var(--warning);
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent-strong);
 }
 
 .da-gfs-grant-list__avatar--agent,
 .da-gfs-grant-list__avatar--workflow {
-  background: rgba(var(--success-rgb), 0.16);
-  color: var(--success);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
 .da-gfs-grant-list__avatar svg {

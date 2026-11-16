@@ -3973,7 +3973,7 @@ export function FilesPage({
 
       {openLinkOpen ? (
         <div
-          className="da-gfs-link-modal"
+          className="da-gfs-manage-modal"
           role="presentation"
           onMouseDown={event => {
             if (event.target === event.currentTarget) setOpenLinkOpen(false)
