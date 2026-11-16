@@ -442,6 +442,10 @@ export function GfsResourceMenu({
   }, [open, shareOpen])
 
   useLayoutEffect(() => {
+    if (!open) shareFocusWithinRef.current = false
+  }, [open])
+
+  useLayoutEffect(() => {
     if (presentation !== 'sidebar-context' || triggerMode !== 'context' || !contextOpenRequest) {
       return
     }

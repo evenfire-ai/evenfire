@@ -23,6 +23,7 @@ const auth = vi.hoisted(() => ({
   runtimeConfigState: { envKey: 'test' },
   sessionGeneration: 7,
 }))
+const geometryState = { sidebarUnavailable: false }
 const menuCapture = vi.hoisted(() => ({
   actionsByResource: new Map<string, unknown[]>(),
   contextStateByResource: new Map<string, unknown>(),
@@ -81,6 +82,7 @@ afterEach(() => {
   menuCapture.contextStateByResource.clear()
   menuCapture.states = []
   menuCapture.onMenuState = null
+  geometryState.sidebarUnavailable = false
   auth.sessionGeneration = 7
 })
 
@@ -133,10 +135,10 @@ function mountedTree(
         y: 0,
         left: 0,
         top: 0,
-        right: 240,
-        bottom: 600,
-        width: 240,
-        height: 600,
+        right: geometryState.sidebarUnavailable ? 0 : 240,
+        bottom: geometryState.sidebarUnavailable ? 0 : 600,
+        width: geometryState.sidebarUnavailable ? 0 : 240,
+        height: geometryState.sidebarUnavailable ? 0 : 600,
         toJSON: () => ({}),
       } as DOMRect
     if (this.classList.contains('da-file-explorer__label'))
@@ -1430,5 +1432,380 @@ describe('r14 mounted-component independent A4 comparisons', () => {
     }
     expect(observed.after).toBe(observed.before)
     f.queryClient.clear()
+  })
+
+  it('A3-34 retires Share focus provenance after an action close and fresh-row reopen', async () => {
+    const f = mountedTree()
+    await openKeyboard('A')
+    await settle(f)
+    const firstMain = screen.getByRole('menu', { name: 'Actions for A' })
+    const firstShare = within(firstMain).getByRole('menuitem', { name: 'Share' })
+    fireEvent.keyDown(firstShare, { key: 'ArrowRight' })
+    const firstFlyout = await screen.findByRole('menu', { name: 'Share options for A' })
+    const copyLink = within(firstFlyout).getByRole('menuitem', { name: 'Copy link' })
+    copyLink.focus()
+    expect(document.activeElement).toBe(copyLink)
+    fireEvent.click(copyLink, { detail: 0 })
+    await waitFor(() => expect(screen.queryAllByRole('menu')).toHaveLength(0))
+    expect(f.onResourceAction.mock.calls.filter(call => call[1] === 'copy-link')).toHaveLength(1)
+
+    await openKeyboard('A')
+    await settle(f)
+    const reopenedMain = screen.getByRole('menu', { name: 'Actions for A' })
+    const reopenedShare = within(reopenedMain).getByRole('menuitem', { name: 'Share' })
+    expect(document.activeElement).toBe(reopenedShare)
+    const before = document.activeElement
+    fireEvent.mouseOver(reopenedShare)
+    await screen.findByRole('menu', { name: 'Share options for A' })
+
+    expect(document.activeElement).toBe(before)
+    expect(f.onResourceAction.mock.calls.filter(call => call[1] === 'copy-link')).toHaveLength(1)
+    f.queryClient.clear()
+  })
+
+  it.each([
+    [
+      'outside dismissal',
+      async () => {
+        const outsideRow = screen.getByRole('button', { name: 'A' })
+        outsideRow.focus()
+        fireEvent.mouseDown(outsideRow)
+      },
+    ],
+    [
+      'Main Escape',
+      async () => {
+        const main = screen.getByRole('menu', { name: 'Actions for A' })
+        const trigger = within(main).getByRole('menuitem', { name: 'Share' })
+        fireEvent.keyDown(window, { key: 'Escape' })
+        await waitFor(() =>
+          expect(screen.queryByRole('menu', { name: 'Share options for A' })).toBeNull()
+        )
+        expect(document.activeElement).toBe(trigger)
+        fireEvent.keyDown(window, { key: 'Escape' })
+      },
+    ],
+  ])(
+    'A3-35 %s retires Share focus provenance before same-row re-admission',
+    async (_cause, close) => {
+      const f = mountedTree()
+      await openKeyboard('A')
+      await settle(f)
+      const firstMain = screen.getByRole('menu', { name: 'Actions for A' })
+      fireEvent.keyDown(within(firstMain).getByRole('menuitem', { name: 'Share' }), {
+        key: 'ArrowRight',
+      })
+      const firstFlyout = await screen.findByRole('menu', { name: 'Share options for A' })
+      within(firstFlyout).getByRole('menuitem', { name: 'Copy link' }).focus()
+      const firstRequest = menuCapture.states.filter(state => state[1]).at(-1)?.[0]
+
+      const rowButton = screen.getByRole('button', { name: 'A' })
+      close()
+      await waitFor(() => expect(screen.queryAllByRole('menu')).toHaveLength(0))
+      expect(document.activeElement).toBe(rowButton)
+      await openKeyboard('A')
+      await settle(f)
+      const reopenedMain = screen.getByRole('menu', { name: 'Actions for A' })
+      const reopenedShare = within(reopenedMain).getByRole('menuitem', { name: 'Share' })
+      expect(menuCapture.states.filter(state => state[1]).at(-1)?.[0]).not.toBe(firstRequest)
+      expect(document.activeElement).toBe(reopenedShare)
+      const before = document.activeElement
+      fireEvent.mouseOver(reopenedShare)
+      await screen.findByRole('menu', { name: 'Share options for A' })
+
+      expect(document.activeElement).toBe(before)
+      expect(f.onResourceAction).not.toHaveBeenCalled()
+      f.queryClient.clear()
+    }
+  )
+
+  it('A3-37 retires Share focus provenance after the geometry close writer', async () => {
+    const f = mountedTree()
+    await openKeyboard('A')
+    await settle(f)
+    const firstMain = screen.getByRole('menu', { name: 'Actions for A' })
+    fireEvent.keyDown(within(firstMain).getByRole('menuitem', { name: 'Share' }), {
+      key: 'ArrowRight',
+    })
+    const firstFlyout = await screen.findByRole('menu', { name: 'Share options for A' })
+    within(firstFlyout).getByRole('menuitem', { name: 'Copy link' }).focus()
+    const firstRequest = menuCapture.states.filter(state => state[1]).at(-1)?.[0]
+
+    geometryState.sidebarUnavailable = true
+    fireEvent(window, new Event('resize'))
+    await waitFor(() => expect(screen.queryAllByRole('menu')).toHaveLength(0))
+    geometryState.sidebarUnavailable = false
+
+    await openKeyboard('A')
+    await settle(f)
+    const reopenedMain = screen.getByRole('menu', { name: 'Actions for A' })
+    const reopenedShare = within(reopenedMain).getByRole('menuitem', { name: 'Share' })
+    expect(menuCapture.states.filter(state => state[1]).at(-1)?.[0]).not.toBe(firstRequest)
+    const before = document.activeElement
+    fireEvent.mouseOver(reopenedShare)
+    await screen.findByRole('menu', { name: 'Share options for A' })
+
+    expect(document.activeElement).toBe(before)
+    expect(f.onResourceAction).not.toHaveBeenCalled()
+    f.queryClient.clear()
+  })
+
+  it('A3-38 retires focusin writeback before the committed geometry-close boundary', async () => {
+    const f = mountedTree()
+    await openKeyboard('A')
+    const firstMain = screen.getByRole('menu', { name: 'Actions for A' })
+    fireEvent.keyDown(within(firstMain).getByRole('menuitem', { name: 'Share' }), {
+      key: 'ArrowRight',
+    })
+    const firstFlyout = await screen.findByRole('menu', { name: 'Share options for A' })
+    const child = within(firstFlyout).getByRole('menuitem', { name: 'Copy link' })
+    child.focus()
+    const trigger = within(firstMain).getByRole('menuitem', { name: 'Share' })
+    let closeIntent = false
+    let postIntentFocusin = 0
+    const captureFocusin = (event: FocusEvent) => {
+      if (closeIntent && event.target === child) postIntentFocusin += 1
+    }
+    document.addEventListener('focusin', captureFocusin, true)
+    geometryState.sidebarUnavailable = true
+    await act(async () => {
+      fireEvent(window, new Event('resize'))
+      closeIntent = true
+      expect(child.isConnected).toBe(true)
+      trigger.focus()
+      child.focus()
+      expect(document.activeElement).toBe(child)
+      await Promise.resolve()
+    })
+    document.removeEventListener('focusin', captureFocusin, true)
+    expect(postIntentFocusin).toBeGreaterThan(0)
+    await waitFor(() => expect(screen.queryAllByRole('menu')).toHaveLength(0))
+    geometryState.sidebarUnavailable = false
+
+    await openKeyboard('A')
+    const reopenedMain = screen.getByRole('menu', { name: 'Actions for A' })
+    const reopenedShare = within(reopenedMain).getByRole('menuitem', { name: 'Share' })
+    const before = document.activeElement
+    fireEvent.mouseOver(reopenedShare)
+    await screen.findByRole('menu', { name: 'Share options for A' })
+
+    expect(document.activeElement).toBe(before)
+    expect(f.onResourceAction).not.toHaveBeenCalled()
+    f.queryClient.clear()
+  })
+
+  it('generated mounted close-commit histories match the independent focus and effect model', async () => {
+    type Model = {
+      open: boolean
+      shareOpen: boolean
+      provenance: boolean
+      requestId: number
+      activeElement: HTMLElement | null
+      focusClass: 'external' | 'row' | 'share-trigger' | 'share-child'
+      actionCount: number
+    }
+    type Real = { mounted: ReturnType<typeof mountedTree>; main: HTMLElement | null }
+    const assertModelMatchesMounted = (model: Model, real: Real) => {
+      const main = screen.queryByRole('menu', { name: 'Actions for A' }) as HTMLElement | null
+      const share = screen.queryByRole('menu', { name: 'Share options for A' })
+      expect(Boolean(main)).toBe(model.open)
+      expect(Boolean(share)).toBe(model.shareOpen)
+      if (main) expect(main).toBe(real.main)
+      if (model.focusClass === 'share-child') {
+        expect(document.activeElement?.getAttribute('data-share-child')).toBe('true')
+      } else {
+        expect(document.activeElement).toBe(model.activeElement)
+      }
+      expect(menuCapture.states.filter(state => state[1]).at(-1)?.[0] ?? 0).toBe(model.requestId)
+      expect(real.mounted.onResourceAction).toHaveBeenCalledTimes(model.actionCount)
+    }
+    class OpenA implements fc.AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return !model.open
+      }
+      async run(model: Model, real: Real) {
+        await openKeyboard('A')
+        real.main = screen.getByRole('menu', { name: 'Actions for A' })
+        model.open = true
+        model.shareOpen = false
+        model.requestId = menuCapture.states.filter(state => state[1]).at(-1)?.[0] ?? 0
+        model.activeElement = within(real.main).getByRole('menuitem', { name: 'Share' })
+        model.focusClass = 'share-trigger'
+        assertModelMatchesMounted(model, real)
+      }
+      toString() {
+        return 'OpenA(real-ContextMenu-key)'
+      }
+    }
+    class EnterShare implements fc.AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.open && !model.shareOpen
+      }
+      async run(model: Model, real: Real) {
+        fireEvent.keyDown(
+          within(screen.getByRole('menu', { name: 'Actions for A' })).getByRole('menuitem', {
+            name: 'Share',
+          }),
+          { key: 'ArrowRight' }
+        )
+        await screen.findByRole('menu', { name: 'Share options for A' })
+        model.shareOpen = true
+        model.provenance = true
+        model.activeElement = null
+        model.focusClass = 'share-child'
+        assertModelMatchesMounted(model, real)
+      }
+      toString() {
+        return 'EnterShare(ArrowRight)'
+      }
+    }
+    class GeometryClose implements fc.AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.open && model.shareOpen
+      }
+      async run(model: Model, real: Real) {
+        const child = screen.getByRole('menuitem', { name: 'Copy link' })
+        const trigger = within(screen.getByRole('menu', { name: 'Actions for A' })).getByRole(
+          'menuitem',
+          { name: 'Share' }
+        )
+        let closeIntent = false
+        let focusinCount = 0
+        const capture = (event: FocusEvent) => {
+          if (closeIntent && event.target === child) focusinCount += 1
+        }
+        document.addEventListener('focusin', capture, true)
+        geometryState.sidebarUnavailable = true
+        await act(async () => {
+          fireEvent(window, new Event('resize'))
+          closeIntent = true
+          trigger.focus()
+          child.focus()
+          await Promise.resolve()
+        })
+        document.removeEventListener('focusin', capture, true)
+        expect(focusinCount).toBeGreaterThan(0)
+        await waitFor(() => expect(screen.queryAllByRole('menu')).toHaveLength(0))
+        geometryState.sidebarUnavailable = false
+        model.open = false
+        model.shareOpen = false
+        model.provenance = false
+        real.main = null
+        model.activeElement = document.body
+        model.focusClass = 'external'
+        assertModelMatchesMounted(model, real)
+      }
+      toString() {
+        return 'GeometryClose(focusin-before-commit)'
+      }
+    }
+    class ReopenA implements fc.AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return !model.open
+      }
+      async run(model: Model, real: Real) {
+        const previousRequest = model.requestId
+        await openKeyboard('A')
+        real.main = screen.getByRole('menu', { name: 'Actions for A' })
+        const nextRequest = menuCapture.states.filter(state => state[1]).at(-1)?.[0] ?? 0
+        expect(nextRequest).toBeGreaterThan(previousRequest)
+        model.requestId = nextRequest
+        model.open = true
+        model.activeElement = within(real.main!).getByRole('menuitem', { name: 'Share' })
+        model.focusClass = 'share-trigger'
+        assertModelMatchesMounted(model, real)
+      }
+      toString() {
+        return 'ReopenA(fresh-request)'
+      }
+    }
+    class PassiveHover implements fc.AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.open
+      }
+      async run(model: Model, real: Real) {
+        const before = document.activeElement
+        if (model.focusClass === 'share-child') {
+          expect(before?.getAttribute('data-share-child')).toBe('true')
+        } else {
+          expect(before).toBe(model.activeElement)
+        }
+        const main = screen.getByRole('menu', { name: 'Actions for A' })
+        expect(main).toBe(real.main)
+        const effects = real.mounted.onResourceAction.mock.calls.length
+        fireEvent.mouseOver(within(main).getByRole('menuitem', { name: 'Share' }))
+        await screen.findByRole('menu', { name: 'Share options for A' })
+        expect(document.activeElement).toBe(before)
+        expect(real.mounted.onResourceAction).toHaveBeenCalledTimes(effects)
+        model.shareOpen = true
+        assertModelMatchesMounted(model, real)
+      }
+      toString() {
+        return 'PassiveHover(preserves-activeElement)'
+      }
+    }
+    class ExplicitKeyboard implements fc.AsyncCommand<Model, Real> {
+      check(model: Model) {
+        return model.open
+      }
+      async run(model: Model, real: Real) {
+        const main = screen.getByRole('menu', { name: 'Actions for A' })
+        fireEvent.keyDown(within(main).getByRole('menuitem', { name: 'Share' }), {
+          key: 'ArrowRight',
+        })
+        await waitFor(() =>
+          expect(document.activeElement?.getAttribute('data-share-child')).toBe('true')
+        )
+        model.provenance = true
+        model.shareOpen = true
+        model.activeElement = null
+        model.focusClass = 'share-child'
+        assertModelMatchesMounted(model, real)
+      }
+      toString() {
+        return 'ExplicitKeyboard(ArrowRight)'
+      }
+    }
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.commands([fc.constant(new PassiveHover()), fc.constant(new ExplicitKeyboard())], {
+          maxCommands: 4,
+        }),
+        async generated => {
+          const names = [...generated].map(command => command.toString())
+          fc.pre(names.includes('PassiveHover(preserves-activeElement)'))
+          fc.pre(names.includes('ExplicitKeyboard(ArrowRight)'))
+          const mounted = mountedTree()
+          const model: Model = {
+            open: false,
+            shareOpen: false,
+            provenance: false,
+            requestId: 0,
+            activeElement: null,
+            focusClass: 'external',
+            actionCount: 0,
+          }
+          const real: Real = { mounted, main: null }
+          await fc.asyncModelRun(
+            () => ({ model, real }),
+            [
+              new OpenA(),
+              new EnterShare(),
+              new GeometryClose(),
+              new ReopenA(),
+              ...Array.from(generated),
+            ]
+          )
+          expect(model.open).toBe(true)
+          expect(model.provenance).toBe(true)
+          expect(model.shareOpen).toBe(true)
+          expect(mounted.onResourceAction).not.toHaveBeenCalled()
+          cleanup()
+          mounted.queryClient.clear()
+        }
+      ),
+      { numRuns: 20, seed: 20261114, endOnFailure: true }
+    )
   })
 })
