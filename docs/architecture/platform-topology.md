@@ -146,21 +146,21 @@ flowchart TB
 
 ### 1.2 Namespace Map
 
-| Namespace           | Purpose                                                  | Deny-All Default | Key Components                                                                                                         |
-| ------------------- | -------------------------------------------------------- | :--------------: | ---------------------------------------------------------------------------------------------------------------------- |
-| **profiles**        | User identity, profiles, team management, access mapping | No (management)  | profile-ui, external-rest-api                                                                                          |
+| Namespace           | Purpose                                                  | Deny-All Default | Key Components                                                                                 |
+| ------------------- | -------------------------------------------------------- | :--------------: | ---------------------------------------------------------------------------------------------- |
+| **profiles**        | User identity, profiles, team management, access mapping | No (management)  | profile-ui, external-rest-api                                                                  |
 | **control-plane**   | Platform management, CRD lifecycle, controllers          | No (management)  | control-ui, control-api, control-postgres, HCC Image (3 synchronizers), workflow-recipes (WRC), codex/grok LLM proxies |
-| **channels**        | External communication ingress (channels)                |   No (ingress)   | Communication Channel Image (TG/Email/Slack)                                                                           |
-| **mcp-host**        | LLM orchestration and agent state machine                |     **Yes**      | mcp-host (Agent + MCP Client)                                                                                          |
-| **mcp-server**      | MCP server runtime and CRD storage                       |     **Yes**      | MCP server pods, McpServer CRDs, Context CRDs                                                                          |
-| **llm-hooks**       | Guardrail hook runtime and LlmHook CRDs                  | **Yes** (static) | Hook pods HCC reconciles from `image`-target LlmHooks; PSS `baseline` enforced, `restricted` warn/audit                |
-| **sandbox-recipes** | Non-MCP workloads from WorkflowRecipes                   |     **Yes**      | StatefulSets, CronJobs, Jobs, Deployments, PVCs                                                                        |
-| **rpc-proxy**       | Secure external access for Desktop App users             |     **Yes**      | mcpProxy Image (MCP Server Proxy, MCP Host Proxy)                                                                      |
-| **sandbox-ui**      | Untrusted recipe-supplied UI workloads                   |     **Yes**      | Recipe-defined UI workloads (ingress only via rpc-proxy)                                                               |
-| **webhook-ingress** | Public webhook termination                               |     **Yes**      | webhook-proxy (HTTP terminator)                                                                                        |
-| **gfs**             | GFS (Global File System) data plane                      |     **Yes**      | gfsc file-broker pods reconciled from GlobalFileSystem CRDs                                                            |
-| **ingress**         | Public tunnel ingress                                    |     **Yes**      | cloudflared                                                                                                            |
-| **registry**        | Recipe registry (declared in the minikube overlay only)  |        No        | registry-api (side-by-side registry server, port 8085)                                                                 |
+| **channels**        | External communication ingress (channels)                |   No (ingress)   | Communication Channel Image (TG/Email/Slack)                                                   |
+| **mcp-host**        | LLM orchestration and agent state machine                |     **Yes**      | mcp-host (Agent + MCP Client)                                                                  |
+| **mcp-server**      | MCP server runtime and CRD storage                       |     **Yes**      | MCP server pods, McpServer CRDs, Context CRDs                                                  |
+| **llm-hooks**       | Guardrail hook runtime and LlmHook CRDs                  |  **Yes** (static) | Hook pods HCC reconciles from `image`-target LlmHooks; PSS `baseline` enforced, `restricted` warn/audit |
+| **sandbox-recipes** | Non-MCP workloads from WorkflowRecipes                   |     **Yes**      | StatefulSets, CronJobs, Jobs, Deployments, PVCs                                                |
+| **rpc-proxy**       | Secure external access for Desktop App users             |     **Yes**      | mcpProxy Image (MCP Server Proxy, MCP Host Proxy)                                              |
+| **sandbox-ui**      | Untrusted recipe-supplied UI workloads                   |     **Yes**      | Recipe-defined UI workloads (ingress only via rpc-proxy)                                       |
+| **webhook-ingress** | Public webhook termination                               |     **Yes**      | webhook-proxy (HTTP terminator)                                                                |
+| **gfs**             | GFS (Global File System) data plane                      |     **Yes**      | gfsc file-broker pods reconciled from GlobalFileSystem CRDs                                    |
+| **ingress**         | Public tunnel ingress                                    |     **Yes**      | cloudflared                                                                                    |
+| **registry**        | Recipe registry (declared in the minikube overlay only)  |        No        | registry-api (side-by-side registry server, port 8085)                                         |
 
 > Namespace names above are the ones declared in `deploy/` (`deploy/base/namespaces.yaml`, plus `deploy/base/ingress/` and `deploy/overlays/minikube/registry/`). The `llm-hooks` deny-all is a static manifest (`llm-hooks-static-default-deny`, labeled `clerum.io/managed-by: llm-hooks`), not an HCC-reconciled L0 policy; HCC adds only the narrow allow policies (§2.2). Diagrams in this document use the historical conceptual names **profile-plane** and **gateway** for the declared namespaces `profiles` and `channels`.
 
@@ -168,29 +168,29 @@ flowchart TB
 
 Every service in the repo. Ports are the container ports in `deploy/base/`.
 
-| Service                              | Directory                           | Namespace              | Port | Role                                                                                                                                                                      |
-| ------------------------------------ | ----------------------------------- | ---------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **profile-ui**                       | `/profile-ui`                       | profiles               | 3001 | User-facing profile management UI                                                                                                                                         |
-| **external-rest-api**                | `/external-rest-api`                | profiles               | 8091 | User-facing profile, auth, team, invitation, and RPC-token API                                                                                                            |
-| **control-ui**                       | `/control-ui`                       | control-plane          | 3000 | Platform management UI                                                                                                                                                    |
-| **control-api**                      | `/control-api`                      | control-plane          | 8090 | CRD lifecycle, resource CRUD, profile mapping                                                                                                                             |
-| **Host Context Controller**          | `/host-context-controller`          | control-plane          | 8081 | 3 synchronizers (MCP Host, AccessCtrl, MCP Server) + Discovery REST API                                                                                                   |
-| **Workflow Recipe Controller**       | `/workflow-recipes`                 | control-plane          | 8082 | Standalone `workflow-recipes` Deployment + Service — a separate process from HCC, own image and SA                                                                        |
+| Service                              | Directory                           | Namespace              | Port | Role                                                                                                 |
+| ------------------------------------ | ----------------------------------- | ---------------------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| **profile-ui**                       | `/profile-ui`                       | profiles               | 3001 | User-facing profile management UI                                                                    |
+| **external-rest-api**                | `/external-rest-api`                | profiles               | 8091 | User-facing profile, auth, team, invitation, and RPC-token API                                       |
+| **control-ui**                       | `/control-ui`                       | control-plane          | 3000 | Platform management UI                                                                               |
+| **control-api**                      | `/control-api`                      | control-plane          | 8090 | CRD lifecycle, resource CRUD, profile mapping                                                        |
+| **Host Context Controller**          | `/host-context-controller`          | control-plane          | 8081 | 3 synchronizers (MCP Host, AccessCtrl, MCP Server) + Discovery REST API                              |
+| **Workflow Recipe Controller**       | `/workflow-recipes`                 | control-plane          | 8082 | Standalone `workflow-recipes` Deployment + Service — a separate process from HCC, own image and SA   |
 | **codex-llm-proxy**                  | `/codex-llm-proxy`                  | control-plane          | 8080 | Broker for Codex subscription model calls (admin 8081, metrics 9090). Execution off by default — see [connect an LLM subscription](../how-to/connect-llm-subscription.md) |
-| **grok-llm-proxy**                   | `/grok-llm-proxy`                   | control-plane          | 8080 | Broker for Grok subscription model calls (admin 8081, metrics 9090). Execution off by default                                                                             |
-| **Comm Channel Image**               | `/channel-reader`                   | channels               | —    | Polls TG/Email/Slack, forwards to mcp-host                                                                                                                                |
-| **workflow-approval-request-reader** | `/workflow-approval-request-reader` | channels               | 8098 | Inbound half of channel approvals — receives provider callbacks, submits decisions                                                                                        |
-| **mcp-host**                         | `/mcp-host`                         | mcp-host               | 8080 | LLM orchestration, agent state machine, MCP tool calling                                                                                                                  |
-| **MCP servers**                      | `/mcp-servers`                      | mcp-server             | 3000 | First-party MCP servers; pods reconciled by HCC from McpServer CRDs                                                                                                       |
-| **mcp-proxy**                        | `/mcp-proxy`                        | mcp-server             | 8083 | Optional centralized MCP router (`MCP_PROXY_ENABLED`); discovers servers via the HCC API                                                                                  |
-| **stdio-bridge**                     | `/stdio-bridge`                     | mcp-server (sidecar)   | 3000 | Translates stdio MCP transport to StreamableHTTP; injected by HCC for `transport.type: stdio`                                                                             |
-| **nginx-egress-proxy**               | `/nginx-egress-proxy`               | mcp-server             | —    | Image only — pinned egress path HCC deploys for remote (`spec.remote`) McpServers                                                                                         |
-| **mcpProxy Image**                   | `/rpc-proxy`                        | rpc-proxy              | 8094 | Secure RPC proxy: Desktop App → MCP servers / Agent                                                                                                                       |
-| **webhook-proxy**                    | `/webhook-proxy`                    | webhook-ingress        | 8095 | Cluster-shared public webhook router (health on 9090); holds no provider secrets                                                                                          |
-| **webhook-gateway**                  | `/webhook-gateway`                  | sandbox-recipes        | 8090 | Per-recipe signature verifier; deployed by the WRC, sits behind `webhook-proxy`                                                                                           |
-| **gfs-controller**                   | `/gfs-controller`                   | gfs                    | 8087 | Brokered HTTP file API over the GlobalFileSystem drive — the only workload that mounts the drive PVC                                                                      |
-| **workspace-files-controller**       | `/workspace-files-controller`       | the SharedFileSystem's | 8086 | Per-SFS HTTP file API; the write path for a team workspace (agents mount the same PVC read-only)                                                                          |
-| **desktop-app**                      | `/desktop-app`                      | — (client)             | —    | Electron + React client; authenticates via external-rest-api, calls rpc-proxy                                                                                             |
+| **grok-llm-proxy**                   | `/grok-llm-proxy`                   | control-plane          | 8080 | Broker for Grok subscription model calls (admin 8081, metrics 9090). Execution off by default        |
+| **Comm Channel Image**               | `/channel-reader`                   | channels               | —    | Polls TG/Email/Slack, forwards to mcp-host                                                           |
+| **workflow-approval-request-reader** | `/workflow-approval-request-reader` | channels               | 8098 | Inbound half of channel approvals — receives provider callbacks, submits decisions                   |
+| **mcp-host**                         | `/mcp-host`                         | mcp-host               | 8080 | LLM orchestration, agent state machine, MCP tool calling                                             |
+| **MCP servers**                      | `/mcp-servers`                      | mcp-server             | 3000 | First-party MCP servers; pods reconciled by HCC from McpServer CRDs                                  |
+| **mcp-proxy**                        | `/mcp-proxy`                        | mcp-server             | 8083 | Optional centralized MCP router (`MCP_PROXY_ENABLED`); discovers servers via the HCC API             |
+| **stdio-bridge**                     | `/stdio-bridge`                     | mcp-server (sidecar)   | 3000 | Translates stdio MCP transport to StreamableHTTP; injected by HCC for `transport.type: stdio`        |
+| **nginx-egress-proxy**               | `/nginx-egress-proxy`               | mcp-server             | —    | Image only — pinned egress path HCC deploys for remote (`spec.remote`) McpServers                    |
+| **mcpProxy Image**                   | `/rpc-proxy`                        | rpc-proxy              | 8094 | Secure RPC proxy: Desktop App → MCP servers / Agent                                                  |
+| **webhook-proxy**                    | `/webhook-proxy`                    | webhook-ingress        | 8095 | Cluster-shared public webhook router (health on 9090); holds no provider secrets                     |
+| **webhook-gateway**                  | `/webhook-gateway`                  | sandbox-recipes        | 8090 | Per-recipe signature verifier; deployed by the WRC, sits behind `webhook-proxy`                      |
+| **gfs-controller**                   | `/gfs-controller`                   | gfs                    | 8087 | Brokered HTTP file API over the GlobalFileSystem drive — the only workload that mounts the drive PVC |
+| **workspace-files-controller**       | `/workspace-files-controller`       | the SharedFileSystem's | 8086 | Per-SFS HTTP file API; the write path for a team workspace (agents mount the same PVC read-only)     |
+| **desktop-app**                      | `/desktop-app`                      | — (client)             | —    | Electron + React client; authenticates via external-rest-api, calls rpc-proxy                        |
 
 Also deployed, but not services in their own right: `control-postgres`,
 `cloudflared` (namespace `ingress`), and the nginx gateway sidecars
@@ -232,19 +232,19 @@ Nothing moves until HCC creates explicit allow policies.
 
 ### 2.2 Trust Boundaries
 
-| Boundary                   | Trust Level                                                | Enforcement                                                                                                                                                                              |
-| -------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| External → rpc-proxy       | Zero trust                                                 | Scoped RS256 bearer JWT (iss/aud/typ/exp/scope/hostRefs), control-api profile ACL                                                                                                        |
-| External → gateway         | Channel trust                                              | Bot tokens, allowed sender lists                                                                                                                                                         |
-| gateway → mcp-host         | Internal trust                                             | NetworkPolicy                                                                                                                                                                            |
-| mcp-host → mcp-server      | Context-scoped                                             | NetworkPolicy per (context, server) + identity headers                                                                                                                                   |
-| sandbox → mcp-server       | Recipe-scoped                                              | NetworkPolicy per recipe binding                                                                                                                                                         |
-| rpc-proxy → mcp-server     | Context/server-scoped data plane + profile-scoped app auth | HCC `rpc-egress-<context>-<server>` plus matching `ctx-<context>-<server>` ingress, with control-api profile ACL                                                                         |
-| rpc-proxy → mcp-host       | Host-scoped data plane + profile-scoped app auth           | HCC `rpc-proxy-<host>-egress-mcp-host` and `mcp-host-<host>-ingress-rpc-proxy` NetworkPolicies plus control-api profile ACL                                                              |
-| control-plane → mcp-server | RBAC watch-only                                            | HCC watches CRDs, creates Deploys. No data plane access                                                                                                                                  |
-| mcp-host → llm-hooks       | Host-scoped (hooks the Host references)                    | HCC `mcp-host-<host>-egress-llm-hooks` egress plus `llmhook-<podKey>` / `llmhook-svc-<crName>` ingress, over the static `llm-hooks` deny-all                                             |
+| Boundary                   | Trust Level                                                | Enforcement                                                                                                                 |
+| -------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| External → rpc-proxy       | Zero trust                                                 | Scoped RS256 bearer JWT (iss/aud/typ/exp/scope/hostRefs), control-api profile ACL                                           |
+| External → gateway         | Channel trust                                              | Bot tokens, allowed sender lists                                                                                            |
+| gateway → mcp-host         | Internal trust                                             | NetworkPolicy                                                                                                               |
+| mcp-host → mcp-server      | Context-scoped                                             | NetworkPolicy per (context, server) + identity headers                                                                      |
+| sandbox → mcp-server       | Recipe-scoped                                              | NetworkPolicy per recipe binding                                                                                            |
+| rpc-proxy → mcp-server     | Context/server-scoped data plane + profile-scoped app auth | HCC `rpc-egress-<context>-<server>` plus matching `ctx-<context>-<server>` ingress, with control-api profile ACL            |
+| rpc-proxy → mcp-host       | Host-scoped data plane + profile-scoped app auth           | HCC `rpc-proxy-<host>-egress-mcp-host` and `mcp-host-<host>-ingress-rpc-proxy` NetworkPolicies plus control-api profile ACL |
+| control-plane → mcp-server | RBAC watch-only                                            | HCC watches CRDs, creates Deploys. No data plane access                                                                     |
+| mcp-host → llm-hooks       | Host-scoped (hooks the Host references)                    | HCC `mcp-host-<host>-egress-llm-hooks` egress plus `llmhook-<podKey>` / `llmhook-svc-<crName>` ingress, over the static `llm-hooks` deny-all |
 | mcp-host → LLM proxies     | Host-scoped + single-use ticket                            | HCC `mcp-host-<host>-egress-codex-proxy` / `-grok-proxy` (only for Hosts configured for that subscription) plus static proxy ingress in `deploy/base/control-plane/networkpolicies.yaml` |
-| mcp-host → public internet | Public-only                                                | Static `mcp-host` policy: TCP 80/443 to `0.0.0.0/0` minus the ranges in `deploy/base/public-egress-exceptions.yaml`                                                                      |
+| mcp-host → public internet | Public-only                                                | Static `mcp-host` policy: TCP 80/443 to `0.0.0.0/0` minus the ranges in `deploy/base/public-egress-exceptions.yaml` |
 
 ### 2.3 Security Invariants
 
@@ -263,12 +263,12 @@ Nothing moves until HCC creates explicit allow policies.
 
 The platform uses a **controller architecture** where all control logic runs in `control-plane`:
 
-| Component                        | Namespace         | Role                                                                                                                                                                   |
-| -------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Host Context Controller (HCC)    | `control-plane`   | 3 synchronizers + Discovery API (port 8081)                                                                                                                            |
-| Workflow Recipe Controller (WRC) | `control-plane`   | Pure CRD reconciler for WorkflowRecipe lifecycle — its own Deployment (port 8082)                                                                                      |
-| Control-plane triggers deploys   | `control-plane`   | Agents cannot trigger deploys directly                                                                                                                                 |
-| Non-MCP workloads                | `sandbox-recipes` | Isolated runtime for non-MCP recipe workloads                                                                                                                          |
+| Component                        | Namespace         | Role                                                                                                                                                        |
+| -------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Host Context Controller (HCC)    | `control-plane`   | 3 synchronizers + Discovery API (port 8081)                                                                                                                 |
+| Workflow Recipe Controller (WRC) | `control-plane`   | Pure CRD reconciler for WorkflowRecipe lifecycle — its own Deployment (port 8082)                                                                           |
+| Control-plane triggers deploys   | `control-plane`   | Agents cannot trigger deploys directly                                                                                                                      |
+| Non-MCP workloads                | `sandbox-recipes` | Isolated runtime for non-MCP recipe workloads                                                                                                               |
 | 13 namespaces                    | —                 | channels, control-plane, gfs, ingress, llm-hooks, mcp-host, mcp-server, profiles, registry (minikube overlay), rpc-proxy, sandbox-recipes, sandbox-ui, webhook-ingress |
 
 ### 3.2 Where the WRC Fits
@@ -354,17 +354,17 @@ sequenceDiagram
 
 ### 4.1 CRD Summary
 
-| CRD                    | Created By                           | Watched By                                | Purpose                                          |
-| ---------------------- | ------------------------------------ | ----------------------------------------- | ------------------------------------------------ |
-| `WorkflowRecipe`       | control-api                          | WR Controller                             | Package of workloads + resources + bindings      |
-| `WorkflowRecipePolicy` | control-api                          | WR Controller                             | Governance rules per recipe context              |
-| `McpServer`            | control-api, WR Controller           | HCC (MCP Server Sync)                     | MCP server deployment spec                       |
-| `Context`              | control-api, WR Controller (patches) | HCC (AccessCtrl Sync)                     | Access control: server allowlist                 |
-| `Host`                 | control-api                          | HCC (MCP Host Sync)                       | LLM provider config                              |
-| `CommunicationChannel` | control-api                          | Comm Channel Image                        | TG/Email/Slack channels                          |
-| `SharedFileSystem`     | control-api                          | HCC (SFS reconciler)                      | Team workspace: PVC + workspace-files-controller |
-| `GlobalFileSystem`     | control-api                          | HCC (GFS reconciler)                      | Global drive: PVC + gfs-controller roles         |
-| `LlmHook`              | control-api (hook install)           | HCC (LlmHook reconciler), mcp-host (read) | Installed guardrail hook in `llm-hooks`          |
+| CRD                    | Created By                           | Watched By            | Purpose                                          |
+| ---------------------- | ------------------------------------ | --------------------- | ------------------------------------------------ |
+| `WorkflowRecipe`       | control-api                          | WR Controller         | Package of workloads + resources + bindings      |
+| `WorkflowRecipePolicy` | control-api                          | WR Controller         | Governance rules per recipe context              |
+| `McpServer`            | control-api, WR Controller           | HCC (MCP Server Sync) | MCP server deployment spec                       |
+| `Context`              | control-api, WR Controller (patches) | HCC (AccessCtrl Sync) | Access control: server allowlist                 |
+| `Host`                 | control-api                          | HCC (MCP Host Sync)   | LLM provider config                              |
+| `CommunicationChannel` | control-api                          | Comm Channel Image    | TG/Email/Slack channels                          |
+| `SharedFileSystem`     | control-api                          | HCC (SFS reconciler)  | Team workspace: PVC + workspace-files-controller |
+| `GlobalFileSystem`     | control-api                          | HCC (GFS reconciler)  | Global drive: PVC + gfs-controller roles         |
+| `LlmHook`              | control-api (hook install)           | HCC (LlmHook reconciler), mcp-host (read) | Installed guardrail hook in `llm-hooks` |
 
 All nine are shipped in [`charts/clerum-crds/crds/`](../../charts/clerum-crds/crds/)
 and have a reference page under [docs/crds/](../crds/).
@@ -374,10 +374,10 @@ and have a reference page under [docs/crds/](../crds/).
 The shipped `McpServer` CRD status has exactly two fields. There is no `status.phase`
 and no `status.sanitization` — reconciliation state is reported through `conditions[]`.
 
-| Field                               | Type   | Description                                                                                                        |
-| ----------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------ |
-| `status.resolvedEgressIPs`          | array  | Resolved IPs for DNS-based egress bindings (for auditability)                                                      |
-| `status.conditions`                 | array  | Standard K8s conditions (`type`, `status`, `reason`, `message`) — e.g. `Ready`                                     |
+| Field                      | Type  | Description                                                                    |
+| -------------------------- | ----- | ------------------------------------------------------------------------------ |
+| `status.resolvedEgressIPs` | array | Resolved IPs for DNS-based egress bindings (for auditability)                  |
+| `status.conditions`        | array | Standard K8s conditions (`type`, `status`, `reason`, `message`) — e.g. `Ready` |
 
 ---
 
@@ -854,10 +854,10 @@ When a workload is deployed, there is a **time gap** between the pod starting (k
 
 Three approaches were evaluated:
 
-| Option                                  | Mechanism                                                                                                                                                                                             | Pros                                                                                                     | Cons                                                                                                                                                                        |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A — ReadinessGate**                   | HCC patches `pod.status.conditions` with `clerum.io/network-isolated: True` after applying NPs                                                                                                        | Standard K8s pattern, Service won't route until ready                                                    | HCC must watch pods in all namespaces, direct pod patching violates Invariant #1 (CRD-only communication), adds Pod RBAC to HCC, complex lifecycle (pod restart = re-patch) |
-| **B — Init container**                  | Sidecar init container blocks until NetworkPolicy exists                                                                                                                                              | No HCC changes needed                                                                                    | Requires shared ServiceAccount, polling from within pod is fragile, no guarantee NP is _applied_ vs just _created_                                                          |
+| Option                                  | Mechanism                                                                                                                                         | Pros                                                                                                     | Cons                                                                                                                                                                        |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A — ReadinessGate**                   | HCC patches `pod.status.conditions` with `clerum.io/network-isolated: True` after applying NPs                                                    | Standard K8s pattern, Service won't route until ready                                                    | HCC must watch pods in all namespaces, direct pod patching violates Invariant #1 (CRD-only communication), adds Pod RBAC to HCC, complex lifecycle (pod restart = re-patch) |
+| **B — Init container**                  | Sidecar init container blocks until NetworkPolicy exists                                                                                          | No HCC changes needed                                                                                    | Requires shared ServiceAccount, polling from within pod is fragile, no guarantee NP is _applied_ vs just _created_                                                          |
 | **C — Pre-deploy annotation handshake** | WRC creates McpServer CRD with `clerum.io/pre-deploy: true` → HCC applies NPs → HCC sets `clerum.io/network-ready: true` (+ `network-ready-observed-generation`, Issue #408) → WRC creates Deployment | 100% CRD-based (Invariant #1 preserved), no pod patching, no RBAC expansion, reuses existing watch loops | Adds ~1-5s latency to first deployment, requires timeout handling for HCC unavailability                                                                                    |
 
 **Decision**: **Option C** — the annotation handshake preserves the CRD-only communication invariant while closing the vulnerability window. ReadinessGate (Option A) is deferred indefinitely as Option C provides equivalent security guarantees with simpler implementation.
@@ -890,11 +890,11 @@ WRC                                    McpServer CRD                          HC
 
 #### 11.4.3 Annotations
 
-| Annotation                                    | Set by | Value                     | Meaning                                                                                                                                                                                                                                                                   |
-| --------------------------------------------- | ------ | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `clerum.io/pre-deploy`                        | WRC    | `"true"`                  | McpServer CRD created before workload pods exist; HCC should apply NPs proactively                                                                                                                                                                                        |
-| `clerum.io/network-ready`                     | HCC    | `"true"`                  | L2/L3 NetworkPolicies applied; safe to start workload pods. Honored only when the generation stamp matches the current generation (a non-numeric generation is tolerated as fresh without a stamp — defensive; `metadata.generation` is always numeric in a real cluster) |
-| `clerum.io/network-ready-observed-generation` | HCC    | `"<metadata.generation>"` | Generation HCC observed when acking (Issue #408). WRC honors `network-ready` only when this equals the current generation, so a stale ack from a prior generation cannot satisfy the gate. HCC re-acks (re-stamps) when the generation advances                           |
+| Annotation                                   | Set by | Value                  | Meaning                                                                                                              |
+| -------------------------------------------- | ------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `clerum.io/pre-deploy`                       | WRC    | `"true"`               | McpServer CRD created before workload pods exist; HCC should apply NPs proactively                                   |
+| `clerum.io/network-ready`                    | HCC    | `"true"`               | L2/L3 NetworkPolicies applied; safe to start workload pods. Honored only when the generation stamp matches the current generation (a non-numeric generation is tolerated as fresh without a stamp — defensive; `metadata.generation` is always numeric in a real cluster) |
+| `clerum.io/network-ready-observed-generation` | HCC    | `"<metadata.generation>"` | Generation HCC observed when acking (Issue #408). WRC honors `network-ready` only when this equals the current generation, so a stale ack from a prior generation cannot satisfy the gate. HCC re-acks (re-stamps) when the generation advances |
 
 #### 11.4.4 Timeout and Graceful Degradation
 
