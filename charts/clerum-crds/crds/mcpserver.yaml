@@ -780,14 +780,6 @@ spec:
             status:
               type: object
               properties:
-                appliedCredentialsRevision:
-                  type: string
-                  description: >-
-                    Content hash (sha256:<hex>) of the spec.envSecret data that
-                    host-context-controller last applied to the managed Deployment;
-                    the hex part is the Deployment's clerum.io/credentials-revision
-                    pod-template annotation. Written by host-context-controller only.
-                    Never contains Secret values. Compare for equality.
                 resolvedEgressIPs:
                   type: array
                   description: Resolved IPs for DNS-based egress bindings (for auditability).
