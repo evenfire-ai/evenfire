@@ -9346,4 +9346,197 @@ describe('FilesPage — folder drag-and-drop', () => {
     expect(folderRow.getAttribute('draggable')).toBe('true')
     expect(folderRow.getAttribute('title')).toBe('Drag Projects into a folder to move it')
   })
+
+  /** The overview: a ready home on its card and a movable shared folder
+   *  `Projects` (parent `folder-1`) listed beside it. */
+  function homeCardDragHarness(options: { sourceParentHeld?: string[] } = {}) {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({ resourceId: 'folder-src', version: 5 }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return { held: options.sourceParentHeld ?? ['read', 'write', 'delete'] }
+      }
+      if (resourceId === 'folder-src') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'folder-src',
+      parentResourceId: 'folder-1',
+      rid: 'foldersrc',
+      gfsUri: 'gfs://main/foldersrc',
+      name: 'Projects',
+      kind: 'directory',
+      pathCache: '/Product/Projects',
+      version: 4,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances, resolve } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+      accessibleResources: [
+        {
+          resourceId: 'folder-src',
+          rid: 'folder-src',
+          gfsUri: 'gfs://main/folder-src',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Projects',
+          kind: 'directory',
+          path: '/Product/Projects',
+          version: 4,
+          bytes: 0,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+        },
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+        },
+        {
+          resourceId: 'home-1',
+          rid: 'home-1',
+          gfsUri: 'gfs://main/home-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'fixture',
+          kind: 'directory',
+          path: '/Users/fixture',
+          version: 1,
+          bytes: 0,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+    return { pushToast, moveResource, affordances }
+  }
+
+  function gfsDragDataTransfer() {
+    return {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+  }
+
+  it('moves a dragged folder into the home when it is dropped on the My home card', async () => {
+    const { pushToast, moveResource } = homeCardDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const homeCard = screen.getByRole('region', { name: 'My home' })
+    const dataTransfer = gfsDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(homeCard, { dataTransfer })
+    fireEvent.dragOver(homeCard, { dataTransfer })
+    fireEvent.drop(homeCard, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to My home' })
+    expect(moveResource).not.toHaveBeenCalled()
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+    await waitFor(() => {
+      expect(moveResource).toHaveBeenCalledWith(
+        'folder-src',
+        'home-1',
+        'main',
+        4,
+        undefined,
+        'folder-1',
+        'env-1:user-1:team-1',
+        true,
+        0
+      )
+    })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Moved Projects to My home', 'success')
+    )
+  })
+
+  it('paints the drop verdict on the My home card while a folder is dragged over it', async () => {
+    const permitted = homeCardDragHarness()
+    const card = screen.getByRole('region', { name: 'My home' })
+    // On the overview no folder is open, so the card's ancestor chain is
+    // unobserved: a dragged folder stays "checking" (the drop asks the
+    // server whether the home lies inside it), as over any overview row.
+    const folderTransfer = gfsDragDataTransfer()
+    fireEvent.dragStart(screen.getByRole('button', { name: 'Open Projects' }), {
+      dataTransfer: folderTransfer,
+    })
+    fireEvent.dragEnter(card, { dataTransfer: folderTransfer })
+    // Witness: the cold check probed the home's and the source parent's bits.
+    await waitFor(() => {
+      expect(permitted.affordances).toHaveBeenCalledWith('home-1', 'main')
+      expect(permitted.affordances).toHaveBeenCalledWith('folder-1', 'main')
+    })
+    fireEvent.dragOver(card, { dataTransfer: folderTransfer })
+    expect(card.getAttribute('data-drop-state')).toBe('checking')
+    fireEvent.dragEnd(screen.getByRole('button', { name: 'Open Projects' }), {
+      dataTransfer: folderTransfer,
+    })
+    expect(card.getAttribute('data-drop-state')).toBeNull()
+
+    // A file needs no ancestor proof: with the same bits the card paints "allowed".
+    const fileTransfer = gfsDragDataTransfer()
+    fireEvent.dragStart(screen.getByRole('button', { name: 'Open notes.txt' }), {
+      dataTransfer: fileTransfer,
+    })
+    fireEvent.dragEnter(card, { dataTransfer: fileTransfer })
+    await waitFor(() => expect(card.getAttribute('data-drop-state')).toBe('allowed'))
+    expect(permitted.moveResource).not.toHaveBeenCalled()
+    cleanup()
+
+    homeCardDragHarness({ sourceParentHeld: ['read', 'write'] })
+    const deniedCard = screen.getByRole('region', { name: 'My home' })
+    const deniedTransfer = gfsDragDataTransfer()
+    fireEvent.dragStart(screen.getByRole('button', { name: 'Open Projects' }), {
+      dataTransfer: deniedTransfer,
+    })
+    fireEvent.dragEnter(deniedCard, { dataTransfer: deniedTransfer })
+    await waitFor(() => expect(deniedCard.getAttribute('data-drop-state')).toBe('denied'))
+    expect(deniedCard.getAttribute('data-drop-reason')).toBe('source-delete')
+  })
+
+  it('ignores a file dragged from the desktop over the My home card', async () => {
+    const { pushToast, moveResource } = homeCardDragHarness()
+    const homeCard = screen.getByRole('region', { name: 'My home' })
+    const osFileTransfer = {
+      types: ['Files'],
+      files: [new File(['hello'], 'notes.txt', { type: 'text/plain' })],
+      effectAllowed: 'all',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+    fireEvent.dragEnter(homeCard, { dataTransfer: osFileTransfer })
+    fireEvent.dragOver(homeCard, { dataTransfer: osFileTransfer })
+    expect(homeCard.getAttribute('data-drop-state')).toBeNull()
+    fireEvent.drop(homeCard, { dataTransfer: osFileTransfer })
+    expect(homeCard.getAttribute('data-drop-state')).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(pushToast).not.toHaveBeenCalled()
+    expect(moveResource).not.toHaveBeenCalled()
+
+    // Liveness witness: an EvenDrive drag over the same card is adjudicated.
+    const gfsTransfer = gfsDragDataTransfer()
+    fireEvent.dragStart(screen.getByRole('button', { name: 'Open Projects' }), {
+      dataTransfer: gfsTransfer,
+    })
+    fireEvent.dragEnter(homeCard, { dataTransfer: gfsTransfer })
+    await waitFor(() => expect(homeCard.getAttribute('data-drop-state')).not.toBeNull())
+  })
 })

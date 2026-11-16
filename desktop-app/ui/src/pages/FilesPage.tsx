@@ -3342,7 +3342,34 @@ export function FilesPage({
 
       <div className="page-layout da-gfs-layout">
         {myHome ? (
-          <section className="page-card da-gfs-my-home" aria-label="My home">
+          // A ready home is a move destination: the card takes a dragged row or
+          // tree node like any folder target, and paints the verdict on itself.
+          <section
+            className="page-card da-gfs-my-home"
+            aria-label="My home"
+            title={
+              gfsDropVerdictReason(dropStatesById[myHome.resourceId]) !== undefined
+                ? gfsDropVerdictLiveAnnouncement(
+                    dropStatesById[myHome.resourceId]!,
+                    GFS_MY_HOME_LABEL,
+                    dragSourceName ?? undefined
+                  )
+                : undefined
+            }
+            data-drop-state={dropStatesById[myHome.resourceId]?.state}
+            data-drop-reason={gfsDropVerdictReason(dropStatesById[myHome.resourceId])}
+            onDragEnter={event => handleFolderDragOver(event, myHome)}
+            onDragOver={event => handleFolderDragOver(event, myHome)}
+            onDragLeave={handleFolderDragLeave}
+            onDrop={event =>
+              void handleFolderDrop(event, {
+                resourceId: myHome.resourceId,
+                name: GFS_MY_HOME_LABEL,
+                drive: myHome.drive,
+                kind: 'directory',
+              })
+            }
+          >
             <Button
               align="start"
               className="da-gfs-my-home__open"
@@ -3784,7 +3811,9 @@ export function FilesPage({
                           dragSourceName ?? undefined
                         )
                       : undefined
-                  // The governed home root never moves; it stays a drop destination.
+                  // A bound home root never moves. While it is still listed (a home
+                  // that is not ready) its row stays a drop destination; a ready
+                  // home takes drops on its card and on its crumb.
                   const canDragResource =
                     resource.readable !== false &&
                     movingResourceId === null &&

@@ -14839,6 +14839,43 @@ pre {
   font-size: var(--font-size-sm);
 }
 
+/* A ready home takes drops on its card. The verdict tints are the breadcrumb
+   ones below: the target gets a 2px accent ring, checking dashes neutrally,
+   ordinary denials read as error, the unknown family warns, and the
+   same-parent no-op stays neutral. */
+.da-gfs-my-home[data-drop-state='checking'] {
+  outline: 2px dashed rgba(var(--accent-rgb), 0.4);
+  outline-offset: -2px;
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-my-home[data-drop-state='allowed'] {
+  outline: 2px solid rgba(var(--accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.da-gfs-my-home[data-drop-state='denied'] {
+  outline: 2px solid rgba(var(--danger-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--danger-rgb), 0.12);
+}
+
+.da-gfs-my-home[data-drop-state='denied'][data-drop-reason='same-parent'] {
+  outline: 2px solid rgba(var(--accent-rgb), 0.35);
+  outline-offset: -2px;
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-my-home[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-gfs-my-home[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-gfs-my-home[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-gfs-my-home[data-drop-state='unavailable'] {
+  outline: 2px solid rgba(var(--warning-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--warning-rgb), 0.12);
+}
+
 .da-gfs-eyebrow {
   margin: 0 0 var(--space-0-5);
   color: var(--text-muted);
