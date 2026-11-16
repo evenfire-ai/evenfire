@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
-import { once } from 'node:events'
 import { Readable } from 'node:stream'
 import { Pool } from 'pg'
 import request from 'supertest'
