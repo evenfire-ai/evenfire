@@ -1333,8 +1333,12 @@ export class WorkflowService {
                 timeoutMs: remainingTimeoutMs(startTime, timeoutMs),
                 signal: abortController.signal,
               })
-              if (stepSpillover && call.name === STEP_SPILLOVER_READ_TOOL_NAME) {
-                // Record the ref and byte count, never the blob content.
+              if (spilloverReadOffered && call.name === STEP_SPILLOVER_READ_TOOL_NAME) {
+                // Record the ref and byte count, never the blob content, but only
+                // for calls the step read tool handled. `spilloverReadOffered` is
+                // set further down when a result is stored, so a read made later
+                // in the same response is rewritten too; before any stored result
+                // the router's own record is kept.
                 record.result = summarizeSpilloverReadForRecord(
                   call.arguments ?? {},
                   result.content as InternalToolResult

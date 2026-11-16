@@ -241,12 +241,19 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     expect(offered[1]).toEqual(['srv__read'])
     expect(offered[2]).toEqual(['srv__read', READ_TOOL])
     const records = res.toolsCalled ?? []
-    // Before the first spill the read tool is outside the allowlist.
-    expect(records[0]?.result).toMatchObject({ success: false })
-    expect(JSON.stringify(records[0]?.result)).toContain('is not allowed in this step')
+    // Before the first spill the read tool is outside the allowlist, and the
+    // record is the router's own.
+    expect(records[0]?.result).toEqual({
+      success: false,
+      error: `Tool '${READ_TOOL}' is not allowed in this step and was not run. Use only the tools provided for this step.`,
+    })
     // After the spill it is callable (192 KiB > threshold, so a whole read is refused
     // by the size limit, not by the allowlist).
-    expect(records[2]?.result).toMatchObject({ success: false })
+    // Its record carries the ref: the step read tool handled it.
+    expect(records[2]?.result).toMatchObject({
+      success: false,
+      ref: FIRST_REF.replace('i1c0', 'i2c0'),
+    })
     expect(JSON.stringify(records[2]?.result)).toContain('pass range')
     // An internal tool the allowlist does not name stays rejected.
     expect(records[3]?.toolName).toBe('generate_markdown')
