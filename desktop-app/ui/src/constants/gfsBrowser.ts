@@ -43,6 +43,16 @@ export const GFS_ACCESS_REVOKED_BODY =
 /** Label of the collection of resources others share with the caller. */
 export const GFS_SHARED_WITH_ME_LABEL = 'Shared with me'
 
+/** Label of the Files trail's first crumb, which opens the EvenDrive overview. */
+export const GFS_EVENDRIVE_ROOT_LABEL = 'EvenDrive'
+
+/**
+ * Identity text of an access row, inside the caller's own home, whose person or
+ * team is in none of the viewer's teams. The surface never shows that member's
+ * name, email or id; the row keeps its role and Remove.
+ */
+export const GFS_OUTSIDE_TEAMS_MEMBER_LABEL = 'Member outside your teams'
+
 /**
  * Files-tab location of the "Shared with me" view. A `null` location is the
  * EvenDrive overview (the caller's home plus what others share); this one

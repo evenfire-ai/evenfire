@@ -1079,14 +1079,6 @@ export function FilesPage({
   const homeTrail =
     crumbs.length > 0 &&
     isCallerHomeRoot(ctrl.home, { resourceId: crumbs[0]!.resourceId, drive: ctrl.drive })
-  // Row-level own-home test for the access list: the home-owner row sits on the
-  // home root, so it is the caller's own grant when its resource is the caller's
-  // ready home root on this drive. `openManage` resets the crumbs, so a
-  // trail-based signal would miss the Share-from-row path (U1).
-  const isOwnHomeRoot = useCallback(
-    (resourceId: string) => isCallerHomeRoot(ctrl.home, { resourceId, drive: ctrl.drive }),
-    [ctrl.home, ctrl.drive]
-  )
   const crumbLabel = (crumb: GfsCrumb, index: number) =>
     homeTrail && index === 0 ? GFS_MY_HOME_LABEL : crumb.name
   // An incomplete inherited derivation becomes a quiet notice in the Share
@@ -4153,8 +4145,8 @@ export function FilesPage({
                     derivationNotice={inheritedAccessNotice}
                     derivationNoticeHint={inheritedAccessNoticeHint}
                     error={grantsError}
+                    home={ctrl.home}
                     inheritedItems={ctrl.inheritedAccess}
-                    isOwnHomeRoot={isOwnHomeRoot}
                     items={ctrl.grants}
                     loading={
                       ctrl.loadingGrants || ctrl.loadingShares || ctrl.loadingInheritedAccess
@@ -4168,6 +4160,7 @@ export function FilesPage({
                     onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
                     onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
                     onLowerShare={handleLowerShare}
+                    resource={{ resourceId: current.resourceId, drive: ctrl.drive }}
                     revoking={ctrl.revoking}
                     revokingShare={ctrl.revokingShare}
                     shareError={sharesError}

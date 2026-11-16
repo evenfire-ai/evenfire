@@ -1,4 +1,5 @@
 import type { GfsGrantErrorPresentation } from '@lib/gfsGrantErrors'
+import type { GfsCallerHome } from '@/gfs/callerHome.types'
 import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
@@ -27,10 +28,11 @@ export interface GfsGrantListProps {
   items: GfsGrantListItem[]
   shares?: GfsShareListItem[]
   /**
-   * Client-derived rows inherited from ancestor folders. Ignored unless
+   * Client-derived rows inherited from ancestor folders. Rendered only when
    * `mergeInherited` is set (file dialogs): they merge into one normal,
    * toggleable row per member whose edits route through the parent-folder
-   * confirmation.
+   * confirmation. Their sources are read whatever that flag is, to decide
+   * whether the list is inside the caller's own home.
    */
   inheritedItems?: GfsInheritedAccessItem[]
   /** File-dialog mode: dedupe members across direct and inherited access. */
@@ -54,10 +56,16 @@ export interface GfsGrantListProps {
   agents: GfsAgentSubjectOption[]
   /** Label source for `user`/`team` subjects (the visible team directory). */
   subjects: GfsDelegationSubjectOption[]
-  /** True for the caller's own ready home root on this drive. A home-owner row on that
-   *  root is the caller's own grant: it stays listed (as "Owner") even when the caller's
-   *  team directory does not name the caller (U1). Absent: the caller has no home here. */
-  isOwnHomeRoot?: (resourceId: string) => boolean
+  /**
+   * The caller's home as the browser controller reports it; `null` when there is
+   * none or it is not loaded. Required, so no call site can leave it out: inside
+   * the caller's own ready home, user/team rows outside the directory are listed
+   * without a name instead of filtered.
+   */
+  home: GfsCallerHome
+  /** The resource whose access the list shows. With `home` and `inheritedItems`
+   *  it decides whether the list is inside the caller's own home. */
+  resource: { resourceId: string; drive: string }
   onRevoke: (item: GfsGrantListItem, label: string) => void | Promise<void>
   onChangeRole?: (
     item: GfsGrantListItem,

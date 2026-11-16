@@ -1627,6 +1627,7 @@ export function useFilePreviewResourceActions({
                   derivationNotice={inheritedAccessNotice}
                   derivationNoticeHint={inheritedAccessNoticeHint}
                   error={grantsQuery.error ? describeGfsGrantError(grantsQuery.error) : null}
+                  home={home}
                   inheritedItems={inheritedQuery.data?.items ?? []}
                   items={grantsQuery.data ?? []}
                   loading={
@@ -1636,6 +1637,7 @@ export function useFilePreviewResourceActions({
                   onChangeRole={handleAccessRoleChange}
                   onRevoke={handleRevokeGrant}
                   onRevokeShare={handleRevokeShare}
+                  resource={{ resourceId: resource.resourceId, drive }}
                   revoking={revokingGrantId !== null}
                   revokingShare={revokingShareId !== null}
                   shareError={sharesQuery.error ? describeGfsGrantError(sharesQuery.error) : null}

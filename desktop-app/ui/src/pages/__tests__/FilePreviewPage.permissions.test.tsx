@@ -13,6 +13,7 @@ import {
   resolvedFile,
   sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import type { GfsCallerHome } from '@/gfs/callerHome.types'
 import { desktopQueryKeys } from '@/hooks/domain/queryKeys'
 import type { Tone } from '@/uiTypes'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
@@ -108,10 +109,15 @@ type InheritedAccessProducers = {
   affordances?: (...args: Parameters<typeof window.clerum.gfs.affordances>) => Promise<unknown>
   agents?: () => Promise<unknown[]>
   pushToast?: (message: string, tone: Tone) => void
+  /** The caller's home as the browser controller reports it; absent leaves it unset. */
+  home?: GfsCallerHome
 }
 
 async function openShareDialogWithInheritedAccess(producers: InheritedAccessProducers) {
-  const controllerState = controller()
+  const controllerState = {
+    ...controller(),
+    ...(producers.home !== undefined ? { home: producers.home } : {}),
+  }
   hookMock.useGfsBrowserController.mockReturnValue(controllerState)
   const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
   queryClients.push(queryClient)
@@ -434,6 +440,47 @@ describe('FilePreviewPage permission-derived actions', () => {
       )
     ).toBeTruthy()
     expect(within(dialog).queryByText('No one has access yet.')).toBeNull()
+  })
+
+  it('shows a home owner without a team their own Owner row in the Share dialog', async () => {
+    const homeId = '11111111111111111111111111111111'
+    const ownerId = 'owner-private-user-id'
+    const target = await inheritedTarget(homeId)
+    const homeRoot = await inheritedParent(homeId, 'fixture-user', null)
+    const ownerGrant = await grantsListPage([
+      {
+        id: 'owner-grant',
+        drive: 'main',
+        resourceId: homeId,
+        subject: { type: 'user', id: ownerId },
+        homeOwner: true,
+        permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+        inherit: true,
+      },
+    ])
+    const resolve = async (uri: string) => {
+      if (uri === resourceUri) return target
+      if (uri === `gfs://main/${homeId}`) return homeRoot
+      throw new Error(`Unexpected resolve: ${uri}`)
+    }
+    const listGrants = async (id: string) => (id === homeId ? ownerGrant : grantsListPage([]))
+    const listShares = async () => sharesListPage([])
+
+    // The team directory is empty (the helper's default): no team names the owner.
+    const { dialog } = await openShareDialogWithInheritedAccess({
+      resolve,
+      listGrants,
+      listShares,
+      home: { state: 'ready', drive: 'main', resourceId: homeId, path: '/Users/fixture' },
+    })
+
+    const ownerRow = await within(dialog).findByTestId(`gfs-access-row-inherited-user:${ownerId}`)
+    expect(ownerRow.textContent).toBe('Owner')
+    // Witness for the absences: the owner's row above is in the same dialog.
+    expect(
+      within(dialog).queryByText('Only members outside your teams have access here.')
+    ).toBeNull()
+    expect(dialog.textContent).not.toContain(ownerId)
   })
 
   it('preserves the existing fail-closed error notice for session authority loss', async () => {
