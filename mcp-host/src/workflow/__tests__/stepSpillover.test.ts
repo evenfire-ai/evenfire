@@ -5,12 +5,15 @@ import {
   type StepSpillover,
   createStepSpillover,
   resolveStepSpilloverConfig,
+  storableToolText,
   summarizeSpilloverReadForRecord,
 } from '../stepSpillover'
 
 const THRESHOLD = 4096
 // The read tool takes a workspace path from its caller; the step store does not use it.
 const WORKSPACE = '/workspace'
+// Size of a string as the caller would paste it; these tests store what they paste.
+const bytes = (text: string): number => Buffer.byteLength(text, 'utf8')
 
 describe('resolveStepSpilloverConfig', () => {
   it('defaults to enabled, 128 KiB threshold and 16 MiB budget', () => {
@@ -99,6 +102,7 @@ describe('createStepSpillover', () => {
         callId: 'c1',
         toolName: 'srv__t',
         content,
+        inlineBytes: bytes(content),
         isError: false,
       })
       expect(res).toEqual({ text: content, spilled: false })
@@ -106,7 +110,13 @@ describe('createStepSpillover', () => {
 
     it('never spills an error result', async () => {
       const content = 'e'.repeat(THRESHOLD * 2)
-      const res = await make().persist({ callId: 'c1', toolName: 'srv__t', content, isError: true })
+      const res = await make().persist({
+        callId: 'c1',
+        toolName: 'srv__t',
+        content,
+        inlineBytes: bytes(content),
+        isError: true,
+      })
       expect(res).toEqual({ text: content, spilled: false })
     })
 
@@ -116,6 +126,7 @@ describe('createStepSpillover', () => {
         callId: 'c1',
         toolName: STEP_SPILLOVER_READ_TOOL_NAME,
         content,
+        inlineBytes: bytes(content),
         isError: false,
       })
       expect(res).toEqual({ text: content, spilled: false })
@@ -136,6 +147,7 @@ describe('createStepSpillover', () => {
             callId,
             toolName: 't',
             content: 'b'.repeat(6000),
+            inlineBytes: 6000,
             isError: false,
           })
           outcomes.push(res.spilled)
@@ -160,7 +172,13 @@ describe('createStepSpillover', () => {
     it('reads a whole blob no larger than the threshold', async () => {
       const spillover = make()
       const content = blob(THRESHOLD)
-      await spillover.persist({ callId: 'c1', toolName: 't', content, isError: false })
+      await spillover.persist({
+        callId: 'c1',
+        toolName: 't',
+        content,
+        inlineBytes: bytes(content),
+        isError: false,
+      })
       const res = await spillover.readTool.execute(
         { ref: 'spillover://review-step/c1.json' },
         WORKSPACE
@@ -174,6 +192,7 @@ describe('createStepSpillover', () => {
         callId: 'c1',
         toolName: 't',
         content: blob(THRESHOLD + 1),
+        inlineBytes: THRESHOLD + 1,
         isError: false,
       })
       const res = await spillover.readTool.execute(
@@ -189,7 +208,13 @@ describe('createStepSpillover', () => {
     it('returns the requested range', async () => {
       const spillover = make()
       const content = blob(THRESHOLD * 3)
-      await spillover.persist({ callId: 'c1', toolName: 't', content, isError: false })
+      await spillover.persist({
+        callId: 'c1',
+        toolName: 't',
+        content,
+        inlineBytes: bytes(content),
+        isError: false,
+      })
       const res = await spillover.readTool.execute(
         { ref: 'spillover://review-step/c1.json', range: { start: 100, end: 200 } },
         WORKSPACE
@@ -203,6 +228,7 @@ describe('createStepSpillover', () => {
         callId: 'c1',
         toolName: 't',
         content: blob(THRESHOLD * 3),
+        inlineBytes: THRESHOLD * 3,
         isError: false,
       })
       const res = await spillover.readTool.execute(
@@ -219,6 +245,7 @@ describe('createStepSpillover', () => {
         callId: 'c1',
         toolName: 't',
         content: blob(THRESHOLD),
+        inlineBytes: THRESHOLD,
         isError: false,
       })
       const res = await spillover.readTool.execute(
@@ -231,7 +258,13 @@ describe('createStepSpillover', () => {
 
     it('rejects a ref that belongs to another step', async () => {
       const other = make({ stepId: 'other-step' })
-      await other.persist({ callId: 'c1', toolName: 't', content: blob(THRESHOLD), isError: false })
+      await other.persist({
+        callId: 'c1',
+        toolName: 't',
+        content: blob(THRESHOLD),
+        inlineBytes: THRESHOLD,
+        isError: false,
+      })
       const res = await make().readTool.execute(
         { ref: 'spillover://other-step/c1.json' },
         WORKSPACE
@@ -258,6 +291,49 @@ describe('createStepSpillover', () => {
       expect(tool.description).toContain(`Reads are limited to ${THRESHOLD} bytes`)
       expect(tool.parameters).toMatchObject({ required: ['ref'] })
     })
+  })
+})
+
+describe('storableToolText', () => {
+  it.each([
+    ['one text block', [{ type: 'text', text: 'a\nb' }], 'a\nb'],
+    [
+      'two text blocks',
+      [
+        { type: 'text', text: 'a' },
+        { type: 'text', text: 'b' },
+      ],
+      'a\nb',
+    ],
+    [
+      'a text block with annotations',
+      [{ type: 'text', text: 'a', annotations: { priority: 1 } }],
+      'a',
+    ],
+    ['an empty text block', [{ type: 'text', text: '' }], ''],
+  ])('returns the text of %s', (_label, content, expected) => {
+    expect(storableToolText(content)).toBe(expected)
+  })
+
+  it.each([
+    ['an empty array', []],
+    ['a string', 'text'],
+    ['an object', { success: true, content: 'x' }],
+    ['null', null],
+    ['undefined', undefined],
+    [
+      'text and image blocks',
+      [
+        { type: 'text', text: 'a' },
+        { type: 'image', data: 'AA', mimeType: 'image/png' },
+      ],
+    ],
+    ['a non-text block that carries text', [{ type: 'resource', text: 'a' }]],
+    ['a text block without a string', [{ type: 'text', text: 1 }]],
+    ['an array of strings', ['a']],
+    ['an array with null', [null]],
+  ])('returns null for %s', (_label, content) => {
+    expect(storableToolText(content)).toBeNull()
   })
 })
 

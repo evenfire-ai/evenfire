@@ -41,6 +41,7 @@ import {
   type StepSpillover,
   createStepSpillover,
   resolveStepSpilloverConfig,
+  storableToolText,
   summarizeSpilloverReadForRecord,
 } from './stepSpillover'
 import {
@@ -1341,15 +1342,24 @@ export class WorkflowService {
               messages.push({ role: 'assistant', content: `Tool call: ${call.name}` })
               // SEC-01 fix: wrap tool results in structural delimiters to prevent prompt
               // injection — MCP server responses are untrusted third-party data.
-              let toolOutput = JSON.stringify(result.content)
-              if (stepSpillover) {
+              const serialized = JSON.stringify(result.content)
+              let toolOutput = serialized
+              // JSON.stringify(undefined) is not a string; such a result stays
+              // inline, as persist() leaves any non-string content inline.
+              if (stepSpillover && typeof serialized === 'string') {
+                // The store keeps the tool text of an MCP text result (so the
+                // summary and the byte ranges index that text) and the
+                // serialized result otherwise. The decision uses the size of
+                // the serialized text the prompt would carry, and a result
+                // that is not stored keeps exactly that text.
                 const spill = await stepSpillover.persist({
                   callId: `i${i + 1}c${callIndex}`,
                   toolName: call.name,
-                  content: toolOutput,
+                  content: storableToolText(result.content) ?? serialized,
+                  inlineBytes: Buffer.byteLength(serialized, 'utf8'),
                   isError: result.isError === true,
                 })
-                toolOutput = spill.text
+                if (spill.spilled) toolOutput = spill.text
                 if (spill.spilled && !spilloverReadOffered) {
                   // Offer the read tool only once something can be read back, so
                   // steps that never spill keep today's exact toolset.

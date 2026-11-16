@@ -75,7 +75,7 @@ function mockMcpClient(
       return Promise.resolve(
         r
           ? { content: r.content, isError: r.isError ?? false }
-          : { content: `result-${name}`, isError: false }
+          : { content: sdk(`result-${name}`), isError: false }
       )
     }),
     disconnect: vi.fn().mockResolvedValue(undefined),
@@ -117,6 +117,11 @@ function toolResultMessages(llm: SingleTurnProvider): string[] {
 }
 
 const big = (size: number): string => 'L'.repeat(size)
+// The MCP client returns the SDK CallToolResult, whose `content` is a block array.
+const sdk = (...texts: string[]): Array<{ type: 'text'; text: string }> =>
+  texts.map(text => ({ type: 'text' as const, text }))
+const inline = (name: string, content: unknown): string =>
+  `<tool-result server="${name}" data-only="true">\n${JSON.stringify(content)}\n</tool-result>`
 
 let outputDir: string
 
@@ -133,7 +138,7 @@ afterEach(async () => {
 describe('WorkflowService step spillover — default (enabled)', () => {
   it('spills a 300 KiB MCP result, then offers the read tool', async () => {
     const payload = big(300 * 1024)
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(payload) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: { path: 'a' } }] },
       { content: 'done', tool_calls: null },
@@ -151,13 +156,13 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     expect(toolResult).toContain(`"spillover_ref":"${FIRST_REF}"`)
     expect(toolResult).not.toContain(payload)
     expect(toolResult!.length).toBeLessThan(4096)
-    expect(res.toolsCalled?.[0]?.result).toBe(payload)
+    expect(res.toolsCalled?.[0]?.result).toEqual(sdk(payload))
     expect(offeredTools(llm)[0]).not.toContain(READ_TOOL)
     expect(offeredTools(llm)[1]).toContain(READ_TOOL)
   })
 
   it('leaves a step with small results unchanged', async () => {
-    const payload = big(1024)
+    const payload = sdk(big(1024))
     const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
@@ -172,7 +177,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     })
 
     expect(res.status).toBe('completed')
-    const expectedResult = `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`
+    const expectedResult = inline('srv__read', payload)
     expect(toolResultMessages(llm)).toEqual([expectedResult, expectedResult])
     const offered = offeredTools(llm)
     expect(offered).toHaveLength(3)
@@ -182,10 +187,10 @@ describe('WorkflowService step spillover — default (enabled)', () => {
   })
 
   it('keeps a 100 KiB result inline under the default 128 KiB threshold', async () => {
-    const payload = big(100 * 1024)
+    const payload = sdk(big(100 * 1024))
     const client = mockMcpClient([{ name: 'read' }, { name: 'dump' }], {
       read: { content: payload },
-      dump: { content: big(300 * 1024) },
+      dump: { content: sdk(big(300 * 1024)) },
     })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
@@ -201,9 +206,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
 
     expect(res.status).toBe('completed')
     const [first, second] = toolResultMessages(llm)
-    expect(first).toBe(
-      `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`
-    )
+    expect(first).toBe(inline('srv__read', payload))
     expect(offeredTools(llm)[1]).not.toContain(READ_TOOL)
     // Witness: spillover is on in this step, so the larger result is stored.
     expect(second).toContain('[Result stored outside the prompt (')
@@ -211,7 +214,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
   })
 
   it('makes the read tool callable under an allowlist only after a spill', async () => {
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(192 * 1024) } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(big(192 * 1024)) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: READ_TOOL, arguments: { ref: FIRST_REF } }] },
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
@@ -254,8 +257,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     const payload = Array.from({ length: 150 * 1024 }, (_, i) =>
       String.fromCharCode(97 + (i % 26))
     ).join('')
-    const serialized = JSON.stringify(payload)
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(payload) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
       {
@@ -274,7 +276,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     })
 
     expect(res.status).toBe('completed')
-    const slice = serialized.slice(1000, 1100)
+    const slice = payload.slice(1000, 1100)
     const readResult = toolResultMessages(llm)[1]
     expect(readResult).toContain(`server="${READ_TOOL}"`)
     expect(readResult).toContain(JSON.stringify(slice).slice(1, -1))
@@ -283,7 +285,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
   })
 
   it('answers a whole read of a large blob with a recoverable error', async () => {
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(300 * 1024) } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(big(300 * 1024)) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
       { content: null, tool_calls: [{ name: READ_TOOL, arguments: { ref: FIRST_REF } }] },
@@ -305,7 +307,7 @@ describe('WorkflowService step spillover — default (enabled)', () => {
   it('does not spill a large tool error', async () => {
     const payload = big(300 * 1024)
     const client = mockMcpClient([{ name: 'read' }], {
-      read: { content: payload, isError: true },
+      read: { content: sdk(payload), isError: true },
     })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
@@ -380,10 +382,163 @@ describe('WorkflowService step spillover — default (enabled)', () => {
   })
 })
 
+describe('WorkflowService step spillover — what is stored', () => {
+  const summaryOf = (message: string) => JSON.parse(message.split('\n')[2]!)
+
+  it('summarises and reads back the tool text of an MCP text result', async () => {
+    const a = 'row line\n'.repeat(20000)
+    const b = 'tail block'
+    const blocks = sdk(a, b)
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: blocks } })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      {
+        content: null,
+        tool_calls: [
+          { name: READ_TOOL, arguments: { ref: FIRST_REF, range: { start: 0, end: 18 } } },
+        ],
+      },
+      { content: 'done', tool_calls: null },
+    ])
+
+    const res = await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    const text = `${a}\n${b}`
+    const [stored, readBack] = toolResultMessages(llm)
+    const summary = summaryOf(stored!)
+    expect(summary.byte_size).toBe(Buffer.byteLength(text, 'utf8'))
+    expect(summary.line_count).toBe(20002)
+    expect(summary.head).toBe(text.slice(0, 400))
+    expect(summary.tail).toBe(text.slice(-400))
+    expect(readBack).toBe(inline(READ_TOOL, { success: true, content: 'row line\nrow line\n' }))
+    expect(res.toolsCalled?.[0]?.result).toEqual(blocks)
+  })
+
+  it('keeps the serialized prompt of an MCP text result that is not stored', async () => {
+    const small = sdk('small\ntext')
+    const client = mockMcpClient([{ name: 'read' }, { name: 'dump' }], {
+      read: { content: small },
+      dump: { content: sdk(big(300 * 1024)) },
+    })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: null, tool_calls: [{ name: 'srv__dump', arguments: {} }] },
+      { content: 'done', tool_calls: null },
+    ])
+
+    await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    const [first, second] = toolResultMessages(llm)
+    expect(first).toBe(inline('srv__read', small))
+    // Witness: spillover is on in this step, so the large result is stored.
+    expect(second).toContain('[Result stored outside the prompt (')
+  })
+
+  it('stores mixed MCP blocks serialized', async () => {
+    const mixed = [
+      { type: 'text', text: big(200 * 1024) },
+      { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+    ]
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: mixed } })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: 'done', tool_calls: null },
+    ])
+
+    await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    const serialized = JSON.stringify(mixed)
+    const summary = summaryOf(toolResultMessages(llm)[0]!)
+    expect(summary.spillover_ref).toBe(FIRST_REF)
+    expect(summary.byte_size).toBe(Buffer.byteLength(serialized, 'utf8'))
+    expect(summary.head).toBe(serialized.slice(0, 400))
+  })
+
+  it('stores an internal tool result serialized', async () => {
+    vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD', '4096')
+    // Twelve missing images, each named with 400 letters, make the generator's
+    // notes long enough to reach the 4096-byte threshold.
+    const images = 'abcdefghijkl'.split('').map(letter => `${letter.repeat(400)}.png`)
+    const llm = mockLlmProvider([
+      {
+        content: null,
+        tool_calls: [
+          {
+            name: 'clerum__generate_pdf',
+            arguments: { filename: 'report.pdf', title: 'Report', body: 'Body text.', images },
+          },
+        ],
+      },
+      { content: 'done', tool_calls: null },
+    ])
+
+    const res = await service(llm, mockMcpClient([{ name: 'read' }])).executeStep({
+      stepId: STEP_ID,
+      instruction: 'report',
+      mcpServers: SERVERS,
+    })
+
+    const record = res.toolsCalled?.[0]?.result
+    expect(record).toMatchObject({ success: true, artifact: { name: 'report.pdf' } })
+    const serialized = JSON.stringify(record)
+    const summary = summaryOf(toolResultMessages(llm)[0]!)
+    expect(summary.spillover_ref).toBe(FIRST_REF)
+    expect(summary.byte_size).toBe(Buffer.byteLength(serialized, 'utf8'))
+    expect(summary.head).toBe(serialized.slice(0, 400))
+  })
+
+  it.each([
+    ['quotes', '"'],
+    ['control characters', '\u0001'],
+  ])(
+    'decides on the serialized size: stores a text under the threshold made of %s',
+    async (_label, char) => {
+      vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD', '4096')
+      const text = char.repeat(4000)
+      const blocks = sdk(text)
+      // The text is under the threshold; the string the prompt would carry is not.
+      expect(Buffer.byteLength(text, 'utf8')).toBe(4000)
+      expect(Buffer.byteLength(JSON.stringify(blocks), 'utf8')).toBeGreaterThanOrEqual(4096)
+      const client = mockMcpClient([{ name: 'read' }], { read: { content: blocks } })
+      const llm = mockLlmProvider([
+        { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+        { content: null, tool_calls: [{ name: READ_TOOL, arguments: { ref: FIRST_REF } }] },
+        { content: 'done', tool_calls: null },
+      ])
+
+      const res = await service(llm, client).executeStep({
+        stepId: STEP_ID,
+        instruction: 'review',
+        mcpServers: SERVERS,
+      })
+
+      expect(res.status).toBe('completed')
+      const summary = summaryOf(toolResultMessages(llm)[0]!)
+      expect(summary.spillover_ref).toBe(FIRST_REF)
+      expect(summary.byte_size).toBe(4000)
+      // The stored text is under the read limit, so it reads back whole.
+      expect(res.toolsCalled?.[1]?.result).toEqual({ success: true, ref: FIRST_REF, bytes: 4000 })
+    }
+  )
+})
+
 describe('WorkflowService step spillover — kill switch', () => {
   it('keeps the full result inline and never offers the read tool', async () => {
     vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED', 'false')
-    const payload = big(300 * 1024)
+    const payload = sdk(big(300 * 1024))
     const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
@@ -397,9 +552,7 @@ describe('WorkflowService step spillover — kill switch', () => {
     })
 
     expect(res.status).toBe('completed')
-    expect(toolResultMessages(llm)[0]).toBe(
-      `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`
-    )
+    expect(toolResultMessages(llm)[0]).toBe(inline('srv__read', payload))
     for (const names of offeredTools(llm)) expect(names).not.toContain(READ_TOOL)
     expect(await fs.readdir(outputDir)).toEqual([])
   })
@@ -408,7 +561,7 @@ describe('WorkflowService step spillover — kill switch', () => {
 describe('WorkflowService step spillover — configured threshold', () => {
   it('spills an 8 KiB result with a 4 KiB threshold', async () => {
     vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD', '4096')
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(8 * 1024) } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(big(8 * 1024)) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
       { content: 'done', tool_calls: null },
@@ -430,7 +583,7 @@ describe('WorkflowService step spillover — configured budget', () => {
     // 1 MiB is the smallest budget the resolver accepts; each result is
     // ~700 KiB, so only the first fits.
     vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_BUDGET_BYTES', '1048576')
-    const payload = big(700 * 1024)
+    const payload = sdk(big(700 * 1024))
     const client = mockMcpClient([{ name: 'read' }], { read: { content: payload } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
@@ -447,9 +600,7 @@ describe('WorkflowService step spillover — configured budget', () => {
     expect(res.status).toBe('completed')
     const [first, second] = toolResultMessages(llm)
     expect(first).toContain(`"spillover_ref":"${FIRST_REF}"`)
-    expect(second).toBe(
-      `<tool-result server="srv__read" data-only="true">\n${JSON.stringify(payload)}\n</tool-result>`
-    )
+    expect(second).toBe(inline('srv__read', payload))
   })
 })
 
@@ -463,7 +614,7 @@ describe('WorkflowService step spillover — first-party flag', () => {
   it('still spills when the first-party spillover is disabled', async () => {
     vi.stubEnv('CLERUM_TOOL_SPILLOVER_ENABLED', 'false')
     config.toolSpilloverEnabled = false
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(300 * 1024) } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(big(300 * 1024)) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
       { content: 'done', tool_calls: null },
@@ -486,8 +637,8 @@ describe('WorkflowService step spillover — other executions', () => {
     const payloadA = 'A'.repeat(300 * 1024)
     const payloadB = 'B'.repeat(300 * 1024)
     const client = mockMcpClient([{ name: 'a' }, { name: 'b' }], {
-      a: { content: payloadA },
-      b: { content: payloadB },
+      a: { content: sdk(payloadA) },
+      b: { content: sdk(payloadB) },
     })
 
     // Responses are routed by the step instruction, so both executions can
@@ -604,7 +755,7 @@ describe('WorkflowService step spillover — metrics', () => {
       outputBytes: await metricTotal('clerum_tool_output_bytes'),
     }
 
-    const client = mockMcpClient([{ name: 'read' }], { read: { content: big(300 * 1024) } })
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(big(300 * 1024)) } })
     const llm = mockLlmProvider([
       { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
       {

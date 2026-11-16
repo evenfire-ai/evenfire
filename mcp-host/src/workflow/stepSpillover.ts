@@ -2,11 +2,15 @@
  * Tool-result spillover for agentic workflow steps.
  *
  * `WorkflowService.executeStep` pastes every tool result into the prompt and
- * resends it on each iteration. This module keeps a result at or above the
- * threshold in this process's memory for the length of the step execution,
- * and the model receives the summary the first-party store gives (head, tail,
- * size, structure hint) plus a `spillover_ref` it can read back by byte range
- * with `clerum__spillover_read`. Refs are `spillover://<stepId>/<callId>.json`.
+ * resends it on each iteration. This module keeps a result whose inline
+ * (JSON-serialized) size is at or above the threshold in this process's memory
+ * for the length of the step execution. For an MCP result made only of text
+ * blocks it keeps the tool text (the blocks joined with a line feed); for any
+ * other result it keeps the JSON-serialized result. The model receives a
+ * summary of the stored string with the first-party fields (head, tail, size,
+ * line count) plus a `spillover_ref` it can read back by byte range of that
+ * string with `clerum__spillover_read`. Refs are
+ * `spillover://<stepId>/<callId>.json`.
  *
  * Invariants:
  *   - Nothing is written to disk. The results of an execution are held by that
@@ -16,9 +20,9 @@
  *   - A step whose results all stay under the threshold is unchanged.
  *   - The read tool only accepts refs of the same step, finds only results of
  *     the same execution, and reads at most the threshold.
- *   - The budget caps the result bytes the store holds for one execution; a
- *     result that does not fit stays inline, as without spillover, and later
- *     results that fit are still stored.
+ *   - The budget caps the bytes of the stored strings the store holds for one
+ *     execution; a result that does not fit stays inline, as without
+ *     spillover, and later results that fit are still stored.
  *   - Logs carry tool names, sizes and refs only, never result content or
  *     arguments.
  *
@@ -152,11 +156,17 @@ export interface StepSpilloverResult {
 export interface StepSpillover {
   /** Internal tool that reads a spilled result of this step. */
   readTool: InternalToolDefinition
-  /** Never throws. When nothing is stored, `text` is `content` unchanged. */
+  /**
+   * Never throws. `content` is the string to store; `inlineBytes` is the size
+   * of the text the caller would otherwise put in the prompt, and decides
+   * whether the result is stored. When nothing is stored, `text` is `content`
+   * unchanged and the caller keeps its own inline text.
+   */
   persist(args: {
     callId: string
     toolName: string
     content: string
+    inlineBytes: number
     isError: boolean
   }): Promise<StepSpilloverResult>
   /** Drops every stored result. After it the read tool finds nothing. */
@@ -182,6 +192,26 @@ function readError(error: string): InternalToolResult {
 
 function tooLargeReadError(size: number, thresholdBytes: number): string {
   return `blob is ${size} bytes; pass range {start,end} with end-start <= ${thresholdBytes}`
+}
+
+/**
+ * The tool text of an MCP result made only of text blocks: the `text` of each
+ * block joined with a line feed, as the first-party tool adapter joins them.
+ * Null for anything else (an empty array, a non-array, or an array with any
+ * block that is not `{ type: 'text', text: string }`); such a result is stored
+ * JSON-serialized. Other keys of a text block (`annotations`, `_meta`) are not
+ * part of the text.
+ */
+export function storableToolText(content: unknown): string | null {
+  if (!Array.isArray(content) || content.length === 0) return null
+  const texts: string[] = []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') return null
+    const { type, text } = block as { type?: unknown; text?: unknown }
+    if (type !== 'text' || typeof text !== 'string') return null
+    texts.push(text)
+  }
+  return texts.join('\n')
 }
 
 /** Synchronous. Returns null when `stepId` is not a valid ref segment. */
@@ -248,6 +278,7 @@ export function createStepSpillover(opts: {
     callId: string
     toolName: string
     content: string
+    inlineBytes: number
     isError: boolean
   }): Promise<StepSpilloverResult> {
     const inline: StepSpilloverResult = { text: args.content, spilled: false }
@@ -255,8 +286,10 @@ export function createStepSpillover(opts: {
       return Promise.resolve(inline)
     }
     if (typeof args.content !== 'string') return Promise.resolve(inline)
+    // The decision is taken on the inline size; everything stored (budget,
+    // summary, blob, read cap) is measured on the stored string.
+    if (args.inlineBytes < thresholdBytes) return Promise.resolve(inline)
     const size = Buffer.byteLength(args.content, 'utf8')
-    if (size < thresholdBytes) return Promise.resolve(inline)
     if (persistedBytes + size > budgetBytes) {
       if (!budgetWarned) {
         budgetWarned = true

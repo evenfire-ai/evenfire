@@ -274,6 +274,13 @@ step execution, separately from the first-party `CLERUM_TOOL_SPILLOVER_*`
 settings. WRC copies them from its own environment into the recipe pods it
 creates, so set them on the WRC Deployment.
 
+A step tool result is stored when its JSON-serialized form, the text the prompt
+would otherwise carry, is at least the threshold. For an MCP result made only of
+text blocks the store keeps the tool text (the blocks joined with a line feed);
+for any other result it keeps the JSON-serialized result. The summary, the byte
+ranges read back and the budget count the bytes of the stored string, so a
+stored tool text can be smaller than the threshold.
+
 `PLUGIN_WORKLOAD_SDK_TOKEN` is not read as a setting. mcp-host only lists it,
 with the runtime tokens above and every provider key, as a reserved secret name
 that never reaches tool subprocesses or capability output.

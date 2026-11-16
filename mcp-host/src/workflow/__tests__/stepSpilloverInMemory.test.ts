@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
+import { McpToolRegistryAdapter } from '../../core/adapters/toolRegistryAdapter'
 import { LlmErrorCode } from '../../core/errors'
+import { BasicSafety } from '../../core/safety/safety'
 import { SpilloverStorage } from '../../core/spillover'
 import type { SingleTurnProvider } from '../../llm'
 import { logger } from '../../logger'
@@ -32,7 +34,13 @@ const content = 'w'.repeat(THRESHOLD * 2)
 const make = (stepId = 'review'): StepSpillover =>
   createStepSpillover({ stepId, thresholdBytes: THRESHOLD, budgetBytes: 1 << 20 })!
 const persist = (s: StepSpillover, callId: string, text = content) =>
-  s.persist({ callId, toolName: 'srv__read', content: text, isError: false })
+  s.persist({
+    callId,
+    toolName: 'srv__read',
+    content: text,
+    inlineBytes: Buffer.byteLength(text, 'utf8'),
+    isError: false,
+  })
 const read = (s: StepSpillover, callId: string, stepId = 'review') =>
   s.readTool.execute(
     { ref: `spillover://${stepId}/${callId}.json`, range: { start: 0, end: 4 } },
@@ -53,28 +61,6 @@ afterEach(async () => {
 })
 
 describe('createStepSpillover — results are kept in memory', () => {
-  it('returns the summary the first-party store returns for the same result', async () => {
-    const text = JSON.stringify({ rows: Array.from({ length: 400 }, (_, i) => `line ${i}\nnext`) })
-    const firstParty = new SpilloverStorage({
-      workspacePath: outputDir,
-      thresholdBytes: THRESHOLD,
-      ttlMs: 0,
-      gcIntervalMs: 0,
-    })
-    const expected = await firstParty.maybePersist({
-      taskId: 'review',
-      toolCallId: 'c1',
-      toolName: 'srv__read',
-      content: text,
-      isError: false,
-    })
-
-    const res = await persist(make(), 'c1', text)
-
-    expect(res.spilled).toBe(true)
-    expect(JSON.parse(res.text.slice(res.text.indexOf('\n') + 1))).toEqual(expected)
-  })
-
   it.each([
     ['with a trailing line feed', `${'row\n'.repeat(2000)}`],
     ['without a trailing line feed', `${'row\n'.repeat(2000)}last`],
@@ -128,7 +114,13 @@ describe('createStepSpillover — results are kept in memory', () => {
   it('keeps a result inline, with a warning, when its call id is not a valid ref segment', async () => {
     const warn = vi.spyOn(logger, 'warn')
     const s = make()
-    const bad = await s.persist({ callId: 'a/b', toolName: 't', content, isError: false })
+    const bad = await s.persist({
+      callId: 'a/b',
+      toolName: 't',
+      content,
+      inlineBytes: Buffer.byteLength(content, 'utf8'),
+      isError: false,
+    })
     expect(bad).toEqual({ text: content, spilled: false })
     const refused = warn.mock.calls.filter(([, msg]) =>
       String(msg).includes('Call id is not a valid spillover segment')
@@ -198,11 +190,17 @@ function provider(
     })),
   }
 }
-function client(result: string): McpClientConnection {
+// The MCP client returns the SDK CallToolResult: `content` is a block array.
+type SdkResult = { content: Array<{ type: 'text'; text: string }>; isError: boolean }
+const sdkResult = (...texts: string[]): SdkResult => ({
+  content: texts.map(text => ({ type: 'text' as const, text })),
+  isError: false,
+})
+function client(result: string | SdkResult): McpClientConnection {
   return {
     connect: vi.fn().mockResolvedValue(undefined),
     listTools: vi.fn().mockResolvedValue([{ name: 'read', description: '' }]),
-    callTool: vi.fn().mockResolvedValue({ content: result, isError: false }),
+    callTool: vi.fn().mockResolvedValue(typeof result === 'string' ? sdkResult(result) : result),
     disconnect: vi.fn().mockResolvedValue(undefined),
   }
 }
@@ -227,6 +225,61 @@ const afterStepRead = () =>
   )
 
 describe('WorkflowService step spillover — results are kept in memory', () => {
+  it('summarises the text the first-party adapter produces for the same MCP result', async () => {
+    // Two text blocks with real line feeds; the last block does not end with one.
+    const mcpResult = sdkResult('row line\n'.repeat(40000), 'last block')
+    const llm = provider([{ tool: { name: 'srv__read', arguments: {} } }, {}])
+
+    const res = await service(llm, client(mcpResult)).executeStep({
+      stepId: 'review',
+      instruction: 'go',
+      mcpServers: SERVERS,
+    })
+
+    expect(res.status).toBe('completed')
+    const stored = llm.prompts[1]!.find(m => m.includes(`"spillover_ref":"${REF}"`))!
+    const stepSummary = JSON.parse(stored.split('\n')[2]!)
+
+    // The text the first-party loop gets from the same MCP result.
+    const adapter = new McpToolRegistryAdapter({
+      getAllTools: () => [
+        { name: 'srv__read', description: '', inputSchema: {}, serverName: 'srv' },
+      ],
+      callTool: async () => ({ result: mcpResult, isError: false }),
+    } as never)
+    const firstPartyText = (await adapter.get('srv__read')!.execute({})).content
+    const firstParty = new SpilloverStorage({
+      workspacePath: outputDir,
+      thresholdBytes: THRESHOLD,
+      ttlMs: 0,
+      gcIntervalMs: 0,
+    })
+    const overText = await firstParty.maybePersist({
+      taskId: 'review',
+      toolCallId: 'i1c0',
+      toolName: 'srv__read',
+      content: firstPartyText,
+      isError: false,
+    })
+    expect(overText).not.toBeNull()
+    expect(stepSummary).toEqual(overText)
+
+    // The first-party loop stores that text inside its tool-output envelope.
+    const wrapped = new BasicSafety().previewOutputForLlm('srv__read', firstPartyText)
+    expect(wrapped).toBe(
+      `<tool_output name="srv__read" sanitized="false">\n${firstPartyText}\n</tool_output>`
+    )
+    const overWrapped = await firstParty.maybePersist({
+      taskId: 'review',
+      toolCallId: 'w1',
+      toolName: 'srv__read',
+      content: wrapped,
+      isError: false,
+    })
+    expect(Object.keys(stepSummary).sort()).toEqual(Object.keys(overWrapped!).sort())
+    expect(overWrapped!.line_count).toBe(stepSummary.line_count + 2)
+  })
+
   it.each([
     [
       'completes',
