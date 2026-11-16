@@ -159,6 +159,14 @@ function renderFilesPage(
   )
 }
 
+/** The trail's crumbs, in order, by their visible label. */
+function trailButtonNames(trail: HTMLElement): string[] {
+  return within(trail)
+    .getAllByRole('button')
+    .filter(button => button.classList.contains('da-gfs-drive__breadcrumb'))
+    .map(button => button.textContent ?? '')
+}
+
 function uploadInput(): HTMLInputElement {
   const input = document.querySelector<HTMLInputElement>('input[aria-label="Upload file"]')
   if (!input) throw new Error('Upload file input is unavailable')
@@ -7141,6 +7149,12 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     const breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
+    expect(trailButtonNames(breadcrumbs)).toEqual([
+      'EvenDrive',
+      'Shared with me',
+      'Product',
+      'Nested',
+    ])
     fireEvent.click(within(breadcrumbs).getByRole('button', { name: 'Product' }))
     expect(goToCrumb).toHaveBeenCalledWith(0)
     fireEvent.click(within(breadcrumbs).getByRole('button', { name: 'Shared with me' }))
@@ -8438,7 +8452,7 @@ describe('FilesPage', () => {
     expect(crumbItems).toContain('Download as zip')
   })
 
-  it('starts the trail at My home inside the caller home and at Shared with me elsewhere', () => {
+  it('starts the trail at EvenDrive, then My home inside the caller home and Shared with me elsewhere', () => {
     const homeCrumb = {
       resourceId: 'home-1',
       gfsUri: 'gfs://main/home-1',
@@ -8456,6 +8470,7 @@ describe('FilesPage', () => {
     })
     renderFilesPage()
     const trail = screen.getByRole('navigation', { name: 'File location' })
+    expect(trailButtonNames(trail)).toEqual(['EvenDrive', 'My home', 'Projects'])
     const homeRootCrumb = within(trail).getByRole('button', { name: 'My home' })
     // The home is the view root; the open folder below it is the highlighted crumb.
     expect(homeRootCrumb.classList.contains('da-gfs-drive__breadcrumb--view-root')).toBe(true)
@@ -8483,6 +8498,7 @@ describe('FilesPage', () => {
     })
     renderFilesPage()
     const otherTrail = screen.getByRole('navigation', { name: 'File location' })
+    expect(trailButtonNames(otherTrail)).toEqual(['EvenDrive', 'Shared with me', 'Team folder'])
     expect(within(otherTrail).getByRole('button', { name: 'Shared with me' })).toBeTruthy()
     expect(within(otherTrail).getByRole('button', { name: 'Team folder' })).toBeTruthy()
     expect(within(otherTrail).queryByRole('button', { name: 'My home' })).toBeNull()
@@ -8584,8 +8600,11 @@ describe('FilesPage', () => {
       expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
       expect(onLocationChange).toHaveBeenLastCalledWith(null, null)
       const shared = screen.getByRole('region', { name: 'EvenDrive browser' })
+      const trail = within(shared).getByRole('navigation', { name: 'File location' })
+      expect(trailButtonNames(trail)).toEqual(['EvenDrive', 'Shared with me'])
       fireEvent.click(within(shared).getByRole('button', { name: 'Shared with me' }))
       expect(controller.reset).toHaveBeenCalledTimes(1)
+      expect(trailButtonNames(trail)).toEqual(['EvenDrive', 'Shared with me'])
       expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
       expect(within(shared).getAllByText('Alpha shared').length).toBeGreaterThan(0)
       expect(onLocationChange).toHaveBeenLastCalledWith(
@@ -8605,12 +8624,101 @@ describe('FilesPage', () => {
         'Shared with me'
       )
       const rootCrumb = within(shared).getByRole('button', { name: 'Shared with me' })
+      expect(
+        trailButtonNames(within(shared).getByRole('navigation', { name: 'File location' }))
+      ).toEqual(['EvenDrive', 'Shared with me'])
       expect(rootCrumb.getAttribute('aria-current')).toBe('page')
       expect(rootCrumb.hasAttribute('disabled')).toBe(false)
       const locationCalls = onLocationChange.mock.calls.length
       fireEvent.click(rootCrumb)
       expect(controller.reset).toHaveBeenCalledTimes(1)
       expect(onLocationChange).toHaveBeenCalledTimes(locationCalls)
+    })
+
+    const folderCrumb = (resourceId: string, name: string) => ({
+      resourceId,
+      gfsUri: `gfs://main/${resourceId}`,
+      name,
+      kind: 'directory' as const,
+      version: 1,
+      bytes: 0,
+    })
+
+    it.each([
+      ['My home', null, [folderCrumb('home-1', 'fixture')]],
+      ['the Shared with me view', GFS_SHARED_WITH_ME_LOCATION, []],
+      ['a shared folder', null, [folderCrumb('alpha-1', 'Alpha shared')]],
+    ] as const)(
+      'returns to the overview from the EvenDrive crumb in %s',
+      (_where, pendingGfsUri, crumbs) => {
+        const atRoot = {
+          ...baseController(),
+          home: { state: 'ready', drive: 'main', resourceId: 'home-1' },
+          accessibleResources: [
+            sharedRow('alpha-1', 'Alpha shared'),
+            sharedRow('home-1', 'fixture'),
+          ],
+        }
+        // The controller goes back to the root when the page resets it.
+        const reset = vi.fn(() => {
+          hookMock.useGfsBrowserController.mockReturnValue(atRoot)
+        })
+        hookMock.useGfsBrowserController.mockReturnValue({
+          ...atRoot,
+          current: crumbs.length > 0 ? crumbs[crumbs.length - 1] : null,
+          crumbs: [...crumbs],
+          reset,
+        })
+        const onLocationChange = vi.fn()
+        const queryClient = new QueryClient()
+        const onPendingGfsUriHandled = vi.fn()
+        const page = () => (
+          <QueryClientProvider client={queryClient}>
+            <FilesPage
+              pendingGfsUri={pendingGfsUri}
+              onLocationChange={onLocationChange}
+              onPendingGfsUriHandled={onPendingGfsUriHandled}
+            />
+          </QueryClientProvider>
+        )
+        const { rerender } = render(page())
+        expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
+        const trail = screen.getByRole('navigation', { name: 'File location' })
+        const evenDrive = within(trail).getAllByRole('button')[0]!
+        expect(evenDrive.textContent).toBe('EvenDrive')
+        expect(evenDrive.getAttribute('aria-current')).toBeNull()
+
+        fireEvent.click(evenDrive)
+        expect(reset).toHaveBeenCalledTimes(1)
+        // The real controller re-renders the page when reset changes its state.
+        rerender(page())
+
+        // Witness that the overview rendered: the home card is back.
+        expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
+        expect(
+          within(screen.getByRole('navigation', { name: 'File location' }))
+            .getByRole('button', { name: 'EvenDrive' })
+            .getAttribute('aria-current')
+        ).toBe('page')
+        expect(onLocationChange).toHaveBeenLastCalledWith(null, null)
+      }
+    )
+
+    it('keeps the EvenDrive crumb inert at the overview', () => {
+      const { controller, onLocationChange } = renderAt(null)
+      const trail = screen.getByRole('navigation', { name: 'File location' })
+      const evenDrive = within(trail).getByRole('button', { name: 'EvenDrive' })
+      expect(evenDrive.getAttribute('aria-current')).toBe('page')
+      expect(evenDrive.hasAttribute('disabled')).toBe(false)
+      const locationCalls = onLocationChange.mock.calls.length
+      fireEvent.click(evenDrive)
+      expect(controller.reset).not.toHaveBeenCalled()
+      expect(onLocationChange).toHaveBeenCalledTimes(locationCalls)
+      expect(screen.getByRole('region', { name: 'My home' })).toBeTruthy()
+      // Liveness witness: the Shared with me crumb beside it still opens its view.
+      fireEvent.click(within(trail).getByRole('button', { name: 'Shared with me' }))
+      expect(controller.reset).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('region', { name: 'My home' })).toBeNull()
     })
 
     describe('My home card for a home that is not ready', () => {

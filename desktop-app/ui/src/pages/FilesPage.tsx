@@ -45,6 +45,7 @@ import {
 import {
   GFS_ACCESS_REVOKED_BODY,
   GFS_DEFAULT_DISCOVERY_DRIVE,
+  GFS_EVENDRIVE_ROOT_LABEL,
   GFS_MY_HOME_DETAIL,
   GFS_MY_HOME_LABEL,
   GFS_RESOURCE_DRAG_TYPE,
@@ -1073,9 +1074,9 @@ export function FilesPage({
   )
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
-  // Inside the caller's own home the trail starts at "My home" instead of
-  // "Shared with me › <home folder>". The ancestor walk stops at the home, so
-  // only the first crumb can be the home root.
+  // Inside the caller's own home the trail reads "EvenDrive › My home" instead
+  // of "EvenDrive › Shared with me › <home folder>". The ancestor walk stops at
+  // the home, so only the first crumb can be the home root.
   const homeTrail =
     crumbs.length > 0 &&
     isCallerHomeRoot(ctrl.home, { resourceId: crumbs[0]!.resourceId, drive: ctrl.drive })
@@ -3410,6 +3411,31 @@ export function FilesPage({
           <div className="page-card__header da-gfs-drive__header">
             <div className="da-gfs-drive__title-row">
               <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
+                <Button
+                  className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
+                  color="neutral"
+                  // Every trail starts here; it returns to the overview (My home
+                  // and Shared with me). A view, not a folder: it takes no drops.
+                  // At the overview it is the active crumb, inert but not
+                  // disabled, like "Shared with me" in its own view.
+                  aria-current={!current && rootView === 'overview' ? 'page' : undefined}
+                  disabled={!current && accessRevoked}
+                  onClick={
+                    !current && rootView === 'overview'
+                      ? undefined
+                      : () => {
+                          manageReturnCrumbsRef.current = null
+                          setManageOpen(false)
+                          beginExplicitFilesNavigation()
+                          setRootView('overview')
+                          ctrl.reset()
+                        }
+                  }
+                  variant="text"
+                >
+                  {GFS_EVENDRIVE_ROOT_LABEL}
+                </Button>
+                {homeTrail ? null : <IconChevronRight aria-hidden="true" />}
                 {homeTrail ? null : (
                   <Button
                     className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
@@ -3438,7 +3464,7 @@ export function FilesPage({
                 )}
                 {crumbs.map((crumb, index) => (
                   <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
-                    {homeTrail && index === 0 ? null : <IconChevronRight aria-hidden="true" />}
+                    <IconChevronRight aria-hidden="true" />
                     {renameTarget?.resourceId === crumb.resourceId ? (
                       <GfsInlineRename
                         className="da-gfs-drive__inline-rename"
