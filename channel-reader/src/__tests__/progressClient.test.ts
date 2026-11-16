@@ -134,7 +134,6 @@ describe('createProgressStream', () => {
         `event: suspended\ndata: ${JSON.stringify({
           taskId: 't2',
           requestId: 'r2',
-          toolName: 'mcp-x__do',
           displayName: 'Do thing',
           reason: 'approval_required',
         })}\n\n`,
@@ -172,7 +171,12 @@ describe('createProgressStream', () => {
     )
 
     expect(onSuspended).toHaveBeenCalledWith(
-      expect.objectContaining({ taskId: 't2', requestId: 'r2', toolName: 'mcp-x__do' })
+      expect.objectContaining({
+        taskId: 't2',
+        requestId: 'r2',
+        displayName: 'Do thing',
+        reason: 'approval_required',
+      })
     )
     expect(onProgress).toHaveBeenCalled()
     expect(onTerminal).not.toHaveBeenCalled()
@@ -185,7 +189,6 @@ describe('createProgressStream', () => {
         `event: suspended\ndata: ${JSON.stringify({
           taskId: 't3',
           requestId: 'r3a',
-          toolName: 'mcp-x__do',
           displayName: 'Do thing',
           reason: 'approval_required',
         })}\n\n`,
@@ -201,7 +204,6 @@ describe('createProgressStream', () => {
         `event: suspended\ndata: ${JSON.stringify({
           taskId: 't3',
           requestId: 'r3b',
-          toolName: 'mcp-x__do2',
           displayName: 'Do thing 2',
           reason: 'approval_required',
         })}\n\n`,

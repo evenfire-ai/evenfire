@@ -122,7 +122,6 @@ describe('post-approval terminal fallback', () => {
     stream.fireSuspended({
       taskId: 'task-terminal-pending',
       requestId: 'approval-terminal-pending',
-      toolName: 'http_request',
       displayName: 'HTTP · http_request',
       reason: 'approval_required',
     })

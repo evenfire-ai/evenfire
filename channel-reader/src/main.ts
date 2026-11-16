@@ -198,6 +198,9 @@ const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
  */
 export const CHANNEL_RESYNC_INTERVAL_MS = 60_000 // 60 seconds
 
+/** What the status bubble shows before any progress step. */
+const PROCESSING_STATUS_TEXT = '⏳ Processing your request...'
+
 type ToolApprovalDecision = '/approve' | '/approve always' | '/deny'
 
 function newToolApprovalActionToken(): string {
@@ -311,6 +314,17 @@ function toolApprovalMessageOptions(
     }
   }
   return undefined
+}
+
+/**
+ * Options for an approval message that carries text without controls: a part
+ * before the last, or the last part once its controls are removed. Teams shows
+ * that text as written, with no Markdown or HTML rendering.
+ */
+function toolApprovalTextOptions(
+  channelType: Message['channelType']
+): SendMessageOptions | undefined {
+  return channelType === 'teams' ? { teamsTextFormat: 'plain' } : undefined
 }
 
 function supportedTelegramOperationalChatType(value: unknown): TelegramProviderChatType | null {
@@ -1791,6 +1805,21 @@ export class ChannelReader {
     return null
   }
 
+  /**
+   * Registers a pending approval. An entry it replaces has ended, so its
+   * controls are removed, as at every other place an entry ends.
+   */
+  private registerPendingApproval(approvalKey: string, state: PendingApprovalState): void {
+    const replaced = this.pendingApprovals.get(approvalKey)
+    this.pendingApprovals.set(approvalKey, state)
+    if (!replaced?.clearControls) return
+    console.warn(
+      `[Main] Pending approval of task ${replaced.taskId} (request ${replaced.requestId}) was replaced by request ${state.requestId} of task ${state.taskId}; removing its controls`
+    )
+    // The clearer never rejects, so the detached call cannot go unhandled.
+    void replaced.clearControls()
+  }
+
   private clearPendingApprovalForTask(msg: Message, taskId: string): void {
     const channelScope = this.pendingApprovalChannelScope(msg)
     for (const [key, pending] of this.pendingApprovals) {
@@ -1858,7 +1887,7 @@ export class ChannelReader {
     const limit = TOOL_APPROVAL_PART_LIMIT[msg.channelType]
     const parts = adapter && limit ? splitToolApprovalText(delivery.content, limit) : null
     if (!adapter || !limit || parts?.length === 1) {
-      this.pendingApprovals.set(approvalKey, {
+      this.registerPendingApproval(approvalKey, {
         taskId,
         requestId,
         userId,
@@ -1886,7 +1915,7 @@ export class ChannelReader {
       await this.denyUnshownToolApproval(msg, userId, requestId)
       return
     }
-    this.pendingApprovals.set(approvalKey, {
+    this.registerPendingApproval(approvalKey, {
       taskId,
       requestId,
       userId,
@@ -1955,7 +1984,7 @@ export class ChannelReader {
     const lastIndex = parts.length - 1
     for (let index = 0; index < lastIndex; index++) {
       if (stop?.()) return { stopped: true }
-      await send(index, undefined)
+      await send(index, toolApprovalTextOptions(msg.channelType))
     }
     if (stop?.()) return { stopped: true }
     const lastText = parts[lastIndex]
@@ -1975,7 +2004,12 @@ export class ChannelReader {
   ): () => Promise<void> {
     return async () => {
       try {
-        await adapter.editMessage(channelId, last.messageId, last.text)
+        await adapter.editMessage(
+          channelId,
+          last.messageId,
+          last.text,
+          toolApprovalTextOptions(ids.channelType)
+        )
       } catch (err) {
         console.error(
           `[Main] Failed to remove the approval controls for task ${ids.taskId} (request ${ids.requestId}, ${ids.channelType}): ${
@@ -2043,15 +2077,17 @@ export class ChannelReader {
    *   abortController/fetch reader; JavaScript closures keep msg, adapter,
    *   editStatus, and `this` (ChannelReader instance) alive for the callbacks
    *   to use after this function returns.
-   * - On `suspended`: fetch the Host's notification for the request and offer
-   *   it. If the fetch fails or the text is missing, deny the request and tell
-   *   the user, unless it was already offered here or the task ended. If the
-   *   Host has no stored entry for it (`pending`), deny it, which succeeds only
-   *   if the Host still holds it; if the task completed, offer nothing. An approval longer
-   *   than one message of the channel is sent instead as several messages
-   *   below the bubble, the controls on the last, and registered only after
-   *   the last one was sent; the controls are removed from that message when
-   *   the approval is decided, the task ends or the entry expires.
+   * - On `suspended`: fetch the task's current approval notification from the
+   *   Host and offer it under the event's request id (the answer's request id
+   *   is not compared with it). If the fetch fails or the text is missing, deny
+   *   the request and tell the user, unless it was already offered here or the
+   *   task ended. If the Host has no stored entry for it (`pending`), deny it,
+   *   which succeeds only if the Host still holds it; if the task completed,
+   *   offer nothing. An approval longer than one message of the channel is
+   *   sent instead as several messages below the bubble, the controls on the
+   *   last, and registered only after the last one was sent; the controls are
+   *   removed from that message when the approval is decided or replaced, the
+   *   task ends or the entry expires.
    * - On `tool_start`/`tool_complete` after approval: keeps editing the
    *   bubble with progress.
    * - On `terminal`: fetch final response via getTaskResult, edit bubble.
@@ -2088,7 +2124,7 @@ export class ChannelReader {
     // 2. Send initial processing message and capture messageId for editing.
     const statusMessageId = await adapter.sendMessage(
       responseChannelId,
-      '\u23f3 Processing your request...',
+      PROCESSING_STATUS_TEXT,
       this.replyTargetMessageId(msg)
     )
 
@@ -2157,9 +2193,11 @@ export class ChannelReader {
       // Denies a request this stream did not show and tells the user when the
       // denial was accepted; a rejected denial is told only with
       // `noticeOnRejected`, and logged with the ids otherwise. Returns
-      // 'task_ended' without a denial when the task ended first: the bubble
-      // already shows the outcome. It denies as msg.sender, the user the Host's
-      // approval is bound to. Never rejects: sendDenial and sendReply catch.
+      // 'task_ended' when the task ended first or while the denial was in
+      // flight: the bubble already shows the outcome, so no notice follows, and
+      // when the task ended first no denial is sent. It denies as msg.sender,
+      // the user the Host's approval is bound to. Never rejects: sendDenial and
+      // sendReply catch.
       const denyUnshownApproval = async (params: {
         requestId: string
         noticeOnRejected: boolean
@@ -2171,6 +2209,7 @@ export class ChannelReader {
           msg.channelType,
           msg.channelId
         )
+        if (finalDelivered) return 'task_ended'
         if (denial.success) {
           await this.sendReply(msg, TOOL_APPROVAL_NOT_SHOWN_DENIED)
           return 'denied'
@@ -2219,7 +2258,7 @@ export class ChannelReader {
           approvalPromptDelivered = true
           acceptProgressUpdates = false
           console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${params.requestId})`)
-          this.pendingApprovals.set(approvalKey, {
+          this.registerPendingApproval(approvalKey, {
             taskId,
             requestId: params.requestId,
             userId: params.userId,
@@ -2262,6 +2301,8 @@ export class ChannelReader {
           return
         }
 
+        // The task ended before the approval could be shown: the bubble keeps its outcome.
+        if (finalDelivered) return
         await editStatus('Approval needed. The request is in the messages below.')
         let outcome: { stopped: false; last: ToolApprovalLastPart } | { stopped: true }
         try {
@@ -2273,6 +2314,16 @@ export class ChannelReader {
             () => finalDelivered
           )
         } catch (err) {
+          // No approval is offered below any more, so the bubble shows the
+          // progress again. This runs before the denial: an accepted denial
+          // completes the task at the Host, and its final text must not be
+          // overwritten. A cancel or failure that already arrived has set
+          // finalDelivered.
+          if (!finalDelivered) {
+            await editStatus(
+              stream.steps.length > 0 ? formatProgressUpdate(stream.steps) : PROCESSING_STATUS_TEXT
+            )
+          }
           await notShown(err)
           return
         }
@@ -2285,7 +2336,7 @@ export class ChannelReader {
           await clearControls?.()
           return
         }
-        this.pendingApprovals.set(approvalKey, {
+        this.registerPendingApproval(approvalKey, {
           taskId,
           requestId: params.requestId,
           userId: params.userId,

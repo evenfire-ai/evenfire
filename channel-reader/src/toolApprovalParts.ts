@@ -18,7 +18,12 @@ export const TOOL_APPROVAL_PART_LIMIT: Partial<
   teams: { max: 12_000, size: part => Buffer.byteLength(JSON.stringify(part), 'utf8') },
 }
 
-/** More parts than this are not sent: the longest card a valid kept-files delete produces has 24 lines. */
+/**
+ * More parts than this are not sent. A schema-valid kept-files delete card has
+ * at most 24 lines and a part holds at least one, so this bound refuses none.
+ * A line that redaction lengthens past the channel's message is refused by the
+ * line rule of splitToolApprovalText.
+ */
 export const TOOL_APPROVAL_MAX_PARTS = 24
 
 /** Sent when an approval could not be shown in full and mcp-host accepted its denial. */

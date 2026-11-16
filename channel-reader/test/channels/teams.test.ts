@@ -142,3 +142,78 @@ describe('TeamsAdapter workflow result files', () => {
     })
   })
 })
+
+describe('TeamsAdapter text format', () => {
+  async function connectedAdapter() {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 })
+      )
+      .mockImplementation(
+        async () => new Response(JSON.stringify({ id: 'activity-1' }), { status: 200 })
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    const adapter = new TeamsAdapter()
+    await adapter.connect({
+      teamsAppId: 'app-1',
+      teamsTenantId: 'tenant-1',
+      teamsAppPassword: 'secret',
+    })
+    adapter.rememberConversation('conversation-1', 'https://smba.trafficmanager.net/amer/')
+    return { adapter, fetchMock }
+  }
+
+  function activityBodies(fetchMock: ReturnType<typeof vi.fn>, method: string) {
+    // Activity requests only: the token request goes to the login host.
+    return fetchMock.mock.calls
+      .filter(call => String(call[0]).includes('/v3/conversations/'))
+      .map(call => call[1] as RequestInit)
+      .filter(init => init.method === method)
+      .map(init => JSON.parse(String(init.body)) as Record<string, unknown>)
+  }
+
+  const TEXT = 'Delete these files permanently:\n- upload: "<b>a_b</b>.txt"'
+
+  it('TA1 sends a text activity as plain text only when asked', async () => {
+    const { adapter, fetchMock } = await connectedAdapter()
+    await adapter.sendMessage('conversation-1', TEXT, undefined, undefined, {
+      teamsTextFormat: 'plain',
+    })
+    await adapter.sendMessage('conversation-1', TEXT)
+
+    const bodies = activityBodies(fetchMock, 'POST')
+    // Witness: both activities were posted with the same text.
+    expect(bodies.map(body => body.text)).toEqual([TEXT, TEXT])
+    expect(bodies[0]).toMatchObject({ type: 'message', textFormat: 'plain' })
+    expect(bodies[0]).not.toHaveProperty('attachments')
+    expect(bodies[1]).not.toHaveProperty('textFormat')
+  })
+
+  it('TA2 edits a text activity as plain text only when asked', async () => {
+    const { adapter, fetchMock } = await connectedAdapter()
+    await adapter.editMessage('conversation-1', 'activity-1', TEXT, { teamsTextFormat: 'plain' })
+    await adapter.editMessage('conversation-1', 'activity-1', TEXT)
+
+    const bodies = activityBodies(fetchMock, 'PUT')
+    // Witness: both edits were sent with the same text.
+    expect(bodies.map(body => body.text)).toEqual([TEXT, TEXT])
+    expect(bodies[0]).toEqual({ type: 'message', text: TEXT, attachments: [], textFormat: 'plain' })
+    expect(bodies[1]).toEqual({ type: 'message', text: TEXT, attachments: [] })
+  })
+
+  it('TA3 keeps a message with actions a card, without a text format', async () => {
+    const { adapter, fetchMock } = await connectedAdapter()
+    await adapter.sendMessage('conversation-1', TEXT, undefined, undefined, {
+      teamsActions: [{ title: 'Approve', value: 'tool:a:abc' }],
+      teamsTextFormat: 'plain',
+    })
+
+    const bodies = activityBodies(fetchMock, 'POST')
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toMatchObject({ type: 'message', summary: TEXT })
+    expect(bodies[0]!.attachments).toHaveLength(1)
+    expect(bodies[0]).not.toHaveProperty('textFormat')
+    expect(bodies[0]).not.toHaveProperty('text')
+  })
+})
