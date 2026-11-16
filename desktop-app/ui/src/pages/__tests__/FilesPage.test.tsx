@@ -729,6 +729,15 @@ describe('FilesPage', () => {
     ])
     const resource = page.items[0]
     if (!resource?.parentResourceId) throw new Error('Missing shared-root producer parent')
+    window.clerum.gfs.resolve = vi.fn(async uri => {
+      expect(uri).toBe(resource.gfsUri)
+      return {
+        ...resource,
+        drive: resource.drive ?? 'main',
+        parentResourceId: resource.parentResourceId ?? null,
+        pathCache: resource.path,
+      }
+    })
     let finishLoading: (loading: boolean) => void = () => undefined
     hookMock.useGfsBrowserController.mockImplementation(() => {
       const [loadingCurrentView, setLoading] = useState(true)
@@ -785,6 +794,10 @@ describe('FilesPage', () => {
       ])
     ).items[0]
     if (!child) throw new Error('The producer fixture did not return the unreadable file')
+    window.clerum.gfs.resolve = vi.fn(async uri => {
+      expect(uri).toBe(child.gfsUri)
+      throw new Error('403 Forbidden: unreadable resource httpStatus=403')
+    })
     const parentCrumb: GfsCrumb = {
       resourceId: parent.resourceId,
       gfsUri: parent.gfsUri,

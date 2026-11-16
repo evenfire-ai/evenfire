@@ -89,9 +89,10 @@ describe('FailoverEngine', () => {
     }
   )
 
-  it('does NOT trigger on a non-eligible error (400/validation) — propagates', async () => {
+  it('does NOT trigger on a non-eligible error (non-retryable ApiCallFailed) — propagates', async () => {
     const e = engine()
-    const err = llmError(LlmErrorCode.ApiCallFailed, false) // 400 → not retryable
+    // e.g. a replayed subscription ticket; an HTTP 400 is UpstreamRejected since #1433
+    const err = llmError(LlmErrorCode.ApiCallFailed, false)
     await expect(
       e.run(
         PRIMARY,

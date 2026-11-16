@@ -63,8 +63,9 @@ wrong):
 ### Group A — OpenAI-compatible, pure data (17)
 
 These speak an OpenAI-compatible `/chat/completions` API. Integrating them is a
-`baseURL` + one API key, **no driver code**. They are all handled by one shared
-class, `OpenAICompatibleProvider`.
+`baseURL` + one API key, **no driver code**. They are all handled by the shared
+OpenAI-family driver (`OpenAIProvider`) composed with the compatible endpoint
+profile (`compatibleProfile`).
 
 | Provider      | id           | Credential slot      | Default model                                       |
 | ------------- | ------------ | -------------------- | --------------------------------------------------- |
@@ -86,7 +87,9 @@ class, `OpenAICompatibleProvider`.
 | Novita AI     | `novita`     | `novita-api-key`     | `deepseek/deepseek-v3.2`                            |
 | MiniMax       | `minimax`    | `minimax-api-key`    | `MiniMax-M2`                                        |
 
-`openai` itself also speaks this protocol but uses the official SDK (Group B).
+`openai` itself does not: the official endpoint is called over the Responses API
+(`/responses`) with the official SDK (Group B). Azure OpenAI and these compatible
+third parties are the providers that stay on Chat Completions.
 
 ### Group B — own SDK / bespoke wire protocol (4)
 

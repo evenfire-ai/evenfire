@@ -25,9 +25,6 @@ export const initial = (): any => ({
   terminal: null,
 })
 
-const mainItems = ['Share', 'Rename', 'Move to', 'Download', 'Replace file']
-const shareItems = ['Share', 'Copy link', 'Copy ID']
-
 export function transition(s: any, e: any): any {
   const n = structuredClone(s)
   if (e.type === 'open') {
@@ -166,8 +163,7 @@ export function transition(s: any, e: any): any {
 
 export function a4(s: any) {
   const open = s.menu === 'open'
-  const rect = s.rect,
-    box = s.sidebar
+  const box = s.sidebar
   return {
     onePanel: open
       ? s.panels.length === (s.view === 'share' ? 2 : 1) &&
@@ -215,6 +211,46 @@ export function assertA4(s: any) {
   return checks
 }
 
+// Product-level D5b oracle: a version-sensitive action is admitted only for the
+// exact captured resource location, identity, kind, parent, and version. It
+// describes the required observable decision without modeling the UI guard.
+export type D5bTargetSnapshot = {
+  resourceId: string
+  gfsUri: string
+  kind: string
+  parentResourceId: string | null
+  version: number
+}
+
+export function d5bExpectedOutcome(
+  requested: D5bTargetSnapshot,
+  current: D5bTargetSnapshot | null
+) {
+  const normalizeId = (value: string) => value.replace(/-/g, '').toLowerCase()
+  const sameTarget = Boolean(
+    current &&
+    normalizeId(current.resourceId) === normalizeId(requested.resourceId) &&
+    current.gfsUri === requested.gfsUri &&
+    current.kind === requested.kind &&
+    (current.parentResourceId == null ? null : normalizeId(current.parentResourceId)) ===
+      (requested.parentResourceId == null ? null : normalizeId(requested.parentResourceId)) &&
+    current.version === requested.version
+  )
+  return sameTarget
+    ? {
+        disposition: 'admit' as const,
+        mutationCount: 1,
+        operationVersion: requested.version,
+        staleFeedbackCount: 0,
+      }
+    : {
+        disposition: 'reject' as const,
+        mutationCount: 0,
+        operationVersion: null,
+        staleFeedbackCount: 1,
+      }
+}
+
 export const commandAlphabet = Object.freeze([
   'open(resource,request)',
   'share',
@@ -257,4 +293,185 @@ export function sensitivityControls() {
     staleNavigationRejected: !a4(stale).newerExplicitNavigationWins,
     unauthorizedEffectRejected: !a4(wrongEffect).noUnownedEffects,
   }
+}
+
+// Focused D5a oracle: a permission continuation may publish only while its
+// existing request receipt still owns the action. This models observable
+// ownership and effects, not React state or the production callback algorithm.
+export const initialD5a = () => ({
+  session: 1,
+  access: 'active' as 'active' | 'revoked',
+  revokeRevision: 0,
+  currentRequest: null as null | {
+    id: number
+    resource: string
+    session: number
+    revokeRevision: number
+  },
+  pending: new Map<
+    number,
+    { requestId: number; resource: string; session: number; revokeRevision: number }
+  >(),
+  feedback: [] as Array<{
+    requestId: number
+    resource: string
+    session: number
+    revokeRevision: number
+    result: 'denied' | 'error'
+  }>,
+  ui: [] as Array<{
+    requestId: number
+    resource: string
+    session: number
+    revokeRevision: number
+  }>,
+})
+
+export function transitionD5a(s: ReturnType<typeof initialD5a>, e: any) {
+  const n = structuredClone(s)
+  if (e.type === 'request') {
+    n.currentRequest = {
+      id: e.id,
+      resource: e.resource,
+      session: e.session,
+      revokeRevision: n.revokeRevision,
+    }
+  } else if (e.type === 'permission-start') {
+    n.pending.set(e.id, {
+      requestId: e.requestId,
+      resource: e.resource,
+      session: e.session,
+      revokeRevision: n.revokeRevision,
+    })
+  } else if (e.type === 'permission-settle') {
+    const pending = n.pending.get(e.id)
+    n.pending.delete(e.id)
+    if (e.result === 'session-authority') {
+      n.access = 'revoked'
+      n.revokeRevision += 1
+      n.ui = []
+      n.feedback = []
+    } else if (
+      pending &&
+      n.access === 'active' &&
+      (e.ignoreRevokeRevisionForSensitivity || pending.revokeRevision === n.revokeRevision) &&
+      n.currentRequest?.id === pending.requestId &&
+      n.currentRequest.session === pending.session &&
+      n.session === pending.session
+    ) {
+      if (e.result === 'allowed')
+        n.ui.push({
+          requestId: pending.requestId,
+          resource: pending.resource,
+          session: pending.session,
+          revokeRevision: pending.revokeRevision,
+        })
+      else
+        n.feedback.push({
+          requestId: pending.requestId,
+          resource: pending.resource,
+          session: pending.session,
+          revokeRevision: pending.revokeRevision,
+          result: e.result,
+        })
+    } else if (pending && e.ignoreReceiptForSensitivity) {
+      n.feedback.push({
+        requestId: pending.requestId,
+        resource: pending.resource,
+        session: pending.session,
+        revokeRevision: pending.revokeRevision,
+        result: e.result === 'allowed' ? 'error' : e.result,
+      })
+    }
+  } else if (e.type === 'session') {
+    n.session = e.session
+  } else if (e.type === 'retry') {
+    n.access = 'active'
+  } else if (e.type === 'quiesce') {
+    // Quiescence is asserted only after every controlled continuation settled.
+  }
+  return n
+}
+
+export function a4D5a(s: ReturnType<typeof initialD5a>) {
+  return {
+    revokedSurfaceHasNoActionUi:
+      s.access !== 'revoked' || (s.ui.length === 0 && s.feedback.length === 0),
+    noPendingContinuation: s.pending.size === 0,
+    feedbackOwnedByCurrentRequest: s.feedback.every(
+      item => item.requestId === s.currentRequest?.id && item.session === s.currentRequest.session
+    ),
+    oneCurrentTerminalFeedback:
+      new Set(s.feedback.map(item => item.requestId)).size === s.feedback.length,
+    uiOwnedByCurrentRequest: s.ui.every(
+      item => item.requestId === s.currentRequest?.id && item.session === s.currentRequest.session
+    ),
+    effectsOwnedByCurrentRevision: [...s.ui, ...s.feedback].every(
+      item => item.revokeRevision === s.revokeRevision
+    ),
+    noDuplicateUi: new Set(s.ui.map(item => item.requestId)).size === s.ui.length,
+  }
+}
+
+export function assertD5a(s: ReturnType<typeof initialD5a>) {
+  const checks = a4D5a(s)
+  for (const [name, pass] of Object.entries(checks))
+    if (!pass) throw new Error(`D5a A4 violation: ${name}`)
+  return checks
+}
+
+export function d5aSensitivityControl() {
+  let model = initialD5a()
+  model = transitionD5a(model, { type: 'request', id: 1, resource: 'A', session: 1 })
+  model = transitionD5a(model, {
+    type: 'permission-start',
+    id: 11,
+    requestId: 1,
+    resource: 'A',
+    session: 1,
+  })
+  model = transitionD5a(model, { type: 'request', id: 2, resource: 'B', session: 1 })
+  model = transitionD5a(model, {
+    type: 'permission-settle',
+    id: 11,
+    result: 'denied',
+    ignoreReceiptForSensitivity: true,
+  })
+  return !a4D5a(model).feedbackOwnedByCurrentRequest
+}
+
+export function d5aRevokeRetrySensitivityControl() {
+  const setup = () => {
+    let state = initialD5a()
+    state = transitionD5a(state, { type: 'request', id: 1, resource: 'A', session: 1 })
+    state = transitionD5a(state, {
+      type: 'permission-start',
+      id: 11,
+      requestId: 1,
+      resource: 'A',
+      session: 1,
+    })
+    state = transitionD5a(state, { type: 'request', id: 2, resource: 'B', session: 1 })
+    state = transitionD5a(state, {
+      type: 'permission-start',
+      id: 12,
+      requestId: 2,
+      resource: 'B',
+      session: 1,
+    })
+    state = transitionD5a(state, { type: 'permission-settle', id: 11, result: 'session-authority' })
+    return transitionD5a(state, { type: 'retry' })
+  }
+  const guarded = transitionD5a(setup(), { type: 'permission-settle', id: 12, result: 'allowed' })
+  const mutant = transitionD5a(setup(), {
+    type: 'permission-settle',
+    id: 12,
+    result: 'allowed',
+    ignoreRevokeRevisionForSensitivity: true,
+  })
+  return (
+    guarded.ui.length === 0 &&
+    mutant.ui.some(item => item.requestId === 2 && item.resource === 'B') &&
+    !a4D5a(mutant).effectsOwnedByCurrentRevision
+  )
 }

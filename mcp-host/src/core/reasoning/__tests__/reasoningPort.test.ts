@@ -372,6 +372,66 @@ describe('DefaultReasoningPort context-breakdown capture (F1.2)', () => {
     expect(sink).not.toHaveBeenCalled() // breakdown swallowed
   })
 
+  const SECRET_TEXT = 'provider payload sk-live-SECRET-0123 {"prompt":"private text"}'
+  it.each([
+    ['an Error', () => new Error(SECRET_TEXT), { name: 'Error' }],
+    ['a plain object', () => ({ message: SECRET_TEXT, body: SECRET_TEXT }), { thrown: 'object' }],
+    ['a string', () => SECRET_TEXT, { thrown: 'string' }],
+  ])(
+    'logs a counter throwing %s as a bounded summary, never its content',
+    async (_case, make, err) => {
+      const previousConsole = { log: console.log, error: console.error, warn: console.warn }
+      const output = vi.spyOn(console, 'error').mockImplementation(() => {})
+      vi.resetModules()
+      try {
+        // The logger binds its sink at import time, so load the port (and the
+        // logger it imports) after the sink is captured.
+        const { DefaultReasoningPort: FreshPort } = await import('../port')
+        const { DefaultPromptBuilder: FreshBuilder } = await import('../promptBuilder')
+        const mockLlm = createMockLlmPort()
+        ;(mockLlm.completeWithTools as any).mockResolvedValue(okToolResponse)
+        const leaking: TokenCounter = {
+          ...createStubTokenCounter(),
+          countSync: () => {
+            throw make()
+          },
+        }
+        const port = new FreshPort(
+          mockLlm,
+          new FreshBuilder({ nativeToolPresentation: 'direct' }),
+          undefined,
+          undefined,
+          parts,
+          leaking,
+          vi.fn(),
+          100000
+        )
+
+        await port.respondWithTools({
+          messages: [{ role: 'user', content: 'hi' }],
+          available_tools: [],
+        })
+
+        expect(output).toHaveBeenCalledOnce()
+        const line = output.mock.calls[0]![0] as string
+        expect(line).not.toContain('sk-live-SECRET-0123')
+        expect(line).not.toContain('private text')
+        expect(JSON.parse(line)).toMatchObject({
+          component: 'Reasoning',
+          level: 'error',
+          msg: 'Context breakdown capture failed (ignored)',
+          err,
+        })
+      } finally {
+        output.mockRestore()
+        console.log = previousConsole.log
+        console.error = previousConsole.error
+        console.warn = previousConsole.warn
+        vi.resetModules()
+      }
+    }
+  )
+
   it('is a no-op when tokenCounter / sink are not wired', async () => {
     const mockLlm = createMockLlmPort()
     ;(mockLlm.completeWithTools as any).mockResolvedValue(okToolResponse)

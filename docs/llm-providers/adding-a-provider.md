@@ -156,8 +156,10 @@ package — no other UI change. A nicer `SECRET_FIELD_HINTS` placeholder is opti
 
 ### 7. Param compatibility (important)
 
-The OpenAI-compatible driver (`mcp-host/src/llm/openaiCompatible.ts`) shares the
-`openai` provider's request shape. Some providers **reject** params: Groq
+The OpenAI-compatible endpoint profile (`compatibleProfile` in
+`mcp-host/src/llm/openaiFamily/endpointProfiles.ts`) shares the Chat
+Completions request shape that Azure also uses (official `openai` is on the
+Responses API, so its request shape is not the reference here). Some providers **reject** params: Groq
 (`n>1`, `logprobs`, `logit_bias`), Cerebras (`frequency_penalty`/`presence_penalty`),
 Moonshot (`tool_choice: 'required'`, temperature outside `[0,1]`), DeepSeek
 reasoner (sampling params). Keep the default request to a **conservative,

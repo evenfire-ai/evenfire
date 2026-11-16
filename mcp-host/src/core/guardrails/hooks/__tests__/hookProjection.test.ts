@@ -4,6 +4,11 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  decodedResponse,
+  deepFreeze,
+} from '../../../../llm/openaiFamily/__tests__/responsesFixtures'
+import { historyAfterToolTurn } from '../../../orchestration/__tests__/loopHistory'
+import {
   type ChatMessage,
   FinishReason,
   type ToolCompletionRequest,
@@ -163,5 +168,59 @@ describe('post_call / on_error projection', () => {
     >
     // A naive {...err} spread would drop `message` entirely; projectError reads it by access.
     expect((body.error as Record<string, unknown>).message).toBe('upstream failed')
+  })
+})
+
+describe('opaque provider continuity never reaches a hook', () => {
+  // The history and the response come from the real driver decode and the real
+  // loop push, so the continuation is exactly what a Responses turn carries.
+  const continuityRequest = async (): Promise<ToolCompletionRequest> => {
+    const history = await historyAfterToolTurn('v1-rfc-preamble-gpt-6.1-terra')
+    expect(history.some(m => m.provider_continuation)).toBe(true)
+    return deepFreeze({
+      messages: [{ role: 'system', content: 'PROPRIETARY SYSTEM PROMPT' }, ...history],
+      tools: [],
+    }) as ToolCompletionRequest
+  }
+
+  const withoutContinuity = (ms: ChatMessage[]) =>
+    ms.filter(m => m.role !== 'system').map(({ provider_continuation: _drop, ...rest }) => rest)
+
+  const cases: [string, HookDescriptor, 'pre_call' | 'moderate' | 'on_error'][] = [
+    ['pre_call (content)', desc({ contentAccess: 'content' }), 'pre_call'],
+    ['pre_call (metadata)', desc({ contentAccess: 'metadata' }), 'pre_call'],
+    ['moderate', desc(), 'moderate'],
+    ['on_error', desc(), 'on_error'],
+  ]
+
+  for (const [label, descriptor, point] of cases) {
+    it(`${label}: no continuity in the body, other message fields intact, input not mutated`, async () => {
+      const req = await continuityRequest()
+      const body = projectForHook(descriptor, point, { request: req, error: { code: 'x' } })
+      const serialized = JSON.stringify(body)
+      expect(serialized).not.toContain('provider_continuation')
+      expect(serialized).not.toContain('encrypted_content')
+
+      const projected = (
+        point === 'on_error'
+          ? (body as { request: Record<string, unknown> }).request
+          : (body as Record<string, unknown>)
+      ).messages as ChatMessage[] | undefined
+      if (descriptor.contentAccess === 'metadata') {
+        expect(projected).toBeUndefined()
+      } else {
+        expect(projected).toEqual(withoutContinuity(req.messages))
+      }
+      // The projection reads the loop's live messages: they keep the blob.
+      expect(req.messages.some(m => m.provider_continuation)).toBe(true)
+    })
+  }
+
+  it('post_call: the whitelisted response never carries the continuation', () => {
+    const decoded = deepFreeze(decodedResponse('v1-rfc-preamble-gpt-6.1-terra'))
+    expect(decoded.provider_continuation).toBeDefined()
+    const body = projectForHook(desc(), 'post_call', { response: decoded })
+    expect(JSON.stringify(body)).not.toContain('provider_continuation')
+    expect(JSON.stringify(body)).not.toContain('encrypted_content')
   })
 })

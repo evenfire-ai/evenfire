@@ -126,10 +126,11 @@ describe('FailoverSingleTurnProvider', () => {
   })
 
   it('does NOT switch on a non-eligible failure and rethrows the ORIGINAL error', async () => {
-    const original = new Error('400 bad request')
+    const original = new Error('subscription ticket replayed')
     const primary = fakeProvider({
       onWithTools: () => Promise.reject(original),
-      classify: { code: LlmErrorCode.ApiCallFailed, retryable: false }, // 400 → not eligible
+      // Non-retryable ApiCallFailed → not eligible; an HTTP 400 is UpstreamRejected since #1433
+      classify: { code: LlmErrorCode.ApiCallFailed, retryable: false },
     })
     const buildFallback = vi.fn(() => fakeProvider({}))
 

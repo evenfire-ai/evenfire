@@ -551,14 +551,6 @@ describe('r14 mounted-component independent A4 comparisons', () => {
       }),
       { numRuns: 12, seed: 20261114, endOnFailure: true }
     )
-    const report = {
-      seed: 20261114,
-      runs: traces.length,
-      traces,
-      reached: [...reached],
-      preconditions: stats,
-      mismatches,
-    }
     expect(traces).toHaveLength(12)
     expect(reached.size).toBeGreaterThanOrEqual(3)
     expect(mismatches).toEqual([])
@@ -690,6 +682,7 @@ describe('r14 mounted-component independent A4 comparisons', () => {
       '.da-gfs-resource-menu__submenu--sidebar-context'
     )
     expect(flyout).not.toBeNull()
+    if (!flyout) throw new Error('Expected the visible sidebar Share flyout')
     expect(flyout?.style.visibility).not.toBe('hidden')
     expect(screen.getByRole('menu', { name: 'Actions for A' })).toBe(main)
     expect(screen.getAllByRole('menu')).toHaveLength(2)
@@ -912,6 +905,8 @@ describe('r14 mounted-component independent A4 comparisons', () => {
     const shareTrigger = within(main).getByRole('menuitem', { name: 'Share' })
     fireEvent.mouseOver(shareTrigger)
     const sharePanel = await screen.findByRole('menu', { name: 'Share options for A' })
+    expect(sharePanel).not.toBe(main)
+    expect(screen.getAllByRole('menu')).toHaveLength(2)
     fireEvent.keyDown(shareTrigger, { key: 'ArrowRight' })
     expect(document.activeElement?.getAttribute('data-share-child')).toBe('true')
 

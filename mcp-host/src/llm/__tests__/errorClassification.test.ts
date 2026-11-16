@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { LlmErrorCode } from '../../core/errors'
 import { classifyByHttpStatus, classifyUnknown } from '../errorClassification'
+import { classifyFailoverClass } from '../failover/classify'
 
 describe('classifyByHttpStatus', () => {
   it('returns null for non-HTTP-shaped errors', () => {
@@ -106,12 +107,16 @@ describe('classifyByHttpStatus', () => {
     )
   })
 
-  it('maps 400 without quota signal to ApiCallFailed, NOT retryable', () => {
-    expect(classifyByHttpStatus({ status: 400, message: 'bad request' })).toMatchObject({
-      code: LlmErrorCode.ApiCallFailed,
+  // #1433: a rejected request, not "Connection Error" (ApiCallFailed).
+  it('maps 400 without quota signal to UpstreamRejected, NOT retryable', () => {
+    const classified = classifyByHttpStatus({ status: 400, message: 'bad request' })
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.UpstreamRejected,
       retryable: false,
       message: 'bad request',
+      httpStatus: 400,
     })
+    expect(classifyFailoverClass(classified!.code, classified!.retryable)).toBeNull()
   })
 
   it('recognizes body-level insufficient_quota via error.code', () => {

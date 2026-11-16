@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, waitFor } from '@testing-library/react'
+import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { GfsDragSessionProvider, GfsDragSessionStore, useGfsDragSession } from '../dragSession'
 import type { GfsDragSource } from '../dragSession.types'
@@ -117,9 +117,34 @@ describe('GfsDragSessionProvider — lifecycle binding', () => {
     expect(api!.beginDrag(source())).toBe(true)
     expect(api!.activeSource()?.resourceId).toBe('r-1')
 
-    // The shared fail-closed boundary writes 'revoked' via setQueryData; the
+    // The shared fail-closed boundary writes revoked status via setQueryData; the
     // provider subscription must clear the active drag in the same turn.
-    queryClient.setQueryData(desktopQueryKeys.gfsAccessState('test:user-1:team-1', 7), 'revoked')
+    queryClient.setQueryData(desktopQueryKeys.gfsAccessState('test:user-1:team-1', 7), {
+      status: 'revoked',
+      revokeRevision: 1,
+    })
+    await waitFor(() => expect(api!.activeSource()).toBeNull())
+  })
+
+  it('linearizes a new drag against the shared revoke write before React commits', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let api: ReturnType<typeof useGfsDragSession> | null = null
+    render(
+      <QueryClientProvider client={queryClient}>
+        <GfsDragSessionProvider>
+          <Probe onApi={captured => (api = captured)} />
+        </GfsDragSessionProvider>
+      </QueryClientProvider>
+    )
+    expect(api!.beginDrag(source())).toBe(true)
+
+    act(() => {
+      queryClient.setQueryData(desktopQueryKeys.gfsAccessState('test:user-1:team-1', 7), {
+        status: 'revoked',
+        revokeRevision: 1,
+      })
+      expect(api!.beginDrag(source({ resourceId: 'r-2', name: 'b.txt' }))).toBe(false)
+    })
     await waitFor(() => expect(api!.activeSource()).toBeNull())
   })
 
@@ -189,9 +214,9 @@ describe('GfsDragSessionProvider — lifecycle binding', () => {
 
     expect(api!.activeSource()).toBeNull()
     expect(api!.currentGeneration()).toBeGreaterThan(gestureGeneration)
-    expect(queryClient.getQueryData(desktopQueryKeys.gfsAccessState('test:user-1:team-1', 8))).toBe(
-      'active'
-    )
+    expect(
+      queryClient.getQueryData(desktopQueryKeys.gfsAccessState('test:user-1:team-1', 8))
+    ).toEqual({ status: 'active', revokeRevision: 0 })
   })
 
   it('invalidates on logout and unmount while refusing further drags', () => {

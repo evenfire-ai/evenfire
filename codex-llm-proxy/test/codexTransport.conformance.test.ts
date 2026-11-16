@@ -1460,7 +1460,7 @@ describe('streamCodexCompletion', () => {
     expect(body).not.toHaveProperty('temperature')
   })
 
-  it('maps upstream 400 to invalid_request and finalizes error without usage', async () => {
+  it('maps upstream 400 to upstream_rejected and finalizes error without usage', async () => {
     const finalize = vi.fn(
       async (_input: Parameters<StreamCodexCompletionInput['finalize']>[0]) => ({
         providerAttemptId: 'att-1',
@@ -1489,7 +1489,7 @@ describe('streamCodexCompletion', () => {
         ),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       })
-    ).rejects.toMatchObject({ code: 'invalid_request' })
+    ).rejects.toMatchObject({ code: 'upstream_rejected', details: { upstreamStatus: 400 } })
     expect(finalize).toHaveBeenCalledWith(
       expect.objectContaining({
         receipt: expect.objectContaining({ outcome: 'error' }),
@@ -1555,7 +1555,7 @@ describe('streamCodexCompletion', () => {
       const other = JSON.stringify({ error: { code: 'rate_limit_exceeded' } })
       await expect(
         streamWith(() => new Response(other, { status: 400 })).pending
-      ).rejects.toMatchObject({ code: 'invalid_request' })
+      ).rejects.toMatchObject({ code: 'upstream_rejected', details: { upstreamStatus: 400 } })
       // G1-1 (#720): a 429 is a rate limit, not an outage.
       await expect(
         streamWith(() => new Response(other, { status: 429 })).pending
@@ -1565,7 +1565,7 @@ describe('streamCodexCompletion', () => {
       ).rejects.toMatchObject({ code: 'connection_unavailable' })
       await expect(
         streamWith(() => new Response('{"error":', { status: 400 })).pending
-      ).rejects.toMatchObject({ code: 'invalid_request' })
+      ).rejects.toMatchObject({ code: 'upstream_rejected', details: { upstreamStatus: 400 } })
     })
 
     it('T-R9-6d reads a bounded prefix of an endless error body and keeps the status mapping', async () => {
@@ -1586,7 +1586,10 @@ describe('streamCodexCompletion', () => {
         { highWaterMark: 0 }
       )
       const { pending } = streamWith(() => new Response(endless, { status: 400 }))
-      await expect(pending).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(pending).rejects.toMatchObject({
+        code: 'upstream_rejected',
+        details: { upstreamStatus: 400 },
+      })
       // Witness: the body was read, and the read stopped at a bound.
       expect(pulled).toBeGreaterThan(0)
       expect(canceled).toBe(true)
@@ -1656,8 +1659,8 @@ describe('streamCodexCompletion', () => {
     })
 
     // G1-3 (#720): the same request gets the same 4xx every time, so it is not
-    // an outage to retry or fail over from.
-    it.each([402, 404, 409, 422])(
+    // an outage to retry or fail over from. #1433: a 400 is one of them.
+    it.each([400, 402, 404, 409, 422])(
       'G1-3a maps an unmapped upstream %i to upstream_rejected',
       async (status) => {
         const err = await streamWith(() => new Response('rejected', { status })).pending.catch(

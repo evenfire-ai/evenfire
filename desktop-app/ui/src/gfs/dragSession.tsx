@@ -1,11 +1,14 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { DRAG_COLD_CHECK_BUDGET, DRAG_COLD_CHECK_MAX_CONCURRENCY } from '@constants/gfsBrowser'
-import { desktopQueryKeys, isGfsSessionGeneration } from '@hooks/domain/queryKeys'
+import {
+  INITIAL_GFS_ACCESS_STATE,
+  desktopQueryKeys,
+  isGfsSessionGeneration,
+} from '@hooks/domain/queryKeys'
+import type { GfsAccessState } from '@hooks/domain/queryKeys'
 import type { GfsDragSessionApi, GfsDragSource, GfsHoverCheckLease } from './dragSession.types'
-
-type GfsAccessState = 'active' | 'revoked'
 
 /** Same lease rules for shared gestures and provider-absent single-surface mode. */
 export class GfsHoverCheckBudget {
@@ -120,6 +123,7 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
     () => sessionScopeOf({ isAuthenticated, me, runtimeConfigState }),
     [isAuthenticated, me, runtimeConfigState]
   )
+  const queryClient = useQueryClient()
 
   // Bind lifecycle: scope change or a revoked shared access state clears the
   // active drag. The access state is written by ANY controller mount's
@@ -128,13 +132,13 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
   // a revocation, and 'active' is the safe default while nothing wrote yet).
   const accessStateQuery = useQuery({
     queryKey: desktopQueryKeys.gfsAccessState(scope ?? 'anonymous', sessionGeneration ?? null),
-    queryFn: (): GfsAccessState => 'active',
+    queryFn: () => INITIAL_GFS_ACCESS_STATE,
     enabled: false,
-    initialData: 'active' as GfsAccessState,
+    initialData: INITIAL_GFS_ACCESS_STATE,
     gcTime: Infinity,
     staleTime: Infinity,
   })
-  const accessState: GfsAccessState = accessStateQuery.data ?? 'active'
+  const accessState = (accessStateQuery.data ?? INITIAL_GFS_ACCESS_STATE).status
   const previousAuthorityRef = useRef({ scope, generation: sessionGeneration ?? null })
 
   useEffect(() => {
@@ -159,10 +163,14 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
   const api = useMemo<GfsDragSessionApi>(
     () => ({
       beginDrag: source => {
+        const liveAccessState =
+          queryClient.getQueryData<GfsAccessState>(
+            desktopQueryKeys.gfsAccessState(scope ?? 'anonymous', sessionGeneration ?? null)
+          ) ?? INITIAL_GFS_ACCESS_STATE
         if (
           scope === null ||
           !isGfsSessionGeneration(sessionGeneration) ||
-          accessState !== 'active'
+          liveAccessState.status !== 'active'
         )
           return false
         // A drag started under another env/user/team never crosses into this
@@ -177,7 +185,7 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
       currentGeneration: () => store.currentGeneration(),
       beginHoverCheck: expectedGeneration => store.beginHoverCheck(expectedGeneration),
     }),
-    [accessState, scope, sessionGeneration, store]
+    [accessState, queryClient, scope, sessionGeneration, store]
   )
 
   return <GfsDragSessionContext.Provider value={api}>{children}</GfsDragSessionContext.Provider>
