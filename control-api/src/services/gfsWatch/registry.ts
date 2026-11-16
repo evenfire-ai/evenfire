@@ -367,7 +367,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   const admittedPerPrincipal = new Map<Uuid, number>()
 
   // Retention and the authorization/roots windows. Nothing here fills them
-  // yet, but every reader (`retenida`, the open's admission, `closeConn`)
+  // yet, but every reader (`connHeld`, the open's admission, `closeConn`)
   // already honours them, so a retained user can neither receive a decision
   // nor open a stream.
   const holdUsers = new Map<Uuid, number>()
@@ -400,12 +400,12 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
     else holdUsers.set(uid, n - 1)
   }
 
-  function usuarioRetenido(uid: Uuid): boolean {
+  function userHeld(uid: Uuid): boolean {
     return reauthPending.users.has(uid) || (holdUsers.get(uid) ?? 0) > 0
   }
 
-  function retenida(conn: WatchConnection): boolean {
-    return reauthPending.conns.has(conn) || usuarioRetenido(conn.binding.userId)
+  function connHeld(conn: WatchConnection): boolean {
+    return reauthPending.conns.has(conn) || userHeld(conn.binding.userId)
   }
 
   function resetWindows(): void {
@@ -424,7 +424,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   /** The only writer after `ready`. Returns whether the frame was written. */
   function send(conn: WatchConnection, frame: WatchFrame, opts = { final: false }): boolean {
     if (conn.phase !== 'ready') return false
-    if (frame.type === 'roots_changed' && retenida(conn)) return false
+    if (frame.type === 'roots_changed' && connHeld(conn)) return false
     const line = ndjson({ schemaVersion: 1, ...frame })
     if (conn.socket.writableLength + Buffer.byteLength(line) > MAX_BUFFERED_BYTES) {
       // A final frame with a full buffer is dropped: the client sees EOF.
@@ -489,7 +489,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
 
   function onFlush(conn: WatchConnection): void {
     conn.timers.flush = null
-    if (retenida(conn)) {
+    if (connHeld(conn)) {
       // Resumed, not dropped: a change has no resync to cover it, so if the
       // hold was a false hint it must still go out once the user is released.
       if (conn.pending.size > 0) {
@@ -894,7 +894,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       }
     }
     // A retained user gets no decision frame.
-    if (retenida(conn)) {
+    if (connHeld(conn)) {
       if (op.kind === 'open') closeConn(conn, 'reauthorize')
       else {
         conn.nextCmd = null
@@ -1066,7 +1066,7 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
       }
       // Same answer the op's final gate would give, without spending the
       // authorization budget, the ancestry query and up to 64 reads.
-      if (usuarioRetenido(uid)) {
+      if (userHeld(uid)) {
         return reply(503, 'watch_reauthorize', DEFAULT_CLOSE_RETRY_AFTER_SEC)
       }
       const c: WatchConnection = {
