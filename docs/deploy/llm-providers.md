@@ -163,7 +163,9 @@ decide (live and plausible) appends a row to `llm_catalog_prune_runs`; a run
 that could not decide only counts in
 `clerum_llm_catalog_prune_runs_total{outcome="skipped"}`. A failed Kubernetes LIST stops the prune for that
 run, keeping what it already disabled
-(`clerum_llm_catalog_prune_runs_total{outcome="aborted"}`). When a later live
+(`clerum_llm_catalog_prune_runs_total{outcome="aborted"}`). A run whose row
+cannot be written to `llm_catalog_prune_runs` is still counted there, and also
+in `clerum_llm_catalog_prune_run_record_failures_total`. When a later live
 run lists a pruned model again, it is enabled again (audited `auto_enable`)
 under the same rules as a new model: provider policy ON, eligible, not
 removed, within the per-run caps, which it shares with the new models it

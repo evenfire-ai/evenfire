@@ -174,6 +174,7 @@ your own NetworkPolicy that allows your Prometheus to reach those ports.
 | `clerum_llm_allowlist_configmap_write_failures_total` | control-api | Failed writes of the `clerum-llm-allowed-models` ConfigMap, by `phase` (`mutation`, `boot`, `sync`)          |
 | `clerum_llm_catalog_prune_runs_total`                 | control-api | Catalog prune runs, by `outcome` (`completed`, `aborted` on a failed LIST/query or `prune_threw`, `skipped`) |
 | `clerum_llm_catalog_pruned_models_total`              | control-api | Stale catalog models nobody used that the catalog prune disabled                                             |
+| `clerum_llm_catalog_prune_run_record_failures_total`  | control-api | Prune runs whose row could not be written to `llm_catalog_prune_runs` (the run itself still counts above)  |
 
 For guardrail behaviour, see [Configure guardrails](../how-to/configure-guardrails.md).
 
