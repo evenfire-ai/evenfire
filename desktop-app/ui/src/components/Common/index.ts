@@ -29,7 +29,11 @@ export type { NavItemProps } from './NavItem'
 export { Pill } from './Pill'
 export type { PillProps } from './Pill'
 export { PermissionErrorDialog } from './PermissionErrorDialog'
-export type { PermissionErrorDialogProps, PermissionErrorItem } from './PermissionErrorDialog/types'
+export type {
+  PermissionErrorDialogProps,
+  PermissionErrorItem,
+  PermissionRetryFailureDisposition,
+} from './PermissionErrorDialog/types'
 export { PermissionStatusIndicator } from './PermissionStatusIndicator'
 export type { PermissionStatusIndicatorProps } from './PermissionStatusIndicator/types'
 export { ReferenceTag } from './ReferenceTag'

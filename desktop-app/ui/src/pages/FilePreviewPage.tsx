@@ -3,9 +3,6 @@ import { useQueryClient } from '@tanstack/react-query'
 import { EmptyState, PermissionErrorDialog, PermissionStatusIndicator } from '@components/Common'
 import {
   installPermissionErrorTracking,
-  isPermissionErrorAcknowledged,
-  isPermissionErrorRecoveryRequested,
-  permissionErrorToken,
   requestPermissionErrorRecovery,
   usePermissionErrorAcknowledgementSnapshot,
 } from '@components/Common/permissionErrorAcknowledgement'
@@ -295,29 +292,25 @@ export function FilePreviewPage({
   )
   const permissionPresentationAvailable =
     !denied && !unavailable && !accessRevoked && !ctrl.authorityPending
-  const permissionErrors = permissionPresentationAvailable
-    ? previewResourceActions.permissionNotices.filter(notice => !notice.pending)
+  const visiblePermissionErrors = permissionPresentationAvailable
+    ? previewResourceActions.permissionNotices.filter(error => !error.pending)
     : []
-  const tokenizedPermissionErrors = permissionErrors.map(error => ({
-    ...error,
-    token: permissionErrorToken(error),
-  }))
-  const visiblePermissionErrors = tokenizedPermissionErrors.filter(
-    error => !isPermissionErrorAcknowledged(error) || isPermissionErrorRecoveryRequested(error)
-  )
-  const acknowledgedPreviewError = tokenizedPermissionErrors.find(isPermissionErrorAcknowledged)
-  const previewRecoveryCue = acknowledgedPreviewError ? (
-    <button
-      aria-haspopup="dialog"
-      aria-label="Permission check failed; open recovery options"
-      className="da-permission-error-recovery-cue"
-      onClick={() => requestPermissionErrorRecovery(acknowledgedPreviewError)}
-      title="Permission check failed; open recovery options"
-      type="button"
-    >
-      !
-    </button>
-  ) : null
+  const acknowledgedPreviewErrors = permissionPresentationAvailable
+    ? previewResourceActions.acknowledgedPermissionNotices.filter(error => !error.pending)
+    : []
+  const previewRecoveryCue =
+    acknowledgedPreviewErrors.length > 0 ? (
+      <button
+        aria-haspopup="dialog"
+        aria-label="Permission check failed; open recovery options"
+        className="da-permission-error-recovery-cue"
+        onClick={() => acknowledgedPreviewErrors.forEach(requestPermissionErrorRecovery)}
+        title="Permission check failed; open recovery options"
+        type="button"
+      >
+        !
+      </button>
+    ) : null
   const permissionProgressLabel = !permissionPresentationAvailable
     ? ''
     : previewResourceActions.permissionProgress.length > 1

@@ -5,13 +5,25 @@ export type PermissionRetryAttempt = {
   completion?: Promise<unknown>
 }
 
+export type PermissionRetryContext = {
+  onAdmitted: () => boolean | void
+  isOriginCurrent: () => boolean
+}
+
+export type PermissionRetryFailureDisposition = 'presented' | 'stale'
+
 export type PermissionErrorItem = {
   id: string
   message: string
-  retry?: () => PermissionRetryAttempt
+  retry?: (context?: PermissionRetryContext) => PermissionRetryAttempt
   queryIdentity?: Query
   errorUpdateCount?: number
   token?: symbol
+  pending?: boolean
+  onRetryFailure?: (
+    error: unknown,
+    context: Pick<PermissionRetryContext, 'isOriginCurrent'>
+  ) => PermissionRetryFailureDisposition
 }
 
 export type PermissionErrorDialogProps = {

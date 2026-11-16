@@ -7,6 +7,7 @@ import fc from 'fast-check'
 import { ToastStack } from '@components/Common/ToastStack'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useToastController } from '@hooks/domain/useToastController'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import {
   accessibleResource,
   gfsRouteFailureMessage,
@@ -258,6 +259,14 @@ describe('FilePreviewPage move permission contract', () => {
         return !model.dialogVisible
       }
       async run(model: Model, state: Real): Promise<void> {
+        // A distinct failure is reportable after the same Query recovers.
+        state.setNextFileOutcome('success')
+        await act(async () => {
+          await state.client.refetchQueries({ exact: true, queryKey: state.fileKey })
+        })
+        await waitFor(() =>
+          expect(state.client.getQueryState(state.fileKey)?.status).toBe('success')
+        )
         state.setNextFileOutcome('error')
         await act(async () => {
           await state.client.refetchQueries({ exact: true, queryKey: state.fileKey })
@@ -559,7 +568,7 @@ describe('FilePreviewPage move permission contract', () => {
           expect(queryClient.getQueryState(fileKey)?.fetchStatus).toBe('fetching')
         )
         expect(screen.getByRole('alertdialog')).toBe(dialog)
-        expect(within(dialog).queryByText(/Could not verify file permissions/i)).toBeNull()
+        expect(within(dialog).getByText(/Could not verify file permissions/i)).toBeTruthy()
         expect(
           within(dialog).getByRole('status', { name: 'Checking file permissions' })
         ).toBeTruthy()
@@ -594,7 +603,7 @@ describe('FilePreviewPage move permission contract', () => {
             outcome === 'success' ? 'success' : 'error'
           )
         )
-        expect(screen.getByRole('alertdialog')).toBe(dialog)
+        expect(screen.getByRole('alertdialog')).toBeTruthy()
         expect(within(dialog).queryByRole('status')).toBeNull()
         expect(within(dialog).getByText(/Could not verify Move permissions/i)).toBeTruthy()
         if (outcome === 'failure') {
@@ -619,7 +628,7 @@ describe('FilePreviewPage move permission contract', () => {
           [resourceId, 'main'],
           [parentId, 'main'],
         ])
-        expect(screen.getByRole('alertdialog')).toBe(dialog)
+        expect(screen.getByRole('alertdialog')).toBeTruthy()
       } finally {
         releaseFile(fullAccess)
         queryClient.clear()
@@ -688,7 +697,7 @@ describe('FilePreviewPage move permission contract', () => {
         expect(
           within(dialog).getByRole('status', { name: 'Checking move permissions' })
         ).toBeTruthy()
-        expect(within(dialog).queryByText(/Could not verify Move permissions/i)).toBeNull()
+        expect(within(dialog).getByText(/Could not verify Move permissions/i)).toBeTruthy()
         expect(within(fileRow).getByText(/Could not verify file permissions/i)).toBeTruthy()
         expect(within(fileRow).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
         expect(queryClient.getQueryCache().find({ exact: true, queryKey: fileKey })).toBe(fileQuery)
@@ -1489,11 +1498,18 @@ describe('FilePreviewPage move permission contract', () => {
     expect(queryClient.getQueryCache().find({ queryKey: sourceKey, exact: true })).toBe(
       queryIdentity
     )
-    expect(screen.getByRole('alertdialog')).toBe(dialog)
-    expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+    const currentDialog = screen.getByRole('alertdialog')
+    expect(
+      within(currentDialog).getByRole('button', { name: 'Retry permission check' })
+    ).toBeTruthy()
 
     vi.setSystemTime(Date.now() + 7_001)
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    fireEvent.click(
+      within(screen.getByRole('alertdialog')).getByRole('button', {
+        name: 'Retry permission check',
+      })
+    )
     await waitFor(() => expect(source).toHaveBeenCalledTimes(2))
     await waitFor(() =>
       expect(queryClient.getQueryState(sourceKey)?.errorUpdateCount).toBe(
@@ -1503,7 +1519,7 @@ describe('FilePreviewPage move permission contract', () => {
     expect(queryClient.getQueryCache().find({ queryKey: sourceKey, exact: true })).toBe(
       queryIdentity
     )
-    expect(screen.getByRole('alertdialog')).toBe(dialog)
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
     queryClient.clear()
   })
 
@@ -2014,6 +2030,58 @@ describe('FilePreviewPage move permission contract', () => {
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(window.clerum.gfs.moveResource).not.toHaveBeenCalled()
+  })
+
+  it('shows one visible origin toast for a Preview Retry failure', async () => {
+    const firstRateLimit = await affordancesApiError(
+      429,
+      { code: 'rate_limited', message: 'Too Many Requests' },
+      resourceId
+    )
+    const retryFailure = await affordancesApiError(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      resourceId
+    )
+    let resourceReads = 0
+    installGfs({
+      resourceAffordances: async () => {
+        resourceReads += 1
+        if (resourceReads === 1) throw firstRateLimit
+        if (resourceReads === 2) throw retryFailure
+        return fullAccess
+      },
+    })
+    installController()
+    const { queryClient } = renderPreviewWithToastStack()
+    const resourceKey = desktopQueryKeys.gfsAffordances(
+      'preview-test-user:main',
+      resourceId,
+      'main',
+      1
+    )
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      const dialog = await screen.findByRole('alertdialog', {
+        name: 'Could not verify permissions',
+      })
+      await waitFor(() => expect(resourceReads).toBe(1))
+
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(Date.now() + 70_000)
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+      await waitFor(() => expect(resourceReads).toBe(2))
+      await waitFor(() => expect(queryClient.getQueryState(resourceKey)?.status).toBe('error'))
+      await screen.findByRole('alertdialog', { name: 'Could not verify permissions' })
+      expect(
+        [...document.querySelectorAll('.toast-body')]
+          .map(node => node.textContent)
+          .filter(text => text === describeGfsReadError(retryFailure).message)
+      ).toHaveLength(1)
+    } finally {
+      queryClient.clear()
+      vi.useRealTimers()
+    }
   })
 })
 

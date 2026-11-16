@@ -32,7 +32,12 @@ const hookMock = vi.hoisted(() => ({
 }))
 
 vi.mock('@hooks/domain/useGfsBrowserController', () => ({
-  ...hookMock,
+  useGfsBrowserController: (...args: unknown[]) => ({
+    permissionBindingFolderId: null,
+    permissionBindingChildResourceIds: [],
+    permissionBindingComplete: false,
+    ...hookMock.useGfsBrowserController(...args),
+  }),
   GFS_UNAVAILABLE_LOCATION_MESSAGE: 'This folder or file is no longer available.',
 }))
 

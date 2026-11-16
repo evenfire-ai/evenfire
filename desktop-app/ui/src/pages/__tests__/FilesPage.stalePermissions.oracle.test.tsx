@@ -1,11 +1,15 @@
 // @vitest-environment jsdom
-import { useLayoutEffect, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
-import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
+import { type Query, QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { isPermissionErrorAcknowledged } from '@components/Common/permissionErrorAcknowledgement'
+import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
+import type { PermissionErrorItem } from '@components/Common/PermissionErrorDialog/types'
+import {
+  isPermissionErrorAcknowledged,
+  permissionErrorToken,
+} from '@components/Common/permissionErrorAcknowledgement'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -23,6 +27,7 @@ import {
   heldPermissionResponse,
 } from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import { FilePreviewPage } from '../FilePreviewPage'
 import { FilesPage } from '../FilesPage'
 
 vi.mock('electron', () => ({
@@ -50,28 +55,7 @@ const authValue = {
   runtimeConfigState: { envKey: 'test-environment' },
 } as unknown as AuthContextValue
 
-function QueryLayoutCommitProbe({
-  client,
-  onCommit,
-}: {
-  client: QueryClient
-  onCommit: () => void
-}) {
-  const querySnapshot = useSyncExternalStore(
-    listener => client.getQueryCache().subscribe(listener),
-    () =>
-      client
-        .getQueryCache()
-        .getAll()
-        .map(query => `${query.queryHash}:${query.state.status}:${query.state.errorUpdateCount}`)
-        .join('|'),
-    () => ''
-  )
-  useLayoutEffect(() => onCommit(), [onCommit, querySnapshot])
-  return null
-}
-
-function wrapper(client: QueryClient, onLayoutCommit?: () => void) {
+function wrapper(client: QueryClient) {
   const clerum = (window as unknown as { clerum?: Record<string, unknown> }).clerum
   if (clerum) {
     const auth = (clerum.auth ?? {}) as Record<string, unknown>
@@ -92,12 +76,7 @@ function wrapper(client: QueryClient, onLayoutCommit?: () => void) {
   return function TestProviders({ children }: { children: ReactNode }) {
     return (
       <AuthContext.Provider value={authValue}>
-        <QueryClientProvider client={client}>
-          {children}
-          {onLayoutCommit ? (
-            <QueryLayoutCommitProbe client={client} onCommit={onLayoutCommit} />
-          ) : null}
-        </QueryClientProvider>
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
       </AuthContext.Provider>
     )
   }
@@ -111,6 +90,974 @@ describe('FilesPage stale permission action oracle', () => {
     vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
   })
+
+  it('runs generated recovery and stale-binding commands through the production FilesPage', async () => {
+    type Model = {
+      failed: boolean
+      acknowledged: boolean
+      folder: 'A' | 'B'
+    }
+    type Real = {
+      client: QueryClient
+      sourceKey: ReturnType<typeof desktopQueryKeys.gfsAffordances>
+      sourceQuery: Query
+      getReads: () => number
+      setOutcome: (outcome: 'success' | 'failure') => void
+      refetchSource: () => Promise<void>
+      remount: () => Promise<void>
+      navigate: (folder: 'A' | 'B') => Promise<void>
+    }
+
+    class PublishFailure implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return !model.failed && model.folder === 'A'
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        state.setOutcome('failure')
+        await state.refetchSource()
+        model.failed = true
+        model.acknowledged = false
+        expect(await screen.findByRole('alertdialog')).toBeTruthy()
+        expect(state.client.getQueryState(state.sourceKey)?.status).toBe('error')
+      }
+      toString(): string {
+        return 'publish a producer-backed source-parent permission failure'
+      }
+    }
+
+    class DismissFailure implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.failed && !model.acknowledged && model.folder === 'A'
+      }
+      async run(model: Model): Promise<void> {
+        const dialog = await screen.findByRole('alertdialog')
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+        model.acknowledged = true
+      }
+      toString(): string {
+        return 'dismiss the visible production Files permission dialog'
+      }
+    }
+
+    class RepeatBackgroundFailure implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.failed && model.acknowledged && model.folder === 'A'
+      }
+      async run(_model: Model, state: Real): Promise<void> {
+        const before = state.client.getQueryState(state.sourceKey)?.errorUpdateCount ?? 0
+        const focusTarget = screen.getByRole('button', { name: 'Options for Reports' })
+        focusTarget.focus()
+        state.setOutcome('failure')
+        await state.refetchSource()
+        expect(state.client.getQueryState(state.sourceKey)?.errorUpdateCount).toBeGreaterThan(
+          before
+        )
+        expect(screen.queryByRole('alertdialog')).toBeNull()
+        expect(document.activeElement).toBe(focusTarget)
+      }
+      toString(): string {
+        return 'repeat a background failure without reopening the dismissed dialog'
+      }
+    }
+
+    class Recover implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.failed && model.acknowledged && model.folder === 'A'
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        state.setOutcome('success')
+        await state.refetchSource()
+        model.failed = false
+        model.acknowledged = false
+        expect(state.client.getQueryState(state.sourceKey)?.status).toBe('success')
+        expect(screen.queryByRole('alertdialog')).toBeNull()
+      }
+      toString(): string {
+        return 'recover the exact permission Query through its real producer'
+      }
+    }
+
+    class NewFailure implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return !model.failed && model.folder === 'A'
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        state.setOutcome('failure')
+        await state.refetchSource()
+        model.failed = true
+        model.acknowledged = false
+        expect(await screen.findByRole('alertdialog')).toBeTruthy()
+      }
+      toString(): string {
+        return 'publish a new failure after successful recovery'
+      }
+    }
+
+    class RetryFailure implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.failed && !model.acknowledged && model.folder === 'A'
+      }
+      async run(_model: Model, state: Real): Promise<void> {
+        const before = state.getReads()
+        state.setOutcome('failure')
+        fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+        await waitFor(() => expect(state.getReads()).toBeGreaterThan(before))
+        await waitFor(() =>
+          expect(state.client.getQueryState(state.sourceKey)?.fetchStatus).toBe('idle')
+        )
+        expect(await screen.findByRole('alertdialog')).toBeTruthy()
+      }
+      toString(): string {
+        return 'admit an explicit production Retry and expose its failure'
+      }
+    }
+
+    class Remount implements AsyncCommand<Model, Real, true> {
+      async check(): Promise<boolean> {
+        return true
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        await state.remount()
+        expect(state.client.getQueryCache().find({ exact: true, queryKey: state.sourceKey })).toBe(
+          state.sourceQuery
+        )
+        expect(Boolean(screen.queryByRole('alertdialog'))).toBe(
+          model.failed && !model.acknowledged && model.folder === 'A'
+        )
+      }
+      toString(): string {
+        return 'remount the production page while preserving the exact Query episode'
+      }
+    }
+
+    class NavigateAway implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.folder === 'A' && model.failed && !model.acknowledged
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        await state.navigate('B')
+        model.folder = 'B'
+        expect(screen.queryByRole('alertdialog')).toBeNull()
+      }
+      toString(): string {
+        return 'navigate to B and verify the committed UI no longer presents A recovery'
+      }
+    }
+
+    class ReturnToOrigin implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.folder === 'B'
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        await state.navigate('A')
+        model.folder = 'A'
+        expect(Boolean(screen.queryByRole('alertdialog'))).toBe(model.failed && !model.acknowledged)
+      }
+      toString(): string {
+        return 'return to the exact A binding and restore only its current episode'
+      }
+    }
+
+    const folderAUri = FOLDER_URI
+    const folderBUri = 'gfs://main/bbb'
+    const folderA = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: folderAUri,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const folderB = await resolveResource(
+      resolvedDirectory('folder-next', 'Archive', {
+        gfsUri: folderBUri,
+        parentResourceId: 'other-parent',
+      })
+    )
+    const denied = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'source-parent'
+    )
+    let outcome: 'success' | 'failure' = 'success'
+    let reads = 0
+    const producer = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId === 'source-parent') {
+        reads += 1
+        if (outcome === 'failure') throw new Error(denied)
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => (uri === folderBUri ? folderB : folderA)),
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances: vi.fn((resourceId: string) => producer(resourceId)),
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const sourceKey = desktopQueryKeys.gfsAffordances(
+      'test-environment:user-1:team-1',
+      'source-parent',
+      'main',
+      0
+    )
+    let view: { unmount: () => void; rerender: (node: ReactNode) => void } | undefined
+    let currentFolder: 'A' | 'B' = 'A'
+    try {
+      const renderPage = () => (
+        <FilesPage pendingGfsUri={currentFolder === 'A' ? folderAUri : folderBUri} />
+      )
+      const commands = fc.commands<Model, Real, true>(
+        [
+          fc.constant(new PublishFailure()),
+          fc.constant(new DismissFailure()),
+          fc.constant(new RepeatBackgroundFailure()),
+          fc.constant(new Recover()),
+          fc.constant(new NewFailure()),
+          fc.constant(new RetryFailure()),
+          fc.constant(new Remount()),
+          fc.constant(new NavigateAway()),
+          fc.constant(new ReturnToOrigin()),
+        ],
+        { maxCommands: 10 }
+      )
+      await fc.assert(
+        fc.asyncProperty(commands, async scheduled => {
+          view?.unmount()
+          client.clear()
+          reads = 0
+          outcome = 'success'
+          currentFolder = 'A'
+          view = render(renderPage(), { wrapper: wrapper(client) })
+          await screen.findByRole('button', { name: 'Options for Reports' })
+          await waitFor(() => expect(reads).toBe(1))
+          const sourceQuery = client.getQueryCache().find({ exact: true, queryKey: sourceKey })
+          if (!sourceQuery) throw new Error('Expected the real Files permission Query')
+          const state: Real = {
+            client,
+            sourceKey,
+            sourceQuery,
+            getReads: () => reads,
+            setOutcome: value => {
+              outcome = value
+            },
+            refetchSource: async () => {
+              await act(async () => {
+                await client.refetchQueries({ exact: true, queryKey: sourceKey })
+              })
+            },
+            remount: async () => {
+              view?.unmount()
+              await act(async () => Promise.resolve())
+              view = render(renderPage(), { wrapper: wrapper(client) })
+              await screen.findByRole('button', {
+                name: currentFolder === 'A' ? 'Options for Reports' : 'Options for Archive',
+              })
+            },
+            navigate: async folder => {
+              currentFolder = folder
+              view?.rerender(renderPage())
+              await screen.findByRole('button', {
+                name: folder === 'A' ? 'Options for Reports' : 'Options for Archive',
+              })
+            },
+          }
+          const model: Model = { failed: false, acknowledged: false, folder: 'A' }
+          await fc.asyncModelRun(() => ({ model, real: state }), scheduled)
+          expect(state.client.getQueryCache().find({ exact: true, queryKey: sourceKey })).toBe(
+            state.sourceQuery
+          )
+        }),
+        { numRuns: 24, seed: 142715 }
+      )
+    } finally {
+      view?.unmount()
+      client.clear()
+    }
+  })
+
+  it('shares one acknowledged Query episode between production Files and Preview callers', async () => {
+    const sharedUri = 'gfs://main/source-parent'
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const previewResource = resolveResource({
+      resourceId: 'source-parent',
+      rid: 'source-parent',
+      gfsUri: sharedUri,
+      drive: 'main',
+      parentResourceId: 'folder-active',
+      name: 'shared.png',
+      kind: 'file',
+      version: 1,
+      bytes: 1,
+    })
+    const denied = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'source-parent'
+    )
+    let outcome: 'success' | 'failure' = 'success'
+    let reads = 0
+    const producer = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId === 'source-parent') {
+        reads += 1
+        if (outcome === 'failure') throw new Error(denied)
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => (uri === sharedUri ? previewResource : folder)),
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances: vi.fn((resourceId: string) => producer(resourceId)),
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const sharedKey = desktopQueryKeys.gfsAffordances(
+      'test-environment:user-1:team-1',
+      'source-parent',
+      'main',
+      0
+    )
+
+    try {
+      render(
+        <>
+          <FilesPage pendingGfsUri={FOLDER_URI} />
+          <FilePreviewPage
+            gfsUri={sharedUri}
+            fileName="shared.png"
+            fileKind="image"
+            mimeType="image/png"
+            byteLength={1}
+          />
+        </>,
+        { wrapper: wrapper(client) }
+      )
+      await screen.findByRole('button', { name: 'Options for Reports' })
+      await screen.findByAltText('Preview of shared.png')
+      await waitFor(() => expect(reads).toBe(1))
+      const sharedQuery = client.getQueryCache().find({ exact: true, queryKey: sharedKey })
+      expect(sharedQuery?.state.status).toBe('success')
+
+      outcome = 'failure'
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: sharedKey })
+      })
+      expect(reads).toBe(2)
+      expect(sharedQuery?.state.status).toBe('error')
+      expect(screen.getAllByRole('alertdialog')).toHaveLength(2)
+
+      const firstDialog = screen.getAllByRole('alertdialog')[0]
+      if (!firstDialog) throw new Error('Expected one shared-Query permission dialog')
+      fireEvent.click(within(firstDialog).getByRole('button', { name: 'Close' }))
+      await waitFor(() => expect(screen.queryAllByRole('alertdialog')).toHaveLength(0))
+      expect(client.getQueryCache().find({ exact: true, queryKey: sharedKey })).toBe(sharedQuery)
+
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: sharedKey })
+      })
+      expect(reads).toBe(3)
+      expect(sharedQuery?.state.errorUpdateCount).toBe(2)
+      expect(screen.queryAllByRole('alertdialog')).toHaveLength(0)
+    } finally {
+      client.clear()
+    }
+  })
+
+  it('keeps a deferred Files Retry failure out of the Preview binding for the same Query', async () => {
+    const sharedUri = 'gfs://main/source-parent'
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const previewResource = await resolveResource({
+      resourceId: 'source-parent',
+      rid: 'source-parent',
+      gfsUri: sharedUri,
+      drive: 'main',
+      parentResourceId: 'folder-active',
+      name: 'shared.png',
+      kind: 'file',
+      version: 1,
+      bytes: 1,
+    })
+    const denied = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'source-parent'
+    )
+    let reads = 0
+    let rejectRetry!: (reason: Error) => void
+    const heldRetry = new Promise<Awaited<ReturnType<typeof heldPermissionResponse>>>(
+      (_resolve, reject) => {
+        rejectRetry = reject
+      }
+    )
+    const producer = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId !== 'source-parent') return heldPermissionResponse(['read', 'write', 'delete'])
+      reads += 1
+      if (reads === 2) throw new Error(denied)
+      if (reads === 3) return heldRetry
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => (uri === sharedUri ? previewResource : folder)),
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances: vi.fn((resourceId: string) => producer(resourceId)),
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const sharedKey = desktopQueryKeys.gfsAffordances(
+      'test-environment:user-1:team-1',
+      'source-parent',
+      'main',
+      0
+    )
+
+    try {
+      render(
+        <>
+          <FilesPage pendingGfsUri={FOLDER_URI} />
+          <FilePreviewPage
+            gfsUri={sharedUri}
+            fileName="shared.png"
+            fileKind="image"
+            mimeType="image/png"
+            byteLength={1}
+          />
+        </>,
+        { wrapper: wrapper(client) }
+      )
+      await screen.findByRole('button', { name: 'Options for Reports' })
+      await screen.findByAltText('Preview of shared.png')
+      await waitFor(() => expect(reads).toBe(1))
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: sharedKey })
+      })
+      await waitFor(() => expect(reads).toBe(2))
+      await waitFor(() => expect(screen.getAllByRole('alertdialog')).toHaveLength(2))
+
+      const filesDialog = screen
+        .getAllByRole('alertdialog')
+        .find(dialog => dialog.textContent?.includes('Could not verify Move permissions'))
+      expect(filesDialog).toBeTruthy()
+      fireEvent.click(within(filesDialog!).getByRole('button', { name: 'Retry permission check' }))
+      await waitFor(() => expect(reads).toBe(3))
+      await waitFor(() => expect(client.getQueryState(sharedKey)?.fetchStatus).toBe('fetching'))
+      const recoveryCues = screen.getAllByRole('button', {
+        name: 'Permission check failed; open recovery options',
+      })
+      fireEvent.click(recoveryCues.at(-1)!)
+      const previewDialog = screen.getAllByRole('alertdialog').at(-1)!
+      fireEvent.click(within(previewDialog).getByRole('button', { name: 'Retry permission check' }))
+      await waitFor(() => expect(client.getQueryState(sharedKey)?.fetchStatus).toBe('fetching'))
+      expect(reads).toBe(3)
+
+      await act(async () => {
+        rejectRetry(new Error(denied))
+      })
+      await waitFor(() => expect(client.getQueryState(sharedKey)?.errorUpdateCount).toBe(2))
+      const remainingDialogs = screen.getAllByRole('alertdialog')
+      expect(remainingDialogs).toHaveLength(1)
+      expect(remainingDialogs[0]?.textContent).toContain('Could not verify Move permissions')
+      expect(remainingDialogs[0]?.textContent).not.toContain('Could not verify file permissions')
+    } finally {
+      if (reads >= 3 && client.getQueryState(sharedKey)?.fetchStatus === 'fetching') {
+        rejectRetry(new Error(denied))
+      }
+      client.clear()
+    }
+  })
+
+  it('routes a pending A Retry 401 after Files commits B through retained session authority', async () => {
+    const folderBUri = 'gfs://main/bbb'
+    const folderA = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const folderB = await resolveResource(
+      resolvedDirectory('folder-next', 'Archive', {
+        gfsUri: folderBUri,
+        parentResourceId: 'other-parent',
+      })
+    )
+    const denied = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'source-parent'
+    )
+    const authorityFailure = await affordancesFailureMessage(
+      401,
+      { code: 'unauthorized', message: 'session expired' },
+      'source-parent'
+    )
+    let reads = 0
+    let rejectRetry!: (reason: Error) => void
+    const heldRetry = new Promise<Awaited<ReturnType<typeof heldPermissionResponse>>>(
+      (_resolve, reject) => {
+        rejectRetry = reject
+      }
+    )
+    const producer = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId !== 'source-parent') return heldPermissionResponse(['read', 'write', 'delete'])
+      reads += 1
+      if (reads === 2) throw new Error(denied)
+      if (reads === 3) return heldRetry
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => 0) },
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => (uri === folderBUri ? folderB : folderA)),
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances: vi.fn((resourceId: string) => producer(resourceId)),
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const scope = 'test-environment:user-1:team-1'
+    const generation = 0
+    const sharedKey = desktopQueryKeys.gfsAffordances(scope, 'source-parent', 'main', generation)
+    const accessKey = desktopQueryKeys.gfsAccessState(scope, generation)
+    let currentFolder: 'A' | 'B' = 'A'
+    const renderFiles = () => (
+      <FilesPage pendingGfsUri={currentFolder === 'A' ? FOLDER_URI : folderBUri} />
+    )
+
+    try {
+      const view = render(renderFiles(), { wrapper: wrapper(client) })
+      await screen.findByRole('button', { name: 'Options for Reports' })
+      await waitFor(() => expect(reads).toBe(1))
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: sharedKey })
+      })
+      await waitFor(() => expect(reads).toBe(2))
+      const filesDialog = await screen.findByRole('alertdialog')
+      expect(filesDialog.textContent).toContain('Could not verify Move permissions')
+      fireEvent.click(within(filesDialog).getByRole('button', { name: 'Retry permission check' }))
+      await waitFor(() => expect(reads).toBe(3))
+      await waitFor(() => expect(client.getQueryState(sharedKey)?.fetchStatus).toBe('fetching'))
+
+      currentFolder = 'B'
+      view.rerender(renderFiles())
+      await screen.findByRole('button', { name: 'Options for Archive' })
+      const sourceQuery = client.getQueryCache().find({ exact: true, queryKey: sharedKey })
+      expect(sourceQuery).toBeTruthy()
+      await waitFor(() => expect(sourceQuery?.getObserversCount()).toBe(0))
+      expect(client.getQueryData(accessKey)).toBe('active')
+
+      await act(async () => {
+        rejectRetry(new Error(authorityFailure))
+      })
+      expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+      await waitFor(() => expect(client.getQueryData(accessKey)).toBe('revoked'))
+      expect(client.getQueryCache().find({ exact: true, queryKey: sharedKey })).toBeUndefined()
+      expect(screen.queryAllByRole('alertdialog')).toHaveLength(0)
+      expect(screen.queryByText(/Could not verify Move permissions/)).toBeNull()
+    } finally {
+      if (reads >= 3 && client.getQueryState(sharedKey)?.fetchStatus === 'fetching') {
+        rejectRetry(new Error(authorityFailure))
+      }
+      client.clear()
+    }
+  })
+
+  it('orders the same producer terminal against the production B1 to B2 React commit', async () => {
+    const folderBUri = 'gfs://main/bbb'
+    const folderA = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const folderB = await resolveResource(
+      resolvedDirectory('folder-next', 'Archive', {
+        gfsUri: folderBUri,
+        parentResourceId: 'other-parent',
+      })
+    )
+    const denied = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'source-parent'
+    )
+    const observedOrders = new Set<string>()
+
+    await fc.assert(
+      fc.asyncProperty(fc.scheduler(), async scheduler => {
+        let scheduledFailure = false
+        const affordanceProducer = appServiceAffordanceProducer(async resourceId => {
+          if (resourceId === 'source-parent' && scheduledFailure) {
+            return scheduler
+              .schedule(Promise.resolve(heldPermissionResponse(['read'])), 'A permission producer')
+              .then(() => {
+                throw new Error(denied)
+              })
+          }
+          return heldPermissionResponse(['read', 'write', 'delete'])
+        })
+        Object.defineProperty(window, 'clerum', {
+          configurable: true,
+          value: {
+            gfs: {
+              listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+              resolve: vi.fn(async (uri: string) => (uri === folderBUri ? folderB : folderA)),
+              listChildren: vi.fn(async () => listChildrenPage([])),
+              affordances: vi.fn((resourceId: string) => affordanceProducer(resourceId)),
+            },
+          },
+        })
+        const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+        const sourceKey = desktopQueryKeys.gfsAffordances(
+          'test-environment:user-1:team-1',
+          'source-parent',
+          'main',
+          0
+        )
+        let sourceQueryHash: string | undefined
+        let currentFolder: 'A' | 'B' = 'A'
+        const renderPage = () => (
+          <FilesPage pendingGfsUri={currentFolder === 'A' ? FOLDER_URI : folderBUri} />
+        )
+        const view = render(renderPage(), { wrapper: wrapper(client) })
+        const order: string[] = []
+        const unsubscribe = client.getQueryCache().subscribe(event => {
+          if (
+            event.type === 'updated' &&
+            event.query.queryHash === sourceQueryHash &&
+            event.action.type === 'error'
+          ) {
+            order.push('A-terminal')
+          }
+        })
+        try {
+          await screen.findByRole('button', { name: 'Options for Reports' })
+          const sourceQuery = client.getQueryCache().find({ exact: true, queryKey: sourceKey })
+          if (!sourceQuery) throw new Error('Expected the production Files source Query')
+          sourceQueryHash = sourceQuery.queryHash
+          scheduledFailure = true
+          const terminal = client.refetchQueries({ exact: true, queryKey: sourceKey })
+          await waitFor(() => expect(scheduler.count()).toBe(1))
+          const commitB = scheduler.schedule(Promise.resolve(), 'B React commit').then(() => {
+            act(() => {
+              currentFolder = 'B'
+              view.rerender(renderPage())
+            })
+            order.push('B-commit')
+          })
+          await waitFor(() => expect(scheduler.count()).toBe(2))
+          await scheduler.waitIdle()
+          await Promise.all([terminal, commitB])
+          await screen.findByRole('button', { name: 'Options for Archive' })
+          expect(order).toHaveLength(2)
+          expect(order).toContain('A-terminal')
+          expect(order).toContain('B-commit')
+          observedOrders.add(order.join(','))
+          expect(client.getQueryCache().find({ exact: true, queryKey: sourceKey })).toBe(
+            sourceQuery
+          )
+          expect(sourceQuery.state.status).toBe('error')
+          expect(screen.getByRole('button', { name: 'Options for Archive' })).toBeTruthy()
+          expect(screen.queryByRole('alertdialog')).toBeNull()
+        } finally {
+          unsubscribe()
+          view.unmount()
+          client.clear()
+        }
+      }),
+      { numRuns: 60, seed: 142716 }
+    )
+
+    expect(observedOrders).toEqual(new Set(['A-terminal,B-commit', 'B-commit,A-terminal']))
+  })
+
+  it('preserves the shared source-parent Query error after folder navigation commits', async () => {
+    const nextFolderUri = 'gfs://main/bbb'
+    const firstFolder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const secondFolder = await resolveResource(
+      resolvedDirectory('folder-next', 'Archive', {
+        gfsUri: nextFolderUri,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const sourceFailure = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'source-parent'
+    )
+    const sourceParentReads = vi.fn(async () => {
+      throw new Error(sourceFailure)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => (uri === FOLDER_URI ? firstFolder : secondFolder)),
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances: vi.fn(async (resourceId: string) =>
+            resourceId === 'source-parent'
+              ? sourceParentReads()
+              : heldPermissionResponse(['read', 'write', 'delete'])
+          ),
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const view = render(<FilesPage pendingGfsUri={FOLDER_URI} />, {
+      wrapper: wrapper(client),
+    })
+    try {
+      await screen.findByText(/Could not verify Move permissions:/)
+      const sourceKey = desktopQueryKeys.gfsAffordances(
+        'test-environment:user-1:team-1',
+        'source-parent',
+        'main',
+        0
+      )
+      const originalQuery = client.getQueryCache().find({ exact: true, queryKey: sourceKey })
+      expect(originalQuery?.state.status).toBe('error')
+
+      view.rerender(<FilesPage pendingGfsUri={nextFolderUri} />)
+      await screen.findByRole('button', { name: 'Options for Archive' })
+      expect(client.getQueryCache().find({ exact: true, queryKey: sourceKey })).toBe(originalQuery)
+      expect(client.getQueryState(sourceKey)?.errorUpdateCount).toBe(1)
+      const dialog = screen.getByRole('alertdialog')
+      expect(within(dialog).getByText(/Could not verify Move permissions:/)).toBeTruthy()
+      expect(sourceParentReads).toHaveBeenCalledTimes(1)
+    } finally {
+      client.clear()
+    }
+  })
+
+  it('does not reactivate an old Files binding during a new-session pending seed', async () => {
+    const nextFolderUri = 'gfs://main/new-session-folder'
+    const oldFolder = await resolveResource(
+      resolvedDirectory('folder-old-session', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const nextFolder = await resolveResource(
+      resolvedDirectory('folder-new-session', 'Projects', { gfsUri: nextFolderUri })
+    )
+    const sourceParent = await resolveResource(
+      resolvedDirectory('source-parent', 'Shared', {
+        gfsUri: 'gfs://main/source-parent',
+      })
+    )
+    const sourceFailure = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'source-parent'
+    )
+    let activeGeneration = 0
+    let releaseSeed!: (resource: typeof nextFolder) => void
+    const pendingSeed = new Promise<typeof nextFolder>(resolve => {
+      releaseSeed = resolve
+    })
+    const resolve = vi.fn((uri: string) =>
+      uri === FOLDER_URI
+        ? Promise.resolve(oldFolder)
+        : uri === nextFolderUri
+          ? pendingSeed
+          : Promise.resolve(sourceParent)
+    )
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'source-parent' && activeGeneration === 0) {
+        throw new Error(sourceFailure)
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => activeGeneration) },
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances,
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const firstSession = authValue
+    const nextSession = {
+      ...authValue,
+      me: { ...me, id: 'user-2' },
+      sessionGeneration: 1,
+    } as unknown as AuthContextValue
+    const renderSession = (auth: AuthContextValue, pendingGfsUri: string) => (
+      <AuthContext.Provider value={auth}>
+        <QueryClientProvider client={client}>
+          <FilesPage pendingGfsUri={pendingGfsUri} />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    try {
+      const oldPage = render(renderSession(firstSession, FOLDER_URI))
+      await waitFor(() => expect(resolve).toHaveBeenCalledWith(FOLDER_URI))
+      await screen.findByText(/Could not verify Move permissions:/)
+
+      activeGeneration = 1
+      oldPage.rerender(renderSession(nextSession, nextFolderUri))
+      await waitFor(() => expect(window.clerum.gfs.resolve).toHaveBeenCalledWith(nextFolderUri))
+      await waitFor(() =>
+        expect(screen.queryByText(/Could not verify Move permissions:/)).toBeNull()
+      )
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(
+        screen.queryByRole('button', { name: 'Permission check failed; open recovery options' })
+      ).toBeNull()
+      oldPage.unmount()
+    } finally {
+      releaseSeed(nextFolder)
+      await act(async () => pendingSeed)
+      client.clear()
+    }
+  })
+
+  it.each(['success', 'failure'] as const)(
+    'does not reactivate a dormant old-team Files binding after a %s seed on remount',
+    async seedOutcome => {
+      const nextFolderUri = 'gfs://main/new-team-folder'
+      const oldFolder = await resolveResource(
+        resolvedDirectory('folder-old-team', 'Reports', {
+          gfsUri: FOLDER_URI,
+          parentResourceId: 'source-parent',
+        })
+      )
+      const nextFolder = await resolveResource(
+        resolvedDirectory('folder-new-team', 'Projects', { gfsUri: nextFolderUri })
+      )
+      const sourceParent = await resolveResource(
+        resolvedDirectory('source-parent', 'Shared', { gfsUri: 'gfs://main/source-parent' })
+      )
+      const sourceFailure = await affordancesFailureMessage(
+        503,
+        { code: 'unavailable', message: 'permission service temporarily unavailable' },
+        'source-parent'
+      )
+      let activeGeneration = 0
+      let resolveSeed!: (folder: typeof nextFolder) => void
+      let rejectSeed!: (reason: Error) => void
+      const pendingSeed = new Promise<typeof nextFolder>((resolve, reject) => {
+        resolveSeed = resolve
+        rejectSeed = reject
+      })
+      const resolve = vi.fn((uri: string) =>
+        uri === FOLDER_URI
+          ? Promise.resolve(oldFolder)
+          : uri === nextFolderUri
+            ? pendingSeed
+            : Promise.resolve(sourceParent)
+      )
+      const affordances = vi.fn(async (resourceId: string) => {
+        if (resourceId === 'source-parent' && activeGeneration === 0) {
+          throw new Error(sourceFailure)
+        }
+        return heldPermissionResponse(['read', 'write', 'delete'])
+      })
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          auth: { getSessionGeneration: vi.fn(async () => activeGeneration) },
+          gfs: {
+            listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+            resolve,
+            listChildren: vi.fn(async () => listChildrenPage([])),
+            affordances,
+          },
+        },
+      })
+      const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+      const oldScope = 'test-environment:user-1:team-1'
+      const staleQueryKey = desktopQueryKeys.gfsAffordances(oldScope, 'source-parent', 'main', 0)
+      const renderSession = (session: AuthContextValue, pendingGfsUri: string) => (
+        <AuthContext.Provider value={session}>
+          <QueryClientProvider client={client}>
+            <FilesPage pendingGfsUri={pendingGfsUri} />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+      try {
+        const oldPage = render(renderSession(authValue, FOLDER_URI))
+        await screen.findByText(/Could not verify Move permissions:/)
+        expect(screen.getByRole('alertdialog')).toBeTruthy()
+        expect(
+          client.getQueryCache().find({ queryKey: staleQueryKey, exact: true })?.state.status
+        ).toBe('error')
+        oldPage.unmount()
+        activeGeneration = 1
+        const nextSession = {
+          ...authValue,
+          me: { ...me, teamId: 'team-2', teamName: 'Team Two' },
+          sessionGeneration: 1,
+        } as unknown as AuthContextValue
+        render(renderSession(nextSession, nextFolderUri))
+        await waitFor(() => expect(resolve).toHaveBeenCalledWith(nextFolderUri))
+        expect(client.getQueryCache().find({ queryKey: staleQueryKey, exact: true })).toBeTruthy()
+        expect(screen.queryByRole('alertdialog')).toBeNull()
+        expect(
+          screen.queryByRole('button', { name: 'Permission check failed; open recovery options' })
+        ).toBeNull()
+
+        await act(async () => {
+          if (seedOutcome === 'success') resolveSeed(nextFolder)
+          else rejectSeed(new Error('new-team location seed failed'))
+          await pendingSeed.catch(() => undefined)
+        })
+        if (seedOutcome === 'success') {
+          await screen.findByRole('button', { name: 'Options for Projects' })
+        }
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+        expect(
+          screen.queryByRole('button', { name: 'Permission check failed; open recovery options' })
+        ).toBeNull()
+      } finally {
+        if (seedOutcome === 'success') resolveSeed(nextFolder)
+        else rejectSeed(new Error('test cleanup'))
+        await pendingSeed.catch(() => undefined)
+        client.clear()
+      }
+    }
+  )
 
   it('routes a settled child-row 401 to session revocation without a local permission dialog', async () => {
     const folder = await resolveResource(
@@ -142,30 +1089,9 @@ describe('FilesPage stale permission action oracle', () => {
     })
 
     const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
-    const localDialogAtAuthorityErrorCommit: boolean[] = []
-    const observeQueryCommit = vi.fn(() => {
-      const query = client.getQueryCache().find({
-        exact: true,
-        queryKey: desktopQueryKeys.gfsAffordances(
-          'test-environment:user-1:team-1',
-          'child-report',
-          'main',
-          0
-        ),
-      })
-      if (query?.state.status === 'error') {
-        localDialogAtAuthorityErrorCommit.push(
-          document.querySelector('[role="alertdialog"]') !== null
-        )
-      }
-    })
     try {
-      render(<FilesPage pendingGfsUri={FOLDER_URI} />, {
-        wrapper: wrapper(client, observeQueryCommit),
-      })
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
       await screen.findByText('File access is not authorized')
-      expect(localDialogAtAuthorityErrorCommit.length).toBeGreaterThan(0)
-      expect(localDialogAtAuthorityErrorCommit.every(present => !present)).toBe(true)
       expect(screen.queryByRole('alertdialog')).toBeNull()
       expect(screen.queryByRole('button', { name: 'Retry permission check' })).toBeNull()
       expect(screen.getByRole('button', { name: 'Retry file access' })).toBeTruthy()
@@ -467,7 +1393,7 @@ describe('FilesPage stale permission action oracle', () => {
       const pendingDialog = screen.getByRole('alertdialog')
       expect(pendingDialog).toBe(dialog)
       expect(within(pendingDialog).getByText(/Could not verify permissions for a.txt/)).toBeTruthy()
-      expect(within(pendingDialog).queryByText(/Could not verify permissions for b.txt/)).toBeNull()
+      expect(within(pendingDialog).getByText(/Could not verify permissions for b.txt/)).toBeTruthy()
       expect(
         within(pendingDialog).getByRole('status', { name: 'Checking permissions for b.txt' })
       ).toBeTruthy()
@@ -763,12 +1689,22 @@ describe('FilesPage stale permission action oracle', () => {
       'child-report'
     )
     let reportReads = 0
+    let folderResolveCalls = 0
+    let releaseSeed!: () => void
+    const seedResolution = new Promise<void>(resolve => {
+      releaseSeed = resolve
+    })
     let rejectRemount!: (error: Error) => void
     const remountRefresh = new Promise<Awaited<ReturnType<typeof heldPermissionResponse>>>(
       (_resolve, reject) => {
         rejectRemount = reject
       }
     )
+    const remountRefreshOutcome = remountRefresh.then(
+      value => ({ kind: 'fulfilled' as const, value }),
+      error => ({ kind: 'rejected' as const, error })
+    )
+    let remountRefreshOutcomeObserved = false
     const produceAffordances = appServiceAffordanceProducer(resourceId => {
       if (resourceId !== 'child-report') {
         return Promise.resolve(heldPermissionResponse(['read', 'write', 'delete']))
@@ -786,7 +1722,11 @@ describe('FilesPage stale permission action oracle', () => {
       value: {
         gfs: {
           listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
-          resolve: vi.fn(async () => folder),
+          resolve: vi.fn(async () => {
+            folderResolveCalls += 1
+            if (folderResolveCalls === 2) await seedResolution
+            return folder
+          }),
           listChildren: vi.fn(async () => children),
           affordances,
         },
@@ -816,7 +1756,16 @@ describe('FilesPage stale permission action oracle', () => {
       await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
 
       view.unmount()
+      await act(async () => {
+        await Promise.resolve()
+      })
       view = render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      await waitFor(() => expect(folderResolveCalls).toBe(2))
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      await act(async () => {
+        releaseSeed()
+        await seedResolution
+      })
       await screen.findByRole('button', { name: 'Options for report.txt' })
       await waitFor(() => expect(reportReads).toBe(3))
       expect(client.getQueryState(rowKey)?.fetchStatus).toBe('fetching')
@@ -825,7 +1774,12 @@ describe('FilesPage stale permission action oracle', () => {
       expect(client.getQueryCache().find({ queryKey: rowKey, exact: true })).toBe(queryIdentity)
       await act(async () => {
         rejectRemount(new Error(denied))
-        await remountRefresh.catch(() => undefined)
+        const outcome = await remountRefreshOutcome
+        remountRefreshOutcomeObserved = true
+        expect(outcome.kind).toBe('rejected')
+        if (outcome.kind !== 'rejected') throw new Error('Expected the remount producer to fail')
+        expect(outcome.error).toBeInstanceOf(Error)
+        expect((outcome.error as Error).message).toBe(denied)
       })
       await waitFor(() => expect(client.getQueryState(rowKey)?.status).toBe('error'))
       expect(screen.queryByRole('alertdialog')).toBeNull()
@@ -833,8 +1787,218 @@ describe('FilesPage stale permission action oracle', () => {
       expect(client.getQueryState(rowKey)?.errorUpdateCount).toBeGreaterThan(errorGeneration ?? 0)
       expect(reportReads).toBe(3)
     } finally {
-      rejectRemount(new Error('cleanup'))
+      releaseSeed()
+      if (!remountRefreshOutcomeObserved) {
+        const cleanupSignal = new Error('test cleanup sentinel')
+        rejectRemount(cleanupSignal)
+        const outcome = await remountRefreshOutcome
+        expect(outcome.kind).toBe('rejected')
+        if (outcome.kind !== 'rejected')
+          throw new Error('Expected cleanup to settle remount producer')
+        expect(outcome.error).toBe(cleanupSignal)
+      }
       view?.unmount()
+      client.clear()
+    }
+  })
+
+  it('preserves a dismissed row failure across folder departure and return', async () => {
+    const folderA = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const folderD = childView('folder-destination', 'Archive', 'directory', {
+      parentResourceId: 'folder-active',
+    })
+    const report = childView('child-report', 'report.txt', 'file', {
+      parentResourceId: 'folder-active',
+    })
+    const folderAChildren = await listChildrenPage([folderD, report])
+    const denied = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'child-report'
+    )
+    let rowReads = 0
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'child-report') {
+        rowReads += 1
+        if (rowReads > 1) throw new Error(denied)
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    const listChildren = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-active') return folderAChildren
+      throw new Error('Archive listing temporarily unavailable')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folderA),
+          listChildren,
+          affordances,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const rowKey = desktopQueryKeys.gfsAffordances(
+      'test-environment:user-1:team-1',
+      'child-report',
+      'main',
+      0
+    )
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      await screen.findByRole('button', { name: 'Options for report.txt' })
+      await waitFor(() => expect(rowReads).toBe(1))
+      const queryIdentity = client.getQueryCache().find({ queryKey: rowKey, exact: true })
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: rowKey })
+      })
+      const dismissedDialog = await screen.findByRole('alertdialog')
+      expect(client.getQueryState(rowKey)?.status).toBe('error')
+      fireEvent.click(within(dismissedDialog).getByRole('button', { name: 'Close' }))
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+
+      fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
+      await waitFor(() =>
+        expect(
+          listChildren.mock.calls.some(([resourceId]) => resourceId === 'folder-destination')
+        ).toBe(true)
+      )
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      fireEvent.click(
+        within(screen.getByRole('navigation', { name: 'File location' })).getByRole('button', {
+          name: 'Reports',
+        })
+      )
+      await screen.findByRole('button', { name: 'Options for report.txt' })
+      expect(client.getQueryCache().find({ queryKey: rowKey, exact: true })).toBe(queryIdentity)
+
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: rowKey })
+      })
+      expect(rowReads).toBe(4)
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(client.getQueryCache().find({ queryKey: rowKey, exact: true })).toBe(queryIdentity)
+    } finally {
+      client.clear()
+    }
+  })
+
+  it('preserves acknowledgement through an incomplete child cursor chain', async () => {
+    const folderA = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const report = childView('child-report', 'report.txt', 'file', {
+      parentResourceId: 'folder-active',
+    })
+    const completePage = await listChildrenPage([report])
+    const incompleteFirstPage = await listChildrenPage([], 'cursor-next')
+    const completeSecondPage = await listChildrenPage([report])
+    const omittedPage = await listChildrenPage([])
+    const denied = await affordancesFailureMessage(
+      503,
+      { code: 'unavailable', message: 'permission service temporarily unavailable' },
+      'child-report'
+    )
+    let listingMode: 'initial' | 'incomplete' | 'omitted' | 'reappeared' = 'initial'
+    let rowReads = 0
+    let recovered = false
+    const listChildren = vi.fn(async (_resourceId: string, _drive: string, cursor?: string) => {
+      if (listingMode === 'incomplete') {
+        return cursor === 'cursor-next' ? completeSecondPage : incompleteFirstPage
+      }
+      if (listingMode === 'omitted') return omittedPage
+      return completePage
+    })
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'child-report') {
+        rowReads += 1
+        if (rowReads > 1 && !recovered) throw new Error(denied)
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folderA),
+          listChildren,
+          affordances,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const sessionScope = 'test-environment:user-1:team-1'
+    const rowKey = desktopQueryKeys.gfsAffordances(sessionScope, 'child-report', 'main', 0)
+    const folderKey = desktopQueryKeys.gfsChildren(sessionScope, 'folder-active', 'main', 0)
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      await screen.findByRole('button', { name: 'Options for report.txt' })
+      await waitFor(() => expect(rowReads).toBe(1))
+      const rowQuery = client.getQueryCache().find({ queryKey: rowKey, exact: true })
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: rowKey })
+      })
+      const dismissedDialog = await screen.findByRole('alertdialog')
+      fireEvent.click(within(dismissedDialog).getByRole('button', { name: 'Close' }))
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+
+      listingMode = 'incomplete'
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: folderKey })
+      })
+      expect(client.getQueryState(folderKey)?.status).toBe('success')
+      expect(listChildren).toHaveBeenCalledTimes(2)
+      expect(client.getQueryData(folderKey)).toMatchObject({
+        pages: [{ items: [], nextCursor: 'cursor-next' }],
+      })
+      await waitFor(() =>
+        expect(screen.queryByRole('button', { name: 'Options for report.txt' })).toBeNull()
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+      await screen.findByRole('button', { name: 'Options for report.txt' })
+      await waitFor(() => expect(rowReads).toBeGreaterThan(2))
+      expect(client.getQueryCache().find({ queryKey: rowKey, exact: true })).toBe(rowQuery)
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+
+      listingMode = 'omitted'
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: folderKey })
+      })
+      expect(client.getQueryState(folderKey)?.status).toBe('success')
+      await waitFor(() =>
+        expect(screen.queryByRole('button', { name: 'Options for report.txt' })).toBeNull()
+      )
+
+      listingMode = 'reappeared'
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: folderKey })
+      })
+      await screen.findByRole('button', { name: 'Options for report.txt' })
+      expect(client.getQueryCache().find({ queryKey: rowKey, exact: true })).toBe(rowQuery)
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: rowKey })
+      })
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+
+      recovered = true
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: rowKey })
+      })
+      expect(client.getQueryState(rowKey)?.status).toBe('success')
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      recovered = false
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: rowKey })
+      })
+      expect(await screen.findByRole('alertdialog')).toBeTruthy()
+    } finally {
       client.clear()
     }
   })
@@ -972,6 +2136,9 @@ describe('FilesPage stale permission action oracle', () => {
       fireEvent.click(within(renameForm).getByRole('button', { name: 'Cancel rename' }))
       const restoredDialog = await screen.findByRole('alertdialog')
       expect(restoredDialog).toBeTruthy()
+      expect(within(restoredDialog).getByRole('button', { name: 'Close' })).toBe(
+        document.activeElement
+      )
       expect(
         within(restoredDialog).getByText(/Could not verify permissions for report\.txt/)
       ).toBeTruthy()
@@ -2018,7 +3185,83 @@ describe('FilesPage stale permission action oracle', () => {
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.queryByRole('dialog', { name: 'Move folder Reports' })).toBeNull()
     expect(moveResource).not.toHaveBeenCalled()
+
     client.clear()
+  })
+
+  it('does not acknowledge a committed Retry after its source-parent Query is replaced', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const children = await listChildrenPage([])
+    let sourceParentReads = 0
+    const rateLimited = await affordancesApiError(
+      429,
+      { code: 'rate_limited', message: 'Too Many Requests' },
+      'source-parent'
+    )
+    const produceAffordances = appServiceAffordanceProducer(resourceId => {
+      if (resourceId === 'source-parent') {
+        sourceParentReads += 1
+        if (sourceParentReads === 2) return Promise.reject(rateLimited)
+      }
+      return Promise.resolve(heldPermissionResponse(['read', 'write', 'delete']))
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances: vi.fn((resourceId: string) => produceAffordances(resourceId)),
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const sourceKey = desktopQueryKeys.gfsAffordances(
+      'test-environment:user-1:team-1',
+      'source-parent',
+      'main',
+      0
+    )
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      await screen.findByRole('button', { name: 'Options for Reports' })
+      await waitFor(() => expect(sourceParentReads).toBe(1))
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: sourceKey })
+      })
+      await screen.findByText(/Could not verify Move permissions:/)
+      const originalQuery = client.getQueryCache().find({ exact: true, queryKey: sourceKey })
+      expect(originalQuery).toBeDefined()
+      const committedError: PermissionErrorItem = {
+        id: 'committed-source-parent-error',
+        message: 'Could not verify Move permissions',
+        queryIdentity: originalQuery,
+        errorUpdateCount: originalQuery?.state.errorUpdateCount,
+      }
+      const committedToken = permissionErrorToken(committedError)
+      expect(committedToken).toBeDefined()
+      committedError.token = committedToken
+      expect(isPermissionErrorAcknowledged(committedError)).toBe(false)
+      const committedRetry = screen.getByRole('button', { name: 'Retry permission check' })
+      const replacementData = await heldPermissionResponse(['read', 'write', 'delete'])
+      act(() => {
+        client.removeQueries({ exact: true, queryKey: sourceKey })
+        client.setQueryData(sourceKey, replacementData)
+        client.invalidateQueries({ exact: true, queryKey: sourceKey, refetchType: 'none' })
+        expect(committedRetry.isConnected).toBe(true)
+        fireEvent.click(committedRetry)
+      })
+      expect(isPermissionErrorAcknowledged(committedError)).toBe(false)
+    } finally {
+      client.clear()
+    }
   })
 
   it('keeps a child Move candidate visible after the current-folder check returns 429', async () => {
@@ -2246,6 +3489,72 @@ describe('FilesPage stale permission action oracle', () => {
     }
   })
 
+  it('shows a generic current-folder alert when an admitted 429 Retry fails with 503', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const tooManyRequests = await affordancesFailureMessage(
+      429,
+      { code: 'rate_limited', message: 'private throttle detail' },
+      'folder-active'
+    )
+    const unavailable = await affordancesFailureMessage(
+      503,
+      { code: 'upstream_unavailable', message: 'private permission upstream detail' },
+      'folder-active'
+    )
+    let currentReads = 0
+    const affordances = vi.fn((resourceId: string) => {
+      if (resourceId !== 'folder-active') {
+        return Promise.resolve(heldPermissionResponse(['read', 'write', 'delete']))
+      }
+      currentReads += 1
+      return Promise.reject(new Error(currentReads === 1 ? tooManyRequests : unavailable))
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const currentKey = desktopQueryKeys.gfsAffordances(
+      'test-environment:user-1:team-1',
+      'folder-active',
+      'main',
+      0
+    )
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      const firstDialog = await screen.findByRole('alertdialog')
+      expect(within(firstDialog).getByText(/Too many file requests/)).toBeTruthy()
+      vi.setSystemTime(Date.now() + 61_000)
+      fireEvent.click(within(firstDialog).getByRole('button', { name: 'Retry permission check' }))
+      await waitFor(() => expect(currentReads).toBe(2))
+      await waitFor(() => expect(client.getQueryState(currentKey)?.status).toBe('error'))
+
+      const retryFailure = await screen.findByRole('alertdialog')
+      expect(
+        within(retryFailure).getByText(/Could not verify permissions for Reports/)
+      ).toBeTruthy()
+      expect(within(retryFailure).queryByText(/private permission upstream detail/)).toBeNull()
+      expect(
+        within(retryFailure).queryByRole('button', { name: 'Retry permission check' })
+      ).toBeNull()
+      expect(affordances).toHaveBeenCalledTimes(2)
+    } finally {
+      client.clear()
+      vi.useRealTimers()
+    }
+  })
+
   it.each([403, 404])(
     'withholds current-folder permission actions after HTTP %i and preserves identity actions',
     async status => {
@@ -2467,5 +3776,351 @@ describe('FilesPage stale permission action oracle', () => {
     } finally {
       client.clear()
     }
+  })
+
+  it('proves an errored Query refetch is not a fresh fetchQuery cache hit', async () => {
+    const sourceKey = desktopQueryKeys.gfsAffordances(
+      'test-environment:user-1:team-1',
+      'shared-source-parent',
+      'main',
+      0
+    )
+    const firstData = heldPermissionResponse(['read', 'write', 'delete'])
+    const recoveredData = heldPermissionResponse(['read', 'write'])
+    const temporaryError = await affordancesApiError(
+      503,
+      { code: 'unavailable', message: 'Permission service unavailable' },
+      'shared-source-parent'
+    )
+    let failNextRead = false
+    const producer = vi.fn(async () => {
+      if (failNextRead) {
+        failNextRead = false
+        throw temporaryError
+      }
+      return firstData
+    })
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      await client.fetchQuery({
+        queryKey: sourceKey,
+        queryFn: producer,
+        staleTime: 15_000,
+        retry: false,
+      })
+      const query = client.getQueryCache().find({ exact: true, queryKey: sourceKey })
+      expect(query?.state.status).toBe('success')
+      const successEvents: unknown[] = []
+      const unsubscribe = client.getQueryCache().subscribe(event => {
+        if (event.type === 'updated' && event.query === query && event.action.type === 'success') {
+          successEvents.push(event)
+        }
+      })
+      failNextRead = true
+      await client.refetchQueries({ exact: true, queryKey: sourceKey })
+      expect(producer).toHaveBeenCalledTimes(2)
+      expect(query?.state.status).toBe('error')
+      expect(query?.state.data).toBe(firstData)
+      expect(query?.state.isInvalidated).toBe(true)
+      expect(Date.now() - query!.state.dataUpdatedAt).toBeLessThan(15_000)
+      expect(query?.isStaleByTime(15_000)).toBe(true)
+      const failedDataUpdateCount = query?.state.dataUpdateCount ?? 0
+      successEvents.length = 0
+
+      const retryProducer = vi.fn(async () => recoveredData)
+      const retryResult = await client.fetchQuery({
+        queryKey: sourceKey,
+        queryFn: retryProducer,
+        staleTime: 15_000,
+        retry: false,
+      })
+      expect(retryResult).toBe(recoveredData)
+      expect(retryProducer).toHaveBeenCalledTimes(1)
+      expect(query?.state.status).toBe('success')
+      expect(query?.state.data).toEqual(recoveredData)
+      expect(query?.state.dataUpdateCount).toBeGreaterThan(failedDataUpdateCount)
+      expect(successEvents).toHaveLength(1)
+      unsubscribe()
+    } finally {
+      client.clear()
+    }
+  })
+
+  it('checks generated dormant-binding session histories with real Query and Files producers', async () => {
+    type Model = {
+      phase: 'g1-error' | 'g2-seed-pending' | 'g2-settled'
+      observedPending: number
+      observedSettled: number
+      outcome: 'success' | 'failure'
+    }
+    type Real = {
+      client: QueryClient
+      scheduler: Scheduler
+      seedOutcome: 'success' | 'failure'
+      nextFolder: Awaited<ReturnType<typeof resolveResource>>
+      releaseSeed: (result: Promise<Awaited<ReturnType<typeof resolveResource>>>) => void
+      staleQueryKey: ReturnType<typeof desktopQueryKeys.gfsAffordances>
+      transitionToG2: () => Promise<void>
+      settleSeed: () => Promise<void>
+    }
+
+    class ObserveG1Error implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.phase === 'g1-error'
+      }
+      async run(): Promise<void> {
+        expect(screen.getByRole('alertdialog')).toBeTruthy()
+      }
+      toString(): string {
+        return 'observe the producer-backed G1 permission error before route departure'
+      }
+    }
+
+    class TransitionToG2 implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.phase === 'g1-error'
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        await state.transitionToG2()
+        model.phase = 'g2-seed-pending'
+        expect(
+          state.client.getQueryCache().find({ exact: true, queryKey: state.staleQueryKey })
+        ).toBeTruthy()
+        expect(screen.queryByRole('alertdialog')).toBeNull()
+        expect(
+          screen.queryByRole('button', { name: 'Permission check failed; open recovery options' })
+        ).toBeNull()
+      }
+      toString(): string {
+        return 'unmount Files, publish G2 while its controllers are absent, and remount on a held seed'
+      }
+    }
+
+    class ObservePending implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.phase === 'g2-seed-pending'
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        expect(
+          state.client.getQueryCache().find({ exact: true, queryKey: state.staleQueryKey })
+        ).toBeTruthy()
+        expect(screen.queryByRole('alertdialog')).toBeNull()
+        expect(
+          screen.queryByRole('button', { name: 'Permission check failed; open recovery options' })
+        ).toBeNull()
+        model.observedPending += 1
+      }
+      toString(): string {
+        return 'observe the dormant G1 Query while G2 Files seed is pending'
+      }
+    }
+
+    class SettleSeed implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.phase === 'g2-seed-pending'
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        await new ObservePending().run(model, state)
+        await state.settleSeed()
+        model.phase = 'g2-settled'
+      }
+      toString(): string {
+        return 'settle the G2 Files location producer under scheduler control'
+      }
+    }
+
+    class ObserveSettled implements AsyncCommand<Model, Real, true> {
+      async check(model: Readonly<Model>): Promise<boolean> {
+        return model.phase === 'g2-settled'
+      }
+      async run(model: Model, state: Real): Promise<void> {
+        expect(
+          state.client.getQueryCache().find({ exact: true, queryKey: state.staleQueryKey })
+        ).toBeTruthy()
+        expect(screen.queryByRole('alertdialog')).toBeNull()
+        expect(
+          screen.queryByRole('button', { name: 'Permission check failed; open recovery options' })
+        ).toBeNull()
+        model.observedSettled += 1
+      }
+      toString(): string {
+        return 'compare the settled G2 Files view with the independent session-binding model'
+      }
+    }
+
+    const historyArbitrary = fc.commands<Model, Real, true>(
+      [
+        fc.constantFrom(
+          new ObserveG1Error(),
+          new TransitionToG2(),
+          new ObservePending(),
+          new SettleSeed(),
+          new ObserveSettled()
+        ),
+      ],
+      { maxCommands: 12 }
+    )
+    const observedOutcomes = new Set<'success' | 'failure'>()
+
+    await fc.assert(
+      fc.asyncProperty(
+        historyArbitrary,
+        fc.constantFrom<'success' | 'failure'>('success', 'failure'),
+        fc.scheduler(),
+        async (scheduled, outcome, scheduler) => {
+          observedOutcomes.add(outcome)
+          const sourceFailure = await affordancesFailureMessage(
+            503,
+            { code: 'unavailable', message: 'permission service temporarily unavailable' },
+            'source-parent'
+          )
+          const oldFolder = await resolveResource(
+            resolvedDirectory('folder-old-team', 'Reports', {
+              gfsUri: FOLDER_URI,
+              parentResourceId: 'source-parent',
+            })
+          )
+          const nextFolderUri = 'gfs://main/new-team-folder'
+          const nextFolder = await resolveResource(
+            resolvedDirectory('folder-new-team', 'Projects', { gfsUri: nextFolderUri })
+          )
+          let activeGeneration = 0
+          let releaseSeed!: (result: Promise<typeof nextFolder>) => void
+          const pendingSeed = new Promise<typeof nextFolder>(resolve => {
+            releaseSeed = resolve
+          })
+          const resolve = vi.fn(async (uri: string) => {
+            if (uri === FOLDER_URI) return oldFolder
+            if (uri === nextFolderUri) return pendingSeed
+            return resolveResource(
+              resolvedDirectory('source-parent', 'Shared', {
+                gfsUri: 'gfs://main/source-parent',
+              })
+            )
+          })
+          const affordances = vi.fn(async (resourceId: string) => {
+            if (resourceId === 'source-parent' && activeGeneration === 0) {
+              throw new Error(sourceFailure)
+            }
+            return heldPermissionResponse(['read', 'write', 'delete'])
+          })
+          Object.defineProperty(window, 'clerum', {
+            configurable: true,
+            value: {
+              auth: { getSessionGeneration: vi.fn(async () => activeGeneration) },
+              gfs: {
+                listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+                resolve,
+                listChildren: vi.fn(async () => listChildrenPage([])),
+                affordances,
+              },
+            },
+          })
+
+          const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+          const staleQueryKey = desktopQueryKeys.gfsAffordances(
+            'test-environment:user-1:team-1',
+            'source-parent',
+            'main',
+            0
+          )
+          const nextSession = {
+            ...authValue,
+            me: { ...me, teamId: 'team-2', teamName: 'Team Two' },
+            sessionGeneration: 1,
+          } as unknown as AuthContextValue
+          const renderSession = (auth: AuthContextValue, pendingGfsUri: string) => (
+            <AuthContext.Provider value={auth}>
+              <QueryClientProvider client={client}>
+                <FilesPage pendingGfsUri={pendingGfsUri} />
+              </QueryClientProvider>
+            </AuthContext.Provider>
+          )
+          let oldPage: ReturnType<typeof render> | undefined
+          let newPage: ReturnType<typeof render> | undefined
+          const model: Model = {
+            phase: 'g1-error',
+            observedPending: 0,
+            observedSettled: 0,
+            outcome,
+          }
+          const real: Real = {
+            client,
+            scheduler,
+            seedOutcome: outcome,
+            nextFolder,
+            releaseSeed,
+            staleQueryKey,
+            transitionToG2: async () => {
+              if (!oldPage) throw new Error('Expected the old Files route to be mounted')
+              oldPage.unmount()
+              oldPage = undefined
+              activeGeneration = 1
+              newPage = render(renderSession(nextSession, nextFolderUri))
+              await waitFor(() => expect(resolve).toHaveBeenCalledWith(nextFolderUri))
+              await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+            },
+            settleSeed: async () => {
+              const result =
+                outcome === 'success'
+                  ? Promise.resolve(nextFolder)
+                  : Promise.reject(new Error('new-team location seed failed'))
+              releaseSeed(scheduler.schedule(result, 'G2 Files seed settlement'))
+              await act(async () => scheduler.waitIdle())
+              if (outcome === 'success') {
+                await screen.findByRole('button', { name: 'Options for Projects' })
+              }
+              await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+              expect(
+                screen.queryByRole('button', {
+                  name: 'Permission check failed; open recovery options',
+                })
+              ).toBeNull()
+            },
+          }
+
+          try {
+            oldPage = render(renderSession(authValue, FOLDER_URI))
+            await screen.findByText(/Could not verify Move permissions:/)
+            expect(client.getQueryState(staleQueryKey)?.status).toBe('error')
+            expect(screen.getByRole('alertdialog')).toBeTruthy()
+
+            expect(model.phase).toBe('g1-error')
+            await fc.asyncModelRun(() => ({ model, real }), scheduled)
+            if (model.phase === 'g1-error') await new TransitionToG2().run(model, real)
+            if (model.phase === 'g2-seed-pending') await new SettleSeed().run(model, real)
+            if (model.observedSettled === 0) await new ObserveSettled().run(model, real)
+            await waitFor(() =>
+              expect(
+                client
+                  .getQueryCache()
+                  .getAll()
+                  .every(query => query.state.fetchStatus === 'idle')
+              ).toBe(true)
+            )
+
+            expect(
+              client.getQueryCache().find({ exact: true, queryKey: staleQueryKey })
+            ).toBeTruthy()
+            expect(screen.queryByRole('alertdialog')).toBeNull()
+            expect(
+              screen.queryByRole('button', {
+                name: 'Permission check failed; open recovery options',
+              })
+            ).toBeNull()
+          } finally {
+            if (model.phase === 'g2-seed-pending') {
+              releaseSeed(Promise.resolve(nextFolder))
+              await act(async () => scheduler.waitIdle())
+            }
+            oldPage?.unmount()
+            newPage?.unmount()
+            client.clear()
+          }
+        }
+      ),
+      { numRuns: 24, seed: 142715 }
+    )
+    expect(observedOutcomes).toEqual(new Set(['success', 'failure']))
   })
 })

@@ -92,6 +92,9 @@ interface GfsAccessibleResource extends GfsBrowserChild {
 }
 
 type GfsAccessibleWirePage = Awaited<ReturnType<typeof window.clerum.gfs.listAccessible>>
+type GfsChildrenPage = Awaited<ReturnType<typeof window.clerum.gfs.listChildren>> & {
+  __filesFullListing?: true
+}
 
 function normalizeAccessibleResource(
   item: GfsAccessibleWirePage['items'][number]
@@ -405,13 +408,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     accessState === 'active'
   const setAccessState = useCallback(
     (next: GfsAccessState) => {
-      if (!ownsPublishedAuthority()) return
       queryClient.setQueryData(
         desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous', sessionGeneration),
         next
       )
     },
-    [queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority]
+    [queryClient, sessionScope, sessionGeneration]
   )
 
   // The open location is CLIENT state, not server state: it records which
@@ -547,15 +549,28 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     currentIsDirectory &&
     accessState === 'active'
 
+  const childrenQueryKey = desktopQueryKeys.gfsChildren(
+    sessionScope ?? 'anonymous',
+    current?.resourceId ?? '',
+    DRIVE,
+    sessionGeneration
+  )
   const childrenQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsChildren(
-      sessionScope ?? 'anonymous',
-      current?.resourceId ?? '',
-      DRIVE,
-      sessionGeneration
-    ),
-    queryFn: ({ pageParam }) =>
-      window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam),
+    queryKey: childrenQueryKey,
+    queryFn: async ({ pageParam, client, queryKey }) => {
+      const query = client.getQueryCache().find({ queryKey, exact: true })
+      const fetchMeta = query?.state.fetchMeta as
+        | { fetchMore?: { direction?: 'forward' | 'backward' } }
+        | null
+        | undefined
+      const isFetchMore = Boolean(fetchMeta?.fetchMore)
+      const page = await window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam)
+      if (!query || isFetchMore) return page as GfsChildrenPage
+      return {
+        ...page,
+        __filesFullListing: true,
+      } satisfies GfsChildrenPage
+    },
     enabled: childrenQueryEnabled,
     // Folder contents change out-of-band: agents with host grants, other
     // sessions, and operator writes never pass through this client. Revisit
@@ -738,7 +753,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         hasGfsSessionGeneration(query.queryKey, sessionGeneration) &&
         query.queryKey[3] !== 'affordances',
     })
-  }, [queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority])
+  }, [queryClient, sessionScope, sessionGeneration])
   /**
    * Fail closed on a session/authorization failure: cached GFS metadata can
    * never outlive the access that produced it. Clears navigation and removes
@@ -747,7 +762,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
    * observers until an explicit retry re-enters through the server.
    */
   const clearGfsState = useCallback(() => {
-    if (!ownsPublishedAuthority()) return
     setCrumbs([])
     setOpenError(null)
     queryClient.removeQueries({
@@ -756,7 +770,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         query.queryKey[2] === sessionScope &&
         hasGfsSessionGeneration(query.queryKey, sessionGeneration),
     })
-  }, [queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority])
+  }, [queryClient, sessionScope, sessionGeneration])
   const clearInaccessibleGfsLocation = useCallback(() => {
     const resourceId = currentCrumbRef.current?.resourceId
     pendingDeniedLocationRef.current =
@@ -846,31 +860,40 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // rejection (401 / typed lifecycle code) revokes the session even when the
   // caller would only have toasted. Policy verdicts (403/412) stay local.
   const failClosedOnMutationError = useCallback(
-    (error: unknown) => {
-      handleAuthorityFailure(toMessage(error), 'operation')
+    (
+      error: unknown,
+      _variables?: unknown,
+      origin?: { scope: string | null; generation: number | null }
+    ) => {
+      handleAuthorityFailure(toMessage(error), 'operation', origin?.scope, origin?.generation)
     },
     [handleAuthorityFailure]
   )
+  const captureMutationAuthority = () => ({ scope: sessionScope, generation: sessionGeneration })
   const revokeGrantMutation = useMutation({
     mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
     onSuccess: refreshGrants,
+    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const revokeShareMutation = useMutation({
     mutationFn: (shareId: string) => window.clerum.gfs.revokeShare(shareId),
     onSuccess: refreshShares,
+    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const createFolderMutation = useMutation({
     mutationFn: (input: { parentResourceId: string; name: string }) =>
       window.clerum.gfs.createFolder(input.parentResourceId, input.name, DRIVE),
     onSuccess: refreshGfs,
+    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const createFileMutation = useMutation({
     mutationFn: (input: { parentResourceId: string; name: string; encodedData: string }) =>
       window.clerum.gfs.createFile(input.parentResourceId, input.name, input.encodedData, DRIVE),
     onSuccess: refreshGfs,
+    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const createFileFromPathMutation = useMutation({
@@ -882,6 +905,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         DRIVE
       ),
     onSuccess: refreshGfs,
+    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const replaceFileMutation = useMutation({
@@ -897,6 +921,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       )
       await refreshGfs()
     },
+    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const replaceFileFromPathMutation = useMutation({
@@ -914,6 +939,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       await refreshGfs()
     },
+    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const renameResourceMutation = useMutation({
@@ -929,6 +955,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       )
       await refreshGfs()
     },
+    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
   const deleteResourceMutation = useMutation({
@@ -938,6 +965,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       setCrumbs(prev => prev.filter(crumb => crumb.resourceId !== input.resourceId))
       await refreshGfs()
     },
+    onMutate: captureMutationAuthority,
     onError: failClosedOnMutationError,
   })
 
@@ -957,31 +985,42 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // per-row actions until discovery lands.
   const childrenFetchedThisEpoch = childrenQuery.dataUpdatedAt >= authorityEpochRef.current
   const permissionBindingFolderId = currentIsDirectory ? (current?.resourceId ?? null) : null
-  const permissionBindingContextKey = JSON.stringify([
-    sessionScope,
-    sessionGeneration,
-    permissionBindingFolderId,
-  ])
-  const permissionBindingSnapshotsRef = useRef(new Map<string, string[]>())
+  const permissionBindingSnapshotsRef = useRef(new WeakMap<Query, string[]>())
   const childPages = childrenQuery.data?.pages ?? []
+  const childrenQueryIdentity = queryClient.getQueryCache().find({
+    queryKey: childrenQueryKey,
+    exact: true,
+  })
+  const pagesHaveFullListingProvenance =
+    childPages.length > 0 && childPages.every(page => page.__filesFullListing === true)
   const childCursorChainComplete = Boolean(
     permissionBindingFolderId &&
-    childrenFetchedThisEpoch &&
     childPages.length > 0 &&
-    childPages[childPages.length - 1]?.nextCursor === null
+    childPages[childPages.length - 1]?.nextCursor === null &&
+    childrenQueryIdentity &&
+    childrenQuery.data?.pageParams.length === childPages.length &&
+    pagesHaveFullListingProvenance
   )
   useLayoutEffect(() => {
     if (!childCursorChainComplete) return
-    permissionBindingSnapshotsRef.current.set(
-      permissionBindingContextKey,
-      childPages.flatMap(page => page.items.map(item => item.resourceId))
-    )
-  }, [childCursorChainComplete, childPages, permissionBindingContextKey])
+    if (childrenQueryIdentity) {
+      permissionBindingSnapshotsRef.current.set(
+        childrenQueryIdentity,
+        childPages.flatMap(page => page.items.map(item => item.resourceId))
+      )
+    }
+  }, [childCursorChainComplete, childPages, childrenQueryIdentity])
   const permissionBindingChildResourceIds = permissionBindingFolderId
-    ? (permissionBindingSnapshotsRef.current.get(permissionBindingContextKey) ??
-      (childCursorChainComplete
-        ? childPages.flatMap(page => page.items.map(item => item.resourceId))
-        : []))
+    ? childCursorChainComplete
+      ? childPages.flatMap(page => page.items.map(item => item.resourceId))
+      : [
+          ...new Set([
+            ...(childrenQueryIdentity
+              ? (permissionBindingSnapshotsRef.current.get(childrenQueryIdentity) ?? [])
+              : []),
+            ...childPages.flatMap(page => page.items.map(item => item.resourceId)),
+          ]),
+        ]
     : []
   const items = useMemo<GfsBrowserChild[]>(
     () =>

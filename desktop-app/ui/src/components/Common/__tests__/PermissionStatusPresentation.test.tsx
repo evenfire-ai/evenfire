@@ -145,6 +145,24 @@ describe('EvenDrive permission status presentation', () => {
     expect(onDismiss).toHaveBeenCalledWith(['query-1'])
   })
 
+  it('contains Escape within the portaled permission dialog', () => {
+    const onDismiss = vi.fn()
+    const parentKeyDown = vi.fn()
+    render(
+      <div onKeyDown={parentKeyDown}>
+        <PermissionErrorDialog
+          errors={[{ id: 'query-escape', message: 'Permission check failed.' }]}
+          onDismiss={onDismiss}
+        />
+      </div>
+    )
+
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Close' }), { key: 'Escape' })
+
+    expect(onDismiss).toHaveBeenCalledOnce()
+    expect(parentKeyDown).not.toHaveBeenCalled()
+  })
+
   it('aggregates duplicate observations of one permission query into one retry target', () => {
     const queryClient = new QueryClient()
     const queryKey = ['permission-aggregation', 'parent-folder'] as const

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { type ReactNode, useState } from 'react'
+import { type ReactNode, useLayoutEffect, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import {
@@ -10,6 +10,11 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import {
+  commitPermissionQueryBinding,
+  deactivatePermissionQueryBinding,
+  installPermissionErrorTracking,
+} from '@components/Common/permissionErrorAcknowledgement'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -34,7 +39,7 @@ import { readGfsOpenLocations } from '@/lib/gfsOpenLocations'
 import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
 import type { DesktopRuntimeConfigState } from '../../../../../src/types'
 import { desktopQueryKeys } from '../queryKeys'
-import { useGfsBrowserController } from '../useGfsBrowserController'
+import { isGfsSessionAuthorityFailure, useGfsBrowserController } from '../useGfsBrowserController'
 
 // Fire-and-forget UI actions in these probes mirror the production callers,
 // which await the same promises inside try/catch (see FilesPage). Swallow
@@ -137,6 +142,13 @@ function Probe() {
       <div data-testid="authority-pending">{ctrl.authorityPending ? 'pending' : 'ready'}</div>
       <div data-testid="accessible-count">{ctrl.accessibleResources.length}</div>
       <div data-testid="items-count">{ctrl.items.length}</div>
+      <div data-testid="permission-binding-complete">
+        {ctrl.permissionBindingComplete ? 'complete' : 'incomplete'}
+      </div>
+      <div data-testid="permission-binding-ids">
+        {ctrl.permissionBindingChildResourceIds.join(',')}
+      </div>
+      <div data-testid="permission-binding-folder">{ctrl.permissionBindingFolderId ?? 'none'}</div>
       <div data-testid="children-error">{ctrl.error ?? 'none'}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
       <div data-testid="accessible-notice">{ctrl.accessibleNotice ?? 'none'}</div>
@@ -475,20 +487,33 @@ describe('useGfsBrowserController', () => {
       childView(`row-${index}`, `row-${index}.md`, 'file', { parentResourceId: 'root' })
     )
     const secondPageItems = [childView('row-30', 'row-30.md', 'file', { parentResourceId: 'root' })]
+    const thirdPageItems = [childView('row-31', 'row-31.md', 'file', { parentResourceId: 'root' })]
     const firstPage = await listChildrenPage(firstPageItems, 'next-page')
     const secondPage = await listChildrenPage(secondPageItems)
+    const thirdPage = await listChildrenPage(thirdPageItems, 'next-page')
+    const fourthPage = await listChildrenPage([])
     let finishFirstRefresh!: (page: typeof firstPage) => void
     let finishSecondRefresh!: (page: typeof secondPage) => void
+    let finishThirdRefresh!: (page: typeof thirdPage) => void
+    let finishFourthRefresh!: (page: typeof fourthPage) => void
     const pendingFirstRefresh = new Promise<typeof firstPage>(resolve => {
       finishFirstRefresh = resolve
     })
     const pendingSecondRefresh = new Promise<typeof secondPage>(resolve => {
       finishSecondRefresh = resolve
     })
+    const pendingThirdRefresh = new Promise<typeof thirdPage>(resolve => {
+      finishThirdRefresh = resolve
+    })
+    const pendingFourthRefresh = new Promise<typeof fourthPage>(resolve => {
+      finishFourthRefresh = resolve
+    })
     const listChildren = vi.fn((_resourceId: string, _drive: string, cursor?: string) => {
       const call = listChildren.mock.calls.length
       if (call === 3) return pendingFirstRefresh
       if (call === 4) return pendingSecondRefresh
+      if (call === 5) return pendingThirdRefresh
+      if (call === 6) return pendingFourthRefresh
       return cursor ? secondPage : firstPage
     })
     const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
@@ -513,6 +538,7 @@ describe('useGfsBrowserController', () => {
     await act(async () => screen.getByRole('button', { name: 'load more' }).click())
     await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('31'))
     await waitFor(() => expect(affordances).toHaveBeenCalledTimes(32))
+    expect(screen.getByTestId('permission-binding-complete').textContent).toBe('incomplete')
 
     const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
     const affordanceKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'row-0', 'main', 1)
@@ -522,9 +548,19 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('items-count').textContent).toBe('31')
     expect(affordances).toHaveBeenCalledTimes(32)
     const cachedChildren = lastHarnessQueryClient?.getQueryData<{
-      pages: Array<{ items: Array<{ resourceId: string }> }>
+      pages: Array<{
+        items: Array<{ resourceId: string }>
+        nextCursor: string | null
+        __filesFullListing?: true
+      }>
     }>(childrenKey)
     expect(cachedChildren?.pages).toHaveLength(2)
+    expect(cachedChildren?.pages[0]).toMatchObject({
+      nextCursor: 'next-page',
+      __filesFullListing: true,
+    })
+    expect(screen.getByTestId('permission-binding-complete').textContent).toBe('incomplete')
+    expect(cachedChildren?.pages[1]).not.toHaveProperty('__filesFullListing')
     expect(cachedChildren?.pages[0]?.items).toEqual(
       expect.arrayContaining([expect.objectContaining({ resourceId: 'row-0' })])
     )
@@ -538,14 +574,183 @@ describe('useGfsBrowserController', () => {
     await act(async () => finishSecondRefresh(secondPage))
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(4))
     await waitFor(() => expect(affordances).toHaveBeenCalledTimes(32))
+    expect(screen.getByTestId('permission-binding-complete').textContent).toBe('complete')
+    expect(screen.getByTestId('permission-binding-ids').textContent).toBe(
+      Array.from({ length: 31 }, (_, index) => `row-${index}`).join(',')
+    )
+    const completedChildren = lastHarnessQueryClient?.getQueryData<{
+      pages: Array<{
+        items: Array<{ resourceId: string }>
+        nextCursor: string | null
+        __filesFullListing?: true
+      }>
+    }>(childrenKey)
+    expect(completedChildren?.pages).toHaveLength(2)
+    expect(completedChildren?.pages.every(page => page.__filesFullListing === true)).toBe(true)
+    expect(completedChildren?.pages[1]?.nextCursor).toBeNull()
 
-    // Two retained pages are refetched, but the 31 cached row permission
-    // queries are not repeated on a periodic scope tick.
-    expect(listAccessible).toHaveBeenCalledTimes(2)
-    expect(affordances).toHaveBeenCalledTimes(32)
-    expect(screen.getByTestId('items-count').textContent).toBe('31')
+    await act(async () => screen.getByRole('button', { name: 'revalidate GFS scope' }).click())
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(5))
+    expect(screen.getByTestId('permission-binding-complete').textContent).toBe('complete')
+    expect(screen.getByTestId('permission-binding-ids').textContent).toContain('row-30')
+    await act(async () => finishThirdRefresh(thirdPage))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(6))
+    expect(screen.getByTestId('permission-binding-complete').textContent).toBe('complete')
+    expect(screen.getByTestId('permission-binding-ids').textContent).toContain('row-30')
+    await act(async () => finishFourthRefresh(fourthPage))
+    await waitFor(() =>
+      expect(screen.getByTestId('permission-binding-complete').textContent).toBe('complete')
+    )
+    expect(screen.getByTestId('permission-binding-ids').textContent).toBe('row-31')
+
+    // Child cycles refetch two retained pages, while cached row permission
+    // queries are not repeated on periodic scope ticks.
+    expect(listAccessible).toHaveBeenCalledTimes(3)
+    expect(affordances).toHaveBeenCalledTimes(33)
+    expect(screen.getByTestId('items-count').textContent).toBe('1')
     expect(shouldRevalidateGfsQuery(childrenKey)).toBe(true)
     expect(shouldRevalidateGfsQuery(affordanceKey)).toBe(false)
+  })
+
+  it('retains child permission membership until a full listing reaches its terminal cursor', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const rowA = childView('row-a', 'row-a.txt', 'file', { parentResourceId: 'root' })
+    const rowB = childView('row-b', 'row-b.txt', 'file', { parentResourceId: 'root' })
+    const rowC = childView('row-c', 'row-c.txt', 'file', { parentResourceId: 'root' })
+    const firstPage = await listChildrenPage([rowA], 'cursor-one')
+    const secondPage = await listChildrenPage([rowB], 'cursor-two')
+    const terminalPage = await listChildrenPage([rowC])
+    const incompletePage = await listChildrenPage([], 'cursor-three')
+    let incomplete = false
+    const listChildren = vi.fn(async (_resourceId: string, _drive: string, cursor?: string) => {
+      if (cursor === undefined) return firstPage
+      if (cursor === 'cursor-one') return secondPage
+      return incomplete ? incompletePage : terminalPage
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => root),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('1'))
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
+    await act(async () => screen.getByRole('button', { name: 'load more' }).click())
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('2'))
+    await act(async () => screen.getByRole('button', { name: 'load more' }).click())
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('3'))
+
+    await act(async () => {
+      await lastHarnessQueryClient?.refetchQueries({ exact: true, queryKey: childrenKey })
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('permission-binding-complete').textContent).toBe('complete')
+    )
+    expect(screen.getByTestId('permission-binding-ids').textContent).toBe('row-a,row-b,row-c')
+
+    incomplete = true
+    await act(async () => {
+      await lastHarnessQueryClient?.refetchQueries({ exact: true, queryKey: childrenKey })
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('2'))
+    expect(screen.getByTestId('permission-binding-ids').textContent).toBe('row-a,row-b,row-c')
+    expect(screen.getByTestId('permission-binding-complete').textContent).toBe('incomplete')
+  })
+
+  it('does not let a terminal Load more page prove a full-listing omission', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const rowA = childView('row-a', 'row-a.txt', 'file', { parentResourceId: 'root' })
+    const rowB = childView('row-b', 'row-b.txt', 'file', { parentResourceId: 'root' })
+    const retainedRow = childView('row-retained', 'retained.txt', 'file', {
+      parentResourceId: 'root',
+    })
+    const rowD = childView('row-d', 'row-d.txt', 'file', { parentResourceId: 'root' })
+    const initialFirst = await listChildrenPage([rowA, retainedRow], 'cursor-one')
+    const initialSecond = await listChildrenPage([rowB])
+    const completeFirst = await listChildrenPage([rowA, retainedRow], 'cursor-one')
+    const completeSecond = await listChildrenPage([rowB])
+    const refreshedFirst = await listChildrenPage([rowA], 'cursor-one')
+    const refreshedSecond = await listChildrenPage([rowB], 'cursor-two')
+    const terminalFetchMore = await listChildrenPage([rowD])
+    let rootReads = 0
+    let cursorOneReads = 0
+    const listChildren = vi.fn(async (_resourceId: string, _drive: string, cursor?: string) => {
+      if (cursor === undefined) {
+        rootReads += 1
+        if (rootReads === 1) return initialFirst
+        if (rootReads === 2) return completeFirst
+        return refreshedFirst
+      }
+      if (cursor === 'cursor-one') {
+        cursorOneReads += 1
+        if (cursorOneReads === 1) return initialSecond
+        if (cursorOneReads === 2) return completeSecond
+        return refreshedSecond
+      }
+      return terminalFetchMore
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => root),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('2'))
+    await act(async () => screen.getByRole('button', { name: 'load more' }).click())
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('3'))
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main', 1)
+    await act(async () => {
+      await lastHarnessQueryClient?.refetchQueries({ exact: true, queryKey: childrenKey })
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('permission-binding-complete').textContent).toBe('complete')
+    )
+    expect(screen.getByTestId('permission-binding-ids').textContent).toContain('row-retained')
+
+    await act(async () => {
+      await lastHarnessQueryClient?.refetchQueries({ exact: true, queryKey: childrenKey })
+    })
+    await waitFor(() => expect(rootReads).toBe(3))
+    await waitFor(() => expect(cursorOneReads).toBe(3))
+    expect(screen.getByTestId('permission-binding-complete').textContent).toBe('incomplete')
+    expect(screen.getByTestId('permission-binding-ids').textContent).toContain('row-retained')
+    expect(screen.getByRole('button', { name: 'load more' })).toBeTruthy()
+
+    await act(async () => screen.getByRole('button', { name: 'load more' }).click())
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(7))
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('3'))
+    expect(screen.getByTestId('permission-binding-ids').textContent).toContain('row-retained')
+    expect(screen.getByTestId('permission-binding-complete').textContent).toBe('incomplete')
   })
 
   afterEach(() => {
@@ -4225,6 +4430,192 @@ describe('useGfsBrowserController — cross-surface move convergence (RP-005)', 
 })
 
 describe('captured GFS authority callbacks', () => {
+  it('revokes the current generation through the Common route after both owners unmount', async () => {
+    const failure = await affordancesFailureMessage(401, {
+      code: 'unauthorized',
+      message: 'Session expired',
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const scope = ':user-a:team-a'
+    const generation = 41
+    const permissionKey = desktopQueryKeys.gfsAffordances(
+      scope,
+      'dormant-route-resource',
+      'main',
+      generation
+    )
+    const accessKey = desktopQueryKeys.gfsAccessState(scope, generation)
+    const owners = [`files-${Math.random()}`, `preview-${Math.random()}`] as const
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({ held: ['read'] })),
+        },
+      },
+    })
+    await client.fetchQuery({ queryKey: permissionKey, queryFn: async () => ({ held: ['read'] }) })
+    const permissionQuery = client.getQueryCache().find({ queryKey: permissionKey, exact: true })
+    if (!permissionQuery) throw new Error('Expected the real permission Query')
+    const trackedPermissionQuery = permissionQuery
+    installPermissionErrorTracking(client)
+    client.setQueryData(accessKey, 'active')
+
+    function Owner({ owner }: { owner: string }) {
+      const controller = useGfsBrowserController()
+      const queryClient = useQueryClient()
+      useLayoutEffect(() => {
+        commitPermissionQueryBinding(owner, 'binding-A', [trackedPermissionQuery], {
+          authorityRoute: {
+            scope,
+            generation,
+            isAuthorityFailure: error =>
+              isGfsSessionAuthorityFailure(
+                error instanceof Error ? error.message : String(error),
+                'operation'
+              ),
+            handleAuthorityFailure: error =>
+              controller.handleAuthorityFailure(
+                error instanceof Error ? error.message : String(error),
+                'operation',
+                scope,
+                generation
+              ),
+          },
+        })
+        return () => deactivatePermissionQueryBinding(owner)
+      }, [controller.handleAuthorityFailure, owner, queryClient])
+      return <output data-testid={`${owner}-access`}>{controller.accessState}</output>
+    }
+    const renderOwners = () => (
+      <AuthContext.Provider value={{ ...authValue(userA), sessionGeneration: generation }}>
+        <QueryClientProvider client={client}>
+          <Owner owner={owners[0]} />
+          <Owner owner={owners[1]} />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+
+    try {
+      const mounted = render(renderOwners())
+      await waitFor(() =>
+        expect(screen.getByTestId(`${owners[0]}-access`).textContent).toBe('active')
+      )
+      mounted.unmount()
+
+      await expect(
+        client.fetchQuery({
+          queryKey: permissionKey,
+          queryFn: async () => Promise.reject(failure),
+          staleTime: 0,
+        })
+      ).rejects.toBe(failure)
+      expect(client.getQueryData(accessKey)).toBe('revoked')
+      expect(client.getQueryCache().find({ queryKey: permissionKey, exact: true })).toBeUndefined()
+
+      render(renderOwners())
+      await waitFor(() =>
+        expect(screen.getByTestId(`${owners[0]}-access`).textContent).toBe('revoked')
+      )
+    } finally {
+      owners.forEach(deactivatePermissionQueryBinding)
+      client.clear()
+    }
+  })
+
+  it('preserves the replacement generation when a dormant old Query settles with 401', async () => {
+    const failure = await affordancesFailureMessage(401, {
+      code: 'unauthorized',
+      message: 'Session expired',
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const scope = ':user-a:team-a'
+    const oldGeneration = 41
+    const newGeneration = 42
+    const resourceId = 'dormant-old-generation'
+    const oldKey = desktopQueryKeys.gfsAffordances(scope, resourceId, 'main', oldGeneration)
+    const oldAccessKey = desktopQueryKeys.gfsAccessState(scope, oldGeneration)
+    const newAccessKey = desktopQueryKeys.gfsAccessState(scope, newGeneration)
+    const newChildrenKey = desktopQueryKeys.gfsChildren(scope, 'new-folder', 'main', newGeneration)
+    const owner = `generation-isolation-${Math.random()}`
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({ held: ['read'] })),
+        },
+      },
+    })
+    await client.fetchQuery({ queryKey: oldKey, queryFn: async () => ({ held: ['read'] }) })
+    const oldQuery = client.getQueryCache().find({ queryKey: oldKey, exact: true })
+    if (!oldQuery) throw new Error('Expected the real old-generation permission Query')
+    const trackedOldQuery = oldQuery
+    installPermissionErrorTracking(client)
+    client.setQueryData(oldAccessKey, 'active')
+
+    function Owner({ generation }: { generation: number }) {
+      const controller = useGfsBrowserController()
+      useLayoutEffect(() => {
+        commitPermissionQueryBinding(owner, `binding-${generation}`, [trackedOldQuery], {
+          authorityRoute: {
+            scope,
+            generation: oldGeneration,
+            isAuthorityFailure: error =>
+              isGfsSessionAuthorityFailure(
+                error instanceof Error ? error.message : String(error),
+                'operation'
+              ),
+            handleAuthorityFailure: error =>
+              controller.handleAuthorityFailure(
+                error instanceof Error ? error.message : String(error),
+                'operation',
+                scope,
+                oldGeneration
+              ),
+          },
+        })
+        return () => deactivatePermissionQueryBinding(owner)
+      }, [controller.handleAuthorityFailure, generation])
+      return <output data-testid="generation-access">{controller.accessState}</output>
+    }
+    const view = (generation: number) => (
+      <AuthContext.Provider value={{ ...authValue(userA), sessionGeneration: generation }}>
+        <QueryClientProvider client={client}>
+          <Owner generation={generation} />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+
+    try {
+      const mounted = render(view(oldGeneration))
+      await waitFor(() =>
+        expect(screen.getByTestId('generation-access').textContent).toBe('active')
+      )
+      mounted.unmount()
+      client.setQueryData(newAccessKey, 'active')
+      client.setQueryData(newChildrenKey, { pages: [{ items: [{ resourceId: 'new-file' }] }] })
+
+      await expect(
+        client.fetchQuery({ queryKey: oldKey, queryFn: async () => Promise.reject(failure) })
+      ).rejects.toBe(failure)
+
+      expect(client.getQueryData(oldAccessKey)).toBe('revoked')
+      expect(client.getQueryData(newAccessKey)).toBe('active')
+      expect(client.getQueryData(newChildrenKey)).toEqual({
+        pages: [{ items: [{ resourceId: 'new-file' }] }],
+      })
+    } finally {
+      deactivatePermissionQueryBinding(owner)
+      client.clear()
+    }
+  })
+
   it('keeps replacement authority intact after an old-generation producer 401, but revokes current authority', async () => {
     const failure = await affordancesFailureMessage(401, {
       code: 'unauthorized',
@@ -4383,4 +4774,221 @@ describe('denied-location cleanup ownership', () => {
     ).toBeUndefined()
     client.clear()
   })
+})
+
+describe('R76 stale mutation authority boundary', () => {
+  afterEach(() => {
+    cleanup()
+    lastHarnessQueryClient = null
+    onlineManager.setOnline(true)
+    focusManager.setFocused(undefined)
+    vi.restoreAllMocks()
+  })
+
+  const otherMutationCases: Array<
+    [string, (controller: ReturnType<typeof useGfsBrowserController>) => Promise<unknown>]
+  > = [
+    ['revokeGrant', controller => controller.revokeGrant('grant-1')],
+    ['revokeShare', controller => controller.revokeShare('share-1')],
+    ['createFolder', controller => controller.createFolder('root', 'New folder')],
+    ['createFile', controller => controller.createFile('root', 'new.txt', 'data')],
+    [
+      'createFileFromPath',
+      controller => controller.createFileFromPath('root', 'new.txt', '/tmp/new.txt'),
+    ],
+    ['replaceFile', controller => controller.replaceFile('root', 'data', 1)],
+    [
+      'replaceFileFromPath',
+      controller => controller.replaceFileFromPath('root', '/tmp/replacement.txt', 1),
+    ],
+    ['deleteResource', controller => controller.deleteResource('root', 1)],
+  ]
+
+  const assertStaleFailurePreservesCurrentSession = async (
+    invoke: (controller: ReturnType<typeof useGfsBrowserController>) => Promise<unknown>
+  ) => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    let rejectProducer!: (error: Error) => void
+    let markProducerStarted!: () => void
+    const producerStarted = new Promise<void>(resolveStarted => {
+      markProducerStarted = resolveStarted
+    })
+    const heldProducer = vi.fn(
+      () =>
+        new Promise<never>((_resolve, reject) => {
+          rejectProducer = reject
+          markProducerStarted()
+        })
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => root),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'write'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          revokeGrant: heldProducer,
+          revokeShare: heldProducer,
+          createFolder: heldProducer,
+          createFile: heldProducer,
+          createFileFromPath: heldProducer,
+          replaceFile: heldProducer,
+          replaceFileFromPath: heldProducer,
+          renameResource: heldProducer,
+          deleteResource: heldProducer,
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let publishGeneration!: (generation: number) => void
+    let controller!: ReturnType<typeof useGfsBrowserController>
+    function Owner() {
+      controller = useGfsBrowserController()
+      return (
+        <>
+          <output data-testid="r76-mutation-generation">{controller.sessionGeneration}</output>
+          <output data-testid="r76-mutation-access">{controller.accessState}</output>
+          <output data-testid="r76-mutation-crumbs">
+            {controller.crumbs.map(crumb => crumb.resourceId).join(',')}
+          </output>
+        </>
+      )
+    }
+    function SessionHarness() {
+      const [generation, setGeneration] = useState(1)
+      publishGeneration = setGeneration
+      return (
+        <AuthContext.Provider value={{ ...authValue(userA), sessionGeneration: generation }}>
+          <QueryClientProvider client={client}>
+            <Owner />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+    }
+
+    try {
+      render(<SessionHarness />)
+      await act(async () => {
+        await controller.openUri('gfs://main/root')
+      })
+      await waitFor(() =>
+        expect(controller.crumbs.map(crumb => crumb.resourceId)).toEqual(['root'])
+      )
+      const mutation = invoke(controller)
+      swallow(mutation)
+      await producerStarted
+      expect(heldProducer).toHaveBeenCalledTimes(1)
+
+      await act(async () => publishGeneration(2))
+      await waitFor(() => {
+        expect(screen.getByTestId('r76-mutation-generation').textContent).toBe('2')
+        expect(screen.getByTestId('r76-mutation-access').textContent).toBe('active')
+        expect(screen.getByTestId('r76-mutation-crumbs').textContent).toBe('root')
+      })
+
+      await act(async () => {
+        rejectProducer(new Error('401 Unauthorized: session rejected'))
+        await mutation.catch(() => undefined)
+      })
+      await waitFor(() => {
+        expect(screen.getByTestId('r76-mutation-access').textContent).toBe('active')
+        expect(screen.getByTestId('r76-mutation-crumbs').textContent).toBe('root')
+      })
+    } finally {
+      client.clear()
+    }
+  }
+
+  it('preserves current-generation navigation after a held prior-generation mutation fails', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    let rejectRename!: (error: Error) => void
+    const renameResource = vi.fn(
+      () =>
+        new Promise<never>((_resolve, reject) => {
+          rejectRename = reject
+        })
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => root),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'write'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          renameResource,
+        },
+      },
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let publishGeneration!: (generation: number) => void
+    let controller!: ReturnType<typeof useGfsBrowserController>
+    function Owner() {
+      controller = useGfsBrowserController()
+      return (
+        <>
+          <output data-testid="r76-generation">{controller.sessionGeneration}</output>
+          <output data-testid="r76-access">{controller.accessState}</output>
+          <output data-testid="r76-crumbs">
+            {controller.crumbs.map(crumb => crumb.resourceId).join(',')}
+          </output>
+          <button onClick={() => swallow(controller.openUri('gfs://main/root'))}>open root</button>
+          <button
+            onClick={() => swallow(controller.renameResource('root', 'Root renamed', root.version))}
+          >
+            rename root
+          </button>
+        </>
+      )
+    }
+    function SessionHarness() {
+      const [generation, setGeneration] = useState(1)
+      publishGeneration = setGeneration
+      return (
+        <AuthContext.Provider value={{ ...authValue(userA), sessionGeneration: generation }}>
+          <QueryClientProvider client={client}>
+            <Owner />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+    }
+
+    render(<SessionHarness />)
+    await act(async () => screen.getByRole('button', { name: 'open root' }).click())
+    await waitFor(() => expect(screen.getByTestId('r76-crumbs').textContent).toBe('root'))
+
+    screen.getByRole('button', { name: 'rename root' }).click()
+    await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(1))
+    await act(async () => publishGeneration(2))
+    await waitFor(() => expect(screen.getByTestId('r76-generation').textContent).toBe('2'))
+    expect(screen.getByTestId('r76-crumbs').textContent).toBe('root')
+
+    await act(async () => {
+      rejectRename(new Error('401 Unauthorized: session rejected'))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(screen.getByTestId('r76-access').textContent).toBe('active'))
+    expect(screen.getByTestId('r76-crumbs').textContent).toBe('root')
+    client.clear()
+  })
+
+  it.each(otherMutationCases)(
+    'preserves current-generation navigation after stale %s failure',
+    async (_name, invoke) => assertStaleFailurePreservesCurrentSession(invoke)
+  )
 })

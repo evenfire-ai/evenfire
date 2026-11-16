@@ -30,11 +30,13 @@ import {
   TextInput,
 } from '@components/Common'
 import {
+  commitPermissionErrorDescriptors,
   commitPermissionQueryBinding,
   deactivatePermissionQueryBinding,
+  getPermissionErrorsForOwner,
   installPermissionErrorTracking,
-  isPermissionErrorAcknowledged,
-  permissionErrorToken,
+  isPermissionRetryFailure,
+  isSilentPermissionRetryCancellation,
   preservePermissionQueryBinding,
   usePermissionErrorAcknowledgementSnapshot,
 } from '@components/Common/permissionErrorAcknowledgement'
@@ -86,6 +88,7 @@ import {
 import {
   describeGfsGrantError,
   describeGfsReadError,
+  isGfsSessionAuthorityFailure,
   isRateLimited,
   parseHttpStatus,
   parseRetryAfterSeconds,
@@ -570,14 +573,34 @@ export function FilesPage({
       !pendingGfsDeepLink &&
       (seedPendingRef.current || Boolean(pendingGfsUri))
     ) {
-      preservePermissionQueryBinding('files')
-      return () => deactivatePermissionQueryBinding('files')
+      preservePermissionQueryBinding('files', sessionScope, ctrl.sessionGeneration)
+      return
     }
     commitPermissionQueryBinding('files', permissionBindingKey, permissionBindingQueries, {
       complete: permissionBindingComplete,
+      sessionScope,
+      sessionGeneration: ctrl.sessionGeneration,
+      authorityRoute: isGfsSessionGeneration(ctrl.sessionGeneration)
+        ? {
+            scope: sessionScope,
+            generation: ctrl.sessionGeneration,
+            isAuthorityFailure: error =>
+              isGfsSessionAuthorityFailure(
+                error instanceof Error ? error.message : String(error),
+                'operation'
+              ),
+            handleAuthorityFailure: error =>
+              ctrl.handleAuthorityFailure(
+                error instanceof Error ? error.message : String(error),
+                'operation',
+                sessionScope,
+                ctrl.sessionGeneration
+              ),
+          }
+        : undefined,
     })
-    return () => deactivatePermissionQueryBinding('files')
   })
+  useLayoutEffect(() => () => deactivatePermissionQueryBinding('files'), [])
   const rowActionContextRef = useRef({
     sessionScope,
     sessionGeneration: ctrl.sessionGeneration,
@@ -889,7 +912,7 @@ export function FilesPage({
     resourceId: string,
     resourceName: string,
     drive: string,
-    onAdmitted?: () => void
+    retryContext?: import('@components/Common/PermissionErrorDialog/types').PermissionRetryContext
   ) => {
     const requestedScope = sessionScope
     const requestedGeneration = ctrl.sessionGeneration
@@ -903,9 +926,11 @@ export function FilesPage({
       drive,
       requestedGeneration
     )
+    let retryAdmitted = false
     try {
       assertGfsAuthorityRetryAllowed(queryClient, queryKey)
-      onAdmitted?.()
+      retryAdmitted = Boolean(retryContext) && retryContext?.onAdmitted() !== false
+      if (retryContext && !retryAdmitted) return null
       const authority = await queryClient.fetchQuery({
         queryKey,
         queryFn: () => window.clerum.gfs.affordances(resourceId, drive),
@@ -914,6 +939,7 @@ export function FilesPage({
       })
       if (
         !pageActiveRef.current ||
+        (retryContext && !retryContext.isOriginCurrent()) ||
         !isGfsSessionAuthorityCurrent(
           requestedScope,
           requestedGeneration,
@@ -926,6 +952,7 @@ export function FilesPage({
       return authority
     } catch (error) {
       if (
+        (retryContext && !retryContext.isOriginCurrent()) ||
         !isGfsSessionAuthorityCurrent(
           requestedScope,
           requestedGeneration,
@@ -934,10 +961,24 @@ export function FilesPage({
         )
       )
         return null
+      if (retryContext && retryAdmitted) return null
       if (!failClosedOnAuthorizationError(error, requestedScope, requestedGeneration)) {
         pushToast?.(describeGfsReadError(error).message, 'error')
       }
       return null
+    }
+  }
+  const bindRowPermissionRetry = (
+    resourceId: string,
+    resourceName: string,
+    drive: string,
+    _error: PermissionErrorItem
+  ) => {
+    return (
+      context?: import('@components/Common/PermissionErrorDialog/types').PermissionRetryContext
+    ) => {
+      const completion = fetchRowAuthority(resourceId, resourceName, drive, context)
+      return { admitted: true, completion }
     }
   }
   const requireFreshRowPermissions = async (
@@ -3173,17 +3214,8 @@ export function FilesPage({
         resource => resource.resourceId === selectedAffordanceResourceId
       )?.name
     : undefined
-  if (
-    ctrl.accessState === 'active' &&
-    !ctrl.authorityPending &&
-    selectedAffordanceResourceId &&
-    affordancesError &&
-    !ctrl.affordancesSessionAuthorityFailure &&
-    [429, 403, 404].includes(ctrl.affordancesHttpStatus ?? 0)
-  ) {
-    permissionErrorItems.push({
-      id: `current:${ctrl.sessionScope}:${ctrl.sessionGeneration}:${selectedAffordanceResourceId}:${ctrl.affordancesErrorUpdateCount}`,
-      queryIdentity: queryClient.getQueryCache().find({
+  const selectedAffordanceQuery = selectedAffordanceResourceId
+    ? queryClient.getQueryCache().find({
         queryKey: desktopQueryKeys.gfsAffordances(
           ctrl.sessionScope ?? 'anonymous',
           selectedAffordanceResourceId,
@@ -3191,50 +3223,89 @@ export function FilesPage({
           ctrl.sessionGeneration
         ),
         exact: true,
-      }),
+      })
+    : undefined
+  const selectedAffordanceRetryFailed = Boolean(
+    selectedAffordanceQuery &&
+    isPermissionRetryFailure({
+      id: 'current-retry-failure',
+      message: '',
+      queryIdentity: selectedAffordanceQuery,
+    })
+  )
+  if (
+    ctrl.accessState === 'active' &&
+    !ctrl.authorityPending &&
+    selectedAffordanceResourceId &&
+    affordancesError &&
+    !ctrl.affordancesSessionAuthorityFailure &&
+    ([429, 403, 404].includes(ctrl.affordancesHttpStatus ?? 0) || selectedAffordanceRetryFailed)
+  ) {
+    const currentPermissionError: PermissionErrorItem = {
+      id: `current:${ctrl.sessionScope}:${ctrl.sessionGeneration}:${selectedAffordanceResourceId}:${ctrl.affordancesErrorUpdateCount}`,
+      queryIdentity: selectedAffordanceQuery,
       errorUpdateCount: ctrl.affordancesErrorUpdateCount,
       message:
         ctrl.affordancesHttpStatus === 429
           ? 'Too many file requests. Wait before retrying permissions.'
           : `Could not verify permissions for ${selectedAffordanceResourceName ?? current?.name ?? 'this resource'}: access could not be confirmed.`,
-      retry:
-        ctrl.affordancesHttpStatus === 429
-          ? () => {
-              let admitted = false
-              const completion = fetchRowAuthority(
-                selectedAffordanceResourceId,
-                selectedAffordanceResourceName ?? current?.name ?? 'this resource',
-                GFS_DRIVE_MAIN,
-                () => {
-                  admitted = true
-                }
-              )
-              return { admitted, completion }
-            }
-          : undefined,
-    })
+    }
+    currentPermissionError.onRetryFailure = error => {
+      if (
+        !pageActiveRef.current ||
+        !isGfsSessionAuthorityCurrent(
+          ctrl.sessionScope,
+          ctrl.sessionGeneration,
+          moveWorkspaceRef.current.sessionScope,
+          moveWorkspaceRef.current.sessionGeneration
+        ) ||
+        failClosedOnAuthorizationError(error, ctrl.sessionScope, ctrl.sessionGeneration)
+      )
+        return 'stale'
+      pushToast?.(describeGfsReadError(error).message, 'error')
+      return 'presented'
+    }
+    if (ctrl.affordancesHttpStatus === 429) {
+      currentPermissionError.retry = bindRowPermissionRetry(
+        selectedAffordanceResourceId,
+        selectedAffordanceResourceName ?? current?.name ?? 'this resource',
+        GFS_DRIVE_MAIN,
+        currentPermissionError
+      )
+    }
+    permissionErrorItems.push(currentPermissionError)
   }
   for (const [resourceId, status] of Object.entries(ctrl.moveSourceParentStatusById ?? {})) {
     if (!status.error || status.isSessionAuthorityFailure || resourceId === current?.resourceId)
       continue
-    permissionErrorItems.push({
+    const moveSourcePermissionError: PermissionErrorItem = {
       id: `move:${ctrl.sessionScope}:${ctrl.sessionGeneration}:${resourceId}:${status.errorUpdateCount}`,
       queryIdentity: status.queryIdentity,
       errorUpdateCount: status.errorUpdateCount,
       message: `Could not verify Move permissions: ${status.error}`,
-      retry: () => {
-        let admitted = false
-        const completion = fetchRowAuthority(
-          resourceId,
-          'the source folder',
-          GFS_DRIVE_MAIN,
-          () => {
-            admitted = true
-          }
+      onRetryFailure: error => {
+        if (
+          !pageActiveRef.current ||
+          !isGfsSessionAuthorityCurrent(
+            ctrl.sessionScope,
+            ctrl.sessionGeneration,
+            moveWorkspaceRef.current.sessionScope,
+            moveWorkspaceRef.current.sessionGeneration
+          ) ||
+          failClosedOnAuthorizationError(error, ctrl.sessionScope, ctrl.sessionGeneration)
         )
-        return { admitted, completion }
+          return 'stale'
+        pushToast?.(describeGfsReadError(error).message, 'error')
+        return 'presented'
       },
-    })
+    }
+    moveSourcePermissionError.retry = bindRowPermissionRetry(
+      resourceId,
+      'the source folder',
+      GFS_DRIVE_MAIN,
+      moveSourcePermissionError
+    )
+    permissionErrorItems.push(moveSourcePermissionError)
   }
   const itemNames = new Map(items.map(item => [item.resourceId, item.name || item.drive]))
   const resourceNames = new Map(
@@ -3261,9 +3332,10 @@ export function FilesPage({
       message: `Could not verify permissions for ${itemNames.get(resourceId)}: ${status.message}`,
     })
   }
-  const visiblePermissionErrorItems = permissionErrorItems
-    .map(item => ({ ...item, token: permissionErrorToken(item) }))
-    .filter(item => !isPermissionErrorAcknowledged(item))
+  useLayoutEffect(() => {
+    commitPermissionErrorDescriptors('files', permissionBindingKey, permissionErrorItems)
+  })
+  const visiblePermissionErrorItems = getPermissionErrorsForOwner('files').errors
   const activeMovePermissionQueries = Object.entries(ctrl.moveSourceParentStatusById ?? {}).filter(
     ([, status]) => status.isFetching
   )
