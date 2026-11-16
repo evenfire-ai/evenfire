@@ -2232,7 +2232,8 @@ spec:
                     type: string
                   description: >-
                     Workload id to the digest of the denied Secret versions for
-                    which the workload was torn down.
+                    which the workload was torn down. An entry is removed before
+                    its workload is rendered again.
                 pluginWorkloadSdk:
                   type: object
                   description: >-

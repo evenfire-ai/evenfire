@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import { ObjectSerializer } from '@kubernetes/client-node/dist/gen/models/ObjectSerializer'
 import { loadAll } from 'js-yaml'
@@ -8303,6 +8303,9 @@ describe('WorkflowRecipeReconciler', () => {
       .mockRejectedValueOnce({ code: 404 })
       .mockRejectedValueOnce({ code: 404 })
       .mockRejectedValueOnce({ code: 404 })
+      // Issue #1349 (B-M1) — the live read that clears revocation entries before
+      // the render.
+      .mockRejectedValueOnce({ code: 404 })
 
     const recipe = makeRecipe({
       spec: {
@@ -12774,6 +12777,306 @@ describe('WorkflowRecipeReconciler', () => {
       await reconciler.reconcile(store.current())
 
       expect(deploymentDeletes('qa-api')).toBe(2)
+    })
+
+    /**
+     * Issue #1349 (B-M1) — Secrets by name: `foreign` ones are labeled for another
+     * recipe (denied), `owned` ones for test-recipe (accessible); others 404.
+     */
+    function classifySecrets(
+      foreign: Record<string, string>,
+      owned: Record<string, string> = {}
+    ): void {
+      mockCoreApi.readNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => {
+        const owner =
+          foreign[name] !== undefined
+            ? 'some-other-recipe'
+            : owned[name] !== undefined
+              ? 'test-recipe'
+              : undefined
+        if (owner === undefined) throw { code: 404 }
+        return {
+          metadata: {
+            resourceVersion: foreign[name] ?? owned[name],
+            labels: { 'clerum.io/owner-recipe': owner },
+          },
+          data: { token: 'eA==' },
+        }
+      })
+    }
+
+    /** Create/replace requests that render the Deployment of `workloadId`. */
+    function deploymentRenders(workloadId: string): number {
+      return [
+        ...mockAppsApi.createNamespacedDeployment.mock.calls,
+        ...mockAppsApi.replaceNamespacedDeployment.mock.calls,
+      ].filter(([arg]) => arg.body?.metadata?.labels?.['clerum.io/workload'] === workloadId).length
+    }
+
+    /** Status patches that remove revocation entries (a `null` member). */
+    function revocationRemovals(): Array<Record<string, string | null>> {
+      return revocationPatches().filter(entry =>
+        Object.values(entry).some(value => value === null)
+      ) as Array<Record<string, string | null>>
+    }
+
+    /**
+     * Reads the stored revocation entry of `workloadId` inside the first request
+     * of `mocks` that `matches` accepts, i.e. at the moment that write is sent.
+     * The wrapped implementations are restored when the test ends.
+     */
+    function entryAtFirstWrite(
+      store: { current: () => WorkflowRecipeCRD },
+      workloadId: string,
+      mocks: Array<ReturnType<typeof vi.fn>>,
+      matches: (arg: Record<string, unknown>) => boolean
+    ): () => { entry: string | undefined } | undefined {
+      let captured: { entry: string | undefined } | undefined
+      for (const mock of mocks) {
+        const original = mock.getMockImplementation()
+        expect(original).toBeDefined()
+        mock.mockImplementation(async (arg: Record<string, unknown>, ...rest: unknown[]) => {
+          if (captured === undefined && matches(arg)) {
+            captured = { entry: store.current().status?.secretOwnershipRevocations?.[workloadId] }
+          }
+          return original!(arg, ...rest)
+        })
+        onTestFinished(() => {
+          mock.mockImplementation(original!)
+        })
+      }
+      return () => captured
+    }
+
+    const rendersWorkload = (workloadId: string) => (arg: Record<string, unknown>) =>
+      (arg.body as { metadata?: { labels?: Record<string, string> } } | undefined)?.metadata
+        ?.labels?.['clerum.io/workload'] === workloadId
+
+    const writesMcpServer = (arg: Record<string, unknown>) => arg.plural === 'mcpservers'
+
+    /** Seeds a stored revocation entry, as an earlier denial pass would have. */
+    function withRevocations(
+      recipe: WorkflowRecipeCRD,
+      entries: Record<string, string>
+    ): WorkflowRecipeCRD {
+      recipe.status = {
+        ...(recipe.status ?? {}),
+        secretOwnershipRevocations: entries,
+      } as WorkflowRecipeCRD['status']
+      return recipe
+    }
+
+    const STORED_DIGEST = `sha256:${'a'.repeat(64)}`
+
+    for (const path of ['non-workflow', 'workflow'] as const) {
+      const recipeFor = (workloads: WorkloadDef[]) =>
+        path === 'workflow'
+          ? runChild(workloads, { phase: 'candidate' })
+          : makeRecipe({ spec: { workloads } })
+
+      it(`T-BM1-${path === 'workflow' ? '2' : '1'} the ${path} deploy path removes a revocation entry before it renders the workload again (spec A→B→A)`, async () => {
+        const inner = path === 'workflow' ? stubInner() : undefined
+        classifySecrets({ 'qa-creds': '7' }, { 'own-creds': '9' })
+        const store = installRecipeStore(recipeFor([deniedDeployment('qa-api', 'qa-creds')]))
+        const entryAtRender = entryAtFirstWrite(
+          store,
+          'qa-api',
+          [mockAppsApi.createNamespacedDeployment, mockAppsApi.replaceNamespacedDeployment],
+          rendersWorkload('qa-api')
+        )
+
+        // Pass 1: denied → torn down and recorded.
+        await reconciler.reconcile(store.current())
+
+        expect(deploymentDeletes('qa-api')).toBe(1)
+        const firstDigest = store.current().status?.secretOwnershipRevocations?.['qa-api']
+        expect(firstDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
+
+        // Pass 2: the spec points the workload at its own Secret → rendered.
+        const pass2 = store.current()
+        pass2.spec.workloads![0] = deniedDeployment('qa-api', 'own-creds')
+        await reconciler.reconcile(pass2)
+
+        // Witness: pass 2 rendered qa-api.
+        expect(deploymentRenders('qa-api')).toBeGreaterThanOrEqual(1)
+        expect(entryAtRender()).toEqual({ entry: undefined })
+        expect(revocationRemovals()).toEqual([{ 'qa-api': null }])
+        expect(store.current().status?.secretOwnershipRevocations).not.toHaveProperty('qa-api')
+
+        // Pass 3: back to the foreign Secret at the same resourceVersion.
+        const pass3 = store.current()
+        pass3.spec.workloads![0] = deniedDeployment('qa-api', 'qa-creds')
+        const third = await reconciler.reconcile(pass3)
+
+        expect(deploymentDeletes('qa-api')).toBe(2)
+        expect(store.current().status?.secretOwnershipRevocations?.['qa-api']).toBe(firstDigest)
+        expect(deniedCondition(third)).toBe('True')
+        if (inner) expect(inner.reconcile).toHaveBeenCalledTimes(3)
+      })
+
+      it(`T-BM1-3 the ${path} deploy path removes a transport workload's revocation entry before its McpServer is written`, async () => {
+        if (path === 'workflow') stubInner()
+        const transportWorkload = {
+          ...deniedDeployment('mcp-api', 'mcp-creds'),
+          port: 3000,
+          transport: { type: 'streamableHttp', path: '/mcp' },
+        } as WorkloadDef
+        classifySecrets({ 'mcp-creds': '7' })
+        const store = installRecipeStore(recipeFor([transportWorkload]))
+
+        // Pass 1: denied → revoked and recorded.
+        await reconciler.reconcile(store.current())
+        expect(store.current().status?.secretOwnershipRevocations?.['mcp-api']).toMatch(/^sha256:/)
+
+        // Pass 2: the Secret is now owned by the recipe → delegated again.
+        classifySecrets({}, { 'mcp-creds': '8' })
+        mockCustomApi.createNamespacedCustomObject.mockClear()
+        mockCustomApi.replaceNamespacedCustomObject.mockClear()
+        const entryAtMcpServerWrite = entryAtFirstWrite(
+          store,
+          'mcp-api',
+          [mockCustomApi.createNamespacedCustomObject, mockCustomApi.replaceNamespacedCustomObject],
+          writesMcpServer
+        )
+
+        await reconciler.reconcile(store.current())
+
+        // Witness: the McpServer write happened.
+        expect(entryAtMcpServerWrite()).toEqual({ entry: undefined })
+        expect(store.current().status?.secretOwnershipRevocations).not.toHaveProperty('mcp-api')
+      })
+
+      it(`T-BM1-4 the ${path} deploy path renders nothing and requeues when the entry cannot be removed`, async () => {
+        const inner = path === 'workflow' ? stubInner() : undefined
+        classifySecrets({}, { 'own-creds': '9' })
+        const store = installRecipeStore(
+          withRevocations(recipeFor([deniedDeployment('qa-api', 'own-creds')]), {
+            'qa-api': STORED_DIGEST,
+          })
+        )
+        const storePatch = mockCustomApi.patchNamespacedCustomObjectStatus.getMockImplementation()!
+        let rejectedRemovals = 0
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(
+          async (arg: { body?: { status?: { secretOwnershipRevocations?: object } } }) => {
+            const entries = arg.body?.status?.secretOwnershipRevocations
+            if (
+              rejectedRemovals === 0 &&
+              entries &&
+              Object.values(entries).some(value => value === null)
+            ) {
+              rejectedRemovals += 1
+              throw { code: 500, message: 'apiserver boom' }
+            }
+            return storePatch(arg)
+          }
+        )
+
+        const failed = await reconciler.reconcile(store.current())
+
+        // Witness: the removal was attempted once and the pass classified the Secret.
+        expect(rejectedRemovals).toBe(1)
+        expect(mockCoreApi.readNamespacedSecret).toHaveBeenCalled()
+        expect(failed.phase).toBe('degraded')
+        expect(failed.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(deploymentRenders('qa-api')).toBe(0)
+        expect(store.current().status?.secretOwnershipRevocations?.['qa-api']).toBe(STORED_DIGEST)
+        if (inner) expect(inner.reconcile).not.toHaveBeenCalled()
+
+        await reconciler.reconcile(store.current())
+
+        expect(store.current().status?.secretOwnershipRevocations).not.toHaveProperty('qa-api')
+        expect(deploymentRenders('qa-api')).toBeGreaterThanOrEqual(1)
+      })
+    }
+
+    it('T-BM1-5 the entry is removed when only the live object holds it', async () => {
+      classifySecrets({}, { 'own-creds': '9' })
+      const store = installRecipeStore(
+        withRevocations(
+          makeRecipe({ spec: { workloads: [deniedDeployment('qa-api', 'qa-creds')] } }),
+          {
+            'qa-api': STORED_DIGEST,
+          }
+        )
+      )
+      // The object the pass runs on was read before the entry was stored.
+      const stale = store.current()
+      delete stale.status!.secretOwnershipRevocations
+      stale.spec.workloads![0] = deniedDeployment('qa-api', 'own-creds')
+
+      await reconciler.reconcile(stale)
+
+      // Witness: the workload was rendered.
+      expect(deploymentRenders('qa-api')).toBeGreaterThanOrEqual(1)
+      expect(store.current().status?.secretOwnershipRevocations).not.toHaveProperty('qa-api')
+    })
+
+    it('T-BM1-6 a pass with no stale entry reads the live recipe once more and writes no revocation record', async () => {
+      classifySecrets({}, { 'own-creds': '9' })
+      const store = installRecipeStore(
+        makeRecipe({ spec: { workloads: [deniedDeployment('qa-api', 'own-creds')] } })
+      )
+      const recipeGets = () =>
+        mockCustomApi.getNamespacedCustomObject.mock.calls.filter(
+          ([arg]) => arg.plural === 'workflowrecipes' && arg.name === 'test-recipe'
+        ).length
+      // Pass 1 creates the Deployment; pass 2 reads it back and finds it current.
+      const deploymentReads = () =>
+        mockAppsApi.readNamespacedDeployment.mock.calls.filter(([arg]) =>
+          String(arg.name).includes('-qa-api-')
+        ).length
+      // Before the clear existed (c5efc1e91) this fixture sent two recipe GETs per
+      // pass; the clear adds its one live read.
+      const recipeGetsPerPassBeforeTheClear = 2
+
+      for (const pass of [1, 2]) {
+        const getsBefore = recipeGets()
+        const readsBefore = deploymentReads()
+
+        await reconciler.reconcile(store.current())
+
+        // Witness: the pass reached the workload's render and made the clear's
+        // live read.
+        expect(deploymentReads(), `pass ${pass}`).toBeGreaterThan(readsBefore)
+        expect(recipeGets() - getsBefore, `pass ${pass}`).toBe(recipeGetsPerPassBeforeTheClear + 1)
+      }
+      expect(deploymentRenders('qa-api')).toBe(1)
+      expect(revocationPatches()).toHaveLength(0)
+    })
+
+    it('T-BM1-7 a denied sibling keeps its entry while the re-rendered workload loses its own', async () => {
+      classifySecrets({ 'a-creds': '7', 'b-creds': '5' })
+      const store = installRecipeStore(
+        makeRecipe({
+          spec: {
+            workloads: [deniedDeployment('api-a', 'a-creds'), deniedDeployment('api-b', 'b-creds')],
+          },
+        })
+      )
+
+      await reconciler.reconcile(store.current())
+
+      expect(deploymentDeletes('api-a')).toBe(1)
+      expect(deploymentDeletes('api-b')).toBe(1)
+      const entryA = store.current().status?.secretOwnershipRevocations?.['api-a']
+      expect(entryA).toMatch(/^sha256:/)
+      expect(store.current().status?.secretOwnershipRevocations?.['api-b']).toMatch(/^sha256:/)
+
+      // b-creds now belongs to the recipe; a-creds is still foreign at the same version.
+      classifySecrets({ 'a-creds': '7' }, { 'b-creds': '6' })
+      const secretReads = mockCoreApi.readNamespacedSecret.mock.calls.length
+
+      await reconciler.reconcile(store.current())
+
+      // Witness: pass 2 classified the Secrets and rendered api-b.
+      expect(mockCoreApi.readNamespacedSecret.mock.calls.length).toBeGreaterThan(secretReads)
+      expect(deploymentRenders('api-b')).toBeGreaterThanOrEqual(1)
+      expect(store.current().status?.secretOwnershipRevocations?.['api-a']).toBe(entryA)
+      expect(store.current().status?.secretOwnershipRevocations).not.toHaveProperty('api-b')
+
+      await reconciler.reconcile(store.current())
+
+      expect(deploymentDeletes('api-a')).toBe(1)
     })
   })
 

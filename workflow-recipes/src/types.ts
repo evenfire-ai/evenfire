@@ -793,7 +793,10 @@ export interface WorkflowRecipeStatus {
    * names a Secret remained deployed with it.
    */
   terminalRunTeardown?: { completedAt: string; noSecretBearingWorkloads?: boolean }
-  /** Workload id → digest of the denied Secret versions the workload was torn down for. */
+  /**
+   * Workload id → digest of the denied Secret versions the workload was torn down
+   * for. An entry is removed before its workload is rendered again.
+   */
   secretOwnershipRevocations?: Record<string, string>
 
   // ─── Plugin Workload SDK ────────────────────────────────────────────

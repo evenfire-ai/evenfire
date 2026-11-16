@@ -3112,6 +3112,7 @@ export class WorkflowRecipeReconciler {
             `(transient read error) — requeuing before delegating or rendering workloads`
         )
       }
+      await this.clearSecretRevocationsBeforeRender(recipe, secretOwnership.deniedWorkloadIds)
 
       // Step 7b: Pre-deploy McpServer CRDs for network isolation (Option C handshake)
       // Creates McpServer CRDs with clerum.io/pre-deploy annotation BEFORE workload
@@ -4081,6 +4082,7 @@ export class WorkflowRecipeReconciler {
           `(transient read error) — requeuing before delegating or rendering workloads`
       )
     }
+    await this.clearSecretRevocationsBeforeRender(recipe, secretOwnership.deniedWorkloadIds)
 
     // Pre-deploy McpServer CRDs for network isolation.
     // MCP batch targets `this.config.namespace` (= mcp-server), not the
@@ -4615,20 +4617,8 @@ export class WorkflowRecipeReconciler {
     recipe: WorkflowRecipeCRD
   ): Promise<void> {
     if (!recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()) return
-    let live: WorkflowRecipeCRD
-    try {
-      live = (await this.customApi.getNamespacedCustomObject({
-        group: CRD_GROUP,
-        version: CRD_VERSION,
-        namespace: recipe.metadata.namespace,
-        plural: WORKFLOWRECIPE_PLURAL,
-        name: recipe.metadata.name,
-      })) as WorkflowRecipeCRD
-    } catch (error) {
-      if (getErrorCode(error) === 404) return
-      throw error
-    }
-    if (live.metadata?.uid !== recipe.metadata.uid || live.metadata?.deletionTimestamp) return
+    const live = await this.readLiveRecipeForRecordClear(recipe)
+    if (!live) return
     if (!live.status?.terminalRunTeardown) return
 
     await this.customApi.patchNamespacedCustomObjectStatus(
@@ -4647,6 +4637,88 @@ export class WorkflowRecipeReconciler {
       'Cleared terminal run teardown record before re-deploy',
       { name: recipe.metadata.name }
     )
+  }
+
+  /**
+   * Issue #1349 — remove the Secret revocation entry of every workload this pass
+   * is about to render (each workload it did not deny), before the first render
+   * or McpServer delegation. An entry means "torn down for this denial and not
+   * rendered since"; a render ends that, so a later denial of the same Secret
+   * version runs the teardown again instead of being skipped by the gate.
+   *
+   * Reads the LIVE object: the pass can run on an object whose in-memory status
+   * lacks an entry that is stored. A failed read or patch ends the pass with a
+   * requeue before anything is rendered. The in-memory entries of every rendered
+   * id are removed too, so a stale in-memory entry cannot outlive the pass.
+   */
+  private async clearSecretRevocationsBeforeRender(
+    recipe: WorkflowRecipeCRD,
+    deniedWorkloadIds: ReadonlySet<string>
+  ): Promise<void> {
+    const rendered = (recipe.spec.workloads ?? [])
+      .map(workload => workload.id)
+      .filter(id => !deniedWorkloadIds.has(id))
+    if (rendered.length === 0) return
+    try {
+      const live = await this.readLiveRecipeForRecordClear(recipe)
+      if (!live) return
+      const stored = live.status?.secretOwnershipRevocations ?? {}
+      const stale = rendered.filter(id => stored[id] !== undefined)
+      if (stale.length > 0) {
+        await this.customApi.patchNamespacedCustomObjectStatus(
+          {
+            group: CRD_GROUP,
+            version: CRD_VERSION,
+            namespace: recipe.metadata.namespace,
+            plural: WORKFLOWRECIPE_PLURAL,
+            name: recipe.metadata.name,
+            body: {
+              status: {
+                secretOwnershipRevocations: Object.fromEntries(stale.map(id => [id, null])),
+              },
+            },
+          },
+          { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+        )
+        createLogger('wrc', recipe.metadata.name).info(
+          'Removed Secret revocation records before re-render',
+          { name: recipe.metadata.name, value2: stale.join(', ') }
+        )
+      }
+    } catch (error) {
+      throw new RetryableReconcileError(
+        `Secret revocation record of WorkflowRecipe "${recipe.metadata.name}" could not be ` +
+          'cleared — requeuing before delegating or rendering workloads',
+        { cause: error }
+      )
+    }
+    const inMemory = recipe.status?.secretOwnershipRevocations
+    if (inMemory) for (const id of rendered) delete inMemory[id]
+  }
+
+  /**
+   * Issue #1349 — the live WorkflowRecipe for a status record clear, or null when
+   * it is gone (404), was replaced (another uid) or is being deleted. Any other
+   * read error propagates.
+   */
+  private async readLiveRecipeForRecordClear(
+    recipe: WorkflowRecipeCRD
+  ): Promise<WorkflowRecipeCRD | null> {
+    let live: WorkflowRecipeCRD
+    try {
+      live = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+      })) as WorkflowRecipeCRD
+    } catch (error) {
+      if (getErrorCode(error) === 404) return null
+      throw error
+    }
+    if (live.metadata?.uid !== recipe.metadata.uid || live.metadata?.deletionTimestamp) return null
+    return live
   }
 
   /**
@@ -7368,9 +7440,11 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
-   * Issue #1349 — the revocation gate of one denied workload. Entries are never
-   * removed: a stale entry is inert because a later denial of a re-labeled Secret
-   * carries another resourceVersion, hence another digest.
+   * Issue #1349 — the revocation gate of one denied workload. An entry is removed
+   * before its workload is rendered again ({@link clearSecretRevocationsBeforeRender}),
+   * so a stored entry means the workload was torn down for that denial and not
+   * rendered since. A later denial of a re-labeled Secret carries another
+   * resourceVersion, hence another digest.
    */
   private secretRevocationFor(
     recipe: WorkflowRecipeCRD,
