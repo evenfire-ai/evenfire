@@ -85,7 +85,7 @@ The mcp-server SecretInformer resumes from the last resourceVersion it saw, and 
 
 A kept verdict has no maximum age while reads keep failing.
 
-A Secret ADDED event that arrives while the McpServer inventory is not authoritative, or whose queued reconcile is dropped because inventory authority moved (`secret-reconcile-dropped`), is held and replayed after the recovery decision. A MODIFIED or DELETED event recorded its evidence before it was queued, so the recovery that restores authority converges it.
+A Secret ADDED event that arrives while the McpServer inventory is not authoritative is held and replayed after the recovery decision. A queued ADDED reconcile that is dropped because inventory authority moved (`secret-reconcile-dropped`) is dispatched again for its own server only: held and replayed the same way while authority is still missing, otherwise queued at once under the new authority. A MODIFIED or DELETED event recorded its evidence before it was queued, so the recovery that restores authority converges it.
 
 Watch establishment has no deadline. A Deployment watch that never establishes delays a correction to the next re-read (every 60 s); a Secret watch that never establishes stops Secret events for its namespace.
 

@@ -581,9 +581,11 @@ filter or report on the signals they name.
 - **Structured HCC watcher and dev-mode configuration logs.** HCC's watcher and
   dev-mode configuration lines are now structured JSON lines like the rest of
   HCC's log. The fixed part of the old text is the `msg` field. An error that
-  used to follow that text is now the `err` field (`err.name` and
-  `err.message`, no stack); a Kubernetes API status code and response body are
-  in `err.message`, not in `msg`. Dev-mode configuration lines log `hasUrl`
+  used to follow that text is now the `err` field (`err.name`, `err.message`,
+  the stack frame lines as `err.stack`, a string or numeric `err.code`, and an
+  Error cause as `err.cause`; the response `body` and `headers` of a Kubernetes
+  API error are not copied as fields); a Kubernetes API status code and
+  response body are in `err.message`, not in `msg`. Dev-mode configuration lines log `hasUrl`
   instead of the URL and `errorName` instead of a parse error's message. Update
   log filters anchored on the start or end of those lines, and filters that
   matched the text and the error as one string.
