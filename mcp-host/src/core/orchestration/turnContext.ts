@@ -221,7 +221,7 @@ export type GfsPreparationFailure =
   | 'missing'
   /** The Host workspace disk has no room for the download. */
   | 'disk_full'
-  /** The Host's cache of downloaded files has no room for the download. */
+  /** The Host's storage for downloaded and kept files has no room for the download. */
   | 'quota_exceeded'
   /** The Host volume could not be measured, so no download was admitted. */
   | 'volume_unmeasurable'
