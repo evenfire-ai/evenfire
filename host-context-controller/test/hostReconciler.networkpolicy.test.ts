@@ -382,6 +382,115 @@ describe('HostReconciler.reconcile — NP wiring', () => {
     }
   })
 
+  function degradedPublications(setStatus: { mock: { calls: unknown[][] } }): unknown[][] {
+    return setStatus.mock.calls.filter(([, status]) =>
+      /degraded/i.test(String((status as { message?: string } | undefined)?.message ?? ''))
+    )
+  }
+
+  it('T6.4 #1495 a supersession that reverses itself (authority lost, then regained) withdraws the reconcile', async () => {
+    const host = { ...HOST, uid: 'chatllm-uid', generation: 5 }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    // Authority is lost for exactly one read, the first one after the first
+    // policy ran, and is back at the captured revisions afterwards.
+    let loseAuthorityOnNextRead = false
+    let authorityLostReads = 0
+    reconciler.setHostMutationAuthority(() => {
+      if (loseAuthorityOnNextRead) {
+        loseAuthorityOnNextRead = false
+        authorityLostReads += 1
+        return { known: false, hostRevision: 7, contextRevision: 11 }
+      }
+      return { known: true, hostRevision: 7, contextRevision: 11 }
+    })
+    const ingress = vi
+      .spyOn(reconciler as any, 'ensureMcpHostIngressNetworkPolicy')
+      .mockImplementation(async () => {
+        loseAuthorityOnNextRead = true
+        return 'up_to_date'
+      })
+    const lastPolicy = vi
+      .spyOn(reconciler as any, 'ensureWorkflowApprovalReaderHostEgressNetworkPolicy')
+      .mockResolvedValue('up_to_date')
+    const setStatus = vi.spyOn(reconciler as any, 'setStatus')
+    const error = vi.spyOn(HostContextLogger.prototype, 'error')
+    try {
+      const supersededBefore = await supersededDurationCount()
+
+      await expect(reconciler.reconcile(host)).rejects.toMatchObject({
+        name: 'HostInventoryAuthorityUnavailableError',
+      })
+
+      // Witnesses: the first policy step ran, and the one authority read that
+      // reported the loss happened after it.
+      expect(ingress).toHaveBeenCalledTimes(1)
+      expect(authorityLostReads).toBe(1)
+      expect(lastPolicy).not.toHaveBeenCalled()
+      expect(error).not.toHaveBeenCalledWith(
+        'Failed to ensure Host NetworkPolicy',
+        expect.anything()
+      )
+      expect(await supersededDurationCount()).toBe(supersededBefore + 1)
+      expect(degradedPublications(setStatus)).toHaveLength(0)
+    } finally {
+      error.mockRestore()
+    }
+  })
+
+  it('T6.4 #1495 a dependency back at its captured value before the next policy still withdraws the reconcile', async () => {
+    const host = { ...HOST, uid: 'chatllm-uid', generation: 5 }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostMutationAuthority(() => ({
+      known: true,
+      hostRevision: 7,
+      contextRevision: 11,
+    }))
+    // The dependency differs for exactly one read, the first one after the
+    // first policy ran, and is back at its captured value afterwards.
+    let changeDependencyOnNextRead = false
+    let changedDependencyReads = 0
+    reconciler.setResolveHostMutationDependencies(() => {
+      if (changeDependencyOnNextRead) {
+        changeDependencyOnNextRead = false
+        changedDependencyReads += 1
+        return [{ name: 'context-a', spec: { revision: 2 } }]
+      }
+      return [{ name: 'context-a', spec: { revision: 1 } }]
+    })
+    const ingress = vi
+      .spyOn(reconciler as any, 'ensureMcpHostIngressNetworkPolicy')
+      .mockImplementation(async () => {
+        changeDependencyOnNextRead = true
+        return 'up_to_date'
+      })
+    const lastPolicy = vi
+      .spyOn(reconciler as any, 'ensureWorkflowApprovalReaderHostEgressNetworkPolicy')
+      .mockResolvedValue('up_to_date')
+    const setStatus = vi.spyOn(reconciler as any, 'setStatus')
+    const error = vi.spyOn(HostContextLogger.prototype, 'error')
+    try {
+      const supersededBefore = await supersededDurationCount()
+
+      await expect(reconciler.reconcile(host)).rejects.toMatchObject({
+        name: 'HostMutationDependencyChangedError',
+      })
+
+      // Witnesses: the first policy step ran, and the one dependency read that
+      // differed happened after it.
+      expect(ingress).toHaveBeenCalledTimes(1)
+      expect(changedDependencyReads).toBe(1)
+      expect(lastPolicy).not.toHaveBeenCalled()
+      expect(error).not.toHaveBeenCalledWith(
+        'Failed to ensure Host NetworkPolicy',
+        expect.anything()
+      )
+      expect(await supersededDurationCount()).toBe(supersededBefore + 1)
+      expect(degradedPublications(setStatus)).toHaveLength(0)
+    } finally {
+      error.mockRestore()
+    }
+  })
+
   it('surfaces a NetworkPolicy apply result of missing as degraded', async () => {
     vi.spyOn(reconciler as any, 'ensureMcpHostIngressNetworkPolicy').mockResolvedValue('missing')
     vi.spyOn(reconciler as any, 'ensureChannelReaderEgressNetworkPolicy').mockResolvedValue(
