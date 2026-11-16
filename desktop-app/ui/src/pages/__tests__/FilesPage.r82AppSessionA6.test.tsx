@@ -586,7 +586,7 @@ describe('R82 real app session lifecycle A6', () => {
   })
 
   it('preserves a current-session recovery dialog through a pending same-session seed', async () => {
-    const { handle } = installAppControllerClerum()
+    installAppControllerClerum()
     let releaseSeed!: (result: Promise<Awaited<ReturnType<typeof resolveResource>>>) => void
     const seedPending = new Promise<Awaited<ReturnType<typeof resolveResource>>>(resolve => {
       releaseSeed = resolve

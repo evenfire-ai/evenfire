@@ -962,7 +962,6 @@ describe('R59 real QueryClient handoff and failure visibility', () => {
       })
 
       const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
-      const session = 'test-environment:user-1:team-1'
       let folderKey: readonly unknown[] = []
       let query:
         | {
