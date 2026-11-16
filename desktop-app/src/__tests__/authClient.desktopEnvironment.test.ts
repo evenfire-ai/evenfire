@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createServer } from 'node:http'
 import { AuthClient } from '../authClient.js'
 
 afterEach(() => {
@@ -47,5 +48,33 @@ describe('Desktop environment discovery request URL', () => {
     await expect(
       new AuthClient().getDesktopEnvironmentForEndpoint('https://rest.customer.example.test')
     ).rejects.toThrow('Desktop environment discovery response exceeded the size limit')
+  })
+
+  it('rejects a redirect from the actual discovery endpoint', async () => {
+    const server = createServer((request, response) => {
+      if (request.url === '/api/v1/desktop/environment') {
+        response.writeHead(302, { location: '/redirected-environment' })
+        response.end()
+        return
+      }
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end('{}')
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('loopback server did not bind')
+
+    try {
+      await expect(
+        new AuthClient().getDesktopEnvironmentForEndpoint(`http://127.0.0.1:${address.port}`)
+      ).rejects.toThrow()
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close(error => (error ? reject(error) : resolve()))
+      )
+    }
   })
 })

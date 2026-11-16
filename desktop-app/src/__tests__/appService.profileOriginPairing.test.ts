@@ -537,4 +537,39 @@ describe('AppService active Profile origin pairing', () => {
     await expect(service.createSandboxUiDeepLink()).rejects.toThrow()
     await expect(service.createGfsResourceDeepLink(gfsUri)).rejects.toThrow()
   })
+
+  it('rejects a real-client discovery response bound to a different URL', async () => {
+    const rest = 'https://api.binding.example.test'
+    const harness = await createNativeCommitTestHarness({ restA: rest })
+    const service = harness.service as LinkService
+    await useRealAppServiceLocation(service)
+    authenticate(service, 'response-url-mismatch')
+
+    const response = new Response(
+      JSON.stringify({
+        externalRestApiBaseUrl: rest,
+        rpcProxyBaseUrl: 'https://rpc.binding.example.test',
+        profileUiBaseUrl: 'https://profile.binding.example.test',
+        appName: 'Binding test',
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    )
+    Object.defineProperty(response, 'url', {
+      value: 'https://other-rest.example.test/api/v1/desktop/environment',
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response)
+    const { shell } = await import('electron')
+
+    await expect(service.openForgotPassword('user@example.test')).rejects.toThrow(
+      'desktop_environment_response_url_mismatch'
+    )
+    expect(fetchMock).toHaveBeenCalledWith(
+      desktopEnvironmentDiscoveryUrl(rest),
+      expect.objectContaining({ redirect: 'error' })
+    )
+    expect(shell.openExternal).not.toHaveBeenCalled()
+    expect(harness.runtimeConfig.getActiveRuntimeConfigProfileIdentity()).not.toHaveProperty(
+      'profileUiBaseUrl'
+    )
+  })
 })
