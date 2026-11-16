@@ -14,10 +14,14 @@ export class DesktopFilesNav {
 
   async openMyHome(): Promise<void> {
     await this.ensureExplorerOpen()
-    // Only the ready home is a section listing its folders (aria-expanded
-    // true); like "Shared with me", one click on its label opens it in Files.
+    // Only the ready home has a chevron (it starts collapsed and lists its
+    // folders on first expand); a home that is not ready is a disabled entry
+    // without one. Like "Shared with me", one click on the label opens the
+    // home in Files and leaves the sidebar expansion as it is.
     const home = this.page.getByRole('treeitem', { name: 'My home' })
-    await expect(home).toHaveAttribute('aria-expanded', 'true', { timeout: 150_000 })
+    await expect(home.getByRole('button', { name: /^(Expand|Collapse) My home$/ })).toBeVisible({
+      timeout: 150_000,
+    })
     await home.getByRole('button', { name: 'My home', exact: true }).click()
     await expect(this.page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
     await expect(
@@ -46,10 +50,12 @@ export class DesktopFilesNav {
           .getByText('Your home folder needs attention from an administrator')
       ).toBeVisible()
     } else if (state === 'ready') {
-      await expect(this.page.getByRole('treeitem', { name: 'My home' })).toHaveAttribute(
-        'aria-expanded',
-        'true'
-      )
+      // The ready home is the one entry with a chevron (collapsed at first).
+      await expect(
+        this.page
+          .getByRole('treeitem', { name: 'My home' })
+          .getByRole('button', { name: /^(Expand|Collapse) My home$/ })
+      ).toBeVisible()
     } else {
       await expect(
         this.page.getByRole('tree', { name: 'File destinations' }).getByRole('alert')
