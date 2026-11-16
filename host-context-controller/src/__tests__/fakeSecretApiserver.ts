@@ -29,6 +29,16 @@ type Change = {
   name: string
 } & StoredSecret
 
+/**
+ * client-node 1.4.0 attaches its line listeners and returns; the replayed
+ * events arrive from the response stream after watch() resolved. Deliver the
+ * replay after the caller's await resumed, never inside watch().
+ */
+async function afterWatchResolves(deliver: () => void): Promise<void> {
+  for (let hop = 0; hop < 3; hop++) await Promise.resolve()
+  deliver()
+}
+
 export function fakeSecretApiserver(namespace: string, initialNames: string[]) {
   let revision = 100
   let uidSequence = 0
@@ -74,7 +84,10 @@ export function fakeSecretApiserver(namespace: string, initialNames: string[]) {
     watchCalls.push(call)
     const from = queryParams.resourceVersion
     if (from === undefined) {
-      for (const [name, stored] of objects) cb('ADDED', secretObject(name, stored))
+      const replay = [...objects].map(([name, stored]) => secretObject(name, stored))
+      void afterWatchResolves(() => {
+        for (const object of replay) cb('ADDED', object)
+      })
     } else if (expireNextResume) {
       expireNextResume = false
       // client-node 1.4.0: a non-200 watch response calls done(err) with
@@ -82,11 +95,12 @@ export function fakeSecretApiserver(namespace: string, initialNames: string[]) {
       done(Object.assign(new Error('Gone'), { statusCode: 410 }))
       return { abort } as unknown as AbortController
     } else {
-      for (const change of changes) {
-        if (change.revision > Number(from)) {
-          cb(change.type, secretObject(change.name, change))
-        }
-      }
+      const replay = changes
+        .filter(change => change.revision > Number(from))
+        .map(change => [change.type, secretObject(change.name, change)] as const)
+      void afterWatchResolves(() => {
+        for (const [type, object] of replay) cb(type, object)
+      })
     }
     live = call
     return { abort } as unknown as AbortController

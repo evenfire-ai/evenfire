@@ -25,6 +25,16 @@ type Change = {
   name: string
 } & StoredRollout
 
+/**
+ * client-node 1.4.0 attaches its line listeners and returns; the replayed
+ * events arrive from the response stream after watch() resolved. Deliver the
+ * replay after the caller's await resumed, never inside watch().
+ */
+async function afterWatchResolves(deliver: () => void): Promise<void> {
+  for (let hop = 0; hop < 3; hop++) await Promise.resolve()
+  deliver()
+}
+
 export function fakeDeploymentApiserver(namespace: string, initial: Record<string, StoredRollout>) {
   let revision = 100
   const objects = new Map<string, StoredRollout>(Object.entries(initial))
@@ -72,11 +82,12 @@ export function fakeDeploymentApiserver(namespace: string, initial: Record<strin
       done(Object.assign(new Error('Gone'), { statusCode: 410 }))
       return { abort } as unknown as AbortController
     }
-    for (const change of changes) {
-      if (change.revision > Number(queryParams.resourceVersion)) {
-        cb(change.type, deployment(change.name, change, change.revision))
-      }
-    }
+    const replay = changes
+      .filter(change => change.revision > Number(queryParams.resourceVersion))
+      .map(change => [change.type, deployment(change.name, change, change.revision)] as const)
+    void afterWatchResolves(() => {
+      for (const [type, object] of replay) cb(type, object)
+    })
     live = call
     return { abort } as unknown as AbortController
   })
