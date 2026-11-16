@@ -18,6 +18,7 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'node:crypto'
+import { config } from './config'
 import {
   MANAGED_BY_LABEL,
   MANAGED_BY_VALUE,
@@ -25,6 +26,7 @@ import {
   POLICY_TYPE_LABEL,
   RECIPE_LABEL,
 } from './constants'
+import { makeK8sApiClientWithDeadline } from './k8s/k8sRequestDeadline'
 import { applyNetworkPolicy, getErrorCode } from './utils'
 
 const SANDBOX_NAMESPACE = 'sandbox-recipes'
@@ -54,7 +56,14 @@ export class BindingPolicyReconciler {
   private mcpServerNamespace: string
 
   constructor(kc: k8s.KubeConfig, mcpServerNamespace: string) {
-    this.networkingApi = kc.makeApiClient(k8s.NetworkingV1Api)
+    // Binding work runs on the McpServer keyed effect queue that the
+    // authoritative NetworkPolicy pass also waits on, so a request that never
+    // settles here would hold that pass (#1338).
+    this.networkingApi = makeK8sApiClientWithDeadline(
+      kc,
+      k8s.NetworkingV1Api,
+      config.k8sRequestTimeoutMs
+    )
     this.mcpServerNamespace = mcpServerNamespace
   }
 

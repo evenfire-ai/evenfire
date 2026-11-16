@@ -22,8 +22,9 @@ export type GfsKeyKind = 'file' | 'dir'
 export type ParsedGfsKey = { kind: GfsKeyKind; drive: string; rid32: Rid32 }
 
 /**
- * Drive names: same rule gfsc and HCC enforce on GFS_DRIVE_NAME, so a key for
- * the configured drive always passes and an invented one is a 400.
+ * Drive names follow the DNS-label shape used for GFS_DRIVE_NAME, so a key for
+ * a correctly configured drive passes and an invented one is a 400. This check
+ * stands on its own: it does not rely on gfsc having validated the name.
  */
 export const DRIVE_NAME_RE = /^[a-z0-9-]{1,63}$/
 

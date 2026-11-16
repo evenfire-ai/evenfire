@@ -12,11 +12,15 @@ data:
   CLERUM_CONTEXT_MAPPER_POLL_INTERVAL: '30000'
   MCP_PROXY_ENABLED: 'false'
   MCP_HOST_CODEX_SUBSCRIPTION_ENABLED: 'true'
-  # e2e lane pin: 60s keeps the revoke-on-staleness scenario fast and
-  # deterministic. Production defaults to 180s (bounded 600s) in
-  # mcp-host/src/config.ts so a normal HCC rollout (~77s in clerum-dev) does not
-  # tear down the MCP fleet. See issue #425.
-  HCC_AUTHORITY_MAX_STALENESS_MS: '60000'
+  # Explicit pin equal to the production default (mcp-host/src/config.ts, capped
+  # at 600s). No lane needs a short bound, so lanes run with production timing.
+  # The pair (CLERUM_CONTEXT_MAPPER_POLL_INTERVAL, HCC_AUTHORITY_MAX_STALENESS_MS)
+  # must satisfy validateHccAuthorityTiming: staleness >= interval
+  # + 2 x max(interval, 10s request timeout) + 10s + 1s, which is 101000 at a 30s
+  # interval. Otherwise every Host runtime refuses to start. 180000 absorbs four
+  # missed HCC polls and allows a poll interval of at most 56333 (196333 at the
+  # 600000 cap). See issues #425 and #1350.
+  HCC_AUTHORITY_MAX_STALENESS_MS: '180000'
   MCP_PROXY_URL: 'http://mcp-proxy.mcp-server.svc.cluster.local:8083'
   CLERUM_AGENT_TASK_DELAY: '3'
   CLERUM_AGENT_MAX_TASK_DURATION: '86400000'
