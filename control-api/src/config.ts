@@ -7,6 +7,10 @@ import {
 import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
 import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
 import { rootLogger } from './observability/logger.js'
+import {
+  GFS_WATCH_MAX_CONNECTIONS,
+  GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL,
+} from './services/gfsWatch/admissionLimits.js'
 import { assertSafeCatalogUrl, resolveModelsDevApiUrl } from './services/modelsDevCatalogUrl.js'
 
 function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
@@ -312,6 +316,8 @@ type Config = {
   entityChangeStreamMaxConnections: number
   entityChangeStreamMaxConnectionsPerPrincipal: number
   gfsWatchHeartbeatMs: number
+  gfsWatchMaxConnections: number
+  gfsWatchMaxConnectionsPerPrincipal: number
   notificationsDesktopFirstEnabled: boolean
   notificationDesktopGraceSeconds: number
   // Stricter than the normal refresh limiter: a client reaching reissue has
@@ -1352,6 +1358,20 @@ export const config: Config = {
   // travels in the watch `ready` frame, and the desktop treats a `ready` whose
   // heartbeat is outside [5 s, 25 s] as invalid and reopens.
   gfsWatchHeartbeatMs: boundedIntegerEnv('GFS_WATCH_HEARTBEAT_MS', 20 * 1000, 5 * 1000, 25 * 1000),
+  gfsWatchMaxConnections: boundedIntegerEnv(
+    'GFS_WATCH_MAX_CONNECTIONS',
+    GFS_WATCH_MAX_CONNECTIONS,
+    1,
+    10000
+  ),
+  // Ceiling well under the process default: one desktop holds one stream, so a
+  // larger per-principal cap only lets a single account crowd out the replica.
+  gfsWatchMaxConnectionsPerPrincipal: boundedIntegerEnv(
+    'GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL',
+    GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL,
+    1,
+    64
+  ),
   entityChangeStreamMaxLifetimeMs: boundedIntegerEnv(
     'ENTITY_CHANGE_STREAM_MAX_LIFETIME_MS',
     10 * 60 * 1000,

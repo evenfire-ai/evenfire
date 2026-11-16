@@ -796,9 +796,10 @@ describeRealPostgres('GFS watch routes on real Postgres', () => {
 
   // ─── Process lifecycle ───────────────────────────────────────────────────
 
-  it('shutdown closes every stream with server_shutdown and then ends the watch pool', async () => {
-    // The process registry announces the configured heartbeat, not the default.
+  it('the process registry takes its config; shutdown closes every stream with server_shutdown and then ends the watch pool', async () => {
+    // The process registry takes the configured heartbeat and admission caps, not the defaults.
     h.modules.config.config.gfsWatchHeartbeatMs = 7_000
+    h.modules.config.config.gfsWatchMaxConnectionsPerPrincipal = 1
     const proc = watchProcess.gfsWatchProcess()
     watchProcess.startGfsWatchProcess()
     for (let i = 0; i < 500 && !proc.registry.listenerReady(); i += 1) {
@@ -815,6 +816,7 @@ describeRealPostgres('GFS watch routes on real Postgres', () => {
     const f = await h.tree.add('file')
     const { r, ready } = await openReady(url, user, [h.key('file', f)])
     expect(ready.heartbeatMs).toBe(7_000)
+    expectWatchError(await call(url, 'GET', { headers: session(user) }), 429, 'admission_full')
     expect(proc.watchPool.totalCount).toBeGreaterThan(0)
 
     await new serverModule.ControlApiServer({} as never, 0).stop()
