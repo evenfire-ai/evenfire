@@ -17,7 +17,9 @@
  *     execution only (`createStepSpillover` returns one store per execution),
  *     and `release` drops them when the execution ends, however it ends. A
  *     process that dies loses them with the process.
- *   - A step whose results all stay under the threshold is unchanged.
+ *   - A step whose results all stay under the threshold is unchanged. A result
+ *     fetched when the next call is sent without tools stays inline too,
+ *     because nothing could read it back; the step loop does not offer it.
  *   - The read tool only accepts refs of the same step, finds only results of
  *     the same execution, and reads at most the threshold.
  *   - The budget caps the bytes of the stored strings the store holds for one

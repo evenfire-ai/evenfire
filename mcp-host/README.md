@@ -279,7 +279,9 @@ would otherwise carry, is at least the threshold. For an MCP result made only of
 text blocks the store keeps the tool text (the blocks joined with a line feed);
 for any other result it keeps the JSON-serialized result. The summary, the byte
 ranges read back and the budget count the bytes of the stored string, so a
-stored tool text can be smaller than the threshold.
+stored tool text can be smaller than the threshold. A result fetched when the
+next call is sent without tools (the forced final call) stays inline, because
+nothing could read it back.
 
 `PLUGIN_WORKLOAD_SDK_TOKEN` is not read as a setting. mcp-host only lists it,
 with the runtime tokens above and every provider key, as a reserved secret name

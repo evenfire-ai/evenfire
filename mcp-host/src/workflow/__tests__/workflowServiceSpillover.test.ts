@@ -535,6 +535,88 @@ describe('WorkflowService step spillover — what is stored', () => {
   )
 })
 
+describe('WorkflowService step spillover — iteration limit', () => {
+  const countRead = (names: string[]): number => names.filter(n => n === READ_TOOL).length
+
+  it.each([
+    ['auto', undefined],
+    ['required', 'required' as const],
+  ])(
+    'keeps a result inline when the next call is sent without tools (%s)',
+    async (_label, toolChoice) => {
+      const content = sdk(big(200 * 1024))
+      const run = async (maxIterations: number) => {
+        const client = mockMcpClient([{ name: 'read' }], { read: { content } })
+        const llm = mockLlmProvider([
+          { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+          { content: 'final', tool_calls: null },
+        ])
+        const res = await service(llm, client).executeStep({
+          stepId: STEP_ID,
+          instruction: 'review',
+          mcpServers: SERVERS,
+          maxIterations,
+          ...(toolChoice ? { toolChoice } : {}),
+        })
+        return { res, llm }
+      }
+
+      const two = await run(2)
+      expect(two.res.status).toBe('completed')
+      expect(offeredTools(two.llm)[1]).toEqual([])
+      expect(toolResultMessages(two.llm)).toEqual([inline('srv__read', content)])
+      // Witness: the same result is stored when a later call can read it back.
+      const three = await run(3)
+      expect(toolResultMessages(three.llm)[0]).toContain(`"spillover_ref":"${FIRST_REF}"`)
+      expect(countRead(offeredTools(three.llm)[1]!)).toBe(1)
+    }
+  )
+
+  it('stores a result on the third-to-last iteration and keeps one on the second-to-last inline', async () => {
+    const content = sdk(big(200 * 1024))
+    const client = mockMcpClient([{ name: 'read' }], { read: { content } })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: 'final', tool_calls: null },
+    ])
+
+    await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+      maxIterations: 3,
+    })
+
+    const [first, second] = toolResultMessages(llm)
+    expect(first).toContain(`"spillover_ref":"${FIRST_REF}"`)
+    expect(second).toBe(inline('srv__read', content))
+    expect(offeredTools(llm)[2]).toEqual([])
+  })
+
+  it('still stores a result on the last iteration of a required step, where no call follows', async () => {
+    const persisted = () =>
+      metricTotal('clerum_workflow_step_spillover_persisted_total', { tool: 'srv__read' })
+    const before = await persisted()
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(big(200 * 1024)) } })
+    const llm = mockLlmProvider([
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+    ])
+
+    const res = await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+      maxIterations: 1,
+      toolChoice: 'required',
+    })
+
+    expect(res.status).toBe('completed')
+    expect(providerCalls(llm)).toHaveLength(1)
+    expect(await persisted()).toBe(before + 1)
+  })
+})
+
 describe('WorkflowService step spillover — kill switch', () => {
   it('keeps the full result inline and never offers the read tool', async () => {
     vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_ENABLED', 'false')

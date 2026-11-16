@@ -1231,6 +1231,9 @@ export class WorkflowService {
       const MAX_ITERATIONS = req.maxIterations ?? (envDefault > 0 ? envDefault : 50)
       const WRAP_UP_THRESHOLD = 3 // Force wrap-up when this many iterations remain
       const requiresToolCall = req.toolChoice === 'required'
+      // True when iteration `index` (0-based) is sent without tools.
+      const forcesFinalText = (index: number): boolean =>
+        MAX_ITERATIONS - index <= 1 && (!requiresToolCall || toolsCalled.length > 0)
 
       for (let i = 0; i < MAX_ITERATIONS; i++) {
         onProgress?.({ iteration: i + 1 })
@@ -1276,8 +1279,7 @@ export class WorkflowService {
             },
             'LLM call started'
           )
-          const shouldForceFinalText =
-            remainingIterations <= 1 && (!requiresToolCall || toolsCalled.length > 0)
+          const shouldForceFinalText = forcesFinalText(i)
           const response = await withTimeout(
             provider.completeSingleTurnWithTools(
               messages.map(m => ({
@@ -1344,9 +1346,13 @@ export class WorkflowService {
               // injection — MCP server responses are untrusted third-party data.
               const serialized = JSON.stringify(result.content)
               let toolOutput = serialized
+              // A result fetched when the next call is sent without tools stays
+              // inline: nothing could read a stored result back. On the last
+              // iteration no call follows, and the store is consulted as before.
+              const nextCallHasNoTools = i + 1 < MAX_ITERATIONS && forcesFinalText(i + 1)
               // JSON.stringify(undefined) is not a string; such a result stays
               // inline, as persist() leaves any non-string content inline.
-              if (stepSpillover && typeof serialized === 'string') {
+              if (stepSpillover && !nextCallHasNoTools && typeof serialized === 'string') {
                 // The store keeps the tool text of an MCP text result (so the
                 // summary and the byte ranges index that text) and the
                 // serialized result otherwise. The decision uses the size of
