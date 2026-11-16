@@ -30,6 +30,40 @@ describe('mcp-host structured logger redaction', () => {
     expect(JSON.stringify(redactUnknown({ err }))).not.toContain('sensitive diagnostic content')
   })
 
+  async function loggedLine(fields: Record<string, unknown>): Promise<string> {
+    const previousConsole = { log: console.log, error: console.error, warn: console.warn }
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.stubEnv('LOG_LEVEL', 'info')
+    vi.resetModules()
+    try {
+      const { logger } = await import('./logger.js')
+      logger.info(fields, 'error probe')
+      expect(output).toHaveBeenCalledOnce()
+      return output.mock.calls[0]![0] as string
+    } finally {
+      output.mockRestore()
+      console.log = previousConsole.log
+      console.error = previousConsole.error
+      console.warn = previousConsole.warn
+      vi.unstubAllEnvs()
+      vi.resetModules()
+    }
+  }
+
+  it('keeps the name of an Error subclass and drops its message', async () => {
+    const line = await loggedLine({ err: new TypeError('cannot read secret-token-value') })
+    expect(line).not.toContain('secret-token-value')
+    expect(JSON.parse(line)).toMatchObject({ err: { name: 'TypeError' }, msg: 'error probe' })
+  })
+
+  it('falls back to Error for a name outside the bounded shape', async () => {
+    const err = new TypeError('boom')
+    err.name = 'Type Error carrying secret-name-value'
+    const line = await loggedLine({ err })
+    expect(line).not.toContain('secret-name-value')
+    expect(JSON.parse(line)).toMatchObject({ err: { name: 'Error' } })
+  })
+
   it('drops prototype-polluting keys instead of writing them onto the clone', () => {
     const input = { ok: true, constructor: { evil: true }, prototype: { evil: true } }
     expect(redactUnknown(input)).toEqual({ ok: true })

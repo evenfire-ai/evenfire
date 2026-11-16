@@ -244,13 +244,14 @@ jq -e '(.spec.replicas // 1) as $r | $r > 0 and (.status.readyReplicas // 0) == 
 
 # hcc_env <name>: <unset>, <valueFrom> or the literal value. A variable not
 # set in env but possibly set through envFrom is <valueFrom>: its value is
-# not in the Deployment, so its default must not be assumed.
+# not in the Deployment, so its default must not be assumed. A duplicated entry
+# resolves to the last one, as Kubernetes does.
 hcc_env() {
   jq -r --arg n "$1" '.spec.template.spec.containers[] | select(.name == "host-context-controller")
     | ((.envFrom // []) | length > 0) as $from
     | [.env[]? | select(.name == $n)]
     | if length == 0 then (if $from then "<valueFrom>" else "<unset>" end)
-      elif .[0].valueFrom then "<valueFrom>" else (.[0].value // "") end' "$WORK/hcc.json"
+      elif .[-1].valueFrom then "<valueFrom>" else (.[-1].value // "") end' "$WORK/hcc.json"
 }
 
 FLAG_RAW="$(hcc_env CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE)"
@@ -454,7 +455,7 @@ hcc_host_image() {
   secret="$(hcc_env CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET)"
   case "$image" in '' | '<unset>' | '<valueFrom>') die "cannot resolve CONTEXT_MAPPER_HOST_IMAGE ($image) for a check Pod" ;; esac
   case "$policy" in '<unset>') policy=Always ;; '' | '<valueFrom>') die "cannot resolve CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY ($policy)" ;; esac
-  case "$secret" in '<unset>') secret=clerum ;; '' | '<valueFrom>') die "cannot resolve CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET ($secret)" ;; esac
+  case "$secret" in '<unset>' | '') secret=- ;; '<valueFrom>') die "cannot resolve CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET ($secret)" ;; esac
   printf '%s\t%s\t%s\n' "$image" "$policy" "$secret"
 }
 
@@ -500,7 +501,10 @@ while IFS=$'\t' read -r type pvc host kind state detail _subpath pods nodes merg
     fi
     if [ -z "$result" ]; then
       if [ "$image" = - ]; then
-        IFS=$'\t' read -r image policy secrets <<<"$(hcc_host_image)"
+        # An assignment keeps hcc_host_image's exit status under set -e; a
+        # here-string discards it and the check Pod would get empty fields.
+        host_image="$(hcc_host_image)"
+        IFS=$'\t' read -r image policy secrets <<<"$host_image"
       fi
       result="$(run_check "$pvc" "$node" "$image" "$policy" "$secrets" </dev/null)"
       # verify names a tree the merge will still change SPLIT.

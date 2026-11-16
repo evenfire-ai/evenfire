@@ -225,7 +225,7 @@ describe('classifyBedrockError', () => {
     ['UnrecognizedClientException', LlmErrorCode.AuthenticationFailed, false],
     ['ServiceQuotaExceededException', LlmErrorCode.InsufficientQuota, false],
     ['ResourceNotFoundException', LlmErrorCode.ModelNotAvailable, false],
-    ['ValidationException', LlmErrorCode.ApiCallFailed, false],
+    ['ValidationException', LlmErrorCode.UpstreamRejected, false],
     ['ServiceUnavailableException', LlmErrorCode.ModelOverloaded, true],
     ['InternalServerException', LlmErrorCode.ModelOverloaded, true],
     ['ModelTimeoutException', LlmErrorCode.ModelOverloaded, true],
@@ -256,6 +256,18 @@ describe('classifyBedrockError', () => {
     expect(c.retryable).toBe(false)
     // Diagnostics still propagate on the $metadata fallback path.
     expect(c.httpStatus).toBe(404)
+    expect(c.providerCode).toBe('SomeNewException')
+  })
+
+  it('maps an unmodeled name with a 400 $metadata status to UpstreamRejected (#1433)', () => {
+    const c = classifyBedrockError({
+      name: 'SomeNewException',
+      message: 'bad request',
+      $metadata: { httpStatusCode: 400 },
+    })
+    expect(c.code).toBe(LlmErrorCode.UpstreamRejected)
+    expect(c.retryable).toBe(false)
+    expect(c.httpStatus).toBe(400)
     expect(c.providerCode).toBe('SomeNewException')
   })
 

@@ -87,8 +87,13 @@ Two behaviours surprise people:
   you are mid-edit on. Stage or discard that file and commit again.
 
 Every refusal names the file and the fix. If you need to bypass the hook to
-get unstuck, say so in the PR rather than leaving it silent. The two release
-validators run in CI and will catch what the hook would have.
+get unstuck, say so in the PR rather than leaving it silent. A commit made
+without the hook leaves its services' versions where they were, and the
+required version check on pull requests into `dev` then fails with
+`code changed but <service>/package.json stayed at <version>`. To fix it, make
+a commit in that service with the hook on, or set the version above the base's
+with `npm version` (see
+[Releases and upgrades](docs/deploy/releases-and-upgrades.md)).
 
 ## Branches and pull requests
 
