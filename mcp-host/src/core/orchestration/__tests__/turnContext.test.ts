@@ -761,4 +761,10 @@ describe('keepOfferLines', () => {
       "Deleting this user's kept files cannot free enough room. Tell the user the space is held by files with no record, by files in workspaces (the user's own workspace files can be removed with an approved shell command), by other users of this agent or by downloads in use, and that kept files leave after the retention time."
     )
   })
+
+  it("names every holder of a generation's kept room", () => {
+    expect(CANNOT_FREE_GENERATION_INSTRUCTION).toBe(
+      "Deleting this user's kept files cannot free enough room. Tell the user the room for kept files is held by this user's kept files that have no record, by files being kept right now, by the kept files of other users of this agent, or the file is larger than the room kept files may use, and that kept files leave after the retention time. Deleting workspace files or downloaded copies does not free this room; do not propose it."
+    )
+  })
 })
