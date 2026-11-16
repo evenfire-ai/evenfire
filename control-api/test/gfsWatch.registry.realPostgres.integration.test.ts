@@ -562,6 +562,56 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(restInvariantViolations(b, [conn])).toEqual([])
   })
 
+  it('spends no more budget and runs no ancestry query after a close during the budget check', async () => {
+    let hits = 0
+    let releaseFirst: () => void = () => {}
+    const firstHeld = new Promise<void>(resolve => (releaseFirst = resolve))
+    const budget = new ProcessMemoryRateLimiter(240)
+    b = await h.build({
+      authBudget: {
+        hit: async k => {
+          hits += 1
+          if (hits === 1) await firstHeld
+          return budget.hit(k)
+        },
+      },
+    })
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    const { conn, socket } = await ready(user, [])
+    const hitsBefore = hits
+    const cteBefore = b.gates.cte.calls
+    await put(conn, [h.key('file', f), h.key('file', g)])
+    await until(() => hits === hitsBefore + 1)
+    socket.emitGone()
+    releaseFirst()
+    await b.settle()
+    await sleep(50)
+    expect([hits - hitsBefore, b.gates.cte.calls - cteBefore]).toEqual([1, 0])
+    expect(restInvariantViolations(b, [conn])).toEqual([])
+  })
+
+  it('mints nothing for the second drive after a close during the mint of the first', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const f = await h.tree.add('file')
+    const g = await h.tree.add('file')
+    const { conn, socket } = await ready(user, [])
+    b.gates.mint.mode = 'hold'
+    await put(conn, [h.key('file', f), `file:gfs://other/${h.toRid(g)}` as GfsKey])
+    await until(() => b.gates.mint.held.length === 1)
+    const mintsBefore = b.gates.mint.calls
+    socket.emitGone()
+    await b.settle()
+    await sleep(50)
+    expect(b.gates.mint.calls).toBe(mintsBefore)
+    b.gates.mint.mode = 'pass'
+    b.gates.mint.releaseAll()
+    await b.settle()
+    expect(restInvariantViolations(b, [conn])).toEqual([])
+  })
+
   it('closes with reauthorize before any read when the mint refuses a revoked session (T-SB108 a2)', async () => {
     b = await h.build()
     const user = await h.createUser()

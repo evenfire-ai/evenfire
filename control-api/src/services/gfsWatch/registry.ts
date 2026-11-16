@@ -791,6 +791,12 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
         'gfsc-read',
         GFSC_READ_TRANSIENT_NO_RESPONSE
       )
+      // Not observable today and kept on purpose: a close aborts op.signal, so
+      // readGfsc answers transient and the default branch only defers a key of
+      // a connection already gone. Without this gate, a read that resolved
+      // with a real status after the close (a reader that does not honour the
+      // abort, or a cached answer) would accept keys or log a refused token on
+      // a closed connection.
       if (!gate(conn, op)) return
       if (!stillAuthorizing(conn, k)) return
       const rec = conn.keys.get(k)!
@@ -835,6 +841,11 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
   }
 
   function onAuthDeadline(conn: WatchConnection, op: WatchOp): void {
+    // Not observable today and kept on purpose: every path that ends or
+    // replaces the op (endOp, closeConn) clears tAuth first, so this timer
+    // cannot fire for a dead op. If a new path ever drops the op without
+    // clearing it, this stops a stale deadline from deferring the keys of
+    // the op that replaced it.
     if (!gate(conn, op)) return
     for (const k of op.added) {
       if (stillAuthorizing(conn, k)) {
