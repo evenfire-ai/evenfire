@@ -12753,6 +12753,51 @@ describe('WorkflowRecipeReconciler', () => {
       ).toBe(true)
     })
 
+    it('clears the stored record when the pass runs on an object read before the run turned terminal', async () => {
+      const stub = stubWorkflowReconciler()
+      const recorded = makeTerminalRunRecipe({ name: 'wf-run-stale', phase: 'failed' })
+      recorded.status = {
+        ...recorded.status,
+        terminalRunTeardown: {
+          completedAt: '2026-11-12T10:00:00.000Z',
+          noSecretBearingWorkloads: true,
+        },
+      } as WorkflowRecipeCRD['status']
+      const store = installRecipeStore(recorded)
+      // The object a queued pass runs on: captured while the run was still
+      // initializing, so it carries no record. Only the live object has one.
+      const stale = makeTerminalRunRecipe({ name: 'wf-run-stale', phase: 'failed' })
+      stale.status = {
+        ...stale.status,
+        phase: 'deploying',
+        message: 'Workflow initializing',
+        workflowExecution: { phase: 'initializing' },
+      } as WorkflowRecipeCRD['status']
+      expect(stale.status?.terminalRunTeardown).toBeUndefined()
+      expect(stale.metadata.uid).toBe(store.current().metadata.uid)
+      let storedAtInnerReconcile: unknown = 'not-called'
+      stub.reconcile.mockImplementation(async () => {
+        storedAtInnerReconcile = store.current().status?.terminalRunTeardown
+        return {
+          phase: 'deploying',
+          message: 'Workflow infrastructure recreated',
+          workflowPhase: 'initializing',
+        }
+      })
+
+      await reconciler.reconcile(stale)
+
+      // Witness: the deploy path was entered.
+      expect(stub.reconcile).toHaveBeenCalledTimes(1)
+      expect(storedAtInnerReconcile).toBeUndefined()
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ body: { status: { terminalRunTeardown: null } } }),
+        expect.anything()
+      )
+      expect(store.current().status?.terminalRunTeardown).toBeUndefined()
+      expect(stub.teardownComputePodsForTerminalRun).not.toHaveBeenCalled()
+    })
+
     /** A non-transport Deployment that reads `secretName` (kept by the terminal teardown). */
     function secretBearingApi(secretName: string): WorkloadDef {
       return {
