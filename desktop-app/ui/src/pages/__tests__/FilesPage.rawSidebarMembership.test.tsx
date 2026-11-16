@@ -122,7 +122,7 @@ describe('Files permission membership after a Sidebar raw write', () => {
       'main',
       0
     )
-    let rerender: (ui: ReactNode) => void = () => {}
+    let rerender!: (ui: ReactNode) => void
     let unmount: () => void = () => {}
     try {
       const view = render(<Composite showTree={false} />, { wrapper: wrapper(client) })
