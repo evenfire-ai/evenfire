@@ -45,6 +45,7 @@ import {
 import {
   GFS_ACCESS_REVOKED_BODY,
   GFS_DEFAULT_DISCOVERY_DRIVE,
+  GFS_MY_HOME_DETAIL,
   GFS_MY_HOME_LABEL,
   GFS_RESOURCE_DRAG_TYPE,
   GFS_SHARED_WITH_ME_LABEL,
@@ -3360,6 +3361,7 @@ export function FilesPage({
               <IconContexts aria-hidden="true" width={16} height={16} />
               {myHome.name}
             </Button>
+            <p className="muted da-gfs-my-home__detail">{GFS_MY_HOME_DETAIL}</p>
           </section>
         ) : myHomeNotice ? (
           <section className="page-card da-gfs-my-home" aria-label="My home">
@@ -3373,6 +3375,7 @@ export function FilesPage({
               <IconContexts aria-hidden="true" width={16} height={16} />
               {GFS_MY_HOME_LABEL}
             </Button>
+            <p className="muted da-gfs-my-home__detail">{GFS_MY_HOME_DETAIL}</p>
             <GfsHomeStateNotice notice={myHomeNotice} variant="page" />
           </section>
         ) : null}

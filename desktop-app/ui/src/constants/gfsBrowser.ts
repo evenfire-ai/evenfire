@@ -27,6 +27,9 @@ export const DRAG_COLD_CHECK_MAX_CONCURRENCY = 2
 /** Label of the caller's own home wherever EvenDrive shows it as a root. */
 export const GFS_MY_HOME_LABEL = 'My home'
 
+/** Detail line under the "My home" title on the Files page. */
+export const GFS_MY_HOME_DETAIL = 'Your personal folder in EvenDrive.'
+
 /** Home-state notice for a home that is still being provisioned. */
 export const GFS_HOME_PENDING_TEXT = 'Your home folder is being prepared'
 

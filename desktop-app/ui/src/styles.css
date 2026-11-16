@@ -14822,9 +14822,28 @@ pre {
   grid-template-rows: auto 1fr;
 }
 
-.da-gfs-my-home__open {
+/* The "My home" card reads like the browser card's header: the title sits at
+   the same inset and size as the "Shared with me" view root, with a muted
+   detail line and any home-state notice under it. */
+.da-gfs-my-home {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+}
+
+.da-gfs-my-home__open.ui-button {
+  justify-self: start;
   gap: var(--space-2);
-  font-weight: var(--font-weight-semibold);
+  padding-inline: var(--space-1);
+  color: var(--text);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-medium);
+}
+
+.da-gfs-my-home__detail {
+  margin: 0;
+  padding-inline: var(--space-1);
+  font-size: var(--font-size-sm);
 }
 
 .da-gfs-eyebrow {
@@ -15397,12 +15416,17 @@ pre {
 }
 
 /* One wrapper for every persistent Files banner: it carries the live role
-   and the card inset, and stacks a banner with its Retry button. */
+   and the card inset, and stacks a banner with its Retry button. Banners span
+   the card width, like the home-state notice in the "My home" card; the Retry
+   button keeps its own width. */
 .da-gfs-alert {
   margin: var(--space-3) var(--space-4);
   display: grid;
   gap: var(--space-2);
-  justify-items: start;
+}
+
+.da-gfs-alert > .ui-button {
+  justify-self: start;
 }
 
 /* BUG-175 — folder-zip assembly progress strip. */

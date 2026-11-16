@@ -8425,6 +8425,8 @@ describe('FilesPage', () => {
     expect(within(shared).queryByText('My home')).toBeNull()
     expect(within(shared).queryByText('fixture')).toBeNull()
     const myHome = screen.getByRole('region', { name: 'My home' })
+    // The card reads like the browser card's header: title plus detail line.
+    expect(within(myHome).getByText('Your personal folder in EvenDrive.')).toBeTruthy()
     fireEvent.click(within(myHome).getByRole('button', { name: 'My home' }))
     expect(openResource).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'home-1', name: 'My home' })
@@ -8549,6 +8551,7 @@ describe('FilesPage', () => {
         expect(within(card).getByRole('status').textContent).toContain(
           'Your home folder is being prepared'
         )
+        expect(within(card).getByText('Your personal folder in EvenDrive.')).toBeTruthy()
         expect(within(card).queryByRole('alert')).toBeNull()
         // Witness: the shared rows still render beside the card.
         expect(screen.getAllByText('Alpha shared').length).toBeGreaterThan(0)
