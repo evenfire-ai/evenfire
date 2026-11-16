@@ -54,9 +54,11 @@ import { ContextMapperServer } from './server'
 // #1490: what a Host tolerates, read from mcp-host's source rather than copied.
 // mcp-host revokes its published fleet after S without a successful inventory
 // poll. Its last success can be as much as one poll interval I before the first
-// refused request, and the poll that recovers lasts up to the request timeout T,
-// with the scheduling allowance J on top. So Hosts keep their fleet only if
-// inventory is served again within S - I - T - J of the change.
+// refused request. After inventory is served again, the next poll can start up
+// to one more interval I later and lasts up to the request timeout T, with the
+// scheduling allowance J on top. So Hosts keep their fleet only if inventory is
+// served again within S - 2I - T - J of the change. The values are mcp-host's
+// source defaults, not the effective values of a deployment.
 const MCP_HOST_CONFIG = resolve(__dirname, '../../mcp-host/src/config.ts')
 const mcpHostConfig = readSourceFile(MCP_HOST_CONFIG)
 const MCP_HOST_AUTHORITY_STALENESS_MS = exportedNumericConst(
@@ -76,7 +78,7 @@ const MCP_HOST_SCHEDULING_ALLOWANCE_MS = exportedNumericConst(
 )
 const HOST_TOLERATED_OUTAGE_MS =
   MCP_HOST_AUTHORITY_STALENESS_MS -
-  MCP_HOST_POLL_INTERVAL_MS -
+  2 * MCP_HOST_POLL_INTERVAL_MS -
   MCP_HOST_REQUEST_TIMEOUT_MS -
   MCP_HOST_SCHEDULING_ALLOWANCE_MS
 // Production default of HCC_K8S_REQUEST_TIMEOUT_MS (host-context-controller/src/config.ts).
