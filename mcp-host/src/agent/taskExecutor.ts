@@ -323,8 +323,10 @@ interface TaskToolRegistry {
  * would add tool results that answer no open call (independent review round
  * 2, P1). They carry `answeredInSnapshot`, since a tool-call id cannot tell
  * the batches apart: some drivers restart ids on every response (round 3,
- * A-1). Approvals saved before that mark existed are filtered by id: only
- * results that answer an open call of the snapshot's last tool-call message.
+ * A-1). Approvals saved before that mark existed still go through the id
+ * filter, which separates batches only when ids stay unique across responses.
+ * A pre-mark row whose ids restart still appends the earlier batch (round 4,
+ * A-4), the same as before the mark.
  */
 function unansweredBatchResults(snapshot: ChatMessage[], results: ToolResult[]): ToolResult[] {
   const current = results.filter(result => result.answeredInSnapshot !== true)

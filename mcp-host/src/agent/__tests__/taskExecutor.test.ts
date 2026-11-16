@@ -1427,8 +1427,9 @@ describe('TaskExecutor', () => {
 
   it.each([
     ['marked when carried', false],
-    // A row saved by the build before the mark: only the id check stops it.
-    ['saved before the mark', true],
+    // Unique ids. A row saved before the mark is dropped by the id check.
+    // The same row under ids that restart per response still duplicates (A-4).
+    ['unique ids, saved before the mark', true],
   ])(
     'P1: a second suspension in the same turn sends no answered tool result again (%s)',
     async (_label, savedBeforeMark) => {
