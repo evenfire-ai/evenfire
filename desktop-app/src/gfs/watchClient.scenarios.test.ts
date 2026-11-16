@@ -509,6 +509,45 @@ describe('frames and stream end', () => {
     expect(linkOf().kind).toBe('Backoff')
   })
 
+  it('a multibyte character cut between two chunks reaches the PUT intact', async () => {
+    await start()
+    h.server.getPolicy = () => ({ kind: 'stream' })
+    h.server.eof()
+    await h.settle()
+    await fire(linkOf().timer)
+    // Only a string the client sends back can show a corrupted decode: keys are
+    // ASCII, and a broken character is just U+FFFD inside a JSON string.
+    const connId = 'conn-\u00e9-\u{1f642}'
+    const line = Buffer.from(
+      JSON.stringify({
+        schemaVersion: 1,
+        type: 'ready',
+        connId,
+        heartbeatMs: 20_000,
+        accepted: [],
+        rejected: [],
+        deferred: [],
+      }) + '\n',
+      'utf8'
+    )
+    const eAt = line.indexOf(Buffer.from('\u00e9', 'utf8'))
+    const emojiAt = line.indexOf(Buffer.from('\u{1f642}', 'utf8'))
+    // Inside the 2-byte é, then between the 2nd and 3rd byte of the 4-byte emoji.
+    for (const [from, to] of [
+      [0, eAt + 1],
+      [eAt + 1, emojiAt + 2],
+      [emojiAt + 2, line.length],
+    ] as const) {
+      h.server.write(line.subarray(from, to))
+      await h.settle()
+    }
+    expect(linkOf().kind).toBe('Ready')
+    await h.subscribe([A])
+    expect(h.server.putBodies.map(b => (JSON.parse(b) as { connId: string }).connId)).toEqual([
+      connId,
+    ])
+  })
+
   it('blank lines are skipped; a ready with heartbeatMs outside [5 s, 25 s] is a transient failure', async () => {
     await start()
     h.server.write('\n\n')

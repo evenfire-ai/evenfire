@@ -115,6 +115,8 @@ export class FakeWatchServer {
   baseUrl = ''
   gets: GetRec[] = []
   puts: PutRec[] = []
+  /** Every PUT body as the client sent it, recorded before validation. */
+  putBodies: string[] = []
   conns: Conn[] = []
   getPolicy: (rec: GetRec) => GetPolicy = () => ({ kind: 'ready' })
   putPolicy: (rec: PutRec) => PutPolicy = () => ({ kind: 'accept' })
@@ -146,7 +148,8 @@ export class FakeWatchServer {
     return this.puts.filter(p => !p.answered && !p.closed)
   }
 
-  write(raw: string, conn = this.current()): void {
+  /** Bytes as given: a test can cut a line, or a character, between two writes. */
+  write(raw: string | Uint8Array, conn = this.current()): void {
     if (conn?.alive) conn.res.write(raw)
   }
 
@@ -306,8 +309,10 @@ export class FakeWatchServer {
 
   private onPut(req: http.IncomingMessage, token: string, res: http.ServerResponse): void {
     let raw = ''
-    req.on('data', chunk => (raw += chunk))
+    req.setEncoding('utf8')
+    req.on('data', (chunk: string) => (raw += chunk))
     req.on('end', () => {
+      this.putBodies.push(raw)
       let body: { connId: string; seq: number; keys: string[] } | null = null
       try {
         body = JSON.parse(raw) as { connId: string; seq: number; keys: string[] }
