@@ -169,7 +169,6 @@ describe('async progress flow — SSE-driven approval', () => {
     stream.fireSuspended({
       taskId: 'task-async-1',
       requestId: 'approval-async-1',
-      toolName: 'mcp-tavily-remote__tavily_research',
       displayName: 'Mcp-tavily-remote · tavily_research',
       reason: 'approval_required',
     })
@@ -304,7 +303,6 @@ describe('async progress flow — SSE-driven approval', () => {
     stream.fireSuspended({
       taskId: 'task-fallback-1',
       requestId: 'approval-fallback-1',
-      toolName: 'http_request',
       displayName: 'HTTP · http_request',
       reason: 'approval_required',
     })
@@ -446,7 +444,6 @@ describe('async progress flow — SSE-driven approval', () => {
     streamCalls[0].fireSuspended({
       taskId: 'task-slack-button-1',
       requestId: 'approval-slack-button-1',
-      toolName: 'http_request',
       displayName: 'HTTP search',
       reason: 'approval_required',
     })
@@ -522,7 +519,6 @@ describe('async progress flow — SSE-driven approval', () => {
     streamCalls[0].fireSuspended({
       taskId: 'task-teams-button-1',
       requestId: 'approval-teams-button-1',
-      toolName: 'http_request',
       displayName: 'HTTP search',
       reason: 'approval_required',
     })
@@ -700,7 +696,6 @@ describe('async progress flow — SSE-driven approval', () => {
     streamCalls[0].fireSuspended({
       taskId: 'task-deny-1',
       requestId: 'approval-deny-1',
-      toolName: 'x',
       displayName: 'X',
       reason: 'approval_required',
     })
@@ -791,7 +786,6 @@ describe('tool approval text and Slack markup', () => {
     streamCalls[0].fireSuspended({
       taskId,
       requestId: `approval-${taskId}`,
-      toolName: 'clerum__kept_files_delete',
       displayName: 'Delete kept files',
       reason: 'approval_required',
     })

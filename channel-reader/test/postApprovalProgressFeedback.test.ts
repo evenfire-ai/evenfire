@@ -127,7 +127,6 @@ describe('post-approval progress feedback (Bug B regression)', () => {
     stream.fireSuspended({
       taskId: 'task-bug-b',
       requestId: 'approval-bug-b-1',
-      toolName: 'mcp-coingecko-remote__execute',
       displayName: 'Mcp-coingecko-remote · execute',
       reason: 'approval_required',
     })
