@@ -149,9 +149,7 @@ read_host_log_window() {
     echo "host-log-window: could not read the log of ${pod} (${host})" >&2
     return 1
   fi
-  # #1489: each container's current log file must reach back to the window
-  # start. Checked after the window read, so a rotation before or during that
-  # read leaves a first line later than the window start.
+  # #1489: each container's current log file must reach back to the window start.
   if ! container_names="$(jq -er '.[].name' <<<"$containers_json")"; then
     echo "host-log-window: could not list the containers of ${pod}" >&2
     return 1
