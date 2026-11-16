@@ -1164,29 +1164,30 @@ describe('tool approval over one message, sent as several', () => {
   })
 })
 
-describe('tool approval in a synchronous response, not shown whole', () => {
-  function syncReader(channelType: ChannelKind, card: string, taskId: string) {
-    const rec = recordingAdapter(channelType)
-    const { rpc } = rpcClientFor(taskId, SENDER[channelType], card)
-    rpc.sendMessage.mockResolvedValueOnce({
-      success: true,
-      status: 'waiting_approval' as const,
-      approval: {
-        taskId,
-        requestId: `approval-${taskId}`,
-        userId: `host-user-${taskId}`,
-        notification: card,
-      },
-    })
-    const reader = new ChannelReader({
-      rpcClient: rpc,
-      adapters: new Map([[channelType, rec.adapter]]),
-      channels: channelType === 'telegram' ? [telegramChannel()] : [],
-      sleep: async () => undefined,
-    })
-    return { rec, rpc, reader }
-  }
+/** A reader whose first message gets a synchronous `waiting_approval` answer. */
+function syncReader(channelType: ChannelKind, card: string, taskId: string) {
+  const rec = recordingAdapter(channelType)
+  const { rpc } = rpcClientFor(taskId, SENDER[channelType], card)
+  rpc.sendMessage.mockResolvedValueOnce({
+    success: true,
+    status: 'waiting_approval' as const,
+    approval: {
+      taskId,
+      requestId: `approval-${taskId}`,
+      userId: `host-user-${taskId}`,
+      notification: card,
+    },
+  })
+  const reader = new ChannelReader({
+    rpcClient: rpc,
+    adapters: new Map([[channelType, rec.adapter]]),
+    channels: channelType === 'telegram' ? [telegramChannel()] : [],
+    sleep: async () => undefined,
+  })
+  return { rec, rpc, reader }
+}
 
+describe('tool approval in a synchronous response, not shown whole', () => {
   it('A37 denies a sync approval with a line longer than a Telegram message', async () => {
     const errors = silenceErrors()
     const name = 'r'.repeat(5000)
@@ -1505,5 +1506,157 @@ describe('tool approval not shown while the task ends', () => {
     expect(bubbleEdits(h.rec)).toContain('Request cancelled.')
     expect(sentContents(h.rec).some(content => content.includes('could not be shown'))).toBe(false)
     expect(bubbleEdits(h.rec).at(-1)).toBe('Request cancelled.')
+  })
+})
+
+describe('a pending approval that another one replaces', () => {
+  const NAMES_Y = asciiNames(20, 255, 's')
+  const CARD_Y = deleteCard(NAMES_Y)
+  const SHORT_Y = `Delete these files permanently:\n${fileLine('notes.txt')}\nTotal files: 1\n${INSTRUCTION}`
+
+  const tokenOf = (call: Parameters<ChannelAdapter['sendMessage']>) =>
+    call[4]!.telegramInlineKeyboard![0]![0]!.callbackData.split(':')[2]!
+
+  it('A46 removes the controls of a multi-part approval replaced at each registration site', async () => {
+    const rows = [
+      { row: 'sync-multi', path: 'sync', card: CARD_Y },
+      { row: 'sync-one', path: 'sync', card: SHORT_Y },
+      { row: 'async-multi', path: 'async', card: CARD_Y },
+      { row: 'async-one', path: 'async', card: SHORT_Y },
+    ] as const
+    for (const { row, path, card } of rows) {
+      const warns = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const xTask = `task-a46-${row}-x`
+      const yTask = `task-a46-${row}-y`
+      const xRequest = `approval-${xTask}`
+      const yRequest = `approval-${yTask}`
+      // Approval X: a synchronous multi-part approval, the keyboard on message 2.
+      const s = syncReader('telegram', CARD_255, xTask)
+      await s.reader.handleMessages([messageFor('telegram', 'clean up my files')])
+      const xLast = s.rec.sendMessage.mock.calls[1]!
+      // Witness: X's last part was sent with a keyboard.
+      expect.soft(xLast[4]?.telegramInlineKeyboard, `A46(${row}) X keyboard`).toBeDefined()
+      const xToken = tokenOf(xLast)
+
+      // Approval Y, for the same sender and chat, through this row's site.
+      const streamsBefore = streamCalls.length
+      if (path === 'sync') {
+        s.rpc.sendMessage.mockResolvedValueOnce({
+          success: true,
+          status: 'waiting_approval' as const,
+          approval: {
+            taskId: yTask,
+            requestId: yRequest,
+            userId: `host-user-${yTask}`,
+            notification: card,
+          },
+        })
+        await s.reader.handleMessages([messageFor('telegram', 'clean up more files')])
+      } else {
+        s.rpc.sendMessage.mockResolvedValueOnce({
+          success: true,
+          status: 'pending' as const,
+          taskId: yTask,
+        })
+        s.rpc.getTaskResult.mockResolvedValueOnce({
+          success: true,
+          status: 'waiting_approval' as const,
+          approval: {
+            taskId: yTask,
+            requestId: yRequest,
+            userId: `host-user-${yTask}`,
+            notification: card,
+          },
+        })
+        await s.reader.handleMessages([messageFor('telegram', 'clean up more files')])
+        await streamCalls[streamsBefore]!.fireSuspended({
+          taskId: yTask,
+          requestId: yRequest,
+          displayName: 'Delete kept files',
+          reason: 'approval_required',
+        })
+      }
+      await settle()
+      // The message that holds Y's controls: the last one sent with a keyboard,
+      // or, for the one-message card on the progress flow, the edited status bubble.
+      const ySends = s.rec.sendMessage.mock.calls
+        .map((call, index) => ({ call, id: `telegram-msg-${index + 1}` }))
+        .filter(entry => entry.id !== 'telegram-msg-2' && entry.call[4]?.telegramInlineKeyboard)
+      const yControls =
+        ySends.at(-1)?.id ??
+        s.rec.editMessage.mock.calls.find(call => call[3]?.telegramInlineKeyboard)?.[1]
+      expect.soft(yControls, `A46(${row}) Y shown with controls`).toBeDefined()
+
+      const xClears = clearEditsOf(s.rec, 'telegram-msg-2')
+      expect.soft(xClears, `A46(${row}) X cleared once`).toHaveLength(1)
+      expect.soft(xClears[0]?.[2], `A46(${row}) X clear text`).toBe(xLast[1])
+      expect.soft(xClears[0]?.[3], `A46(${row}) X clear options`).toBeUndefined()
+      expect
+        .soft(
+          clearEditsOf(s.rec, yControls ?? 'none').filter(call => call[3] === undefined),
+          `A46(${row}) no clear of Y`
+        )
+        .toEqual([])
+      const warnLines = errorLines(warns)
+      expect
+        .soft(
+          warnLines.some(line => line.includes(xRequest) && line.includes(yRequest)),
+          `A46(${row}) warn names both requests`
+        )
+        .toBe(true)
+      for (const line of warnLines) {
+        expect.soft(line, `A46(${row}) warn without file names`).not.toContain('upload: "')
+      }
+
+      await s.reader.handleMessages([messageFor('telegram', `tool:a:${xToken}`)])
+      expect.soft(sentContents(s.rec).at(-1), `A46(${row}) X token`).toBe(NO_PENDING)
+      await s.reader.handleMessages([messageFor('telegram', '/approve')])
+      expect.soft(s.rpc.sendApproval, `A46(${row}) one decision`).toHaveBeenCalledTimes(1)
+      expect.soft(s.rpc.sendApproval, `A46(${row}) Y decided`).toHaveBeenCalledWith(
+        // The sync answer names the Host user; the progress flow uses the sender.
+        path === 'sync' ? `host-user-${yTask}` : SENDER.telegram,
+        yRequest,
+        false,
+        'telegram',
+        CHANNEL_ID.telegram
+      )
+      if (path === 'async') {
+        await streamCalls[streamsBefore]!.fireTerminal({ taskId: yTask, status: 'cancelled' })
+      }
+      warns.mockRestore()
+    }
+  })
+
+  it('A47 clears every keyboard once when two streams follow one task', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const h = await startAsync('telegram', CARD_255, 'task-a47')
+    await h.suspend()
+    await settle()
+    const firstLastId = lastCallId(h.rec, 'telegram')
+    expect(h.rec.sendMessage.mock.calls.at(-1)![4]?.telegramInlineKeyboard).toBeDefined()
+
+    // The same message delivered again: the Host answers with the task in flight.
+    await h.send('clean up my files')
+    expect(streamCalls).toHaveLength(2)
+    const second = streamCalls[1]!
+    await second.fireSuspended({
+      taskId: 'task-a47',
+      requestId: 'approval-task-a47',
+      displayName: 'Delete kept files',
+      reason: 'approval_required',
+    })
+    await settle()
+    // Witness: the second stream sent the card again, its controls on a new message.
+    const keyboardIds = h.rec.sendMessage.mock.calls
+      .map((call, index) => ({ call, id: `telegram-msg-${index + 1}` }))
+      .filter(entry => entry.call[4]?.telegramInlineKeyboard)
+      .map(entry => entry.id)
+    expect(keyboardIds).toHaveLength(2)
+    expect(clearEditsOf(h.rec, firstLastId)).toHaveLength(1)
+
+    await h.end()
+    await second.fireTerminal({ taskId: 'task-a47', status: 'cancelled' })
+    await settle()
+    for (const id of keyboardIds) expect(clearEditsOf(h.rec, id)).toHaveLength(1)
   })
 })

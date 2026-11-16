@@ -1794,6 +1794,21 @@ export class ChannelReader {
     return null
   }
 
+  /**
+   * Registers a pending approval. An entry it replaces has ended, so its
+   * controls are removed, as at every other place an entry ends.
+   */
+  private registerPendingApproval(approvalKey: string, state: PendingApprovalState): void {
+    const replaced = this.pendingApprovals.get(approvalKey)
+    this.pendingApprovals.set(approvalKey, state)
+    if (!replaced?.clearControls) return
+    console.warn(
+      `[Main] Pending approval of task ${replaced.taskId} (request ${replaced.requestId}) was replaced by request ${state.requestId} of task ${state.taskId}; removing its controls`
+    )
+    // The clearer never rejects, so the detached call cannot go unhandled.
+    void replaced.clearControls()
+  }
+
   private clearPendingApprovalForTask(msg: Message, taskId: string): void {
     const channelScope = this.pendingApprovalChannelScope(msg)
     for (const [key, pending] of this.pendingApprovals) {
@@ -1861,7 +1876,7 @@ export class ChannelReader {
     const limit = TOOL_APPROVAL_PART_LIMIT[msg.channelType]
     const parts = adapter && limit ? splitToolApprovalText(delivery.content, limit) : null
     if (!adapter || !limit || parts?.length === 1) {
-      this.pendingApprovals.set(approvalKey, {
+      this.registerPendingApproval(approvalKey, {
         taskId,
         requestId,
         userId,
@@ -1889,7 +1904,7 @@ export class ChannelReader {
       await this.denyUnshownToolApproval(msg, userId, requestId)
       return
     }
-    this.pendingApprovals.set(approvalKey, {
+    this.registerPendingApproval(approvalKey, {
       taskId,
       requestId,
       userId,
@@ -2225,7 +2240,7 @@ export class ChannelReader {
           approvalPromptDelivered = true
           acceptProgressUpdates = false
           console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${params.requestId})`)
-          this.pendingApprovals.set(approvalKey, {
+          this.registerPendingApproval(approvalKey, {
             taskId,
             requestId: params.requestId,
             userId: params.userId,
@@ -2303,7 +2318,7 @@ export class ChannelReader {
           await clearControls?.()
           return
         }
-        this.pendingApprovals.set(approvalKey, {
+        this.registerPendingApproval(approvalKey, {
           taskId,
           requestId: params.requestId,
           userId: params.userId,
