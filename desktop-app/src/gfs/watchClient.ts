@@ -25,7 +25,7 @@ import {
   normUid,
   parseFrameLine,
   parseRetryAfterMs,
-  trunc64,
+  withinSetCeilings,
 } from './watchProtocol.js'
 import { gfsWatchTransportDefaults } from './watchTransportDefaults.js'
 
@@ -945,7 +945,7 @@ export function createGfsWatchClient(deps: GfsWatchClientDeps) {
 
   function recompute(): void {
     desired = fuse(owners.values())
-    const fused = trunc64(desired)
+    const fused = withinSetCeilings(desired)
     // Against the previous merge, not against `sent`: after a 400 the empty
     // `sent` must stay empty until the merge itself changes.
     if (sameList(fused, lastFused)) return
@@ -1072,7 +1072,7 @@ export function createGfsWatchClient(deps: GfsWatchClientDeps) {
         if (senderFrameToken !== rec.frameToken) return { sessionExpired: false }
         const forCurrentUser =
           session?.binding != null && normUid(payload?.userId) === session.binding.userId
-        rec.keys = forCurrentUser ? trunc64(canonList(payload?.keys)) : []
+        rec.keys = forCurrentUser ? withinSetCeilings(canonList(payload?.keys)) : []
         recompute()
         return { sessionExpired: latch !== null && !latch.deferred }
       })

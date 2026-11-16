@@ -11,3 +11,9 @@ export const GFS_WATCH_DEBOUNCE_MS = 150
  * keys it drops are the lowest-priority ones, not whichever main cuts.
  */
 export const GFS_WATCH_MAX_KEYS = 64
+
+/**
+ * Main also keeps the keys of at most this many drives per stream, in priority
+ * order; the renderer applies the same rule for the same reason as the key cap.
+ */
+export const GFS_WATCH_MAX_DRIVES = 2

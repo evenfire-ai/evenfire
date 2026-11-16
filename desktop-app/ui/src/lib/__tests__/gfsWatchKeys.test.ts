@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { GFS_WATCH_MAX_KEYS } from '@constants/gfsWatch'
+import { GFS_WATCH_MAX_DRIVES, GFS_WATCH_MAX_KEYS } from '@constants/gfsWatch'
 import { parseGfsUri } from '../../../../src/gfs/uriHandler'
-import { canonList, canonicalKey, trunc64 } from '../../../../src/gfs/watchProtocol'
+import {
+  MAX_DRIVES,
+  MAX_KEYS,
+  canonList,
+  canonicalKey,
+  withinSetCeilings,
+} from '../../../../src/gfs/watchProtocol'
 import {
   buildGfsWatchKeys,
   gfsRidOfResourceId,
@@ -87,11 +93,12 @@ describe('gfsWatchKey', () => {
 
 describe('buildGfsWatchKeys', () => {
   it('equals what main keeps of the same prioritized list', () => {
+    expect([GFS_WATCH_MAX_KEYS, GFS_WATCH_MAX_DRIVES]).toEqual([MAX_KEYS, MAX_DRIVES])
     fc.assert(
       fc.property(fc.array(fc.tuple(kind, gfsUri), { maxLength: 90 }), entries => {
         const sources = entries.map(([k, uri]) => ({ kind: k, uri }))
         const keys = buildGfsWatchKeys(sources)
-        const mainView = trunc64(canonList(sources.map(s => gfsWatchKey(s.kind, s.uri))))
+        const mainView = withinSetCeilings(canonList(sources.map(s => gfsWatchKey(s.kind, s.uri))))
         expect(keys).toEqual(mainView)
         expect(keys.length).toBeLessThanOrEqual(GFS_WATCH_MAX_KEYS)
       }),

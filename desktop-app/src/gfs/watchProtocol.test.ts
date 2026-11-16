@@ -3,7 +3,9 @@ import fc from 'fast-check'
 import * as server from '../../../control-api/src/services/gfsWatch/keys.js'
 import { USER_A, signV1SessionToken } from '../../testSupport/gfsWatch/sessionTokens.js'
 import {
+  MAX_DRIVES,
   MAX_FRAME_CHARS,
+  MAX_KEYS,
   bindingChanged,
   bindingOf,
   canonList,
@@ -15,7 +17,7 @@ import {
   parseFrameLine,
   parseRetryAfterMs,
   positiveGeneration,
-  trunc64,
+  withinSetCeilings,
 } from './watchProtocol.js'
 
 // control-api's keys.ts is the producer of every key and binding the watch
@@ -74,7 +76,25 @@ describe('watch protocol helpers', () => {
     const b = `dir:gfs://d1/${'b'.repeat(32)}`
     expect(canonList([b, 'nope', a, b, 7, `FILE:gfs://d1/${'c'.repeat(32)}`])).toEqual([b, a])
     expect(canonList('not an array')).toEqual([])
-    expect(trunc64(Array.from({ length: 80 }, (_, i) => String(i)))).toHaveLength(64)
+    expect(withinSetCeilings(Array.from({ length: 80 }, (_, i) => String(i)))).toHaveLength(64)
+  })
+
+  it('withinSetCeilings sends a set control-api accepts, the rank-order prefix of the first two drives', () => {
+    expect(MAX_KEYS).toBe(server.MAX_KEYS_PER_SET)
+    expect(MAX_DRIVES).toBe(server.MAX_DRIVES_PER_SET)
+    const canonical = fc
+      .tuple(fc.constantFrom('file', 'dir'), fc.constantFrom('d1', 'd2', 'd3', 'main'), hex(32))
+      .map(([k, d, r]) => `${k}:gfs://${d}/${r.toLowerCase()}`)
+    fc.assert(
+      fc.property(fc.uniqueArray(canonical, { maxLength: 90 }), list => {
+        const out = withinSetCeilings(list)
+        expect(server.parseKeys(out)).not.toBeNull()
+        const drive = (k: string) => k.split('/')[2]!
+        const kept = [...new Set(list.map(drive))].slice(0, MAX_DRIVES)
+        expect(out).toEqual(list.filter(k => kept.includes(drive(k))).slice(0, MAX_KEYS))
+      }),
+      { numRuns: 5000 }
+    )
   })
 
   it('fuse merges by rank, breaks ties by registration order and never repeats a key', () => {

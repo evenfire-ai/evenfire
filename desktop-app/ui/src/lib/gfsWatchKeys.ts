@@ -1,4 +1,4 @@
-import { GFS_WATCH_MAX_KEYS } from '@constants/gfsWatch'
+import { GFS_WATCH_MAX_DRIVES, GFS_WATCH_MAX_KEYS } from '@constants/gfsWatch'
 
 export type GfsWatchKeyKind = 'file' | 'dir'
 
@@ -56,15 +56,21 @@ export function gfsRidOfResourceId(resourceId: string): string {
 
 /**
  * The watch list in priority order: the first occurrence of a key keeps its
- * place, unwatchable URIs are skipped, and the list is cut at main's cap so the
- * lowest-priority keys are the ones left out.
+ * place, unwatchable URIs are skipped, and the list is cut at main's key and
+ * drive caps so the lowest-priority keys are the ones left out.
  */
 export function buildGfsWatchKeys(sources: readonly GfsWatchKeySource[]): string[] {
   const keys: string[] = []
   const seen = new Set<string>()
+  const drives = new Set<string>()
   for (const source of sources) {
     const key = gfsWatchKey(source.kind, source.uri)
     if (!key || seen.has(key)) continue
+    const drive = parseGfsWatchKey(key)!.drive
+    if (!drives.has(drive)) {
+      if (drives.size === GFS_WATCH_MAX_DRIVES) continue
+      drives.add(drive)
+    }
     seen.add(key)
     keys.push(key)
     if (keys.length === GFS_WATCH_MAX_KEYS) break

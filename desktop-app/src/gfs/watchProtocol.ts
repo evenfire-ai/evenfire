@@ -35,8 +35,9 @@ export const HEARTBEAT_MAX_MS = 25_000
 export const WATCHDOG_HEARTBEATS = 3
 /** Longest line the reader buffers; anything longer is a broken stream, not a frame. */
 export const MAX_FRAME_CHARS = 16 * 1024
-/** The server's per-set ceiling: the GET line and the command NOTIFY are sized for it. */
+/** The server's per-set ceilings: the GET line and the command NOTIFY are sized for them. */
 export const MAX_KEYS = 64
+export const MAX_DRIVES = 2
 export const RETRY_AFTER_CAP_MS = 5 * 60 * 1000
 const FRAME_RETRY_AFTER_MAX_MS = 300_000
 
@@ -62,8 +63,25 @@ export function canonList(xs: unknown): string[] {
   return [...out]
 }
 
-export function trunc64(list: readonly string[]): string[] {
-  return list.slice(0, MAX_KEYS)
+/**
+ * A ranked list → the prefix the server accepts as one set: keys of the first
+ * `MAX_DRIVES` drives in rank order, at most `MAX_KEYS` of them. A set over
+ * either ceiling is a 400 on the GET and poisons the PUT, so an extra drive
+ * costs only its own keys instead of every key of the set.
+ */
+export function withinSetCeilings(list: readonly string[]): string[] {
+  const drives = new Set<string>()
+  const out: string[] = []
+  for (const k of list) {
+    if (out.length === MAX_KEYS) break
+    const drive = KEY_RE.exec(k)?.[2] ?? ''
+    if (!drives.has(drive)) {
+      if (drives.size === MAX_DRIVES) continue
+      drives.add(drive)
+    }
+    out.push(k)
+  }
+  return out
 }
 
 /**

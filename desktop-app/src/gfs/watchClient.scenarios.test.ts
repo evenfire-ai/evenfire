@@ -179,6 +179,19 @@ describe('key set changes over PUT', () => {
     expect(gets().at(-1)!.keys).toEqual(all.slice(0, MAX_KEYS))
   })
 
+  it('keys of a third drive are left out of the PUT and the GET, the rest keep their order', async () => {
+    await start()
+    const onDrive = (drive: string, n: number) =>
+      `file:gfs://${drive}/${n.toString(16).padStart(32, '0')}`
+    const [a, b, c, d] = [onDrive('d1', 1), onDrive('d2', 2), onDrive('d3', 3), onDrive('d1', 4)]
+    await h.subscribe([a, b, c, d])
+    expect(puts().map(p => p.keys)).toEqual([[a, b, d]])
+    h.server.eof()
+    await h.settle()
+    await fire(linkOf().timer)
+    expect(gets().at(-1)?.keys).toEqual([a, b, d])
+  })
+
   it('T-CB17: two owners with different lists share one stream with the fused union through reopens', async () => {
     await start()
     await h.subscribe([A, B], 1)
