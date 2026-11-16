@@ -534,7 +534,11 @@ filter or report on the signals they name.
   `SecretAccessDenied`), HCC writes `SecretResolved=False` and `Ready=False`
   before it deletes the runtime. NetworkPolicy intent follows `SecretResolved`,
   so the server's allows are revoked from that write on, also when the
-  Deployment delete then fails.
+  Deployment delete then fails. The delete starts after both writes return.
+  Each write is a status GET and PATCH, repeated up to three times only on a
+  write conflict, and each call is bounded by `HCC_K8S_REQUEST_TIMEOUT_MS`
+  (default 30 s), so a status endpoint that does not answer delays the delete
+  by up to about 2 minutes at the default.
 - **Restart comparison.** After a restart HCC compares the Secret it reads with
   the `clerum.io/credentials-revision` annotation of the managed Deployment, so a
   Secret changed while HCC was down no longer keeps a ready verdict over a
@@ -589,9 +593,15 @@ digits, or the component refuses to start.
 | mcp-host                | `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`, `CLERUM_DYNAMIC_TOOLS_THRESHOLD`, `MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS`, `MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS`, `MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS`, `MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS`, `MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS`, `MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN`, `MCP_CATALOG_BOOTSTRAP_BACKOFF_MS` |
 
 Values that used to be accepted and now stop the pod: surrounding white space,
-`+5000`, `05000`, `5e3`, `0x1388`, `5000.0`, and for the catalog-bootstrap
+`+5000`, `05000`, `5e3`, `0x1388`, `5000.0` (for
+`HCC_HOST_FULL_RECONCILE_CONCURRENCY`, whose range is 1 to 8, the same forms of
+an in-range value, such as `+5` or `05`), and for the catalog-bootstrap
 variables and `CLERUM_DYNAMIC_TOOLS_THRESHOLD` also a fraction such as `2000.5`
-(the threshold used to truncate it). A value of only white space used to
+(the threshold used to truncate it). `CONTEXT_MAPPER_HEARTBEAT_POLL_MS`,
+`CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`, `CLERUM_DYNAMIC_TOOLS_THRESHOLD` and
+the catalog-bootstrap variables also used to accept a value above
+9007199254740991 (for example `99999999999999999999`); it now stops the pod.
+A value of only white space used to
 mean the default for the HCC variables and `CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS`;
 it now stops the pod. `deploy/base` sets the three HCC variables in plain
 digits, the minikube overlay sets `CONTEXT_MAPPER_HEARTBEAT_POLL_MS` in plain
@@ -603,6 +613,11 @@ stops the Host at startup; `60abc` used to become `60` and now stops it too.
 
 `""` now means the default for the catalog-bootstrap variables; it used to stop
 the Host.
+
+The rule covers only the variables in the table. The other external-egress
+settings of HCC (`HCC_EXTERNAL_EGRESS_RESYNC_SEC`, `HCC_EXTERNAL_EGRESS_OVERLAP_SEC`,
+`HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC`, `HCC_EXTERNAL_EGRESS_MAX_ENTRIES`) keep
+their unsigned-digits rule, which still accepts leading zeros such as `05000`.
 
 ### mcp-host authority staleness floor
 
