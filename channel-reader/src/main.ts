@@ -198,6 +198,9 @@ const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
  */
 export const CHANNEL_RESYNC_INTERVAL_MS = 60_000 // 60 seconds
 
+/** What the status bubble shows before any progress step. */
+const PROCESSING_STATUS_TEXT = '⏳ Processing your request...'
+
 type ToolApprovalDecision = '/approve' | '/approve always' | '/deny'
 
 function newToolApprovalActionToken(): string {
@@ -2088,7 +2091,7 @@ export class ChannelReader {
     // 2. Send initial processing message and capture messageId for editing.
     const statusMessageId = await adapter.sendMessage(
       responseChannelId,
-      '\u23f3 Processing your request...',
+      PROCESSING_STATUS_TEXT,
       this.replyTargetMessageId(msg)
     )
 
@@ -2262,6 +2265,8 @@ export class ChannelReader {
           return
         }
 
+        // The task ended before the approval could be shown: the bubble keeps its outcome.
+        if (finalDelivered) return
         await editStatus('Approval needed. The request is in the messages below.')
         let outcome: { stopped: false; last: ToolApprovalLastPart } | { stopped: true }
         try {
@@ -2273,6 +2278,16 @@ export class ChannelReader {
             () => finalDelivered
           )
         } catch (err) {
+          // No approval is offered below any more, so the bubble shows the
+          // progress again. This runs before the denial: an accepted denial
+          // completes the task at the Host, and its final text must not be
+          // overwritten. A cancel or failure that already arrived has set
+          // finalDelivered.
+          if (!finalDelivered) {
+            await editStatus(
+              stream.steps.length > 0 ? formatProgressUpdate(stream.steps) : PROCESSING_STATUS_TEXT
+            )
+          }
           await notShown(err)
           return
         }

@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import type { ChannelAdapter, CommunicationChannelCRD, Message } from '../src/types'
+import { formatProgressUpdate } from '../src/progressFormatter'
+import type { ChannelAdapter, CommunicationChannelCRD, Message, ProgressStep } from '../src/types'
 
 // Tool approvals longer than one message of the channel: sent as several
 // messages, the controls on the last, registered only after the last was sent.
@@ -12,6 +13,8 @@ interface StreamCall {
   fireTerminal: (data: unknown) => Promise<void>
   fireError: (msg: string) => Promise<void>
   closed: boolean
+  /** What the stream reports as its steps; a test may push to it. */
+  steps: ProgressStep[]
 }
 const streamCalls: StreamCall[] = []
 
@@ -23,6 +26,7 @@ vi.mock('../src/progressClient', () => ({
       fireTerminal: options.onTerminal as never,
       fireError: options.onError as never,
       closed: false,
+      steps: [],
     }
     streamCalls.push(entry)
     return {
@@ -30,7 +34,7 @@ vi.mock('../src/progressClient', () => ({
         entry.closed = true
       },
       get steps() {
-        return []
+        return entry.steps
       },
     }
   },
@@ -188,12 +192,15 @@ interface AdapterEvent {
 
 /**
  * An adapter that records every call. Message ids are `<channel>-msg-<n>`, n
- * counting sendMessage calls from 1; a hook replaces the n-th call.
+ * counting sendMessage calls from 1; a hook replaces the n-th call. An edit
+ * hold delays the first editMessage call with that content until its gate
+ * opens, and calls `entered` when that call starts.
  */
 function recordingAdapter(channelType: ChannelKind) {
   const events: AdapterEvent[] = []
   const hooks = new Map<number, SendHook>()
   const editFailures = new Set<string>()
+  const editHolds = new Map<string, { gate: Promise<void>; entered: () => void }>()
   let calls = 0
   const sendMessage = vi.fn<ChannelAdapter['sendMessage']>(async (_channelId, content) => {
     calls += 1
@@ -206,6 +213,12 @@ function recordingAdapter(channelType: ChannelKind) {
   const editMessage = vi.fn<ChannelAdapter['editMessage']>(
     async (_channelId, messageId, content) => {
       events.push({ kind: 'edit', messageId, content })
+      const hold = editHolds.get(content)
+      if (hold) {
+        editHolds.delete(content)
+        hold.entered()
+        await hold.gate
+      }
       if (editFailures.has(messageId)) throw new Error('provider refused the edit')
     }
   )
@@ -217,7 +230,7 @@ function recordingAdapter(channelType: ChannelKind) {
     sendMessage,
     editMessage,
   }
-  return { adapter, sendMessage, editMessage, events, hooks, editFailures }
+  return { adapter, sendMessage, editMessage, events, hooks, editFailures, editHolds }
 }
 
 function rpcClientFor(taskId: string, userId: string, notification: string) {
@@ -1249,5 +1262,179 @@ describe('tool approval in a synchronous response, not shown whole', () => {
     const withBlocks = parts.filter(call => call[4]?.slackBlocks)
     expect(withBlocks).toEqual([parts[parts.length - 1]])
     expect(s.rpc.sendDenial).not.toHaveBeenCalled()
+  })
+})
+
+describe('the status bubble when a multi-part approval is not shown', () => {
+  const PROCESSING = '⏳ Processing your request...'
+
+  function bubbleEdits(rec: ReturnType<typeof recordingAdapter>): string[] {
+    return rec.editMessage.mock.calls
+      .filter(call => call[1] === 'telegram-msg-1')
+      .map(call => call[2])
+  }
+
+  /** Settles until `done` holds, at most `rounds` times. */
+  async function settleUntil(done: () => boolean, rounds = 25): Promise<void> {
+    for (let i = 0; i < rounds && !done(); i++) await settle()
+  }
+
+  it('A42 writes no pointer when the task was cancelled before the approval was fetched', async () => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const h = await startAsync('telegram', CARD_255, 'task-a42')
+    const held = gate()
+    h.rpc.getTaskResult.mockImplementationOnce(async () => {
+      await held.promise
+      return {
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-a42',
+          requestId: 'approval-task-a42',
+          userId: SENDER.telegram,
+          notification: CARD_255,
+        },
+      }
+    })
+    void h.suspend()
+    await settle()
+    await h.end()
+    held.release()
+    await settle()
+
+    // Witnesses: the cancel reached the bubble, and the multi-part branch ran after it.
+    expect(bubbleEdits(h.rec)).toContain('Request cancelled.')
+    expect(
+      logs.mock.calls.some(call =>
+        String(call[0]).includes(
+          'Tool approval needed (task: task-a42, request: approval-task-a42)'
+        )
+      )
+    ).toBe(true)
+    expect(bubbleEdits(h.rec).at(-1)).toBe('Request cancelled.')
+    expect(bubbleEdits(h.rec)).not.toContain(POINTER)
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(1)
+    expect(h.rpc.sendDenial).not.toHaveBeenCalled()
+    await h.send('/approve')
+    expect(sentContents(h.rec).at(-1)).toBe(NO_PENDING)
+    expect(h.rpc.sendApproval).not.toHaveBeenCalled()
+  })
+
+  it('A43 shows the progress again before the denial when a part is not delivered', async () => {
+    silenceErrors()
+    const failPart2 = (h: Awaited<ReturnType<typeof startAsync>>) =>
+      h.rec.hooks.set(3, async () => {
+        throw new Error('provider refused the message')
+      })
+
+    // (i) denial accepted: the bubble is restored before the denial is sent.
+    const i = await startAsync('telegram', CARD_600, 'task-a43-i')
+    failPart2(i)
+    await i.suspend()
+    await settle()
+    expect.soft(bubbleEdits(i.rec), 'A43(i) bubble edits').toEqual([POINTER, PROCESSING])
+    expect.soft(sentContents(i.rec).at(-1), 'A43(i) notice').toBe(DENIED)
+    const restoreCall = i.rec.editMessage.mock.calls.findIndex(
+      call => call[1] === 'telegram-msg-1' && call[2] === PROCESSING
+    )
+    const restoreOrder =
+      restoreCall >= 0 ? i.rec.editMessage.mock.invocationCallOrder[restoreCall]! : Infinity
+    expect.soft(i.rpc.sendDenial, 'A43(i) denial sent').toHaveBeenCalledTimes(1)
+    expect
+      .soft(restoreOrder, 'A43(i) the progress edit comes before the denial')
+      .toBeLessThan(i.rpc.sendDenial.mock.invocationCallOrder[0] ?? -Infinity)
+    await i.end()
+
+    // (ii) denial rejected.
+    const ii = await startAsync('telegram', CARD_600, 'task-a43-ii')
+    failPart2(ii)
+    ii.rpc.sendDenial.mockResolvedValueOnce({ success: false })
+    await ii.suspend()
+    await settle()
+    expect.soft(bubbleEdits(ii.rec), 'A43(ii) bubble edits').toEqual([POINTER, PROCESSING])
+    expect.soft(sentContents(ii.rec).at(-1), 'A43(ii) notice').toBe(STILL_WAITING)
+    await ii.end()
+
+    // (iii) a line over the limit: no pointer was written, so nothing is restored.
+    const iii = await startAsync('telegram', deleteCard(['r'.repeat(5000)]), 'task-a43-iii')
+    await iii.suspend()
+    await settle()
+    // Witness: the refusal ran to its notice.
+    expect.soft(sentContents(iii.rec).at(-1), 'A43(iii) notice').toBe(DENIED)
+    expect.soft(bubbleEdits(iii.rec), 'A43(iii) bubble edits').toEqual([])
+    await iii.end()
+
+    // (iv) the task is cancelled while the failing part is held.
+    const iv = await startAsync('telegram', CARD_600, 'task-a43-iv')
+    const heldIv = gate()
+    iv.rec.hooks.set(3, async () => {
+      await heldIv.promise
+      throw new Error('provider refused the message')
+    })
+    void iv.suspend()
+    await settle()
+    await iv.end()
+    heldIv.release()
+    await settle()
+    // Witness: the refused call was made.
+    expect.soft(iv.rec.sendMessage, 'A43(iv) refused call made').toHaveBeenCalledTimes(3)
+    const ivEdits = bubbleEdits(iv.rec)
+    expect.soft(ivEdits.at(-1), 'A43(iv) last bubble edit').toBe('Request cancelled.')
+    expect
+      .soft(
+        ivEdits.slice(ivEdits.indexOf(POINTER) + 1).some(text => text.startsWith(PROCESSING)),
+        'A43(iv) no progress text after the pointer'
+      )
+      .toBe(false)
+
+    // (v) as (i), with one completed step: the restore shows the progress list.
+    const v = await startAsync('telegram', CARD_600, 'task-a43-v')
+    failPart2(v)
+    const step: ProgressStep = {
+      toolCallId: 'call-a43-v',
+      toolName: 'kept_files_list',
+      displayName: 'List kept files',
+      intentSummary: 'List the kept files',
+      iteration: 1,
+      stepIndex: 1,
+      totalSteps: 1,
+      state: 'completed',
+      durationMs: 120,
+    }
+    v.stream.steps.push(step)
+    await v.suspend()
+    await settle()
+    expect
+      .soft(bubbleEdits(v.rec), 'A43(v) bubble edits')
+      .toEqual([POINTER, formatProgressUpdate([step])])
+    await v.end()
+
+    // (vi) the accepted denial completes the task at the Host: its final text
+    // is written while the denial's answer is handled, and stays last.
+    const vi6 = await startAsync('telegram', CARD_600, 'task-a43-vi')
+    failPart2(vi6)
+    const finalText = 'Tool `kept_files_delete` was denied by the user.'
+    const finalEdit = gate()
+    const finalEntered = gate()
+    vi6.rec.editHolds.set(finalText, { gate: finalEdit.promise, entered: finalEntered.release })
+    vi6.rpc.sendDenial.mockImplementationOnce(async () => {
+      vi6.rpc.getTaskResult.mockResolvedValue({
+        success: true,
+        status: 'completed' as const,
+        response: finalText,
+      } as never)
+      void vi6.stream.fireTerminal({ taskId: 'task-a43-vi', status: 'completed' })
+      // The Host answers after the task completed; the final edit is in flight.
+      await finalEntered.promise
+      return { success: true }
+    })
+    void vi6.suspend()
+    await settleUntil(() => sentContents(vi6.rec).includes(DENIED))
+    // Witnesses: the notice was sent while the final edit was held, then it is released.
+    expect.soft(sentContents(vi6.rec), 'A43(vi) notice sent').toContain(DENIED)
+    finalEdit.release()
+    await settle()
+    expect.soft(bubbleEdits(vi6.rec), 'A43(vi) final edit made').toContain(finalText)
+    expect.soft(bubbleEdits(vi6.rec).at(-1), 'A43(vi) last bubble edit').toBe(finalText)
   })
 })
