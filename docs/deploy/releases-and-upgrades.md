@@ -328,7 +328,6 @@ Read the notes for every release you skip over, not only the target release.
 | [mcp-host authority staleness floor](#mcp-host-authority-staleness-floor)              | Your `mcp-host-config` sets `HCC_AUTHORITY_MAX_STALENESS_MS` or `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`, for example as a copy of the minikube file with `60000`.                                                                                                                                                               |
 | [HCC Deployment watch RBAC](#hcc-deployment-watch-rbac)                                | Every cluster. Apply the updated Role before you roll the new host-context-controller image.                                                                                                                                                                                                                                  |
 | [HCC McpServer verdict changes](#hcc-mcpserver-verdict-changes)                        | You alert, filter or report on HCC's McpServer conditions, NetworkPolicy pass results or log lines.                                                                                                                                                                                                                           |
-| [McpServer CRD: applied credentials record](#mcpserver-crd-applied-credentials-record) | Every cluster. Apply the updated McpServer CRD before you roll the new host-context-controller image.                                                                                                                                                                                                                         |
 | [Numeric settings in plain digits](#numeric-settings-in-plain-digits)                  | You set one of twelve HCC or mcp-host numeric variables to anything but plain digits, or `CLERUM_DYNAMIC_TOOLS_THRESHOLD` to an invalid value. The pod no longer starts.                                                                                                                                                      |
 
 #### Snippet runner Node permissions
@@ -516,7 +515,8 @@ the new HCC image. If your CD identity may not patch Roles, re-run
 `deploy/scripts/bootstrap-rbac.sh` before upgrading.
 
 If the image rolls first, the list succeeds, the watch answers 403, and the
-informer retries at up to 30 s with a warning per attempt, with
+informer retries at up to 30 s and logs an error line per attempt
+(`event: deployment-informer-watch-forbidden`), with
 `clerum_hcc_deployment_informer_running` at 0. HCC readiness does not depend on
 the informer. While the informer is down, a rollout that converges after its
 readiness budget is published at HCC's next re-read of the Deployment (every
@@ -535,35 +535,43 @@ filter or report on the signals they name.
   before it deletes the runtime. NetworkPolicy intent follows `SecretResolved`,
   so the server's allows are revoked from that write on, also when the
   Deployment delete then fails.
-- **NetworkPolicy pass outcomes.** A NetworkPolicy pass that ends because the
-  desired Context or McpServer inventory changed is now reported as
+- **Restart comparison.** After a restart HCC compares the Secret it reads with
+  the `clerum.io/credentials-revision` annotation of the managed Deployment, so a
+  Secret changed while HCC was down no longer keeps a ready verdict over a
+  transient failure of a later call. It costs one extra Deployment read per
+  reconcile of a Secret-backed, ready McpServer until HCC's first completed sync
+  of it. No CRD or RBAC change. If that Deployment read itself fails
+  transiently, HCC has nothing to compare and keeps the verdict until a read
+  succeeds: about 35 s for a single failure, and for the API outage plus up to
+  about 330 s while the API keeps failing. A failed carried read is reported as
+  `site=resource_sync` in `clerum_hcc_mcpserver_reconcile_call_failures_total`.
+- **NetworkPolicy pass outcomes.** A NetworkPolicy pass that returns without
+  certifying because the desired Context or McpServer inventory changed is now
+  reported as
   `clerum_hcc_initial_convergence_pass_results_total{result="aborted-bump"}` and
   `clerum_hcc_initial_convergence_swallowed_total{sink="inventory-changed"}`.
   Before, it was counted as `aborted-authority` / `authority-lost`, which now
-  mean only that a watch cache lost authority.
+  mean only that a watch cache lost authority. A pass that ends with an
+  inventory-changed error was already reported as `aborted-bump` and, as before,
+  increments no `swallowed` series.
+- **Secret informer metrics carry a `namespace` label.**
+  `clerum_hcc_secret_informer_events_total` (labels `type` → `namespace`,
+  `type`), `clerum_hcc_secret_informer_reconnects_total` and
+  `clerum_hcc_secret_informer_running` (no label → `namespace`) now report one
+  series per informer namespace (McpServer, channels and llm-hooks namespaces).
+  Before, the three informers shared one series. A query or alert on the bare
+  name now returns three series: select a namespace or aggregate with
+  `sum by (namespace)`. `clerum_hcc_secret_informer_reconnects_total` is exposed
+  at 0 per namespace from start.
 - **Structured HCC watcher and dev-mode configuration logs.** HCC's watcher and
   dev-mode configuration lines are now structured JSON lines like the rest of
-  HCC's log; the old text is the `msg` field. Log filters anchored on the start
-  or end of those lines need updating.
-
-### McpServer CRD: applied credentials record
-
-host-context-controller (HCC) now writes `status.appliedCredentialsRevision` on
-each McpServer that has an `envSecret`: the content hash (`sha256:<hex>`) of the
-Secret data it last applied to the Deployment. It never contains Secret values.
-After a restart HCC compares the Secret it reads with this record, so a Secret
-changed while HCC was down no longer keeps a ready verdict over a transient
-failure of the reconcile's next call.
-
-Apply the updated McpServer CRD (`charts/clerum-crds/crds/mcpserver.yaml`)
-before you roll the new HCC image. The status schema prunes undeclared fields:
-on a cluster whose CRD lacks the property the write is dropped and HCC behaves
-as before for that case. On GKE the evenfire-infra deploy workflows run a CRD
-guard (`deploy/scripts/crd-guard.sh` in evenfire-infra) that fails the deploy
-while the cluster's CRD differs from the release's file. The first completed
-reconcile of each Secret-backed McpServer after the upgrade writes the field
-once; afterwards it changes when the Secret data changes, and it is removed when
-`envSecret` is removed. Rolling back to an older image ignores the field.
+  HCC's log. The fixed part of the old text is the `msg` field. An error that
+  used to follow that text is now the `err` field (`err.name` and
+  `err.message`, no stack); a Kubernetes API status code and response body are
+  in `err.message`, not in `msg`. Dev-mode configuration lines log `hasUrl`
+  instead of the URL and `errorName` instead of a parse error's message. Update
+  log filters anchored on the start or end of those lines, and filters that
+  matched the text and the error as one string.
 
 ### Numeric settings in plain digits
 
