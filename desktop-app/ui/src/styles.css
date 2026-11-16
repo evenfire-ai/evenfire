@@ -1984,13 +1984,6 @@ body.sidebar-resizing {
   gap: var(--space-0-5);
 }
 
-/* A section ("My home") reads like the "Shared with me" label: no toggle
-   column, and its children sit at the same indent as the shared roots. It
-   must follow the row rule above, which it overrides. */
-.da-file-explorer__row--section {
-  grid-template-columns: minmax(0, 1fr);
-}
-
 .da-file-explorer__group--section {
   margin-left: 0;
   padding-left: 0;
