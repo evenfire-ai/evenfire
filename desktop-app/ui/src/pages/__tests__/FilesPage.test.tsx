@@ -4385,6 +4385,87 @@ describe('FilesPage', () => {
     ).toBeNull()
   })
 
+  it('lets the home owner remove a member outside their teams from a folder inside the home', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const revokeGrant = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      home: { state: 'ready', drive: 'main', resourceId: 'home-1', path: '/Users/owner' },
+      current: {
+        resourceId: 'sub-1',
+        gfsUri: 'gfs://main/sub',
+        name: 'Subfolder',
+        kind: 'directory',
+      },
+      crumbs: [{ resourceId: 'sub-1', gfsUri: 'gfs://main/sub', name: 'Subfolder' }],
+      affordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read'],
+        canCreateShare: false,
+      },
+      inheritedAccess: [
+        {
+          subject: { type: 'user', id: 'owner-1' },
+          homeOwner: true,
+          permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+          inheritedFrom: ['My home'],
+          sources: [
+            {
+              resourceId: 'home-1',
+              name: 'My home',
+              permissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+              grantId: 'owner-grant',
+              shareIds: [],
+              grantPermissions: ['read', 'write', 'delete', 'share', 'manage_acl'],
+              grantInherit: true,
+              shareEntries: [],
+            },
+          ],
+        },
+      ],
+      // A member of no team the owner belongs to, granted on the subfolder.
+      grants: [
+        {
+          id: 'grant-outside',
+          drive: 'main',
+          resourceId: 'sub-1',
+          subject: { type: 'user', id: 'user-outside' },
+          permissions: ['read'],
+          inherit: true,
+        },
+      ],
+      revokeGrant,
+    })
+
+    renderFilesPage(pushToast)
+    await openManageDialog('Subfolder')
+
+    const row = await screen.findByTestId('gfs-access-row-grant-grant-outside')
+    expect(row.textContent).toContain('Member outside your teams')
+    expect(row.textContent).toContain('Read')
+    expect(row.textContent).not.toContain('user-outside')
+    fireEvent.click(
+      within(row).getByRole('button', { name: 'Actions for Member outside your teams' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+
+    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('grant-outside'))
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'Access revoked for Member outside your teams',
+        'success'
+      )
+    )
+  })
+
   it('lists direct shares in the who-has-access list and revokes them', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
