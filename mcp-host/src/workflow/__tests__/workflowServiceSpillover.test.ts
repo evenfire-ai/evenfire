@@ -349,36 +349,72 @@ describe('WorkflowService step spillover — default (enabled)', () => {
     expect(res.error).toContain('required-tool-unavailable')
   })
 
-  it('keeps the artifact output when a large artifact result was spilled', async () => {
-    const artifact = {
-      success: true,
-      artifact: {
-        name: 'report.pdf',
-        format: 'pdf',
-        path: '/output/report.pdf',
-        sizeBytes: 12,
-        createdAt: '2026-05-13T00:00:00.000Z',
-      },
-      notes: big(192 * 1024),
-    }
-    const client = mockMcpClient([{ name: 'make_report' }], { make_report: { content: artifact } })
+  it('keeps the artifact output when a generator result was stored', async () => {
+    // A generator is the producer of artifact results. Twelve missing images,
+    // each named with 400 letters, make its notes reach the minimum threshold.
+    vi.stubEnv('CLERUM_WORKFLOW_TOOL_SPILLOVER_THRESHOLD', '4096')
+    const images = 'abcdefghijkl'.split('').map(letter => `${letter.repeat(400)}.png`)
     const llm = mockLlmProvider([
-      { content: null, tool_calls: [{ name: 'srv__make_report', arguments: {} }] },
+      {
+        content: null,
+        tool_calls: [
+          {
+            name: 'clerum__generate_pdf',
+            arguments: { filename: 'report.pdf', title: 'Report', body: 'Body text.', images },
+          },
+        ],
+      },
       { content: 'partial', finish_reason: FinishReason.Length },
       { content: 'still partial', finish_reason: FinishReason.Length },
     ])
 
-    const res = await service(llm, client).executeStep({
+    const res = await service(llm, mockMcpClient([{ name: 'read' }])).executeStep({
       stepId: STEP_ID,
       instruction: 'report',
       mcpServers: SERVERS,
     })
 
-    expect(toolResultMessages(llm)[0]).toContain('[Result stored outside the prompt (')
+    const record = res.toolsCalled?.[0]?.result
+    expect(record).toMatchObject({
+      success: true,
+      artifact: { name: 'report.pdf', format: 'pdf' },
+    })
+    expect(Buffer.byteLength(JSON.stringify(record), 'utf8')).toBeGreaterThanOrEqual(4096)
+    // Witness: the generator's own result was stored outside the prompt.
+    const [message] = toolResultMessages(llm)
+    expect(message).toContain('[Result stored outside the prompt (')
+    expect(message).toContain(`"spillover_ref":"${FIRST_REF}"`)
     expect(res.status).toBe('completed')
     expect(res.output).toContain('Use the run artifacts for the complete output')
     expect(res.output).toContain('report.pdf')
-    expect(res.toolsCalled?.[0]?.result).toEqual(artifact)
+  })
+
+  it('offers the read tool once however many results are stored', async () => {
+    const client = mockMcpClient([{ name: 'read' }], { read: { content: sdk(big(200 * 1024)) } })
+    const llm = mockLlmProvider([
+      {
+        content: null,
+        tool_calls: [
+          { name: 'srv__read', arguments: {} },
+          { name: 'srv__read', arguments: {} },
+        ],
+      },
+      { content: null, tool_calls: [{ name: 'srv__read', arguments: {} }] },
+      { content: 'done', tool_calls: null },
+    ])
+
+    await service(llm, client).executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: SERVERS,
+    })
+
+    // Witness: three results were stored.
+    const refs = toolResultMessages(llm).map(m => JSON.parse(m.split('\n')[2]!).spillover_ref)
+    expect(refs).toEqual(['i1c0', 'i1c1', 'i2c0'].map(id => `spillover://${STEP_ID}/${id}.json`))
+    expect(offeredTools(llm).map(names => names.filter(n => n === READ_TOOL).length)).toEqual([
+      0, 1, 1,
+    ])
   })
 })
 
