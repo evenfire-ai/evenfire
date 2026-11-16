@@ -552,7 +552,8 @@ filter or report on the signals they name.
   `clerum_hcc_initial_convergence_swallowed_total{sink="inventory-changed"}`.
   Before, it was counted as `aborted-authority` / `authority-lost`, which now
   mean only that a watch cache lost authority. A pass that ends with an
-  inventory-changed error was already reported as `aborted-bump` and, as before,
+  inventory-changed error was already classified the same way (`aborted-bump`
+  when the inventory moved, `aborted-authority` otherwise) and, as before,
   increments no `swallowed` series.
 - **Secret informer metrics carry a `namespace` label.**
   `clerum_hcc_secret_informer_events_total` (labels `type` → `namespace`,
