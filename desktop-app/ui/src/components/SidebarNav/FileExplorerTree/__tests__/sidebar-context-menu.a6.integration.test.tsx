@@ -12,23 +12,63 @@ import {
   resourceAffordances,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FileExplorerTree } from '..'
+import { SidebarNav, shouldDeferCompactSidebarEscape } from '../../index'
 import { assertA4, initial, transition } from '../sidebar-context-menu-a4-reference'
 
 const auth = vi.hoisted(() => ({
   isAuthenticated: true,
   me: { id: 'u', teamId: 't' },
+  busy: false,
+  handleLogout: vi.fn(),
   runtimeConfigState: { envKey: 'test' },
   sessionGeneration: 7,
 }))
-const menuCapture = vi.hoisted(() => ({ actionsByResource: new Map<string, unknown[]>() }))
+const menuCapture = vi.hoisted(() => ({
+  actionsByResource: new Map<string, unknown[]>(),
+  contextStateByResource: new Map<string, unknown>(),
+  states: [] as Array<[number, boolean, boolean]>,
+  onMenuState: null as null | ((requestId: number, open: boolean, shareOpen: boolean) => void),
+}))
 vi.mock('@contexts/AuthContext', () => ({ useAuthContext: () => auth }))
+vi.mock('@contexts/ChatListContext', () => ({
+  useChatListContext: () => ({
+    activeChatId: null,
+    latestChatSessions: [],
+    latestChatSessionsLoading: false,
+    sessionStateByChatKey: {},
+  }),
+}))
+vi.mock('@contexts/AgentChatActionsContext', () => ({
+  useAgentChatActionsContext: () => ({
+    captureChatDeleteFence: vi.fn(async () => {
+      throw new Error('no delete target')
+    }),
+    handleRenameChatForAgent: vi.fn(),
+    handleDeleteChatForAgent: vi.fn(),
+  }),
+}))
+vi.mock('@contexts/NavigationContext', () => ({
+  useNavigationContext: () => ({ selectedAgent: null, handleSelectChatAgent: vi.fn() }),
+}))
 vi.mock('@components/GfsResourceMenu', async importOriginal => {
   const actual = await importOriginal<typeof import('@components/GfsResourceMenu')>()
   return {
     ...actual,
     GfsResourceMenu: (props: Parameters<typeof actual.GfsResourceMenu>[0]) => {
       menuCapture.actionsByResource.set(props.resourceName, props.actions ?? [])
-      return createElement(actual.GfsResourceMenu, props)
+      menuCapture.contextStateByResource.set(props.resourceName, {
+        presentation: props.presentation,
+        contextVisible: props.contextVisible,
+        ownerCurrent: props.isContextOwnerCurrent?.('open'),
+      })
+      return createElement(actual.GfsResourceMenu, {
+        ...props,
+        onSidebarMenuStateChange: (requestId, open, shareOpen) => {
+          menuCapture.states.push([requestId, open, shareOpen])
+          props.onSidebarMenuStateChange?.(requestId, open, shareOpen)
+          menuCapture.onMenuState?.(requestId, open, shareOpen)
+        },
+      })
     },
   }
 })
@@ -38,6 +78,9 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.useRealTimers()
   menuCapture.actionsByResource.clear()
+  menuCapture.contextStateByResource.clear()
+  menuCapture.states = []
+  menuCapture.onMenuState = null
   auth.sessionGeneration = 7
 })
 
@@ -46,7 +89,15 @@ type Pending = {
   reject: (error: Error) => void
 }
 
-function mountedTree(controlled = false, strict = false) {
+function mountedTree(
+  controlled = false,
+  strict = false,
+  onContextMenuEscapeStateChange?: Parameters<
+    typeof FileExplorerTree
+  >[0]['onContextMenuEscapeStateChange'],
+  compactSidebar = false,
+  onCompactMenuOpenChange = vi.fn()
+) {
   const idA = '00000000000000000000000000000001'
   const idB = '00000000000000000000000000000002'
   const resources = [accessibleResource(idA, 'A', 'file'), accessibleResource(idB, 'B', 'file')]
@@ -117,6 +168,36 @@ function mountedTree(controlled = false, strict = false) {
         toJSON: () => ({}),
       } as DOMRect
     }
+    if (this.classList.contains('da-gfs-resource-menu__submenu')) {
+      const left = Number.parseFloat(this.style.left) || 0
+      const top = Number.parseFloat(this.style.top) || 0
+      const width = Number.parseFloat(this.style.width) || 232
+      const height = Math.min(144, Number.parseFloat(this.style.maxHeight) || 552)
+      return {
+        x: left,
+        y: top,
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+        width,
+        height,
+        toJSON: () => ({}),
+      } as DOMRect
+    }
+    if (this.classList.contains('ui-menu-item__icon')) {
+      return {
+        x: 16,
+        y: 120,
+        left: 16,
+        top: 120,
+        right: 36,
+        bottom: 140,
+        width: 20,
+        height: 20,
+        toJSON: () => ({}),
+      } as DOMRect
+    }
     return {
       x: 0,
       y: 0,
@@ -130,6 +211,30 @@ function mountedTree(controlled = false, strict = false) {
     } as DOMRect
   })
   const tree = () => {
+    if (compactSidebar) {
+      const content = (
+        <QueryClientProvider client={queryClient}>
+          <SidebarNav
+            navItem="chat"
+            collapsed={false}
+            compactMode
+            compactMenuOpen
+            onCompactMenuOpenChange={onCompactMenuOpenChange}
+            activeSandboxUiApp={null}
+            availableSandboxUiApps={[]}
+            onCollapsedChange={vi.fn()}
+            onNewChat={vi.fn()}
+            onOpenSandboxUiApp={vi.fn()}
+            onSelect={vi.fn()}
+            onOpenFilesSection={vi.fn()}
+            onOpenPreviewSection={vi.fn()}
+            onGfsResourceAction={onResourceAction}
+            pushToast={pushToast}
+          />
+        </QueryClientProvider>
+      )
+      return strict ? <StrictMode>{content}</StrictMode> : content
+    }
     const content = (
       <QueryClientProvider client={queryClient}>
         <div className="left-nav">
@@ -138,6 +243,7 @@ function mountedTree(controlled = false, strict = false) {
             onOpenPreview={vi.fn()}
             onResourceAction={onResourceAction}
             pushToast={pushToast}
+            onContextMenuEscapeStateChange={onContextMenuEscapeStateChange}
           />
         </div>
       </QueryClientProvider>
@@ -293,7 +399,7 @@ describe('r14 mounted-component independent A4 comparisons', () => {
       async run(model: Model, real: Real) {
         real.trace.push('click:Share')
         const menu = screen.getByRole('menu', { name: `Actions for ${model.resource}` })
-        fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+        fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }), { detail: 1 })
         await screen.findByRole('menu', { name: `Share options for ${model.resource}` })
         Object.assign(model, transition(model, { type: 'share', resource: model.resource! }))
       }
@@ -301,22 +407,25 @@ describe('r14 mounted-component independent A4 comparisons', () => {
         return 'SelectShare(click)'
       }
     }
-    class Back implements fc.Command<Model, Real> {
+    class ReturnFromShare implements fc.Command<Model, Real> {
       check(model: Model) {
         return admit(model.menu === 'open' && model.view === 'share')
       }
       async run(model: Model, real: Real) {
-        real.trace.push('click:Back')
-        fireEvent.click(
-          within(
-            screen.getByRole('menu', { name: `Share options for ${model.resource}` })
-          ).getByRole('menuitem', { name: 'Back' })
+        real.trace.push('ArrowLeft:Share')
+        const child = within(
+          screen.getByRole('menu', { name: `Share options for ${model.resource}` })
+        ).getByRole('menuitem', { name: 'Copy link' })
+        fireEvent.keyDown(child, { key: 'ArrowLeft' })
+        await waitFor(() =>
+          expect(
+            screen.queryByRole('menu', { name: `Share options for ${model.resource}` })
+          ).toBeNull()
         )
-        await screen.findByRole('menu', { name: `Actions for ${model.resource}` })
         Object.assign(model, transition(model, { type: 'back' }))
       }
       toString() {
-        return 'Back(click)'
+        return 'ReturnFromShare(ArrowLeft)'
       }
     }
     class OpenB implements fc.Command<Model, Real> {
@@ -370,7 +479,7 @@ describe('r14 mounted-component independent A4 comparisons', () => {
     const commandArbs = [
       fc.constant(new OpenA()),
       fc.constant(new SelectShare()),
-      fc.constant(new Back()),
+      fc.constant(new ReturnFromShare()),
       fc.constant(new OpenB()),
       fc.constant(new Escape()),
       fc.constant(new Dismiss()),
@@ -385,16 +494,17 @@ describe('r14 mounted-component independent A4 comparisons', () => {
           await fc.asyncModelRun(() => ({ model, real }), commands)
           await settle(f)
           const actual = observe(f, model.resource ?? undefined)
-          const panelRect = actual.open
-            ? (
-                screen.getByRole('menu', {
-                  name:
-                    actual.view === 'share'
-                      ? `Share options for ${model.resource}`
-                      : `Actions for ${model.resource}`,
-                }) as HTMLElement
-              ).getBoundingClientRect()
-            : null
+          const panelRects = actual.open
+            ? (screen.queryAllByRole('menu') as HTMLElement[]).map(panel => {
+                const rect = panel.getBoundingClientRect()
+                return {
+                  left: rect.left,
+                  top: rect.top,
+                  right: rect.right,
+                  bottom: rect.bottom,
+                }
+              })
+            : []
           const sidebarRect = document.querySelector('.left-nav')!.getBoundingClientRect()
           Object.assign(
             model,
@@ -407,14 +517,8 @@ describe('r14 mounted-component independent A4 comparisons', () => {
                 right: sidebarRect.right,
                 bottom: sidebarRect.bottom,
               },
-              rect: panelRect
-                ? {
-                    left: panelRect.left,
-                    top: panelRect.top,
-                    right: panelRect.right,
-                    bottom: panelRect.bottom,
-                  }
-                : null,
+              rect: panelRects[0] ?? null,
+              rects: panelRects,
             })
           )
           Object.assign(model, transition(model, { type: 'settled' }))
@@ -537,7 +641,7 @@ describe('r14 mounted-component independent A4 comparisons', () => {
     f.queryClient.clear()
   })
 
-  it('compares Main → Share against one stable model panel and rectangle', async () => {
+  it('compares Main plus overlapping Share against the independent overlay model', async () => {
     const f = mountedTree()
     await openMouse('A')
     await settle(f)
@@ -551,24 +655,210 @@ describe('r14 mounted-component independent A4 comparisons', () => {
     })
     const main = screen.getByRole('menu', { name: 'Actions for A' })
     const identity = main
-    fireEvent.click(within(main).getByRole('menuitem', { name: 'Share' }))
+    fireEvent.click(within(main).getByRole('menuitem', { name: 'Share' }), { detail: 1 })
     await screen.findByRole('menu', { name: 'Share options for A' })
-    const shareModel = transition(model, { type: 'share', resource: 'A' })
+    const shareModel = transition(model, { type: 'share', resource: 'A', modality: 'touch' })
     const after = observe(f, 'A')
     const modelPanelCount = shareModel.panels.length
-    const actualPanelIdentityStable =
-      screen.queryByRole('menu', { name: 'Share options for A' }) === identity
+    const mainStayedMounted = screen.queryByRole('menu', { name: 'Actions for A' }) === identity
     await settle(f)
-    // Expected baseline RED: the actual consumer opens a second popup instead of replacing Main.
     expect({
       view: after.view,
       panelCount: after.visiblePanelCount,
-      samePanel: actualPanelIdentityStable,
-    }).toEqual({ view: shareModel.view, panelCount: modelPanelCount, samePanel: true })
+      sameMain: mainStayedMounted,
+    }).toEqual({ view: shareModel.view, panelCount: modelPanelCount, sameMain: true })
     f.queryClient.clear()
   })
 
-  it('keeps one panel through Back and Escape with deliberate keyboard entry and focus return', async () => {
+  it('opens a separate overlapping Share flyout on sidebar hover', async () => {
+    const f = mountedTree()
+    await openMouse('A')
+    await settle(f)
+    const main = screen.getByRole('menu', { name: 'Actions for A' })
+    const share = within(main).getByRole('menuitem', { name: 'Share' })
+    expect(menuCapture.contextStateByResource.get('A')).toEqual({
+      presentation: 'sidebar-context',
+      contextVisible: true,
+      ownerCurrent: true,
+    })
+    const activeElement = document.activeElement
+
+    fireEvent.mouseOver(share)
+
+    expect(share.getAttribute('aria-expanded')).toBe('true')
+    const flyout = document.querySelector<HTMLElement>(
+      '.da-gfs-resource-menu__submenu--sidebar-context'
+    )
+    expect(flyout).not.toBeNull()
+    expect(flyout?.style.visibility).not.toBe('hidden')
+    expect(screen.getByRole('menu', { name: 'Actions for A' })).toBe(main)
+    expect(screen.getAllByRole('menu')).toHaveLength(2)
+    expect(flyout).not.toBe(main)
+    expect(document.activeElement).toBe(activeElement)
+
+    const mainRect = main.getBoundingClientRect()
+    const flyoutRect = flyout.getBoundingClientRect()
+    const iconRect = share.querySelector('.ui-menu-item__icon')!.getBoundingClientRect()
+    const sidebarRect = document.querySelector('.left-nav')!.getBoundingClientRect()
+    expect(flyoutRect.left - mainRect.left).toBeGreaterThanOrEqual(44)
+    expect(flyoutRect.left - mainRect.left).toBeLessThanOrEqual(56)
+    expect(flyoutRect.left).toBeLessThan(mainRect.right)
+    expect(iconRect.right).toBeLessThan(flyoutRect.left)
+    expect(flyoutRect.right).toBeLessThanOrEqual(sidebarRect.right)
+    expect(flyoutRect.top).toBeGreaterThanOrEqual(sidebarRect.top)
+    expect(flyoutRect.bottom).toBeLessThanOrEqual(sidebarRect.bottom)
+    expect(f.onResourceAction).not.toHaveBeenCalled()
+    f.queryClient.clear()
+  })
+
+  it('preserves trigger-to-flyout transit and gives Main actions hover precedence', async () => {
+    const f = mountedTree()
+    await openMouse('A')
+    await settle(f)
+    const main = screen.getByRole('menu', { name: 'Actions for A' })
+    const shareTrigger = within(main).getByRole('menuitem', { name: 'Share' })
+    fireEvent.mouseOver(shareTrigger)
+    const flyout = await screen.findByRole('menu', { name: 'Share options for A' })
+    const copyLink = within(flyout).getByRole('menuitem', { name: 'Copy link' })
+
+    fireEvent.mouseLeave(shareTrigger, { relatedTarget: copyLink })
+    expect(screen.getByRole('menu', { name: 'Share options for A' })).toBe(flyout)
+    copyLink.focus()
+    const rename = within(main).getByRole('menuitem', { name: 'Rename' })
+    fireEvent.mouseLeave(flyout, { relatedTarget: rename })
+
+    await waitFor(() =>
+      expect(screen.queryByRole('menu', { name: 'Share options for A' })).toBeNull()
+    )
+    expect(screen.getByRole('menu', { name: 'Actions for A' })).toBe(main)
+    expect(document.activeElement).toBe(rename)
+    expect(f.onResourceAction).not.toHaveBeenCalled()
+
+    fireEvent.click(rename)
+    expect(f.onResourceAction).toHaveBeenCalledOnce()
+    expect(f.onResourceAction.mock.calls[0]?.[1]).toBe('rename')
+    f.queryClient.clear()
+  })
+
+  it('closes a passively hovered flyout on external ArrowLeft without moving focus', async () => {
+    const f = mountedTree()
+    const external = document.createElement('button')
+    external.textContent = 'External control'
+    document.body.append(external)
+    await openMouse('A')
+    await settle(f)
+    const main = screen.getByRole('menu', { name: 'Actions for A' })
+    const share = within(main).getByRole('menuitem', { name: 'Share' })
+    external.focus()
+    fireEvent.mouseOver(share)
+    await screen.findByRole('menu', { name: 'Share options for A' })
+    expect(document.activeElement).toBe(external)
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'ArrowLeft',
+      bubbles: true,
+      cancelable: true,
+    })
+    external.dispatchEvent(event)
+    await waitFor(() =>
+      expect(screen.queryByRole('menu', { name: 'Share options for A' })).toBeNull()
+    )
+    expect(event.defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(external)
+    expect(screen.getByRole('menu', { name: 'Actions for A' })).toBe(main)
+    expect(f.onResourceAction).not.toHaveBeenCalled()
+    external.remove()
+    f.queryClient.clear()
+  })
+
+  it('activates one existing Share child once and closes both menu panels', async () => {
+    const f = mountedTree()
+    await openMouse('A')
+    await settle(f)
+    const main = screen.getByRole('menu', { name: 'Actions for A' })
+    fireEvent.mouseOver(within(main).getByRole('menuitem', { name: 'Share' }))
+    const flyout = await screen.findByRole('menu', { name: 'Share options for A' })
+    const copyLink = within(flyout).getByRole('menuitem', { name: 'Copy link' })
+    fireEvent.mouseDown(copyLink)
+    expect(screen.getByRole('menu', { name: 'Actions for A' })).toBe(main)
+    expect(screen.getByRole('menu', { name: 'Share options for A' })).toBe(flyout)
+    fireEvent.mouseUp(copyLink)
+    fireEvent.click(copyLink)
+    expect(f.onResourceAction).toHaveBeenCalledOnce()
+    expect(f.onResourceAction.mock.calls[0]?.[1]).toBe('copy-link')
+    await waitFor(() => expect(screen.queryAllByRole('menu')).toHaveLength(0))
+    expect(f.onResourceAction).toHaveBeenCalledOnce()
+    f.queryClient.clear()
+  })
+
+  it('opens a hover-visible Share flyout from keyboard activation and focuses its first child', async () => {
+    const f = mountedTree()
+    await openKeyboard('A')
+    await settle(f)
+    const main = screen.getByRole('menu', { name: 'Actions for A' })
+    const share = within(main).getByRole('menuitem', { name: 'Share' })
+    share.focus()
+    fireEvent.click(share, { detail: 0 })
+    const flyout = await screen.findByRole('menu', { name: 'Share options for A' })
+    expect(screen.getByRole('menu', { name: 'Actions for A' })).toBe(main)
+    expect(document.activeElement?.getAttribute('data-share-child')).toBe('true')
+    expect(flyout).not.toBe(main)
+    f.queryClient.clear()
+  })
+
+  it('publishes the exact tree-owner admission and committed menu states', async () => {
+    const reports: Array<{
+      requestId: number
+      state: {
+        phase: 'open' | 'replace'
+        menuOpen: boolean
+        shareOpen: boolean
+        admissionPending: boolean
+      } | null
+    }> = []
+    const f = mountedTree(false, false, (requestId, state) => {
+      reports.push({ requestId, state })
+    })
+    await openMouse('A')
+    await settle(f)
+    const ownerReport = reports.find(report => report.state !== null)
+    expect(ownerReport).toBeDefined()
+    expect(
+      reports.some(
+        report =>
+          report.state?.admissionPending &&
+          shouldDeferCompactSidebarEscape(document.body, report.state)
+      )
+    ).toBe(true)
+    expect(reports.at(-1)?.state).toMatchObject({
+      phase: 'open',
+      menuOpen: true,
+      shareOpen: false,
+      admissionPending: false,
+    })
+
+    fireEvent.mouseOver(
+      within(screen.getByRole('menu', { name: 'Actions for A' })).getByRole('menuitem', {
+        name: 'Share',
+      })
+    )
+    await screen.findByRole('menu', { name: 'Share options for A' })
+    expect(reports.at(-1)).toMatchObject({
+      requestId: ownerReport?.requestId,
+      state: { phase: 'open', menuOpen: true, shareOpen: true, admissionPending: false },
+    })
+    expect(shouldDeferCompactSidebarEscape(document.body, reports.at(-1)?.state ?? null)).toBe(true)
+
+    fireEvent.mouseDown(document.body)
+    await waitFor(() => expect(screen.queryAllByRole('menu')).toHaveLength(0))
+    expect(reports.at(-1)).toEqual({ requestId: ownerReport?.requestId, state: null })
+    expect(shouldDeferCompactSidebarEscape(document.body, reports.at(-1)?.state ?? null)).toBe(
+      false
+    )
+    f.queryClient.clear()
+  })
+
+  it('keeps Main mounted and restores focus across Share Escape and keyboard navigation', async () => {
     const f = mountedTree()
     await openMouse('A')
     await settle(f)
@@ -576,25 +866,31 @@ describe('r14 mounted-component independent A4 comparisons', () => {
     const share = within(main).getByRole('menuitem', { name: 'Share' })
     const panelIdentity = main
 
-    fireEvent.mouseEnter(share)
+    fireEvent.mouseOver(share)
     expect(screen.getByRole('menu', { name: 'Actions for A' })).toBe(panelIdentity)
-    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    expect(screen.getAllByRole('menu')).toHaveLength(2)
 
     fireEvent.keyDown(share, { key: 'ArrowRight' })
     const sharePanel = await screen.findByRole('menu', { name: 'Share options for A' })
-    expect(sharePanel).toBe(panelIdentity)
-    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    expect(sharePanel).not.toBe(panelIdentity)
+    expect(screen.getAllByRole('menu')).toHaveLength(2)
     expect(document.activeElement?.getAttribute('data-share-child')).toBe('true')
 
-    fireEvent.click(within(sharePanel).getByRole('menuitem', { name: 'Back' }))
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' })
+    await waitFor(() =>
+      expect(screen.queryByRole('menu', { name: 'Share options for A' })).toBeNull()
+    )
     expect(screen.getByRole('menu', { name: 'Actions for A' })).toBe(panelIdentity)
     expect(document.activeElement).toBe(
       within(panelIdentity).getByRole('menuitem', { name: 'Share' })
     )
 
-    fireEvent.click(within(panelIdentity).getByRole('menuitem', { name: 'Share' }))
+    fireEvent.mouseOver(share)
     await screen.findByRole('menu', { name: 'Share options for A' })
     fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() =>
+      expect(screen.queryByRole('menu', { name: 'Share options for A' })).toBeNull()
+    )
     expect(screen.getByRole('menu', { name: 'Actions for A' })).toBe(panelIdentity)
     expect(document.activeElement).toBe(
       within(panelIdentity).getByRole('menuitem', { name: 'Share' })
@@ -603,6 +899,39 @@ describe('r14 mounted-component independent A4 comparisons', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
     expect(document.activeElement).toBe(await screen.findByRole('button', { name: 'A' }))
+    f.queryClient.clear()
+  })
+
+  it('restores row focus before Main Escape at the Share-close commit in compact SidebarNav', async () => {
+    const onCompactMenuOpenChange = vi.fn()
+    const f = mountedTree(false, false, undefined, true, onCompactMenuOpenChange)
+    fireEvent.click(screen.getByTestId('nav-files-explorer-toggle'))
+    const row = await openMouse('A')
+    await settle(f)
+    const main = screen.getByRole('menu', { name: 'Actions for A' })
+    const shareTrigger = within(main).getByRole('menuitem', { name: 'Share' })
+    fireEvent.mouseOver(shareTrigger)
+    const sharePanel = await screen.findByRole('menu', { name: 'Share options for A' })
+    fireEvent.keyDown(shareTrigger, { key: 'ArrowRight' })
+    expect(document.activeElement?.getAttribute('data-share-child')).toBe('true')
+
+    let injectedEscape = false
+    menuCapture.onMenuState = (_requestId, open, shareOpen) => {
+      if (injectedEscape || !open || shareOpen) return
+      injectedEscape = true
+      // This callback runs from GfsResourceMenu's layout effect after the
+      // Share-close commit, before its passive focus effect can run.
+      fireEvent.keyDown(window, { key: 'Escape' })
+    }
+
+    fireEvent.mouseLeave(shareTrigger, { relatedTarget: row })
+
+    expect(screen.queryByRole('menu', { name: 'Share options for A' })).toBeNull()
+    expect(injectedEscape, `state reports: ${JSON.stringify(menuCapture.states)}`).toBe(true)
+    expect(screen.queryByRole('menu', { name: 'Share options for A' })).toBeNull()
+    expect(screen.queryByRole('menu', { name: 'Actions for A' })).toBeNull()
+    expect(document.activeElement).toBe(row)
+    expect(onCompactMenuOpenChange).not.toHaveBeenCalledWith(false)
     f.queryClient.clear()
   })
 
@@ -885,7 +1214,7 @@ describe('r14 mounted-component independent A4 comparisons', () => {
     f.queryClient.clear()
   })
 
-  it('keeps Share in the same panel and repositions it with its row on scroll', async () => {
+  it('keeps Main and Share panels stable and repositions Share with its row on scroll', async () => {
     const f = mountedTree()
     let rowTop = 50
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
@@ -995,7 +1324,7 @@ describe('r14 mounted-component independent A4 comparisons', () => {
     }
     expect(afterScroll.top).toBe(180)
     expect(afterResize.top).toBe(200)
-    expect(afterResize.panels).toBe(1)
+    expect(afterResize.panels).toBe(2)
     expect(observed.shareRight).toBeLessThanOrEqual(observed.sidebarRight - 8)
     f.queryClient.clear()
   })
@@ -1056,7 +1385,7 @@ describe('r14 mounted-component independent A4 comparisons', () => {
       panels: screen.getAllByRole('menu').length,
     }
     expect(observed.sameResource).toBe(true)
-    expect(observed.panels).toBe(1)
+    expect(observed.panels).toBe(2)
     expect(after).not.toEqual(before)
     f.queryClient.clear()
   })

@@ -18,6 +18,13 @@ export type FileExplorerMenuOwner = {
   phase: 'open' | 'replace'
 }
 
+export type FileExplorerMenuEscapeState = {
+  phase: FileExplorerMenuOwner['phase']
+  menuOpen: boolean
+  shareOpen: boolean
+  admissionPending: boolean
+}
+
 /**
  * Actions the sidebar file explorer hands back to the app. A file activates on
  * single-click; a folder opens its files tab on double-click / Enter (its
@@ -46,6 +53,11 @@ export interface FileExplorerTreeProps {
   pushToast: (message: string, tone: Tone) => void
   /** False while the compact sidebar is hidden/inert. */
   sidebarVisible?: boolean
+  /** Current tree-owner state mirrored to SidebarNav's compact Escape guard. */
+  onContextMenuEscapeStateChange?: (
+    requestId: number,
+    state: FileExplorerMenuEscapeState | null
+  ) => void
 }
 
 export interface FileExplorerNodeProps {
@@ -60,6 +72,7 @@ export interface FileExplorerNodeProps {
   sessionGeneration: number | null
   sidebarVisible: boolean
   contextMenuOwner: FileExplorerMenuOwner | null
+  onContextMenuEscapeStateChange?: FileExplorerTreeProps['onContextMenuEscapeStateChange']
   /** Session access is live: gates the per-node children fetch the same way the
    *  controller gates its own children query — a revoked session fetches nothing. */
   accessActive: boolean
