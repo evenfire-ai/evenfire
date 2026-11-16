@@ -247,7 +247,11 @@ export function createStepSpillover(opts: {
 
   const readTool: InternalToolDefinition = {
     name: STEP_SPILLOVER_READ_TOOL_NAME,
-    description: `${reader.description()} Reads are limited to ${thresholdBytes} bytes; pass range for larger results.`,
+    description:
+      'Read a tool result of this step that was stored outside the prompt. Pass the ' +
+      '`spillover_ref` from the summary that replaced the result. Pass `range: { start, end }` ' +
+      'to read the `[start, end)` byte window of the stored result. ' +
+      `Reads are limited to ${thresholdBytes} bytes; pass range for larger results.`,
     parameters: reader.parametersSchema(),
     async execute(args: Record<string, unknown>): Promise<InternalToolResult> {
       const parsed = parseSpilloverRef(args.ref)

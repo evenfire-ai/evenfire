@@ -323,6 +323,9 @@ describe('createStepSpillover', () => {
       const tool = make().readTool
       expect(tool.name).toBe('clerum__spillover_read')
       expect(tool.description).toContain(`Reads are limited to ${THRESHOLD} bytes`)
+      // Its own wording: results are stored in memory, not on disk.
+      expect(tool.description).toContain('stored outside the prompt')
+      expect(tool.description).not.toContain('disk')
       expect(tool.parameters).toMatchObject({ required: ['ref'] })
     })
   })
