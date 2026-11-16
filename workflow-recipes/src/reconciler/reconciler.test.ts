@@ -13986,7 +13986,8 @@ describe('WorkflowRecipeReconciler', () => {
           new Set()
         )
       ).toBe(false)
-      // Nor is a PVC-backed transport Deployment.
+      // Nor is a transport Deployment that declares volumeClaimTemplates: the
+      // terminal teardown keeps it, although only a StatefulSet turns them into PVCs.
       expect(
         noSecretBearingWorkloadsRemain(
           withWorkloads([

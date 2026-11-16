@@ -211,7 +211,11 @@ function jsonPointerToken(key: string): string {
 
 /**
  * The workloads the terminal run teardown deletes: transport runtimes that are
- * neither StatefulSets nor PVC-backed (#558: never delete stateful data here).
+ * not StatefulSets and declare no volumeClaimTemplates (#558: never delete
+ * stateful data here). A workload of another type that declares
+ * volumeClaimTemplates is kept as well, although the field creates no PVC for
+ * it: only a StatefulSet turns volumeClaimTemplates into PVCs (the Secret-denial
+ * teardown deletes such a workload, see {@link isDeletedBySecretDenialTeardown}).
  */
 export function isRemovedByTerminalRunTeardown(workload: WorkloadDef): boolean {
   if (!workload.transport) return false
@@ -4744,7 +4748,9 @@ export class WorkflowRecipeReconciler {
    * - Only workloads with a `transport` field (the MCP servers). Non-transport
    *   workloads are left to the CR finalizer's `cleanupDeclaredRuntimeResources`.
    * - StatefulSets and any workload declaring `volumeClaimTemplates` are SKIPPED
-   *   so a PVC-backed transport workload can never trigger data loss (#558).
+   *   (#558: never delete stateful data here). Only a StatefulSet turns
+   *   `volumeClaimTemplates` into PVCs; a workload of another type that declares
+   *   them is skipped as well (see {@link isRemovedByTerminalRunTeardown}).
    * - The resource name is the RUN-SCOPED name (`status.workloadInstances` /
    *   UID-derived hash via resolveWorkloadRuntimeResourceName), so a delete
    *   cannot reach a sibling run's or the parent recipe's workloads.
@@ -4762,7 +4768,8 @@ export class WorkflowRecipeReconciler {
     const targeted: string[] = []
     const errors: unknown[] = []
     for (const workload of recipe.spec.workloads ?? []) {
-      // Defense in depth: never delete a stateful/PVC-backed workload here.
+      // Skip what this teardown keeps: non-transport workloads, StatefulSets and
+      // workloads that declare volumeClaimTemplates.
       if (!isRemovedByTerminalRunTeardown(workload)) continue
 
       const ns = this.resolveWorkloadNamespace(workload, recipe.spec.ui?.workloadRef)
@@ -7549,7 +7556,7 @@ export class WorkflowRecipeReconciler {
     const resourceName = rb.resolveWorkloadRuntimeResourceName(recipe, workload)
     // Issue #637 — throwOnError so a non-404 delete failure (RBAC 403 / apiserver 5xx)
     // PROPAGATES: the denied-workload teardown callers (the non-workflow deploy path
-    // in reconcile, deployWorkflowWorkloads and enforceActiveWorkflowSecretOwnership)
+    // in reconcileInternal, deployWorkflowWorkloads and enforceActiveWorkflowSecretOwnership)
     // requeue and retry instead of writing a false "revoked" status over a still-live
     // foreign credential. Brings Deployment/CronJob/Job/DaemonSet to parity with the
     // StatefulSet/transport paths, which already re-throw non-404.
