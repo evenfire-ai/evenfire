@@ -618,7 +618,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/tasks/:taskId/cancel',
-      runtimeEdgeGuard(['rpc-proxy']),
+      runtimeEdgeGuard(['rpc-proxy', 'channel-reader']),
       async (req, res) => {
         const taskId = String(req.params.taskId || '').trim()
         if (!taskId) {
@@ -632,9 +632,9 @@ export class RPCServer {
         }
 
         const caller = getRuntimeCallerContext(req)
-        const requesterUserId = caller?.caller === 'rpc-proxy' ? caller.userId : undefined
+        const requesterUserId = caller?.caller === 'rpc-proxy' ? caller.userId : caller?.sender
 
-        const result = await this.cancelHandler(taskId, requesterUserId)
+        const result = await this.cancelHandler(taskId, requesterUserId, caller)
 
         if (result === 'cancelled' || result === 'already_terminal') {
           res.status(204).end()

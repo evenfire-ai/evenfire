@@ -282,4 +282,37 @@ describe('createProgressStream', () => {
     expect(onError).toHaveBeenCalledWith('task_not_found_or_expired')
     expect(onTerminal).not.toHaveBeenCalled()
   })
+
+  it('reports llm and tool heartbeats as activity without progress', async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        makeSseResponse([
+          `event: llm_in_progress\ndata: ${JSON.stringify({ taskId: 't-beat' })}\n\n`,
+          `event: tool_progress\ndata: ${JSON.stringify({ taskId: 't-beat', toolCallId: 'c1' })}\n\n`,
+        ])
+      ) as unknown as typeof fetch
+
+    const onProgress = vi.fn()
+    const onActivity = vi.fn()
+    const onTerminal = vi.fn()
+    const onError = vi.fn()
+    const stream = createProgressStream({
+      mcpHostUrl: 'http://mcp-host.test',
+      taskId: 't-beat',
+      onProgress,
+      onActivity,
+      onSuspended: vi.fn(),
+      onTerminal,
+      onError,
+    })
+
+    await waitForCondition(() => onActivity.mock.calls.length >= 2)
+
+    expect(onActivity).toHaveBeenCalledTimes(2)
+    expect(onProgress).not.toHaveBeenCalled()
+    expect(onTerminal).not.toHaveBeenCalled()
+    expect(onError).not.toHaveBeenCalled()
+    expect(stream.steps).toEqual([])
+  })
 })

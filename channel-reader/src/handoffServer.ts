@@ -1,4 +1,5 @@
 import http from 'node:http'
+import type { SlackSharedFileRef } from './channels/slack'
 import type { ProviderTargetIdentity } from './types'
 
 const MAX_HANDOFF_BODY_BYTES = 256 * 1024
@@ -14,6 +15,7 @@ export type SlackMessageHandoff = {
   providerMessageTs: string
   responseThreadTs?: string | null
   providerTarget: ProviderTargetIdentity
+  slackFiles?: SlackSharedFileRef[]
   rawData?: Record<string, unknown>
 }
 

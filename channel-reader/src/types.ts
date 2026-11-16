@@ -227,6 +227,8 @@ export interface SendMessageOptions {
   parseMode?: 'telegram-html'
   telegramInlineKeyboard?: TelegramInlineKeyboardButton[][]
   slackBlocks?: SlackBlock[]
+  /** Task id stamped on Slack API error logs. */
+  runId?: string
   teamsActions?: Array<{
     title: string
     value: string

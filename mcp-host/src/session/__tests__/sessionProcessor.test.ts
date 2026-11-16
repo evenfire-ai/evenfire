@@ -188,6 +188,104 @@ describe('SessionProcessor', () => {
     expect(processor.activeCount).toBe(0)
     expect(processor.pendingSessionCount).toBe(0)
   })
+
+  it('releases a cancelled hung run only after the executor settles', async () => {
+    vi.useFakeTimers()
+    try {
+      const lc = new TaskLifecycle()
+      const started: string[] = []
+      const timedOut: string[] = []
+      let finishHung!: (result: boolean) => void
+      const hungRun = new Promise<boolean>(resolve => {
+        finishHung = resolve
+      })
+      const hungProcessor = new SessionProcessor({
+        maxConcurrent: 1,
+        lifecycle: lc,
+        executor: task => {
+          started.push(task.id)
+          if (task.id === 'hung') return hungRun
+          return Promise.resolve(false)
+        },
+      })
+      hungProcessor.on('task:timeout', () => timedOut.push('timeout'))
+      const hung = createTask('hung')
+      const next = createTask('next')
+      lc.register(hung)
+      lc.register(next)
+      hungProcessor.enqueue('dm-1', hung)
+      hungProcessor.enqueue('dm-1', next)
+
+      expect(started).toEqual(['hung'])
+      lc.transition(hung.id, 'cancelled', 'user_requested')
+      await vi.advanceTimersByTimeAsync(9_999)
+      expect(started).toEqual(['hung'])
+      expect(hungProcessor.activeCount).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(started).toEqual(['hung'])
+      expect(hungProcessor.activeCount).toBe(1)
+      expect(timedOut).toEqual([])
+
+      finishHung(false)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(started).toEqual(['hung', 'next'])
+      expect(timedOut).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the queue closed while a run is still executing', async () => {
+    vi.useFakeTimers()
+    const lc = new TaskLifecycle()
+    const started: string[] = []
+    const hungProcessor = new SessionProcessor({
+      maxConcurrent: 1,
+      lifecycle: lc,
+      executor: task => {
+        started.push(task.id)
+        return new Promise<boolean>(() => undefined)
+      },
+    })
+    const hung = createTask('hung')
+    const next = createTask('next')
+    lc.register(hung)
+    lc.register(next)
+    hungProcessor.enqueue('dm-1', hung)
+    hungProcessor.enqueue('dm-1', next)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(started).toEqual(['hung'])
+    expect(hungProcessor.activeCount).toBe(1)
+    vi.useRealTimers()
+  })
+
+  it('releases the session when the executor throws', async () => {
+    const lc = new TaskLifecycle()
+    const started: string[] = []
+    let releaseSecond!: () => void
+    const secondDone = new Promise<void>(resolve => {
+      releaseSecond = resolve
+    })
+    const failing = new SessionProcessor({
+      maxConcurrent: 1,
+      lifecycle: lc,
+      executor: async task => {
+        started.push(task.id)
+        if (task.id === 'bad') throw new Error('boom')
+        releaseSecond()
+        return false
+      },
+    })
+    const bad = createTask('bad')
+    const next = createTask('after')
+    lc.register(bad)
+    lc.register(next)
+    failing.enqueue('dm-2', bad)
+    failing.enqueue('dm-2', next)
+    await secondDone
+    expect(started).toEqual(['bad', 'after'])
+  })
 })
 
 describe('SessionProcessor dispatch spacing', () => {

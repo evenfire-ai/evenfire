@@ -392,6 +392,60 @@ describe('decisionHandler', () => {
     })
   })
 
+  it('accepts a Slack file_share upload instead of dropping it', () => {
+    const result = normalizeProviderMessage('slack', {
+      type: 'event_callback',
+      team_id: 'T123',
+      event: {
+        type: 'message',
+        subtype: 'file_share',
+        user: 'U123',
+        channel: 'D123',
+        text: 'Review this patch for security issues.',
+        ts: '1710000000.000009',
+        files: [
+          {
+            id: 'F123',
+            name: 'fix.patch',
+            mimetype: 'text/x-diff',
+            size: 42,
+            url_private_download: 'https://files.slack.com/files-pri/T123-F123/download/fix.patch',
+          },
+        ],
+      },
+    })
+
+    expect(result).toMatchObject({
+      content: 'Review this patch for security issues.',
+      slackFiles: [
+        {
+          id: 'F123',
+          name: 'fix.patch',
+          mimetype: 'text/x-diff',
+          size: 42,
+          urlPrivateDownload: 'https://files.slack.com/files-pri/T123-F123/download/fix.patch',
+        },
+      ],
+    })
+  })
+
+  it('still ignores Slack message edits', () => {
+    expect(
+      normalizeProviderMessage('slack', {
+        type: 'event_callback',
+        team_id: 'T123',
+        event: {
+          type: 'message',
+          subtype: 'message_changed',
+          user: 'U123',
+          channel: 'D123',
+          text: 'edited',
+          ts: '1710000000.000010',
+        },
+      })
+    ).toBeNull()
+  })
+
   it('normalizes Slack workflow result button clicks as download messages', () => {
     expect(
       normalizeProviderMessage('slack', {
