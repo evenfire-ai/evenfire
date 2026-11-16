@@ -10,8 +10,11 @@ import type { McpServerInfo } from '../types'
 
 /**
  * BR-15 (#1491): the adapter that binds runContextMapperPoll to the process
- * state. main() builds its poll with createContextMapperPoll, so these tests
- * run the adapter production runs, with the state a test can observe.
+ * state. main.ts builds its poll with createContextMapperPoll when it loads,
+ * so these tests run the adapter production runs, with the state a test can
+ * observe. The bindings inside contextMapperPollState read module-private
+ * variables no test can set; only the ones A7 checks are covered (documented
+ * limit).
  */
 
 function readyServer(name = 'secured-server'): McpServerInfo {
@@ -75,7 +78,7 @@ function harness(overrides: Partial<ContextMapperPollState<Manager>> = {}) {
   return { manager, client, serverState, state, poll: createContextMapperPoll(state) }
 }
 
-describe('createContextMapperPoll (BR-15, #1491): the adapter main() polls with', () => {
+describe('createContextMapperPoll (BR-15, #1491): the adapter main.ts polls with', () => {
   afterEach(() => {
     vi.restoreAllMocks()
   })
@@ -103,11 +106,14 @@ describe('createContextMapperPoll (BR-15, #1491): the adapter main() polls with'
 
   it('A2 without a client the poll does nothing', async () => {
     // A stale last success: a poll that ran without a client would fail and revoke.
-    const h = harness({ getClient: () => null, lastSuccessAt: () => 1 })
+    const getClient = vi.fn(() => null)
+    const h = harness({ getClient, lastSuccessAt: () => 1 })
 
     await h.poll()
 
-    // Witness for the negatives below: the same harness with a client polls (A1).
+    // Witness for the negatives below: the poll ran and checked for a client.
+    expect(getClient).toHaveBeenCalledTimes(1)
+    expect(h.client.pollServers).not.toHaveBeenCalled()
     expect(h.state.initialize).not.toHaveBeenCalled()
     expect(h.state.recordSuccess).not.toHaveBeenCalled()
     expect(h.manager.addServer).not.toHaveBeenCalled()
@@ -179,7 +185,7 @@ describe('createContextMapperPoll (BR-15, #1491): the adapter main() polls with'
   })
 })
 
-describe('contextMapperPollState (BR-15): the state main() passes to the adapter', () => {
+describe('contextMapperPollState (BR-15): the state main.ts binds the adapter to', () => {
   it('A7 recordSuccess moves the last success the failure path reads, and revoke clears it', () => {
     vi.useFakeTimers()
     try {
@@ -189,7 +195,6 @@ describe('contextMapperPollState (BR-15): the state main() passes to the adapter
 
       contextMapperPollState.revoke('br15-test', false)
       expect(contextMapperPollState.lastSuccessAt()).toBe(0)
-      expect(contextMapperPollState.getManager()).toBeNull()
     } finally {
       vi.useRealTimers()
     }

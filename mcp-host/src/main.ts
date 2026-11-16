@@ -1217,9 +1217,9 @@ export async function runContextMapperPoll<M>(deps: {
 type ContextMapperPollManager = Parameters<typeof reconcileAuthoritativeMcpSnapshot>[0]['manager']
 
 /**
- * The module state one context-mapper poll reads and writes. main() passes
- * its live state; a test passes its own, so the adapter below is the code
- * both run.
+ * The module state one context-mapper poll reads and writes. This module
+ * binds the poll to its live state when it loads; a test passes its own, so
+ * the adapter below is the code both run.
  */
 export type ContextMapperPollState<M extends ContextMapperPollManager> = {
   getClient: () => Pick<ContextMapperClient, 'pollServers' | 'getAuthToken'> | null
@@ -1279,7 +1279,12 @@ export function createContextMapperPoll<M extends ContextMapperPollManager>(
 }
 
 /**
- * The live module state main() binds the context-mapper poll to.
+ * The live module state the context-mapper poll is bound to when this module
+ * loads. Documented limit (#1491): these bindings read module-private
+ * variables that no test can set, and their types accept null or an empty
+ * value, so neither the tests nor the type checker detect a binding to the
+ * wrong variable. Only recordSuccess, lastSuccessAt and revoke are checked
+ * through this object (main.contextMapperPollAdapter.test.ts, A7).
  */
 export const contextMapperPollState: ContextMapperPollState<McpManager> = {
   getClient: () => contextMapperClient,

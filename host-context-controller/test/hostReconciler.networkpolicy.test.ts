@@ -437,7 +437,7 @@ describe('HostReconciler.reconcile — NP wiring', () => {
     }
   })
 
-  it('T6.4 #1495 a dependency back at its captured value before the next policy still withdraws the reconcile', async () => {
+  it('T6.5 #1495 a dependency back at its captured value before the next policy still withdraws the reconcile', async () => {
     const host = { ...HOST, uid: 'chatllm-uid', generation: 5 }
     reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
     reconciler.setHostMutationAuthority(() => ({

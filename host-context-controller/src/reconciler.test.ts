@@ -5398,7 +5398,7 @@ describe('L1a: the revision the Deployment carries, read after a restart', () =>
     expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
   })
 
-  it('T-A1.3 (migration) a Deployment written before this version, with no status record, publishes not-ready on a rotated Secret', async () => {
+  it('T-A1.3 (migration) a Deployment and status written before this version publish not-ready on a rotated Secret', async () => {
     const server = h3Server()
     const f = await h3ReadyCluster(server)
     const { reconciler, persisted } = restart(f, server)
@@ -5472,6 +5472,22 @@ describe('L1a: the revision the Deployment carries, read after a restart', () =>
       expect(reconciler.getStatus(persisted)).toMatchObject({ ready: false })
     }
   )
+
+  it('T-A1.9c a Deployment deleted while HCC was down is recreated in the same reconcile: the carried read takes the 404 as a difference', async () => {
+    const server = h3Server()
+    const f = await h3ReadyCluster(server)
+    const { reconciler, persisted } = restart(f, server)
+    f.deployments.delete('h3-server')
+    const creates = f.appsApi.createNamespacedDeployment.mock.calls.length
+    const reads = deploymentReads(f)
+
+    await reconciler.reconcile(persisted)
+
+    // Witness: the carried read ran and saw the 404 before the sync recreated the Deployment.
+    expect(deploymentReads(f) - reads).toBeGreaterThanOrEqual(1)
+    expect(f.appsApi.createNamespacedDeployment.mock.calls.length - creates).toBe(1)
+    expect(reconciler.getStatus(persisted)).toMatchObject({ ready: true })
+  })
 
   it('T-A1.10b a server without envSecret is not compared: a stale carried annotation and a Service timeout keep ready', async () => {
     const server = h3Server()
