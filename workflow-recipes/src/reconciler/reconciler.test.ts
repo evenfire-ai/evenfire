@@ -18238,6 +18238,95 @@ describe('WorkflowRecipeReconciler', () => {
       }
     })
 
+    it('T-R2-8: a denied StatefulSet whose stored hash is the desired one but whose immutable fields drifted is not patched, keeps its Pods and records no revocation (issue #1349)', async () => {
+      mockCoreApi.deleteCollectionNamespacedPod.mockClear()
+      const denyAt = (resourceVersion: string) =>
+        mockCoreApi.readNamespacedSecret.mockResolvedValue({
+          metadata: { resourceVersion, labels: { 'clerum.io/owner-recipe': 'some-other-recipe' } },
+          data: { 'db-password': 'eA==' },
+        })
+      denyAt('1')
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [
+            {
+              id: 'db',
+              type: 'statefulset',
+              image: 'postgres:16',
+              port: 5432,
+              envSecret: {
+                name: 'db-creds',
+                keys: [{ secretKey: 'db-password', envVar: 'POSTGRES_PASSWORD' }],
+              },
+            },
+          ],
+        },
+        status: {
+          workloadInstances: { db: 'test-recipe-db-live' },
+        } as unknown as WorkflowRecipeCRD['status'],
+      })
+      const credentialed = buildStatefulSet(
+        recipe.spec.workloads![0] as Parameters<typeof buildStatefulSet>[0],
+        recipe,
+        'minimal',
+        new Map([['db-creds', { state: 'accessible', keys: new Set(['db-password']) }]])
+      ).statefulSet
+      const stsName = credentialed.metadata!.name!
+      const namespace = recipe.metadata.namespace!
+      const storedStatefulSet = async () =>
+        (await mockAppsApi.readNamespacedStatefulSet({
+          name: stsName,
+          namespace,
+        })) as k8s.V1StatefulSet
+      await mockAppsApi.createNamespacedStatefulSet({ namespace, body: credentialed })
+      const store = installRecipeStore(recipe)
+      const statefulSetPatches = () => mockAppsApi.patchNamespacedStatefulSet.mock.calls.length
+
+      try {
+        // Pass 1 revokes: the desired hash is stamped and the entry stored.
+        await reconciler.reconcile(store.current())
+        const revoked = await storedStatefulSet()
+        const hash = revoked.metadata?.annotations?.['clerum.io/spec-hash']
+        expect(hash).toEqual(expect.any(String))
+        const firstDigest = store.current().status?.secretOwnershipRevocations?.['db']
+        expect(firstDigest).toMatch(/^sha256:/)
+        expect(mockCoreApi.deleteCollectionNamespacedPod).toHaveBeenCalledTimes(1)
+
+        // An immutable field drifts while the annotation still carries the desired hash.
+        const drifted = structuredClone(revoked)
+        drifted.spec!.serviceName = 'manually-mutated-headless-service'
+        await mockAppsApi.replaceNamespacedStatefulSet({ name: stsName, namespace, body: drifted })
+        expect((await storedStatefulSet()).metadata?.annotations?.['clerum.io/spec-hash']).toBe(
+          hash
+        )
+
+        // The Secret moves to a new resourceVersion: a new denial, so the gate does not skip.
+        denyAt('2')
+        const patchesBefore = statefulSetPatches()
+        const errorLog = captureLogger('error')
+
+        const result = await reconciler.reconcile(store.current())
+        errorLog.mockRestore()
+
+        // Witness: the teardown ran and stopped at the immutable-drift check.
+        const teardownFailure = errorLog.mock.calls.find(
+          ([message]) => message === 'Teardown of denied workload failed; will requeue'
+        )
+        expect(teardownFailure).toBeDefined()
+        expect((teardownFailure![1] as { err: Error }).err.name).toBe(
+          'ImmutableStatefulSetDriftError'
+        )
+        expect(statefulSetPatches()).toBe(patchesBefore)
+        expect(mockCoreApi.deleteCollectionNamespacedPod).toHaveBeenCalledTimes(1)
+        expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(firstDigest)
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      } finally {
+        mockCustomApi.patchNamespacedCustomObjectStatus
+          .mockReset()
+          .mockImplementation(echoPatchedStatus)
+      }
+    })
+
     it('fails closed: does NOT render a workload whose envSecret Secret is unlabeled (no ownership claim) (Issue #637)', async () => {
       mockAppsApi.createNamespacedDeployment.mockClear()
       mockCoreApi.readNamespacedSecret.mockResolvedValue({
