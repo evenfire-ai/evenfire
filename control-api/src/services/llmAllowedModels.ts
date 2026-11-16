@@ -354,16 +354,23 @@ function episodeCounter(raw: unknown, column: string): number {
   throw new Error(`llm_allowed_models.${column} is not an integer counter`)
 }
 
+// The row condition of each attention kind, shared by the feed and the
+// acknowledgement so the two cannot disagree on what is an item. The deprecated
+// predicate takes the catalog providers as the bound parameter `param`.
+const STALE_CONDITION = 'stale'
+const deprecatedCondition = (param: string) =>
+  `catalog_status = 'deprecated' AND provider = ANY(${param}::text[])`
+
 export async function listAttentionCandidates(
   db: DbClient = pool
 ): Promise<AttentionCandidateRow[]> {
   const result = await db.query(
     `SELECT provider, model, display_name, stale,
-            (catalog_status = 'deprecated' AND provider = ANY($1::text[])) IS TRUE AS deprecated,
+            (${deprecatedCondition('$1')}) IS TRUE AS deprecated,
             stale_episode, deprecated_episode, attention_ack
        FROM llm_allowed_models
       WHERE enabled
-        AND (stale OR (catalog_status = 'deprecated' AND provider = ANY($1::text[])))
+        AND (${STALE_CONDITION} OR (${deprecatedCondition('$1')}))
       ORDER BY provider ASC, model ASC`,
     [CATALOG_PROVIDERS]
   )
@@ -390,6 +397,21 @@ export const ATTENTION_ACK_EPISODE_COLUMN = {
 } as const
 
 export type AckableAttentionKind = keyof typeof ATTENTION_ACK_EPISODE_COLUMN
+
+/**
+ * The row condition an acknowledgement requires, per kind: the same one the
+ * feed uses to list the row, so a kind whose condition is gone (the model came
+ * back to the catalog, or is no longer deprecated) is not acknowledged. Closed
+ * like the episode map, and interpolated the same way; any value it needs is a
+ * bound parameter starting at `$6`.
+ */
+const ATTENTION_ACK_CONDITION: Record<
+  AckableAttentionKind,
+  { sql: string; params: readonly unknown[] }
+> = {
+  stale_model_referenced: { sql: STALE_CONDITION, params: [] },
+  deprecated_model_enabled: { sql: deprecatedCondition('$6'), params: [CATALOG_PROVIDERS] },
+}
 
 const ACKABLE_KINDS = Object.keys(ATTENTION_ACK_EPISODE_COLUMN) as [
   AckableAttentionKind,
@@ -457,7 +479,8 @@ export interface AttentionAckEntry {
  * Record that the operator reviewed an attention item. Stores the consumer keys
  * the CLIENT saw, not the current consumers: one that appeared between the feed
  * and the click must reopen the item, not be accepted unseen. Returns null when
- * the row is gone, disabled, or in another episode (the caller answers 409).
+ * the row is gone, disabled, in another episode, or no longer meets the kind's
+ * condition (the caller answers 409 and the client reloads the feed).
  */
 export async function acknowledgeAttention(
   input: AttentionAckInput,
@@ -465,6 +488,7 @@ export async function acknowledgeAttention(
   db: DbTransactionClient
 ): Promise<AttentionAckEntry | null> {
   const column = ATTENTION_ACK_EPISODE_COLUMN[input.kind]
+  const condition = ATTENTION_ACK_CONDITION[input.kind]
   const entry: AttentionAckEntry = {
     episode: input.episode,
     consumerKeys: [...new Set(input.consumerKeys)].sort(),
@@ -475,8 +499,16 @@ export async function acknowledgeAttention(
     `UPDATE llm_allowed_models
         SET attention_ack = jsonb_set(coalesce(attention_ack, '{}'::jsonb), ARRAY[$3::text], $4::jsonb)
       WHERE provider = $1 AND model = $2 AND enabled
-        AND ${column} = $5::int`,
-    [input.provider, input.model, input.kind, JSON.stringify(entry), input.episode]
+        AND ${column} = $5::int
+        AND ${condition.sql}`,
+    [
+      input.provider,
+      input.model,
+      input.kind,
+      JSON.stringify(entry),
+      input.episode,
+      ...condition.params,
+    ]
   )
   if (result.rowCount !== 1) return null
   await writeAudit(db, {

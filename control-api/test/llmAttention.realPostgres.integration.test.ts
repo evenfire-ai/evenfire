@@ -802,6 +802,35 @@ describeRealPostgres('attention feed, acknowledgement and consumers (real Postgr
       expect((await ack(seen).expect(409)).body.error).toBe('attention_episode_changed')
     })
 
+    it('S-27c: an item whose condition is gone since the feed was loaded is a 409 and acknowledges nothing', async () => {
+      const [s, d] = [pick(0), pick(1)]
+      await sync(FULL)
+      await sync(catalogWith({ gone: [s], patch: { [d]: deprecate } }))
+      await subsetHost('uses-s', s)
+      await subsetHost('uses-d', d)
+      const stale = await itemOf(STALE_KIND, s)
+      const deprecated = await itemOf(DEPRECATED_KIND, d)
+
+      // Back in the catalog and no longer deprecated: same episodes, no item.
+      await sync(FULL)
+      expect(await itemsFor(s)).toEqual([])
+      expect(await itemsFor(d)).toEqual([])
+      for (const item of [stale, deprecated]) {
+        const res = await ack(item)
+        expect(res.status, item.kind).toBe(409)
+        expect(res.body.error).toBe('attention_episode_changed')
+      }
+      const { rows } = await corePool.query(
+        `SELECT model, attention_ack FROM llm_allowed_models WHERE model = ANY($1::text[]) ORDER BY model`,
+        [[s, d]]
+      )
+      expect(rows.map(r => r.attention_ack ?? {})).toEqual([{}, {}])
+      const audit = await corePool.query(
+        `SELECT 1 FROM llm_allowed_models_audit WHERE action = 'attention_ack'`
+      )
+      expect(audit.rows).toEqual([])
+    })
+
     it('S-28: a consumer added between the feed and the click is not accepted unseen', async () => {
       const s = pick(0)
       await staleModel(s)
