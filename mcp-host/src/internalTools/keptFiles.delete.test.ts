@@ -1018,7 +1018,7 @@ describe('the delete approval names every file', () => {
     }
   })
 
-  it('keeps every line of a schema-valid card within one channel message', () => {
+  it('keeps every line of an unredacted schema-valid card within one channel message', () => {
     // The widest schema-valid name: each character escapes to `\u{E0001}`.
     const files = Array.from({ length: 20 }, () => ({
       kind: 'generated',
