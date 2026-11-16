@@ -151,10 +151,12 @@ When an agent produces files, they appear under the answer in a
 
 **EvenDrive** in the sidebar opens the **Files** page. It shows your
 **My home** folder and the list of everything that has been shared with you.
-Under **EvenDrive** in the sidebar, **My home** opens your own folder and
-**Shared with me** opens only what others share; the folders of each are
-listed below it. Click a folder to go into it. The breadcrumb at the top shows
-where you are.
+Under **EvenDrive** in the sidebar, **My home** opens your own folder; use the
+arrow next to it to list its folders in the sidebar. **Shared with me** opens
+only what others share, and what is shared with you is listed below it. Click a
+folder to go into it. The breadcrumb at the top shows where you are. It starts
+at **EvenDrive**, which returns to the overview of **My home** and what is
+shared with you.
 
 - **Add files.** In a folder you can edit, use **New folder** and
   **Upload file**, or drag files onto the page. The server sets the size
