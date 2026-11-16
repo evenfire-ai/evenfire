@@ -303,13 +303,23 @@ describe('App GFS watch subscription', () => {
     await bridge.open(await openGfsResourcePayload(DIAGRAM))
     expect(await settledRequest(bridge.watch)).toEqual({ keys: [IMAGE_KEY], userId: USER_A })
     expect(h.server.current()?.keys).toEqual(new Set([IMAGE_KEY]))
+    expect(await screen.findByRole('heading', { name: 'diagram.png' })).toBeTruthy()
     const source = await new GfsWatchEventSource().start([IMAGE_KEY])
     try {
       const changed = await source.changed([IMAGE_KEY])
-      const before = bridge.gfs.resolve!.mock.calls.length
+      // The write renamed the file: only a re-resolve that reaches the overlay shows it.
+      const renamed = resolvedFile(IMAGE_RID, 'diagram-renamed.png', {
+        gfsUri: IMAGE_URI,
+        bytes: 3,
+        version: 2,
+      })
+      bridge.resolveImpl.mockImplementation(async (uri: string) => {
+        if (uri === IMAGE_URI) return resolveResource(renamed)
+        throw new Error(`unexpected resolve of ${uri}`)
+      })
       await act(async () => bridge.watch.deliver(changed))
-      await waitFor(() => expect(bridge.gfs.resolve!.mock.calls.length).toBe(before + 1))
-      expect(bridge.gfs.resolve!.mock.calls.at(-1)).toEqual([IMAGE_URI])
+      expect(await screen.findByRole('heading', { name: 'diagram-renamed.png' })).toBeTruthy()
+      expect(screen.queryByRole('heading', { name: 'diagram.png' })).toBeNull()
     } finally {
       await source.stop()
     }
@@ -603,14 +613,28 @@ describe('App GFS watch: what the window watches and how it reacts', () => {
 
     const source = await new GfsWatchEventSource().start([mainDriveKey('dir', FOLDER_RID)])
     try {
-      const resolves = bridge.gfs.resolve!.mock.calls.length
-      const listings = listChildren.mock.calls.length
-      await act(async () =>
-        bridge.watch.deliver(await source.changed([mainDriveKey('dir', FOLDER_RID)]))
+      const changed = await source.changed([mainDriveKey('dir', FOLDER_RID)])
+      // An agent wrote a new file into the open folder.
+      listChildren.mockImplementation(async () =>
+        listChildrenPage([
+          childView('9f8e7d6c-5b4a-4392-8171-605f4e3d2c1b', 'notes.md', 'file'),
+          childView('2b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091', 'agent-report.md', 'file'),
+        ])
       )
-      await waitFor(() => expect(listChildren.mock.calls.length).toBeGreaterThan(listings))
-      await waitFor(() => expect(bridge.gfs.resolve!.mock.calls.length).toBe(resolves + 1))
-      expect(bridge.gfs.resolve!.mock.calls.at(-1)).toEqual([FOLDER_URI])
+      // ...and renamed the folder itself.
+      const renamed = resolvedDirectory(FOLDER_ID, 'Reports 2026', { gfsUri: FOLDER_URI })
+      bridge.resolveImpl.mockImplementation(async (uri: string) => {
+        if (uri === FOLDER_URI) return resolveResource(renamed)
+        throw new Error(`unexpected resolve of ${uri}`)
+      })
+      const location = () =>
+        screen.queryByRole('navigation', { name: 'File location' })?.textContent ?? ''
+      expect(location()).toContain('Reports')
+      expect(location()).not.toContain('Reports 2026')
+      await act(async () => bridge.watch.deliver(changed))
+      expect(await screen.findByText('agent-report.md')).toBeTruthy()
+      expect(screen.getByText('notes.md')).toBeTruthy()
+      await waitFor(() => expect(location()).toContain('Reports 2026'))
     } finally {
       await source.stop()
     }
@@ -659,10 +683,25 @@ describe('App GFS watch: what the window watches and how it reacts', () => {
 
     const source = await new GfsWatchEventSource().start([fileKey])
     try {
-      const resolves = bridge.gfs.resolve!.mock.calls.length
-      await act(async () => bridge.watch.deliver(await source.changed([fileKey])))
+      const changed = await source.changed([fileKey])
+      // The write renamed the file the location points at.
+      bridge.resolveImpl.mockImplementation(async (uri: string) => {
+        if (uri === FOLDER_URI) return resolveResource(FOLDER)
+        if (uri === CONTRACT_URI) {
+          return resolveResource(
+            resolvedFile(CONTRACT_ID, 'contract-signed.bin', {
+              gfsUri: CONTRACT_URI,
+              parentResourceId: FOLDER_ID,
+            })
+          )
+        }
+        throw new Error(`unexpected resolve of ${uri}`)
+      })
+      await act(async () => bridge.watch.deliver(changed))
       await waitFor(() =>
-        expect(bridge.gfs.resolve!.mock.calls.slice(resolves)).toContainEqual([CONTRACT_URI])
+        expect(
+          screen.getByRole('navigation', { name: 'File location', hidden: true }).textContent
+        ).toContain('contract-signed.bin')
       )
     } finally {
       await source.stop()
