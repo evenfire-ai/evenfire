@@ -426,9 +426,6 @@ marker_bindings=(
   "$WATCH_GATE" 'Listing all Hosts in namespace ${HOST_NS}'
   "$HCC_K8S_CLIENT" 'Listing all Hosts in namespace ${config.hostNamespace}'
 
-  "$WATCH_GATE" '"msg":"\[K8s\] Completed Host reconciliation after (CommunicationChannel recovery|Host watch recovery convergence)"'
-  "$HCC_K8S_CLIENT" 'hccLogger.info(`[K8s] Completed Host reconciliation after ${reason}`)'
-
   "$WATCH_GATE" 'CommunicationChannel watch event: DELETED for ${FIXTURE_CHANNEL}'
   "$HCC_K8S_CLIENT" 'CommunicationChannel watch event: ${type} for ${cc.name}'
 
@@ -444,14 +441,18 @@ marker_bindings=(
   "$LOG_HELPER" 'Listing all Hosts in namespace '
   "$HCC_K8S_CLIENT" 'Listing all Hosts in namespace ${config.hostNamespace}'
 
-  "$LOG_HELPER" 'Host(s) for lifecycle after CommunicationChannel recovery'
-  "$HCC_K8S_CLIENT" 'Reconciling ${hosts.length} Host(s) for lifecycle after ${reason}'
+  # The Completed statement is formatted over four lines; its message text is
+  # bound by the readiness pairs below, and this pair pins the generation field
+  # line the helper reads off it (indented as formatted; the other
+  # `ccLifecycleGeneration,` line in k8sClient.ts is indented less).
+  "$LOG_HELPER" '/"msg":"\[K8s\] Completed Host reconciliation after /'
+  "$HCC_K8S_CLIENT" '          ccLifecycleGeneration,'
+
+  "$LOG_HELPER" '"ccLifecycleGeneration":'
+  "$HCC_K8S_CLIENT" 'ccLifecycleGeneration: lifecycleGeneration'
 
   "$LOG_HELPER" 'Host(s) after Host watch recovery convergence'
   "$HCC_K8S_CLIENT" 'Reconciling ${hosts.length} Host(s) after ${reason}'
-
-  "$LOG_HELPER" '/"msg":"\[K8s\] Completed Host reconciliation after CommunicationChannel recovery"/'
-  "$HCC_K8S_CLIENT" "requestHostFleetReconcile('CommunicationChannel recovery'"
 
   "$LOG_HELPER" '/"msg":"\[K8s\] Completed Host reconciliation after Host watch recovery convergence"/'
   "$HCC_K8S_CLIENT" "convergenceReason = 'Host watch recovery convergence'"
@@ -539,7 +540,7 @@ done
 # unset. Assert the arity explicitly rather than relying on the pair count to
 # happen to notice.
 if [ $((${#marker_bindings[@]} % 4)) -eq 0 ] &&
-  [ "$marker_binding_count" -eq 35 ] &&
+  [ "$marker_binding_count" -eq 34 ] &&
   [ -z "$marker_drift" ]; then
   pass "all ${marker_binding_count} consumed HCC log markers stay bound to their runtime producers"
 else
@@ -1384,82 +1385,301 @@ else
   fail "the MCP readiness gate no longer proves B3 retain-identity-stable (or regressed to revoke-same-intent before readiness)"
 fi
 
-printf '%s\n' \
-  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' >"$MOCK_LOG_FILE"
+# Recovery-cycle fixtures. Every line copies the format the HCC logger prints
+# (captured from hccLogger in the host-context-controller unit runs): one JSON
+# object per line, with `ccLifecycleGeneration` after msg on the Recovered line
+# and `mode` plus `ccLifecycleGeneration` after msg on the Completed line.
+hcc_fixture_line() {
+  printf '{"ts":"2026-11-16T21:33:22.237Z","level":"info","svc":"host-context-controller","msg":"[K8s] %s"%s}\n' \
+    "$1" "${2:-}"
+}
+fx_ended() {
+  hcc_fixture_line 'CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery'
+}
+fx_listed() { hcc_fixture_line 'Listing all Hosts in namespace mcp-host'; }
+# fx_recovered <channels> [generation]; no generation prints the line without the field.
+fx_recovered() {
+  local fields=''
+  [ -z "${2:-}" ] || fields=",\"ccLifecycleGeneration\":$2"
+  hcc_fixture_line "Recovered $1 CommunicationChannel(s) into cache (ccCacheSynced=true)" "$fields"
+}
+fx_reconciling() { hcc_fixture_line "Reconciling $1"; }
+# fx_completed <reason> [mode] [generation]; no mode prints the line without fields.
+fx_completed() {
+  local fields=''
+  [ -z "${2:-}" ] || fields=",\"mode\":\"$2\""
+  [ -z "${3:-}" ] || fields="${fields},\"ccLifecycleGeneration\":$3"
+  hcc_fixture_line "Completed Host reconciliation after $1" "$fields"
+}
+
+{
+  fx_ended
+  fx_listed
+  fx_recovered 2 2
+  fx_reconciling '5 Host(s) for lifecycle after CommunicationChannel recovery'
+  fx_completed 'CommunicationChannel recovery' lifecycle 2
+} >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   pass "fresh Host LIST before channel recovery is attributed to the same interruption"
 else
   fail "valid LIST-to-recovery ordering was rejected"
 fi
 
-printf '%s\n' \
-  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) after Host watch recovery convergence"}' \
-  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after Host watch recovery convergence"}' >"$MOCK_LOG_FILE"
+{
+  fx_ended
+  fx_listed
+  fx_recovered 2 2
+  fx_reconciling '5 Host(s) after Host watch recovery convergence'
+  fx_completed 'Host watch recovery convergence' full
+} >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   pass "a causally ordered Host-watch pass may cover the recovered CC and fresh Host inventories"
 else
   fail "a valid covering Host-watch recovery pass was rejected"
 fi
 
-printf '%s\n' \
-  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) after Host watch recovery convergence"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
-  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after Host watch recovery convergence"}' >"$MOCK_LOG_FILE"
+{
+  fx_ended
+  fx_listed
+  fx_reconciling '5 Host(s) after Host watch recovery convergence'
+  fx_recovered 2 2
+  fx_completed 'Host watch recovery convergence' full
+} >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   fail "a Host-watch pass selected before CC recovery satisfied the covering assertion"
 else
   pass "covering Host-watch recovery requires recovered CC state before pass selection"
 fi
 
-printf '%s\n' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
-  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' >"$MOCK_LOG_FILE"
+{
+  fx_listed
+  fx_ended
+  fx_recovered 2 2
+  fx_reconciling '5 Host(s) for lifecycle after CommunicationChannel recovery'
+  fx_completed 'CommunicationChannel recovery' lifecycle 2
+} >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   fail "a Host LIST from before the interruption satisfied the recovery assertion"
 else
   pass "a stale pre-interruption Host LIST cannot satisfy recovery"
 fi
 
-printf '%s\n' \
-  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 4 Host(s) for lifecycle after CommunicationChannel recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' >"$MOCK_LOG_FILE"
+{
+  fx_ended
+  fx_listed
+  fx_recovered 2 2
+  fx_reconciling '4 Host(s) for lifecycle after CommunicationChannel recovery'
+  fx_completed 'CommunicationChannel recovery' lifecycle 2
+} >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 1 5; then
   fail "a stale Host inventory count satisfied recovery"
 else
   pass "recovery requires the exact fresh Host inventory count"
 fi
 
-printf '%s\n' \
-  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 1 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 4 Host(s) for lifecycle after CommunicationChannel recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.426Z","level":"info","svc":"host-context-controller","msg":"[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Listing all Hosts in namespace mcp-host"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)"}' \
-  '{"ts":"2026-11-14T21:29:06.427Z","level":"info","svc":"host-context-controller","msg":"[K8s] Reconciling 5 Host(s) for lifecycle after CommunicationChannel recovery"}' \
-  '{"ts":"2026-11-14T21:29:06.428Z","level":"info","svc":"host-context-controller","msg":"[K8s] Completed Host reconciliation after CommunicationChannel recovery"}' >"$MOCK_LOG_FILE"
+{
+  fx_ended
+  fx_listed
+  fx_recovered 1 1
+  fx_reconciling '4 Host(s) for lifecycle after CommunicationChannel recovery'
+  fx_completed 'CommunicationChannel recovery' lifecycle 1
+  fx_ended
+  fx_listed
+  fx_recovered 2 2
+  fx_reconciling '5 Host(s) for lifecycle after CommunicationChannel recovery'
+  fx_completed 'CommunicationChannel recovery' lifecycle 2
+} >"$MOCK_LOG_FILE"
 if recovery_cycle_used_fresh_host_inventory 2 5; then
   pass "recovery attribution selects the requested interruption cycle"
 else
   fail "the second recovery cycle was not isolated from the first"
 fi
+
+# A cycle in which the recovered generation reaches the Hosts through a full
+# pass labelled Context cache recovery (the CC pass returned while the Context
+# cache was not synced). <completion generation> empty prints no field.
+context_recovery_cycle() {
+  fx_ended
+  fx_listed
+  fx_recovered 2 "$1"
+  fx_reconciling '6 Host(s) after Context cache recovery'
+  fx_completed 'Context cache recovery' full "${2-$1}"
+}
+
+context_recovery_cycle 2 >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 6 &&
+  [ "$(hcc_recovery_logs | grep -Fc '"ccLifecycleGeneration":2')" = 2 ]; then
+  pass "a full pass that carries the recovered lifecycle generation satisfies recovery under any reason"
+else
+  fail "a full pass labelled Context cache recovery that applied the recovered generation was rejected"
+fi
+
+context_recovery_cycle 2 '' >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 6; then
+  fail "a completion without a lifecycle generation satisfied the channel rule"
+else
+  context_recovery_cycle 2 >"$MOCK_LOG_FILE"
+  if recovery_cycle_used_fresh_host_inventory 1 6; then
+    pass "a completion without a lifecycle generation cannot satisfy the channel rule"
+  else
+    fail "the witness completion carrying the recovered generation was rejected"
+  fi
+fi
+
+context_recovery_cycle 2 1 >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 6; then
+  fail "a completion carrying an older lifecycle generation satisfied the channel rule"
+else
+  context_recovery_cycle 2 >"$MOCK_LOG_FILE"
+  if recovery_cycle_used_fresh_host_inventory 1 6; then
+    pass "a completion carrying an older lifecycle generation cannot satisfy the channel rule"
+  else
+    fail "the witness completion carrying the recovered generation was rejected"
+  fi
+fi
+
+{
+  fx_ended
+  fx_listed
+  fx_recovered 2 2
+  fx_reconciling '6 Host(s) after CommunicationChannel recovery'
+  fx_completed 'CommunicationChannel recovery' full 2
+} >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 6; then
+  pass "a full pass labelled CommunicationChannel recovery satisfies recovery through its generation"
+else
+  fail "a full CommunicationChannel recovery pass that applied the recovered generation was rejected"
+fi
+
+context_recovery_cycle 2 3 >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 6; then
+  pass "a pass carrying a lifecycle generation above the recovered one satisfies recovery"
+else
+  fail "a pass carrying a later lifecycle generation was rejected"
+fi
+
+# The Recovered line must carry its generation, as a current HCC image prints it.
+channel_recovery_cycle() {
+  fx_ended
+  fx_listed
+  fx_recovered 2 "$1"
+  fx_reconciling '6 Host(s) for lifecycle after CommunicationChannel recovery'
+  if [ "$2" = fields ]; then
+    fx_completed 'CommunicationChannel recovery' lifecycle 2
+  else
+    fx_completed 'CommunicationChannel recovery'
+  fi
+}
+channel_recovery_cycle '' fields >"$MOCK_LOG_FILE"
+recovered_without_field=0
+recovery_cycle_used_fresh_host_inventory 1 6 && recovered_without_field=1
+channel_recovery_cycle '' none >"$MOCK_LOG_FILE"
+old_image_lines=0
+recovery_cycle_used_fresh_host_inventory 1 6 && old_image_lines=1
+channel_recovery_cycle 2 fields >"$MOCK_LOG_FILE"
+if [ "$recovered_without_field" = 0 ] && [ "$old_image_lines" = 0 ] &&
+  recovery_cycle_used_fresh_host_inventory 1 6; then
+  pass "a Recovered line without a lifecycle generation cannot satisfy the channel rule"
+else
+  fail "the channel rule passed without the recovered generation, or rejected the witness with it (without=${recovered_without_field}, old=${old_image_lines})"
+fi
+
+# Pass selection follows the latest Reconciling line: a pass with the expected
+# count that never completes cannot lend its count to a later pass.
+non_sticky_cycle() {
+  fx_ended
+  fx_listed
+  fx_recovered 2 2
+  fx_reconciling '6 Host(s) for lifecycle after CommunicationChannel recovery'
+  fx_reconciling "$1 Host(s) for lifecycle after CommunicationChannel recovery"
+  fx_completed 'CommunicationChannel recovery' lifecycle 2
+}
+non_sticky_cycle 5 >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 6; then
+  fail "an earlier pass with the expected Host count lent its selection to a later pass"
+else
+  non_sticky_cycle 6 >"$MOCK_LOG_FILE"
+  if recovery_cycle_used_fresh_host_inventory 1 6; then
+    pass "pass selection follows the latest Reconciling line"
+  else
+    fail "the witness pass with the expected Host count was rejected"
+  fi
+fi
+
+# recovery_fleet_pass_count: per cycle, every Host-watch recovery convergence
+# completion, plus at most one other completion carrying the recovered
+# generation or a later one.
+assert_fleet_pass_count() {
+  local expected=$1 description=$2 counted
+  counted="$(recovery_fleet_pass_count "$(cat "$MOCK_LOG_FILE")")"
+  if [ "$counted" = "$expected" ]; then
+    pass "fleet pass count: ${description} (${counted})"
+  else
+    fail "fleet pass count: ${description}: expected ${expected}, counted '${counted}'"
+  fi
+}
+
+{
+  context_recovery_cycle 1
+  context_recovery_cycle 2
+} >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 2 "two cycles that each applied their recovered generation count 2"
+fx_completed 'Periodic resync' full >>"$MOCK_LOG_FILE"
+assert_fleet_pass_count 2 "a Periodic resync completion is not counted"
+{
+  fx_ended
+  fx_listed
+  fx_recovered 2 2
+  fx_reconciling '6 Host(s) after Periodic resync'
+  fx_completed 'Periodic resync' full
+  fx_reconciling '6 Host(s) for lifecycle after CommunicationChannel recovery'
+  fx_completed 'CommunicationChannel recovery' lifecycle 1
+  context_recovery_cycle 3
+} >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 1 "a cycle whose completions carry no generation or an older one counts 0"
+
+{
+  context_recovery_cycle 1 2
+  context_recovery_cycle 3
+} >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 2 "a cycle covered only by a later generation counts 1"
+
+{
+  fx_ended
+  fx_listed
+  fx_recovered 2 1
+  fx_reconciling '6 Host(s) after CommunicationChannel event convergence fallback'
+  fx_completed 'CommunicationChannel event convergence fallback' full 2
+  context_recovery_cycle 3
+} >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 2 "a merged full pass under the fallback reason covers its cycle"
+
+{
+  context_recovery_cycle 1
+  fx_reconciling '6 Host(s) after CommunicationChannel event convergence fallback'
+  fx_completed 'CommunicationChannel event convergence fallback' full 2
+} >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 1 "a later fallback completion in the same cycle adds nothing"
+
+{
+  fx_ended
+  fx_listed
+  fx_recovered 2 1
+  fx_reconciling '6 Host(s) after Host watch recovery convergence'
+  fx_completed 'Host watch recovery convergence' full 1
+} >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 1 "a Host-watch recovery completion carrying the generation counts once"
+
+{
+  fx_ended
+  fx_listed
+  fx_recovered 2 1
+  fx_reconciling '6 Host(s) for lifecycle after CommunicationChannel recovery'
+  fx_completed 'CommunicationChannel recovery' lifecycle 1
+  fx_reconciling '6 Host(s) after Context cache recovery'
+  fx_completed 'Context cache recovery' full 1
+} >"$MOCK_LOG_FILE"
+assert_fleet_pass_count 1 "two completions at the recovered generation in one cycle count 1"
 
 large_log_tail="$(awk 'BEGIN {
   for (i = 1; i <= 20000; i++) {
