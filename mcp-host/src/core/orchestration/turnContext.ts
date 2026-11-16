@@ -150,10 +150,11 @@ export const CANNOT_FREE_INSTRUCTION =
 /**
  * The cannot-free sentence of a generation. A generation's room counts only
  * kept bytes (this caller's and every caller's), so it names those causes and
- * not workspace files or downloaded copies.
+ * not workspace files or downloaded copies. Record files also count and are
+ * not named: a deleted file's record is deleted with it.
  */
 export const CANNOT_FREE_GENERATION_INSTRUCTION =
-  "Deleting this user's kept files cannot free enough room. Tell the user the room for kept files is held by this user's generated files that have no record, by the kept files of other users of this agent, or the file is larger than the room kept files may use, and that kept files leave after the retention time. Deleting workspace files or downloaded copies does not free this room; do not propose it."
+  "Deleting this user's kept files cannot free enough room. Tell the user the room for kept files is held by this user's kept files that have no record, by files being kept right now, by the kept files of other users of this agent, or the file is larger than the room kept files may use, and that kept files leave after the retention time. Deleting workspace files or downloaded copies does not free this room; do not propose it."
 
 const CANNOT_FREE_SENTENCE: Record<KeepOfferSubject, string> = {
   attachments: CANNOT_FREE_INSTRUCTION,
