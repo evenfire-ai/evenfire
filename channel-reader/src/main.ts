@@ -1983,6 +1983,7 @@ export class ChannelReader {
       }
 
       let finalDelivered = false
+      let terminalDeliveryStarted = false
       let finalDeliveryInFlight: Promise<boolean> | null = null
       let resultPollingFallbackStarted = false
       let approvalPromptDelivered = false
@@ -1990,6 +1991,8 @@ export class ChannelReader {
       const closeStream = () => stream?.close()
       const streamSteps = () => stream?.steps ?? []
       let runTimer: ReturnType<typeof setTimeout> | undefined
+      let pollPaused = false
+      let pollDeadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
 
       const clearRunTimer = () => {
         if (runTimer) clearTimeout(runTimer)
@@ -2002,9 +2005,18 @@ export class ChannelReader {
         }, this.runTimeoutMs)
         runTimer.unref?.()
       }
+      const resetPollDeadline = () => {
+        pollDeadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
+      }
+      const noteRunActivity = (): boolean => {
+        if (!acceptProgressUpdates) return false
+        armRunTimer()
+        resetPollDeadline()
+        return true
+      }
 
       const failRun = async (reason: string): Promise<void> => {
-        if (finalDelivered) return
+        if (finalDelivered || terminalDeliveryStarted) return
         finalDelivered = true
         acceptProgressUpdates = false
         clearRunTimer()
@@ -2069,11 +2081,14 @@ export class ChannelReader {
           actionToken,
           startResultPollingFallback,
           updateStatusAfterDecision: content => {
+            pollPaused = false
+            resetPollDeadline()
             acceptProgressUpdates = true
             armRunTimer()
             return editStatus(content)
           },
         })
+        pollPaused = true
         clearRunTimer()
         await editStatus(
           params.notification,
@@ -2083,11 +2098,12 @@ export class ChannelReader {
       }
 
       const deliverFinalResult = async (): Promise<boolean> => {
-        if (finalDelivered) return true
+        if (finalDelivered || terminalDeliveryStarted) return true
         if (finalDeliveryInFlight) return finalDeliveryInFlight
 
         finalDeliveryInFlight = (async () => {
           const result = await this.rpcClient.getTaskResult(taskId, msg)
+          if (finalDelivered || terminalDeliveryStarted) return true
           if (result.status === 'waiting_approval' && result.approval) {
             await deliverApprovalPrompt({
               requestId: result.approval.requestId,
@@ -2099,6 +2115,9 @@ export class ChannelReader {
           if (result.status === 'pending' || result.status === 'waiting_approval') {
             return false
           }
+          // Commit before any Slack edit so the silence timer cannot replace the answer.
+          terminalDeliveryStarted = true
+          clearRunTimer()
           acceptProgressUpdates = false
 
           if (result.success && result.response) {
@@ -2113,13 +2132,14 @@ export class ChannelReader {
                   taskId,
                   edit: text => editStatus(text, true),
                   post: async text => {
-                    await adapter.sendMessage(
+                    const messageTs = await adapter.sendMessage(
                       responseChannelId,
                       text,
                       this.replyTargetMessageId(msg),
                       undefined,
                       { runId: taskId }
                     )
+                    if (!messageTs) throw new Error('slack_post_failed')
                   },
                   uploadSnippet: async (filename, text) => {
                     if (adapter instanceof SlackAdapter) {
@@ -2192,13 +2212,24 @@ export class ChannelReader {
             try {
               await editStatus(errorText, true)
             } catch {
-              await adapter.sendMessage(
-                responseChannelId,
-                errorText,
-                this.replyTargetMessageId(msg),
-                undefined,
-                { runId: taskId }
-              )
+              try {
+                await adapter.sendMessage(
+                  responseChannelId,
+                  errorText,
+                  this.replyTargetMessageId(msg),
+                  undefined,
+                  { runId: taskId }
+                )
+              } catch (err) {
+                console.error(
+                  JSON.stringify({
+                    level: 'error',
+                    msg: 'terminal_status_failed',
+                    taskId,
+                    code: err instanceof Error ? err.message : 'unknown',
+                  })
+                )
+              }
             }
             finalDelivered = true
             clearRunTimer()
@@ -2238,12 +2269,36 @@ export class ChannelReader {
       const startResultPollingFallback = () => {
         if (resultPollingFallbackStarted) return
         resultPollingFallbackStarted = true
+        resetPollDeadline()
 
         void (async () => {
-          const deadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
-          while (!finalDelivered && Date.now() < deadline) {
-            await new Promise(resolve => setTimeout(resolve, RESULT_POLL_FALLBACK_INTERVAL_MS))
+          while (!finalDelivered) {
+            await new Promise<void>(resolve => {
+              const timer = setTimeout(resolve, RESULT_POLL_FALLBACK_INTERVAL_MS)
+              timer.unref?.()
+            })
             if (finalDelivered) return
+            if (pollPaused) {
+              resetPollDeadline()
+              continue
+            }
+            if (Date.now() >= pollDeadline) {
+              try {
+                const delivered = await deliverFinalResult()
+                if (delivered) {
+                  closeStream()
+                  resolveOnce()
+                  return
+                }
+              } catch (err) {
+                console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
+              }
+              // Pending and waiting_approval stay up. The silence timer owns idle cancel.
+              if (!finalDelivered) {
+                console.warn(`[Main] Result polling fallback timed out for task ${taskId}`)
+              }
+              return
+            }
             try {
               const delivered = await deliverFinalResult()
               if (delivered) {
@@ -2255,10 +2310,6 @@ export class ChannelReader {
               console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
             }
           }
-          if (!finalDelivered) {
-            console.warn(`[Main] Result polling fallback timed out for task ${taskId}`)
-            await failRun('timed out')
-          }
         })()
       }
 
@@ -2267,11 +2318,12 @@ export class ChannelReader {
         taskId,
         source: msg,
         onProgress: (steps: ProgressStep[]) => {
-          if (!acceptProgressUpdates) return
-          // A run that is still reporting tool progress is not the stuck
-          // acknowledgement. Silence, not wall-clock age, trips the cap.
-          armRunTimer()
+          // Silence, not wall-clock age, trips the cap. Tool progress is activity.
+          if (!noteRunActivity()) return
           void editStatus(formatProgressUpdate(steps))
+        },
+        onActivity: () => {
+          noteRunActivity()
         },
         onSuspended: async suspended => {
           // Approval needed. Fetch the server-formatted notification (which
@@ -2306,7 +2358,9 @@ export class ChannelReader {
           resolveOnce()
         },
         onTerminal: async terminal => {
-          if (finalDelivered) {
+          // A terminal result already being posted must not be replaced by a
+          // later cancelled or timeout event. failRun uses the same flag.
+          if (finalDelivered || terminalDeliveryStarted) {
             closeStream()
             resolveOnce()
             return

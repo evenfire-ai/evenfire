@@ -643,6 +643,7 @@ export class SlackAdapter implements ChannelAdapter {
   ): Promise<string | undefined> {
     if (!this.client) {
       console.warn('[Slack] Not connected, cannot send message')
+      if (options?.runId) throw new Error('slack_not_connected')
       return undefined
     }
 
@@ -650,6 +651,7 @@ export class SlackAdapter implements ChannelAdapter {
       const resolvedChannelId = await this.resolveChannelId(channelId)
       if (!resolvedChannelId) {
         console.error(`[Slack] Could not resolve channel ${channelId}`)
+        if (options?.runId) throw new Error('slack_channel_unresolved')
         return undefined
       }
 
@@ -706,6 +708,7 @@ export class SlackAdapter implements ChannelAdapter {
             })
         )
         messageTs = result.ts
+        if (options?.runId && !messageTs) throw new Error('slack_post_failed')
       }
 
       if (documentAttachments.length > 0) {
@@ -768,6 +771,7 @@ export class SlackAdapter implements ChannelAdapter {
               thread_ts: replyToMessageId,
             })
         )
+        if (options?.runId && !fallback.ts) throw new Error('slack_post_failed')
         return fallback.ts
       }
 
@@ -813,7 +817,8 @@ export class SlackAdapter implements ChannelAdapter {
    */
   async inlineSharedFiles(files: SlackSharedFileRef[]): Promise<string> {
     const notes: string[] = []
-    for (const file of files.slice(0, 3)) {
+    const inlineLimit = 3
+    for (const file of files.slice(0, inlineLimit)) {
       const name = file.name.trim() || file.id
       if (!this.botToken || !file.urlPrivateDownload) {
         notes.push(`[Attached ${name}, but the file contents were not available.]`)
@@ -841,6 +846,14 @@ export class SlackAdapter implements ChannelAdapter {
         )
         notes.push(`[Attached ${name}, but the file could not be read.]`)
       }
+    }
+    const omitted = files.length - inlineLimit
+    if (omitted > 0) {
+      notes.push(
+        omitted === 1
+          ? '[1 more attached file was not inlined.]'
+          : `[${omitted} more attached files were not inlined.]`
+      )
     }
     return notes.join('\n\n')
   }

@@ -168,6 +168,8 @@ function fenceSpans(text: string): Array<{ start: number; end: number }> {
 }
 
 function fenceMarker(line: string): string | null {
-  const match = /^(```+|~~~+)/.exec(line)
-  return match ? match[1]! : null
+  // CommonMark allows up to three leading spaces. The pair key is the fence
+  // token only, so an indented close still closes an indented open.
+  const match = /^( {0,3})(```+|~~~+)/.exec(line)
+  return match ? match[2]! : null
 }

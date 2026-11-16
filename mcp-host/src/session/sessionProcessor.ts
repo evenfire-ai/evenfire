@@ -33,7 +33,7 @@ export interface SessionProcessorConfig {
   onBudgetDenied?: (task: Task, reason?: string) => void
 }
 
-/** How long a cancelled or failed executor may keep its session slot. */
+/** Warn if a cancelled or failed executor has not settled. Does not release the slot. */
 const SESSION_RELEASE_GRACE_MS = 10_000
 
 /**
@@ -213,7 +213,7 @@ export class SessionProcessor extends EventEmitter {
     let released = false
     let grace: ReturnType<typeof setTimeout> | undefined
 
-    const release = (mode: 'completed' | 'suspended' | 'failed' | 'timeout') => {
+    const release = (mode: 'completed' | 'suspended' | 'failed') => {
       if (released) return
       released = true
       if (grace) clearTimeout(grace)
@@ -222,9 +222,6 @@ export class SessionProcessor extends EventEmitter {
       if (mode === 'suspended') {
         this.suspendedSessions.add(sessionKey)
         this.emit('task:suspended', { sessionKey, task })
-      } else if (mode === 'timeout') {
-        this.suspendedSessions.delete(sessionKey)
-        this.emit('task:timeout', { sessionKey, task })
       } else if (mode === 'completed') {
         this.emit('task:completed', { sessionKey, task })
       }
@@ -232,18 +229,18 @@ export class SessionProcessor extends EventEmitter {
     }
 
     // A cancel or failure should let the executor promise settle and release
-    // the slot in the handlers below. If that promise never settles, this
-    // grace is the finally: the conversation queue cannot stay closed.
+    // the slot in the handlers below. This grace only warns. The queue stays
+    // closed until executor(task) settles; it is not a wall-clock release.
     const onTransition = (ev: { taskId?: string; to?: string }) => {
       if (released || ev.taskId !== task.id) return
       if (ev.to !== 'cancelled' && ev.to !== 'failed') return
       if (grace) return
       grace = setTimeout(() => {
+        if (released) return
         logger.warn(
           { taskId: task.id, sessionKey },
-          'Releasing conversation queue; the run did not settle after it ended'
+          'Run did not settle after it ended; conversation queue stays closed'
         )
-        release('timeout')
       }, SESSION_RELEASE_GRACE_MS)
       grace.unref?.()
     }

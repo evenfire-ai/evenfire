@@ -17,7 +17,7 @@ function assertIntact(text: string, limit: number): string[] {
   for (const chunk of chunks) {
     const fenceOpens = chunk.match(/```/g)?.length ?? 0
     if (chunk.length > limit) {
-      expect(chunk.startsWith('```') || chunk.startsWith('~~~')).toBe(true)
+      expect(/^( {0,3})?(```|~~~)/.test(chunk)).toBe(true)
       expect(fenceOpens % 2).toBe(0)
     } else {
       expect(chunk.length).toBeLessThanOrEqual(limit)
@@ -55,6 +55,31 @@ describe('splitSlackText', () => {
     expect(codeChunks[0]?.startsWith('```')).toBe(true)
   })
 
+  it('does not split a fence indented by 1 to 3 spaces', () => {
+    for (const openIndent of [1, 2, 3]) {
+      for (const closeIndent of [0, 1, 2, 3]) {
+        const fence =
+          `${' '.repeat(openIndent)}\`\`\`ts\n` +
+          'const value = 1\n'.repeat(400) +
+          `${' '.repeat(closeIndent)}\`\`\``
+        expect(fence.length).toBeGreaterThan(SLACK_CHAT_UPDATE_TEXT_LIMIT)
+        const text = `Before the sample.\n\n${fence}\n\nAfter the sample.`
+        const chunks = assertIntact(text, SLACK_CHAT_UPDATE_TEXT_LIMIT)
+        const codeChunks = chunks.filter(chunk => chunk.includes('const value = 1'))
+        expect(codeChunks).toHaveLength(1)
+        expect(codeChunks[0]).toContain(fence)
+      }
+    }
+  })
+
+  it('still splits a fence indented by 4 spaces', () => {
+    const fence = `    \`\`\`\n${'const value = 1\n'.repeat(400)}    \`\`\``
+    expect(fence.length).toBeGreaterThan(SLACK_CHAT_UPDATE_TEXT_LIMIT)
+    const chunks = splitSlackText(fence, SLACK_CHAT_UPDATE_TEXT_LIMIT)
+    expect(chunks.length).toBeGreaterThan(1)
+    expect(chunks.join('')).toBe(fence)
+  })
+
   it.each([SLACK_SECTION_TEXT_LIMIT, SLACK_CHAT_UPDATE_TEXT_LIMIT, SLACK_CHAT_POST_TEXT_LIMIT])(
     'keeps text just under %i in one piece and splits text just over it',
     limit => {
@@ -89,6 +114,9 @@ describe('planSlackReply', () => {
     const fence = '```\n' + 'x'.repeat(5_000) + '\n```'
     const plan = planSlackReply(`Intro\n\n${fence}`)
     expect(plan.acknowledgement.startsWith('Intro')).toBe(true)
-    expect(plan.followUps).toEqual([expect.objectContaining({ kind: 'snippet', text: fence })])
+    expect(plan.acknowledgement.length).toBeLessThanOrEqual(SLACK_CHAT_UPDATE_TEXT_LIMIT)
+    expect(plan.acknowledgement).not.toContain(fence)
+    expect(plan.acknowledgement).not.toContain('x'.repeat(20))
+    expect(plan.followUps).toEqual([{ kind: 'snippet', filename: 'reply-part-2.txt', text: fence }])
   })
 })

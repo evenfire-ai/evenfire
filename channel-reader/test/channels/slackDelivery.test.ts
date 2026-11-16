@@ -61,10 +61,65 @@ describe('deliverSlackAnswer', () => {
     )
 
     expect(result).toBe('error')
+    expect(edits).toEqual([edits[0]])
+    expect(edits[0]?.startsWith('⚠️')).toBe(false)
     expect(edits[0]?.length).toBeLessThanOrEqual(4000)
     expect(posts.at(-1)).toBe(channelRunErrorText('Slack ratelimited'))
-    expect(
-      [edits[0], ...posts.filter(value => !value.startsWith('⚠️'))].join('').length
-    ).toBeGreaterThan(0)
+    expect([edits[0], ...posts.filter(value => !value.startsWith('⚠️'))].join('')).toBe(text)
+  })
+
+  it('returns error when a later post throws slack_post_failed and keeps the first chunk', async () => {
+    const edits: string[] = []
+    const posts: string[] = []
+    const text = `${'review '.repeat(1_300)}end`
+    const result = await deliverSlackAnswer(
+      {
+        taskId: 'task-missing-ts',
+        edit: async value => {
+          edits.push(value)
+        },
+        post: async value => {
+          posts.push(value)
+          if (value.startsWith('⚠️')) return
+          throw new Error('slack_post_failed')
+        },
+        uploadSnippet: vi.fn(),
+        onApiError: () => undefined,
+      },
+      text
+    )
+
+    const delivered = [edits[0], ...posts.filter(value => !value.startsWith('⚠️'))].join('')
+    expect(result).toBe('error')
+    expect(edits).toEqual([edits[0]])
+    expect(edits[0]).not.toContain("couldn't finish")
+    expect(posts.at(-1)).toBe(channelRunErrorText('Slack slack_post_failed'))
+    expect(text.startsWith(delivered)).toBe(true)
+    expect(delivered.length).toBeGreaterThan(0)
+    expect(delivered.length).toBeLessThan(text.length)
+  })
+
+  it('uploads an over-limit fence and does not post the fence', async () => {
+    const fence = '```\n' + 'x'.repeat(5_000) + '\n```'
+    const posts: string[] = []
+    const uploadSnippet = vi.fn(async () => undefined)
+    const result = await deliverSlackAnswer(
+      {
+        taskId: 'task-fence',
+        edit: async () => undefined,
+        post: async value => {
+          posts.push(value)
+        },
+        uploadSnippet,
+        onApiError: () => undefined,
+      },
+      `Intro\n\n${fence}`
+    )
+
+    expect(result).toBe('delivered')
+    expect(uploadSnippet).toHaveBeenCalledTimes(1)
+    expect(uploadSnippet.mock.calls[0]?.[1]).toBe(fence)
+    expect(posts.join('\n')).not.toContain(fence)
+    expect(posts.join('\n')).not.toContain('x'.repeat(100))
   })
 })

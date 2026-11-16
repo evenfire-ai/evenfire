@@ -29,6 +29,8 @@ export interface ProgressStreamOptions {
   onSuspended: (data: SuspendedEventData) => void
   onTerminal: (data: TerminalEventData) => void
   onError: (error: string) => void
+  /** Liveness signal. Must not append a step or edit the chat. */
+  onActivity?: () => void
   source?: ChannelReaderRuntimeSource
   debounceMs?: number
 }
@@ -44,6 +46,7 @@ export function createProgressStream(options: ProgressStreamOptions): {
     onSuspended,
     onTerminal,
     onError,
+    onActivity,
     source,
     debounceMs = 300,
   } = options
@@ -150,6 +153,9 @@ export function createProgressStream(options: ProgressStreamOptions): {
               target.errorSummary = typeof d.errorSummary === 'string' ? d.errorSummary : undefined
             }
             scheduleFlush()
+          } else if (parsed.event === 'tool_progress' || parsed.event === 'llm_in_progress') {
+            // Heartbeats prove the run is alive. They are not chat progress.
+            if (!closed) onActivity?.()
           } else if (parsed.event === 'suspended') {
             // Approval needed — flush any pending progress, surface the event to
             // the caller, then KEEP THE STREAM OPEN. The same stream will deliver
