@@ -729,8 +729,29 @@ describe('generic OIDC protocol foundation', () => {
         code: 'fixture-code',
         issuer: GENERIC_ISSUER,
       })
-    ).rejects.toBeInstanceOf(OidcProviderIncompatibleError)
+    ).rejects.toMatchObject({
+      name: 'OidcAttemptRejectedError',
+      category: 'attempt-rejected',
+      attemptReason: 'provider-response',
+    })
     expect(f.tokenRequests()).toBe(1)
+    expect([...f.db.rows.values()][0]?.status).toBe('failed')
+  })
+
+  it('keeps a token-endpoint client error that is not invalid_grant incompatible', async () => {
+    const f = fixture()
+    const { params } = await begin(f)
+    f.setTokenStatus(400)
+    await expect(
+      f.engine.completeIdentityProofAttempt({
+        state: params.get('state')!,
+        code: 'fixture-code',
+        issuer: GENERIC_ISSUER,
+      })
+    ).rejects.toMatchObject({
+      name: 'OidcProviderIncompatibleError',
+      category: 'provider-incompatible',
+    })
     expect([...f.db.rows.values()][0]?.status).toBe('failed')
   })
 

@@ -6428,19 +6428,30 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: backfillLegacyPasswordSecurityEpochs,
   },
   {
-    version: '0139_oidc_protocol_attempts',
+    version: '0145_oidc_protocol_attempts',
     // Preserve receipts from all previously used feature-branch identities.
-    legacyVersions: ['0130_oidc_protocol_attempts', '0131_oidc_protocol_attempts'],
+    // 0139 is the slot this branch published before PR 594 reserved 0139–0144.
+    legacyVersions: [
+      '0130_oidc_protocol_attempts',
+      '0131_oidc_protocol_attempts',
+      '0139_oidc_protocol_attempts',
+    ],
     apply: applyOidcProtocolAttemptSchema,
   },
   {
-    version: '0140_oidc_protocol_attempt_expiry_index',
-    legacyVersions: ['0132_oidc_protocol_attempt_expiry_index'],
+    version: '0146_oidc_protocol_attempt_expiry_index',
+    legacyVersions: [
+      '0132_oidc_protocol_attempt_expiry_index',
+      '0140_oidc_protocol_attempt_expiry_index',
+    ],
     apply: applyOidcProtocolAttemptExpiryIndexMigration,
   },
   {
-    version: '0141_oidc_protocol_attempt_browser_binding',
-    legacyVersions: ['0133_oidc_protocol_attempt_browser_binding'],
+    version: '0147_oidc_protocol_attempt_browser_binding',
+    legacyVersions: [
+      '0133_oidc_protocol_attempt_browser_binding',
+      '0141_oidc_protocol_attempt_browser_binding',
+    ],
     apply: applyOidcProtocolAttemptBrowserBindingSchema,
   },
 ]

@@ -69,9 +69,9 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     const lastDev = '0136_llm_catalog_dismissed_backfill'
     const task106 = ['0137_user_access_foundation', '0138_legacy_password_security_epoch_backfill']
     const oidc = [
-      '0139_oidc_protocol_attempts',
-      '0140_oidc_protocol_attempt_expiry_index',
-      '0141_oidc_protocol_attempt_browser_binding',
+      '0145_oidc_protocol_attempts',
+      '0146_oidc_protocol_attempt_expiry_index',
+      '0147_oidc_protocol_attempt_browser_binding',
     ]
 
     expect(

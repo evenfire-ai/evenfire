@@ -4,6 +4,7 @@ import { resolveValidatedOAuthEndpoint } from '../http/validateMcpServerSpec.js'
 import { checkAsEndpointsSameSite, registrableSite } from '../oauth/discovery.js'
 import type { OidcProviderConfiguration } from './configuration.js'
 import {
+  OidcAttemptRejectedError,
   OidcCallerCancelledError,
   type OidcOperationContext,
   OidcProviderIncompatibleError,
@@ -193,6 +194,17 @@ export class TrustedOidcTransport {
     if (result.response.status >= 500 || result.response.status === 429) {
       throw this.recordOperationFailure(new OidcProviderUnavailableError()).error
     }
+    if (
+      this.profile &&
+      normalized === this.profile.tokenEndpoint &&
+      result.response.status === 400 &&
+      oauthTokenError(result.response.bodyText) === 'invalid_grant'
+    ) {
+      throw new OidcAttemptRejectedError(
+        'provider-response',
+        'OIDC token endpoint rejected the authorization code'
+      )
+    }
     if (result.response.status < 200 || result.response.status >= 300) {
       throw this.recordOperationFailure(
         new OidcProviderIncompatibleError('OIDC endpoint rejected the supported protocol request')
@@ -271,6 +283,16 @@ function requestBody(value: FetchBody): string | undefined {
   if (ArrayBuffer.isView(value))
     return Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('utf8')
   throw new OidcProviderIncompatibleError('OIDC request body type is unsupported')
+}
+
+function oauthTokenError(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as unknown
+    if (!isRecord(parsed) || typeof parsed.error !== 'string') return undefined
+    return parsed.error
+  } catch {
+    return undefined
+  }
 }
 
 function toWebHeaders(headers: Record<string, string | string[] | undefined>): Headers {

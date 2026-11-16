@@ -1,6 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { EXTERNAL_REST_API_INTERNAL_URL } from '../../constants/serverApi'
 
+export const OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS = 600
+/** Control API and Profile UI clocks can differ by a small amount. */
+export const OIDC_BROWSER_CLOCK_SKEW_SECONDS = 60
+
 const BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
 const CALLBACK_PATH = '/api/oidc/callback'
@@ -204,7 +208,7 @@ export function readSingleCookie(request: Request, name: string): string | undef
 }
 
 export function setBrowserCookie(name: string, binding: string, maxAgeSeconds: number): string {
-  const age = Math.max(0, Math.min(600, Math.floor(maxAgeSeconds)))
+  const age = Math.max(0, Math.min(OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS, Math.floor(maxAgeSeconds)))
   return `${name}=${binding}; Path=/; Max-Age=${age}; Secure; HttpOnly; SameSite=Lax`
 }
 

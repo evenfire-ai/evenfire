@@ -81,6 +81,50 @@ test('Profile OIDC start binds the browser cookie to the validated provider stat
   }
 })
 
+test('Profile OIDC start accepts a small clock skew and still caps the cookie', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return configurationResponse()
+    return Response.json({
+      authorizationUrl: authorizationUrl(),
+      expiresAt: new Date(Date.now() + 601_000).toISOString(),
+    })
+  })
+  try {
+    const response = await POST(
+      new Request('https://profile.example.test/api/oidc/start', {
+        method: 'POST',
+        headers: { origin: 'https://profile.example.test' },
+      })
+    )
+    assert.equal(response.status, 303)
+    assert.match(response.headers.get('set-cookie') ?? '', /Max-Age=600/)
+  } finally {
+    restore()
+  }
+})
+
+test('Profile OIDC start rejects an attempt expiry far beyond the protocol lifetime', async () => {
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return configurationResponse()
+    return Response.json({
+      authorizationUrl: authorizationUrl(),
+      expiresAt: new Date(Date.now() + 661_000).toISOString(),
+    })
+  })
+  try {
+    const response = await POST(
+      new Request('https://profile.example.test/api/oidc/start', {
+        method: 'POST',
+        headers: { origin: 'https://profile.example.test' },
+      })
+    )
+    assert.equal(response.status, 503)
+    assert.equal(response.headers.get('set-cookie'), null)
+  } finally {
+    restore()
+  }
+})
+
 test('Profile OIDC start rejects cross-origin requests before creating an attempt', async () => {
   const paths: string[] = []
   const restore = mockExternalApi(url => {

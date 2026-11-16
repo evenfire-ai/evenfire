@@ -1,4 +1,6 @@
 import {
+  OIDC_BROWSER_CLOCK_SKEW_SECONDS,
+  OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS,
   beginOidcAttempt,
   browserCookieName,
   getOidcProfileConfiguration,
@@ -34,7 +36,7 @@ export async function POST(request: Request): Promise<Response> {
       !state ||
       !Number.isFinite(expiresAt.getTime()) ||
       maxAge <= 0 ||
-      maxAge > 600
+      maxAge > OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS + OIDC_BROWSER_CLOCK_SKEW_SECONDS
     ) {
       return new Response('Sign-in is unavailable.', {
         status: 503,
