@@ -27,7 +27,7 @@ vi.hoisted(() => {
 // whole app (global middleware, routers, client, global handler) runs as built.
 vi.mock('../src/authToken.js', () => ({
   verifyToken: (token: string) => {
-    const userId = { 'session-u1': USER_1, 'session-u2': USER_2 }[token]
+    const userId = { 'test-token-u1': USER_1, 'test-token-u2': USER_2 }[token]
     return userId
       ? {
           userId,
@@ -282,7 +282,7 @@ describe('GFS watch through external-rest-api', () => {
   })
 
   const watchUrl = (query = '') => `${urlOf(era)}/api/v1/me/gfs/watch${query}`
-  const bearer = (token = 'session-u1') => ({ authorization: `Bearer ${token}` })
+  const bearer = (token = 'test-token-u1') => ({ authorization: `Bearer ${token}` })
   const putBody = { connId: CONN_ID, seq: 1, keys: [KEY_1] }
   const watchCalls = () => upstreamRequests.filter(r => r.url.startsWith('/external/gfs/watch'))
 
@@ -304,7 +304,7 @@ describe('GFS watch through external-rest-api', () => {
       // value the client wrote in front of it.
       expect(sent!.headers['x-forwarded-for']).toBe('203.0.113.7')
       expect(sent!.headers['x-request-id']).toBe(r.headers['x-request-id'])
-      expect(sent!.headers['x-user-session-token']).toBe('session-u1')
+      expect(sent!.headers['x-user-session-token']).toBe('test-token-u1')
     })
 
     const distinctKeys = (n: number) =>
@@ -418,7 +418,7 @@ describe('GFS watch through external-rest-api', () => {
           const direct = await call(
             `${urlOf(upstream)}/external/gfs/watch${c.query ?? ''}`,
             method,
-            { ...opts, headers: { 'x-user-session-token': 'session-u1' }, record: false }
+            { ...opts, headers: { 'x-user-session-token': 'test-token-u1' }, record: false }
           )
           resetIngress()
           const viaEdge = await call(watchUrl(c.query), method, opts)
@@ -635,7 +635,7 @@ describe('GFS watch through external-rest-api', () => {
       expect(watchCalls()).toHaveLength(240)
 
       const otherUserRead = await call(`${urlOf(era)}/api/v1/me/gfs/roots`, 'GET', {
-        headers: { ...bearer('session-u2'), 'x-forwarded-for': '198.51.100.20' },
+        headers: { ...bearer('test-token-u2'), 'x-forwarded-for': '198.51.100.20' },
       })
       expect(otherUserRead.status).not.toBe(429)
     })
