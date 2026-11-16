@@ -115,9 +115,9 @@ function FileExplorerNode({
 }: FileExplorerNodeProps) {
   const queryClient = useQueryClient()
   const isDirectory = node.kind === 'directory'
-  // A section (the caller's home) always lists its children, like the
-  // "Shared with me" roots below its label.
-  const isExpanded = isDirectory && (section || expandedIds.has(node.resourceId))
+  // Every folder, the section (the caller's home) included, starts collapsed
+  // and lists its children only once the user expands it from its chevron.
+  const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
   // The treeitem is named by its label alone, not by its toggle and children.
@@ -152,7 +152,12 @@ function FileExplorerNode({
     // is a persistent surface, so under the app's Infinity staleTime an expanded
     // folder would otherwise serve its first page forever — removed files linger
     // and new files never appear until a hard reload. Revalidate on revisit and
-    // window focus, matching the controller's own children query.
+    // window focus, matching the controller's own children query. The caller's
+    // home (the section) follows the same policy: collapsed, it requests
+    // nothing; expanded, it refreshes on window focus like any other folder.
+    // Collapsing and expanding a node again does not refetch by itself: the
+    // query is only disabled meanwhile, and its data stays fresh under the
+    // Infinity staleTime.
     refetchOnMount: 'always',
     refetchOnWindowFocus: 'always',
     initialPageParam: undefined as string | undefined,
@@ -203,7 +208,8 @@ function FileExplorerNode({
     // (open preview, or download when not previewable) immediately — no delay.
     // A double-click on a file just re-activates it idempotently. onActivateFile
     // also selects the node, so selection still follows a file's single-click.
-    // A section label has no toggle: a click opens it, like "Shared with me".
+    // A section label opens on click, like "Shared with me"; only its chevron
+    // expands or collapses it.
     if (!isDirectory || section) {
       runActivate()
       return
@@ -304,7 +310,6 @@ function FileExplorerNode({
       const hoverState = dropState?.state
       if (
         isDirectoryRow &&
-        !section &&
         !isExpanded &&
         (hoverState === undefined || hoverState === 'allowed' || hoverState === 'checking')
       ) {
@@ -316,7 +321,7 @@ function FileExplorerNode({
         }
       }
     },
-    [dropState, handleRowDragOver, isDirectoryRow, isExpanded, node.resourceId, onToggle, section]
+    [dropState, handleRowDragOver, isDirectoryRow, isExpanded, node.resourceId, onToggle]
   )
 
   const handleRowDragLeave = useCallback(
@@ -368,9 +373,7 @@ function FileExplorerNode({
       role="treeitem"
     >
       <div
-        className={`da-file-explorer__row${section ? ' da-file-explorer__row--section' : ''}${
-          dropStateName ? ` is-drop-${dropStateName}` : ''
-        }`}
+        className={`da-file-explorer__row${dropStateName ? ` is-drop-${dropStateName}` : ''}`}
         data-drop-state={dropStateName}
         data-drop-reason={dropReason}
         title={dropReasonTooltip}
@@ -379,7 +382,7 @@ function FileExplorerNode({
         onDragLeave={isDirectory ? handleRowDragLeave : undefined}
         onDrop={isDirectory ? handleRowDrop : undefined}
       >
-        {section ? null : isDirectory ? (
+        {isDirectory ? (
           <IconButton
             aria-expanded={isExpanded}
             className={`da-file-explorer__toggle${isExpanded ? ' is-expanded' : ''}`}

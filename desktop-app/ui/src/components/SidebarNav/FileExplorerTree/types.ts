@@ -36,8 +36,9 @@ export interface FileExplorerNodeProps {
   homeResourceId: string | null
   expandedIds: ReadonlySet<string>
   /** Render the node as a section of the tree, like "Shared with me": a label
-   *  with no toggle or icon whose children are always listed. Activating the
-   *  label opens the folder. Used for the caller's own home. */
+   *  with no folder icon, and a chevron that lists its children on demand.
+   *  Activating the label opens the folder and does not expand it. Used for
+   *  the caller's own home. */
   section?: boolean
   selectedId: string | null
   /** Resource id currently being moved (freezes drag starts), when a move the

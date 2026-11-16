@@ -3,6 +3,7 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
   GFS_ACCESS_REVOKED_BODY,
@@ -64,8 +65,8 @@ type Producers = {
   getHome?: () => Promise<Awaited<ReturnType<typeof homeView>>>
   listAccessible?: (drive?: string, cursor?: string) => Promise<unknown>
   listChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
-  /** Children of the caller's home. The home section always lists them, so
-   *  they are served apart from `listChildren`, which serves shared folders. */
+  /** Children of the caller's home. They are served apart from `listChildren`,
+   *  which serves shared folders, so a test can count the home's own listings. */
   listHomeChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
   download?: (uri: string) => Promise<unknown>
   getSessionGeneration?: () => Promise<number>
@@ -123,6 +124,19 @@ function renderTree(
   return { onOpenFolder, onOpenPreview, pushToast, queryClient }
 }
 
+/** The ready home's tree node. While the home loads, "My home" is a disabled
+ *  flat entry with no label button inside it, so this waits for the node whose
+ *  own label is enabled. */
+async function findReadyHomeNode() {
+  await waitFor(() => {
+    const node = screen.getByRole('treeitem', { name: 'My home' })
+    expect(within(node).getByRole('button', { name: 'My home' }).hasAttribute('disabled')).toBe(
+      false
+    )
+  })
+  return screen.getByRole('treeitem', { name: 'My home' })
+}
+
 beforeEach(() => {
   // jsdom has no object-URL implementation; the download fallback needs both.
   Object.defineProperty(URL, 'createObjectURL', {
@@ -141,28 +155,26 @@ afterEach(() => {
 })
 
 describe('My home', () => {
-  it('shows the server-provided non-main home as a My home section that lists its folders and opens on click', async () => {
+  it('shows the server-provided non-main home as a collapsed My home that opens from its label', async () => {
     const listHomeChildren = vi.fn(async () =>
       listChildrenPage([childView('child-1', 'Projects', 'directory', { drive: 'private' })])
     )
     installClerum({ getHome: async () => homeView({ drive: 'private' }), listHomeChildren })
     const { onOpenFolder } = renderTree()
-    // Like "Shared with me", My home is a label with its folders listed below
-    // it: no toggle, nothing to expand first.
-    // Until the home loads, My home is the disabled flat entry.
-    await waitFor(() =>
-      expect(screen.getByRole('treeitem', { name: 'My home' }).getAttribute('aria-expanded')).toBe(
-        'true'
-      )
-    )
-    const home = screen.getByRole('treeitem', { name: 'My home' })
+    // Until the home loads, My home is the disabled flat entry. Once it is
+    // ready it is a collapsed node with a chevron, and nothing is listed yet.
+    const home = await findReadyHomeNode()
+    expect(home.getAttribute('aria-expanded')).toBe('false')
+    expect(within(home).getByRole('button', { name: 'Expand My home' })).toBeTruthy()
+    expect(listHomeChildren).not.toHaveBeenCalled()
+    // The chevron lists the folders of the home's own drive.
+    fireEvent.click(within(home).getByRole('button', { name: 'Expand My home' }))
     expect(await within(home).findByRole('treeitem', { name: 'Projects' })).toBeTruthy()
     expect(listHomeChildren).toHaveBeenCalledWith(
       'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       'private',
       undefined
     )
-    expect(within(home).queryByRole('button', { name: /^(Expand|Collapse) My home$/ })).toBeNull()
     // The folders under it keep their own toggle.
     expect(within(home).getByRole('button', { name: 'Expand Projects' })).toBeTruthy()
     fireEvent.click(within(home).getByRole('button', { name: 'My home' }))
@@ -173,6 +185,155 @@ describe('My home', () => {
     fireEvent.click(screen.getByRole('treeitem', { name: 'Shared with me' }))
     expect(onOpenFolder).toHaveBeenLastCalledWith(GFS_SHARED_WITH_ME_LOCATION)
     expect(onOpenFolder).not.toHaveBeenCalledWith(null)
+  })
+
+  it('lists the folders of My home only after its chevron is expanded', async () => {
+    const listHomeChildren = vi.fn(async () =>
+      listChildrenPage([childView('child-1', 'Projects', 'directory')])
+    )
+    const listAccessible = vi.fn(async () =>
+      listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+    )
+    installClerum({ getHome: async () => homeView(), listAccessible, listHomeChildren })
+    renderTree({}, true)
+    // Witness: the ready home node is mounted and the tree's own listing settled.
+    const home = await findReadyHomeNode()
+    expect(await screen.findByRole('button', { name: 'Reports' })).toBeTruthy()
+    expect(listAccessible).toHaveBeenCalled()
+    expect(listHomeChildren).not.toHaveBeenCalled()
+    expect(home.getAttribute('aria-expanded')).toBe('false')
+    expect(within(home).queryByRole('treeitem', { name: 'Projects' })).toBeNull()
+
+    fireEvent.click(within(home).getByRole('button', { name: 'Expand My home' }))
+    expect(await within(home).findByRole('treeitem', { name: 'Projects' })).toBeTruthy()
+    expect(listHomeChildren).toHaveBeenCalledTimes(1)
+    expect(home.getAttribute('aria-expanded')).toBe('true')
+
+    fireEvent.click(within(home).getByRole('button', { name: 'Collapse My home' }))
+    await waitFor(() =>
+      expect(within(home).queryByRole('treeitem', { name: 'Projects' })).toBeNull()
+    )
+    expect(home.getAttribute('aria-expanded')).toBe('false')
+    expect(within(home).getByRole('button', { name: 'Expand My home' })).toBeTruthy()
+  })
+
+  it('expands and collapses My home from the keyboard', async () => {
+    const listHomeChildren = vi.fn(async () =>
+      listChildrenPage([childView('child-1', 'Projects', 'directory')])
+    )
+    installClerum({ getHome: async () => homeView(), listHomeChildren })
+    renderTree({}, true)
+    const user = userEvent.setup()
+    const home = await findReadyHomeNode()
+    const chevron = within(home).getByRole('button', { name: 'Expand My home' })
+    // The chevron is the first stop of the tree in the tab order.
+    await user.tab()
+    expect(document.activeElement).toBe(chevron)
+
+    await user.keyboard('{Enter}')
+    expect(await within(home).findByRole('treeitem', { name: 'Projects' })).toBeTruthy()
+    expect(listHomeChildren).toHaveBeenCalledTimes(1)
+    expect(home.getAttribute('aria-expanded')).toBe('true')
+    expect(document.activeElement).toBe(
+      within(home).getByRole('button', { name: 'Collapse My home' })
+    )
+
+    await user.keyboard(' ')
+    await waitFor(() =>
+      expect(within(home).queryByRole('treeitem', { name: 'Projects' })).toBeNull()
+    )
+    expect(home.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it.each([
+    ['a click', 'click'],
+    ['a double click', 'dblclick'],
+    ['Enter', 'enter'],
+  ] as const)(
+    'opens the home from its label with %s and does not list its folders',
+    async (_name, gesture) => {
+      const listHomeChildren = vi.fn(async () =>
+        listChildrenPage([childView('child-1', 'Projects', 'directory')])
+      )
+      installClerum({ getHome: async () => homeView(), listHomeChildren })
+      const { onOpenFolder } = renderTree({}, true)
+      const user = userEvent.setup()
+      const home = await findReadyHomeNode()
+      const label = within(home).getByRole('button', { name: 'My home' })
+
+      if (gesture === 'click') await user.click(label)
+      else if (gesture === 'dblclick') await user.dblClick(label)
+      else {
+        label.focus()
+        await user.keyboard('{Enter}')
+      }
+
+      // Witness: the label opened the home.
+      await waitFor(() =>
+        expect(onOpenFolder).toHaveBeenCalledWith('gfs://main/aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa')
+      )
+      // Past the window in which a folder's single click would toggle it.
+      await act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 320))
+      })
+      expect(listHomeChildren).not.toHaveBeenCalled()
+      expect(home.getAttribute('aria-expanded')).toBe('false')
+      expect(within(home).queryByRole('treeitem', { name: 'Projects' })).toBeNull()
+    }
+  )
+
+  it('expands My home when a dragged item dwells on it', async () => {
+    const listHomeChildren = vi.fn(async () =>
+      listChildrenPage([childView('home-sub-1', 'Projects', 'directory')])
+    )
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('folder-a', 'A', 'directory')])
+      ),
+      listHomeChildren,
+      affordances: vi.fn(async () => ({ held: ['read', 'write', 'delete'] })),
+      resolve: vi.fn(async () => ({ parentResourceId: 'grand', kind: 'directory', version: 1 })),
+    })
+    renderTreeWithSession()
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const home = await findReadyHomeNode()
+    const homeRow = home.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+
+    // The dwell time is the thing under test: fake the timers only once the
+    // rows exist, so the queries above keep their real clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fireEvent.dragStart(rowA, { dataTransfer })
+      fireEvent.dragEnter(homeRow, { dataTransfer })
+      fireEvent.dragOver(homeRow, { dataTransfer })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FOLDER_HOVER_EXPAND_DELAY_MS - 100)
+      })
+      expect(listHomeChildren).not.toHaveBeenCalled()
+      expect(home.getAttribute('aria-expanded')).toBe('false')
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200)
+      })
+      // The listing the dwell started settles through the query cache's own
+      // timers, which are fake here: advance them until it renders.
+      for (
+        let step = 0;
+        step < 40 && within(home).queryByRole('treeitem', { name: 'Projects' }) === null;
+        step += 1
+      ) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(50)
+        })
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(within(home).getByRole('treeitem', { name: 'Projects' })).toBeTruthy()
+    expect(listHomeChildren).toHaveBeenCalledTimes(1)
+    expect(home.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.dragEnd(rowA, { dataTransfer })
   })
 
   it('lists the caller home only as My home, never under Shared with me', async () => {
@@ -3201,8 +3362,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    // A folder that lives in the caller's own home: the My home section lists
-    // it, so the keyboard Move path opens from inside the home.
+    // A folder that lives in the caller's own home: once My home is expanded
+    // from its chevron, the keyboard Move path opens from inside the home.
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand My home' }))
     const projectsRow = await screen.findByRole('button', { name: 'Projects' })
     await act(async () => {
       fireEvent.keyDown(projectsRow, { key: 'F10', shiftKey: true })
