@@ -23,6 +23,8 @@ export function gfsWatchProcess(): GfsWatchProcess {
       listenConnectionString: config.pgConnectionString,
       watchPool,
       heartbeatMs: config.gfsWatchHeartbeatMs,
+      maxConnections: config.gfsWatchMaxConnections,
+      maxConnectionsPerPrincipal: config.gfsWatchMaxConnectionsPerPrincipal,
       log: rootLogger.child({ module: 'gfs-watch' }),
     })
     current = { registry, watchPool }

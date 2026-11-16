@@ -796,36 +796,75 @@ describeRealPostgres('GFS watch routes on real Postgres', () => {
 
   // ─── Process lifecycle ───────────────────────────────────────────────────
 
-  it('shutdown closes every stream with server_shutdown and then ends the watch pool', async () => {
-    // The process registry announces the configured heartbeat, not the default.
-    h.modules.config.config.gfsWatchHeartbeatMs = 7_000
-    const proc = watchProcess.gfsWatchProcess()
-    watchProcess.startGfsWatchProcess()
-    for (let i = 0; i < 500 && !proc.registry.listenerReady(); i += 1) {
-      await new Promise(r => setTimeout(r, 10))
+  /** Sets config fields for `run` and restores them after, whatever `run` does. */
+  async function withConfig(
+    overrides: Partial<RegistryHarness['modules']['config']['config']>,
+    run: () => Promise<void>
+  ) {
+    const config = h.modules.config.config
+    const previous = Object.fromEntries(
+      Object.keys(overrides).map(k => [k, config[k as keyof typeof config]])
+    )
+    Object.assign(config, overrides)
+    try {
+      await run()
+    } finally {
+      Object.assign(config, previous)
     }
-    expect(proc.registry.listenerReady()).toBe(true)
-    // The production wiring: default dependencies, the process registry.
-    const app = express()
-    app.use(express.json())
-    app.use(correlation.correlationIdMiddleware)
-    app.use(routes.createExternalGfsWatchRouter())
-    const url = await listen(app)
-    const user = await h.createUser()
-    const f = await h.tree.add('file')
-    const { r, ready } = await openReady(url, user, [h.key('file', f)])
-    expect(ready.heartbeatMs).toBe(7_000)
-    expect(proc.watchPool.totalCount).toBeGreaterThan(0)
+  }
 
-    await new serverModule.ControlApiServer({} as never, 0).stop()
-    const closing = await r.waitFrame('stream.closing')
-    expect(closing.reason).toBe('server_shutdown')
-    for (let i = 0; i < 200 && !r.ended(); i += 1) await new Promise(x => setTimeout(x, 5))
-    expect(r.ended()).toBe(true)
-    expect(proc.registry.state.byConnId.size).toBe(0)
+  // The process registry is built once per module load, on the first
+  // gfsWatchProcess() call, so this is the only test that can observe the
+  // config it is built from. Both caps are set apart (process 2, principal 1)
+  // so each 429 below is answered by exactly one of them.
+  it('the process registry takes its config; shutdown closes every stream with server_shutdown and then ends the watch pool', async () => {
+    await withConfig(
+      {
+        gfsWatchHeartbeatMs: 7_000,
+        gfsWatchMaxConnections: 2,
+        gfsWatchMaxConnectionsPerPrincipal: 1,
+      },
+      async () => {
+        const proc = watchProcess.gfsWatchProcess()
+        watchProcess.startGfsWatchProcess()
+        for (let i = 0; i < 500 && !proc.registry.listenerReady(); i += 1) {
+          await new Promise(r => setTimeout(r, 10))
+        }
+        expect(proc.registry.listenerReady()).toBe(true)
+        // The production wiring: default dependencies, the process registry.
+        const app = express()
+        app.use(express.json())
+        app.use(correlation.correlationIdMiddleware)
+        app.use(routes.createExternalGfsWatchRouter())
+        const url = await listen(app)
+        const first = await h.createUser()
+        const second = await h.createUser()
+        const third = await h.createUser()
+        const f = await h.tree.add('file')
+        const { r, ready } = await openReady(url, first, [h.key('file', f)])
+        expect(ready.heartbeatMs).toBe(7_000)
+        // Per-principal cap: the same user's second stream, one stream open in the process.
+        expectWatchError(await call(url, 'GET', { headers: session(first) }), 429, 'admission_full')
+        const { r: r2 } = await openReady(url, second, [h.key('file', f)])
+        // Process cap: a user with no stream open, two streams open in the process.
+        expectWatchError(await call(url, 'GET', { headers: session(third) }), 429, 'admission_full')
+        expect(proc.watchPool.totalCount).toBeGreaterThan(0)
 
-    await watchProcess.closeGfsWatchPool()
-    expect(proc.watchPool.totalCount).toBe(0)
-    expect((proc.watchPool as unknown as { ended: boolean }).ended).toBe(true)
+        await new serverModule.ControlApiServer({} as never, 0).stop()
+        for (const stream of [r, r2]) {
+          const closing = await stream.waitFrame('stream.closing')
+          expect(closing.reason).toBe('server_shutdown')
+          for (let i = 0; i < 200 && !stream.ended(); i += 1) {
+            await new Promise(x => setTimeout(x, 5))
+          }
+          expect(stream.ended()).toBe(true)
+        }
+        expect(proc.registry.state.byConnId.size).toBe(0)
+
+        await watchProcess.closeGfsWatchPool()
+        expect(proc.watchPool.totalCount).toBe(0)
+        expect((proc.watchPool as unknown as { ended: boolean }).ended).toBe(true)
+      }
+    )
   })
 })

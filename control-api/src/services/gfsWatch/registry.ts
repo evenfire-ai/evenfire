@@ -26,6 +26,10 @@ import {
   observeExternalSessionCurrentness,
 } from '../auth/externalSessionCurrentnessObserver.js'
 import {
+  GFS_WATCH_MAX_CONNECTIONS,
+  GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL,
+} from './admissionLimits.js'
+import {
   type GfsKey,
   MAX_DRIVES_PER_SET,
   MAX_KEYS_PER_SET,
@@ -61,8 +65,6 @@ import { FAILED, type TimerHandle, type WatchClock, createWatchRuntime } from '.
 
 export const GFS_WATCH_DEFAULT_HEARTBEAT_MS = 20_000
 export const GFS_WATCH_DEFAULT_MAX_LIFETIME_MS = 120 * 60_000
-export const GFS_WATCH_MAX_CONNECTIONS = 256
-export const GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL = 8
 /**
  * A forged command with s = 2^53 - 1 would otherwise pin `lastSeq` and make
  * every legitimate PUT of the connection look stale. The client restarts its
