@@ -49,11 +49,13 @@ parse → normalize → dispatch. Normalized payloads become one of:
   bearer handoff token. Slack `url_verification` challenges are echoed.
 
 Slack and Teams button decisions are acknowledged with `200` immediately and
-submitted in the background. The original message is updated when the decision
-is recorded, or when a click finds the approval no longer pending; a background
-retry changes it only when it succeeds. Failures and waits are sent as a
-separate message, placed per the channel's reply-in-threads setting (Slack and
-Teams), through control-api's target proxy endpoints.
+submitted in the background, once. The original message is updated when the
+decision is recorded, or when the click finds the approval no longer pending.
+Any other result is sent as a separate message, placed per the channel's
+reply-in-threads setting (Slack and Teams), through control-api's target proxy
+endpoints, and the original message keeps its buttons. When the MCP Host
+refuses the decision with its admission limit (`429`), that message gives the
+Host's wait; the reader does not send the decision again.
 
 ## Configuration
 

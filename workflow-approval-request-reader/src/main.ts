@@ -1,5 +1,4 @@
 import { config } from './config.js'
-import { decisionAdmissionRetries } from './decisionAdmissionRetry.js'
 import { readerLogger } from './logger.js'
 import { createServer } from './server.js'
 
@@ -10,9 +9,7 @@ const server = createServer().listen(config.port, () => {
 })
 
 function shutdown(signal: string): void {
-  // Pending decision retries are dropped, not sent while the pod drains.
-  const cancelled = decisionAdmissionRetries.close()
-  log.info('shutting down', { signal, cancelledDecisionRetries: cancelled })
+  log.info('shutting down', { signal })
   server.close(() => process.exit(0))
 }
 

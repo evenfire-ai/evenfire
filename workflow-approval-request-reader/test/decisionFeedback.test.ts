@@ -7,10 +7,6 @@ import {
 import type { McpHostDecisionResult } from '../src/mcpHostClient.js'
 
 const T_STALE = 'This workflow approval is no longer pending.'
-const T_RETRY_STALE =
-  'Your earlier decision was not recorded: this workflow approval is no longer pending.'
-const tSched = (seconds: number) =>
-  `The assistant is busy. Your decision will be sent again in ${seconds} seconds. If the approval message has not changed a minute from now, choose again.`
 const tBusy = (seconds: number) => `The assistant is busy. Try again in ${seconds} seconds.`
 const tGen = (decision: 'approve' | 'deny') =>
   `I could not ${decision} this workflow approval. Try again in a moment.`
@@ -53,148 +49,83 @@ type Row = {
   expected: (medium: 'slack' | 'teams') => DecisionFeedbackPlan
 }
 
-const notice = (
-  action: 'send_retry_scheduled' | 'send_failure' | 'send_retry_stale',
-  text: string
-): DecisionFeedbackPlan => ({ shared: null, notice: { action, text } })
+const notice = (text: string): DecisionFeedbackPlan => ({
+  shared: null,
+  notice: { action: 'send_failure', text },
+})
 
 const rows: Row[] = [
   {
-    row: '5 first attempt ok',
-    input: { decision: 'approve', attempt: 'first', result: { ok: true }, armed: null },
+    row: 'recorded',
+    input: { decision: 'approve', result: { ok: true } },
     expected: () => ({
       shared: { action: 'update_success', text: 'Approved. Workflow approval recorded.' },
       notice: null,
     }),
   },
   {
-    row: '5 first attempt duplicate, deny',
-    input: {
-      decision: 'deny',
-      attempt: 'first',
-      result: { ok: true, duplicate: true },
-      armed: null,
-    },
+    row: 'recorded as a duplicate, deny',
+    input: { decision: 'deny', result: { ok: true, duplicate: true } },
     expected: () => ({
       shared: { action: 'update_success', text: 'Denied. Workflow approval recorded.' },
       notice: null,
     }),
   },
   {
-    row: '9 retry ok',
-    input: { decision: 'approve', attempt: 'retry', result: { ok: true }, armed: null },
-    expected: () => ({
-      shared: { action: 'update_success', text: 'Approved. Workflow approval recorded.' },
-      notice: null,
-    }),
-  },
-  {
-    row: '3b other user refused by control-api',
-    input: {
-      decision: 'deny',
-      attempt: 'first',
-      result: { ok: false, status: 409, error: 'approval_requester_mismatch' },
-      armed: null,
-    },
-    expected: () => notice('send_failure', tGen('deny')),
-  },
-  {
-    row: '3c / 12 first attempt 429, retry not scheduled',
-    input: { decision: 'approve', attempt: 'first', result: limited(7), armed: 'not_scheduled' },
-    expected: () => notice('send_failure', tBusy(7)),
-  },
-  {
-    row: '1b first attempt 429 while the same user retry is armed',
-    input: { decision: 'deny', attempt: 'first', result: limited(7), armed: 'held' },
-    expected: () => ({ shared: null, notice: null }),
-  },
-  {
-    row: '7 first attempt 429, retry scheduled',
-    input: { decision: 'approve', attempt: 'first', result: limited(7), armed: 'scheduled' },
-    expected: () => notice('send_retry_scheduled', tSched(7)),
-  },
-  {
-    row: '8 retry 429 again',
-    input: { decision: 'approve', attempt: 'retry', result: limited(9), armed: null },
-    expected: () => notice('send_failure', tBusy(9)),
+    row: 'refused by the Host admission limit',
+    input: { decision: 'approve', result: limited(7) },
+    expected: () => notice(tBusy(7)),
   },
   ...STALE_RESULTS.map(result => ({
-    row: `6 retry stale ${result.status} ${result.error}`,
-    input: { decision: 'approve' as const, attempt: 'retry' as const, result, armed: null },
-    expected: () => notice('send_retry_stale', T_RETRY_STALE),
-  })),
-  ...STALE_RESULTS.map(result => ({
-    row: `13a / 3d first attempt stale ${result.status} ${result.error}`,
-    input: { decision: 'deny' as const, attempt: 'first' as const, result, armed: null },
+    row: `no longer pending ${result.status} ${result.error}`,
+    input: { decision: 'deny' as const, result },
     expected: (): DecisionFeedbackPlan => ({
       shared: { action: 'update_stale', text: T_STALE },
       notice: null,
     }),
   })),
-  ...DENIALS.flatMap(result =>
-    (['first', 'retry'] as const).map(attempt => ({
-      row: `${attempt === 'first' ? '13b' : '10'} ${attempt} denial ${result.status} ${result.error}`,
-      input: { decision: 'approve' as const, attempt, result, armed: null },
-      expected: (medium: 'slack' | 'teams') => notice('send_failure', tDeny(medium)),
-    }))
-  ),
-  ...OTHER_FAILURES.flatMap(result =>
-    (['first', 'retry'] as const).map(attempt => ({
-      row: `${attempt === 'first' ? '13c' : '11'} ${attempt} failure ${result.status} ${result.error}`,
-      input: { decision: 'deny' as const, attempt, result, armed: null },
-      expected: () => notice('send_failure', tGen('deny')),
-    }))
-  ),
+  ...DENIALS.map(result => ({
+    row: `denial ${result.status} ${result.error}`,
+    input: { decision: 'approve' as const, result },
+    expected: (medium: 'slack' | 'teams') => notice(tDeny(medium)),
+  })),
+  ...OTHER_FAILURES.map(result => ({
+    row: `failure ${result.status} ${result.error}`,
+    input: { decision: 'deny' as const, result },
+    expected: () => notice(tGen('deny')),
+  })),
 ]
 
 describe('planDecisionFeedback', () => {
   for (const medium of ['slack', 'teams'] as const) {
-    it.each(rows)(`${medium}: row $row`, ({ input, expected }) => {
+    it.each(rows)(`${medium}: $row`, ({ input, expected }) => {
       expect(planDecisionFeedback({ ...input, medium })).toEqual(expected(medium))
     })
   }
 
-  it('refuses a scheduled retry without the Host wait', () => {
-    expect(() =>
-      planDecisionFeedback({
-        medium: 'slack',
-        decision: 'approve',
-        attempt: 'first',
-        result: { ok: false, status: 504, error: 'mcp_host_unavailable' },
-        armed: 'scheduled',
-      })
-    ).toThrow('a scheduled decision retry needs the Host admission wait')
-  })
-
-  it('never rewrites the approval message for a retry that is not recorded', () => {
-    const failures = [...STALE_RESULTS, ...OTHER_FAILURES, ...DENIALS, limited(9)]
-    const armedValues = ['scheduled', 'held', 'not_scheduled', null] as const
-    let checked = 0
-    let recorded = 0
+  it('rewrites the approval message only for a recorded decision or a stale approval', () => {
+    const notShared = [...OTHER_FAILURES, ...DENIALS, limited(9)]
+    let notices = 0
+    let shared = 0
     for (const medium of ['slack', 'teams'] as const) {
       for (const decision of ['approve', 'deny'] as const) {
-        for (const armed of armedValues) {
-          // Only a Host admission refusal with a wait can be armed.
-          const results = armed === 'scheduled' ? [limited(9)] : failures
-          for (const result of results) {
-            const plan = planDecisionFeedback({ medium, decision, attempt: 'retry', result, armed })
-            expect(plan.shared).toBeNull()
-            checked += 1
-          }
-          // Witness: the same loop with a recorded decision does write it.
-          const ok = planDecisionFeedback({
-            medium,
-            decision,
-            attempt: 'retry',
-            result: { ok: true },
-            armed,
-          })
-          expect(ok.shared?.action).toBe('update_success')
-          recorded += 1
+        for (const result of notShared) {
+          const plan = planDecisionFeedback({ medium, decision, result })
+          expect(plan.shared).toBeNull()
+          expect(plan.notice?.action).toBe('send_failure')
+          notices += 1
+        }
+        // Witness: the same loop does write the approval message for the
+        // results that may change it.
+        for (const result of [{ ok: true }, ...STALE_RESULTS]) {
+          const plan = planDecisionFeedback({ medium, decision, result })
+          expect(plan.notice).toBeNull()
+          expect(plan.shared?.action).toBe(result.ok ? 'update_success' : 'update_stale')
+          shared += 1
         }
       }
     }
-    expect(checked).toBe(2 * 2 * (3 * failures.length + 1))
-    expect(recorded).toBe(2 * 2 * armedValues.length)
+    expect(notices).toBe(2 * 2 * notShared.length)
+    expect(shared).toBe(2 * 2 * (1 + STALE_RESULTS.length))
   })
 })

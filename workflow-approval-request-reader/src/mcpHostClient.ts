@@ -1,7 +1,7 @@
 import type { ReaderConfig } from './config.js'
 import { canApprove, resolveCommunicationChannelRef } from './controlApiClient.js'
-import { HOST_ADMISSION_LIMITED_ERROR } from './decisionAdmissionRetry.js'
 import type { ReaderDecisionCommand, ReaderEnrollmentCommand } from './decisionHandler.js'
+import { HOST_ADMISSION_LIMITED_ERROR } from './hostAdmission.js'
 import { fetchWithTimeout, timeoutErrorName } from './httpTimeout.js'
 import { readerLogger } from './logger.js'
 import { targetForProviderHostRef, targetsForDecision } from './mcpHostTargets.js'
