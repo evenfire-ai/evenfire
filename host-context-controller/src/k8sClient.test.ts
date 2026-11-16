@@ -7759,6 +7759,105 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     watcher.stop()
   })
 
+  /** Capture the structured lines hccLogger prints through console.log, parsed. */
+  function captureInfoLines(): {
+    lines: Array<Record<string, unknown>>
+    restore: () => void
+  } {
+    const lines: Array<Record<string, unknown>> = []
+    const spy = vi.spyOn(console, 'log').mockImplementation((line?: unknown) => {
+      if (typeof line === 'string' && line.startsWith('{')) lines.push(JSON.parse(line))
+    })
+    return { lines, restore: () => spy.mockRestore() }
+  }
+
+  function seedSyncedHost(watcher: McpServerWatcher): void {
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).hosts.set('stateless-host', {
+      name: 'stateless-host',
+      namespace: 'mcp-host',
+      spec: { host: 'stateless-host', contextRef: 'context1', secretRef: 'agent-secret' },
+    })
+  }
+
+  it('G-K1 the Context-recovery pass that applies the recovered channel lifecycle logs its generation and mode', async () => {
+    resetMocks()
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'communicationchannels') {
+        return {
+          metadata: { resourceVersion: '201' },
+          items: [
+            {
+              metadata: { name: 'current-channel', namespace: 'channels' },
+              spec: { hostRef: 'stateless-host' },
+            },
+          ],
+        }
+      }
+      if (plural === 'contexts') return { metadata: { resourceVersion: '301' }, items: [] }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    seedSyncedHost(watcher)
+    ;(watcher as any).contextCacheSynced = false
+    const capture = captureInfoLines()
+    try {
+      // The channel cache recovers while the Context cache is not synced: its
+      // lifecycle pass returns without a line, and the Context recovery applies
+      // the pending generation under its own label.
+      await expect((watcher as any).recoverCommunicationChannelCache()).resolves.toBe(true)
+      await (watcher as any).recoverContextInventoryAndWatch()
+      await vi.waitFor(() =>
+        expect(
+          capture.lines.some(
+            line => line.msg === '[K8s] Completed Host reconciliation after Context cache recovery'
+          )
+        ).toBe(true)
+      )
+
+      const recovered = capture.lines.find(line =>
+        String(line.msg).startsWith('[K8s] Recovered 1 CommunicationChannel(s) into cache')
+      )
+      const completed = capture.lines.find(
+        line => line.msg === '[K8s] Completed Host reconciliation after Context cache recovery'
+      )
+      expect(recovered?.ccLifecycleGeneration).toEqual(expect.any(Number))
+      expect(recovered?.ccLifecycleGeneration).toBe((watcher as any).ccLifecycleGeneration)
+      expect(completed).toMatchObject({
+        mode: 'full',
+        ccLifecycleGeneration: recovered?.ccLifecycleGeneration,
+      })
+      // Witness: that pass is the one that applied the recovered generation.
+      expect((watcher as any).ccAppliedLifecycleGeneration).toBe(recovered?.ccLifecycleGeneration)
+      expect(mocks.hostReconcileHosts).not.toHaveBeenCalled()
+      expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+    } finally {
+      capture.restore()
+      await watcher.stop()
+    }
+  })
+
+  it('G-K2 a Periodic resync completion carries its mode and no channel lifecycle generation', async () => {
+    resetMocks()
+    const watcher = newContextAuthoritativeWatcher()
+    seedSyncedHost(watcher)
+    const capture = captureInfoLines()
+    try {
+      await (watcher as any).requestHostFleetReconcile('Periodic resync', undefined, 'full')
+
+      const completed = capture.lines.find(
+        line => line.msg === '[K8s] Completed Host reconciliation after Periodic resync'
+      )
+      // Witness: the pass ran and printed its completion line.
+      expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+      expect(completed).toMatchObject({ mode: 'full' })
+      expect(completed).not.toHaveProperty('ccLifecycleGeneration')
+    } finally {
+      capture.restore()
+      await watcher.stop()
+    }
+  })
+
   it('keeps a partial cache fail-closed when the recovery list fails', async () => {
     resetMocks()
     const host = {

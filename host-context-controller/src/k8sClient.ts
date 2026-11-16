@@ -1875,7 +1875,8 @@ export class McpServerWatcher implements McpServerProvider {
         const lifecycleGeneration = this.beginCommunicationChannelLifecycleTransition()
         hccLogger.info(
           `[K8s] Recovered ${snapshot.channels.length} CommunicationChannel(s) into cache ` +
-            '(ccCacheSynced=true)'
+            '(ccCacheSynced=true)',
+          { ccLifecycleGeneration: lifecycleGeneration }
         )
         void this.requestHostFleetReconcile('CommunicationChannel recovery', lifecycleGeneration)
         return true
@@ -2416,7 +2417,10 @@ export class McpServerWatcher implements McpServerProvider {
         if (ccLifecycleGeneration !== undefined) {
           this.markCommunicationChannelLifecycleApplied(ccLifecycleGeneration)
         }
-        hccLogger.info(`[K8s] Completed Host reconciliation after ${reason}`)
+        hccLogger.info(`[K8s] Completed Host reconciliation after ${reason}`, {
+          mode,
+          ccLifecycleGeneration,
+        })
       }
     } catch (error) {
       hostFleetRequestsTotal.inc({ result: 'failed' })
