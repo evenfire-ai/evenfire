@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { register } from 'prom-client'
+import { clerumSpilloverReadsTotal } from '../../core/spillover'
 import { logger } from '../../logger'
 import {
   STEP_SPILLOVER_READ_TOOL_NAME,
   type StepSpillover,
+  clerumWorkflowStepSpilloverReadsTotal,
   createStepSpillover,
   resolveStepSpilloverConfig,
   storableToolText,
@@ -391,5 +394,72 @@ describe('summarizeSpilloverReadForRecord', () => {
         { success: false, error: 'spillover blob not found' }
       )
     ).toEqual({ success: false, ref: 'spillover://s/c.json', error: 'spillover blob not found' })
+  })
+})
+
+async function metricTotal(name: string, labels: Record<string, string> = {}): Promise<number> {
+  const metric = register.getSingleMetric(name)
+  if (!metric) throw new Error(`metric ${name} is not registered`)
+  const { values } = await metric.get()
+  return values
+    .filter(v => Object.entries(labels).every(([k, val]) => v.labels[k] === val))
+    .reduce((sum, v) => sum + v.value, 0)
+}
+
+describe('step read tool counter', () => {
+  it('counts every read call once, by with_range, whatever its outcome', async () => {
+    // The module exports are the instruments the registry serves, so the
+    // first-party delta of 0 below is read from the counter a first-party
+    // read would move.
+    expect(register.getSingleMetric('clerum_spillover_reads_total')).toBe(clerumSpilloverReadsTotal)
+    expect(register.getSingleMetric('clerum_workflow_step_spillover_reads_total')).toBe(
+      clerumWorkflowStepSpilloverReadsTotal
+    )
+    const stepCounter = 'clerum_workflow_step_spillover_reads_total'
+    const before = {
+      ranged: await metricTotal(stepCounter, { with_range: 'true' }),
+      whole: await metricTotal(stepCounter, { with_range: 'false' }),
+      firstParty: await metricTotal('clerum_spillover_reads_total'),
+    }
+    const spillover = createStepSpillover({
+      stepId: 'review',
+      thresholdBytes: THRESHOLD,
+      budgetBytes: 1048576,
+    })
+    if (!spillover) throw new Error('expected a spillover')
+    const big = 'x'.repeat(THRESHOLD * 3)
+    const fit = 'y'.repeat(THRESHOLD)
+    await spillover.persist({
+      callId: 'big',
+      toolName: 't',
+      content: big,
+      inlineBytes: bytes(big),
+      isError: false,
+    })
+    await spillover.persist({
+      callId: 'fit',
+      toolName: 't',
+      content: fit,
+      inlineBytes: bytes(fit),
+      isError: false,
+    })
+    const ref = (id: string, stepId = 'review'): string => `spillover://${stepId}/${id}.json`
+    const read = spillover.readTool
+    const outcomes = [
+      // Rejected by the step tool before any blob is loaded.
+      await read.execute({ ref: ref('big', 'other') }, WORKSPACE),
+      await read.execute({ ref: ref('missing'), range: { start: 0, end: 1 } }, WORKSPACE),
+      await read.execute({ ref: ref('big') }, WORKSPACE),
+      await read.execute({ ref: ref('big'), range: { start: 0, end: THRESHOLD + 1 } }, WORKSPACE),
+      // Rejected by the reader.
+      await read.execute({ ref: ref('big'), range: { start: 9, end: 3 } }, WORKSPACE),
+      // Served.
+      await read.execute({ ref: ref('big'), range: { start: 0, end: 4 } }, WORKSPACE),
+      await read.execute({ ref: ref('fit') }, WORKSPACE),
+    ]
+    expect(outcomes.map(o => o.success)).toEqual([false, false, false, false, false, true, true])
+    expect(await metricTotal(stepCounter, { with_range: 'true' })).toBe(before.ranged + 4)
+    expect(await metricTotal(stepCounter, { with_range: 'false' })).toBe(before.whole + 3)
+    expect(await metricTotal('clerum_spillover_reads_total')).toBe(before.firstParty)
   })
 })

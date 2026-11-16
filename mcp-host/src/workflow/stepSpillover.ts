@@ -80,7 +80,7 @@ export const clerumWorkflowStepSpilloverReadsTotal = (() => {
   try {
     return new Counter({
       name: 'clerum_workflow_step_spillover_reads_total',
-      help: 'Count of clerum__spillover_read calls made by workflow steps.',
+      help: 'Count of clerum__spillover_read calls handled by a workflow step read tool, rejected reads included.',
       labelNames: ['with_range'] as const,
     })
   } catch {
@@ -237,9 +237,12 @@ export function createStepSpillover(opts: {
   // The spilled results of this execution, by ref. `release` empties the map,
   // after which the read tool finds nothing.
   const blobs = new Map<string, SpilloverBlob>()
+  // The step read tool counts its own calls, rejected ones included, so the
+  // reader gets an empty instrument set: its default is the first-party
+  // counter, and counting there too would count a step read twice.
   const reader = new SpilloverReadTool(
     { load: (ref: string) => Promise.resolve(blobs.get(ref) ?? null) },
-    { reads: clerumWorkflowStepSpilloverReadsTotal }
+    {}
   )
 
   let persistedBytes = 0
@@ -254,6 +257,12 @@ export function createStepSpillover(opts: {
       `Reads are limited to ${thresholdBytes} bytes; pass range for larger results.`,
     parameters: reader.parametersSchema(),
     async execute(args: Record<string, unknown>): Promise<InternalToolResult> {
+      const range =
+        args.range && typeof args.range === 'object'
+          ? (args.range as { start?: unknown; end?: unknown })
+          : null
+      clerumWorkflowStepSpilloverReadsTotal?.inc({ with_range: range === null ? 'false' : 'true' })
+
       const parsed = parseSpilloverRef(args.ref)
       if (!parsed || parsed.taskId !== stepId) {
         return readError('spillover ref is not available to this step')
@@ -261,10 +270,6 @@ export function createStepSpillover(opts: {
       const blob = blobs.get(args.ref as string)
       if (!blob) return readError('spillover blob not found')
 
-      const range =
-        args.range && typeof args.range === 'object'
-          ? (args.range as { start?: unknown; end?: unknown })
-          : null
       if (range === null) {
         if (blob.byte_size > thresholdBytes) {
           return readError(tooLargeReadError(blob.byte_size, thresholdBytes))
