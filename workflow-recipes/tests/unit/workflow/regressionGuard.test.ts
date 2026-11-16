@@ -683,10 +683,12 @@ describe('REG-25: maxIterations config and graceful degradation', () => {
     const content = readMcpHostSource('workflow/workflowService.ts')
     // Required tool-call steps must not lose their tool list on the last
     // iteration until at least one real tool call has happened.
-    expect(content).toContain('const shouldForceFinalText =')
+    // The condition is a helper so the spill path can ask it for the next call.
+    expect(content).toContain('const forcesFinalText = (index: number): boolean =>')
     expect(content).toContain(
-      'remainingIterations <= 1 && (!requiresToolCall || toolsCalled.length > 0)'
+      'MAX_ITERATIONS - index <= 1 && (!requiresToolCall || toolsCalled.length > 0)'
     )
+    expect(content).toContain('const shouldForceFinalText = forcesFinalText(i)')
     expect(content).toMatch(/shouldForceFinalText\s*\?\s*\[\]\s*:\s*toolDefs/)
     expect(content).toMatch(/shouldForceFinalText[\s\S]*tool_choice:\s*'none'/)
   })
