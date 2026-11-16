@@ -349,9 +349,10 @@ interface ReadinessPollState {
    * exhausted): it defers one interval so the next read, which starts after
    * that Deployment write, observes the new generation and resets the
    * window. Without this, the exhausting tick could publish RolloutIncomplete
-   * with the SUPERSEDED generation's numbers and — since McpServer has no
-   * periodic resync or Deployment watch — nothing would ever re-arm the poll
-   * for the new rollout (issue #223).
+   * with the SUPERSEDED generation's numbers, and the new rollout would keep
+   * that verdict until the Deployment informer or the watcher's 60 s re-read
+   * of awaiting rollouts reports the new generation (before those existed,
+   * nothing re-armed the poll: issue #223).
    */
   recheckRequested: boolean
   /**
