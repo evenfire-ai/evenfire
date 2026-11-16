@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { GfsGrantList } from '../GfsGrantList'
+import { GfsGrantList, type GfsGrantListProps } from '../GfsGrantList'
+import type { GfsCallerHome } from '../callerHome.types'
 import type {
   GfsGrantListItem,
   GfsInheritedAccessItem,
@@ -11,18 +12,34 @@ import { mergeInheritedAccessItem } from '../inheritedAccessMerge'
 
 /**
  * "Who has access" list (Manage modal). Rows resolve host subjects to agent
- * names, user/team subjects through the visible team directory. A user/team
- * outside the directory has no name this surface can act on, so its row is
- * filtered and one muted line explains what isn't listed and why; a fully
- * filtered list says so instead of claiming to be empty. Unresolved host ids
- * keep their raw identifier. A manage_acl_required list failure is an
- * expected state and renders as a quiet informational banner, not an error.
+ * names, user/team subjects through the visible team directory. Outside the
+ * caller's own home, a user/team outside the directory is filtered and one
+ * muted line explains what isn't listed and why; a fully filtered list says so
+ * instead of claiming to be empty. Inside the caller's own ready home, such a
+ * member is listed without a name ("Member outside your teams"), with its role
+ * as text and Remove. Unresolved host ids keep their raw identifier. A
+ * manage_acl_required list failure is an expected state and renders as a
+ * quiet informational banner, not an error.
  */
 
 afterEach(cleanup)
 
 const HIDDEN_ACCESS_NOTICE_TEXT =
   'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
+const OUTSIDE_TEAMS_LABEL = 'Member outside your teams'
+
+/** Most renders involve no home: the list keeps the directory filter there. */
+const outsideAnyHome = {
+  home: null,
+  resource: { resourceId: 'res-1', drive: 'main' },
+} satisfies Pick<GfsGrantListProps, 'home' | 'resource'>
+
+const readyHome = (resourceId: string): GfsCallerHome => ({
+  state: 'ready',
+  drive: 'main',
+  resourceId,
+  path: '/Users/fixture',
+})
 
 const agents = [{ id: '1st:mcp-host/chatllm', name: 'Chat LLM' }]
 const userInheritedRowTestId = 'gfs-access-row-inherited-user:user-2'
@@ -68,6 +85,7 @@ describe('GfsGrantList', () => {
     const user = grantItem({ id: 'user', subject: { type: 'user', id: 'user-2' } })
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         items={[context, user]}
         onChangeRole={onChangeRole}
@@ -106,6 +124,7 @@ describe('GfsGrantList', () => {
     })
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         items={[]}
         onLowerShare={onLowerShare}
@@ -143,6 +162,7 @@ describe('GfsGrantList', () => {
       )
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         inheritedItems={[
           inherited({ type: 'context', id: 'context-a' }),
@@ -189,6 +209,7 @@ describe('GfsGrantList', () => {
     })
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         items={[foreign, grantItem({ id: 'own' })]}
         onChangeRole={onChangeRole}
@@ -223,6 +244,7 @@ describe('GfsGrantList', () => {
   it('renders resolved subject labels, grouped roles, and revoke controls', () => {
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         items={[
           grantItem({ id: 'grant-1', permissions: ['read', 'write'], inherit: true }),
@@ -271,6 +293,7 @@ describe('GfsGrantList', () => {
   it('filters directory-less user and team rows and explains what is not listed', () => {
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         items={[
           grantItem({
@@ -311,6 +334,7 @@ describe('GfsGrantList', () => {
   it('protects another home owner grant while a manager grant retains its actions', () => {
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         subjects={[...subjects, { type: 'user', id: 'owner', label: 'Home Owner' }]}
         items={[
@@ -355,7 +379,8 @@ describe('GfsGrantList', () => {
           agents={[]}
           // The viewer has a home, but it is a different one: the owner row on
           // `home` is not the caller's own grant.
-          isOwnHomeRoot={id => id === 'viewer-home'}
+          home={readyHome('viewer-home')}
+          resource={{ resourceId: source === 'direct' ? 'home' : 'res-1', drive: 'main' }}
           subjects={subjects}
           items={[
             ...(source !== 'inherited'
@@ -417,7 +442,9 @@ describe('GfsGrantList', () => {
       render(
         <GfsGrantList
           agents={[]}
-          isOwnHomeRoot={id => id === 'home'}
+          home={readyHome('home')}
+          // Direct: Share on the home root. Inherited: Share on a file inside the home.
+          resource={{ resourceId: source === 'direct' ? 'home' : 'file-in-home', drive: 'main' }}
           subjects={[]}
           items={
             source === 'direct'
@@ -457,6 +484,217 @@ describe('GfsGrantList', () => {
     }
   )
 
+  describe('inside the caller’s own home', () => {
+    const caller = { type: 'user' as const, id: 'caller-private-id' }
+    const outsiderUser = { type: 'user' as const, id: 'outsider-user-private-id' }
+    const outsiderTeam = { type: 'team' as const, id: 'outsider-team-private-id' }
+    const ownerPermissions = ['read', 'write', 'delete', 'share', 'manage_acl']
+    const teammate = [{ type: 'user' as const, id: 'user-2', label: 'Test Two' }]
+    const ancestorAccess = (
+      subject: { type: string; id: string },
+      permissions: string[],
+      folder: { resourceId: string; name: string },
+      homeOwner = false
+    ): GfsInheritedAccessItem => ({
+      ...mergeInheritedAccessItem(
+        null,
+        { subject, permissions, grantId: `grant-on-${folder.resourceId}`, shareIds: [] },
+        folder
+      ),
+      ...(homeOwner ? { homeOwner: true as const } : {}),
+    })
+    const ownerFromHomeRoot = ancestorAccess(
+      caller,
+      ownerPermissions,
+      { resourceId: 'home-root', name: 'fixture-user' },
+      true
+    )
+
+    /** Every id that must never reach a text or an accessible name. */
+    function expectNoPrivateId() {
+      for (const id of [outsiderUser.id, outsiderTeam.id, caller.id]) {
+        expect(document.body.textContent).not.toContain(id)
+        const named = [...document.querySelectorAll('[aria-label]')].filter(element =>
+          element.getAttribute('aria-label')!.includes(id)
+        )
+        expect(named).toEqual([])
+      }
+    }
+
+    it.each(['the home root', 'a folder inside the home'] as const)(
+      'lists a member outside the viewer’s teams without a name, with role and Remove, on %s of the caller’s home',
+      target => {
+        const onRevoke = vi.fn()
+        const onRevokeShare = vi.fn()
+        const onLowerShare = vi.fn()
+        const onRoot = target === 'the home root'
+        const resourceId = onRoot ? 'home-root' : 'home-folder'
+        const outsiderGrant = grantItem({
+          id: 'outsider',
+          resourceId,
+          subject: outsiderUser,
+          permissions: ['read', 'write'],
+        })
+        const outsiderShare = shareItem({
+          id: 'outsider-share',
+          resourceId,
+          subject: outsiderTeam,
+          permissions: ['read', 'write'],
+        })
+        const teammateShare = shareItem({
+          id: 'teammate-share',
+          resourceId,
+          subject: { type: 'user', id: 'user-2' },
+          permissions: ['read', 'write'],
+        })
+        render(
+          <GfsGrantList
+            agents={[]}
+            home={readyHome('home-root')}
+            resource={{ resourceId, drive: 'main' }}
+            items={[
+              ...(onRoot
+                ? [
+                    grantItem({
+                      id: 'owner',
+                      resourceId: 'home-root',
+                      subject: caller,
+                      homeOwner: true,
+                      permissions: ownerPermissions,
+                      inherit: true,
+                    }),
+                  ]
+                : []),
+              outsiderGrant,
+            ]}
+            shares={[outsiderShare, teammateShare]}
+            inheritedItems={onRoot ? [] : [ownerFromHomeRoot]}
+            mergeInherited
+            onChangeRole={vi.fn()}
+            onChangeInheritedRole={vi.fn()}
+            onRemoveInherited={vi.fn()}
+            onLowerShare={onLowerShare}
+            onRevoke={onRevoke}
+            onRevokeShare={onRevokeShare}
+            subjects={teammate}
+          />
+        )
+
+        const grantRow = screen.getByTestId('gfs-access-row-grant-outsider')
+        const shareRow = screen.getByTestId('gfs-access-row-share-outsider-share')
+        expect(grantRow.textContent).toBe(`${OUTSIDE_TEAMS_LABEL}Editor`)
+        expect(shareRow.textContent).toBe(`${OUTSIDE_TEAMS_LABEL}Editor`)
+        // The role is text: the row's only control is its three-dot menu.
+        for (const row of [grantRow, shareRow]) {
+          expect(
+            within(row)
+              .getAllByRole('button')
+              .map(button => button.getAttribute('aria-label'))
+          ).toEqual([`Actions for ${OUTSIDE_TEAMS_LABEL}`])
+        }
+        // Witness: a named Editor share in the same list keeps its role control.
+        expect(
+          within(screen.getByTestId('gfs-access-row-share-teammate-share')).getByRole('button', {
+            name: 'Access role for Test Two',
+          })
+        ).toBeTruthy()
+        // The caller's own Owner row is unchanged: "Owner", no identity, no controls.
+        const ownerRow = screen.getByTestId(
+          onRoot ? 'gfs-access-row-grant-owner' : `gfs-access-row-inherited-user:${caller.id}`
+        )
+        expect(ownerRow.textContent).toBe('Owner')
+
+        fireEvent.click(
+          within(grantRow).getByRole('button', { name: `Actions for ${OUTSIDE_TEAMS_LABEL}` })
+        )
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+        expect(onRevoke).toHaveBeenCalledWith(outsiderGrant, OUTSIDE_TEAMS_LABEL)
+        fireEvent.click(
+          within(shareRow).getByRole('button', { name: `Actions for ${OUTSIDE_TEAMS_LABEL}` })
+        )
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+        expect(onRevokeShare).toHaveBeenCalledWith(outsiderShare, OUTSIDE_TEAMS_LABEL)
+        expect(onLowerShare).not.toHaveBeenCalled()
+
+        expectNoPrivateId()
+        // Nothing is hidden, so neither filter notice is shown (witness: the rows above).
+        expect(screen.queryByText(HIDDEN_ACCESS_NOTICE_TEXT)).toBeNull()
+        expect(screen.queryByText('Only members outside your teams have access here.')).toBeNull()
+      }
+    )
+
+    it('lists an inherited member outside the viewer’s teams without a name and routes Remove to the parent-folder handler', () => {
+      const onRemoveInherited = vi.fn()
+      const outsiderFromFolder = ancestorAccess(outsiderUser, ['read'], {
+        resourceId: 'home-folder',
+        name: 'Projects',
+      })
+      render(
+        <GfsGrantList
+          agents={[]}
+          home={readyHome('home-root')}
+          resource={{ resourceId: 'file-in-home-folder', drive: 'main' }}
+          items={[]}
+          inheritedItems={[outsiderFromFolder, ownerFromHomeRoot]}
+          mergeInherited
+          onChangeInheritedRole={vi.fn()}
+          onRemoveInherited={onRemoveInherited}
+          onRevoke={vi.fn()}
+          subjects={teammate}
+        />
+      )
+
+      const row = screen.getByTestId(`gfs-access-row-inherited-user:${outsiderUser.id}`)
+      expect(row.textContent).toBe(`${OUTSIDE_TEAMS_LABEL}Read`)
+      expect(
+        within(row)
+          .getAllByRole('button')
+          .map(button => button.getAttribute('aria-label'))
+      ).toEqual([`Actions for ${OUTSIDE_TEAMS_LABEL}`])
+      fireEvent.click(
+        within(row).getByRole('button', { name: `Actions for ${OUTSIDE_TEAMS_LABEL}` })
+      )
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+      expect(onRemoveInherited).toHaveBeenCalledWith(
+        expect.objectContaining({ inherited: outsiderFromFolder }),
+        OUTSIDE_TEAMS_LABEL
+      )
+      expect(screen.getByTestId(`gfs-access-row-inherited-user:${caller.id}`).textContent).toBe(
+        'Owner'
+      )
+      expectNoPrivateId()
+    })
+
+    it('keeps the filter while the home membership of the resource is not known', () => {
+      render(
+        <GfsGrantList
+          agents={[]}
+          home={readyHome('home-root')}
+          // A folder inside the home whose ancestor walk is loading or stopped.
+          resource={{ resourceId: 'home-folder', drive: 'main' }}
+          items={[
+            grantItem({ id: 'outsider', resourceId: 'home-folder', subject: outsiderUser }),
+            grantItem({
+              id: 'teammate',
+              resourceId: 'home-folder',
+              subject: { type: 'user', id: 'user-2' },
+            }),
+          ]}
+          inheritedItems={[]}
+          mergeInherited
+          onRevoke={vi.fn()}
+          subjects={teammate}
+        />
+      )
+
+      // Witness: the teammate's row is rendered in the same list.
+      expect(screen.getByTestId('gfs-access-row-grant-teammate').textContent).toContain('Test Two')
+      expect(screen.queryByTestId('gfs-access-row-grant-outsider')).toBeNull()
+      expect(screen.queryByText(OUTSIDE_TEAMS_LABEL)).toBeNull()
+      expect(screen.getByText(HIDDEN_ACCESS_NOTICE_TEXT)).toBeTruthy()
+    })
+  })
+
   it.each(['inherited', 'direct'] as const)(
     'protects an owner grant from a %s contribution in a merged row',
     ownerSource => {
@@ -476,6 +714,7 @@ describe('GfsGrantList', () => {
       }
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           subjects={[...subjects, { type: 'user', id: 'owner', label: 'Home Owner' }]}
           items={[
@@ -505,6 +744,7 @@ describe('GfsGrantList', () => {
   it('never claims an empty folder when the filter removed every row', () => {
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         items={[
           grantItem({
@@ -526,6 +766,7 @@ describe('GfsGrantList', () => {
   it('shows no hidden-members notice when every subject resolves', () => {
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         items={[
           grantItem({
@@ -546,6 +787,7 @@ describe('GfsGrantList', () => {
   it('labels a host subject by its displayName, falling back to the identifier when blank', () => {
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={[
           { id: '1st:mcp-host/withdisplay', name: 'withdisplay', displayName: 'Support Bot' },
           { id: '1st:mcp-host/blankdisplay', name: 'blankdisplay', displayName: '   ' },
@@ -568,7 +810,15 @@ describe('GfsGrantList', () => {
   it('fires the revoke callback from the three-dot menu', () => {
     const onRevoke = vi.fn()
     const item = grantItem({ id: 'grant-1' })
-    render(<GfsGrantList agents={agents} items={[item]} onRevoke={onRevoke} subjects={subjects} />)
+    render(
+      <GfsGrantList
+        {...outsideAnyHome}
+        agents={agents}
+        items={[item]}
+        onRevoke={onRevoke}
+        subjects={subjects}
+      />
+    )
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for Chat LLM' }))
     const menu = screen.getByRole('menu', { name: 'Actions for Chat LLM' })
@@ -583,6 +833,7 @@ describe('GfsGrantList', () => {
     const item = grantItem({ subject: { type: 'user', id: 'user-2' } })
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         items={[item]}
         onChangeRole={onChangeRole}
@@ -603,6 +854,7 @@ describe('GfsGrantList', () => {
     const share = shareItem({})
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         items={[grantItem({})]}
         onRevoke={onRevoke}
@@ -626,6 +878,7 @@ describe('GfsGrantList', () => {
   it('renders manage_acl_required as a quiet informational banner instead of the list', () => {
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         error={{
           code: 'manage_acl_required',
@@ -647,6 +900,7 @@ describe('GfsGrantList', () => {
   it('renders other list failures as an error banner', () => {
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         error={{ code: null, message: 'listGrants exploded', severity: 'error' }}
         items={[]}
@@ -660,7 +914,15 @@ describe('GfsGrantList', () => {
   })
 
   it('renders an empty notice when nothing has been granted', () => {
-    render(<GfsGrantList agents={agents} items={[]} onRevoke={vi.fn()} subjects={subjects} />)
+    render(
+      <GfsGrantList
+        {...outsideAnyHome}
+        agents={agents}
+        items={[]}
+        onRevoke={vi.fn()}
+        subjects={subjects}
+      />
+    )
 
     expect(screen.getByText('No one has access yet.')).toBeTruthy()
   })
@@ -688,6 +950,7 @@ describe('GfsGrantList', () => {
       const onRemoveInherited = vi.fn()
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           inheritedItems={[
             inheritedItem({ subject: { type: 'host', id: '1st:mcp-host/foreign' } }),
@@ -733,6 +996,7 @@ describe('GfsGrantList', () => {
       const onRemoveInherited = vi.fn()
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           inheritedItems={[
             inheritedItem({}),
@@ -768,6 +1032,7 @@ describe('GfsGrantList', () => {
     it('dedupes a member with both a direct grant and inherited access into one row', () => {
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           inheritedItems={[inheritedItem({ permissions: ['read', 'write'] })]}
           items={[grantItem({ subject: { type: 'user', id: 'user-2' }, permissions: ['read'] })]}
@@ -791,6 +1056,7 @@ describe('GfsGrantList', () => {
     it('uses the stable subject identity when two inherited subjects share a type', () => {
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           inheritedItems={[
             inheritedItem({}),
@@ -818,6 +1084,7 @@ describe('GfsGrantList', () => {
       const item = inheritedItem({})
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           inheritedItems={[item]}
           items={[]}
@@ -850,6 +1117,7 @@ describe('GfsGrantList', () => {
     it('consumes direct share rows of a merged member', () => {
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           inheritedItems={[
             inheritedItem({
@@ -875,6 +1143,7 @@ describe('GfsGrantList', () => {
     it('ignores inherited items without mergeInherited (folder dialogs unchanged)', () => {
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           inheritedItems={[inheritedItem({})]}
           items={[]}
@@ -892,6 +1161,7 @@ describe('GfsGrantList', () => {
     it('renders the derivation notice and suppresses the empty claim', () => {
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           derivationNotice="Inherited access could not be loaded. Members with access from a parent folder may be missing."
           items={[]}
@@ -910,6 +1180,7 @@ describe('GfsGrantList', () => {
       const grant = grantItem({ id: 'grant-1' })
       render(
         <GfsGrantList
+          {...outsideAnyHome}
           agents={agents}
           inheritedItems={[
             inheritedItem({ subject: { type: 'team', id: 'team-1' }, permissions: ['read'] }),
@@ -940,6 +1211,7 @@ describe('GfsGrantList', () => {
     const grant = grantItem({ id: 'grant-1' })
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         error={null}
         items={[grant]}
@@ -966,6 +1238,7 @@ describe('GfsGrantList', () => {
     const share = shareItem({})
     render(
       <GfsGrantList
+        {...outsideAnyHome}
         agents={agents}
         error={{ code: null, message: 'listGrants exploded', severity: 'error' }}
         items={[]}
@@ -984,3 +1257,21 @@ describe('GfsGrantList', () => {
     expect(onRevokeShare).toHaveBeenCalledWith(share, 'Core Team')
   })
 })
+
+/**
+ * Type-level contract, checked by the renderer typecheck
+ * (`tsc --noEmit -p ui/tsconfig.json`), not by vitest: `home` and `resource`
+ * are required, so no call site can leave out the caller's home and silently
+ * hide the owner's rows. Declared and never called.
+ */
+function requiredHomeContract() {
+  const props = { agents: [], items: [], onRevoke: () => undefined, subjects: [] }
+  const resource = { resourceId: 'res-1', drive: 'main' }
+  // (a) leaves out only `home`.
+  // @ts-expect-error `home` is required; a call site with no home passes `null`.
+  const withoutHome = <GfsGrantList {...props} resource={resource} />
+  // (b) leaves out only `resource`.
+  // @ts-expect-error `resource` is required; the list derives the home from it.
+  const withoutResource = <GfsGrantList {...props} home={null} />
+  return [withoutHome, withoutResource]
+}
