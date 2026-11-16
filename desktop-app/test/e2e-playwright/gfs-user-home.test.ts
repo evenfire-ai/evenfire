@@ -9,11 +9,10 @@
  *  - Entry is a visible Desktop login of a per-test user, or the seeded
  *    initial admin in J5; homes and owner grants are never seeded — each
  *    journey consumes automatic provisioning.
- *  - Every grant/share under test is created and changed through the Share
- *    dialog, except the named `seedShare` precondition and J1b's operator
- *    removal in Control UI; SQL is used only for named preconditions and for
- *    reading business signals (gfs_user_homes, gfs_grants, gfs_shares,
- *    gfs_audit).
+ *  - Every grant/share under test is created, changed and removed through
+ *    the Share dialog, except the named `seedShare` precondition; SQL is used
+ *    only for named preconditions and for reading business signals
+ *    (gfs_user_homes, gfs_grants, gfs_shares, gfs_audit).
  *  - Each negative has a same-test positive on the same resource.
  *  - Agent denials are observed authorization refusals (no successful
  *    gfs_read, no sentinel leak), never timeouts.
@@ -70,7 +69,8 @@ import { DesktopShareDialog } from './pages/DesktopShareDialog'
 
 const MAIN_ENTRY = path.resolve(__dirname, '../../dist/main.js')
 const OWNER_BITS = ['delete', 'manage_acl', 'read', 'share', 'write']
-/** The team-directory filter's one notice (GfsGrantList HIDDEN_ACCESS_NOTICE). */
+/** The team-directory filter's one notice (GfsGrantList HIDDEN_ACCESS_NOTICE).
+ *  Inside the owner's own home nothing is hidden, so J1b expects it absent. */
 const HIDDEN_MEMBERS_NOTICE =
   'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
 
@@ -541,11 +541,14 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         ).toHaveCount(1)
         await page.keyboard.press('Escape')
         // Home root: the direct owner row is present and protected as well.
+        // The caller's own home root is named "My home" in its location menu
+        // and Share dialog, whichever path opened it.
         await page
           .getByRole('navigation', { name: 'File location' })
           .getByRole('button', { name: 'My home', exact: true })
           .click()
-        await new DesktopResourceView(page).openShare(home.storageUsername!)
+        await new DesktopResourceView(page).openShare('My home')
+        await expect(page.getByRole('dialog', { name: 'Share folder My home' })).toBeVisible()
         const ownerRow = page
           .getByRole('list', { name: 'Resource access' })
           .getByRole('listitem')
@@ -600,12 +603,8 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     }
   })
 
-  test("J1b sharing with users follows the Unix model; entries for people outside the owner's teams are hidden and an operator removes them", async ({
-    browser,
-  }, testInfo) => {
+  test('J1b sharing with users follows the Unix model; the owner removes an entry for someone outside their teams', async ({}, testInfo) => {
     test.setTimeout(20 * 60_000)
-    const adminUser = requiredEnv('ADMIN_USER')
-    const adminPass = requiredAdminPassword()
     const fx = new UserHomeFixtures(runTagFor(testInfo))
     const owner = fx.createUser('j1b-owner')
     const b = fx.createUser('j1b-b')
@@ -618,7 +617,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
     const sibling = `j1b-sibling-${fx.runTag}`
     const file = `j1b-file-${fx.runTag}.txt`
     const sessions: DesktopSession[] = []
-    const control = await newOperatorContext(browser)
     let shareId: string | null = null
     try {
       const ownerS = await launchDesktopAs(testInfo, owner)
@@ -698,40 +696,63 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         // Revoking B removed B's grant only: B's share to D survives.
         expect(dRows()).toHaveLength(1)
       })
-      await test.step("C's entry is hidden from the owner; an operator removes it in Control UI", async () => {
+      await test.step("the owner sees C's entry without C's name and removes it; C loses access", async () => {
         const cGrant = fx.accessFor(outerId, 'user', c.id)
         if (!cGrant) throw new Error('J1b: C’s grant row is missing before the owner opens Share')
         await openHomeFolder(ownerS.page, home)
         await view.openShare(outer)
         const shareDialog = ownerS.page.getByRole('dialog', { name: `Share folder ${outer}` })
         const access = ownerS.page.getByRole('list', { name: 'Resource access' })
-        // Witnesses inside the same list that hides C: the owner's own
-        // inherited row (labelled by name — the owner is in owner-b), D's share
-        // row with its role control, and the one notice that replaces the rows
-        // the team directory cannot name.
+        // Witnesses in the same list: the owner's own inherited row (labelled
+        // by name, the owner is in owner-b) and D's share row with its role
+        // control.
         const ownerRow = access
           .getByRole('listitem')
           .filter({ has: ownerS.page.getByText('Owner', { exact: true }) })
         await expect(ownerRow).toHaveCount(1)
         await expect(ownerRow).toContainText(owner.name)
-        await expect(access.getByRole('button', { name: `Access role for ${d.name}` })).toHaveCount(
-          1
-        )
-        await expect(shareDialog.getByText(HIDDEN_MEMBERS_NOTICE, { exact: true })).toBeVisible()
-        // Negatives: C's grant row is absent by its own testid (a row rendered
-        // under any label fails this), and neither C's name nor email shows.
-        await expect(shareDialog.getByTestId(`gfs-access-row-grant-${cGrant.id}`)).toHaveCount(0)
+        const dRoleControl = access.getByRole('button', { name: `Access role for ${d.name}` })
+        await expect(dRoleControl).toHaveCount(1)
+        // C is outside the owner's teams, and the folder is inside the owner's
+        // home: C's grant row is listed without a name, with its role as text
+        // and a Remove action.
+        const cRow = shareDialog.getByTestId(`gfs-access-row-grant-${cGrant.id}`)
+        await expect(cRow).toBeVisible()
+        // The row's whole text is the label and the role, nothing else.
+        await expect(cRow).toHaveText(/^\s*Member outside your teams\s*Read\s*$/)
+        await expect(
+          cRow.getByRole('button', { name: 'Actions for Member outside your teams', exact: true })
+        ).toBeVisible()
+        // Negatives, with the visible row above as their witness: no role
+        // control, neither C's name nor C's email anywhere in the dialog, and
+        // no hidden-members notice, because nothing is hidden here.
+        await expect(cRow.getByRole('button', { name: /^Access role for / })).toHaveCount(0)
         await expect(shareDialog.getByText(c.name, { exact: true })).toHaveCount(0)
         await expect(shareDialog.getByText(c.email, { exact: true })).toHaveCount(0)
-        await ownerS.page.keyboard.press('Escape')
+        await expect(shareDialog.getByText(HIDDEN_MEMBERS_NOTICE, { exact: true })).toHaveCount(0)
 
-        // An operator sees every row, including C's, and removes it.
-        const operatorPage = await control.newPage()
-        const operatorPanel = new ControlUiAccessPanel(operatorPage)
-        await operatorPanel.login(adminUser, adminPass)
-        await operatorPanel.openResource(`/Users/${home.storageUsername}/${outer}`)
-        await operatorPanel.revoke({ label: c.name })
+        // The owner removes the entry in Desktop.
+        const revokedToast = ownerS.page.getByRole('status').filter({
+          has: ownerS.page.getByText('Access revoked for Member outside your teams', {
+            exact: true,
+          }),
+        })
+        await expect(revokedToast).toHaveCount(0)
+        await cRow
+          .getByRole('button', { name: 'Actions for Member outside your teams', exact: true })
+          .click()
+        await ownerS.page
+          .getByRole('menu', { name: 'Actions for Member outside your teams' })
+          .getByRole('menuitem', { name: 'Remove access' })
+          .click()
+        await expect(revokedToast).toHaveCount(1)
+        await expect(cRow).toHaveCount(0)
+        // The list is still rendered after the removal, so the row is gone
+        // because of the removal and not because the dialog closed.
+        await expect(ownerRow).toHaveCount(1)
+        await expect(dRoleControl).toHaveCount(1)
         expect(fx.accessFor(outerId, 'user', c.id)).toBeNull()
+        await ownerS.page.keyboard.press('Escape')
 
         // C loses access; the owner still opens the file two levels down.
         await openEvenDriveLink(cS.page, `gfs://${home.drive}/${ridOf(outerId)}`)
@@ -806,7 +827,6 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
         await expect(innerRow).toBeVisible()
       })
     } finally {
-      await control.close()
       for (const s of sessions.reverse()) await s.close()
       fx.cleanup()
     }
@@ -1004,7 +1024,7 @@ test.describe('GFS per-user homes — Desktop (#1168)', () => {
           .getByRole('navigation', { name: 'File location' })
           .getByRole('button', { name: 'My home', exact: true })
           .click()
-        await view.openShare(home.storageUsername!)
+        await view.openShare('My home')
         await new DesktopShareDialog(ownerS.page).grant(b.name, 'Read', { includeContents: true })
         expect(fx.accessFor(home.resourceId!, 'user', b.id)).toMatchObject({
           permissions: ['read', 'share'],
