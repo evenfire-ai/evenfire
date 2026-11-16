@@ -2043,10 +2043,11 @@ export class ChannelReader {
    *   abortController/fetch reader; JavaScript closures keep msg, adapter,
    *   editStatus, and `this` (ChannelReader instance) alive for the callbacks
    *   to use after this function returns.
-   * - On `suspended`: register pending approval, edit bubble with the
-   *   notification (fetched once from getTaskResult; falls back to a generic
-   *   message if the cache hasn't been written yet — the sub-millisecond
-   *   micro-race in mcp-host's taskExecutor.ts:472-485). An approval longer
+   * - On `suspended`: fetch the Host's notification for the request and offer
+   *   it. If the fetch fails or the text is missing, deny the request and tell
+   *   the user, unless it was already offered here or the task ended. If the
+   *   Host has no stored entry for it (`pending`), deny it, which succeeds only
+   *   if the Host still holds it; if the task completed, offer nothing. An approval longer
    *   than one message of the channel is sent instead as several messages
    *   below the bubble, the controls on the last, and registered only after
    *   the last one was sent; the controls are removed from that message when
@@ -2144,6 +2145,50 @@ export class ChannelReader {
       // two seconds, and a multi-part approval has no entry until its last part
       // was sent, so the entry alone cannot stop a second attempt.
       let multiPartRequestId: string | undefined
+      // The request this stream showed with the Host's text. Set before the
+      // first await and never cleared: a decision through the card deletes the
+      // entry, and a decided card still counts as offered.
+      let offeredRequestId: string | undefined
+      // The request `onSuspended` refused because its text could not be read.
+      // Set before the denial's await and never cleared, so the Slack and Teams
+      // result poll never offers it.
+      let refusedRequestId: string | undefined
+
+      // Denies a request this stream did not show and tells the user when the
+      // denial was accepted; a rejected denial is told only with
+      // `noticeOnRejected`, and logged with the ids otherwise. Returns
+      // 'task_ended' without a denial when the task ended first: the bubble
+      // already shows the outcome. It denies as msg.sender, the user the Host's
+      // approval is bound to. Never rejects: sendDenial and sendReply catch.
+      const denyUnshownApproval = async (params: {
+        requestId: string
+        noticeOnRejected: boolean
+      }): Promise<'task_ended' | 'denied' | 'denial_rejected'> => {
+        if (finalDelivered) return 'task_ended'
+        const denial = await this.rpcClient.sendDenial(
+          msg.sender,
+          params.requestId,
+          msg.channelType,
+          msg.channelId
+        )
+        if (denial.success) {
+          await this.sendReply(msg, TOOL_APPROVAL_NOT_SHOWN_DENIED)
+          return 'denied'
+        }
+        if (params.noticeOnRejected) {
+          await this.sendReply(msg, TOOL_APPROVAL_NOT_SHOWN_STILL_WAITING)
+        } else {
+          console.warn(`[Main] Denial of request ${params.requestId} not accepted; no notice sent`)
+        }
+        return 'denial_rejected'
+      }
+
+      // This stream offered the request, or another delivery in this process
+      // holds a live entry for it.
+      const alreadyOffered = (requestId: string): boolean =>
+        offeredRequestId === requestId ||
+        multiPartRequestId === requestId ||
+        this.pendingApprovals.get(this.pendingApprovalKey(msg))?.requestId === requestId
 
       const deliverApprovalPrompt = async (params: {
         requestId: string
@@ -2154,10 +2199,12 @@ export class ChannelReader {
         const existing = this.pendingApprovals.get(approvalKey)
         if (
           (approvalPromptDelivered && existing?.requestId === params.requestId) ||
-          multiPartRequestId === params.requestId
+          multiPartRequestId === params.requestId ||
+          refusedRequestId === params.requestId
         ) {
           return
         }
+        offeredRequestId = params.requestId
 
         const actionToken =
           existing?.requestId === params.requestId
@@ -2200,10 +2247,13 @@ export class ChannelReader {
         const ids = { taskId, requestId: params.requestId, channelType: msg.channelType }
         const notShown = async (err: unknown): Promise<void> => {
           this.logToolApprovalNotShown(ids, err)
+          const outcome = await denyUnshownApproval({
+            requestId: params.requestId,
+            noticeOnRejected: true,
+          })
           // The task ended during the delivery: the bubble already shows the
-          // outcome, so there is nothing to deny and nothing to tell.
-          if (finalDelivered) return
-          await this.denyUnshownToolApproval(msg, params.userId, params.requestId)
+          // outcome, so progress stays off.
+          if (outcome === 'task_ended') return
           acceptProgressUpdates = true
           approvalPromptDelivered = false
         }
@@ -2369,32 +2419,61 @@ export class ChannelReader {
         },
         onSuspended: async suspended => {
           // Approval needed. Fetch the server-formatted notification (which
-          // includes tool parameters) once. If the cache hasn't been written
-          // yet (sub-ms micro-race), fall back to a generic notification.
-          let notification =
-            `Tool \`${suspended.toolName}\` requires approval. ` +
-            (msg.channelType === 'slack'
-              ? `Reply \\approve or \\deny to this message.`
-              : msg.channelType === 'teams'
-                ? `Reply approve or deny to this message.`
-                : `Reply /approve or /deny to this message.`)
-          try {
-            const result = await this.rpcClient.getTaskResult(taskId, msg)
-            if (
-              result.success &&
-              result.status === 'waiting_approval' &&
-              result.approval?.notification
-            ) {
-              notification = result.approval.notification
-            }
-          } catch (err) {
-            console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
+          // includes tool parameters) once. For a live `suspended` on a task this
+          // reader submitted with `?async=true`, the Host stores the notification
+          // in the same synchronous run that publishes the event, before it can
+          // serve a request. An answer without it is a failed read, or a stream
+          // on a task whose entry was never stored, was already decided, or
+          // expired after 10 minutes. No controls are shown without the Host's
+          // text.
+          const requestId = suspended.requestId
+          // Deny a request this stream did not offer. refusedRequestId is set
+          // before the denial's await, so the result poll never offers it.
+          const refuse = async (noticeOnRejected: boolean): Promise<void> => {
+            refusedRequestId = requestId
+            await denyUnshownApproval({ requestId, noticeOnRejected })
           }
-          await deliverApprovalPrompt({
-            requestId: suspended.requestId,
-            userId: msg.sender,
-            notification,
-          })
+          let result: MessageResponse
+          try {
+            result = await this.rpcClient.getTaskResult(taskId, msg)
+          } catch (err) {
+            console.error(
+              `[Main] Failed to fetch approval notification for task ${taskId} (request ${requestId}, ${msg.channelType}):`,
+              err
+            )
+            if (!alreadyOffered(requestId)) await refuse(true)
+            resolveOnce()
+            return
+          }
+          if (
+            result.success &&
+            result.status === 'waiting_approval' &&
+            result.approval?.notification
+          ) {
+            await deliverApprovalPrompt({
+              requestId,
+              userId: msg.sender,
+              notification: result.approval.notification,
+            })
+          } else if (result.status === 'completed') {
+            console.warn(
+              `[Main] Suspension of task ${taskId} (request ${requestId}) is no longer waiting at the Host (status: completed); no approval offered`
+            )
+          } else if (result.status === 'pending') {
+            console.warn(`[Main] No stored approval for task ${taskId} (request ${requestId})`)
+            if (alreadyOffered(requestId)) {
+              console.warn(`[Main] Request ${requestId} already offered here; not denied`)
+            } else {
+              await refuse(false)
+            }
+          } else {
+            // waiting_approval without success or text (impossible by contract),
+            // or an answer with no known status: refused as a failed read.
+            console.error(
+              `[Main] Approval notification missing for task ${taskId} (request ${requestId}, ${msg.channelType})`
+            )
+            if (!alreadyOffered(requestId)) await refuse(true)
+          }
           // Release handleMessages's for loop. The stream stays open; the next
           // tool_start/tool_complete/suspended/terminal events keep firing.
           resolveOnce()
