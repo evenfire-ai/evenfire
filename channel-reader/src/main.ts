@@ -2077,15 +2077,17 @@ export class ChannelReader {
    *   abortController/fetch reader; JavaScript closures keep msg, adapter,
    *   editStatus, and `this` (ChannelReader instance) alive for the callbacks
    *   to use after this function returns.
-   * - On `suspended`: fetch the Host's notification for the request and offer
-   *   it. If the fetch fails or the text is missing, deny the request and tell
-   *   the user, unless it was already offered here or the task ended. If the
-   *   Host has no stored entry for it (`pending`), deny it, which succeeds only
-   *   if the Host still holds it; if the task completed, offer nothing. An approval longer
-   *   than one message of the channel is sent instead as several messages
-   *   below the bubble, the controls on the last, and registered only after
-   *   the last one was sent; the controls are removed from that message when
-   *   the approval is decided, the task ends or the entry expires.
+   * - On `suspended`: fetch the task's current approval notification from the
+   *   Host and offer it under the event's request id (the answer's request id
+   *   is not compared with it). If the fetch fails or the text is missing, deny
+   *   the request and tell the user, unless it was already offered here or the
+   *   task ended. If the Host has no stored entry for it (`pending`), deny it,
+   *   which succeeds only if the Host still holds it; if the task completed,
+   *   offer nothing. An approval longer than one message of the channel is
+   *   sent instead as several messages below the bubble, the controls on the
+   *   last, and registered only after the last one was sent; the controls are
+   *   removed from that message when the approval is decided or replaced, the
+   *   task ends or the entry expires.
    * - On `tool_start`/`tool_complete` after approval: keeps editing the
    *   bubble with progress.
    * - On `terminal`: fetch final response via getTaskResult, edit bubble.
