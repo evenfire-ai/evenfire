@@ -912,3 +912,208 @@ describe('Teams send-message route', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('Teams service URL check on the update and send routes', () => {
+  const FIXTURE_SERVICE_URL = 'https://smba.trafficmanager.net/amer/'
+  // Each route's request path after the base, for the bodies below. The send
+  // route replies in the card thread: the seeded target has no Teams group.
+  const ROUTES = [
+    {
+      route: 'update-message',
+      body: {
+        conversationId: '19:channel-1@thread.tacv2',
+        messageId: 'activity-1',
+        text: 'Approved. Workflow approval recorded.',
+      },
+      suffix: '/v3/conversations/19%3Achannel-1%40thread.tacv2/activities/activity-1',
+      providerAnswer: () => teamsProviderAnswer(200, { id: 'activity-1' }),
+    },
+    {
+      route: 'send-message',
+      body: {
+        conversationId: '19:channel-1@thread.tacv2',
+        threadConversationId: '19:channel-1@thread.tacv2;messageid=1700000000000',
+        replyToId: '1700000000000',
+        text: 'The assistant is busy. Try again in 9 seconds.',
+      },
+      suffix:
+        '/v3/conversations/19%3Achannel-1%40thread.tacv2%3Bmessageid%3D1700000000000/activities/1700000000000',
+      providerAnswer: () => teamsProviderAnswer(201, { id: 'activity-2' }),
+    },
+  ] as const
+
+  type Route = (typeof ROUTES)[number]
+
+  function routePath(route: Route, targetId: string): string {
+    return `/api/v1/internal/workflow-approval-reader/teams-targets/${encodeURIComponent(
+      targetId
+    )}/${route.route}`
+  }
+
+  function stubTokenThenProvider(route: Route): ReturnType<typeof vi.fn> {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(teamsTokenAnswer())
+      .mockResolvedValueOnce(route.providerAnswer())
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  function forEachRoute<Row extends { label: string }>(
+    rows: readonly Row[]
+  ): Array<Row & { route: Route; name: string }> {
+    return ROUTES.flatMap(route =>
+      rows.map(row => ({ ...row, route, name: `${route.route}: ${row.label}` }))
+    )
+  }
+
+  const ACCEPTED = [
+    {
+      label: 'fixture URL with a trailing slash',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      base: 'https://smba.trafficmanager.net/amer',
+    },
+    {
+      label: 'fixture URL without a trailing slash',
+      serviceUrl: 'https://smba.trafficmanager.net/amer',
+      base: 'https://smba.trafficmanager.net/amer',
+    },
+    {
+      label: 'host only',
+      serviceUrl: 'https://smba.trafficmanager.net',
+      base: 'https://smba.trafficmanager.net',
+    },
+    {
+      label: 'documented /teams/ path',
+      serviceUrl: 'https://smba.trafficmanager.net/teams/',
+      base: 'https://smba.trafficmanager.net/teams',
+    },
+    {
+      label: 'tenant GUID segment',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/3f2504e0-4f89-11d3-9a0c-0305e82c3301/',
+      base: 'https://smba.trafficmanager.net/amer/3f2504e0-4f89-11d3-9a0c-0305e82c3301',
+    },
+    {
+      label: 'upper-case host',
+      serviceUrl: 'https://SMBA.TrafficManager.NET/amer/',
+      base: 'https://smba.trafficmanager.net/amer',
+    },
+    {
+      label: 'explicit port 443',
+      serviceUrl: 'https://smba.trafficmanager.net:443/amer/',
+      base: 'https://smba.trafficmanager.net/amer',
+    },
+    {
+      label: 'doubled slashes',
+      serviceUrl: 'https://smba.trafficmanager.net//amer//',
+      base: 'https://smba.trafficmanager.net/amer',
+    },
+    {
+      label: 'backslashes',
+      serviceUrl: 'https://smba.trafficmanager.net\\amer\\',
+      base: 'https://smba.trafficmanager.net/amer',
+    },
+    {
+      label: 'plain-segment prefix: the route suffix still ends the path',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/v3/conversations/OTHER/members',
+      base: 'https://smba.trafficmanager.net/amer/v3/conversations/OTHER/members',
+    },
+  ] as const
+
+  it.each(forEachRoute(ACCEPTED))(
+    '$name: sends to the base rebuilt from the constant host',
+    async ({ route, serviceUrl, base }) => {
+      const fetchMock = stubTokenThenProvider(route)
+      const { app, targetId } = await teamsTargetApp()
+
+      const res = await authedPost(app, routePath(route, targetId), { ...route.body, serviceUrl })
+
+      expect(res.status).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock.mock.calls[0]?.[0]).toContain(
+        'https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token'
+      )
+      expect(fetchMock.mock.calls[1]?.[0]).toBe(`${base}${route.suffix}`)
+    }
+  )
+
+  const REFUSED = [
+    { label: 'subdomain of the Teams host', serviceUrl: 'https://x.smba.trafficmanager.net/amer/' },
+    { label: 'botframework.com', serviceUrl: 'https://botframework.com/' },
+    { label: 'subdomain of botframework.com', serviceUrl: 'https://api.botframework.com' },
+    { label: 'port 8443', serviceUrl: 'https://smba.trafficmanager.net:8443/amer/' },
+    { label: 'credentials', serviceUrl: 'https://user:pass@smba.trafficmanager.net/amer/' },
+    { label: 'query', serviceUrl: 'https://smba.trafficmanager.net/amer/?x=1' },
+    { label: 'fragment', serviceUrl: 'https://smba.trafficmanager.net/amer/#x' },
+    { label: 'bare ?', serviceUrl: 'https://smba.trafficmanager.net/amer/?' },
+    { label: 'bare #', serviceUrl: 'https://smba.trafficmanager.net/amer/#' },
+    {
+      label: 'retarget prefix ending in a bare ?',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/v3/conversations/OTHER/members?',
+    },
+    {
+      label: 'dot segments ending in a bare ?',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/../../v3/attachments/X?',
+    },
+    { label: 'percent-encoded space', serviceUrl: 'https://smba.trafficmanager.net/amer/a%20b/' },
+    { label: 'percent-encoded slash', serviceUrl: 'https://smba.trafficmanager.net/amer%2Fx/' },
+    { label: 'reserved characters', serviceUrl: 'https://smba.trafficmanager.net/a;b@c/' },
+    {
+      label: 'query padded with 80,000 slashes',
+      serviceUrl: `https://smba.trafficmanager.net/amer/?${'/'.repeat(80_000)}x`,
+    },
+    // Refused before this check was rebuilt, and still refused.
+    { label: 'trailing-dot host', serviceUrl: 'https://smba.trafficmanager.net./amer/' },
+    {
+      label: 'sovereign-cloud host',
+      serviceUrl: 'https://smba.infra.gcc.teams.microsoft.com/teams',
+    },
+  ] as const
+
+  it.each(forEachRoute(REFUSED))(
+    '$name: answers 400 before reading the credentials',
+    async ({ route, serviceUrl }) => {
+      const fetchMock = stubTokenThenProvider(route)
+      const { app, targetId } = await teamsTargetApp()
+
+      // Liveness witness: the same target and body reach the token exchange and
+      // Bot Connector with the fixture URL.
+      const fixture = await authedPost(app, routePath(route, targetId), {
+        ...route.body,
+        serviceUrl: FIXTURE_SERVICE_URL,
+      })
+      expect(fixture.status).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      // The same answers again, so only the service URL check can refuse.
+      fetchMock
+        .mockClear()
+        .mockResolvedValueOnce(teamsTokenAnswer())
+        .mockResolvedValueOnce(route.providerAnswer())
+
+      const res = await authedPost(app, routePath(route, targetId), { ...route.body, serviceUrl })
+
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid_teams_service_url' })
+      expect(fetchMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(ROUTES.map(route => [route.route, route] as const))(
+    '%s: a path of 100,000 slashes is rebuilt in linear time',
+    async (_name, route) => {
+      const fetchMock = stubTokenThenProvider(route)
+      const { app, targetId } = await teamsTargetApp()
+
+      const started = performance.now()
+      const res = await authedPost(app, routePath(route, targetId), {
+        ...route.body,
+        serviceUrl: `https://smba.trafficmanager.net/${'/'.repeat(100_000)}x`,
+      })
+      const elapsedMs = performance.now() - started
+
+      expect(res.status).toBe(200)
+      expect(fetchMock.mock.calls[1]?.[0]).toBe(`https://smba.trafficmanager.net/x${route.suffix}`)
+      expect(elapsedMs).toBeLessThan(1_000)
+    }
+  )
+})

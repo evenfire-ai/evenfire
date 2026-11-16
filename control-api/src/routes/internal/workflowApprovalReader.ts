@@ -292,24 +292,35 @@ function providerJsonHeaders(value: string): Headers {
   return headers
 }
 
-function stripTrailingSlashes(value: string): string {
-  return value.replace(/\/+$/, '')
-}
+const TEAMS_SERVICE_HOST = 'smba.trafficmanager.net'
 
-function isAllowedTeamsServiceUrl(value: string): boolean {
+/**
+ * The base URL for Bot Connector calls, rebuilt from a Teams `serviceUrl`, or
+ * null when the value is not an accepted one. Accepted: https, host exactly
+ * TEAMS_SERVICE_HOST, no credentials, no port other than 443, no `?` or `#`,
+ * and path segments that percent-encoding leaves unchanged. The result is
+ * built from the constant host and the encoded segments, never from the input
+ * string, and has no trailing slash.
+ */
+function teamsServiceBase(serviceUrl: string): string | null {
+  // A bare `?` or `#` leaves `url.search` and `url.hash` empty.
+  if (serviceUrl.includes('?') || serviceUrl.includes('#')) return null
+  let url: URL
   try {
-    const url = new URL(value)
-    if (url.protocol !== 'https:') return false
-    const hostname = url.hostname.toLowerCase()
-    return (
-      hostname === 'smba.trafficmanager.net' ||
-      hostname.endsWith('.smba.trafficmanager.net') ||
-      hostname === 'botframework.com' ||
-      hostname.endsWith('.botframework.com')
-    )
+    url = new URL(serviceUrl)
   } catch {
-    return false
+    return null
   }
+  if (url.protocol !== 'https:' || url.hostname !== TEAMS_SERVICE_HOST) return null
+  if (url.username || url.password || url.port) return null
+  let base = `https://${TEAMS_SERVICE_HOST}`
+  for (const segment of url.pathname.split('/')) {
+    if (!segment) continue
+    const encoded = encodeURIComponent(segment)
+    if (encoded !== segment) return null
+    base += `/${encoded}`
+  }
+  return base
 }
 
 async function fetchTeamsBotAccessToken(params: {
@@ -499,7 +510,8 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
           res.status(400).json({ error: 'invalid_teams_message_update' })
           return
         }
-        if (!isAllowedTeamsServiceUrl(serviceUrl)) {
+        const serviceBase = teamsServiceBase(serviceUrl)
+        if (!serviceBase) {
           res.status(400).json({ error: 'invalid_teams_service_url' })
           return
         }
@@ -511,7 +523,7 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
         }
 
         const response = await fetch(
-          `${stripTrailingSlashes(serviceUrl)}/v3/conversations/${encodeURIComponent(
+          `${serviceBase}/v3/conversations/${encodeURIComponent(
             conversationId
           )}/activities/${encodeURIComponent(messageId)}`,
           {
@@ -568,7 +580,8 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
           res.status(400).json({ error: 'invalid_teams_message' })
           return
         }
-        if (!isAllowedTeamsServiceUrl(serviceUrl)) {
+        const serviceBase = teamsServiceBase(serviceUrl)
+        if (!serviceBase) {
           res.status(400).json({ error: 'invalid_teams_service_url' })
           return
         }
@@ -581,7 +594,7 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
 
         const threaded =
           replyToId !== '' && teamsConversationRepliesInThreads(resolved, conversationId)
-        const conversationsRoot = `${stripTrailingSlashes(serviceUrl)}/v3/conversations`
+        const conversationsRoot = `${serviceBase}/v3/conversations`
         const url = threaded
           ? `${conversationsRoot}/${encodeURIComponent(
               threadConversationId || conversationId
