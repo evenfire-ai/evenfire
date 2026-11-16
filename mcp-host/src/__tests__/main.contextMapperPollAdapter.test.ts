@@ -174,11 +174,14 @@ describe('createContextMapperPoll (BR-15, #1491): the adapter main.ts polls with
     expect(stale.state.revoke).toHaveBeenCalledWith('authority_stale', true)
 
     const unpublished = harness({ lastSuccessAt: () => 1 })
-    let calls = 0
+    let pollFailed = false
     // The manager is published when the poll starts and withdrawn when it fails.
-    unpublished.state.getManager = () => (calls++ === 0 ? unpublished.manager : null)
+    unpublished.state.getManager = () => (pollFailed ? null : unpublished.manager)
     const poll = createContextMapperPoll(unpublished.state)
-    unpublished.client.pollServers.mockRejectedValueOnce(new Error('connect ECONNREFUSED'))
+    unpublished.client.pollServers.mockImplementationOnce(async () => {
+      pollFailed = true
+      throw new Error('connect ECONNREFUSED')
+    })
     await poll()
     expect(unpublished.client.pollServers).toHaveBeenCalledTimes(1)
     expect(unpublished.state.revoke).not.toHaveBeenCalled()
