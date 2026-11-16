@@ -482,17 +482,27 @@ anything is written, so an earlier file of that name stays. Where the turn has
 `clerum__kept_files_delete`, the refusal offers the user's own kept files,
 oldest first, to delete after approval; otherwise it says why it cannot make
 room. The user approves the delete on a card that shows each file's name, size
-and creation date. In the usual progress flow Telegram cuts the card at 4096
-characters; when that flow is unavailable, Telegram sends it as several
-messages with the buttons on the first. Slack may not show a card above its
-block text limit. Desktop shows the whole list of any call the delete accepts.
+and creation date. Desktop shows the card of any call the delete accepts, with
+a note when the 64 KiB bound cut it. A channel shows a card longer than one
+message as several messages, split between its lines (Telegram 4096
+characters, Slack 3000 characters, Teams 12,000 bytes), with the approval
+buttons on the last one; the approval can be given, by button or by
+`/approve`, only after the last message was sent. If a message cannot be sent,
+if one line is longer than a message, if the card would need more than 24
+messages, or if channel-reader cannot read the card from the Host when the
+approval is asked, the request is denied and the user is told. The buttons are
+removed from the last message when the approval is decided, when the task ends
+and when this channel stops offering the approval, 10 minutes after it was
+sent. If a removal fails, the buttons stay visible but no longer act: a press
+is answered with 'No pending approval found'. A card cut at 64 KiB says so
+before the instruction and gives the total.
 While the download store is closed or not initialized, no file is
 generated. When the volume cannot be measured, the Host reads it once more and
 then generates without this check (the folder quota and the free-space floor
-still apply); the next sweep counts the file. The check is soft: two
-generations of one turn read the same room, and generations of several callers
-at the same moment can together pass the bound by their combined size until
-the next sweep counts them. Each generation result says after how many hours
+still apply); the next sweep counts the file. The check is soft: generations
+that run at the same moment, in two conversations of one caller or for several
+callers, can together pass the bound by their combined size until the next
+sweep counts them. Each generation result says after how many hours
 the Host deletes the file. A regular file there expires once the retention
 period has passed since the later of its record's `createdAt` and its own
 modification time, each taken as now when it is in the future; a file with no
