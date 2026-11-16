@@ -57,6 +57,15 @@ backoff, session guards) live in main's watch client.
 - A window registers on mount even with an empty list, so session and access events reach it.
 - Leaving the list does not cancel an in-flight refresh of a still-open preview: the result still
   applies to its tab. Only closing the tab retires its pending refreshes and retries.
+- Pickers that read GFS on their own are not in the list: the composer's global-files picker
+  (`ComposerGlobalFilesModal`, its own browser controller) and the move destination tree
+  (`gfs/moveDialog`). While one is open, a write into the folder it shows does not refresh it,
+  unless the window also watches that folder (the active Files location or an expanded sidebar
+  folder), because they share its cached listing. Their roots do follow `accessChanged` and
+  `accessChangedRoots`. The composer picker re-reads its folder and roots when it mounts and on
+  window focus; the move tree does not, so under the app's `staleTime: Infinity` and no refetch on
+  mount, reopening it within the 30-minute cache lifetime can show folder rows from before the
+  write.
 
 ## Ordering and recovery invariants
 
