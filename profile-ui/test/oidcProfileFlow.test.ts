@@ -108,7 +108,7 @@ test('Profile OIDC start rejects an attempt expiry far beyond the protocol lifet
     if (url.pathname.endsWith('/configuration')) return configurationResponse()
     return Response.json({
       authorizationUrl: authorizationUrl(),
-      expiresAt: new Date(Date.now() + 661_000).toISOString(),
+      expiresAt: new Date(Date.now() + 720_000).toISOString(),
     })
   })
   try {
