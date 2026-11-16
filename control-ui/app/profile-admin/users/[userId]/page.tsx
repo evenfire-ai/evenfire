@@ -292,7 +292,12 @@ export default function UserDetailsPage() {
         userAgentAccess,
         communicationChannelsData,
       ] = await Promise.all([
-        getAdminUserContext(userId),
+        // The Home folder field needs only the member. Bind it to this request so a failure of
+        // another request on this page cannot hide it.
+        getAdminUserContext(userId).then(memberContext => {
+          setLoadedMemberId(requestedUserId)
+          return memberContext
+        }),
         getContexts(),
         getAdminUserContexts(userId),
         getAdminTeams(),
@@ -306,7 +311,6 @@ export default function UserDetailsPage() {
 
       setEmailDraft(context.email || '')
       setUserName(context.name || context.displayName || context.email || '')
-      setLoadedMemberId(requestedUserId)
       setContactEmailsDraft(uniqueTrimmed(context.channels.emails || [], true))
       setSlackHandlesDraft(uniqueTrimmed(context.channels.slackUserNames || []))
       setTelegramIdsDraft(uniqueTrimmed(context.channels.telegramIds || []))
