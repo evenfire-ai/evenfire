@@ -498,14 +498,31 @@ describe('GFS watch through external-rest-api', () => {
       })
     }
 
-    it('PUT: a redirect with a non-JSON body is the client’s 502, never a 500 or a 200', async () => {
-      scenario.raw = {
-        status: 302,
-        headers: { location: `${urlOf(upstream)}/redirect-target`, 'content-type': 'text/plain' },
-        body: 'Found. Redirecting to /redirect-target',
+    it('PUT: any answer with a non-JSON body is 503 watch_reopen, never a 502, 500 or 200', async () => {
+      const html = { 'content-type': 'text/html' }
+      const nonJson: Array<[string, RawUpstream]> = [
+        [
+          '302 with a text body',
+          {
+            status: 302,
+            headers: {
+              location: `${urlOf(upstream)}/redirect-target`,
+              'content-type': 'text/plain',
+            },
+            body: 'Found. Redirecting to /redirect-target',
+          },
+        ],
+        ['413 HTML page', { status: 413, headers: html, body: '<html>Too Large</html>' }],
+        ['404 HTML page', { status: 404, headers: html, body: '<html>Not Found</html>' }],
+        ['503 HTML page', { status: 503, headers: html, body: '<html>Unavailable</html>' }],
+        ['200 text', { status: 200, headers: { 'content-type': 'text/plain' }, body: 'ok' }],
+      ]
+      for (const [name, raw] of nonJson) {
+        scenario.raw = raw
+        const r = await call(watchUrl(), 'PUT', { headers: bearer(), body: putBody })
+        expect(watchError(r), name).toEqual(reopen)
+        expect(r.headers['retry-after'], name).toBe('2')
       }
-      const r = await call(watchUrl(), 'PUT', { headers: bearer(), body: putBody })
-      expect(r.status).toBe(502)
       expect(redirectTargetHits).toBe(0)
     })
 
@@ -579,6 +596,29 @@ describe('GFS watch through external-rest-api', () => {
       const req = httpRequest(watchUrl(), { method: 'GET', headers: bearer() })
       req.on('error', () => {})
       req.end()
+      expect(await until(() => upstreamStream.opened === 1, 1_000)).toBe(true)
+      const closedAt = performance.now()
+      req.destroy()
+
+      expect(await until(() => upstreamStream.goneAt !== null, 1_000)).toBe(true)
+      expect(upstreamStream.goneAt! - closedAt).toBeLessThanOrEqual(200)
+    })
+    it('abandons the control-api request on the response closing alone, without an aborted request', async () => {
+      // Node emits a request's 'aborted' only while its body is unread. The JSON
+      // body parser reads this one to its end, so the socket going away reaches
+      // the handler only as the response's 'close'.
+      scenario.openDelayMs = 1_000
+      const payload = '{}'
+      const req = httpRequest(watchUrl(), {
+        method: 'GET',
+        headers: {
+          ...bearer(),
+          'content-type': 'application/json',
+          'content-length': String(payload.length),
+        },
+      })
+      req.on('error', () => {})
+      req.end(payload)
       expect(await until(() => upstreamStream.opened === 1, 1_000)).toBe(true)
       const closedAt = performance.now()
       req.destroy()

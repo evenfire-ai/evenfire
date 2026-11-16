@@ -35,6 +35,7 @@ type AgentProvider = LlmProviderId
 const DEFAULT_STEP_TIMEOUT_SECONDS = 300
 const PROVIDER_OUTPUT_LENGTH_EXCEEDED = 'provider_output_length_exceeded'
 const MCP_HOST_NOT_READY = 'mcp_host not ready'
+const SNIPPET_RUNNER_NOT_READY = 'snippet_runner not ready'
 
 interface RuntimeAgentSpec {
   provider: AgentProvider
@@ -89,6 +90,9 @@ export interface RuntimeDependencies {
   waitForMcpHost?: boolean
   mcpHostReadyAttempts?: number
   mcpHostReadyDelayMs?: number
+  waitForSnippetRunner?: boolean
+  snippetRunnerReadyAttempts?: number
+  snippetRunnerReadyDelayMs?: number
 }
 
 export interface RuntimeResult {
@@ -109,6 +113,12 @@ class StepRuntimeError extends Error {
 class McpHostReadinessTimeoutError extends Error {
   constructor() {
     super(MCP_HOST_NOT_READY)
+  }
+}
+
+class SnippetRunnerReadinessTimeoutError extends Error {
+  constructor() {
+    super(SNIPPET_RUNNER_NOT_READY)
   }
 }
 
@@ -205,6 +215,21 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
     if (orderedSteps.every(step => completedStepIds.has(step.id))) {
       await status.reportWorkflowStatus('completed', { completedAt: new Date().toISOString() })
       return { exitCode: 0, workflowPhase: 'completed' }
+    }
+
+    // Wait for the runner only when a step that still has to run uses it: a resumed run whose
+    // snippet steps are already completed must not block on a runner it will never call.
+    const pendingStepNeedsSnippetRunner = orderedSteps.some(
+      step =>
+        !completedStepIds.has(step.id) &&
+        workflowStepUsesSnippetRunner(runtimeStepsById.get(step.id) ?? step)
+    )
+    if (pendingStepNeedsSnippetRunner && deps.waitForSnippetRunner !== false) {
+      await waitForSnippetRunnerReady(
+        snippetRunner!,
+        deps.snippetRunnerReadyAttempts ?? 120,
+        deps.snippetRunnerReadyDelayMs ?? 2000
+      )
     }
 
     await status.reportWorkflowStatus('running')
@@ -343,7 +368,10 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
       })
       await reportRemainingAsSkipped(orderedSteps, failedStepId, status)
     }
-    if (err instanceof McpHostReadinessTimeoutError) {
+    if (
+      err instanceof McpHostReadinessTimeoutError ||
+      err instanceof SnippetRunnerReadinessTimeoutError
+    ) {
       await status.reportWorkflowStatus('recovering', { failureReason })
       return { exitCode: 1, workflowPhase: 'recovering', failureReason }
     }
@@ -522,6 +550,19 @@ async function waitForMcpHostReady(
     if (attempt < maxAttempts) await new Promise(resolve => setTimeout(resolve, delayMs))
   }
   throw new McpHostReadinessTimeoutError()
+}
+
+async function waitForSnippetRunnerReady(
+  client: SnippetRunnerClient,
+  maxAttempts: number,
+  delayMs: number
+): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const health = await client.healthCheck()
+    if (health.status === 'healthy') return
+    if (attempt < maxAttempts) await new Promise(resolve => setTimeout(resolve, delayMs))
+  }
+  throw new SnippetRunnerReadinessTimeoutError()
 }
 
 async function readCurrentStatus(status: StatusReporter): Promise<RuntimeStatusSnapshot> {
