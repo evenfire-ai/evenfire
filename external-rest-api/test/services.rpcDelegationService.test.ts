@@ -15,6 +15,10 @@ const producer = resolve(
 )
 let producedMessageResponse: { delegationToken: string; messageId: string }
 let producedMcpResponse: { delegationToken: string }
+// Setup, not behaviour under test: each Control API producer child has its own
+// limit, and the hook budget covers both limits plus 120 s of margin.
+const PRODUCER_CHILD_TIMEOUT_MS = 240_000
+const PRODUCER_SETUP_TIMEOUT_MS = 2 * PRODUCER_CHILD_TIMEOUT_MS + 120_000
 
 beforeAll(() => {
   const emit = (operationId: string, resourceType: string, resourceId: string, target: unknown) =>
@@ -22,7 +26,12 @@ beforeAll(() => {
       execFileSync(
         tsx,
         [producer, JSON.stringify({ operationId, resourceType, resourceId, target })],
-        { cwd: repositoryRoot, encoding: 'utf8', env: process.env }
+        {
+          cwd: repositoryRoot,
+          encoding: 'utf8',
+          env: process.env,
+          timeout: PRODUCER_CHILD_TIMEOUT_MS,
+        }
       )
     ) as { token: string; messageId: string | null }
   const message = emit('chat.message.invoke', 'host', 'mcp-host/chatllm', {
@@ -41,7 +50,7 @@ beforeAll(() => {
     messageId: message.messageId,
   }
   producedMcpResponse = { delegationToken: mcp.token }
-})
+}, PRODUCER_SETUP_TIMEOUT_MS)
 
 describe('rpc delegation v2 forwarding', () => {
   beforeEach(() => vi.clearAllMocks())
