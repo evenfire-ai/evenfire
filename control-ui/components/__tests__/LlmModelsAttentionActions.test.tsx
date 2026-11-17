@@ -535,6 +535,59 @@ describe('catalog attention from a control-api without acknowledgements', () => 
   })
 })
 
+describe('catalog attention dialog Keep enabled offer', () => {
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  function serve(items: WireItem[], rows: LlmAllowedModel[]) {
+    vi.mocked(getLlmModels).mockResolvedValue({ rows })
+    vi.mocked(getUnpricedModels).mockResolvedValue({ rows: [] })
+    serveFeed(items, new Set())
+  }
+
+  it('offers only Reviewed on a deprecated item, even with its allowlist row loaded', async () => {
+    const items = attentionWireBody().items
+    const deprecated = items.find(item => item.kind === 'deprecated_model_enabled')!
+    serve(items, rowsFor(items))
+
+    renderSurface()
+    const row = pendingRow(await openReview(), deprecated)
+
+    expect(
+      within(row).getByRole('button', { name: `Mark reviewed: ${itemName(deprecated)}` })
+    ).toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: /^Keep enabled: / })).not.toBeInTheDocument()
+  })
+
+  it('offers only Reviewed on a stale item whose model has no allowlist row to pin', async () => {
+    const items = attentionWireBody().items
+    const stale = items.find(item => item.model === 'claude-fable-5-1')!
+    const otherStale = items.find(item => item.model === 'claude-haiku-4-5')!
+    serve(
+      items,
+      rowsFor(items).filter(row => `${row.provider}/${row.model}` !== pairOf(stale))
+    )
+
+    renderSurface()
+    const dialog = await openReview()
+    const row = pendingRow(dialog, stale)
+
+    expect(
+      within(row).getByRole('button', { name: `Mark reviewed: ${itemName(stale)}` })
+    ).toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: /^Keep enabled: / })).not.toBeInTheDocument()
+    // A stale item whose row did load still gets the offer, so the absence above
+    // comes from the missing row and not from the kind.
+    expect(
+      within(pendingRow(dialog, otherStale)).getByRole('button', {
+        name: `Keep enabled: ${itemName(otherStale)}`,
+      })
+    ).toBeInTheDocument()
+  })
+})
+
 describe('catalog attention dialog Used by', () => {
   afterEach(() => {
     cleanup()
