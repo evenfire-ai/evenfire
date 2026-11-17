@@ -72,6 +72,14 @@ export interface Decision {
     | null;
 }
 
+/** The decision when no grant or share matches (deny by default). Shared; never mutated. */
+export const DENIED: Readonly<Decision> = {
+  allowed: false,
+  via: null,
+  matchedSubject: null,
+  authorizationSource: null,
+};
+
 export function resolveDecision(input: DecisionInput): Decision {
   // 1. Intrinsic operator authority — the root of trust, no grant required.
   if (input.isOperator) {
@@ -133,5 +141,5 @@ export function resolveDecision(input: DecisionInput): Decision {
     }
   }
 
-  return { allowed: false, via: null, matchedSubject: null, authorizationSource: null };
+  return DENIED;
 }

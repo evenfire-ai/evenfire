@@ -64,7 +64,10 @@ HTTP API, and that indirection is the point:
   unauthorized one are indistinguishable (both `403`).
 - **Audited.** Every decision — allow, deny, or error — is written to an
   append-only audit log before the operation is served; no operation runs
-  un-audited.
+  un-audited. A decision re-made inside a writer transaction (upload
+  finalization) records its allow row in that transaction, so the row is kept
+  only if the write commits; a denial or a store error there is recorded after
+  the rollback.
 - **Addressed by URI.** Files are named `gfs://<drive>/<resource>` and resolved
   through the API; an agent that holds a grant reads (and, where granted,
   writes) through the broker.

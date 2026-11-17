@@ -6,7 +6,15 @@ import { Readable } from 'node:stream'
 import type { Pool } from 'pg'
 import { GfsError } from '../api/errors'
 import type { GfsResource } from '../api/read'
-import type { DbAuditSink, PermissionClient } from '../authz/permissionClient'
+import type { Decision } from '../authz/resolve'
+import type {
+  AuthzContext,
+  DbAuditSink,
+  PermissionClient,
+  PermissionEpoch,
+  RefusedWithin,
+} from '../authz/permissionClient'
+import { permissionEpochMoved, stillAuthorized } from '../authz/reconfirm'
 import { resolveAuthzContext } from '../authz/subjectResolver'
 import { GfsWriteService, type TxClient } from '../db/writeStore'
 import type { UploadPartRow, UploadPrincipal, UploadSessionRow } from './uploadSession'
@@ -70,11 +78,34 @@ export interface GfsUploadFinalizerDeps {
   audit: DbAuditSink
 }
 
+/** Settled result of the pre-publication re-authorization. */
+type ReauthorizationOutcome =
+  | { ok: true; decision: Decision; subjects: readonly string[]; epoch: PermissionEpoch }
+  | { ok: false; error: unknown }
+
 /**
  * Production upload finalizer seam. Keeping this closure in a small module
- * makes the writer's stream, permission-epoch recheck, and same-transaction
- * receipt update executable in focused tests instead of hiding them behind
- * the process bootstrap.
+ * makes the writer's stream, the in-transaction authority re-check, and the
+ * same-transaction receipt update executable in focused tests instead of
+ * hiding them behind the process bootstrap.
+ *
+ * The re-authorization reads the subject and permission stores and appends its
+ * decision audit row on the pool, so it runs in `beforePublication`, before the
+ * writer opens the publication transaction. Running it inside that transaction
+ * would hold one client plus the drive structure (or row) lock while waiting for
+ * a second client from the same pool (issue #1398). `beforePublication` skips
+ * the re-authorization when abort or deadline already fail, and otherwise
+ * captures the permission epoch and stores the settled outcome. `onPublished`
+ * applies it inside the transaction in this order: abort and deadline; the
+ * subject re-read on the transaction's own client (which catches subject changes
+ * committed while the transaction waited for its lock); the stored outcome; the
+ * decision, re-decided on that client when the permission epoch moved or the
+ * subject set changed in a way that could change it; abort and deadline again.
+ * The writer's own checks (missing target, tombstone, name conflict, stale
+ * ifMatch) still take precedence, and the transactor's deadline handling still
+ * applies to every error. A re-decision that denies or fails leaves its
+ * in-transaction row to the rollback, so after the publication transaction has
+ * ended the finalizer appends that decision's row on the pool.
  */
 export function createGfsUploadFinalizer(
   deps: GfsUploadFinalizerDeps
@@ -86,7 +117,6 @@ export function createGfsUploadFinalizer(
   principal?: UploadPrincipal
 ) => Promise<{ resourceId: string; version: number; sha256: string }> {
   return async (session, parts, signal, deadlineAtMs, principal) => {
-    const capturedPermissionEpoch = deps.permissions.permissionEpoch()
     const source = {
       stream: orderedUploadStream(deps.storageMountPath, parts, signal),
       expectedBytes: session.expectedBytes,
@@ -97,62 +127,91 @@ export function createGfsUploadFinalizer(
       requestId: session.uploadId,
       audit: deps.audit,
     }
+    const targetRid = session.operation === 'create' ? session.parentRid : session.resourceRid
+    const reauthorizationPrincipal = principal ?? {
+      drive: session.drive,
+      ownerSubject: session.ownerSubject,
+      primarySubject: session.primarySubject,
+    }
+    const reauthorizationClaims = {
+      sub: reauthorizationPrincipal.ownerSubject,
+      drive: reauthorizationPrincipal.drive,
+      ...(reauthorizationPrincipal.authGeneration === undefined
+        ? {}
+        : { authGeneration: reauthorizationPrincipal.authGeneration }),
+      ...(reauthorizationPrincipal.principalType
+        ? { principalType: reauthorizationPrincipal.principalType }
+        : {}),
+      ...(reauthorizationPrincipal.brokeredAuthority
+        ? { brokeredAuthority: reauthorizationPrincipal.brokeredAuthority }
+        : {}),
+    }
+    const rejectIfExpired = (activeSignal?: AbortSignal): void => {
+      activeSignal?.throwIfAborted()
+      if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
+        throw new GfsError('precondition_failed', 'upload finalization timed out')
+      }
+    }
+    let reauthorization: ReauthorizationOutcome | undefined
+    let refused: { context: AuthzContext; refusal: RefusedWithin } | undefined
+    const beforePublication = async (hookSignal?: AbortSignal): Promise<void> => {
+      try {
+        rejectIfExpired(hookSignal)
+        if (!targetRid) throw new GfsError('path_invalid', 'upload target is required')
+        // Captured immediately before the decision it qualifies, as copy does.
+        const epoch = deps.permissions.permissionEpoch()
+        const context = await resolveAuthzContext(deps.pool, reauthorizationClaims)
+        const decision = await deps.permissions.authorize(context, targetRid, 'write')
+        reauthorization = { ok: true, decision, subjects: context.subjects, epoch }
+      } catch (error) {
+        // Not a fallback: onPublished rethrows this error inside the
+        // transaction, after the writer's own checks, its abort and deadline
+        // checks and the subject re-read, the position the error had before
+        // #1398. When one of those rejects first, that rejection wins, as it
+        // did then.
+        reauthorization = { ok: false, error }
+      }
+    }
     const onPublished = async (
       client: TxClient,
       published: GfsResource,
       publicationSignal?: AbortSignal
     ): Promise<void> => {
-      publicationSignal?.throwIfAborted()
-      if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
-        throw new GfsError('precondition_failed', 'upload finalization timed out')
-      }
-      const currentPermissionEpoch = deps.permissions.permissionEpoch()
-      if (
-        capturedPermissionEpoch.bypassed ||
-        currentPermissionEpoch.bypassed ||
-        currentPermissionEpoch.generation !== capturedPermissionEpoch.generation
-      ) {
-        throw new GfsError(
-          'precondition_failed',
-          'authorization changed during upload finalization'
-        )
-      }
-      const targetRid = session.operation === 'create' ? session.parentRid : session.resourceRid
+      rejectIfExpired(publicationSignal)
       if (!targetRid) throw new GfsError('path_invalid', 'upload target is required')
-      const reauthorizationPrincipal = principal ?? {
-        drive: session.drive,
-        ownerSubject: session.ownerSubject,
-        primarySubject: session.primarySubject,
+      if (!reauthorization) {
+        throw new GfsError('internal', 'upload was not re-authorized before publication')
       }
-      const targetContext = await resolveAuthzContext(deps.pool, {
-        sub: reauthorizationPrincipal.ownerSubject,
-        drive: reauthorizationPrincipal.drive,
-        ...(reauthorizationPrincipal.authGeneration === undefined
-          ? {}
-          : { authGeneration: reauthorizationPrincipal.authGeneration }),
-        ...(reauthorizationPrincipal.principalType
-          ? { principalType: reauthorizationPrincipal.principalType }
-          : {}),
-        ...(reauthorizationPrincipal.brokeredAuthority
-          ? { brokeredAuthority: reauthorizationPrincipal.brokeredAuthority }
-          : {}),
+      // The transaction may have waited for the structure or row lock since the
+      // re-authorization. Re-read the subject on this transaction's client (never
+      // the pool, #1398) so a retirement, membership removal, admin or link
+      // revocation, or generation bump committed during that wait is caught. A
+      // denied subject propagates unchanged, as before #1398.
+      const current = await resolveAuthzContext(client, reauthorizationClaims)
+      if (!reauthorization.ok) throw reauthorization.error
+      // Read after the subject reads, so an invalidation processed while they
+      // awaited is seen.
+      const now = deps.permissions.permissionEpoch()
+      const verdict = await stillAuthorized(client, {
+        decided: { subjects: reauthorization.subjects, allowed: reauthorization.decision.allowed },
+        current,
+        requests: [{ resourceId: targetRid, op: 'write' }],
+        epochMoved: permissionEpochMoved(reauthorization.epoch, now),
+        authorizeWithin: async (db, ctx, requests) => {
+          try {
+            const decisions = await deps.permissions.authorizeWithin(db, ctx, requests)
+            const denied = requests.filter((_, index) => !decisions[index].allowed)
+            if (denied.length > 0) refused = { context: ctx, refusal: { denied } }
+            return decisions
+          } catch (error) {
+            refused = { context: ctx, refusal: { failed: requests, error } }
+            throw error
+          }
+        },
       })
-      const decision = await deps.permissions.authorize(targetContext, targetRid, 'write')
-      publicationSignal?.throwIfAborted()
-      if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
-        throw new GfsError('precondition_failed', 'upload finalization timed out')
-      }
-      const postAuthorizationEpoch = deps.permissions.permissionEpoch()
-      if (
-        postAuthorizationEpoch.bypassed ||
-        postAuthorizationEpoch.generation !== capturedPermissionEpoch.generation
-      ) {
-        throw new GfsError(
-          'precondition_failed',
-          'authorization changed during upload finalization'
-        )
-      }
-      if (!decision.allowed) {
+      // The subject reads and a re-decision awaited on the client.
+      rejectIfExpired(publicationSignal)
+      if (!verdict.allowed) {
         throw new GfsError('forbidden', 'upload authorization was revoked before publication')
       }
       const completed = await client.query(
@@ -174,30 +233,40 @@ export function createGfsUploadFinalizer(
         throw new GfsError('upload_aborted', 'upload session changed before publication')
       }
     }
-    const resource =
-      session.operation === 'create'
-        ? await deps.writeService.create({
-            drive: session.drive,
-            parentId: session.parentRid!,
-            name: session.resourceName!,
-            kind: 'file',
-            resourceId: session.uploadId,
-            content: source,
-            mutation,
-            onPublished,
-            signal,
-            deadlineAtMs,
-          })
-        : await deps.writeService.replace({
-            drive: session.drive,
-            resourceId: session.resourceRid!,
-            ifMatch: session.ifMatch ?? undefined,
-            content: source,
-            mutation,
-            onPublished,
-            signal,
-            deadlineAtMs,
-          })
+    let resource: GfsResource
+    try {
+      resource =
+        session.operation === 'create'
+          ? await deps.writeService.create({
+              drive: session.drive,
+              parentId: session.parentRid!,
+              name: session.resourceName!,
+              kind: 'file',
+              resourceId: session.uploadId,
+              content: source,
+              mutation,
+              beforePublication,
+              onPublished,
+              signal,
+              deadlineAtMs,
+            })
+          : await deps.writeService.replace({
+              drive: session.drive,
+              resourceId: session.resourceRid!,
+              ifMatch: session.ifMatch ?? undefined,
+              content: source,
+              mutation,
+              beforePublication,
+              onPublished,
+              signal,
+              deadlineAtMs,
+            })
+    } catch (error) {
+      // The publication transaction has ended and its client is released. A
+      // re-decision refused inside it left no durable row: record it now, on the pool.
+      if (refused) await deps.permissions.auditRefusedWithin(refused.context, refused.refusal)
+      throw error
+    }
     if (!resource.contentSha256) throw new GfsError('internal', 'published upload has no checksum')
     return {
       resourceId: resource.resourceId,
