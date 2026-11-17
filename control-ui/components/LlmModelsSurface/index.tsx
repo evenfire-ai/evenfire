@@ -194,8 +194,10 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
       return
     }
     // The 409 proved the sync turned the row back on, so the loaded row (off,
-    // "Turned off by catalog sync") is stale even though nothing was written.
+    // "Turned off by catalog sync") and the attention feed are stale even though
+    // nothing was written.
     await loadAll()
+    setAttentionRefreshKey(key => key + 1)
   }
 
   useEffect(() => {

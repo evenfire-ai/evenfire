@@ -7,8 +7,10 @@ import {
   getAdminAttention,
   getLlmModels,
   getUnpricedModels,
+  parseAdminAttentionReport,
   updateLlmModel,
 } from '@lib/api'
+import { attentionWireBodyOf } from '../../test/fixtures/llmAttention'
 import { LlmModelsSurface } from '../LlmModelsSurface'
 import { ToastProvider } from '../Toast'
 
@@ -166,6 +168,32 @@ describe('Keep disabled on a row the catalog sync turned off', () => {
       .getByRole('button', { name: 'Actions for model claude/claude-old' })
       .closest('tr')!
     expect(within(row).getByText('Enabled')).toBeInTheDocument()
+    expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes the attention banner when the operator cancels after the sync turned the row back on', async () => {
+    // Back on and referenced again, the model is something the feed now reports.
+    let feed = { items: [] as unknown[], generatedAt: 'x' }
+    vi.mocked(getAdminAttention).mockImplementation(async () => parseAdminAttentionReport(feed))
+    vi.mocked(updateLlmModel).mockImplementationOnce(async () => {
+      feed = attentionWireBodyOf('deprecated_model_enabled')
+      throw structuredApiError(409, {
+        error: 'model_in_use',
+        message: 'still referenced',
+        impact: {
+          provider: 'claude',
+          model: 'claude-old',
+          hostsAffected: [{ namespace: 'mcp-host', name: 'agent-a', roles: ['primary'] }],
+          grantsAffected: [],
+        },
+      })
+    })
+
+    renderSurface()
+    await keepDisabled()
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+
+    expect(await screen.findByText(/Models need review/)).toHaveTextContent('1 deprecated')
     expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(1)
   })
 })
