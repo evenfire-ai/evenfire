@@ -1,4 +1,5 @@
 import type { ModelSelectionWriteOutcome, ReapedSession } from '../../db/worker/protocol'
+import type { ApprovalMode } from '../approval/approvalMode'
 import {
   type Conversation,
   ConversationState,
@@ -32,7 +33,8 @@ export interface SessionTokenUsage {
  * the durable store project the sessionKey into indexable columns
  * (user_id, channel_type, channel_id, thread_id, source, team_id). All
  * fields are optional — the in-memory store ignores them; the SQLite store
- * derives any missing pieces from the sessionKey itself.
+ * derives any missing pieces from the sessionKey itself, except
+ * `channel_type`, which is written only from `channelType` (null when absent).
  */
 export interface GetOrCreateOptions {
   userId?: string
@@ -42,6 +44,11 @@ export interface GetOrCreateOptions {
   source?: string
   teamId?: string | null
   model?: string
+  /**
+   * Stored approval mode for a session this call creates. Ignored when the
+   * session is loaded from the store or already cached.
+   */
+  approvalMode?: ApprovalMode
 }
 
 export interface PersistedSessionListing {
@@ -340,6 +347,13 @@ export interface ConversationStore {
   ): Promise<ModelSelectionWriteOutcome> | ModelSelectionWriteOutcome
 
   /**
+   * Persist `sessions.approval_mode` and then mirror it on `conv`. SQLite
+   * awaits `enqueueSync` before the mirror changes. A failed write leaves the
+   * previous mode in place.
+   */
+  persistApprovalMode(conv: Conversation, mode: ApprovalMode): Promise<void>
+
+  /**
    * Spec 15 Fase B — persist a user rename (`sessions.title` overwrite). Async
    * (enqueued via the worker), keyed by sessionKey. In-memory stores no-op (the
    * title already lives on the Conversation object). Optional so legacy stores
@@ -548,6 +562,10 @@ export class InMemoryConversationStore implements ConversationStore {
       modelSelectionRevision: current + 1,
       modelSelections: { ...conv.modelSelections },
     }
+  }
+
+  async persistApprovalMode(conv: Conversation, mode: ApprovalMode): Promise<void> {
+    conv.approval_mode = mode
   }
 
   persistTitle(_conv: Conversation): void {

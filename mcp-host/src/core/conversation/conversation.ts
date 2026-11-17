@@ -56,7 +56,10 @@ export class ConversationManager {
    * chat share one creation; two would insert two rows with the same
    * `session_key`, and the second insert fails on its unique index.
    */
-  private readonly pendingCreates = new Map<string, Promise<Conversation>>()
+  private readonly pendingCreates = new Map<
+    string,
+    Promise<{ conversation: Conversation; created: boolean }>
+  >()
 
   constructor(store: ConversationStore = new InMemoryConversationStore()) {
     this.store = store
@@ -90,10 +93,23 @@ export class ConversationManager {
    * RPC handlers); tests must `await`.
    */
   async getOrCreate(sessionKey: string, opts?: GetOrCreateOptions): Promise<Conversation> {
+    const { conversation } = await this.getOrCreateDetailed(sessionKey, opts)
+    return conversation
+  }
+
+  /**
+   * Same lookup as `getOrCreate`. `created` is true only when the create
+   * branch ran. A cache hit and a cold load are false. `opts.approvalMode`
+   * is written only in that create branch.
+   */
+  async getOrCreateDetailed(
+    sessionKey: string,
+    opts?: GetOrCreateOptions
+  ): Promise<{ conversation: Conversation; created: boolean }> {
     const cached = this.store.get(sessionKey)
     if (cached) {
       this.assertSessionOwner(cached, opts?.userId)
-      return cached
+      return { conversation: cached, created: false }
     }
 
     let pending = this.pendingCreates.get(sessionKey)
@@ -103,14 +119,17 @@ export class ConversationManager {
       })
       this.pendingCreates.set(sessionKey, pending)
     }
-    const conv = await pending
-    this.assertSessionOwner(conv, opts?.userId)
-    return conv
+    const result = await pending
+    this.assertSessionOwner(result.conversation, opts?.userId)
+    return result
   }
 
-  private async loadOrCreate(sessionKey: string, opts?: GetOrCreateOptions): Promise<Conversation> {
+  private async loadOrCreate(
+    sessionKey: string,
+    opts?: GetOrCreateOptions
+  ): Promise<{ conversation: Conversation; created: boolean }> {
     const loaded = await this.store.getOrLoad(sessionKey)
-    if (loaded) return loaded
+    if (loaded) return { conversation: loaded, created: false }
 
     const parsed = parseSessionKey(sessionKey)
 
@@ -122,6 +141,9 @@ export class ConversationManager {
       turns: [],
       auto_approved_tools: new Set(),
       denials: new Map(),
+      approval_mode: opts?.approvalMode ?? 'manual',
+      auto_shell_grants: { wholeTool: false, commands: new Set() },
+      ...(opts?.channelType !== undefined ? { channel_type: opts.channelType } : {}),
       created_at: new Date(),
       updated_at: new Date(),
       // #654 — a freshly inserted row carries the column default, so the RAM
@@ -132,7 +154,7 @@ export class ConversationManager {
     }
     this.store.set(sessionKey, conv)
     await Promise.resolve(this.store.persistSessionCreate(conv, opts ?? {}))
-    return conv
+    return { conversation: conv, created: true }
   }
 
   /**

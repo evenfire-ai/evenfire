@@ -23,7 +23,9 @@ function preMigrationDb(): Database.Database {
 
 describe('migration 018 — sessions.denied_tools', () => {
   it('appends last to the ordered migration list', () => {
-    expect(migrations[migrations.length - 1]?.name).toBe(migration.name)
+    const names = migrations.map(m => m.name)
+    const index = names.indexOf(migration.name)
+    expect(names[index + 1]).toBe('019-sessions-approval-mode')
   })
 
   it('adds a nullable column that reads null for a pre-existing row', () => {

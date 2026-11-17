@@ -34,6 +34,13 @@ export interface SessionRow {
   model_selection_revision?: number
   /** Migration 016 — JSON array of `{ tool, userId }` denials. NULL if none. */
   denied_tools?: string | null
+  /**
+   * Migration 019 — stored approval mode (`manual`, `auto`, or `allow_all`).
+   * Optional on the in-memory shape so a fixture built before the column
+   * existed still typechecks; readers treat a missing or unknown value as
+   * `manual`. The worker does not interpret the ceiling or the channel cap.
+   */
+  approval_mode?: string | null
   system_prompt_stable_hash: string | null
   parent_session_id: string | null
   started_at: number
@@ -267,6 +274,12 @@ export type WorkerOp =
       expectedRevision?: number
     }
   | {
+      /** Durable `sessions.approval_mode` write. The stored value only. */
+      kind: 'update_session_approval_mode'
+      sessionId: string
+      approvalMode: string
+    }
+  | {
       /** Spec 15 Fase B — overwrite the user-set session title (rename). Unlike
        *  the Fase A auto-title (COALESCE, turn 1 only), this UNCONDITIONALLY
        *  overwrites: an explicit rename always wins. */
@@ -391,6 +404,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'update_session_counters':
     case 'update_session_prompt_stable_hash':
     case 'update_session_model_selections':
+    case 'update_session_approval_mode':
     case 'update_session_title':
     case 'insert_message':
     case 'persist_turn_boundary':

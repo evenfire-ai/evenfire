@@ -701,7 +701,7 @@ describe('SqliteConversationStore — cold-start rehydration', () => {
       const manager = new ConversationManager(handle.store)
       for (let i = 0; i < 3; i++) {
         const key = `u-${i}:rpc:agent:default`
-        const conv = await manager.getOrCreate(key)
+        const conv = await manager.getOrCreate(key, { channelType: 'rpc' })
         await manager.startTurn(conv, `msg ${i}`, 'test-task')
         await manager.suspendForApproval(conv, {
           request_id: `req-${i}`,

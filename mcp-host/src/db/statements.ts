@@ -26,6 +26,7 @@ export interface PreparedStatements {
   recomputeSessionMessageSummary: Statement
   updateSessionPromptStableHash: Statement
   updateSessionModelSelections: Statement
+  updateSessionApprovalMode: Statement
   selectSessionModelSelectionRevision: Statement
   setSessionTitleIfAbsent: Statement
   updateSessionTitle: Statement
@@ -72,7 +73,8 @@ export function prepareStatements(db: Database): PreparedStatements {
         message_count, tool_call_count,
         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
         cache_tokens_reported,
-        title, state, active_task_id, active_trace_context
+        title, state, active_task_id, active_trace_context,
+        approval_mode
       ) VALUES (
         @id, @session_key, @source, @user_id, @team_id,
         @channel_type, @channel_id, @thread_id,
@@ -81,7 +83,8 @@ export function prepareStatements(db: Database): PreparedStatements {
         @message_count, @tool_call_count,
         @input_tokens, @output_tokens, @cache_read_tokens, @cache_write_tokens,
         @cache_tokens_reported,
-        @title, @state, @active_task_id, @active_trace_context
+        @title, @state, @active_task_id, @active_trace_context,
+        @approval_mode
       )
       ON CONFLICT(id) DO UPDATE SET
         state = excluded.state,
@@ -189,6 +192,11 @@ export function prepareStatements(db: Database): PreparedStatements {
       UPDATE sessions
          SET model_selections = @model_selections,
              model_selection_revision = @model_selection_revision
+       WHERE id = @id
+    `),
+    updateSessionApprovalMode: db.prepare(`
+      UPDATE sessions
+         SET approval_mode = @approval_mode
        WHERE id = @id
     `),
     // #654 — the CAS base. Read INSIDE the same IMMEDIATE transaction that

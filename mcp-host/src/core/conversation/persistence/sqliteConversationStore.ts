@@ -27,6 +27,7 @@ import type {
 import { logger } from '../../../logger'
 import { parseSessionKey } from '../../../session/types'
 import { projectGfsApproval } from '../../../visualInput/suspension'
+import type { ApprovalMode } from '../../approval/approvalMode'
 import { ConversationError, ConversationErrorCode } from '../../errors'
 import {
   type ChatMessage,
@@ -646,7 +647,9 @@ export class SqliteConversationStore implements ConversationStore {
       source: opts.source ?? parsed?.channelType ?? 'internal',
       user_id: opts.userId ?? parsed?.userId ?? conv.user_id ?? null,
       team_id: opts.teamId ?? null,
-      channel_type: opts.channelType ?? parsed?.channelType ?? null,
+      // Channel type comes only from the caller. A missing value stays null
+      // instead of being parsed out of the session key.
+      channel_type: opts.channelType ?? null,
       channel_id: opts.channelId ?? parsed?.channelId ?? null,
       thread_id: opts.threadId ?? parsed?.threadId ?? null,
       // R2 — `model` now records the effective model served (opts.model); the
@@ -670,6 +673,7 @@ export class SqliteConversationStore implements ConversationStore {
       state: conv.state,
       active_task_id: conv.activeTaskId ?? null,
       active_trace_context: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
+      approval_mode: opts.approvalMode ?? 'manual',
     }
     this.persistQueue.enqueueAsync(sessionKey, {
       kind: 'insert_session',
@@ -997,6 +1001,29 @@ export class SqliteConversationStore implements ConversationStore {
       },
       sessionKey
     )
+  }
+
+  /**
+   * Awaited durability barrier for `sessions.approval_mode`. The mirror moves
+   * only after the worker acknowledges the write, and it chains after this
+   * session's `insert_session` on the same FIFO.
+   */
+  async persistApprovalMode(conv: Conversation, mode: ApprovalMode): Promise<void> {
+    const sessionKey = this.sessionKeyById.get(conv.id)
+    if (!sessionKey) {
+      throw new Error(
+        `persistApprovalMode: no sessionKey for conversation ${conv.id}; refusing a write with no durable target`
+      )
+    }
+    await this.persistQueue.enqueueSync(
+      {
+        kind: 'update_session_approval_mode',
+        sessionId: conv.id,
+        approvalMode: mode,
+      },
+      sessionKey
+    )
+    conv.approval_mode = mode
   }
 
   /**
