@@ -2233,7 +2233,9 @@ spec:
                   description: >-
                     Workload id to the digest of the denied Secret versions for
                     which the workload was torn down. An entry is removed before
-                    its workload is rendered again.
+                    its workload is rendered with the denied refs again. A denied
+                    StatefulSet is kept and still follows the spec, without the
+                    denied refs.
                 pluginWorkloadSdk:
                   type: object
                   description: >-
