@@ -2354,6 +2354,17 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
       pending: false,
       canAttachImages: true,
     })
+
+    // The ack confirmed the default, not a selection: once the operator moves
+    // the Host default, the next settled read names the new one.
+    brokerTransport.getHostModels.mockResolvedValue({ ...brokerCatalog, hostDefault: 'gpt-5.3' })
+    await act(async () => {
+      await loadHostModels(brokerTransport, 'agent-x', chatId, { force: true })
+    })
+    expect(getHostModelSelectionSnapshot('agent-x', chatId)).toMatchObject({
+      effectiveModel: 'gpt-5.3',
+      pending: false,
+    })
   })
 
   it('refuses a twenty-first attachment and sends twenty', async () => {
