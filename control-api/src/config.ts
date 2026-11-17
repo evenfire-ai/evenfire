@@ -13,9 +13,28 @@ import {
 } from './services/gfsWatch/admissionLimits.js'
 import { assertSafeCatalogUrl, resolveModelsDevApiUrl } from './services/modelsDevCatalogUrl.js'
 
+function isBoundedInteger(value: number, min: number, max: number): boolean {
+  return Number.isSafeInteger(value) && value >= min && value <= max
+}
+
 function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
   const parsed = Number(process.env[name])
-  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
+  return isBoundedInteger(parsed, min, max) ? parsed : fallback
+}
+
+// Same tolerance as boundedIntegerEnv (an unusable value boots with the
+// default instead of refusing), but says so: a silently ignored cap leaves the
+// operator believing the replica runs with the value they wrote.
+function warnedBoundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return fallback
+  const parsed = Number(raw)
+  if (isBoundedInteger(parsed, min, max)) return parsed
+  rootLogger.warn(
+    { event: 'env_value_out_of_range', env: name, value: raw, min, max, default: fallback },
+    `${name} is outside [${min}, ${max}] or not an integer; using the default`
+  )
+  return fallback
 }
 
 type Config = {
@@ -1350,8 +1369,13 @@ export const config: Config = {
   // Kept apart from ENTITY_CHANGE_STREAM_HEARTBEAT_MS (ceiling 60 s): the value
   // travels in the watch `ready` frame, and the desktop treats a `ready` whose
   // heartbeat is outside [5 s, 25 s] as invalid and reopens.
-  gfsWatchHeartbeatMs: boundedIntegerEnv('GFS_WATCH_HEARTBEAT_MS', 20 * 1000, 5 * 1000, 25 * 1000),
-  gfsWatchMaxConnections: boundedIntegerEnv(
+  gfsWatchHeartbeatMs: warnedBoundedIntegerEnv(
+    'GFS_WATCH_HEARTBEAT_MS',
+    20 * 1000,
+    5 * 1000,
+    25 * 1000
+  ),
+  gfsWatchMaxConnections: warnedBoundedIntegerEnv(
     'GFS_WATCH_MAX_CONNECTIONS',
     GFS_WATCH_MAX_CONNECTIONS,
     1,
@@ -1359,7 +1383,7 @@ export const config: Config = {
   ),
   // Ceiling well under the process default: one desktop holds one stream, so a
   // larger per-principal cap only lets a single account crowd out the replica.
-  gfsWatchMaxConnectionsPerPrincipal: boundedIntegerEnv(
+  gfsWatchMaxConnectionsPerPrincipal: warnedBoundedIntegerEnv(
     'GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL',
     GFS_WATCH_MAX_CONNECTIONS_PER_PRINCIPAL,
     1,

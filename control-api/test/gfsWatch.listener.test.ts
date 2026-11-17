@@ -37,10 +37,16 @@ class FakeClient implements ListenerClient {
   ended = 0
   destroyed = 0
   echo = true
+  /** The next `on` for this event throws once, before registering anything. */
+  throwOn: string | null = null
   connectResult: { resolve: () => void; reject: (e: Error) => void } | null = null
   connection = { stream: { destroy: () => void (this.destroyed += 1) } }
 
   on(event: string, listener: Handler) {
+    if (event === this.throwOn) {
+      this.throwOn = null
+      throw new Error(`on('${event}') failed`)
+    }
     for (const map of [this.handlers, this.everRegistered]) {
       map.set(event, [...(map.get(event) ?? []), listener])
     }
@@ -74,6 +80,9 @@ class FakeClient implements ListenerClient {
 
 type Conn = ListenerConn & { op: { dirtyOverflow: boolean } | null }
 
+/** How the n-th createClient call (1-based) fails, if it does. */
+type CreateFault = (n: number) => 'create' | 'on' | null
+
 async function counterValue(
   metric: { get(): Promise<{ values: { labels: Record<string, unknown>; value: number }[] }> },
   labels: Record<string, string>
@@ -101,8 +110,17 @@ function setup({
   clock = createVirtualWatchClock({ random: () => 0 }) as VirtualWatchClock,
   autoConnect = true,
   instanceId,
-}: { conns?: Conn[]; clock?: VirtualWatchClock; autoConnect?: boolean; instanceId?: string } = {}) {
+  createFault = () => null,
+}: {
+  conns?: Conn[]
+  clock?: VirtualWatchClock
+  autoConnect?: boolean
+  instanceId?: string
+  createFault?: CreateFault
+} = {}) {
   const clients: FakeClient[] = []
+  /** Clock instant of every createClient call, including the ones that throw. */
+  const attempts: number[] = []
   const events: string[] = []
   const closed: { connId: string; reason: string; spreadMs?: number }[] = []
   const live = new Set(conns)
@@ -138,7 +156,11 @@ function setup({
     onExpansionFailed,
     instanceId,
     createClient: () => {
+      attempts.push(clock.now())
+      const fault = createFault(attempts.length)
+      if (fault === 'create') throw new Error('invalid connection string')
       const c = new FakeClient()
+      if (fault === 'on') c.throwOn = 'notification'
       clients.push(c)
       if (autoConnect) queueMicrotask(() => c.connectResult?.resolve())
       return c
@@ -147,6 +169,7 @@ function setup({
   return {
     clock,
     clients,
+    attempts,
     events,
     closed,
     live,
@@ -734,5 +757,103 @@ describe('tConnect belongs to the current attempt only', () => {
     const lossesBefore = t.resetWindows.mock.calls.length
     await t.clock.advanceAsync(10_000)
     expect(t.resetWindows.mock.calls.length).toBe(lossesBefore + 1)
+  })
+})
+
+describe('a client that cannot be built still leaves a way back', () => {
+  it('createClient throwing at start schedules a reconnection after the backoff', async () => {
+    const t = setup({ createFault: n => (n === 1 ? 'create' : null) })
+    const before = await counterValue(gfsWatchTickFailedTotal, { name: 'listener-connect' })
+    t.listener.startGfsWatchRegistry()
+    const s = t.listener.state
+    expect(s.listenerClient).toBeNull()
+    expect(s.tConnect).toBeNull()
+    expect(s.reconnectTimer).not.toBeNull()
+    expect(s.reconnectAttempt).toBe(1)
+    await t.clock.advanceAsync(999)
+    expect(t.attempts).toEqual([0])
+    await t.clock.advanceAsync(1)
+    expect(t.attempts).toEqual([0, 1_000])
+    expect(s.listenerReady).toBe(true)
+    expect(s.reconnectAttempt).toBe(0)
+    // Handled where it happens, not as an escaped tick failure.
+    expect(await counterValue(gfsWatchTickFailedTotal, { name: 'listener-connect' })).toBe(before)
+  })
+
+  it('createClient throwing on a reconnection backs off further and retries', async () => {
+    const t = setup({ createFault: n => (n === 2 ? 'create' : null) })
+    t.listener.startGfsWatchRegistry()
+    await flushMicrotasks()
+    t.clients[0]!.emit('end')
+    await t.clock.advanceAsync(1_000)
+    const s = t.listener.state
+    expect(t.attempts).toEqual([0, 1_000])
+    expect(s.listenerClient).toBeNull()
+    expect(s.reconnectTimer).not.toBeNull()
+    expect(s.reconnectAttempt).toBe(2)
+    await t.clock.advanceAsync(1_999)
+    expect(t.attempts).toHaveLength(2)
+    await t.clock.advanceAsync(1)
+    expect(t.attempts).toEqual([0, 1_000, 3_000])
+    expect(s.listenerReady).toBe(true)
+  })
+
+  it('a client whose handlers cannot be attached is disposed and never becomes current', async () => {
+    const t = setup({ createFault: n => (n === 1 ? 'on' : null) })
+    t.listener.startGfsWatchRegistry()
+    const s = t.listener.state
+    const half = t.clients[0]!
+    expect(s.listenerClient).toBeNull()
+    expect(s.tConnect).toBeNull()
+    expect(s.reconnectTimer).not.toBeNull()
+    expect(half.ended).toBe(1)
+    expect(half.connectResult).toBeNull()
+    expect([...half.handlers.keys()]).toEqual(['error'])
+    await t.clock.advanceAsync(1_000)
+    expect(t.clients).toHaveLength(2)
+    expect(s.listenerClient).toBe(t.clients[1])
+    expect(s.listenerReady).toBe(true)
+  })
+
+  it('a stop after a failed build cancels the scheduled reconnection', async () => {
+    const t = setup({ createFault: n => (n === 1 ? 'create' : null) })
+    t.listener.startGfsWatchRegistry()
+    expect(t.listener.state.reconnectTimer).not.toBeNull()
+    t.listener.stopGfsWatchRegistry()
+    expect(t.listener.state.reconnectTimer).toBeNull()
+    expect(t.clock.pendingCount()).toBe(0)
+    await t.clock.advanceAsync(30_000)
+    expect(t.attempts).toEqual([0])
+  })
+
+  it('repeated build failures back off 1 s, 2 s, 4 s, 8 s, 8 s and never spin', async () => {
+    const t = setup({ createFault: n => (n <= 6 ? 'create' : null) })
+    t.listener.startGfsWatchRegistry()
+    await t.clock.advanceAsync(31_000)
+    const gaps = t.attempts.slice(1).map((at, i) => at - t.attempts[i]!)
+    expect(gaps).toEqual([1_000, 2_000, 4_000, 8_000, 8_000, 8_000])
+    expect(t.listener.state.listenerReady).toBe(true)
+    expect(t.listener.state.reconnectAttempt).toBe(0)
+  })
+
+  it('a late event of the previous client after a failed build changes nothing', async () => {
+    const t = setup({ createFault: n => (n === 2 ? 'create' : null) })
+    t.listener.startGfsWatchRegistry()
+    await flushMicrotasks()
+    const c1 = t.clients[0]!
+    c1.emit('end')
+    await t.clock.advanceAsync(1_000)
+    const s = t.listener.state
+    const timer = s.reconnectTimer
+    expect(timer).not.toBeNull()
+    const losses = t.resetWindows.mock.calls.length
+    for (const h of c1.everRegistered.get('error')!) h(new Error('C1 late error'))
+    for (const h of c1.everRegistered.get('end')!) h()
+    expect(t.resetWindows.mock.calls.length).toBe(losses)
+    expect(s.reconnectTimer).toBe(timer)
+    expect(s.reconnectAttempt).toBe(2)
+    await t.clock.advanceAsync(2_000)
+    expect(t.attempts).toEqual([0, 1_000, 3_000])
+    expect(s.listenerReady).toBe(true)
   })
 })
