@@ -30,6 +30,11 @@ export type ApprovalPolicy = 'cli_only' | 'channel_users' | 'designated_approver
 export interface ChannelApprovalConfig {
   enabled: boolean
   approvers?: string[]
+  /**
+   * When true, a telegram, email, or slack session may use a channel cap of
+   * allow_all. Teams and every other channel stay manual. Absent is false.
+   */
+  allowModeChange?: boolean
 }
 
 // ─── Approval Config ───────────────────────────────────────
@@ -50,6 +55,11 @@ export interface ApprovalConfig {
    * Out of scope for v1: MCP tools (gated separately by serverName__toolName).
    */
   tools?: Record<string, boolean>
+  /**
+   * Ceiling for a stored approval mode. Readers accept only manual, auto, and
+   * allow_all; an absent or any other value is manual.
+   */
+  modeCeiling?: string
 }
 
 // ─── Approval Decision ─────────────────────────────────────
