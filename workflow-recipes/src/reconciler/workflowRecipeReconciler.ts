@@ -148,6 +148,7 @@ import * as rb from './resourceBuilder'
 import {
   classifySecretAccess,
   combineSecretAccess,
+  deniedSecretRevocationDigest,
   isSecretAccessibleByRecipe,
   parseSecretOwnership,
 } from './secretOwnership'
@@ -177,6 +178,8 @@ const PARENT_RECIPE_LABEL = 'clerum.io/parent-recipe'
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
 const WORKFLOW_ACTOR_ID_LABEL = 'clerum.io/workflow-actor-id'
 const WORKFLOW_ACTOR_TYPE_LABEL = 'clerum.io/workflow-actor-type'
+/** Written on a pod template by `kubectl rollout restart`. */
+const RESTARTED_AT_ANNOTATION = 'kubectl.kubernetes.io/restartedAt'
 /**
  * Returned by a replaceFn that re-read the live object after a 409 and chose not
  * to write it; `replaceResource` then skips its "Updated resource" log.
@@ -192,6 +195,159 @@ export function hasPendingTransportNetworkReadiness(recipe: WorkflowRecipeCRD): 
         condition.type === TRANSPORT_NETWORK_CONDITION_TYPE && condition.status !== 'True'
     ) ?? false
   )
+}
+
+/**
+ * Issue #1349 — true when the run's terminal compute teardown has been recorded
+ * on the run CR (`status.terminalRunTeardown.completedAt`). The record is removed
+ * before the run is deployed again, so it describes the current terminal entry.
+ */
+export function hasTerminalRunTeardownRecord(recipe: WorkflowRecipeCRD): boolean {
+  return typeof recipe.status?.terminalRunTeardown?.completedAt === 'string'
+}
+
+/** RFC 6901 — escape one reference token of a JSON Pointer. */
+function jsonPointerToken(key: string): string {
+  return key.replace(/~/g, '~0').replace(/\//g, '~1')
+}
+
+/**
+ * The workloads the terminal run teardown deletes: transport runtimes that are
+ * not StatefulSets and declare no volumeClaimTemplates (#558: never delete
+ * stateful data here). A workload of another type that declares
+ * volumeClaimTemplates is kept as well, although the field creates no PVC for
+ * it: only a StatefulSet turns volumeClaimTemplates into PVCs (the Secret-denial
+ * teardown deletes such a workload, see {@link isDeletedBySecretDenialTeardown}).
+ */
+export function isRemovedByTerminalRunTeardown(workload: WorkloadDef): boolean {
+  if (!workload.transport) return false
+  if (workload.type === 'statefulset') return false
+  return !(workload as { volumeClaimTemplates?: unknown[] }).volumeClaimTemplates?.length
+}
+
+/**
+ * The workloads the Secret-denial teardown deletes. A StatefulSet is kept (its
+ * PVCs hold data): it is re-rendered without the denied refs and its Pods are
+ * restarted. Every other type is deleted; only a StatefulSet turns
+ * volumeClaimTemplates into PVCs.
+ */
+export function isDeletedBySecretDenialTeardown(workload: WorkloadDef): boolean {
+  return workload.type !== 'statefulset'
+}
+
+/**
+ * Issue #1349 — true when no workload that names a Secret (`envSecret` or
+ * `imagePullSecrets`) is left deployed with it after the terminal teardown: each
+ * one is deleted by the terminal teardown ({@link isRemovedByTerminalRunTeardown})
+ * or is denied and deleted by the Secret-denial teardown
+ * ({@link isDeletedBySecretDenialTeardown}). A denied StatefulSet does not count:
+ * the denial teardown keeps it and re-renders it with its accessible refs. A
+ * workload whose Secret is accessible or missing and that the terminal teardown
+ * keeps makes it false.
+ */
+export function noSecretBearingWorkloadsRemain(
+  recipe: WorkflowRecipeCRD,
+  deniedWorkloadIds: ReadonlySet<string>
+): boolean {
+  return (recipe.spec.workloads ?? [])
+    .filter(w => Boolean(w.envSecret?.name) || (w.imagePullSecrets?.length ?? 0) > 0)
+    .every(
+      w =>
+        isRemovedByTerminalRunTeardown(w) ||
+        (deniedWorkloadIds.has(w.id) && isDeletedBySecretDenialTeardown(w))
+    )
+}
+
+/** Issue #637 — outcome of the steady-state Secret ownership enforcer. */
+interface SteadyOwnershipOutcome {
+  conditions: StatusCondition[]
+  hadDenied: boolean
+  needsRequeue: boolean
+  requeueReason?: string
+  /**
+   * Issue #1349 — the denied workloads were torn down, but this pass's revocation
+   * record was not stored: the denial is published and the pass requeues.
+   */
+  revocationRecordPending: boolean
+  /**
+   * Workloads denied in this pass. When `hadDenied`, each was torn down in this
+   * pass or under a recorded revocation of the same denial. Empty otherwise.
+   */
+  deniedWorkloadIds: ReadonlySet<string>
+}
+
+/**
+ * Issue #637 — shape a steady enforcer outcome into the `ReconcileResult` a
+ * short-circuit returns, or `null` to let it fall through to its steady return.
+ */
+function steadyOwnershipResult(
+  outcome: SteadyOwnershipOutcome,
+  phase: RecipePhase
+): ReconcileResult | null {
+  if (outcome.needsRequeue) {
+    // Could not verify or could not tear down — requeue (transient) rather than
+    // report a clean or revoked status. `skipStatusPatch` + `requeueAfterMs`
+    // schedules a deterministic retry without writing a misleading condition.
+    return {
+      phase,
+      message: `EnvSecretOwnershipDenied recheck deferred: ${outcome.requeueReason} — requeuing`,
+      workloadStatuses: [],
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+      skipStatusPatch: true,
+    }
+  }
+  if (outcome.hadDenied) {
+    return {
+      phase,
+      message: 'EnvSecretOwnershipDenied: foreign Secret ref revoked on steady workflow',
+      workloadStatuses: [],
+      secretOwnershipConditions: outcome.conditions,
+      ...(outcome.revocationRecordPending ? { requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS } : {}),
+    }
+  }
+  return null
+}
+
+/**
+ * A workflow latched `failed` by a transient infra error skips the terminal
+ * block and is handed to the inner reconciler as `recovering`. Policy failures
+ * never self-heal: their message embeds operator-controlled workload fields.
+ * For a workflow the real error is on `workflowExecution.message` (the top-level
+ * message is just "Workflow failed"), so both messages are checked.
+ */
+export function isWorkflowLatchedByTransientError(recipe: WorkflowRecipeCRD): boolean {
+  const currentPhase = recipe.status?.phase ?? 'candidate'
+  return (
+    currentPhase === 'failed' &&
+    !recipe.status?.message?.startsWith('Policy violation:') &&
+    (isRetryableInfraError(recipe.status?.message) ||
+      isRetryableInfraError(recipe.status?.workflowExecution?.message))
+  )
+}
+
+/**
+ * Issue #1349 — a patch response that lacks a status field the controller just
+ * sent means the cluster's WorkflowRecipe CRD is older than the controller and
+ * the apiserver pruned the field.
+ */
+export class StatusRecordPrunedError extends Error {
+  constructor(field: string) {
+    super(
+      `The WorkflowRecipe CRD on this cluster does not declare status.${field}; ` +
+        'apply the CRDs of this release (workflowrecipes.clerum.io) before this controller image'
+    )
+    this.name = 'StatusRecordPrunedError'
+  }
+}
+
+/**
+ * Issue #1349 — per-workload revocation gate. `digest` identifies the denial
+ * (denied Secret names and versions); `alreadyApplied` is true when
+ * `status.secretOwnershipRevocations[workloadId]` holds that same digest.
+ */
+interface SecretRevocationGate {
+  digest: string | undefined
+  alreadyApplied: boolean
 }
 
 function pendingTransportNetworkConditions(
@@ -2085,11 +2241,7 @@ export class WorkflowRecipeReconciler {
     // workload. Policy failures stay terminal until the spec is fixed (which
     // re-arms enforcement). The classifier is also anchored to transport-error
     // shapes (see isRetryableInfraError) so an embedded token can't match.
-    const latchedByTransientError =
-      currentPhase === 'failed' &&
-      !recipe.status?.message?.startsWith('Policy violation:') &&
-      (isRetryableInfraError(recipe.status?.message) ||
-        isRetryableInfraError(recipe.status?.workflowExecution?.message))
+    const latchedByTransientError = isWorkflowLatchedByTransientError(recipe)
 
     // ─── Workflow Detection — must come BEFORE non-deployable guard ────
     // Workflow recipes have their own lifecycle managed by the coordinator Pod.
@@ -2196,8 +2348,10 @@ export class WorkflowRecipeReconciler {
           // Issue #637 — this awaiting-trigger short-circuit also returns before the
           // Step 8 ownership gate, yet the recipe's envSecret/imagePullSecrets
           // workloads were already deployed on the first-deploy pass. Enforce
-          // revocation (teardown only, no redeploy) so a mid-life re-label is honored
-          // even while the workflow idles awaiting its trigger.
+          // revocation so a mid-life re-label is honored even while the workflow
+          // idles awaiting its trigger. Only denied workloads are touched: they are
+          // torn down, except a denied StatefulSet, which is kept and updated
+          // without the denied refs (see enforceActiveWorkflowSecretOwnership).
           const awaitOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, 'active')
           if (awaitOwnership) return awaitOwnership
           return {
@@ -2232,30 +2386,48 @@ export class WorkflowRecipeReconciler {
         // PRESERVE the artifact-reader pod, the workflow-output PVC, the
         // run-scoped CR, and the DB run history so /output artifacts stay
         // downloadable until the archive-cron deletes the CR.
-        await this.teardownTerminalRunComputeIfRunScoped(recipe)
+        // Issue #1349 — runs once per terminal entry: a completed teardown is
+        // recorded on the run CR and later passes skip it. A failed step (or a
+        // record that was not stored) is retried through a requeue.
+        const terminalTeardownSettled = await this.teardownTerminalRunComputeIfRunScoped(recipe)
         // Issue #637 — a terminal (completed/failed/cancelled) workflow that is NOT
         // run-scoped keeps its steady envSecret/imagePullSecrets workloads. Enforce
         // revocation on a mid-life re-label here too (run-scoped compute is already
         // torn down above; this teardown is idempotent/404-tolerant).
-        const terminalOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, derivedPhase)
-        if (terminalOwnership) return terminalOwnership
+        const ownershipOutcome = await this.enforceActiveWorkflowSecretOwnership(recipe)
+        // Issue #1349 — written before the denial return below, which is the
+        // common case for a run child whose Secrets all name the parent recipe.
+        const secretFactSettled = await this.recordNoSecretBearingWorkloads(
+          recipe,
+          ownershipOutcome
+        )
+        const withTeardownRetry = (result: ReconcileResult): ReconcileResult =>
+          (terminalTeardownSettled && secretFactSettled) || result.requeueAfterMs !== undefined
+            ? result
+            : { ...result, requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS }
+        const terminalOwnership = steadyOwnershipResult(ownershipOutcome, derivedPhase)
+        if (terminalOwnership) return withTeardownRetry(terminalOwnership)
         await this.settleNetworkPolicyMarkerForTerminalRun(recipe)
         // The recipe phase may remain active across running -> completed. Still
         // patch once if the top-level message is stale so UIs do not show a
         // completed execution as still running.
         if (currentPhase === derivedPhase) {
-          return {
+          return withTeardownRetry({
             phase: derivedPhase,
             message: derivedMessage,
             workloadStatuses: [],
             skipStatusPatch: recipe.status?.message === derivedMessage,
-          }
+          })
         }
         createLogger('wrc', recipe.metadata.name).info(
           'Transitioning recipe phase from workflow execution state',
           { name, wfExecPhase, currentPhase, derivedPhase }
         )
-        return { phase: derivedPhase, message: derivedMessage, workloadStatuses: [] }
+        return withTeardownRetry({
+          phase: derivedPhase,
+          message: derivedMessage,
+          workloadStatuses: [],
+        })
       }
 
       if (!this.workflowReconciler) {
@@ -2332,8 +2504,9 @@ export class WorkflowRecipeReconciler {
         await this.ensureSteadyWorkflowRuntimeCredentials(recipe, approvalScopeRecipeName)
         // Issue #637 — this short-circuit runs BEFORE the Step 8 ownership gate to
         // protect the coordinator 409-window. Enforce Secret-ownership revocation on
-        // the active workload(s) (teardown only, no redeploy) and re-seed the
-        // SecretReverseIndex for restart durability. Surface the denial so the
+        // the active workload(s) and re-seed the SecretReverseIndex for restart
+        // durability. Only denied workloads are touched: they are torn down, except
+        // a denied StatefulSet, which is kept and updated without the denied refs. Surface the denial so the
         // operator re-labels the Secret.
         const activeOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, 'active')
         if (activeOwnership) return activeOwnership
@@ -2492,6 +2665,10 @@ export class WorkflowRecipeReconciler {
       let workflowWorkloadConditions: StatusCondition[] | undefined
       let workflowTransportNetworkConditions: StatusCondition[] | undefined =
         workflowWorkloads.length === 0 ? [] : undefined
+      let workflowSecretRevocationRecordPending = false
+      // Issue #1349 (D4) — both creation sites (workflow workloads below and the
+      // inner reconcile) follow; the record must be gone before either runs.
+      await this.clearTerminalRunTeardownRecordBeforeDeploy(recipe)
       if (workflowWorkloads.length > 0) {
         createLogger('wrc', recipe.metadata.name).info('Deploying workflow workloads', {
           length: workflowWorkloads.length,
@@ -2510,6 +2687,8 @@ export class WorkflowRecipeReconciler {
           // workflow build path too; previously it was computed and dropped, so a
           // denied workflow workload degraded silently with no status condition.
           workflowSecretOwnershipConditions = workflowDeploy.secretOwnershipConditions
+          workflowSecretRevocationRecordPending =
+            workflowDeploy.secretRevocationRecordPending === true
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           const internalDependencyConditions =
@@ -2654,13 +2833,19 @@ export class WorkflowRecipeReconciler {
         // later reconcile() prune or the finalizer clears it. The
         // awaiting-trigger short-circuit does not reapply; the triggered run
         // applies them.
+        //
+        // Issue #1349 — a Secret revocation record that was not stored joins
+        // last, only when no other term set a requeue: the next pass repeats
+        // the revocation round and records it.
         requeueAfterMs: result.skipStatusPatch
           ? TRANSIENT_REQUEUE_BASE_MS
           : result.phase === 'deploying' ||
               result.pluginWorkloadSdkPolicyPending ||
               result.networkPolicyRetryPending
             ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS
-            : undefined,
+            : workflowSecretRevocationRecordPending
+              ? TRANSIENT_REQUEUE_BASE_MS
+              : undefined,
         requeueFixedInterval: !result.skipStatusPatch && result.phase === 'deploying',
         internalDependencyConditions: workflowInternalDependencyConditions,
         secretOwnershipConditions: workflowSecretOwnershipConditions,
@@ -2945,6 +3130,7 @@ export class WorkflowRecipeReconciler {
             `(transient read error) — requeuing before delegating or rendering workloads`
         )
       }
+      await this.clearSecretRevocationsBeforeRender(recipe, secretOwnership.deniedWorkloadIds)
 
       // Step 7b: Pre-deploy McpServer CRDs for network isolation (Option C handshake)
       // Creates McpServer CRDs with clerum.io/pre-deploy annotation BEFORE workload
@@ -3009,23 +3195,33 @@ export class WorkflowRecipeReconciler {
       // reuse that verdict so render and delegation share one source of truth.
       const workloadStatuses: ReconcileResult['workloadStatuses'] = []
       const workloadConditions: StatusCondition[] = []
-      // Issue #637 — set when a denied workload's teardown throws; drives a requeue
-      // (see requeueAfterMs at the return) so the revocation is retried deterministically
+      // Issue #637 — set when a denied workload's teardown throws, or when the update
+      // of a StatefulSet revoked earlier throws; drives a requeue (see requeueAfterMs at
+      // the return) so the failed step is retried deterministically: for a teardown,
       // instead of leaving a foreign-credentialed pod live until the next event.
       let deniedTeardownFailed = false
+      const revokedEntries: Record<string, string> = {}
       for (const workloadId of sortOrder) {
         const workload = (recipe.spec.workloads ?? []).find(w => w.id === workloadId)!
 
         if (secretOwnership.deniedWorkloadIds.has(workload.id)) {
           // Ownership-refused Secret ref — do not render. Tear down any prior
           // instance and surface the denial so the operator labels the Secret.
-          await this.teardownDeniedWorkload(workload, recipe, secretKeys).catch(err => {
+          const revocation = this.secretRevocationFor(recipe, workload, secretKeys)
+          try {
+            await this.teardownDeniedWorkload(workload, recipe, secretKeys, revocation)
+            if (!revocation.alreadyApplied && revocation.digest !== undefined) {
+              revokedEntries[workload.id] = revocation.digest
+            }
+          } catch (err) {
             deniedTeardownFailed = true
             createLogger('wrc', recipe.metadata.name).error(
-              'Teardown of denied workload failed; will requeue',
+              revocation.alreadyApplied
+                ? 'Update of a revoked StatefulSet failed; will requeue'
+                : 'Teardown of denied workload failed; will requeue',
               { id: workload.id, err }
             )
-          })
+          }
           workloadStatuses.push({
             id: workload.id,
             phase: 'failed',
@@ -3098,6 +3294,11 @@ export class WorkflowRecipeReconciler {
           })
         }
       }
+      // Issue #1349 — record the workloads revoked in this pass, also when another
+      // workload's teardown failed. A record that was not stored requeues the pass.
+      const secretRevocationRecordPending =
+        Object.keys(revokedEntries).length > 0 &&
+        !(await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries }))
 
       // Step 9: Create services for workloads with ports (no transport)
       for (const workload of recipe.spec.workloads ?? []) {
@@ -3367,6 +3568,7 @@ export class WorkflowRecipeReconciler {
         requeueAfterMs:
           legacyRawCleanupPending ||
           deniedTeardownFailed ||
+          secretRevocationRecordPending ||
           sdkOnlyRuntime?.phase === 'deploying' ||
           sdkOnlyRuntime?.phase === 'provider_unavailable' ||
           sdkOnlyPolicyPending ||
@@ -3861,6 +4063,8 @@ export class WorkflowRecipeReconciler {
     secretOwnershipConditions: StatusCondition[]
     workloadConditions: StatusCondition[]
     transportNetworkConditions?: StatusCondition[]
+    /** Issue #1349 — a revocation record was not stored; the caller requeues. */
+    secretRevocationRecordPending?: boolean
   }> {
     const workloads = recipe.spec.workloads ?? []
     if (workloads.length === 0)
@@ -3899,6 +4103,7 @@ export class WorkflowRecipeReconciler {
           `(transient read error) — requeuing before delegating or rendering workloads`
       )
     }
+    await this.clearSecretRevocationsBeforeRender(recipe, secretOwnership.deniedWorkloadIds)
 
     // Pre-deploy McpServer CRDs for network isolation.
     // MCP batch targets `this.config.namespace` (= mcp-server), not the
@@ -3966,29 +4171,52 @@ export class WorkflowRecipeReconciler {
     // manifests as an unrendered workload (its dependent steps fail to connect)
     // plus the per-workload log below, so the workflow degrades without leaking a
     // foreign credential.
+    const revokedEntries: Record<string, string> = {}
     for (const workloadId of sortOrder) {
       const workload = workloads.find(w => w.id === workloadId)!
       if (secretOwnership.deniedWorkloadIds.has(workload.id)) {
-        createLogger('wrc', recipe.metadata.name).error(
-          'Secret ownership denied for workflow workload',
-          {
-            workloadId,
-            name,
-            value3: secretOwnership.messageByWorkload.get(workloadId) ?? 'foreign Secret reference',
-          }
-        )
+        const revocation = this.secretRevocationFor(recipe, workload, secretKeys)
+        if (!revocation.alreadyApplied) {
+          createLogger('wrc', recipe.metadata.name).error(
+            'Secret ownership denied for workflow workload',
+            {
+              workloadId,
+              name,
+              value3:
+                secretOwnership.messageByWorkload.get(workloadId) ?? 'foreign Secret reference',
+            }
+          )
+        }
         try {
-          await this.teardownDeniedWorkload(workload, recipe, secretKeys)
+          await this.teardownDeniedWorkload(workload, recipe, secretKeys, revocation)
+          if (!revocation.alreadyApplied && revocation.digest !== undefined) {
+            revokedEntries[workload.id] = revocation.digest
+          }
         } catch (err) {
+          // Issue #1349 — record the workloads already revoked in this pass
+          // before failing it; the retry then repeats only the failed one. A
+          // failed record write needs nothing more: this pass requeues anyway.
+          if (Object.keys(revokedEntries).length > 0) {
+            await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries })
+          }
           // Issue #637 — fail-loud + fail-closed. A denied workflow workload whose
           // teardown failed must NOT be left as a silent swallow (the prior
           // foreign-credentialed pod may still be live). Degrade + requeue so the
           // steady-state ownership backstop (workflowNeedsOwnershipBackstop) and this
           // retry re-attempt the revocation. The caller's catch converts a
           // RetryableReconcileError into a degraded result that the watcher requeues.
+          // For a StatefulSet revoked in an earlier pass the failed step is its update:
+          // the credential is already gone. The pass stops here, as it does for a
+          // StatefulSet that is not denied (see the `statefulset` rethrow below), but
+          // the error is classified as retryable: the recipe is degraded and
+          // requeued, and an immutable drift does not set the StatefulSetImmutableDrift
+          // condition that the rethrow below produces.
           throw new RetryableReconcileError(
-            `Issue #637: teardown of denied workflow workload "${workloadId}" failed; ` +
-              `requeueing to retry revocation: ${err instanceof Error ? err.message : String(err)}`,
+            (revocation.alreadyApplied
+              ? `Issue #1349: update of revoked workflow StatefulSet "${workloadId}" failed; requeueing: `
+              : `Issue #637: teardown of denied workflow workload "${workloadId}" failed; ` +
+                'requeueing to retry revocation: ') +
+              (err instanceof Error ? err.message : String(err)),
             { cause: err }
           )
         }
@@ -4035,6 +4263,12 @@ export class WorkflowRecipeReconciler {
         }
       }
     }
+    // Issue #1349 — a record that was not stored does not fail the deploy: the
+    // caller keeps this pass's result and requeues, and the next pass repeats
+    // the revocation round.
+    const secretRevocationRecordPending =
+      Object.keys(revokedEntries).length > 0 &&
+      !(await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries }))
 
     // Create Services for workloads with ports
     for (const workload of workloads) {
@@ -4117,6 +4351,7 @@ export class WorkflowRecipeReconciler {
           internalDependencyConditions,
           secretOwnershipConditions: secretOwnership.conditions,
           workloadConditions: [],
+          secretRevocationRecordPending,
         }
       }
       try {
@@ -4152,6 +4387,7 @@ export class WorkflowRecipeReconciler {
       secretOwnershipConditions: secretOwnership.conditions,
       workloadConditions: [],
       transportNetworkConditions: [],
+      secretRevocationRecordPending,
     }
   }
 
@@ -4228,21 +4464,29 @@ export class WorkflowRecipeReconciler {
    * pluginWorkloadSdk hosts, trigger infrastructure, classic non-run recipes —
    * never carry that label and are left untouched.
    *
-   * Best-effort and idempotent: deleting already-gone pods is a 404 no-op, and
-   * any failure is logged + swallowed so the terminal status patch still lands.
+   * Idempotent: deleting already-gone pods is a 404 no-op. A failed step is
+   * logged and does not skip the others; the function then returns false and
+   * writes no record, so the caller requeues and the next pass repeats every
+   * step, while the terminal status patch still lands. A transport Deployment
+   * delete that fails with anything but a 404 throws, which fails its step.
    * NEVER deletes the artifact-reader, the PVC, the CR, or the DB run row — the
    * CR's finalizer cascade (reconcileDelete) at archive-cron TTL owns those.
    */
-  private async teardownTerminalRunComputeIfRunScoped(recipe: WorkflowRecipeCRD): Promise<void> {
+  private async teardownTerminalRunComputeIfRunScoped(recipe: WorkflowRecipeCRD): Promise<boolean> {
     const name = recipe.metadata.name
     const runId = recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()
-    if (!runId) return // not a run-scoped recipe — leave long-lived infra alone
+    if (!runId) return true // not a run-scoped recipe — leave long-lived infra alone
+    // Issue #1349 — this terminal entry's teardown already completed and is
+    // recorded on the run CR. The record is removed before any re-deploy, so
+    // nothing was created since; repeating the deletes would only re-send 404s.
+    if (hasTerminalRunTeardownRecord(recipe)) return true
 
     // Each step is independently best-effort: an error in one MUST NOT skip the
     // others (thermo-nuclear/sec-context-depth finding — a shared try would let
-    // a blip in step 1 leak the transport Deployment). All failures are logged
-    // and swallowed so the terminal status patch still lands; the archive-cron
-    // finalizer cascade is the backstop for anything left behind.
+    // a blip in step 1 leak the transport Deployment). Failures are logged, the
+    // terminal status patch still lands, and no record is written, so the caller
+    // requeues and the next pass repeats all three steps. The archive-cron
+    // finalizer cascade remains the backstop for anything left behind.
     const completed: string[] = []
     const failures: string[] = []
     const workflowReconciler = this.workflowReconciler
@@ -4261,6 +4505,10 @@ export class WorkflowRecipeReconciler {
           err: error,
         })
       }
+    } else {
+      // Without the workflow subsystem the compute pods were not deleted, so the
+      // teardown is not complete and must not be recorded as such.
+      failures.push('compute-pods(workflow subsystem not initialized)')
     }
 
     // 2. Cross-namespace transport runtime in mcp-server (e.g. web-search).
@@ -4305,9 +4553,214 @@ export class WorkflowRecipeReconciler {
         name,
         runId,
         value3: completed.join('; ') || 'nothing',
-        value4: failures.length ? `; failed (left for archive-cron) [${failures.join(', ')}]` : '',
+        value4: failures.length ? `; failed (retried on requeue) [${failures.join(', ')}]` : '',
       }
     )
+    if (failures.length > 0) return false
+
+    return this.publishStatusRecord(recipe, {
+      terminalRunTeardown: { completedAt: new Date().toISOString() },
+    })
+  }
+
+  /**
+   * Issue #1349 — write a record fragment (`terminalRunTeardown` and/or
+   * `secretOwnershipRevocations`) with a merge patch that names only that
+   * fragment, so no other status writer can strip it and it strips nothing.
+   * The `noSecretBearingWorkloads` fact has its own writer,
+   * {@link publishNoSecretBearingWorkloads}.
+   *
+   * The apiserver answers with the stored object. When a key that was sent is
+   * missing from the answer, the cluster's CRD predates these fields and the
+   * apiserver pruned them: that is reported as an error naming the CRD.
+   *
+   * Returns `true` only when the fragment is stored; the in-memory status is
+   * updated only then. A failure is logged here and never thrown: every caller
+   * asks for a requeue instead, so the pass keeps its result and its status patch.
+   */
+  private async publishStatusRecord(
+    recipe: WorkflowRecipeCRD,
+    fragment: {
+      terminalRunTeardown?: { completedAt: string }
+      secretOwnershipRevocations?: Record<string, string>
+    }
+  ): Promise<boolean> {
+    try {
+      const stored = (await this.customApi.patchNamespacedCustomObjectStatus(
+        {
+          group: CRD_GROUP,
+          version: CRD_VERSION,
+          namespace: recipe.metadata.namespace,
+          plural: WORKFLOWRECIPE_PLURAL,
+          name: recipe.metadata.name,
+          body: { status: fragment },
+        },
+        { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+      )) as WorkflowRecipeCRD | undefined
+      const storedStatus = stored?.status
+      // Presence and type, not equality: the readers only need the field to be
+      // there. The API server stores the date-time string as sent (`format` is
+      // validated, not rewritten), which the `test` op of
+      // publishNoSecretBearingWorkloads relies on.
+      for (const [key, value] of Object.entries(fragment.terminalRunTeardown ?? {})) {
+        const storedValue = (
+          storedStatus?.terminalRunTeardown as Record<string, unknown> | undefined
+        )?.[key]
+        if (typeof storedValue !== typeof value) {
+          throw new StatusRecordPrunedError(`terminalRunTeardown.${key}`)
+        }
+      }
+      for (const [key, value] of Object.entries(fragment.secretOwnershipRevocations ?? {})) {
+        if (storedStatus?.secretOwnershipRevocations?.[key] !== value) {
+          throw new StatusRecordPrunedError('secretOwnershipRevocations')
+        }
+      }
+    } catch (error) {
+      createLogger('wrc', recipe.metadata.name).error(
+        'Run status record was not stored; requeueing',
+        { name: recipe.metadata.name, value2: Object.keys(fragment).join(','), err: error }
+      )
+      return false
+    }
+
+    const status = (recipe.status ?? {}) as WorkflowRecipeStatus
+    if (fragment.terminalRunTeardown) {
+      status.terminalRunTeardown = {
+        ...status.terminalRunTeardown,
+        ...fragment.terminalRunTeardown,
+      } as WorkflowRecipeStatus['terminalRunTeardown']
+    }
+    if (fragment.secretOwnershipRevocations) {
+      status.secretOwnershipRevocations = {
+        ...status.secretOwnershipRevocations,
+        ...fragment.secretOwnershipRevocations,
+      }
+    }
+    recipe.status = status as typeof recipe.status
+    return true
+  }
+
+  /**
+   * Issue #1349 (D4) — remove the terminal teardown record before a run-scoped
+   * recipe can be deployed again (latched retry, coordinator `recovering`,
+   * admin retry), so the next terminal entry tears down what this pass creates.
+   *
+   * Reads the LIVE object: a pass can run on an object captured before the run
+   * turned terminal, and its in-memory status would not show the record. A failed
+   * read or patch propagates, so the pass stops before anything is created and
+   * the watcher retries it.
+   */
+  private async clearTerminalRunTeardownRecordBeforeDeploy(
+    recipe: WorkflowRecipeCRD
+  ): Promise<void> {
+    if (!recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()) return
+    const live = await this.readLiveRecipeForRecordClear(recipe)
+    if (!live) return
+    if (!live.status?.terminalRunTeardown) return
+
+    await this.customApi.patchNamespacedCustomObjectStatus(
+      {
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+        body: { status: { terminalRunTeardown: null } },
+      },
+      { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+    )
+    if (recipe.status) delete recipe.status.terminalRunTeardown
+    createLogger('wrc', recipe.metadata.name).info(
+      'Cleared terminal run teardown record before re-deploy',
+      { name: recipe.metadata.name }
+    )
+  }
+
+  /**
+   * Issue #1349 — remove the Secret revocation entry of every workload this pass
+   * is about to render (each workload it did not deny), before the first render
+   * or McpServer delegation. An entry means "torn down for this denial and not
+   * rendered with the denied refs since"; a render ends that, so a later denial of
+   * the same Secret version runs the teardown again instead of being skipped by
+   * the gate. A kept StatefulSet is still updated, without those refs, while its
+   * entry stands.
+   *
+   * Reads the LIVE object: the pass can run on an object whose in-memory status
+   * lacks an entry that is stored. A failed read or patch ends the pass with a
+   * requeue before anything is rendered. Whenever the live read returns the recipe
+   * and no patch failed, the in-memory entries of every rendered id are removed
+   * too, also when no stored entry needed a patch, so a stale in-memory entry
+   * cannot outlive the pass. When the live read finds the recipe gone, replaced or
+   * being deleted, nothing is cleared, in memory or stored.
+   */
+  private async clearSecretRevocationsBeforeRender(
+    recipe: WorkflowRecipeCRD,
+    deniedWorkloadIds: ReadonlySet<string>
+  ): Promise<void> {
+    const rendered = (recipe.spec.workloads ?? [])
+      .map(workload => workload.id)
+      .filter(id => !deniedWorkloadIds.has(id))
+    if (rendered.length === 0) return
+    try {
+      const live = await this.readLiveRecipeForRecordClear(recipe)
+      if (!live) return
+      const stored = live.status?.secretOwnershipRevocations ?? {}
+      const stale = rendered.filter(id => stored[id] !== undefined)
+      if (stale.length > 0) {
+        await this.customApi.patchNamespacedCustomObjectStatus(
+          {
+            group: CRD_GROUP,
+            version: CRD_VERSION,
+            namespace: recipe.metadata.namespace,
+            plural: WORKFLOWRECIPE_PLURAL,
+            name: recipe.metadata.name,
+            body: {
+              status: {
+                secretOwnershipRevocations: Object.fromEntries(stale.map(id => [id, null])),
+              },
+            },
+          },
+          { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+        )
+        createLogger('wrc', recipe.metadata.name).info(
+          'Removed Secret revocation records before re-render',
+          { name: recipe.metadata.name, value2: stale.join(', ') }
+        )
+      }
+    } catch (error) {
+      throw new RetryableReconcileError(
+        `Secret revocation record of WorkflowRecipe "${recipe.metadata.name}" could not be ` +
+          'cleared — requeuing before delegating or rendering workloads',
+        { cause: error }
+      )
+    }
+    const inMemory = recipe.status?.secretOwnershipRevocations
+    if (inMemory) for (const id of rendered) delete inMemory[id]
+  }
+
+  /**
+   * Issue #1349 — the live WorkflowRecipe for a status record clear, or null when
+   * it is gone (404), was replaced (another uid) or is being deleted. Any other
+   * read error propagates.
+   */
+  private async readLiveRecipeForRecordClear(
+    recipe: WorkflowRecipeCRD
+  ): Promise<WorkflowRecipeCRD | null> {
+    let live: WorkflowRecipeCRD
+    try {
+      live = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+      })) as WorkflowRecipeCRD
+    } catch (error) {
+      if (getErrorCode(error) === 404) return null
+      throw error
+    }
+    if (live.metadata?.uid !== recipe.metadata.uid || live.metadata?.deletionTimestamp) return null
+    return live
   }
 
   /**
@@ -4318,31 +4771,40 @@ export class WorkflowRecipeReconciler {
    * - Only workloads with a `transport` field (the MCP servers). Non-transport
    *   workloads are left to the CR finalizer's `cleanupDeclaredRuntimeResources`.
    * - StatefulSets and any workload declaring `volumeClaimTemplates` are SKIPPED
-   *   so a PVC-backed transport workload can never trigger data loss (#558).
+   *   (#558: never delete stateful data here). Only a StatefulSet turns
+   *   `volumeClaimTemplates` into PVCs; a workload of another type that declares
+   *   them is skipped as well (see {@link isRemovedByTerminalRunTeardown}).
    * - The resource name is the RUN-SCOPED name (`status.workloadInstances` /
    *   UID-derived hash via resolveWorkloadRuntimeResourceName), so a delete
    *   cannot reach a sibling run's or the parent recipe's workloads.
    * - The namespace is `resolveWorkloadNamespace(workload)` which, for transport
    *   workloads, is the mcp-server namespace.
-   * - `deleteWorkload`→`safeDelete` swallows 404, so this is idempotent and a
-   *   no-op once the Deployment is gone.
+   * - A 404 is success, so this is idempotent and a no-op once the Deployment
+   *   is gone.
    *
    * Returns the list of resolved Deployment names targeted (for logs). A
-   * non-404 delete error is logged by safeDelete and left for archive-cron.
+   * non-404 delete error does not stop the other workloads' deletes; after the
+   * loop the first such error is thrown, so the caller records no completed
+   * teardown and the next pass retries (issue #1349).
    */
   private async deleteTransportRuntimeWorkloads(recipe: WorkflowRecipeCRD): Promise<string[]> {
     const targeted: string[] = []
+    const errors: unknown[] = []
     for (const workload of recipe.spec.workloads ?? []) {
-      if (!workload.transport) continue
-      // Defense in depth: never delete a stateful/PVC-backed workload here.
-      if (workload.type === 'statefulset') continue
-      if ((workload as { volumeClaimTemplates?: unknown[] }).volumeClaimTemplates?.length) continue
+      // Skip what this teardown keeps: non-transport workloads, StatefulSets and
+      // workloads that declare volumeClaimTemplates.
+      if (!isRemovedByTerminalRunTeardown(workload)) continue
 
       const ns = this.resolveWorkloadNamespace(workload, recipe.spec.ui?.workloadRef)
       const resourceName = rb.resolveWorkloadRuntimeResourceName(recipe, workload)
-      await this.deleteWorkload(workload.type, resourceName, ns)
-      targeted.push(resourceName)
+      try {
+        await this.deleteWorkload(workload.type, resourceName, ns, { throwOnError: true })
+        targeted.push(resourceName)
+      } catch (error) {
+        errors.push(error)
+      }
     }
+    if (errors.length > 0) throw errors[0]
     return targeted
   }
 
@@ -4747,6 +5209,28 @@ export class WorkflowRecipeReconciler {
     return fields
   }
 
+  /**
+   * The desired pod template with the live template's
+   * `kubectl.kubernetes.io/restartedAt` carried over, on a copy, so the hashed
+   * manifest never contains it. `kubectl rollout restart` writes that annotation;
+   * a `replace /spec/template` without it would remove it and roll the Pods once
+   * more. Every other live-only template key is still dropped by the replace.
+   */
+  private withLiveRestartedAt(
+    desired: k8s.V1PodTemplateSpec | undefined,
+    existing: k8s.V1PodTemplateSpec | undefined
+  ): k8s.V1PodTemplateSpec | undefined {
+    const restartedAt = existing?.metadata?.annotations?.[RESTARTED_AT_ANNOTATION]
+    if (desired === undefined || restartedAt === undefined) return desired
+    return {
+      ...desired,
+      metadata: {
+        ...desired.metadata,
+        annotations: { ...desired.metadata?.annotations, [RESTARTED_AT_ANNOTATION]: restartedAt },
+      },
+    }
+  }
+
   private buildStatefulSetMutableSpecPatch(
     desired: k8s.V1StatefulSet,
     existing: k8s.V1StatefulSet
@@ -4760,14 +5244,15 @@ export class WorkflowRecipeReconciler {
     if (!this.equalComparable(desiredSpec.replicas, existingSpec.replicas)) {
       patch.replicas = desiredSpec.replicas
     }
+    const desiredTemplate = this.withLiveRestartedAt(desiredSpec.template, existingSpec.template)
     if (
-      desiredSpec.template !== undefined &&
+      desiredTemplate !== undefined &&
       !this.equalComparable(
-        this.normalizePodTemplate(desiredSpec.template),
+        this.normalizePodTemplate(desiredTemplate),
         this.normalizePodTemplate(existingSpec.template)
       )
     ) {
-      patch.template = desiredSpec.template
+      patch.template = desiredTemplate
     }
     for (const key of [
       'ordinals',
@@ -4811,7 +5296,8 @@ export class WorkflowRecipeReconciler {
   private async createOrPatchStatefulSet(
     statefulSet: k8s.V1StatefulSet,
     namespace: string,
-    name: string
+    name: string,
+    options: { ignoreSpecHash?: boolean } = {}
   ): Promise<void> {
     const desiredHash = stampSpecHash(statefulSet)
     let existing = await this.readStatefulSetIfPresent(name, namespace)
@@ -4842,7 +5328,14 @@ export class WorkflowRecipeReconciler {
         }
       }
     }
-    await this.reconcileExistingStatefulSet(statefulSet, existing, desiredHash, namespace, name)
+    await this.reconcileExistingStatefulSet(
+      statefulSet,
+      existing,
+      desiredHash,
+      namespace,
+      name,
+      options
+    )
   }
 
   /** The live StatefulSet, or null on a 404; every other read error is rethrown. */
@@ -4863,9 +5356,17 @@ export class WorkflowRecipeReconciler {
     existing: k8s.V1StatefulSet,
     desiredHash: string,
     namespace: string,
-    name: string
+    name: string,
+    options: { ignoreSpecHash?: boolean } = {}
   ): Promise<void> {
-    if (existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash) {
+    // `ignoreSpecHash` (the Secret-denial teardown only): the hash records which
+    // manifest WRC last sent, not what the API server stored. A template that an
+    // older strategic-merge patch left with leftovers carries the desired hash, so
+    // the revocation compares the templates instead of trusting it.
+    if (
+      !options.ignoreSpecHash &&
+      existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash
+    ) {
       createLogger('wrc', 'workflow-recipes').info(
         'StatefulSet spec hash unchanged; skipping update',
         { name, namespace }
@@ -4878,24 +5379,39 @@ export class WorkflowRecipeReconciler {
       throw this.immutableStatefulSetDriftError(name, namespace, immutableDriftFields)
     }
 
+    // A JSON Patch (RFC 6902), not a strategic merge: `replace /spec/template`
+    // substitutes the whole pod template, so an env entry, pull Secret or volume
+    // the desired template omits is removed. A strategic merge merges those lists
+    // by key and keeps what the patch omits. The patch is applied atomically, so
+    // the hash and the template land together. client-node 1.4.0 already defaults
+    // this operation to application/json-patch+json; the middleware keeps the
+    // content type explicit and independent of the client version. The stored
+    // `kubectl.kubernetes.io/restartedAt` annotation is the one exception: the patch
+    // value carries it over ({@link withLiveRestartedAt}).
     const specPatch = this.buildStatefulSetMutableSpecPatch(statefulSet, existing)
-    const patchBody: {
-      metadata: { annotations: Record<string, string> }
-      spec?: Record<string, unknown>
-    } = {
-      metadata: { annotations: { [SPEC_HASH_ANNOTATION]: desiredHash } },
+    const operations: Array<{ op: 'add' | 'replace'; path: string; value: unknown }> = []
+    for (const [key, value] of Object.entries(specPatch)) {
+      operations.push({ op: key === 'template' ? 'replace' : 'add', path: `/spec/${key}`, value })
     }
-    if (Object.keys(specPatch).length > 0) patchBody.spec = specPatch
+    operations.push(
+      existing.metadata?.annotations
+        ? {
+            op: 'add',
+            path: `/metadata/annotations/${jsonPointerToken(SPEC_HASH_ANNOTATION)}`,
+            value: desiredHash,
+          }
+        : {
+            op: 'add',
+            path: '/metadata/annotations',
+            value: { [SPEC_HASH_ANNOTATION]: desiredHash },
+          }
+    )
 
     await this.appsApi.patchNamespacedStatefulSet(
-      { name, namespace, body: patchBody },
-      {
-        middleware: [
-          k8s.setHeaderMiddleware('Content-Type', 'application/strategic-merge-patch+json'),
-        ],
-      }
+      { name, namespace, body: operations },
+      { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/json-patch+json')] }
     )
-    const patchKind = patchBody.spec ? 'metadata+mutable spec' : 'metadata'
+    const patchKind = Object.keys(specPatch).length > 0 ? 'metadata+mutable spec' : 'metadata'
     createLogger('wrc', 'workflow-recipes').info('Patched StatefulSet', {
       name,
       namespace,
@@ -6840,8 +7356,12 @@ export class WorkflowRecipeReconciler {
    * coordinator's 409-free window. That left a revocation hole: a Secret
    * re-labeled foreign mid-run was never torn down, because the SecretWatcher
    * fan-out routes through that same short-circuited reconcile. This helper runs
-   * ONLY the ownership gate + targeted teardown of denied workloads — it does NOT
-   * redeploy workloads or touch the coordinator, so the 409-window is preserved.
+   * ONLY the ownership gate + targeted teardown of denied workloads, so the
+   * 409-window is preserved: it does not touch the coordinator or any workload
+   * that is not denied. A denied StatefulSet is kept rather than deleted; the
+   * teardown re-renders it without the denied refs, and once its revocation is
+   * recorded each pass still applies spec changes to it through the spec-hash
+   * gate, so its Pods can roll mid-run.
    *
    * Calling `readReferencedSecrets` also re-seeds the `SecretReverseIndex`, so
    * watcher coverage survives a WRC restart for in-flight workflow recipes (the
@@ -6854,15 +7374,20 @@ export class WorkflowRecipeReconciler {
    * rather than silently skipping or — worse — reporting `hadDenied` (which would
    * write `EnvSecretOwnershipDenied=True` while the foreign credential is still
    * live because the delete actually failed). `hadDenied` is returned ONLY when
-   * every denied workload was torn down successfully.
+   * every denied workload was torn down successfully. Issue #1349 — when only the
+   * revocation record was not stored, `hadDenied` is returned with
+   * `revocationRecordPending`, so the denial is published and the pass requeues.
    */
-  private async enforceActiveWorkflowSecretOwnership(recipe: WorkflowRecipeCRD): Promise<{
-    conditions: StatusCondition[]
-    hadDenied: boolean
-    needsRequeue: boolean
-    requeueReason?: string
-  }> {
-    const clean = { conditions: [] as StatusCondition[], hadDenied: false, needsRequeue: false }
+  private async enforceActiveWorkflowSecretOwnership(
+    recipe: WorkflowRecipeCRD
+  ): Promise<SteadyOwnershipOutcome> {
+    const clean: SteadyOwnershipOutcome = {
+      conditions: [],
+      hadDenied: false,
+      needsRequeue: false,
+      revocationRecordPending: false,
+      deniedWorkloadIds: new Set(),
+    }
     const hasSecretRefs = (recipe.spec.workloads ?? []).some(
       w => !!w.envSecret?.name || (w.imagePullSecrets ?? []).length > 0
     )
@@ -6894,98 +7419,234 @@ export class WorkflowRecipeReconciler {
       }
     }
     if (secretOwnership.deniedWorkloadIds.size === 0) {
-      return { conditions: secretOwnership.conditions, hadDenied: false, needsRequeue: false }
+      return { ...clean, conditions: secretOwnership.conditions }
     }
 
     const failedTeardowns: string[] = []
+    // StatefulSets revoked in an earlier pass whose update to the current spec failed.
+    const failedUpdates: string[] = []
+    const revokedEntries: Record<string, string> = {}
     for (const workload of recipe.spec.workloads ?? []) {
       if (!secretOwnership.deniedWorkloadIds.has(workload.id)) continue
-      createLogger('wrc', recipe.metadata.name).warn(
-        'Revoking steady workflow workload because Secret access was denied',
-        {
-          id: workload.id,
-          name: recipe.metadata.name,
-          value3: secretOwnership.messageByWorkload.get(workload.id) ?? 'foreign Secret ref',
-        }
-      )
+      const revocation = this.secretRevocationFor(recipe, workload, secretKeys)
+      if (!revocation.alreadyApplied) {
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Revoking steady workflow workload because Secret access was denied',
+          {
+            id: workload.id,
+            name: recipe.metadata.name,
+            value3: secretOwnership.messageByWorkload.get(workload.id) ?? 'foreign Secret ref',
+          }
+        )
+      }
       try {
-        await this.teardownDeniedWorkload(workload, recipe, secretKeys)
+        await this.teardownDeniedWorkload(workload, recipe, secretKeys, revocation)
+        if (!revocation.alreadyApplied && revocation.digest !== undefined) {
+          revokedEntries[workload.id] = revocation.digest
+        }
       } catch (error) {
         // Teardown FAILED (e.g. RBAC 403 / apiserver 5xx). The foreign credential
         // is still live, so we must NOT report the workload as revoked. Requeue so
         // the next pass retries; the EnvSecretOwnershipDenied condition is written
-        // only once teardown actually succeeds.
-        failedTeardowns.push(workload.id)
+        // only once teardown actually succeeds. When the revocation was recorded in
+        // an earlier pass, the failed step is the update of the kept StatefulSet: the
+        // credential is already gone, and the pass is requeued so the update is
+        // retried.
+        ;(revocation.alreadyApplied ? failedUpdates : failedTeardowns).push(workload.id)
         createLogger('wrc', recipe.metadata.name).error(
-          'Denied workload teardown failed; requeueing',
+          revocation.alreadyApplied
+            ? 'Update of a revoked StatefulSet failed; requeueing'
+            : 'Denied workload teardown failed; requeueing',
           { id: workload.id, name: recipe.metadata.name, err: error }
         )
       }
     }
-    if (failedTeardowns.length > 0) {
+    // Issue #1349 — record the workloads revoked in this pass, also when another
+    // workload's teardown failed, so the next pass does not repeat them.
+    const revocationRecordStored =
+      Object.keys(revokedEntries).length === 0 ||
+      (await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries }))
+    if (failedTeardowns.length > 0 || failedUpdates.length > 0) {
       return {
         ...clean,
         needsRequeue: true,
-        requeueReason: `teardown failed for ${failedTeardowns.join(', ')}`,
+        requeueReason: [
+          ...(failedTeardowns.length > 0
+            ? [`teardown failed for ${failedTeardowns.join(', ')}`]
+            : []),
+          ...(failedUpdates.length > 0
+            ? [`update of revoked StatefulSet failed for ${failedUpdates.join(', ')}`]
+            : []),
+        ].join('; '),
       }
     }
-    return { conditions: secretOwnership.conditions, hadDenied: true, needsRequeue: false }
+    return {
+      conditions: secretOwnership.conditions,
+      hadDenied: true,
+      needsRequeue: false,
+      revocationRecordPending: !revocationRecordStored,
+      deniedWorkloadIds: secretOwnership.deniedWorkloadIds,
+    }
   }
 
   /**
    * Issue #637 — run steady-state ownership enforcement at a reconcile
    * short-circuit and convert the outcome into a `ReconcileResult` the caller
    * returns directly, or `null` to let the caller fall through to its normal
-   * (cheap) steady return. Centralizes the requeue/denial result shaping so all
-   * four steady short-circuits (awaiting-trigger, in-progress, active, terminal)
-   * stay fail-closed-consistent.
+   * (cheap) steady return. The result shaping is in `steadyOwnershipResult`: the
+   * awaiting-trigger, in-progress and active short-circuits call this wrapper,
+   * and the terminal block calls the enforcer and that function directly, so
+   * all four stay fail-closed-consistent.
    */
   private async revokeOrRequeueSteadyWorkflow(
     recipe: WorkflowRecipeCRD,
     phase: RecipePhase
   ): Promise<ReconcileResult | null> {
-    const outcome = await this.enforceActiveWorkflowSecretOwnership(recipe)
-    if (outcome.needsRequeue) {
-      // Could not verify or could not tear down — requeue (transient) rather than
-      // report a clean or revoked status. `skipStatusPatch` + `requeueAfterMs`
-      // schedules a deterministic retry without writing a misleading condition.
-      return {
-        phase,
-        message: `EnvSecretOwnershipDenied recheck deferred: ${outcome.requeueReason} — requeuing`,
-        workloadStatuses: [],
-        requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
-        skipStatusPatch: true,
-      }
+    return steadyOwnershipResult(await this.enforceActiveWorkflowSecretOwnership(recipe), phase)
+  }
+
+  /**
+   * Issue #1349 — after the terminal pass, record that no workload naming a Secret
+   * is left deployed with it, so the ownership backstop can skip this run child.
+   * Only the terminal block calls this, and only after the enforcer: the record
+   * lives inside `terminalRunTeardown`, which is removed before any re-deploy.
+   * The fact is added with a JSON Patch that the API server applies only while the
+   * stored `completedAt` is the one this pass holds
+   * ({@link publishNoSecretBearingWorkloads}).
+   * Returns false when the write was due and was not stored, so the caller requeues.
+   */
+  private async recordNoSecretBearingWorkloads(
+    recipe: WorkflowRecipeCRD,
+    outcome: SteadyOwnershipOutcome
+  ): Promise<boolean> {
+    if (!recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()) return true
+    const completedAt = recipe.status?.terminalRunTeardown?.completedAt
+    if (
+      typeof completedAt !== 'string' ||
+      outcome.needsRequeue ||
+      outcome.revocationRecordPending
+    ) {
+      return true
     }
-    if (outcome.hadDenied) {
-      return {
-        phase,
-        message: 'EnvSecretOwnershipDenied: foreign Secret ref revoked on steady workflow',
-        workloadStatuses: [],
-        secretOwnershipConditions: outcome.conditions,
-      }
+    if (recipe.status?.terminalRunTeardown?.noSecretBearingWorkloads === true) return true
+    const workloads = recipe.spec.workloads ?? []
+    if (!workloads.some(w => !!w.envSecret?.name || (w.imagePullSecrets ?? []).length > 0)) {
+      return true
     }
-    return null
+    if (!noSecretBearingWorkloadsRemain(recipe, outcome.deniedWorkloadIds)) return true
+    return this.publishNoSecretBearingWorkloads(recipe, completedAt)
+  }
+
+  /**
+   * Issue #1349 — add `noSecretBearingWorkloads` to the stored terminal teardown
+   * record, and only to the record this pass saw: a JSON Patch whose `test`
+   * operation requires the stored `completedAt` to be the one in memory. When the
+   * pass ran on an object read before a re-deploy removed the record, or before
+   * a later terminal entry wrote another one, the API server rejects the patch
+   * and nothing is written, so the fact is never stored without its record.
+   *
+   * Returns `true` only when the fact is stored; the in-memory status is updated
+   * only then. A failure is logged here and never thrown, as in
+   * {@link publishStatusRecord}: the caller asks for a requeue.
+   */
+  private async publishNoSecretBearingWorkloads(
+    recipe: WorkflowRecipeCRD,
+    completedAt: string
+  ): Promise<boolean> {
+    try {
+      const stored = (await this.customApi.patchNamespacedCustomObjectStatus(
+        {
+          group: CRD_GROUP,
+          version: CRD_VERSION,
+          namespace: recipe.metadata.namespace,
+          plural: WORKFLOWRECIPE_PLURAL,
+          name: recipe.metadata.name,
+          body: [
+            {
+              op: 'test',
+              path: '/status/terminalRunTeardown/completedAt',
+              value: completedAt,
+            },
+            {
+              op: 'add',
+              path: '/status/terminalRunTeardown/noSecretBearingWorkloads',
+              value: true,
+            },
+          ],
+        },
+        { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/json-patch+json')] }
+      )) as WorkflowRecipeCRD | undefined
+      if (stored?.status?.terminalRunTeardown?.noSecretBearingWorkloads !== true) {
+        throw new StatusRecordPrunedError('terminalRunTeardown.noSecretBearingWorkloads')
+      }
+    } catch (error) {
+      createLogger('wrc', recipe.metadata.name).error(
+        'Run status record was not stored; requeueing',
+        { name: recipe.metadata.name, value2: 'terminalRunTeardown', err: error }
+      )
+      return false
+    }
+    const status = recipe.status as WorkflowRecipeStatus
+    status.terminalRunTeardown = { completedAt, noSecretBearingWorkloads: true }
+    return true
+  }
+
+  /**
+   * Issue #1349 — the revocation gate of one denied workload. An entry is removed
+   * before its workload is rendered with the denied refs again
+   * ({@link clearSecretRevocationsBeforeRender}), so a stored entry means the
+   * workload was torn down for that denial and not rendered with the denied refs
+   * since. A kept StatefulSet is still updated, without those refs, while its
+   * entry stands. A later denial of a re-labeled Secret carries another
+   * resourceVersion, hence another digest.
+   */
+  private secretRevocationFor(
+    recipe: WorkflowRecipeCRD,
+    workload: WorkloadDef,
+    secretKeys: rb.SecretKeysByName
+  ): SecretRevocationGate {
+    const refNames = [
+      ...(workload.envSecret?.name ? [workload.envSecret.name] : []),
+      ...(workload.imagePullSecrets ?? []),
+    ]
+    const digest = deniedSecretRevocationDigest(refNames, secretKeys)
+    return {
+      digest,
+      alreadyApplied:
+        digest !== undefined && recipe.status?.secretOwnershipRevocations?.[workload.id] === digest,
+    }
   }
 
   /**
    * Fail-closed teardown of a workload whose Secret ref is ownership-denied.
-   * Stateful/PVC-backed workloads are NOT deleted (data-loss guard, parity with
-   * deleteTransportRuntimeWorkloads) — they are left NotReady and the operator
-   * must rotate the (potentially compromised) Secret; see plan §10.
+   * Only a StatefulSet is kept (data-loss guard: its PVCs hold data, see
+   * {@link isDeletedBySecretDenialTeardown}); it is re-rendered without the
+   * denied refs and its Pods are restarted. Every other type is deleted. The
+   * operator must still rotate the (potentially compromised) Secret.
+   *
+   * Issue #1349 — `revocation` is this workload's gate (see
+   * {@link secretRevocationFor}). A denial already revoked under the same digest
+   * is not torn down again: a deleted workload stays deleted, and a kept
+   * StatefulSet is only brought up to date with the spec through the spec-hash
+   * gate, with no Pod delete. A steady denial is therefore revoked once per denied
+   * Secret version instead of on every pass. A failed update propagates like a
+   * failed teardown, and the caller requeues.
    */
   private async teardownDeniedWorkload(
     workload: WorkloadDef,
     recipe: WorkflowRecipeCRD,
-    secretKeys: rb.SecretKeysByName
+    secretKeys: rb.SecretKeysByName,
+    revocation: SecretRevocationGate
   ): Promise<void> {
+    // A workload the teardown deletes stays deleted while its record stands.
+    if (revocation.alreadyApplied && isDeletedBySecretDenialTeardown(workload)) return
     // Issue #637 — for transport workloads the McpServer CRD + transport Service
     // (in mcp-server) carry the projected envSecret/imagePullSecrets to HCC. The
     // create-time skip only stops NEW foreign refs; on REVOCATION an already
     // materialized McpServer CRD keeps feeding the foreign credential until it is
     // removed. These objects are not stateful, so this runs even when the workload
-    // itself is PVC-backed and left running below. Idempotent (404-tolerant).
-    if (workload.transport) {
+    // itself is a StatefulSet, which is kept below. Idempotent (404-tolerant).
+    if (!revocation.alreadyApplied && workload.transport) {
       await deleteTransportDelegation(this.delegationDeps, recipe, workload, this.config.namespace)
     }
     const ns = this.resolveWorkloadNamespace(workload, recipe.spec.ui?.workloadRef)
@@ -6995,25 +7656,44 @@ export class WorkflowRecipeReconciler {
     // StatefulSet without the denied Secret ref (buildEnvVars drops a 'denied'
     // secretKeyRef) and delete ONLY the managed Pod(s) so they restart from the
     // credential-free template. This stops continued injection; the operator must
-    // still rotate the (potentially compromised) Secret to fully remediate.
-    if (workload.type === 'statefulset') {
+    // still rotate the (potentially compromised) Secret to fully remediate. The
+    // revocation's re-render ignores the spec hash: a template an older
+    // strategic-merge patch left with the foreign refs carries the desired hash, so
+    // the templates are compared and the whole template is replaced when they differ.
+    if (!isDeletedBySecretDenialTeardown(workload)) {
+      // Issue #1349 — a StatefulSet that was never deployed has nothing to
+      // re-render and no Pod to restart. Read it first: ensureStatefulSet creates
+      // the headless Service and the StatefulSet when they are absent.
+      const existing = await this.readStatefulSetIfPresent(
+        rb.resolveStatefulSetResourceName(recipe, workload.id),
+        ns
+      )
+      if (!existing) return
       const isolationLevel: SecurityIsolationLevel =
         recipe.spec.security?.isolationLevel ?? 'minimal'
-      await this.ensureStatefulSet(workload as StatefulSetDef, recipe, isolationLevel, secretKeys)
-      await this.deleteStatefulSetManagedPods(workload as StatefulSetDef, recipe, ns)
+      // A StatefulSet revoked earlier under this digest keeps following the spec:
+      // the update goes through the spec-hash gate like any other StatefulSet
+      // (an unchanged spec writes nothing) and the StatefulSet controller rolls
+      // the Pods. Only the revocation itself ignores the hash and deletes the Pods.
+      await this.ensureStatefulSet(workload as StatefulSetDef, recipe, isolationLevel, secretKeys, {
+        ignoreSpecHash: !revocation.alreadyApplied,
+      })
+      if (!revocation.alreadyApplied) {
+        await this.deleteStatefulSetManagedPods(workload as StatefulSetDef, recipe, ns)
+      }
       return
     }
-    // A non-StatefulSet workload that nonetheless declares volumeClaimTemplates is
-    // malformed for K8s; keep the data-loss guard rather than guess a safe re-render.
-    if ((workload as { volumeClaimTemplates?: unknown[] }).volumeClaimTemplates?.length) return
 
+    // Issue #1349 — every other type is deleted, including one that declares
+    // volumeClaimTemplates: only buildStatefulSet turns them into PVCs, so there
+    // is no data to protect.
     const resourceName = rb.resolveWorkloadRuntimeResourceName(recipe, workload)
     // Issue #637 — throwOnError so a non-404 delete failure (RBAC 403 / apiserver 5xx)
-    // PROPAGATES: the denied-workload teardown callers (deploy non-workflow ~1879,
-    // deploy workflow ~2632, steady enforcer ~3997) requeue and retry instead of
-    // writing a false "revoked" status over a still-live foreign credential. Brings
-    // Deployment/CronJob/Job/DaemonSet to parity with the StatefulSet/transport paths,
-    // which already re-throw non-404.
+    // PROPAGATES: the denied-workload teardown callers (the non-workflow deploy path
+    // in reconcileInternal, deployWorkflowWorkloads and enforceActiveWorkflowSecretOwnership)
+    // requeue and retry instead of writing a false "revoked" status over a still-live
+    // foreign credential. Brings Deployment/CronJob/Job/DaemonSet to parity with the
+    // StatefulSet/transport paths, which already re-throw non-404.
     await this.deleteWorkload(workload.type, resourceName, ns, { throwOnError: true })
   }
 
@@ -7087,7 +7767,8 @@ export class WorkflowRecipeReconciler {
     w: StatefulSetDef,
     recipe: WorkflowRecipeCRD,
     level: SecurityIsolationLevel,
-    secretKeys?: rb.SecretKeysByName
+    secretKeys?: rb.SecretKeysByName,
+    options: { ignoreSpecHash?: boolean } = {}
   ): Promise<void> {
     const { statefulSet, headlessService } = rb.buildStatefulSet(w, recipe, level, secretKeys, {
       pluginWorkloadSdkEnabled: this.config.pluginWorkloadSdkEnabled,
@@ -7130,9 +7811,10 @@ export class WorkflowRecipeReconciler {
       }
     )
     // Then StatefulSet. StatefulSet immutable fields cannot be full-replaced
-    // safely once PVC-backed workloads exist; patch only mutable fields and
-    // surface immutable drift as status instead of retrying a doomed PUT.
-    await this.createOrPatchStatefulSet(statefulSet, ns, stsName)
+    // safely once PVC-backed workloads exist; patch only mutable fields (the pod
+    // template is replaced whole with a JSON Patch) and surface immutable drift
+    // as status instead of retrying a doomed PUT.
+    await this.createOrPatchStatefulSet(statefulSet, ns, stsName, options)
   }
 
   private statefulSetPvcNames(workload: StatefulSetDef, statefulSetName: string): string[] {

@@ -9,6 +9,7 @@ import {
   sumProviderCounts,
   syncResultCase,
   syncResultLegacyCase,
+  syncResultWithReEnable,
 } from '../../test/fixtures/llmCatalogSyncResult'
 import { catalogPolicyCase } from '../../test/fixtures/llmProviderCatalogPolicy'
 import { LlmDiscoveryPanel } from '../LlmDiscoveryPanel'
@@ -157,9 +158,27 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Enable OpenAI/gpt-5' }))
 
     await waitFor(() =>
-      expect(api.updateLlmModel).toHaveBeenCalledWith('review-openai', { enabled: true })
+      expect(api.updateLlmModel).toHaveBeenCalledWith('review-openai', {
+        enabled: true,
+        pinEnabled: true,
+      })
     )
     expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('pins every model a bulk enable turns on', async () => {
+    const onRefresh = vi.fn().mockResolvedValue(undefined)
+    render(<LlmDiscoveryPanel items={[reviewModel]} loading={false} onRefresh={onRefresh} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select OpenAI/gpt-5' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable 1 selected' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable 1 models' }))
+
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.updateLlmModel).mock.calls).toEqual([
+      ['review-openai', { enabled: true, pinEnabled: true }],
+    ])
   })
 
   it('cancels a single-model confirmation without mutation', () => {
@@ -410,6 +429,23 @@ describe('LlmDiscoveryPanel sync feedback', () => {
     expect(notice()).toHaveAttribute('role', 'status')
     expect(notice()).toHaveTextContent(
       `${deferred} more new models were not added yet (auto-enable limit for this run reached); run the sync again to add them.`
+    )
+  })
+
+  it('reports rows the sync turned back on and those the cap held back', async () => {
+    const body = syncResultWithReEnable('decidable_auto_enabled', 'claude', {
+      reEnabled: 2,
+      reEnableDeferredByCap: 1,
+    })
+    useSyncCase(body)
+
+    const toast = await syncAndReadToast()
+
+    expect(toast).toHaveTextContent(
+      `Synced from live: +${body.added} new (${sumProviderCounts(body, 'autoEnabled')} enabled automatically), ${body.updated} updated, ${body.staled} marked stale, 2 turned back on. Enabled models are in the Catalog tab.`
+    )
+    expect(notice()).toHaveTextContent(
+      '1 model the catalog lists again was not turned back on yet (auto-enable limit for this run reached); run the sync again to finish.'
     )
   })
 

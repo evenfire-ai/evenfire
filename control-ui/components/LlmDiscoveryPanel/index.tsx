@@ -37,6 +37,12 @@ import { describeDiscoverySync } from '@lib/llmDiscoverySync'
 import type { DiscoverySyncNotice } from '@lib/llmDiscoverySync.types'
 import type { LlmDiscoveryPanelProps } from './types'
 
+// The queue lists disabled rows, including ones the catalog prune turned off.
+// The sync may turn such a row back on before the operator clicks; without the
+// pin, an enable that equals the stored value leaves the row to the sync, which
+// can prune it again.
+const ENABLE_PINNED = { enabled: true, pinEnabled: true } as const
+
 const CONFIGMAP_DEFERRED_WARNING =
   'Propagation to the cluster is delayed and will reconcile shortly.'
 
@@ -216,7 +222,7 @@ export function LlmDiscoveryPanel({
     setPendingId(model.id)
     setError('')
     try {
-      await updateLlmModel(model.id, { enabled: true })
+      await updateLlmModel(model.id, ENABLE_PINNED)
       await onRefresh()
       showToast(`${label} enabled.`, { tone: 'success' })
     } catch (caught) {
@@ -243,7 +249,7 @@ export function LlmDiscoveryPanel({
     let results: PromiseSettledResult<unknown>[] = []
     try {
       results = await Promise.allSettled(
-        targets.map(model => updateLlmModel(model.id, { enabled: true }))
+        targets.map(model => updateLlmModel(model.id, ENABLE_PINNED))
       )
       setSelectedIds(new Set())
       await onRefresh()
