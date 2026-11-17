@@ -3189,6 +3189,35 @@ export class WorkflowRecipeReconciler {
       }
       await this.clearSecretRevocationsBeforeRender(recipe, secretOwnership.deniedWorkloadIds)
 
+      // Issue #637 — revoke every denied workload before any workload is delegated
+      // or rendered, so a failed pre-deploy, a pending readiness wait or the stale
+      // check below cannot leave a foreign-credentialed pod live. A failed
+      // revocation does not stop the others and does not end the pass: the verdict
+      // still keeps the denied workloads out of delegation and render.
+      const revocationRound = await this.revokeDeniedWorkloads(
+        recipe,
+        secretKeys,
+        secretOwnership.deniedWorkloadIds,
+        {
+          firstRevocation: () => undefined,
+          failure: failure =>
+            createLogger('wrc', recipe.metadata.name).error(
+              failure.alreadyApplied
+                ? 'Update of a revoked StatefulSet failed; will requeue'
+                : 'Teardown of denied workload failed; will requeue',
+              { id: failure.workloadId, err: failure.error }
+            ),
+        }
+      )
+      // Issue #637 — set when a denied workload's teardown throws, or when the update
+      // of a StatefulSet revoked earlier throws; drives a requeue (see requeueAfterMs at
+      // the return) so the failed step is retried deterministically: for a teardown,
+      // instead of leaving a foreign-credentialed pod live until the next event.
+      const deniedTeardownFailed = revocationRound.failures.length > 0
+      // Issue #1349 — the round records the workloads it revoked, also when another
+      // workload's teardown failed. A record that was not stored requeues the pass.
+      const secretRevocationRecordPending = !revocationRound.revocationRecordStored
+
       // Step 7b: Pre-deploy McpServer CRDs for network isolation (Option C handshake)
       // Creates McpServer CRDs with clerum.io/pre-deploy annotation BEFORE workload
       // resources, so HCC can apply NetworkPolicies proactively. This closes the
@@ -3249,36 +3278,17 @@ export class WorkflowRecipeReconciler {
 
       // Step 8: Create workloads in dependency order. Secret ownership was already
       // classified and fail-closed up front (secretKeys / secretOwnership above);
-      // reuse that verdict so render and delegation share one source of truth.
+      // reuse that verdict so render and delegation share one source of truth. The
+      // denied workloads were already revoked right after the verdict.
       const workloadStatuses: ReconcileResult['workloadStatuses'] = []
       const workloadConditions: StatusCondition[] = []
-      // Issue #637 — set when a denied workload's teardown throws, or when the update
-      // of a StatefulSet revoked earlier throws; drives a requeue (see requeueAfterMs at
-      // the return) so the failed step is retried deterministically: for a teardown,
-      // instead of leaving a foreign-credentialed pod live until the next event.
-      let deniedTeardownFailed = false
-      const revokedEntries: Record<string, string> = {}
       for (const workloadId of sortOrder) {
         const workload = (recipe.spec.workloads ?? []).find(w => w.id === workloadId)!
 
         if (secretOwnership.deniedWorkloadIds.has(workload.id)) {
-          // Ownership-refused Secret ref — do not render. Tear down any prior
-          // instance and surface the denial so the operator labels the Secret.
-          const revocation = this.secretRevocationFor(recipe, workload, secretKeys)
-          try {
-            await this.teardownDeniedWorkload(workload, recipe, secretKeys, revocation)
-            if (!revocation.alreadyApplied && revocation.digest !== undefined) {
-              revokedEntries[workload.id] = revocation.digest
-            }
-          } catch (err) {
-            deniedTeardownFailed = true
-            createLogger('wrc', recipe.metadata.name).error(
-              revocation.alreadyApplied
-                ? 'Update of a revoked StatefulSet failed; will requeue'
-                : 'Teardown of denied workload failed; will requeue',
-              { id: workload.id, err }
-            )
-          }
+          // Ownership-refused Secret ref — do not render; the revocation round
+          // above already tore down any prior instance. Surface the denial so the
+          // operator labels the Secret.
           workloadStatuses.push({
             id: workload.id,
             phase: 'failed',
@@ -3351,11 +3361,6 @@ export class WorkflowRecipeReconciler {
           })
         }
       }
-      // Issue #1349 — record the workloads revoked in this pass, also when another
-      // workload's teardown failed. A record that was not stored requeues the pass.
-      const secretRevocationRecordPending =
-        Object.keys(revokedEntries).length > 0 &&
-        !(await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries }))
 
       // Step 9: Create services for workloads with ports (no transport)
       for (const workload of recipe.spec.workloads ?? []) {
@@ -7471,7 +7476,7 @@ export class WorkflowRecipeReconciler {
    * teardown re-renders it without the denied refs, and once its revocation is
    * recorded each pass still applies spec changes to it through the spec-hash
    * gate, so its Pods can roll mid-run. The teardown is the revocation round
-   * shared with the workflow deploy pass ({@link revokeDeniedWorkloads}).
+   * shared with the deploy passes ({@link revokeDeniedWorkloads}).
    *
    * Calling `readReferencedSecrets` also re-seeds the `SecretReverseIndex`, so
    * watcher coverage survives a WRC restart for in-flight workflow recipes (the
@@ -7836,10 +7841,9 @@ export class WorkflowRecipeReconciler {
     // is no data to protect.
     const resourceName = rb.resolveWorkloadRuntimeResourceName(recipe, workload)
     // Issue #637 — throwOnError so a non-404 delete failure (RBAC 403 / apiserver 5xx)
-    // PROPAGATES: the denied-workload teardown callers (the non-workflow deploy path
-    // in reconcileInternal, and revokeDeniedWorkloads, the round of deployWorkflowWorkloads
-    // and enforceActiveWorkflowSecretOwnership)
-    // requeue and retry instead of writing a false "revoked" status over a still-live
+    // PROPAGATES: the denied-workload teardown caller (revokeDeniedWorkloads, the
+    // revocation round of both deploy passes and enforceActiveWorkflowSecretOwnership)
+    // collects the failure, and its callers requeue and retry instead of writing a false "revoked" status over a still-live
     // foreign credential. Brings Deployment/CronJob/Job/DaemonSet to parity with the
     // StatefulSet/transport paths, which already re-throw non-404.
     await this.deleteWorkload(workload.type, resourceName, ns, { throwOnError: true })

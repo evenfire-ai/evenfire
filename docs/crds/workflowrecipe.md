@@ -862,7 +862,7 @@ which is deny-by-default), the reconciler **fails closed**: it does NOT render
 the offending workload, tears down any prior instance, and marks the recipe
 `NotReady` with an `EnvSecretOwnershipDenied` condition naming the Secret and the
 label to add. The credential is never injected into the workload's runtime.
-On a workflow deploy, every denied workload is revoked before any workload is
+On every deploy pass, every denied workload is revoked before any workload is
 delegated or rendered, and a failed revocation does not stop the others.
 
 Enforcement points: the WRC reconciler is authoritative (it sees every reconcile

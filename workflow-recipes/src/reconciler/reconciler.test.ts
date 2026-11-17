@@ -12842,9 +12842,9 @@ describe('WorkflowRecipeReconciler', () => {
       expect(second.requeueAfterMs).toBeUndefined()
     })
 
-    // Row (c) — a workflow deploy pass revokes every denied workload before it
-    // delegates or renders anything, and a failed revocation does not stop the
-    // others. Each pass is driven as the watcher drives it.
+    // Row (c) — a deploy pass revokes every denied workload before it delegates or
+    // renders anything, and a failed revocation does not stop the others. Each
+    // pass is driven as the watcher drives it.
     describe('row (c): a failed revocation does not stop the other denied workloads', () => {
       type RecipeStore = ReturnType<typeof installRecipeStore>
 
@@ -13147,11 +13147,199 @@ describe('WorkflowRecipeReconciler', () => {
         ])
         expect(inner.reconcile).toHaveBeenCalledTimes(2)
       })
+
+      // The non-workflow pass revokes the denied workloads right after the verdict
+      // too, before MCP pre-deploy, the readiness wait and the stale check. A
+      // failed revocation does not end that pass: it continues and requeues.
+      describe('non-workflow pass', () => {
+        const webSearch = {
+          id: 'web-search',
+          type: 'deployment',
+          image: 'clerum/web-search:test',
+          port: 3000,
+          transport: { type: 'streamableHttp', path: '/mcp' },
+        } as WorkloadDef
+        const transportRecipe = () =>
+          makeRecipe({
+            spec: {
+              contextRef: 'default',
+              workloads: [deniedDeployment('qa-api', 'qa-creds'), webSearch],
+            },
+          })
+        const preDeployCalls = () => mockCustomApi.replaceNamespacedCustomObject.mock.calls.length
+        const mcpServerWrites = () =>
+          [
+            ...mockCustomApi.createNamespacedCustomObject.mock.calls,
+            ...mockCustomApi.replaceNamespacedCustomObject.mock.calls,
+          ].filter(([arg]) => arg?.plural === 'mcpservers').length
+
+        afterEach(() => {
+          mockCustomApi.replaceNamespacedCustomObject.mockReset().mockResolvedValue({})
+        })
+
+        it('T-ROWC-NW-1: a denied workload is torn down although MCP pre-deploy fails on every pass', async () => {
+          denySecrets({ 'qa-creds': '7' })
+          mockCustomApi.replaceNamespacedCustomObject.mockRejectedValue(
+            new Error('API unavailable')
+          )
+          const store = installRecipeStore(transportRecipe())
+
+          // Pass 1: pre-deploy fails after the revocation.
+          const first = await pass(store)
+
+          expect(preDeployCalls()).toBeGreaterThan(0)
+          expect(first.result.phase).toBe('degraded')
+          expect(first.result.message).toContain(
+            'Pre-deploy failed for WorkflowRecipe "test-recipe"'
+          )
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+
+          // Pass 2: pre-deploy fails again; nothing is torn down or recorded again.
+          mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+          const preDeployBefore2 = preDeployCalls()
+          const secretReadsBefore2 = secretReads()
+          const second = await pass(store)
+
+          expect(preDeployCalls()).toBeGreaterThan(preDeployBefore2)
+          expect(secretReads()).toBeGreaterThan(secretReadsBefore2)
+          expect(second.result.message).toContain(
+            'Pre-deploy failed for WorkflowRecipe "test-recipe"'
+          )
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocationPatches()).toHaveLength(0)
+
+          // Pass 3: pre-deploy succeeds; the denied workload is skipped, the
+          // transport workload is rendered.
+          mockCustomApi.replaceNamespacedCustomObject.mockResolvedValue({})
+          const preDeployBefore3 = preDeployCalls()
+          const third = await pass(store)
+
+          expect(preDeployCalls()).toBeGreaterThan(preDeployBefore3)
+          expect(deploymentWrites('web-search')).toBeGreaterThan(0)
+          expect(third.result.workloadStatuses).toContainEqual(
+            expect.objectContaining({
+              id: 'qa-api',
+              phase: 'failed',
+              message: expect.stringMatching(/^EnvSecretOwnershipDenied: /),
+            })
+          )
+          expect(deniedCondition(third.result)).toBe('True')
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(deploymentWrites('qa-api')).toBe(0)
+        })
+
+        it('T-ROWC-NW-2: a denied workload is torn down although the readiness wait fails', async () => {
+          denySecrets({ 'qa-creds': '7' })
+          const readinessWait = vi
+            .spyOn(
+              reconciler as unknown as {
+                waitForTransportNetworkReadiness: (...args: unknown[]) => Promise<void>
+              },
+              'waitForTransportNetworkReadiness'
+            )
+            .mockRejectedValue(new Error('network isolation was never confirmed'))
+          const store = installRecipeStore(transportRecipe())
+
+          const { result } = await pass(store)
+          const readinessWaits = readinessWait.mock.calls.length
+          readinessWait.mockRestore()
+
+          // Witness: pre-deploy succeeded and the pass reached the wait.
+          expect(readinessWaits).toBe(1)
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+          expect(result.phase).toBe('failed')
+          expect(store.current().status?.phase).toBe('failed')
+        })
+
+        it('T-ROWC-NW-3: a denied workload is torn down although the recipe is deleting at the stale check', async () => {
+          denySecrets({ 'qa-creds': '7' })
+          let recipeReads = 0
+          let deletingReads = 0
+          // The recipe is answered as deleting once the McpServers were
+          // pre-deployed, so only the stale check after pre-deploy sees it; the
+          // first check of the pass and the record-clear read get the live recipe.
+          const store = installRecipeStore(transportRecipe(), {
+            onGet: stored => {
+              recipeReads += 1
+              if (mcpServerWrites() === 0) return undefined
+              deletingReads += 1
+              return {
+                ...stored,
+                metadata: { ...stored.metadata, deletionTimestamp: '2026-11-17T00:00:00Z' },
+              }
+            },
+          })
+
+          const { result } = await pass(store)
+
+          expect(recipeReads).toBeGreaterThanOrEqual(2)
+          expect(deletingReads).toBe(1)
+          expect(mcpServerWrites()).toBeGreaterThan(0)
+          expect(result.message).toBe(
+            'Recipe deleted during reconcile; skipped post-network materialization'
+          )
+          expect(result.skipStatusPatch).toBe(true)
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+        })
+
+        it('T-ROWC-NW-4: a failed revocation does not stop the others and the pass continues and requeues', async () => {
+          denySecrets({ 'db-creds': '7', 'qa-creds': '7' })
+          const okWorkload = { id: 'ok-api', type: 'deployment', image: 'ok:test' } as WorkloadDef
+          const recipe = deniedStatefulSetRecipe('non-workflow deploy', [
+            db(),
+            deniedDeployment('qa-api', 'qa-creds'),
+            okWorkload,
+          ])
+          const name = await storeCredentialedStatefulSet(recipe)
+          const namespace = recipe.metadata.namespace
+          const drifted = (await mockAppsApi.readNamespacedStatefulSet({
+            name,
+            namespace,
+          })) as k8s.V1StatefulSet
+          drifted.spec!.serviceName = 'renamed-by-hand'
+          await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: drifted })
+          const store = installRecipeStore(recipe)
+          const dbReadsBefore = statefulSetReadsOf(name)
+          const errorLog = captureLogger('error')
+
+          const { result } = await pass(store)
+          const errors = errorLog.mock.calls.map(([message, context]) => [
+            message,
+            (context as { err?: Error } | undefined)?.err?.name,
+          ])
+          errorLog.mockRestore()
+
+          // Witness: db was read and its revocation was refused for the drift.
+          expect(statefulSetReadsOf(name)).toBeGreaterThan(dbReadsBefore)
+          expect(errors).toContainEqual([
+            'Teardown of denied workload failed; will requeue',
+            'ImmutableStatefulSetDriftError',
+          ])
+          expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
+          expect(mockCoreApi.deleteCollectionNamespacedPod).not.toHaveBeenCalled()
+          expect(deploymentDeletes('qa-api')).toBe(1)
+          expect(revocations(store)['qa-api']).toMatch(/^sha256:[0-9a-f]{64}$/)
+          expect(revocations(store)).not.toHaveProperty('db')
+          expect(deploymentWrites('ok-api')).toBe(1)
+          expect(result.workloadStatuses?.map(status => status.id).sort()).toEqual([
+            'db',
+            'ok-api',
+            'qa-api',
+          ])
+          expect(result.phase).toBe('degraded')
+          expect(deniedCondition(result)).toBe('True')
+          expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        })
+      })
     })
 
     // R1-M1 — a denied StatefulSet is kept, and after its revocation is recorded
     // it keeps following the spec through the spec-hash gate: no second Pod
-    // delete, no record write. The three callers of teardownDeniedWorkload.
+    // delete, no record write. The three callers of the revocation round
+    // (revokeDeniedWorkloads), which calls teardownDeniedWorkload.
     const DENIED_CALLERS = ['non-workflow deploy', 'workflow deploy', 'steady enforcer'] as const
     type DeniedCaller = (typeof DENIED_CALLERS)[number]
 
