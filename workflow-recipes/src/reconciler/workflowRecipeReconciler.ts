@@ -109,7 +109,6 @@ import {
   getErrorCode,
   isRetryableInfraError,
 } from './k8sErrors'
-import { canonicalKubernetesQuantity } from './kubernetesQuantity'
 import {
   DelegationDeps,
   cleanupDelegation,
@@ -5128,14 +5127,6 @@ export class WorkflowRecipeReconciler {
       if (spec?.volumeMode === 'Filesystem') delete spec.volumeMode
       if (Array.isArray(spec.accessModes)) {
         spec.accessModes = [...spec.accessModes].sort()
-      }
-      // The API server stores a quantity in its canonical spelling (`1024Mi` is
-      // stored as `1Gi`), so the storage request is compared by amount.
-      const requests = (spec.resources as { requests?: Record<string, unknown> } | undefined)
-        ?.requests
-      if (requests && typeof requests.storage === 'string') {
-        const amount = canonicalKubernetesQuantity(requests.storage)
-        if (amount !== undefined) requests.storage = amount
       }
       return {
         metadata: { name: metadata.name },
