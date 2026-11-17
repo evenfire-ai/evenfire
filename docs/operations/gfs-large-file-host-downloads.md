@@ -508,8 +508,9 @@ channel-reader sends every tool approval once and does not measure or split
 it: as an edit of the status message, or as one reply when the Host answers
 synchronously. On Telegram a synchronous reply over 4096 characters is split by
 the adapter into several messages, with the buttons on the first; an edited
-card over 4096 characters is cut to 4093 and "...". Only a very long workflow
-name reaches either. channel-reader registers an approval before the channel
+card over 4096 characters is cut to 4093 and "...". A very long workflow name
+reaches either, and so does a delete card admitted before the configured
+secrets or the approval policy changed (above). channel-reader registers an approval before the channel
 confirms that the card was shown. If the edit or the send fails, the error is
 only logged: the approval stays registered and is not denied, no card or
 button is shown, and a typed `/approve` from the same user still approves it.
