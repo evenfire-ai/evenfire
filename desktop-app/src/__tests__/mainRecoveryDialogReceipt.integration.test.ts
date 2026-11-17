@@ -88,7 +88,11 @@ const harness = vi.hoisted(() => {
   return state
 })
 
-vi.mock('electron', () => ({
+vi.mock('keytar', () => {
+  throw new Error('keytar is unavailable in this hermetic integration test')
+})
+
+vi.mock('electron', async () => ({
   BrowserWindow: class {
     constructor(options?: Record<string, unknown>) {
       return harness.createWindow?.(options)
@@ -133,6 +137,7 @@ vi.mock('electron', () => ({
   powerMonitor: { on: vi.fn() },
   Notification: vi.fn(),
   clipboard: { writeText: vi.fn() },
+  safeStorage: (await import('../../testSupport/electronStorageTestMocks.js')).safeStorage,
   dialog: { showSaveDialog: vi.fn(), showMessageBox: harness.showMessageBox },
 }))
 
