@@ -2,6 +2,7 @@
  * Configuration settings loaded from environment variables.
  */
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
+import { NETPOL_PASS_OVERRUN_WARN_MS } from './constants'
 import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
 import { ContextCRD, McpServerCRD } from './types'
 
@@ -104,7 +105,8 @@ export interface Config {
   hostPort: number
   hostConfigMapName: string
   hostServiceAccountName: string
-  hostWorkspaceStorageClassName: string
+  // Unset: the PVC omits storageClassName and the cluster default class applies.
+  hostWorkspaceStorageClassName: string | undefined
   hostWorkspaceStorageSize: string
   hostWorkspacePath: string
   hostResources: {
@@ -200,6 +202,22 @@ export interface Config {
   // Per-request deadline for finite Kubernetes calls on the serialized Host
   // convergence path. Watches keep their independent long-lived lifecycle.
   hostK8sRequestTimeoutMs: number
+
+  // Per-request deadline for finite Kubernetes calls made by the NetworkPolicy,
+  // McpServer runtime and binding reconcilers and by the watcher's shared
+  // McpServer/Context and Secret clients. Their work shares the keyed effect
+  // queues with the authoritative NetworkPolicy pass, so one request that never
+  // settles would hold that pass forever (#1338). Host work, including the Host
+  // convergence queued on the Context identity queue and the watcher's Host
+  // client, uses hostK8sRequestTimeoutMs instead. Watches keep their
+  // independent long-lived lifecycle.
+  k8sRequestTimeoutMs: number
+
+  // Hard bound for one NetworkPolicy convergence pass. A pass that exceeds it
+  // is logged with its phase and pending effect and the process exits so the
+  // container restarts; a pass that never settles otherwise blocks every later
+  // pass and keeps the provider inventory non-authoritative (#1338).
+  netPolPassHardLimitMs: number
 
   // Bounded cross-Host concurrency for a full/lifecycle Host fleet pass. Urgent
   // per-Host events (ADDED/MODIFIED/DELETED/wake) are admitted outside this
@@ -363,15 +381,70 @@ export function parseHeartbeatPollMs(raw: string | undefined): number {
   return parsed
 }
 
+// Node clamps a larger setTimeout delay to 1 ms, which would fire a deadline
+// or a hard limit immediately instead of never.
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+// Unset or "" means "not configured". Anything else must be plain decimal
+// digits: Number() also reads '3e4', '0x7530', '+30000', '30000.0' and a value
+// with surrounding white space, which the range checks cannot see.
+function plainPositiveIntegerOrDefault(raw: string | undefined, defaultValue: number): number {
+  if (raw === undefined || raw === '') return defaultValue
+  return /^[1-9]\d*$/.test(raw) ? Number(raw) : Number.NaN
+}
+
 export function parseHostK8sRequestTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined) return 30_000
-  const parsed = Number(raw)
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+  const parsed = plainPositiveIntegerOrDefault(raw, 30_000)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
     throw new Error(
-      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer (milliseconds), got '${raw}'`
+      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds in plain digits, got '${raw}'`
     )
   }
   return parsed
+}
+
+export function parseK8sRequestTimeoutMs(raw: string | undefined): number {
+  const parsed = plainPositiveIntegerOrDefault(raw, 30_000)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `HCC_K8S_REQUEST_TIMEOUT_MS must be a positive integer of at most ${MAX_TIMER_DELAY_MS} milliseconds in plain digits, got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+export function parseNetPolPassHardLimitMs(raw: string | undefined): number {
+  const parsed = plainPositiveIntegerOrDefault(raw, 30 * 60_000)
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed <= NETPOL_PASS_OVERRUN_WARN_MS ||
+    parsed > MAX_TIMER_DELAY_MS
+  ) {
+    throw new Error(
+      `HCC_NETPOL_PASS_HARD_LIMIT_MS must be an integer number of milliseconds above the ${NETPOL_PASS_OVERRUN_WARN_MS}ms overrun warning and at most ${MAX_TIMER_DELAY_MS}, in plain digits, got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+/**
+ * A request timeout at or above the pass hard limit can never fail the pass
+ * before the hard limit exits the process, so this refuses it at startup. It
+ * does not guarantee the converse: a request that starts late in a pass can
+ * still be running when the hard limit fires. Both deadlines can hold the pass:
+ * Host convergence queued on a Context identity uses the Host deadline.
+ */
+export function assertRequestTimeoutsBelowPassHardLimit(
+  timeouts: { name: string; valueMs: number }[],
+  netPolPassHardLimitMs: number
+): void {
+  for (const { name, valueMs } of timeouts) {
+    if (valueMs >= netPolPassHardLimitMs) {
+      throw new Error(
+        `${name} (${valueMs}ms) must be below HCC_NETPOL_PASS_HARD_LIMIT_MS (${netPolPassHardLimitMs}ms): a request that runs to its deadline would otherwise hold the pass to the hard limit and exit the process instead of failing the pass`
+      )
+    }
+  }
 }
 
 /**
@@ -579,6 +652,19 @@ export function validateExternalEgressResyncInvariant(cfg: {
   }
 }
 
+const hostK8sRequestTimeoutMs = parseHostK8sRequestTimeoutMs(
+  getEnv('HCC_HOST_K8S_REQUEST_TIMEOUT_MS')
+)
+const k8sRequestTimeoutMs = parseK8sRequestTimeoutMs(getEnv('HCC_K8S_REQUEST_TIMEOUT_MS'))
+const netPolPassHardLimitMs = parseNetPolPassHardLimitMs(getEnv('HCC_NETPOL_PASS_HARD_LIMIT_MS'))
+assertRequestTimeoutsBelowPassHardLimit(
+  [
+    { name: 'HCC_K8S_REQUEST_TIMEOUT_MS', valueMs: k8sRequestTimeoutMs },
+    { name: 'HCC_HOST_K8S_REQUEST_TIMEOUT_MS', valueMs: hostK8sRequestTimeoutMs },
+  ],
+  netPolPassHardLimitMs
+)
+
 export const config: Config = {
   devMode,
 
@@ -653,9 +739,15 @@ export const config: Config = {
   // (deploy/base/llm-hooks/networkpolicies.yaml: deny-all ingress + egress),
   // with per-pod-key ingress and scoped CoreDNS emitted by LlmHookReconciler
   // only for hooks that declare egressBindings.
+  //
+  // mcp-host is not listed either: it keeps static policies
+  // (deploy/base/mcp-host/networkpolicies.yaml) under the names HCC would
+  // write; they carry no HCC ownership label, so listing mcp-host makes HCC's
+  // startup NetworkPolicy pass fail on conflicting ownership. The default
+  // equals the deploy/base value.
   runtimeNamespaces: getEnv(
     'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
-    'mcp-server,mcp-host,sandbox-recipes,rpc-proxy'
+    'mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui'
   )!.split(','),
 
   // DNS infrastructure CIDR for GKE NodeLocal DNSCache / kube-dns. Empty
@@ -668,8 +760,9 @@ export const config: Config = {
   // allow-k8s-api. Use this for namespaces whose pods are not K8s clients
   // and don't consume the HCC discovery API (e.g. third-party UI workloads
   // that only need to serve HTTP back to a single ingress source).
-  // Empty by default → all runtime namespaces get the full infra set.
-  minimalInfraNamespaces: getEnv('CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES', '')!
+  // Defaults to sandbox-ui, matching deploy/base. Set "" to give every runtime
+  // namespace the full infra set.
+  minimalInfraNamespaces: getEnv('CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES', 'sandbox-ui')!
     .split(',')
     .map(s => s.trim())
     .filter(s => s.length > 0),
@@ -705,14 +798,11 @@ export const config: Config = {
     | 'Always'
     | 'IfNotPresent'
     | 'Never',
-  hostImagePullSecretName: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', 'clerum')!,
+  hostImagePullSecretName: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', '')!,
   hostPort: getEnvInt('CONTEXT_MAPPER_HOST_PORT', 8080),
   hostConfigMapName: getEnv('CONTEXT_MAPPER_HOST_CONFIGMAP_NAME', 'mcp-host-config')!,
   hostServiceAccountName: getEnv('CONTEXT_MAPPER_HOST_SERVICE_ACCOUNT', 'mcp-host')!,
-  hostWorkspaceStorageClassName: getEnv(
-    'CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS',
-    'do-block-storage-retain'
-  )!,
+  hostWorkspaceStorageClassName: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS'),
   hostWorkspaceStorageSize: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_SIZE', '10Gi')!,
   hostWorkspacePath: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_PATH', '/workspace')!,
   hostResources: {
@@ -752,7 +842,7 @@ export const config: Config = {
     | 'Always'
     | 'IfNotPresent'
     | 'Never',
-  wfcImagePullSecretName: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET', 'clerum')!,
+  wfcImagePullSecretName: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET', '')!,
   wfcPort: getEnvInt('CONTEXT_MAPPER_WFC_PORT', 8086),
   wfcInitImage: getEnv('CONTEXT_MAPPER_WFC_INIT_IMAGE', 'busybox:1.36')!,
   wfcResources: {
@@ -832,7 +922,9 @@ export const config: Config = {
 
   // Every finite Kubernetes request that can hold Host convergence gets its
   // own deadline. Watch streams are intentionally excluded.
-  hostK8sRequestTimeoutMs: parseHostK8sRequestTimeoutMs(getEnv('HCC_HOST_K8S_REQUEST_TIMEOUT_MS')),
+  hostK8sRequestTimeoutMs,
+  k8sRequestTimeoutMs,
+  netPolPassHardLimitMs,
   hostFullReconcileConcurrency: parseHostFullReconcileConcurrency(
     getEnv('HCC_HOST_FULL_RECONCILE_CONCURRENCY')
   ),
@@ -857,22 +949,24 @@ export const config: Config = {
   runtimeTokenRotateBeforeSec: getEnvInt('CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S', 86_400),
 
   // Periodic external-egress DNS resync. Lowered from the legacy 5 min to 60s so
-  // it sits below the 300s overlap window: accumulated IPs are refreshed before
-  // they expire, closing the #299 rotation gap. 0 disables (reintroduces the
-  // stale-snapshot risk; only for operators who explicitly opt out).
+  // it sits at or below half the overlap window (default 3600s): accumulated IPs
+  // are refreshed before they expire, closing the #299 rotation gap. 0 disables
+  // (reintroduces the stale-snapshot risk; only for operators who explicitly
+  // opt out).
   externalEgressResyncIntervalSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 60),
   externalEgressDnsResolveTimeoutMs: parseExternalEgressDnsTimeoutMs(
     getEnv('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS')
   ),
-  externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 300),
+  externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 3600),
   externalEgressRefreshFloorSec: getExternalEgressEnvInt(
     'HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC',
     5
   ),
   externalEgressMaxEntries: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_MAX_ENTRIES', 128),
 
-  // Plugin image-host allowlist (Phase 2.3). Permissive default = current
-  // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit mode).
+  // Plugin image-host allowlist (Phase 2.3). Default from @clerum/image-policy:
+  // the deploy/base list plus registry.evenfire.ai/; enforce defaults to false
+  // (audit mode).
   allowedPluginImagePrefixes: getEnv(
     'CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES',
     [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES].join(',')

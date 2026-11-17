@@ -37,9 +37,16 @@ export type GfsResourceActionId =
 
 export type GfsResourceActionContext = {
   requestFileSelection?: () => void
+  /** Existing App receipt fence for a pending sidebar action continuation. */
+  isRequestCurrent?: () => boolean
+  /** Existing shared GFS access-revision fence for pre-dispatch continuations. */
+  isAccessRevisionCurrent?: () => boolean
 }
 
-export type GfsResourceActionHandler = (file?: File, context?: GfsResourceActionContext) => void
+export type GfsResourceActionHandler = (
+  file?: File,
+  context?: GfsResourceActionContext
+) => void | Promise<void>
 
 export type GfsResourceAction = {
   id: GfsResourceActionId

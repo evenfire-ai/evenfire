@@ -37,11 +37,13 @@ import type {
 } from '@/gfs/delegation.types'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
 import {
+  INITIAL_GFS_ACCESS_STATE,
   desktopQueryKeys,
   hasGfsSessionGeneration,
   isGfsSessionAuthorityCurrent,
   isGfsSessionGeneration,
 } from './queryKeys'
+import type { GfsAccessState } from './queryKeys'
 
 /**
  * P4-S07 — Desktop Global File System browser controller (user plane).
@@ -63,8 +65,6 @@ const DRIVE = 'main'
 export const GFS_UNAVAILABLE_LOCATION_MESSAGE = 'This folder or file is no longer available.'
 
 export type GfsUriOpenFailure = { kind: 'superseded' } | { kind: 'error'; error: unknown }
-
-type GfsAccessState = 'active' | 'revoked'
 
 export interface GfsBrowserChild {
   resourceId: string
@@ -385,14 +385,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // session-scope change returns to 'active'.
   const accessStateQuery = useQuery({
     queryKey: desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous', sessionGeneration),
-    queryFn: () => 'active' as GfsAccessState,
+    queryFn: () => INITIAL_GFS_ACCESS_STATE,
     enabled: false,
-    initialData: 'active' as GfsAccessState,
+    initialData: INITIAL_GFS_ACCESS_STATE,
     gcTime: Infinity,
     staleTime: Infinity,
   })
-  const accessState: GfsAccessState =
-    sessionGeneration === null ? 'revoked' : (accessStateQuery.data ?? 'active')
+  const accessStateRecord = accessStateQuery.data ?? INITIAL_GFS_ACCESS_STATE
+  const accessState: GfsAccessState['status'] =
+    sessionGeneration === null ? 'revoked' : accessStateRecord.status
   const accessibleQueryEnabled =
     Boolean(sessionScope) &&
     sessionGeneration !== null &&
@@ -403,7 +404,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       if (!ownsPublishedAuthority()) return
       queryClient.setQueryData(
         desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous', sessionGeneration),
-        next
+        (previous: GfsAccessState | undefined) => {
+          const current = previous ?? INITIAL_GFS_ACCESS_STATE
+          if (next.status === 'revoked') {
+            return current.status === 'revoked'
+              ? current
+              : { status: 'revoked' as const, revokeRevision: current.revokeRevision + 1 }
+          }
+          return { status: 'active' as const, revokeRevision: current.revokeRevision }
+        }
       )
     },
     [queryClient, sessionScope, sessionGeneration, ownsPublishedAuthority]
@@ -781,7 +790,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     })
   }, [current?.resourceId, queryClient])
   const revokeAccess = useCallback(() => {
-    setAccessState('revoked')
+    setAccessState({ status: 'revoked', revokeRevision: 0 })
     clearGfsState()
   }, [clearGfsState, setAccessState])
   const retryAccess = useCallback(() => {
@@ -789,7 +798,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // This restores no local capability; it only re-enables the queries so a
     // server-side re-grant (or a fresh sign-in) is the sole way back in. Because
     // the flag is shared, a retry here re-activates every mounted controller.
-    setAccessState('active')
+    setAccessState({ status: 'active', revokeRevision: 0 })
   }, [setAccessState, ownsPublishedAuthority])
   /** For imperative flows (openUri, revoke mutations): fail closed on a
    * session-authority rejection; returns true when it did. */
@@ -846,6 +855,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     },
     [handleAuthorityFailure]
   )
+  const hasCurrentAccessRevision = useCallback(
+    (revision: number) => {
+      const live =
+        queryClient.getQueryData<GfsAccessState>(
+          desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous', sessionGeneration)
+        ) ?? INITIAL_GFS_ACCESS_STATE
+      return live.status === 'active' && live.revokeRevision === revision
+    },
+    [queryClient, sessionScope, sessionGeneration]
+  )
   const revokeGrantMutation = useMutation({
     mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
     onSuccess: refreshGrants,
@@ -895,9 +914,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onError: failClosedOnMutationError,
   })
   const replaceFileFromPathMutation = useMutation({
-    mutationFn: (input: { resourceId: string; filePath: string; ifMatch?: number }) =>
+    mutationFn: (input: {
+      resourceId: string
+      filePath: string
+      ifMatch?: number
+      revokeRevision: number
+    }) =>
       window.clerum.gfs.replaceFileFromPath(input.resourceId, input.filePath, DRIVE, input.ifMatch),
     onSuccess: async (receipt, input) => {
+      if (!hasCurrentAccessRevision(input.revokeRevision)) return
       if (receipt.resultVersion !== undefined) {
         setCrumbs(prev =>
           prev.map(crumb =>
@@ -907,9 +932,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           )
         )
       }
+      if (!hasCurrentAccessRevision(input.revokeRevision)) return
       await refreshGfs()
     },
-    onError: failClosedOnMutationError,
+    onError: (error, input) => {
+      if (hasCurrentAccessRevision(input.revokeRevision)) {
+        failClosedOnMutationError(error)
+      }
+    },
   })
   const renameResourceMutation = useMutation({
     mutationFn: (input: { resourceId: string; name: string; ifMatch?: number }) =>
@@ -1930,7 +1960,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     replaceFile: (resourceId: string, encodedData: string, ifMatch?: number) =>
       replaceFileMutation.mutateAsync({ resourceId, encodedData, ifMatch }),
     replaceFileFromPath: (resourceId: string, filePath: string, ifMatch?: number) =>
-      replaceFileFromPathMutation.mutateAsync({ resourceId, filePath, ifMatch }),
+      replaceFileFromPathMutation.mutateAsync({
+        resourceId,
+        filePath,
+        ifMatch,
+        revokeRevision:
+          queryClient.getQueryData<GfsAccessState>(
+            desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous', sessionGeneration)
+          )?.revokeRevision ?? INITIAL_GFS_ACCESS_STATE.revokeRevision,
+      }),
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>
       renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
     moveResource: (

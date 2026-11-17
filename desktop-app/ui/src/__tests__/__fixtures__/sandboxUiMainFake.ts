@@ -17,7 +17,10 @@ import type {
   GfsResourceDeepLinkQueue,
   GfsUserNavigationGeneration,
 } from '../../../../src/gfsResourceDeepLinkQueue'
-import { registerDeepLinkAcknowledgmentHandlers } from '../../../../src/ipc'
+import {
+  registerDeepLinkAcknowledgmentHandlers,
+  registerGfsDeepLinkListHandler,
+} from '../../../../src/ipc'
 import type { SandboxUiDeepLinkQueue } from '../../../../src/sandboxUiDeepLinkQueue'
 import { getActiveSandboxUi, getActiveSandboxUiLocation } from '../../../../src/sandboxUiDriver'
 import {
@@ -26,7 +29,11 @@ import {
   SANDBOX_UI_REFRESH_INTERVAL_MS,
   SANDBOX_UI_RETRY_GRACE_MS,
 } from '../../../../src/sandboxUiSessionRefresh'
-import type { DeepLinkAcknowledgmentAuthority, SandboxUiReleasedEvent } from '../../../../src/types'
+import type {
+  DeepLinkAcknowledgmentAuthority,
+  GfsResourceDeepLinkEnvelope,
+  SandboxUiReleasedEvent,
+} from '../../../../src/types'
 
 /**
  * The trusted renderer's `window.clerum.sandboxUi` lifecycle bridge, backed by
@@ -87,6 +94,7 @@ export function createSandboxUiMainFake() {
   >()
   const refreshRecoveredListeners = new Set<(event: { appRef: string; launchId: string }) => void>()
   const sessionInvalidatedListeners = new Set<(event: SandboxUiSessionInvalidation) => void>()
+  const gfsDeepLinkListeners = new Set<(link: GfsResourceDeepLinkEnvelope) => void>()
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'clerum-sandbox-ui-main-'))
   const openMints: MintDecision[] = []
   let failNextMount: Error | null = null
@@ -148,6 +156,11 @@ export function createSandboxUiMainFake() {
         case 'sandboxUi:sessionInvalidated':
           for (const listener of [...sessionInvalidatedListeners]) {
             listener(payload as SandboxUiSessionInvalidation)
+          }
+          return
+        case 'gfs:deepLink':
+          for (const listener of [...gfsDeepLinkListeners]) {
+            listener(payload as GfsResourceDeepLinkEnvelope)
           }
       }
     })
@@ -262,6 +275,9 @@ export function createSandboxUiMainFake() {
   const open = vi.fn((request: SandboxUiOpenCall) => send('sandboxUi:open', request))
   const close = vi.fn((request: { launchId: string }) => send('sandboxUi:close', request))
   const reload = vi.fn((request: { launchId: string }) => send('sandboxUi:reload', request))
+  const setBounds = vi.fn((bounds: unknown) => send('sandboxUi:setBounds', { bounds }))
+  const setVisible = vi.fn((visible: boolean) => send('sandboxUi:setVisible', { visible }))
+  const capturePreview = vi.fn(() => send('sandboxUi:capturePreview', {}))
 
   function liveView() {
     const active = getActiveSandboxUi()
@@ -279,6 +295,9 @@ export function createSandboxUiMainFake() {
       open,
       close,
       reload,
+      setBounds,
+      setVisible,
+      capturePreview,
       onReleased: vi.fn((listener: (event: SandboxUiReleasedEvent) => void) => {
         releasedListeners.add(listener)
         return () => releasedListeners.delete(listener)
@@ -301,6 +320,7 @@ export function createSandboxUiMainFake() {
           return () => refreshRecoveredListeners.delete(listener)
         }
       ),
+      onFindResult: vi.fn(() => vi.fn()),
       onSessionInvalidated: vi.fn((listener: (event: SandboxUiSessionInvalidation) => void) => {
         sessionInvalidatedListeners.add(listener)
         return () => sessionInvalidatedListeners.delete(listener)
@@ -311,6 +331,7 @@ export function createSandboxUiMainFake() {
       gfsQueue: GfsResourceDeepLinkQueue,
       navigation: GfsUserNavigationGeneration
     ): void {
+      registerGfsDeepLinkListHandler(gfsQueue)
       registerDeepLinkAcknowledgmentHandlers(main.service, () => main.parent as never, {
         appQueue,
         gfsQueue,
@@ -321,6 +342,19 @@ export function createSandboxUiMainFake() {
       send('sandboxUi:acknowledgeDeepLink', { id, authority }) as Promise<boolean>,
     acknowledgeHeldResourceDeepLink: (id: number, authority: DeepLinkAcknowledgmentAuthority) =>
       send('gfs:acknowledgeDeepLink', { id, authority }) as Promise<boolean>,
+    listPendingGfsDeepLinks(): Promise<{ links: GfsResourceDeepLinkEnvelope[] }> {
+      return main.invoke('gfs:listPendingDeepLinks', {}) as Promise<{
+        links: GfsResourceDeepLinkEnvelope[]
+      }>
+    },
+    onGfsDeepLink(listener: (link: GfsResourceDeepLinkEnvelope) => void): () => void {
+      gfsDeepLinkListeners.add(listener)
+      return () => gfsDeepLinkListeners.delete(listener)
+    },
+    async emitGfsDeepLink(link: GfsResourceDeepLinkEnvelope): Promise<void> {
+      main.parent.webContents.send('gfs:deepLink', link)
+      await toRendererLane
+    },
     /** The main bridge clears exactly the test queue owned by the prior session. */
     setSessionInvalidationCleanup(
       cleanup: () => { appDeepLinkMinimumId: number; gfsDeepLinkMinimumId: number } | void
@@ -347,6 +381,9 @@ export function createSandboxUiMainFake() {
         appRef: active.appRef,
         ...(routePath ? { routePath } : {}),
       }
+    },
+    liveVisibilityCalls(): boolean[] {
+      return liveView()?.view.setVisible.mock.calls.map(([visible]) => visible) ?? []
     },
     /**
      * rpc-proxy holds the session mint of the next open that reaches main until

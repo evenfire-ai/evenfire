@@ -13,6 +13,14 @@ import {
   within,
 } from '@testing-library/react'
 import fc, { type AsyncCommand, type Scheduler } from 'fast-check'
+import {
+  assertD5a,
+  d5aRevokeRetrySensitivityControl,
+  d5aSensitivityControl,
+  d5bExpectedOutcome,
+  initialD5a,
+  transitionD5a,
+} from '@components/SidebarNav/FileExplorerTree/sidebar-context-menu-a4-reference'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { installMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
 import { useNavigationController } from '@hooks/domain/useNavigationController'
@@ -34,9 +42,11 @@ import {
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
+import type { GfsResourceDeepLinkEnvelope } from '@/App.types'
 import {
   accessibleResource,
   childView,
+  gfsRouteFailureMessage,
   listAccessiblePage,
   listChildrenPage,
   previewDownloadResult,
@@ -54,6 +64,24 @@ type MarkdownSessionPreclearNotice = {
   sessionGeneration: number
   reason: 'logout' | 'session-ended' | 'environment-change'
 }
+type PushToast = NonNullable<AppController['pushToast']>
+type GfsAffordances = typeof window.clerum.gfs.affordances
+type GfsAffordancesMock = {
+  getMockImplementation: () => GfsAffordances | undefined
+  mockImplementation: (implementation: GfsAffordances) => unknown
+  mock: { calls: Parameters<GfsAffordances>[] }
+}
+
+function recordedToastCalls(): Parameters<PushToast>[] {
+  const pushToast = appHarness.controller.pushToast as unknown as {
+    mock: { calls: Parameters<PushToast>[] }
+  }
+  return pushToast.mock.calls
+}
+
+function affordanceMock(gfs: { affordances: unknown }): GfsAffordancesMock {
+  return gfs.affordances as GfsAffordancesMock
+}
 
 const appHarness = vi.hoisted(() => ({
   controller: null as unknown as AppController,
@@ -64,6 +92,15 @@ const appHarness = vi.hoisted(() => ({
   lastShortcutCommand: null as string | null,
   filesPagePendingActions: [] as unknown[],
   filesPageLatestPendingAction: null as unknown,
+  filesPageCurrentnessById: new Map<number, (requestId: number) => boolean>(),
+  filesPageResourceByRequestId: new Map<number, string>(),
+  filesPageHandledEvents: [] as Array<{
+    id: number
+    resourceUri: string | null
+    permissionSettled: boolean
+  }>,
+  d5aPermissionSettledUris: new Set<string>(),
+  d5aPostPermissionAckIds: new Set<number>(),
   filesPageRenderCount: 0,
   filesPageLastLocation: null as { gfsUri: string | null; name: string | null } | null,
   filesPageReportLocation: null as ((gfsUri: string | null, name: string | null) => void) | null,
@@ -78,6 +115,7 @@ const appHarness = vi.hoisted(() => ({
   sessionPreclear: null as ((notice: MarkdownSessionPreclearNotice) => void) | null,
   sessionCleared: null as (() => void) | null,
   acknowledgeSessionPreclear: async (_notice: MarkdownSessionPreclearNotice) => true,
+  emitGfsDeepLink: null as ((link: GfsResourceDeepLinkEnvelope) => void) | null,
 }))
 
 const allowNotificationDelivery = () => true
@@ -189,6 +227,16 @@ vi.mock('@pages/FilesPage', async importOriginal => {
       appHarness.filesPageReportLocation = props.onLocationChange ?? null
       if (props.pendingResourceAction) {
         appHarness.filesPagePendingActions.push(props.pendingResourceAction)
+        appHarness.filesPageResourceByRequestId.set(
+          props.pendingResourceAction.id,
+          props.pendingResourceAction.targetUri
+        )
+        if (props.isPendingResourceActionCurrent) {
+          appHarness.filesPageCurrentnessById.set(
+            props.pendingResourceAction.id,
+            props.isPendingResourceActionCurrent
+          )
+        }
       }
       return (
         <actual.FilesPage
@@ -196,6 +244,19 @@ vi.mock('@pages/FilesPage', async importOriginal => {
           onLocationChange={(gfsUri, name) => {
             appHarness.filesPageLastLocation = { gfsUri, name }
             props.onLocationChange?.(gfsUri, name)
+          }}
+          onPendingResourceActionHandled={requestId => {
+            const resourceUri = appHarness.filesPageResourceByRequestId.get(requestId) ?? null
+            const permissionSettled = resourceUri
+              ? appHarness.d5aPermissionSettledUris.has(resourceUri)
+              : false
+            appHarness.filesPageHandledEvents.push({
+              id: requestId,
+              resourceUri,
+              permissionSettled,
+            })
+            if (permissionSettled) appHarness.d5aPostPermissionAckIds.add(requestId)
+            props.onPendingResourceActionHandled?.(requestId)
           }}
         />
       )
@@ -416,14 +477,20 @@ function makeController(workspaceTabs = createWorkspaceTabsState('chat-tab-1')):
   return controller
 }
 
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
+type Deferred<T> = {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (error: Error) => void
+}
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>(done => {
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((done, fail) => {
     resolve = done
+    reject = fail
   })
-  return { promise, resolve }
+  return { promise, resolve, reject }
 }
 
 type HarnessResource = Awaited<ReturnType<typeof resolvedFile>>
@@ -500,7 +567,10 @@ function installClerum(
       )
     }),
     getPathForFile: vi.fn((file: File) => file.name),
-    onDeepLink: vi.fn(() => vi.fn()),
+    onDeepLink: vi.fn((listener: (link: GfsResourceDeepLinkEnvelope) => void) => {
+      appHarness.emitGfsDeepLink = listener
+      return vi.fn()
+    }),
     listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
     acknowledgeDeepLink: vi.fn(async () => undefined),
   }
@@ -571,6 +641,19 @@ function installClerum(
     replaceFileFromPath,
     moveResource,
   }
+}
+
+function holdExactTargetResolve(
+  gfs: ReturnType<typeof installClerum>['gfs'],
+  targetUri: string,
+  pending: Deferred<unknown>
+) {
+  const originalResolve = gfs.resolve.getMockImplementation()
+  if (!originalResolve) throw new Error('Expected the GFS resolve boundary mock')
+  gfs.resolve.mockClear()
+  gfs.resolve.mockImplementation(uri =>
+    uri === targetUri ? pending.promise : originalResolve(uri)
+  )
 }
 
 function renderApp() {
@@ -668,7 +751,8 @@ async function chooseRowAction(resourceName: string, actionName: string) {
     return
   }
   if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
-    fireEvent.mouseEnter(await screen.findByRole('menuitem', { name: 'Share' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Share' }))
+    await screen.findByRole('menu', { name: `Share options for ${resourceName}` })
   }
   fireEvent.click(await screen.findByRole('menuitem', { name: actionName }))
 }
@@ -787,6 +871,30 @@ const targetB = await resolveResource(
   resolvedFile('33333333333333333333333333333333', 'target-b.txt')
 )
 
+function mockSidebarBounds() {
+  const getBoundingClientRect = HTMLElement.prototype.getBoundingClientRect
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+    this: HTMLElement
+  ) {
+    if (this.classList.contains('left-nav')) {
+      const width = 328
+      const height = window.innerHeight || 768
+      return {
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+        width,
+        height,
+        toJSON: () => ({}),
+      } as DOMRect
+    }
+    return getBoundingClientRect.call(this)
+  })
+}
+
 beforeEach(() => {
   originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
   originalCreateObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, 'createObjectURL')
@@ -797,6 +905,11 @@ beforeEach(() => {
   appHarness.lastShortcutCommand = null
   appHarness.filesPagePendingActions = []
   appHarness.filesPageLatestPendingAction = null
+  appHarness.filesPageResourceByRequestId.clear()
+  appHarness.filesPageHandledEvents = []
+  appHarness.d5aPermissionSettledUris.clear()
+  appHarness.d5aPostPermissionAckIds.clear()
+  appHarness.filesPageCurrentnessById.clear()
   appHarness.filesPageRenderCount = 0
   appHarness.filesPageLastLocation = null
   appHarness.filesPageReportLocation = null
@@ -807,6 +920,7 @@ beforeEach(() => {
   appHarness.sessionPreclear = null
   appHarness.sessionCleared = null
   appHarness.acknowledgeSessionPreclear = async () => true
+  appHarness.emitGfsDeepLink = null
   appHarness.controller = makeController()
   appHarness.useRealNavigationController = false
   vi.mocked(useAppController).mockImplementation(useReactiveController)
@@ -814,6 +928,7 @@ beforeEach(() => {
     configurable: true,
     value: vi.fn(() => ({ matches: false, addListener: vi.fn(), removeListener: vi.fn() })),
   })
+  mockSidebarBounds()
 })
 
 afterEach(() => {
@@ -1001,10 +1116,168 @@ describe('App → Files action lifecycle integration', () => {
     await chooseRowAction(file.name, 'Share')
     const sidebarDialog = await screen.findByRole('dialog', { name: `Share file ${file.name}` })
     expect(sidebarDialog.getAttribute('aria-label')).toBe(filesDialogName)
+    expect(appHarness.filesPagePendingActions).toEqual(
+      expect.arrayContaining([expect.objectContaining({ navigationUri: parent.gfsUri })])
+    )
+    fireEvent.click(within(sidebarDialog).getByRole('button', { name: 'Close share dialog' }))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: parent.gfsUri },
+      })
+    )
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
       kind: 'files',
-      files: { path: null },
+      files: { path: parent.gfsUri },
     })
+  })
+
+  it('reuses the Files owner and converges to a file parent after browsing elsewhere', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'Owner parent')
+    )
+    const otherFolder = await resolveResource(
+      resolvedDirectory('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'Other folder', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const file = await resolveResource(
+      resolvedFile('cccccccccccccccccccccccccccccccc', 'owner-target.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const { gfs } = installClerum([parent, otherFolder, file], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(otherFolder.resourceId, otherFolder.name, 'directory', {
+              parentResourceId: parent.resourceId,
+            }),
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+            }),
+          ],
+        ],
+      ]),
+    })
+    const parentResolution = deferred<unknown>()
+    const originalResolve = gfs.resolve
+    let holdParentResolution = false
+    Object.assign(gfs, {
+      resolve: vi.fn((uri: string) => {
+        if (holdParentResolution && uri === parent.gfsUri) return parentResolution.promise
+        return originalResolve(uri)
+      }),
+    })
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'owner-files-tab',
+        path: parent.gfsUri,
+      })
+    )
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Owner parent/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Owner parent' }))
+    await findResourceTreeRow(file.name)
+    await chooseRowAction(file.name, 'Copy link')
+    await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1))
+
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    fireEvent.click(within(browser).getByRole('button', { name: otherFolder.name }))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: 'owner-files-tab',
+        kind: 'files',
+        files: { path: otherFolder.gfsUri },
+      })
+    )
+    const nestedResolveCountBeforeReselect = gfs.resolve.mock.calls.filter(
+      ([uri]) => uri === otherFolder.gfsUri
+    ).length
+    fireEvent.click(getWorkspaceTabButtons(otherFolder.name)[0]!)
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: 'owner-files-tab',
+        kind: 'files',
+        files: { path: otherFolder.gfsUri },
+      })
+    )
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === otherFolder.gfsUri)).toHaveLength(
+      nestedResolveCountBeforeReselect
+    )
+    const resolveCountBeforeRepeat = gfs.resolve.mock.calls.filter(
+      ([uri]) => uri === parent.gfsUri
+    ).length
+    fireEvent.click(screen.getByTestId('nav-chat'))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+    )
+
+    const parentResolveCountBeforeAction = gfs.resolve.mock.calls.filter(
+      ([uri]) => uri === parent.gfsUri
+    ).length
+    holdParentResolution = true
+    await chooseRowAction(file.name, 'Copy link')
+    await waitFor(() =>
+      expect(gfs.resolve.mock.calls.filter(([uri]) => uri === parent.gfsUri)).toHaveLength(
+        parentResolveCountBeforeAction + 1
+      )
+    )
+    // Flush the controller state update and React effects while the first
+    // resolve remains pending. D2's request marker must prevent this rerender
+    // from starting another parent resolve.
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === parent.gfsUri)).toHaveLength(
+      parentResolveCountBeforeAction + 1
+    )
+    await act(async () => {
+      parentResolution.resolve(parent)
+      await parentResolution.promise
+    })
+    await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(2))
+
+    expect(
+      appHarness.controller.workspaceTabs.tabs.filter(tab => tab.kind === 'files')
+    ).toHaveLength(1)
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      id: 'owner-files-tab',
+      kind: 'files',
+      files: { path: parent.gfsUri },
+    })
+    expect(gfs.resolve.mock.calls.filter(([uri]) => uri === parent.gfsUri)).toHaveLength(
+      resolveCountBeforeRepeat + 1
+    )
+    expect(gfs.download).not.toHaveBeenCalled()
+
+    const filesBrowser = screen.getByRole('region', { name: 'EvenDrive browser' })
+    fireEvent.click(within(filesBrowser).getByRole('button', { name: 'Shared with me' }))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: 'owner-files-tab',
+        kind: 'files',
+        files: { path: null },
+      })
+    )
+    const rootResolveCount = gfs.resolve.mock.calls.length
+    fireEvent.click(getWorkspaceTabButtons('Files')[0]!)
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id).toBe('owner-files-tab')
+    )
+    expect(gfs.resolve).toHaveBeenCalledTimes(rootResolveCount)
+    expect(
+      appHarness.controller.workspaceTabs.tabs.filter(tab => tab.kind === 'files')
+    ).toHaveLength(1)
   })
 
   it('opens the clicked folder through the same Files route as the row action', async () => {
@@ -1013,7 +1286,10 @@ describe('App → Files action lifecycle integration', () => {
     )
     installClerum([folder])
     appHarness.controller = makeController(
-      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'files-root',
+        path: null,
+      })
     )
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
@@ -1093,7 +1369,8 @@ describe('App → Files action lifecycle integration', () => {
     Object.assign(gfs, {
       renameResource,
       resolve: vi.fn(async (uri: string) => {
-        if (uri === child.gfsUri) throw new Error('403 Forbidden: unreadable resource')
+        if (uri === child.gfsUri)
+          throw new Error('403 Forbidden: unreadable resource httpStatus=403')
         return resolve(uri)
       }),
     })
@@ -1134,6 +1411,7 @@ describe('App → Files action lifecycle integration', () => {
 
     renameResource.mockClear()
     await chooseRowAction('secret.pdf', 'Rename')
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(child.gfsUri))
     const sidebarRenameForm = await screen.findByRole('form', { name: 'Rename resource' })
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
       id: 'files-parent',
@@ -1153,7 +1431,6 @@ describe('App → Files action lifecycle integration', () => {
       )
     )
     expect(renameResource).toHaveBeenCalledTimes(1)
-    expect(gfs.resolve).not.toHaveBeenCalledWith(child.gfsUri)
   })
 
   it('does not rename a newer resource version after the sidebar route resolves', async () => {
@@ -1168,7 +1445,25 @@ describe('App → Files action lifecycle integration', () => {
       readable: true,
       version: 7,
     })
-    const renameResource = vi.fn(async () => ({}))
+    const d5bExpected = d5bExpectedOutcome(
+      {
+        resourceId,
+        gfsUri: clickedRow.gfsUri,
+        kind: clickedRow.kind,
+        parentResourceId,
+        version: 7,
+      },
+      {
+        resourceId: resolvedVersion.resourceId,
+        gfsUri: resolvedVersion.gfsUri,
+        kind: resolvedVersion.kind,
+        parentResourceId: resolvedVersion.parentResourceId,
+        version: resolvedVersion.version,
+      }
+    )
+    const renameResource = vi.fn(
+      async (_resourceId: string, _name: string, _drive: string, _version: number) => ({})
+    )
     const { gfs } = installClerum([parent, resolvedVersion], new Map(), {
       accessibleRows: [
         accessibleResource(parent.resourceId, parent.name, 'directory', {
@@ -1187,7 +1482,7 @@ describe('App → Files action lifecycle integration', () => {
     await findResourceTreeRow('report.txt')
     await chooseRowAction('report.txt', 'Rename')
 
-    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(clickedRow.gfsUri))
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(parent.gfsUri))
     await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
     expect(screen.queryAllByRole('form', { name: 'Rename resource' })).toHaveLength(0)
     expect(renameResource).not.toHaveBeenCalled()
@@ -1195,6 +1490,431 @@ describe('App → Files action lifecycle integration', () => {
       'Renamed to report.txt',
       'success'
     )
+    expect(
+      vi
+        .mocked(appHarness.controller.pushToast)
+        .mock.calls.filter(
+          ([message, tone]) =>
+            message === 'This resource changed before the action could run.' && tone === 'error'
+        )
+    ).toHaveLength(1)
+    expect({
+      disposition: 'reject',
+      mutationCount: renameResource.mock.calls.length,
+      operationVersion: renameResource.mock.calls[0]?.[3] ?? null,
+      staleFeedbackCount: vi
+        .mocked(appHarness.controller.pushToast)
+        .mock.calls.filter(
+          ([message, tone]) =>
+            message === 'This resource changed before the action could run.' && tone === 'error'
+        ).length,
+    }).toEqual(d5bExpected)
+  })
+
+  it('does not rename a target that moved after the sidebar row was captured', async () => {
+    const parentResourceId = '11111111111111111111111111111111'
+    const movedParentResourceId = '22222222222222222222222222222222'
+    const resourceId = '44444444444444444444444444444444'
+    const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Vault'))
+    const movedTarget = await resolveResource(
+      resolvedFile(resourceId, 'report.txt', {
+        parentResourceId: movedParentResourceId,
+        version: 7,
+      })
+    )
+    const clickedRow = childView(resourceId, 'report.txt', 'file', {
+      parentResourceId,
+      readable: true,
+      version: 7,
+    })
+    const d5bExpected = d5bExpectedOutcome(
+      {
+        resourceId,
+        gfsUri: clickedRow.gfsUri,
+        kind: clickedRow.kind,
+        parentResourceId,
+        version: 7,
+      },
+      {
+        resourceId: movedTarget.resourceId,
+        gfsUri: movedTarget.gfsUri,
+        kind: movedTarget.kind,
+        parentResourceId: movedTarget.parentResourceId,
+        version: movedTarget.version,
+      }
+    )
+    const renameResource = vi.fn(
+      async (_resourceId: string, _name: string, _drive: string, _version: number) => ({})
+    )
+    const { gfs } = installClerum([parent, movedTarget], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parentResourceId, [clickedRow]]]),
+      affordanceBits: ['write'],
+    })
+    Object.assign(gfs, { renameResource })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Vault' }))
+    await findResourceTreeRow('report.txt')
+    await chooseRowAction('report.txt', 'Rename')
+
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(movedTarget.gfsUri))
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    expect(screen.queryAllByRole('form', { name: 'Rename resource' })).toHaveLength(0)
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(
+      vi
+        .mocked(appHarness.controller.pushToast)
+        .mock.calls.filter(
+          ([message, tone]) =>
+            message === 'This resource changed before the action could run.' && tone === 'error'
+        )
+    ).toHaveLength(1)
+    expect({
+      disposition: 'reject',
+      mutationCount: renameResource.mock.calls.length,
+      operationVersion: renameResource.mock.calls[0]?.[3] ?? null,
+      staleFeedbackCount: vi
+        .mocked(appHarness.controller.pushToast)
+        .mock.calls.filter(
+          ([message, tone]) =>
+            message === 'This resource changed before the action could run.' && tone === 'error'
+        ).length,
+    }).toEqual(d5bExpected)
+  })
+
+  it('does not rename a file when the authoritative target changed kind', async () => {
+    const parentResourceId = '11111111111111111111111111111111'
+    const resourceId = '44444444444444444444444444444444'
+    const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Vault'))
+    const currentDirectory = await resolveResource(
+      resolvedDirectory(resourceId, 'report.txt', { parentResourceId, version: 7 })
+    )
+    const clickedRow = childView(resourceId, 'report.txt', 'file', {
+      parentResourceId,
+      readable: true,
+      version: 7,
+    })
+    const expected = d5bExpectedOutcome(
+      {
+        resourceId,
+        gfsUri: clickedRow.gfsUri,
+        kind: clickedRow.kind,
+        parentResourceId,
+        version: 7,
+      },
+      {
+        resourceId: currentDirectory.resourceId,
+        gfsUri: currentDirectory.gfsUri,
+        kind: currentDirectory.kind,
+        parentResourceId: currentDirectory.parentResourceId,
+        version: currentDirectory.version,
+      }
+    )
+    const renameResource = vi.fn(
+      async (_resourceId: string, _name: string, _drive: string, _version: number) => ({})
+    )
+    const { gfs } = installClerum([parent, currentDirectory], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parentResourceId, [clickedRow]]]),
+      affordanceBits: ['write'],
+    })
+    Object.assign(gfs, { renameResource })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Vault' }))
+    await findResourceTreeRow('report.txt')
+    await chooseRowAction('report.txt', 'Rename')
+
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(currentDirectory.gfsUri))
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    expect(screen.queryAllByRole('form', { name: 'Rename resource' })).toHaveLength(0)
+    expect(renameResource).not.toHaveBeenCalled()
+    expect({
+      disposition: 'reject',
+      mutationCount: renameResource.mock.calls.length,
+      operationVersion: renameResource.mock.calls[0]?.[3] ?? null,
+      staleFeedbackCount: vi
+        .mocked(appHarness.controller.pushToast)
+        .mock.calls.filter(
+          ([message, tone]) =>
+            message === 'This resource changed before the action could run.' && tone === 'error'
+        ).length,
+    }).toEqual(expected)
+  })
+
+  it('keeps Rename available when the authoritative target remains at the captured version', async () => {
+    const parentResourceId = '11111111111111111111111111111111'
+    const resourceId = '44444444444444444444444444444444'
+    const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Vault'))
+    const currentTarget = await resolveResource(
+      resolvedFile(resourceId, 'report.txt', { parentResourceId, version: 7 })
+    )
+    const clickedRow = childView(resourceId, 'report.txt', 'file', {
+      parentResourceId,
+      readable: true,
+      version: 7,
+    })
+    const d5bExpected = d5bExpectedOutcome(
+      {
+        resourceId,
+        gfsUri: clickedRow.gfsUri,
+        kind: clickedRow.kind,
+        parentResourceId,
+        version: 7,
+      },
+      {
+        resourceId: currentTarget.resourceId,
+        gfsUri: currentTarget.gfsUri,
+        kind: currentTarget.kind,
+        parentResourceId: currentTarget.parentResourceId,
+        version: currentTarget.version,
+      }
+    )
+    const renameResource = vi.fn(
+      async (_resourceId: string, _name: string, _drive: string, _version: number) => ({})
+    )
+    const { gfs } = installClerum([parent, currentTarget], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parentResourceId, [clickedRow]]]),
+      affordanceBits: ['write'],
+    })
+    Object.assign(gfs, { renameResource })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Vault' }))
+    await findResourceTreeRow('report.txt')
+    await chooseRowAction('report.txt', 'Rename')
+
+    const renameForm = await screen.findByRole('form', { name: 'Rename resource' })
+    fireEvent.change(within(renameForm).getByLabelText('New name'), {
+      target: { value: 'renamed-report.txt' },
+    })
+    fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
+    await waitFor(() =>
+      expect(renameResource).toHaveBeenCalledWith(resourceId, 'renamed-report.txt', 'main', 7)
+    )
+    expect(renameResource).toHaveBeenCalledTimes(1)
+    expect({
+      disposition: 'admit',
+      mutationCount: renameResource.mock.calls.length,
+      operationVersion: renameResource.mock.calls[0]?.[3] ?? null,
+      staleFeedbackCount: vi
+        .mocked(appHarness.controller.pushToast)
+        .mock.calls.filter(
+          ([message, tone]) =>
+            message === 'This resource changed before the action could run.' && tone === 'error'
+        ).length,
+    }).toEqual(d5bExpected)
+  })
+
+  it('fails closed when target resolution returns a typed session-authority 403', async () => {
+    const file = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'authority-target.txt', { version: 7 })
+    )
+    const { gfs } = installClerum([file], new Map(), {
+      affordanceBits: ['read', 'write', 'delete'],
+    })
+    const renameResource = vi.fn(async () => ({}))
+    Object.assign(gfs, { renameResource })
+    const authorityFailure = await gfsRouteFailureMessage(
+      client => client.resolveUri(file.gfsUri, 'fixture-session-token'),
+      403,
+      { code: 'operator_link_inactive', message: 'operator link is inactive' }
+    )
+    const originalResolve = gfs.resolve.getMockImplementation()
+    if (!originalResolve) throw new Error('Expected the GFS resolve boundary mock')
+    gfs.resolve.mockImplementation(uri =>
+      uri === file.gfsUri ? Promise.reject(new Error(authorityFailure)) : originalResolve(uri)
+    )
+    appHarness.useRealNavigationController = true
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(file.name)
+    await chooseRowAction(file.name, 'Rename')
+
+    const accessQuery = () =>
+      desktopQueryClient
+        .getQueryCache()
+        .findAll()
+        .find(query => query.queryKey[1] === 'gfs-access')
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(file.gfsUri))
+    await waitFor(() =>
+      expect(accessQuery()?.state.data).toMatchObject({ status: 'revoked', revokeRevision: 1 })
+    )
+    await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+    await waitFor(() => expect(desktopQueryClient.isMutating()).toBe(0))
+
+    expect(gfs.resolve).toHaveBeenCalledWith(file.gfsUri)
+    expect(screen.queryAllByRole('form', { name: 'Rename resource' })).toHaveLength(0)
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(recordedToastCalls().filter(([message]) => message === authorityFailure)).toHaveLength(0)
+  })
+
+  it('fails closed when Replace target resolution returns a typed session-authority 403', async () => {
+    const file = await resolveResource(
+      resolvedFile('cccccccccccccccccccccccccccccccc', 'authority-replace.bin', { version: 7 })
+    )
+    const { gfs, replaceFileFromPath } = installClerum([file], new Map(), {
+      affordanceBits: ['read', 'write'],
+    })
+    const authorityFailure = await gfsRouteFailureMessage(
+      client => client.resolveUri(file.gfsUri, 'fixture-session-token'),
+      403,
+      { code: 'gfs_operator_link_invalid', message: 'operator link is invalid' }
+    )
+    const originalResolve = gfs.resolve.getMockImplementation()
+    if (!originalResolve) throw new Error('Expected the GFS resolve boundary mock')
+    gfs.resolve.mockImplementation(uri =>
+      uri === file.gfsUri ? Promise.reject(new Error(authorityFailure)) : originalResolve(uri)
+    )
+    appHarness.useRealNavigationController = true
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const row = await findResourceTreeRow(file.name)
+    await chooseRowAction(file.name, 'Replace file')
+    const input = within(row).getByLabelText(`Replace ${file.name}`) as HTMLInputElement
+    fireEvent.change(input, {
+      target: {
+        files: [new File(['replacement'], 'replacement.bin', { type: 'application/octet-stream' })],
+      },
+    })
+
+    const accessQuery = () =>
+      desktopQueryClient
+        .getQueryCache()
+        .findAll()
+        .find(query => query.queryKey[1] === 'gfs-access')
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(file.gfsUri))
+    await waitFor(() =>
+      expect(accessQuery()?.state.data).toMatchObject({ status: 'revoked', revokeRevision: 1 })
+    )
+    await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+    await waitFor(() => expect(desktopQueryClient.isMutating()).toBe(0))
+
+    expect(gfs.resolve).toHaveBeenCalledWith(file.gfsUri)
+    expect(replaceFileFromPath).not.toHaveBeenCalled()
+    expect(recordedToastCalls().some(([message]) => message === `Replaced ${file.name}`)).toBe(
+      false
+    )
+  })
+
+  it('settles an authoritative target lookup error without opening a stale Rename UI', async () => {
+    const parentResourceId = '11111111111111111111111111111111'
+    const resourceId = '44444444444444444444444444444444'
+    const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Vault'))
+    const clickedRow = childView(resourceId, 'report.txt', 'file', {
+      parentResourceId,
+      readable: true,
+      version: 7,
+    })
+    const { gfs } = installClerum([parent], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parentResourceId, [clickedRow]]]),
+      affordanceBits: ['write'],
+    })
+    const originalResolve = gfs.resolve.getMockImplementation()
+    if (!originalResolve) throw new Error('Expected the GFS resolver boundary mock')
+    gfs.resolve.mockImplementation(uri =>
+      uri === clickedRow.gfsUri
+        ? Promise.reject(new Error('503 Service Unavailable'))
+        : originalResolve(uri)
+    )
+    const renameResource = vi.fn(async () => ({}))
+    Object.assign(gfs, { renameResource })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Vault' }))
+    await findResourceTreeRow('report.txt')
+    await chooseRowAction('report.txt', 'Rename')
+
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(clickedRow.gfsUri))
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    expect(screen.queryAllByRole('form', { name: 'Rename resource' })).toHaveLength(0)
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(
+      recordedToastCalls().filter(
+        ([message, tone]) => message === '503 Service Unavailable' && tone === 'error'
+      )
+    ).toHaveLength(1)
+  })
+
+  it('settles a deleted current target without opening Rename or invoking a mutation', async () => {
+    const parentResourceId = '11111111111111111111111111111111'
+    const resourceId = '44444444444444444444444444444444'
+    const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Vault'))
+    const clickedRow = childView(resourceId, 'report.txt', 'file', {
+      parentResourceId,
+      readable: true,
+      version: 7,
+    })
+    const { gfs } = installClerum([parent], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([[parentResourceId, [clickedRow]]]),
+      affordanceBits: ['write'],
+    })
+    const originalResolve = gfs.resolve.getMockImplementation()
+    if (!originalResolve) throw new Error('Expected the GFS resolver boundary mock')
+    gfs.resolve.mockImplementation(uri =>
+      uri === clickedRow.gfsUri
+        ? Promise.reject(new Error('404 Not Found: resource deleted'))
+        : originalResolve(uri)
+    )
+    const renameResource = vi.fn(async () => ({}))
+    Object.assign(gfs, { renameResource })
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const sidebarParent = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(sidebarParent).getByRole('button', { name: 'Expand Vault' }))
+    await findResourceTreeRow('report.txt')
+    await chooseRowAction('report.txt', 'Rename')
+
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(clickedRow.gfsUri))
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    expect(screen.queryAllByRole('form', { name: 'Rename resource' })).toHaveLength(0)
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(
+      recordedToastCalls().filter(
+        ([message, tone]) => message === '404 Not Found: resource deleted' && tone === 'error'
+      )
+    ).toHaveLength(1)
   })
 
   it('cancels a pending Files action when the session generation changes', async () => {
@@ -1202,15 +1922,13 @@ describe('App → Files action lifecycle integration', () => {
       resolvedFile('44444444444444444444444444444444', 'session-target.txt', { version: 3 })
     )
     const delayedTarget = deferred<unknown>()
-    const { deleteResource, gfs } = installClerum(
-      [target],
-      new Map([[target.gfsUri, delayedTarget]])
-    )
+    const { deleteResource, gfs } = installClerum([target])
     appHarness.controller = makeController()
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await findResourceTreeRow(target.name)
+    holdExactTargetResolve(gfs, target.gfsUri, delayedTarget)
     await chooseDeleteAction(target.name)
     await expectActionAtConsumer(appHarness.filesPagePendingActions, target.gfsUri, 'delete')
     await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(target.gfsUri))
@@ -1573,13 +2291,270 @@ describe('App → Files action lifecycle integration', () => {
     })
   })
 
+  it('keeps Retry state after an already-dispatched Replace 401 reaches FilesPage catch', async () => {
+    const fileA = await resolveResource(
+      resolvedFile('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'authority-source.bin', { version: 2 })
+    )
+    const fileB = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'replace-target.bin', { version: 7 })
+    )
+    const { gfs, replaceFileFromPath } = installClerum([fileA, fileB], new Map(), {
+      affordanceBits: ['read', 'write', 'delete'],
+    })
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    let rejectReplace!: (reason: unknown) => void
+    const replacePending = new Promise<{}>((_resolve, reject) => {
+      rejectReplace = reject
+    })
+    replaceFileFromPath.mockImplementation(() => replacePending)
+    const authorityFailureA = await gfsRouteFailureMessage(
+      client => client.affordances(fileA.resourceId, 'fixture-session-token', 'main'),
+      401,
+      { code: 'unauthorized', message: 'source operation revoked the session' }
+    )
+    const authorityFailureB = await gfsRouteFailureMessage(
+      client =>
+        client.replaceFile(
+          {
+            resourceId: fileB.resourceId,
+            encodedData: 'bmV3',
+            drive: 'main',
+            ifMatch: fileB.version,
+          },
+          'fixture-session-token'
+        ),
+      401,
+      { code: 'unauthorized', message: 'delayed Replace operation from old access interval' }
+    )
+    const authorityFailureCurrent = await gfsRouteFailureMessage(
+      client =>
+        client.replaceFile(
+          {
+            resourceId: fileB.resourceId,
+            encodedData: 'bmV3',
+            drive: 'main',
+            ifMatch: fileB.version,
+          },
+          'fixture-session-token'
+        ),
+      401,
+      { code: 'unauthorized', message: 'current Replace operation denied' }
+    )
+    const normalAffordances = affordanceMock(gfs).getMockImplementation()
+    if (!normalAffordances) throw new Error('Expected the real GFS affordance boundary mock')
+    let rejectPermissionA = false
+    affordanceMock(gfs).mockImplementation((resourceId: string, drive?: string) => {
+      if (rejectPermissionA && resourceId === fileA.resourceId)
+        return Promise.reject(new Error(authorityFailureA))
+      return normalAffordances(resourceId, drive)
+    })
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const rowB = await findResourceTreeRow(fileB.name)
+    await chooseRowAction(fileB.name, 'Replace file')
+    const inputB = within(rowB).getByLabelText(`Replace ${fileB.name}`) as HTMLInputElement
+    const replacement = new File(['new bytes'], 'replacement.txt', { type: 'text/plain' })
+    fireEvent.change(inputB, { target: { files: [replacement] } })
+    await waitFor(() => expect(replaceFileFromPath).toHaveBeenCalledTimes(1))
+
+    const accessQuery = () =>
+      desktopQueryClient
+        .getQueryCache()
+        .findAll()
+        .find(query => query.queryKey[1] === 'gfs-access')
+    const permissionQueryA = desktopQueryClient
+      .getQueryCache()
+      .findAll()
+      .find(
+        query => query.queryKey.includes(fileA.resourceId) && query.queryKey.includes('affordances')
+      )
+    expect(permissionQueryA).toBeTruthy()
+    rejectPermissionA = true
+    await act(async () => {
+      await desktopQueryClient.invalidateQueries({
+        queryKey: permissionQueryA!.queryKey,
+        exact: true,
+        refetchType: 'none',
+      })
+    })
+    await openRowActions(fileA.name)
+    await waitFor(() =>
+      expect(accessQuery()?.state.data).toMatchObject({ status: 'revoked', revokeRevision: 1 })
+    )
+    rejectPermissionA = false
+    const listCallsBeforeRetry = gfs.listAccessible.mock.calls.length
+    fireEvent.click(screen.getAllByRole('button', { name: 'Retry file access' })[0]!)
+    await waitFor(() =>
+      expect(accessQuery()?.state.data).toMatchObject({ status: 'active', revokeRevision: 1 })
+    )
+    await waitFor(() =>
+      expect(gfs.listAccessible.mock.calls.length).toBeGreaterThan(listCallsBeforeRetry)
+    )
+    await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+    const retrySnapshot = desktopQueryClient
+      .getQueryCache()
+      .findAll()
+      .find(query => query.queryKey.some(part => part === 'accessible'))?.state.data
+    expect(retrySnapshot).toBeTruthy()
+
+    await act(async () => rejectReplace(new Error(authorityFailureB)))
+    await waitFor(() => expect(desktopQueryClient.isMutating()).toBe(0))
+    await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+
+    const observed = {
+      accessStatus: accessQuery()?.state.data,
+      retrySnapshot: desktopQueryClient
+        .getQueryCache()
+        .findAll()
+        .find(query => query.queryKey.some(part => part === 'accessible'))?.state.data,
+      replaceCalls: replaceFileFromPath.mock.calls.length,
+      pending: desktopQueryClient.isFetching() + desktopQueryClient.isMutating(),
+    }
+    expect(observed.accessStatus).toMatchObject({ status: 'active', revokeRevision: 1 })
+    expect(observed.retrySnapshot).toEqual(retrySnapshot)
+    expect(observed.replaceCalls).toBe(1)
+    expect(observed.pending).toBe(0)
+    expect(appHarness.controller.pushToast).toHaveBeenCalledWith(authorityFailureB, 'error')
+
+    replaceFileFromPath.mockImplementationOnce(() =>
+      Promise.reject(new Error(authorityFailureCurrent))
+    )
+    const currentRowB = await findResourceTreeRow(fileB.name)
+    await chooseRowAction(fileB.name, 'Replace file')
+    const currentInputB = within(currentRowB).getByLabelText(
+      `Replace ${fileB.name}`
+    ) as HTMLInputElement
+    fireEvent.change(currentInputB, { target: { files: [replacement] } })
+    await waitFor(() => expect(replaceFileFromPath).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(appHarness.controller.pushToast).toHaveBeenCalledWith(authorityFailureCurrent, 'error')
+    )
+    await waitFor(() =>
+      expect(accessQuery()?.state.data).toMatchObject({ status: 'revoked', revokeRevision: 2 })
+    )
+    await waitFor(() => expect(desktopQueryClient.isMutating()).toBe(0))
+    expect(
+      recordedToastCalls().filter(([message]) => message === authorityFailureCurrent)
+    ).toHaveLength(1)
+  })
+
+  it('keeps the Retry snapshot when dispatched Replace succeeds after access Retry', async () => {
+    const fileA = await resolveResource(
+      resolvedFile('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'authority-source.bin', { version: 2 })
+    )
+    const fileB = await resolveResource(
+      resolvedFile('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'replace-target.bin', { version: 7 })
+    )
+    const { gfs, replaceFileFromPath } = installClerum([fileA, fileB], new Map(), {
+      affordanceBits: ['read', 'write', 'delete'],
+    })
+    appHarness.controller = makeController(
+      openFilesTab(createWorkspaceTabsState('chat-tab-1'), { id: 'files-root', path: null })
+    )
+    let resolveReplace!: (value: {}) => void
+    const replacePending = new Promise<{}>(resolve => {
+      resolveReplace = resolve
+    })
+    replaceFileFromPath.mockImplementation(() => replacePending)
+    const authorityFailureA = await gfsRouteFailureMessage(
+      client => client.affordances(fileA.resourceId, 'fixture-session-token', 'main'),
+      401,
+      { code: 'unauthorized', message: 'source operation revoked the session' }
+    )
+    const normalAffordances = affordanceMock(gfs).getMockImplementation()
+    if (!normalAffordances) throw new Error('Expected the real GFS affordance boundary mock')
+    let rejectPermissionA = false
+    affordanceMock(gfs).mockImplementation((resourceId: string, drive?: string) => {
+      if (rejectPermissionA && resourceId === fileA.resourceId)
+        return Promise.reject(new Error(authorityFailureA))
+      return normalAffordances(resourceId, drive)
+    })
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const rowB = await findResourceTreeRow(fileB.name)
+    await chooseRowAction(fileB.name, 'Replace file')
+    const inputB = within(rowB).getByLabelText(`Replace ${fileB.name}`) as HTMLInputElement
+    const replacement = new File(['new bytes'], 'replacement.txt', { type: 'text/plain' })
+    fireEvent.change(inputB, { target: { files: [replacement] } })
+    await waitFor(() => expect(replaceFileFromPath).toHaveBeenCalledTimes(1))
+
+    const accessQuery = () =>
+      desktopQueryClient
+        .getQueryCache()
+        .findAll()
+        .find(query => query.queryKey[1] === 'gfs-access')
+    const permissionQueryA = desktopQueryClient
+      .getQueryCache()
+      .findAll()
+      .find(
+        query => query.queryKey.includes(fileA.resourceId) && query.queryKey.includes('affordances')
+      )
+    expect(permissionQueryA).toBeTruthy()
+    rejectPermissionA = true
+    await act(async () => {
+      await desktopQueryClient.invalidateQueries({
+        queryKey: permissionQueryA!.queryKey,
+        exact: true,
+        refetchType: 'none',
+      })
+    })
+    await openRowActions(fileA.name)
+    await waitFor(() =>
+      expect(accessQuery()?.state.data).toMatchObject({ status: 'revoked', revokeRevision: 1 })
+    )
+    rejectPermissionA = false
+    const listCallsBeforeRetry = gfs.listAccessible.mock.calls.length
+    fireEvent.click(screen.getAllByRole('button', { name: 'Retry file access' })[0]!)
+    await waitFor(() =>
+      expect(accessQuery()?.state.data).toMatchObject({ status: 'active', revokeRevision: 1 })
+    )
+    await waitFor(() =>
+      expect(gfs.listAccessible.mock.calls.length).toBeGreaterThan(listCallsBeforeRetry)
+    )
+    await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+    const retrySnapshot = desktopQueryClient
+      .getQueryCache()
+      .findAll()
+      .find(query => query.queryKey.some(part => part === 'accessible'))?.state.data
+    expect(retrySnapshot).toBeTruthy()
+    const listCallsBeforeReplaceSettlement = gfs.listAccessible.mock.calls.length
+
+    await act(async () => resolveReplace({ resultVersion: 8 }))
+    await waitFor(() => expect(desktopQueryClient.isMutating()).toBe(0))
+    await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+
+    const observed = {
+      accessStatus: accessQuery()?.state.data,
+      retrySnapshot: desktopQueryClient
+        .getQueryCache()
+        .findAll()
+        .find(query => query.queryKey.some(part => part === 'accessible'))?.state.data,
+      replaceCalls: replaceFileFromPath.mock.calls.length,
+      pending: desktopQueryClient.isFetching() + desktopQueryClient.isMutating(),
+    }
+    expect(observed.accessStatus).toMatchObject({ status: 'active', revokeRevision: 1 })
+    expect(observed.retrySnapshot).toEqual(retrySnapshot)
+    expect(gfs.listAccessible).toHaveBeenCalledTimes(listCallsBeforeReplaceSettlement)
+    expect(observed.replaceCalls).toBe(1)
+    expect(observed.pending).toBe(0)
+    expect(appHarness.controller.pushToast).toHaveBeenCalledWith(
+      `Replaced ${fileB.name}`,
+      'success'
+    )
+    expect(
+      recordedToastCalls().filter(([message]) => message === `Replaced ${fileB.name}`)
+    ).toHaveLength(1)
+  })
+
   it('reuses an inactive exact-destination Files tab and completes the pending action', async () => {
     const target = await resolveResource(
       resolvedFile('22222222222222222222222222222222', 'existing-target.txt')
     )
     const initialTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
       id: 'existing-target-files',
-      path: target.gfsUri,
+      path: null,
     })
     appHarness.controller = makeController(selectWorkspaceTab(initialTabs, 'chat-tab-1'))
     installClerum([target])
@@ -1604,18 +2579,20 @@ describe('App → Files action lifecycle integration', () => {
     const deferredTarget = deferred<unknown>()
     const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
     const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+    appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
     expect(appHarness.controller.workspaceTabs.tabs.some(tab => tab.kind === 'files')).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    holdExactTargetResolve(gfs, targetA.gfsUri, deferredTarget)
     await chooseDeleteAction('target-a.txt')
 
     const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
     expect((breadcrumb as HTMLButtonElement).disabled).toBe(true)
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
 
@@ -1626,13 +2603,12 @@ describe('App → Files action lifecycle integration', () => {
     await confirmDelete('target-a.txt')
     await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1))
     expect(deleteResource.mock.calls[0]).toEqual([targetA.resourceId, 'main', targetA.version])
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
   })
 
   it('cancels a pending sidebar action when its active owner tab is selected again', async () => {
     const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+    const { gfs, deleteResource } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
@@ -1640,12 +2616,13 @@ describe('App → Files action lifecycle integration', () => {
     expect(appHarness.controller.workspaceTabs.tabs.some(tab => tab.kind === 'files')).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    holdExactTargetResolve(gfs, targetA.gfsUri, deferredTarget)
     await chooseDeleteAction('target-a.txt')
 
     const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
     expect((breadcrumb as HTMLButtonElement).disabled).toBe(true)
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
     expect(deleteResource).not.toHaveBeenCalled()
 
     const tabs = within(screen.getByRole('toolbar', { name: 'Workspace tabs' })).getAllByRole(
@@ -1661,7 +2638,7 @@ describe('App → Files action lifecycle integration', () => {
     })
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
     expect(deleteResource).not.toHaveBeenCalled()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
   })
 
   it('cancels a pending folder action when the sidebar reopens the same active folder', async () => {
@@ -1711,19 +2688,19 @@ describe('App → Files action lifecycle integration', () => {
 
   it('cancels a pending sidebar action when a tabs shortcut reselects its active owner', async () => {
     const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+    const { gfs, deleteResource } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    holdExactTargetResolve(gfs, targetA.gfsUri, deferredTarget)
     await chooseDeleteAction('target-a.txt')
 
     const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
     expect((breadcrumb as HTMLButtonElement).disabled).toBe(true)
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
 
@@ -1756,19 +2733,19 @@ describe('App → Files action lifecycle integration', () => {
 
   it('cancels a pending Files action when the drawer chat switcher advances user intent', async () => {
     const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+    const { gfs, deleteResource } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    holdExactTargetResolve(gfs, targetA.gfsUri, deferredTarget)
     await chooseDeleteAction('target-a.txt')
 
     const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
     expect((breadcrumb as HTMLButtonElement).disabled).toBe(true)
     expect(screen.queryByText('Delete target-a.txt?')).toBeNull()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
     await expectActionAtConsumer(appHarness.filesPagePendingActions, targetA.gfsUri, 'delete')
     expect(deleteResource).not.toHaveBeenCalled()
 
@@ -1791,21 +2768,19 @@ describe('App → Files action lifecycle integration', () => {
   it('cancels a pending Files action when the sidebar selects a chat in the open drawer', async () => {
     const deferredTarget = deferred<unknown>()
     const latestChatSessions = await produceLatestSidebarSession()
-    const { gfs, deleteResource } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
-    )
+    const { gfs, deleteResource } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     appHarness.controller.latestChatSessions = latestChatSessions
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    holdExactTargetResolve(gfs, targetA.gfsUri, deferredTarget)
     await chooseDeleteAction('target-a.txt')
     await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
       kind: 'files',
-      files: { path: targetA.gfsUri },
+      files: { path: null },
     })
     expect(
       ((await screen.findByRole('button', { name: 'Shared with me' })) as HTMLButtonElement)
@@ -1837,21 +2812,19 @@ describe('App → Files action lifecycle integration', () => {
 
   it('cancels a pending Files action when a notification selects a drawer chat', async () => {
     const deferredTarget = deferred<unknown>()
-    const { gfs, deleteResource } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
-    )
+    const { gfs, deleteResource } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     appHarness.controller.notifications = [produceConversationNotification()]
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    holdExactTargetResolve(gfs, targetA.gfsUri, deferredTarget)
     await chooseDeleteAction('target-a.txt')
     await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
     expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
       kind: 'files',
-      files: { path: targetA.gfsUri },
+      files: { path: null },
     })
     expect(
       ((await screen.findByRole('button', { name: 'Shared with me' })) as HTMLButtonElement)
@@ -1882,20 +2855,20 @@ describe('App → Files action lifecycle integration', () => {
 
   it('cancels a pending Files action when sidebar navigation selects Chat', async () => {
     const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+    const { gfs, deleteResource } = installClerum([targetA])
     appHarness.controller.desktopEnvironmentSetupComplete = false
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    holdExactTargetResolve(gfs, targetA.gfsUri, deferredTarget)
     await chooseDeleteAction('target-a.txt')
 
     expect(
       ((await screen.findByRole('button', { name: 'Shared with me' })) as HTMLButtonElement)
         .disabled
     ).toBe(true)
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
     expect(deleteResource).not.toHaveBeenCalled()
     fireEvent.click(screen.getByTestId('nav-chat'))
     await waitFor(() =>
@@ -1920,12 +2893,12 @@ describe('App → Files action lifecycle integration', () => {
 
   it('cancels a pending sidebar action when its Files owner tab closes', async () => {
     const deferredTarget = deferred<unknown>()
-    const deferredByUri = new Map([[targetA.gfsUri, deferredTarget]])
-    const { gfs, deleteResource } = installClerum([targetA], deferredByUri)
+    const { gfs, deleteResource } = installClerum([targetA])
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    holdExactTargetResolve(gfs, targetA.gfsUri, deferredTarget)
     await chooseDeleteAction('target-a.txt')
 
     const breadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
@@ -1939,7 +2912,7 @@ describe('App → Files action lifecycle integration', () => {
     expect(ownerTab).toBeTruthy()
     const ownerTitle = ownerTab?.getAttribute('aria-label')
     expect(ownerTitle).toBeTruthy()
-    expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri)
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
     fireEvent.click(screen.getByRole('button', { name: `Close ${ownerTitle}` }))
     await waitFor(() => {
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
@@ -2013,14 +2986,12 @@ describe('App → Files action lifecycle integration', () => {
     })
     appHarness.controller = makeController(workspaceTabs)
     const deferredTarget = deferred<unknown>()
-    const { deleteResource, gfs } = installClerum(
-      [targetA],
-      new Map([[targetA.gfsUri, deferredTarget]])
-    )
+    const { deleteResource, gfs } = installClerum([targetA])
     renderApp()
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await screen.findByRole('treeitem', { name: /target-a\.txt/ })
+    holdExactTargetResolve(gfs, targetA.gfsUri, deferredTarget)
     await chooseDeleteAction('target-a.txt')
 
     const targetBreadcrumb = await screen.findByRole('button', { name: 'Shared with me' })
@@ -2029,7 +3000,7 @@ describe('App → Files action lifecycle integration', () => {
     await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(targetA.gfsUri))
     expect(deleteResource).not.toHaveBeenCalled()
     const tabs = getWorkspaceTabButtons('Files')
-    expect(tabs).toHaveLength(2)
+    expect(tabs).toHaveLength(1)
 
     fireEvent.click(tabs[0]!)
     await waitFor(() => expect(tabs[0]?.getAttribute('aria-pressed')).toBe('true'))
@@ -2037,11 +3008,9 @@ describe('App → Files action lifecycle integration', () => {
       deferredTarget.resolve(targetA)
       await deferredTarget.promise
     })
-    const targetTab = getWorkspaceTabButtons('Files')[1]
-    expect(targetTab).toBeDefined()
-    fireEvent.click(targetTab!)
     await waitFor(() =>
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        id: 'root-files-tab',
         kind: 'files',
         files: { path: null },
       })
@@ -2127,6 +3096,7 @@ describe('App → Files action lifecycle integration', () => {
       ownerTabId: string
       targetUri: string
       initialResolveCount: number
+      returnCount: number
       returnToFiles: () => Promise<void>
     }
     class ReturnToFiles implements AsyncCommand<Model, Real> {
@@ -2136,6 +3106,7 @@ describe('App → Files action lifecycle integration', () => {
 
       async run(model: Model, real: Real) {
         await real.returnToFiles()
+        real.returnCount += 1
         model.active = 'files'
         expect(model.effects).toBe(1)
         expect(model.path).toBeNull()
@@ -2153,7 +3124,9 @@ describe('App → Files action lifecycle integration', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.scheduler(),
-        fc.commands([fc.constant(command)], { maxCommands: 3 }),
+        fc
+          .commands([fc.constant(command)], { maxCommands: 3 })
+          .filter(generated => [...generated].length > 0),
         async (scheduler, commands) => {
           const archive = await resolveResource(
             resolvedFile('abababababababababababababababab', 'archive.bin')
@@ -2194,6 +3167,7 @@ describe('App → Files action lifecycle integration', () => {
             ownerTabId,
             targetUri: archive.gfsUri,
             initialResolveCount,
+            returnCount: 0,
             returnToFiles: async () => {
               act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
               await waitFor(() =>
@@ -2212,12 +3186,14 @@ describe('App → Files action lifecycle integration', () => {
           }
           try {
             await fc.asyncModelRun(() => ({ model, real }), [...commands])
+            expect(real.returnCount).toBeGreaterThan(0)
             expect(model.effects).toBe(1)
             expect(download).toHaveBeenCalledTimes(1)
             expect(savedFiles).toHaveLength(1)
           } finally {
             cleanup()
             vi.restoreAllMocks()
+            mockSidebarBounds()
           }
         }
       ),
@@ -2225,27 +3201,17 @@ describe('App → Files action lifecycle integration', () => {
     )
   })
 
-  it('generates resolve, cancellation, supersession and return orderings with a reference reducer', async () => {
+  it('generates stale location report, resolver completion and Files return histories', async () => {
     type Model = {
-      active: 'chat' | 'old-files' | 'new-files'
-      oldStatus: 'pending' | 'resolved' | 'cancelled' | 'superseded'
-      oldRequestId: number
+      active: 'chat' | 'old-files'
+      oldStatus: 'pending' | 'resolved'
       oldOwnerId: string
       oldDownloads: number
       oldPath: string | null
       oldLocationReported: boolean
       consumedSeed: { requestId: number; path: string } | null
-      newCopies: number
-      newPath: string | null
-      session: number
-      intent: number
     }
-    type Event =
-      | { kind: 'resolve-old' }
-      | { kind: 'report-old-location' }
-      | { kind: 'cancel-old' }
-      | { kind: 'supersede-old' }
-      | { kind: 'return-old' }
+    type Event = { kind: 'resolve-old' } | { kind: 'report-old-location' } | { kind: 'return-old' }
     const reduceModel = (model: Model, event: Event): Model => {
       switch (event.kind) {
         case 'resolve-old':
@@ -2254,49 +3220,25 @@ describe('App → Files action lifecycle integration', () => {
             oldStatus: 'resolved',
             oldDownloads: 1,
             oldPath: null,
-            consumedSeed: { requestId: model.oldRequestId, path: realOldUri },
+            consumedSeed: null,
           }
         case 'report-old-location':
-          return { ...model, oldLocationReported: true, oldPath: realOldUri }
-        case 'cancel-old':
-          return {
-            ...model,
-            active: 'chat',
-            oldStatus: 'cancelled',
-            oldPath: null,
-            consumedSeed: { requestId: model.oldRequestId, path: realOldUri },
-            intent: model.intent + 1,
-          }
-        case 'supersede-old':
-          return {
-            ...model,
-            active: 'new-files',
-            oldStatus: 'superseded',
-            oldPath: null,
-            consumedSeed: { requestId: model.oldRequestId, path: realOldUri },
-            newCopies: 1,
-            newPath: null,
-            intent: model.intent + 1,
-          }
+          return { ...model, oldLocationReported: true, oldPath: null }
         case 'return-old':
           return { ...model, active: 'old-files' }
       }
     }
-    const realOldUri = 'gfs://main/abababababababababababababababab'
     type Real = {
       scheduler: Scheduler
       oldOwnerId: string
       oldUri: string
-      newUri: string
       resolveOld: (expectDownload: boolean) => Promise<void>
       reportOldLocation: () => Promise<void>
-      cancelOld: () => Promise<void>
-      supersedeOld: () => Promise<void>
       returnOld: () => Promise<void>
       download: ReturnType<typeof vi.fn>
       savedFiles: string[]
-      oldResolveCount: () => number
-      newResolveCount: () => number
+      oldDownloadCount: () => number
+      events: string[]
     }
     class ResolveOld implements AsyncCommand<Model, Real> {
       check(model: Model) {
@@ -2304,6 +3246,7 @@ describe('App → Files action lifecycle integration', () => {
       }
       async run(model: Model, real: Real) {
         await real.resolveOld(true)
+        real.events.push('resolve-old')
         Object.assign(model, reduceModel(model, { kind: 'resolve-old' }))
         expect(real.download).toHaveBeenCalledTimes(model.oldDownloads)
         expect(real.savedFiles).toHaveLength(model.oldDownloads)
@@ -2322,162 +3265,76 @@ describe('App → Files action lifecycle integration', () => {
       }
       async run(model: Model, real: Real) {
         await real.reportOldLocation()
+        real.events.push('report-old-location')
         Object.assign(model, reduceModel(model, { kind: 'report-old-location' }))
         await waitFor(() =>
           expect(
             appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === real.oldOwnerId)
-          ).toMatchObject({ kind: 'files', files: { path: real.oldUri } })
+          ).toMatchObject({ kind: 'files', files: { path: null } })
         )
       }
       toString() {
         return 'report the action-owned URI while its action is still pending'
       }
     }
-    class CancelOld implements AsyncCommand<Model, Real> {
-      check(model: Model) {
-        return model.oldStatus === 'pending'
-      }
-      async run(model: Model, real: Real) {
-        await real.cancelOld()
-        Object.assign(model, reduceModel(model, { kind: 'cancel-old' }))
-        expect(model.oldPath).toBeNull()
-      }
-      toString() {
-        return 'switch to Chat and cancel the pending old action'
-      }
-    }
-    class SupersedeOld implements AsyncCommand<Model, Real> {
-      check(model: Model) {
-        return model.oldStatus === 'pending'
-      }
-      async run(model: Model, real: Real) {
-        await real.supersedeOld()
-        Object.assign(model, reduceModel(model, { kind: 'supersede-old' }))
-        expect(model.oldPath).toBeNull()
-        expect(model.newCopies).toBe(1)
-        expect(model.newPath).toBeNull()
-      }
-      toString() {
-        return 'accept a new-URI action into a distinct Files owner'
-      }
-    }
-    class SessionChange implements AsyncCommand<Model, Real> {
-      check(model: Model) {
-        return model.oldStatus === 'pending'
-      }
-      async run(model: Model, real: Real) {
-        act(() => {
-          appHarness.controller.sessionGeneration = 2
-          appHarness.forceRender()
-        })
-        await real.cancelOld()
-        Object.assign(model, {
-          active: 'chat',
-          oldStatus: 'cancelled',
-          oldPath: null,
-          consumedSeed: { requestId: model.oldRequestId, path: real.oldUri },
-          session: model.session + 1,
-          intent: model.intent + 1,
-        })
-        expect(model.session).toBe(2)
-        expect(model.oldPath).toBeNull()
-      }
-      toString() {
-        return 'change session while the Files action is resolving'
-      }
-    }
-    class SettleStaleOld implements AsyncCommand<Model, Real> {
-      check(model: Model) {
-        return model.oldStatus === 'cancelled' || model.oldStatus === 'superseded'
-      }
-      async run(model: Model, real: Real) {
-        await real.resolveOld(false)
-        expect(real.download).toHaveBeenCalledTimes(model.oldDownloads)
-        expect(real.savedFiles).toHaveLength(model.oldDownloads)
-        expect(real.oldResolveCount()).toBe(1)
-      }
-      toString() {
-        return 'settle the stale old resolver after cancellation or replacement'
-      }
-    }
     class ReturnOld implements AsyncCommand<Model, Real> {
       check(model: Model) {
-        return model.oldStatus !== 'pending'
+        return model.oldStatus !== 'pending' && model.active !== 'old-files'
       }
       async run(model: Model, real: Real) {
         await real.returnOld()
+        real.events.push('return-old')
         Object.assign(model, reduceModel(model, { kind: 'return-old' }))
         expect(model.active).toBe('old-files')
         expect(model.oldPath).toBeNull()
-        expect(real.oldResolveCount()).toBe(1)
+        expect(real.oldDownloadCount()).toBe(1)
         expect(real.download).toHaveBeenCalledTimes(model.oldDownloads)
-        expect(real.newResolveCount()).toBe(model.newCopies)
       }
       toString() {
         return 'return to the old Files owner without replay'
       }
     }
 
-    const commands = [
-      new ResolveOld(),
-      new ReportOldLocation(),
-      new CancelOld(),
-      new SupersedeOld(),
-      new SessionChange(),
-      new SettleStaleOld(),
-      new ReturnOld(),
-    ]
+    const commands = [new ResolveOld(), new ReportOldLocation(), new ReturnOld()]
+    const generatedCommandsArbitrary = fc
+      .commands(
+        commands.map(command => fc.constant(command)),
+        { maxCommands: 5 }
+      )
+      .filter(generated => {
+        const names = [...generated].map(command => command.toString())
+        const reportIndex = names.findIndex(name => name.includes('action-owned URI'))
+        const resolveIndex = names.findIndex(name => name.includes('resolve and acknowledge'))
+        const returnIndex = names.findIndex(name => name.includes('return to the old Files owner'))
+        return reportIndex >= 0 && resolveIndex > reportIndex && returnIndex > resolveIndex
+      })
     await fc.assert(
       fc.asyncProperty(
         fc.scheduler(),
-        fc.commands(
-          commands.map(command => fc.constant(command)),
-          { maxCommands: 4 }
-        ),
+        generatedCommandsArbitrary,
         async (scheduler, generatedCommands) => {
           const generated = [...generatedCommands]
-          const names = generated.map(command => command.toString())
-          const reportIndex = names.findIndex(name => name.includes('action-owned URI'))
-          const resolveIndex = names.findIndex(name => name.includes('resolve and acknowledge'))
-          const otherTerminalIndices = names
-            .map((name, index) => ({ name, index }))
-            .filter(({ name }) =>
-              /cancel the pending old action|distinct Files owner|change session/.test(name)
-            )
-            .map(({ index }) => index)
-          fc.pre(
-            reportIndex >= 0 &&
-              resolveIndex > reportIndex &&
-              otherTerminalIndices.every(index => index > resolveIndex)
-          )
           const oldFile = await resolveResource(
             resolvedFile('abababababababababababababababab', 'archive.bin')
           )
-          const newFile = await resolveResource(
-            resolvedFile('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', 'second.bin')
-          )
-          const { gfs, deleteResource } = installClerum([oldFile, newFile])
-          const originalResolve = gfs.resolve
-          let oldResolveCount = 0
-          Object.assign(gfs, {
-            resolve: vi.fn((uri: string) => {
-              if (uri === oldFile.gfsUri) {
-                oldResolveCount += 1
-                return scheduler.schedule(
-                  new Promise(resolve => {
-                    setTimeout(() => {
-                      originalResolve(uri).then(resolve)
-                    }, 0)
-                  }),
-                  'old file resolution'
-                )
-              }
-              return originalResolve(uri)
-            }),
+          const { gfs } = installClerum([oldFile])
+          let oldDownloadCount = 0
+          const download = vi.fn((uri: string) => {
+            expect(uri).toBe(oldFile.gfsUri)
+            oldDownloadCount += 1
+            return scheduler.schedule(
+              Promise.resolve({ bytes: new Uint8Array([1]).buffer }),
+              'old file download'
+            )
           })
-          const download = vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer }))
-          Object.assign(gfs, { download })
+          Object.assign(gfs, {
+            download,
+          })
           const savedFiles: string[] = []
+          Object.defineProperty(URL, 'createObjectURL', {
+            configurable: true,
+            value: vi.fn(() => 'blob:r30-stale-location'),
+          })
           vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
             this: HTMLAnchorElement
           ) {
@@ -2487,49 +3344,40 @@ describe('App → Files action lifecycle integration', () => {
           renderApp()
           fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
           await findResourceTreeRow(oldFile.name)
-          await findResourceTreeRow(newFile.name)
           await chooseRowAction(oldFile.name, 'Download')
-          await waitFor(() => expect(oldResolveCount).toBe(1))
+          await waitFor(() => expect(oldDownloadCount).toBe(1))
+          await waitFor(() =>
+            expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('files')
+          )
           const oldOwner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
           expect(oldOwner?.kind).toBe('files')
+          act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
+          await waitFor(() =>
+            expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
+          )
           const initialModel: Model = {
-            active: 'old-files',
+            active: 'chat',
             oldStatus: 'pending',
-            oldRequestId: (appHarness.filesPageLatestPendingAction as { id: number }).id,
             oldOwnerId: oldOwner!.id,
             oldDownloads: 0,
-            oldPath: oldFile.gfsUri,
+            oldPath: null,
             oldLocationReported: false,
             consumedSeed: null,
-            newCopies: 0,
-            newPath: null,
-            session: 1,
-            intent: 1,
           }
           const real: Real = {
             scheduler,
             oldOwnerId: oldOwner!.id,
             oldUri: oldFile.gfsUri,
-            newUri: newFile.gfsUri,
+            events: [],
             reportOldLocation: async () => {
               act(() => appHarness.filesPageReportLocation?.(oldFile.gfsUri, oldFile.name))
             },
             resolveOld: async expectDownload => {
               await act(async () => scheduler.waitAll())
-              await waitFor(() => expect(oldResolveCount).toBeGreaterThanOrEqual(1))
+              await waitFor(() => expect(oldDownloadCount).toBeGreaterThanOrEqual(1))
               await Promise.resolve()
               await waitFor(() => expect(download).toHaveBeenCalledTimes(expectDownload ? 1 : 0))
               await waitFor(() => expect(savedFiles).toHaveLength(expectDownload ? 1 : 0))
-            },
-            cancelOld: async () => {
-              act(() => appHarness.controller.selectWorkspaceTabById('chat-tab-1'))
-              await waitFor(() =>
-                expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind).toBe('chat')
-              )
-            },
-            supersedeOld: async () => {
-              await chooseRowAction(newFile.name, 'Copy link')
-              await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1))
             },
             returnOld: async () => {
               if (activeWorkspaceTab(appHarness.controller.workspaceTabs)?.id !== 'chat-tab-1') {
@@ -2547,40 +3395,31 @@ describe('App → Files action lifecycle integration', () => {
             },
             download,
             savedFiles,
-            oldResolveCount: () => oldResolveCount,
-            newResolveCount: () =>
-              gfs.resolve.mock.calls.filter(([uri]) => uri === newFile.gfsUri).length,
+            oldDownloadCount: () => oldDownloadCount,
           }
           let model = initialModel
           try {
-            if (!generated.length)
-              generated.push(new CancelOld(), new SettleStaleOld(), new ReturnOld())
             await fc.asyncModelRun(() => ({ model, real }), generated)
-            if (model.oldStatus === 'pending') {
-              await new SessionChange().run(model, real)
-            }
-            if (model.oldStatus === 'cancelled' || model.oldStatus === 'superseded') {
-              await real.resolveOld(false)
-              await real.returnOld()
-              Object.assign(model, reduceModel(model, { kind: 'return-old' }))
-            }
+            expect(model.oldStatus).toBe('resolved')
+            expect(model.oldLocationReported).toBe(true)
+            expect(model.oldPath).toBeNull()
+            expect(model.consumedSeed).toBeNull()
+            expect(model.active).toBe('old-files')
             await scheduler.waitAll()
             await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
             expect(download).toHaveBeenCalledTimes(model.oldDownloads)
             expect(savedFiles).toHaveLength(model.oldDownloads)
-            expect(oldResolveCount).toBe(1)
-            expect(deleteResource).not.toHaveBeenCalled()
+            expect(oldDownloadCount).toBe(1)
+            expect(real.events).toEqual(['report-old-location', 'resolve-old', 'return-old'])
             expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull()
             if (model.consumedSeed) {
-              expect(model.consumedSeed).toEqual({
-                requestId: model.oldRequestId,
-                path: oldFile.gfsUri,
-              })
+              expect(model.consumedSeed.path).toBe(oldFile.gfsUri)
               expect(model.oldOwnerId).toBe(oldOwner!.id)
             }
           } finally {
             cleanup()
             vi.restoreAllMocks()
+            mockSidebarBounds()
           }
         }
       ),
@@ -2734,7 +3573,7 @@ describe('App → Files action lifecycle integration', () => {
     await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(archive.gfsUri))
     await chooseRowAction(archive.name, 'Copy link')
     await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1))
-    expect(targetCallCount).toBe(2)
+    expect(targetCallCount).toBe(1)
     expect(deleteResource).not.toHaveBeenCalled()
     await waitFor(() =>
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
@@ -2784,7 +3623,7 @@ describe('App → Files action lifecycle integration', () => {
     await waitFor(() => expect(gfs.copyDeepLink).toHaveBeenCalledTimes(1))
     const newOwner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
     expect(newOwner?.kind).toBe('files')
-    expect(newOwner!.id).not.toBe(oldOwnerId)
+    expect(newOwner!.id).toBe(oldOwnerId)
     expect(
       appHarness.controller.workspaceTabs.tabs.find(tab => tab.id === oldOwnerId)
     ).toMatchObject({ kind: 'files', files: { path: null } })
@@ -2994,7 +3833,7 @@ describe('App → Files action lifecycle integration', () => {
       resolvedFile('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd', 'second.bin')
     )
     const oldResolution = deferred<unknown>()
-    const { gfs } = installClerum([archive, second])
+    const { gfs, deleteResource } = installClerum([archive, second])
     const originalResolve = gfs.resolve
     let oldResolveCount = 0
     Object.assign(gfs, {
@@ -3018,7 +3857,7 @@ describe('App → Files action lifecycle integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
     await findResourceTreeRow(archive.name)
     await findResourceTreeRow(second.name)
-    await chooseRowAction(archive.name, 'Download')
+    await chooseDeleteAction(archive.name)
     await waitFor(() => expect(oldResolveCount).toBe(1))
     const owner = activeWorkspaceTab(appHarness.controller.workspaceTabs)
     expect(owner?.kind).toBe('files')
@@ -3029,12 +3868,12 @@ describe('App → Files action lifecycle integration', () => {
       explicitOwnerId: null,
       requestId,
       active: 'old-files',
-      consumedSeed: { requestId, path: archive.gfsUri },
+      consumedSeed: null,
       oldDownloads: 0,
       explicitDownloads: 0,
       locationReports: 0,
       settled: false,
-      path: archive.gfsUri,
+      path: null,
     }
     const real: Real = {
       scheduler,
@@ -3110,6 +3949,7 @@ describe('App → Files action lifecycle integration', () => {
       })
     expect(generated).toBeDefined()
     await fc.asyncModelRun(() => ({ model, real }), generated!)
+    expect(deleteResource).not.toHaveBeenCalled()
     expect(model).toMatchObject({
       active: 'explicit-files',
       consumedSeed: null,
@@ -3146,15 +3986,7 @@ describe('App → Files action lifecycle integration', () => {
     fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
     await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(1))
     await scheduler.waitAll()
-    await waitFor(() =>
-      expect(screen.getAllByRole('button', { name: 'after.txt' }).length).toBeGreaterThan(0)
-    )
-    await waitFor(() =>
-      expect(appHarness.filesPageLastLocation).toMatchObject({
-        gfsUri: file.gfsUri,
-        name: 'before.txt',
-      })
-    )
+    act(() => appHarness.filesPageReportLocation?.(file.gfsUri, 'before.txt'))
     await waitFor(() =>
       expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
         kind: 'files',
@@ -3299,6 +4131,90 @@ describe('App → Files action lifecycle integration', () => {
     expect(markdownResolveCalls).toBe(4)
     expect(gfs.downloadPreview.mock.calls.filter(([uri]) => uri === markdown.gfsUri)).toHaveLength(
       1
+    )
+    expect(
+      getWorkspaceTabButtons(markdown.name).find(tab => tab.getAttribute('aria-pressed') === 'true')
+    ).toBeTruthy()
+    expect(gfs.download).not.toHaveBeenCalled()
+    expect(gfs.downloadPreview).toHaveBeenCalledWith(markdown.gfsUri, expect.any(Number))
+  })
+
+  it('lets a confirmed GFS deep link replace the action owner expected location', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('11111111111111111111111111111111', 'Vault')
+    )
+    const file = await resolveResource(
+      resolvedFile('44444444444444444444444444444444', 'report.txt', {
+        parentResourceId: parent.resourceId,
+      })
+    )
+    const linkedFolder = await resolveResource(
+      resolvedDirectory('55555555555555555555555555555555', 'Linked folder')
+    )
+    const { gfs } = installClerum([parent, file, linkedFolder], new Map(), {
+      accessibleRows: [
+        accessibleResource(parent.resourceId, parent.name, 'directory', {
+          gfsUri: parent.gfsUri,
+        }),
+        accessibleResource(linkedFolder.resourceId, linkedFolder.name, 'directory', {
+          gfsUri: linkedFolder.gfsUri,
+        }),
+      ],
+      childRowsByParent: new Map([
+        [
+          parent.resourceId,
+          [
+            childView(file.resourceId, file.name, 'file', {
+              parentResourceId: parent.resourceId,
+              version: file.version,
+            }),
+          ],
+        ],
+      ]),
+    })
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer }))
+    const savedFiles: string[] = []
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      savedFiles.push(this.download)
+    })
+    Object.assign(gfs, { download })
+    appHarness.useRealNavigationController = true
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    const parentRow = await screen.findByRole('treeitem', { name: /Vault/ })
+    fireEvent.click(within(parentRow).getByRole('button', { name: 'Expand Vault' }))
+    await chooseRowAction(file.name, 'Download')
+    await waitFor(() => expect(download).toHaveBeenCalledOnce())
+    expect(savedFiles).toEqual([file.name])
+    await waitFor(() => expect(appHarness.filesPageLatestPendingAction).toBeNull())
+    expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: parent.gfsUri },
+    })
+
+    const link: GfsResourceDeepLinkEnvelope = {
+      id: 1,
+      uri: linkedFolder.gfsUri,
+      userNavigationGenerationAtActivation: 0,
+    }
+    await waitFor(() => expect(appHarness.emitGfsDeepLink).toBeTypeOf('function'))
+    act(() => appHarness.emitGfsDeepLink?.(link))
+    await screen.findByRole('dialog', { name: 'Open EvenDrive link?' })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(linkedFolder.gfsUri))
+    await waitFor(() => expect(appHarness.filesPageReportLocation).toBeTypeOf('function'))
+    act(() => {
+      appHarness.filesPageReportLocation?.(linkedFolder.gfsUri, linkedFolder.name)
+    })
+
+    await waitFor(() =>
+      expect(activeWorkspaceTab(appHarness.controller.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: linkedFolder.gfsUri },
+      })
     )
   })
 
@@ -3940,5 +4856,1094 @@ describe('App → Files action lifecycle integration', () => {
     })
     await screen.findByRole('heading', { name: 'Preview body' })
     expect(writeText).not.toHaveBeenCalled()
+  })
+
+  const createD5aGeneratedFixture = async () => {
+    cleanup()
+    desktopQueryClient.clear()
+    appHarness.controller = makeController()
+    appHarness.filesPagePendingActions = []
+    appHarness.filesPageCurrentnessById.clear()
+    appHarness.filesPageHandledEvents = []
+    appHarness.d5aPermissionSettledUris.clear()
+    appHarness.d5aPostPermissionAckIds.clear()
+    const resourceAId = '44444444444444444444444444444444'
+    const resourceBId = '55555555555555555555555555555555'
+    const fileA = await resolveResource(resolvedFile(resourceAId, 'first-root.txt', { version: 7 }))
+    const fileB = await resolveResource(
+      resolvedFile(resourceBId, 'second-root.txt', { version: 3 })
+    )
+    const permissionA = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const permissionB = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const { gfs } = installClerum([fileA, fileB], new Map(), {
+      accessibleRows: [
+        accessibleResource(resourceAId, fileA.name, 'file', {
+          gfsUri: fileA.gfsUri,
+          version: 7,
+          permissions: ['read', 'write'],
+        }),
+        accessibleResource(resourceBId, fileB.name, 'file', {
+          gfsUri: fileB.gfsUri,
+          version: 3,
+          permissions: ['read', 'write'],
+        }),
+      ],
+    })
+    const initialAffordances = affordanceMock(gfs).getMockImplementation()
+    expect(initialAffordances).toBeTruthy()
+    let holdA = false
+    let holdB = false
+    affordanceMock(gfs).mockImplementation((resourceId: string) => {
+      if (resourceId === resourceAId && holdA)
+        return permissionA.promise.then(
+          result => {
+            appHarness.d5aPermissionSettledUris.add(fileA.gfsUri)
+            return result
+          },
+          error => {
+            appHarness.d5aPermissionSettledUris.add(fileA.gfsUri)
+            throw error
+          }
+        )
+      if (resourceId === resourceBId && holdB)
+        return permissionB.promise.then(
+          result => {
+            appHarness.d5aPermissionSettledUris.add(fileB.gfsUri)
+            return result
+          },
+          error => {
+            appHarness.d5aPermissionSettledUris.add(fileB.gfsUri)
+            throw error
+          }
+        )
+      return initialAffordances!(resourceId, 'main')
+    })
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(fileA.name)
+    await findResourceTreeRow(fileB.name)
+
+    const queryFor = (resourceId: string) =>
+      desktopQueryClient
+        .getQueryCache()
+        .findAll()
+        .find(
+          query => query.queryKey.includes(resourceId) && query.queryKey.includes('affordances')
+        )
+    const requestFor = (uri: string) =>
+      appHarness.filesPagePendingActions.find(
+        (candidate): candidate is { id: number; targetUri: string } =>
+          Boolean(candidate && typeof candidate === 'object' && 'targetUri' in candidate) &&
+          (candidate as { targetUri: string }).targetUri === uri
+      )
+    const invalidate = async (resourceId: string) => {
+      const query = queryFor(resourceId)
+      expect(query).toBeTruthy()
+      await waitFor(() => expect(query!.state.status).toBe('success'))
+      await desktopQueryClient.invalidateQueries({
+        queryKey: query!.queryKey,
+        exact: true,
+        refetchType: 'none',
+      })
+      return query!
+    }
+    let requestA: { id: number; targetUri: string } | undefined
+    let requestB: { id: number; targetUri: string } | undefined
+    let queryA: NonNullable<ReturnType<typeof queryFor>> | undefined
+    let queryB: NonNullable<ReturnType<typeof queryFor>> | undefined
+    let aPermissionWasPendingBeforeB = false
+    let bPermissionWasPending = false
+    const startA = async () => {
+      const menu = await openRowActions(fileA.name)
+      queryA = await invalidate(resourceAId)
+      holdA = true
+      fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Rename' }))
+      await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(resourceAId, 'main'))
+      requestA = requestFor(fileA.gfsUri)
+      expect(requestA).toBeTruthy()
+      await waitFor(() => expect(queryA!.state.fetchStatus).toBe('fetching'))
+      aPermissionWasPendingBeforeB = queryA!.state.fetchStatus === 'fetching'
+      return requestA!
+    }
+    const startB = async () => {
+      if (!aPermissionWasPendingBeforeB) throw new Error('A permission was not pending before B')
+      const menu = await openRowActions(fileB.name)
+      queryB = await invalidate(resourceBId)
+      holdB = true
+      fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Rename' }))
+      await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(resourceBId, 'main'))
+      requestB = requestFor(fileB.gfsUri)
+      expect(requestB).toBeTruthy()
+      await waitFor(() => expect(queryB!.state.fetchStatus).toBe('fetching'))
+      bPermissionWasPending = queryB!.state.fetchStatus === 'fetching'
+      return requestB!
+    }
+    const settleA = async (result: 'denied' | 'rejected') => {
+      if (!queryA || !requestA) throw new Error('A permission request was not started')
+      if (result === 'denied') permissionA.resolve(await resourceAffordances(['read']))
+      else permissionA.reject(new Error('permission service unavailable for first-root.txt'))
+      await waitFor(() => expect(queryA!.state.fetchStatus).not.toBe('fetching'))
+      expect(appHarness.filesPageCurrentnessById.get(requestA.id)?.(requestA.id)).toBe(false)
+      expect(
+        recordedToastCalls().some(
+          ([message]) => typeof message === 'string' && message.includes(fileA.name)
+        )
+      ).toBe(false)
+    }
+    const settleB = async (result: 'denied' | 'error' | 'allowed') => {
+      if (!queryB || !requestB) throw new Error('B permission request was not started')
+      if (result === 'denied') permissionB.resolve(await resourceAffordances(['read']))
+      else if (result === 'allowed')
+        permissionB.resolve(await resourceAffordances(['read', 'write']))
+      else permissionB.reject(new Error('permission service unavailable for second-root.txt'))
+      await waitFor(() => expect(queryB!.state.fetchStatus).not.toBe('fetching'))
+      if (result === 'denied') {
+        await waitFor(() =>
+          expect(recordedToastCalls()).toContainEqual([
+            `You do not have write access to ${fileB.name}.`,
+            'error',
+          ])
+        )
+      } else if (result === 'error') {
+        await waitFor(() =>
+          expect(
+            recordedToastCalls().some(
+              ([message]) => typeof message === 'string' && message.includes(`for ${fileB.name}`)
+            )
+          ).toBe(true)
+        )
+      } else {
+        await screen.findByRole('form', { name: 'Rename resource' })
+        expect((screen.getByLabelText('New name') as HTMLInputElement).value).toBe(fileB.name)
+      }
+    }
+    return {
+      startA,
+      startB,
+      settleA,
+      settleB,
+      observeD5a: (model: ReturnType<typeof initialD5a>) => {
+        const feedback = recordedToastCalls().flatMap(([message]) => {
+          if (typeof message !== 'string') return []
+          const resource = message.includes(fileA.name)
+            ? 'A'
+            : message.includes(fileB.name)
+              ? 'B'
+              : null
+          return resource ? [{ resource, message }] : []
+        })
+        const dialog = screen.queryByRole('form', { name: 'Rename resource' })
+        const queryPending = desktopQueryClient.isFetching() > 0
+        const modelChecks = assertD5a(model)
+        const violations = Object.entries(modelChecks)
+          .filter(([, passes]) => !passes)
+          .map(([name]) => `model:${name}`)
+        if (feedback.some(item => item.resource === 'A'))
+          violations.push('stale A feedback was emitted')
+        if (queryPending) violations.push('permission query remains pending')
+        const actualFeedback = feedback.map(item => ({
+          requestId: item.resource === 'A' ? requestA!.id : requestB!.id,
+          resource: item.resource,
+          session: 1,
+          revokeRevision: 0,
+          result: item.message.startsWith('You do not have')
+            ? ('denied' as const)
+            : ('error' as const),
+        }))
+        const actualUi = dialog
+          ? [{ requestId: requestB!.id, resource: 'B', session: 1, revokeRevision: 0 }]
+          : []
+        if (JSON.stringify(actualFeedback) !== JSON.stringify(model.feedback))
+          violations.push('mounted feedback differs from independent D5a A4 model')
+        if (JSON.stringify(actualUi) !== JSON.stringify(model.ui))
+          violations.push('mounted action UI differs from independent D5a A4 model')
+        return {
+          requestA: requestA?.id,
+          requestB: requestB?.id,
+          aPermissionWasPendingBeforeB,
+          bPermissionWasPending,
+          pending: desktopQueryClient.isFetching(),
+          sensitivity: d5aSensitivityControl(),
+          aCurrentDuringPermission: requestA
+            ? (appHarness.filesPageCurrentnessById.get(requestA.id)?.(requestA.id) ?? null)
+            : null,
+          bCurrentDuringPermission: requestB
+            ? (appHarness.filesPageCurrentnessById.get(requestB.id)?.(requestB.id) ?? null)
+            : null,
+          aCurrentAfterB: requestA
+            ? (appHarness.filesPageCurrentnessById.get(requestA.id)?.(requestA.id) ?? null)
+            : null,
+          bCurrentAfterB: requestB
+            ? (appHarness.filesPageCurrentnessById.get(requestB.id)?.(requestB.id) ?? null)
+            : null,
+          feedback,
+          actualFeedback,
+          actualUi,
+          modelExpected: { feedback: model.feedback, ui: model.ui, checks: modelChecks },
+          dialogValue: (dialog?.querySelector('input') as HTMLInputElement | null)?.value ?? null,
+          queryPending,
+          violations,
+        }
+      },
+      resourceNames: { A: fileA.name, B: fileB.name },
+    }
+  }
+
+  const runD5aPermissionSuccessorProbe = async (
+    staleA: 'denied' | 'rejected' | 'authority',
+    currentB: 'denied' | 'error' | 'allowed',
+    completionOrder: 'A-then-B' | 'B-then-A' | 'fc.scheduler',
+    scheduler?: Scheduler,
+    assertContract = true,
+    heldTargetResolution?: Deferred<unknown>
+  ) => {
+    cleanup()
+    desktopQueryClient.clear()
+    appHarness.controller = makeController()
+    appHarness.filesPagePendingActions = []
+    appHarness.filesPageCurrentnessById.clear()
+    const resourceAId = '44444444444444444444444444444444'
+    const resourceBId = '55555555555555555555555555555555'
+    const fileA = await resolveResource(resolvedFile(resourceAId, 'first-root.txt', { version: 7 }))
+    const fileB = await resolveResource(
+      resolvedFile(resourceBId, 'second-root.txt', { version: 3 })
+    )
+    const permissionA = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const permissionB = deferred<Awaited<ReturnType<typeof resourceAffordances>>>()
+    const renameResource = vi.fn(async () => ({}))
+    const { gfs } = installClerum([fileA, fileB], new Map(), {
+      accessibleRows: [
+        accessibleResource(resourceAId, fileA.name, 'file', {
+          gfsUri: fileA.gfsUri,
+          version: 7,
+          permissions: ['read', 'write'],
+        }),
+        accessibleResource(resourceBId, fileB.name, 'file', {
+          gfsUri: fileB.gfsUri,
+          version: 3,
+          permissions: ['read', 'write'],
+        }),
+      ],
+    })
+    const initialAffordances = affordanceMock(gfs).getMockImplementation()
+    expect(initialAffordances).toBeTruthy()
+    let holdA = false
+    let holdB = false
+    let accessStateAtRevoke: unknown = null
+    let retryListAccessibleCalls = 0
+    let bTargetResolveWasHeld = false
+    let bCurrentAtTargetAwait: boolean | null = null
+    affordanceMock(gfs).mockImplementation((resourceId: string) => {
+      if (resourceId === resourceAId && holdA)
+        return permissionA.promise.then(
+          result => {
+            appHarness.d5aPermissionSettledUris.add(fileA.gfsUri)
+            return result
+          },
+          error => {
+            appHarness.d5aPermissionSettledUris.add(fileA.gfsUri)
+            throw error
+          }
+        )
+      if (resourceId === resourceBId && holdB)
+        return permissionB.promise.then(
+          result => {
+            appHarness.d5aPermissionSettledUris.add(fileB.gfsUri)
+            return result
+          },
+          error => {
+            appHarness.d5aPermissionSettledUris.add(fileB.gfsUri)
+            throw error
+          }
+        )
+      return initialAffordances!(resourceId, 'main')
+    })
+    Object.assign(gfs, { renameResource })
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand file explorer' }))
+    await findResourceTreeRow(fileA.name)
+    await findResourceTreeRow(fileB.name)
+    if (heldTargetResolution) holdExactTargetResolve(gfs, fileB.gfsUri, heldTargetResolution)
+
+    const menuA = await openRowActions(fileA.name)
+    const renameA = await within(menuA).findByRole('menuitem', { name: 'Rename' })
+    const queryA = desktopQueryClient
+      .getQueryCache()
+      .findAll()
+      .find(query => query.queryKey.includes(resourceAId) && query.queryKey.includes('affordances'))
+    expect(queryA?.state.status).toBe('success')
+    await desktopQueryClient.invalidateQueries({
+      queryKey: queryA!.queryKey,
+      exact: true,
+      refetchType: 'none',
+    })
+    holdA = true
+    fireEvent.click(renameA)
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(resourceAId, 'main'))
+    const requestA = appHarness.filesPagePendingActions.find(
+      (candidate): candidate is { id: number; targetUri: string } =>
+        Boolean(candidate && typeof candidate === 'object' && 'targetUri' in candidate) &&
+        (candidate as { targetUri: string }).targetUri === fileA.gfsUri
+    )
+    expect(requestA).toBeTruthy()
+    await waitFor(() => expect(queryA!.state.fetchStatus).toBe('fetching'))
+    const aPermissionWasPendingBeforeB = queryA!.state.fetchStatus === 'fetching'
+    const aCurrentDuringPermission =
+      appHarness.filesPageCurrentnessById.get(requestA!.id)?.(requestA!.id) ?? null
+
+    const menuB = await openRowActions(fileB.name)
+    const renameB = await within(menuB).findByRole('menuitem', { name: 'Rename' })
+    const queryB = desktopQueryClient
+      .getQueryCache()
+      .findAll()
+      .find(query => query.queryKey.includes(resourceBId) && query.queryKey.includes('affordances'))
+    expect(queryB?.state.status).toBe('success')
+    await desktopQueryClient.invalidateQueries({
+      queryKey: queryB!.queryKey,
+      exact: true,
+      refetchType: 'none',
+    })
+    holdB = true
+    fireEvent.click(renameB)
+    await waitFor(() => expect(gfs.affordances).toHaveBeenCalledWith(resourceBId, 'main'))
+    const requestB = appHarness.filesPagePendingActions.find(
+      (candidate): candidate is { id: number; targetUri: string } =>
+        Boolean(candidate && typeof candidate === 'object' && 'targetUri' in candidate) &&
+        (candidate as { targetUri: string }).targetUri === fileB.gfsUri
+    )
+    expect(requestB).toBeTruthy()
+    expect(requestB!.id).not.toBe(requestA!.id)
+    await waitFor(() => expect(queryB!.state.fetchStatus).toBe('fetching'))
+    const bPermissionWasPending = queryB!.state.fetchStatus === 'fetching'
+    const bCurrentDuringPermission =
+      appHarness.filesPageCurrentnessById.get(requestB!.id)?.(requestB!.id) ?? null
+    const aCurrentAfterB =
+      appHarness.filesPageCurrentnessById.get(requestA!.id)?.(requestA!.id) ?? null
+    const sameFilesOwner =
+      activeWorkspaceTab(appHarness.controller.workspaceTabs)?.kind === 'files' &&
+      appHarness.controller.workspaceTabs.tabs.filter(tab => tab.kind === 'files').length === 1
+    let model = initialD5a()
+    model = transitionD5a(model, { type: 'request', id: requestA!.id, resource: 'A', session: 1 })
+    model = transitionD5a(model, {
+      type: 'permission-start',
+      id: 101,
+      requestId: requestA!.id,
+      resource: 'A',
+      session: 1,
+    })
+    model = transitionD5a(model, { type: 'request', id: requestB!.id, resource: 'B', session: 1 })
+    model = transitionD5a(model, {
+      type: 'permission-start',
+      id: 102,
+      requestId: requestB!.id,
+      resource: 'B',
+      session: 1,
+    })
+
+    const resolveA = async () => {
+      await act(async () => {
+        if (staleA === 'denied') permissionA.resolve(await resourceAffordances(['read']))
+        else if (staleA === 'authority') {
+          const failure = await gfsRouteFailureMessage(
+            client => client.affordances(resourceAId, 'fixture-session-token', 'main'),
+            401,
+            { code: 'unauthorized', message: 'captured session denied' }
+          )
+          permissionA.reject(new Error(failure))
+        } else permissionA.reject(new Error(`500 permission service unavailable for ${fileA.name}`))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      await waitFor(() => expect(queryA!.state.fetchStatus).not.toBe('fetching'))
+      const hadEarlyAcknowledgment = appHarness.filesPageHandledEvents.some(
+        event => event.id === requestA!.id && !event.permissionSettled
+      )
+      if (staleA === 'authority') {
+        await waitFor(() =>
+          expect(
+            desktopQueryClient
+              .getQueryCache()
+              .findAll()
+              .some(
+                query =>
+                  query.queryKey[1] === 'gfs-access' &&
+                  (query.state.data as { status?: string } | undefined)?.status === 'revoked'
+              )
+          ).toBe(true)
+        )
+        accessStateAtRevoke = desktopQueryClient
+          .getQueryCache()
+          .findAll()
+          .find(query => query.queryKey[1] === 'gfs-access')?.state.data
+        const listCallsBeforeRetry = gfs.listAccessible.mock.calls.length
+        const retryButtons = screen.getAllByRole('button', { name: 'Retry file access' })
+        fireEvent.click(retryButtons[0]!)
+        await waitFor(() =>
+          expect(
+            desktopQueryClient
+              .getQueryCache()
+              .findAll()
+              .find(query => query.queryKey[1] === 'gfs-access')?.state.data
+          ).toMatchObject({ status: 'active', revokeRevision: 1 })
+        )
+        await waitFor(() =>
+          expect(gfs.listAccessible.mock.calls.length).toBeGreaterThan(listCallsBeforeRetry)
+        )
+        await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+        retryListAccessibleCalls = gfs.listAccessible.mock.calls.length - listCallsBeforeRetry
+      } else if (hadEarlyAcknowledgment) {
+        await waitFor(() =>
+          expect(
+            recordedToastCalls().some(
+              ([message]) => typeof message === 'string' && message.includes(fileA.name)
+            )
+          ).toBe(true)
+        )
+      } else {
+        expect(appHarness.filesPageCurrentnessById.get(requestA!.id)?.(requestA!.id)).toBe(false)
+        expect(
+          recordedToastCalls().some(
+            ([message]) => typeof message === 'string' && message.includes(fileA.name)
+          )
+        ).toBe(false)
+      }
+    }
+    const resolveB = async () => {
+      await act(async () => {
+        if (currentB === 'denied') permissionB.resolve(await resourceAffordances(['read']))
+        else if (currentB === 'allowed')
+          permissionB.resolve(await resourceAffordances(['read', 'write']))
+        else permissionB.reject(new Error(`500 permission service unavailable for ${fileB.name}`))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      if (staleA === 'authority') {
+        await waitFor(() =>
+          expect(appHarness.d5aPermissionSettledUris.has(fileB.gfsUri)).toBe(true)
+        )
+        if (heldTargetResolution) {
+          await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(fileB.gfsUri))
+          bTargetResolveWasHeld = true
+          bCurrentAtTargetAwait =
+            appHarness.filesPageCurrentnessById.get(requestB!.id)?.(requestB!.id) ?? null
+        } else {
+          await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+        }
+      } else await waitFor(() => expect(queryB!.state.fetchStatus).not.toBe('fetching'))
+      const hadEarlyAcknowledgment = appHarness.filesPageHandledEvents.some(
+        event => event.id === requestB!.id && !event.permissionSettled
+      )
+      if (!hadEarlyAcknowledgment && staleA !== 'authority') {
+        await waitFor(() => expect(appHarness.d5aPostPermissionAckIds.has(requestB!.id)).toBe(true))
+      }
+      if (currentB === 'denied') {
+        await waitFor(() =>
+          expect(
+            recordedToastCalls().filter(
+              ([message]) => message === `You do not have write access to ${fileB.name}.`
+            )
+          ).toHaveLength(1)
+        )
+      } else if (currentB === 'error') {
+        await waitFor(() =>
+          expect(
+            recordedToastCalls().filter(
+              ([message]) => typeof message === 'string' && message.includes(`for ${fileB.name}`)
+            )
+          ).toHaveLength(1)
+        )
+      } else if (staleA === 'authority') {
+        // A current-session 401 has already revoked shared access. Let B's
+        // real permission continuation settle; the final mounted/model
+        // comparison below records any unauthorized Rename UI as expected RED.
+        await act(async () => {
+          await Promise.resolve()
+          await Promise.resolve()
+        })
+      } else {
+        if (heldTargetResolution) {
+          await waitFor(() => expect(gfs.resolve).toHaveBeenCalledWith(fileB.gfsUri))
+          bTargetResolveWasHeld = true
+        } else {
+          await screen.findByRole('form', { name: 'Rename resource' })
+          expect((screen.getByLabelText('New name') as HTMLInputElement).value).toBe(fileB.name)
+        }
+      }
+    }
+    const settleModelA = () => {
+      model = transitionD5a(model, {
+        type: 'permission-settle',
+        id: 101,
+        result: staleA === 'authority' ? 'session-authority' : staleA,
+      })
+    }
+    const settleModelB = () => {
+      model = transitionD5a(model, {
+        type: 'permission-settle',
+        id: 102,
+        result: currentB,
+      })
+    }
+    const schedulerCompletionOrder: string[] = []
+    if (completionOrder === 'fc.scheduler') {
+      if (!scheduler) throw new Error('D5a scheduler order requires fc.scheduler()')
+      const scheduledA = scheduler
+        .schedule(Promise.resolve('denied'), 'A permission completion')
+        .then(async () => {
+          schedulerCompletionOrder.push('A')
+          await resolveA()
+          settleModelA()
+        })
+      const scheduledB = scheduler
+        .schedule(Promise.resolve('denied'), 'B permission completion')
+        .then(async () => {
+          schedulerCompletionOrder.push('B')
+          await resolveB()
+          settleModelB()
+        })
+      await scheduler.waitIdle()
+      await Promise.all([scheduledA, scheduledB])
+    } else if (completionOrder === 'A-then-B') {
+      schedulerCompletionOrder.push('A', 'B')
+      await resolveA()
+      settleModelA()
+      if (staleA === 'authority') model = transitionD5a(model, { type: 'retry' })
+      await resolveB()
+      settleModelB()
+    } else {
+      schedulerCompletionOrder.push('B', 'A')
+      await resolveB()
+      settleModelB()
+      await resolveA()
+      settleModelA()
+    }
+    if (heldTargetResolution) {
+      if (!bTargetResolveWasHeld) throw new Error('B exact-target resolver was not held')
+      await act(async () => heldTargetResolution.resolve(fileB))
+    }
+    await waitFor(() => expect(desktopQueryClient.isFetching()).toBe(0))
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const toastCalls = recordedToastCalls().map(([message, tone]) => ({
+      message,
+      tone,
+    }))
+    model = transitionD5a(model, { type: 'quiesce' })
+    const modelChecks = assertD5a(model)
+    type ActualFeedback =
+      | {
+          requestId: null
+          resource: 'unowned'
+          session: number
+          result: 'unowned'
+          message: string
+        }
+      | {
+          requestId: number
+          resource: 'A' | 'B'
+          session: number
+          revokeRevision: number
+          result: 'denied' | 'error'
+        }
+    const actualFeedback = toastCalls.flatMap<ActualFeedback>(call => {
+      const resource = call.message.includes(fileA.name)
+        ? 'A'
+        : call.message.includes(fileB.name)
+          ? 'B'
+          : null
+      // Keep every visible toast in the mounted observation. A generic
+      // cancellation toast has no current request owner and must not vanish
+      // from the independent model comparison.
+      if (!resource)
+        return [
+          {
+            requestId: null,
+            resource: 'unowned' as const,
+            session: 1,
+            result: 'unowned' as const,
+            message: call.message,
+          },
+        ]
+      return [
+        {
+          requestId: resource === 'A' ? requestA!.id : requestB!.id,
+          resource,
+          session: 1,
+          revokeRevision: 0,
+          result: call.message.startsWith('You do not have')
+            ? ('denied' as const)
+            : ('error' as const),
+        },
+      ]
+    })
+    const actualUi = screen.queryByRole('form', { name: 'Rename resource' })
+      ? [{ requestId: requestB!.id, resource: 'B', session: 1, revokeRevision: 0 }]
+      : []
+    const observed = {
+      requestA: requestA!.id,
+      requestB: requestB!.id,
+      sameFilesOwner,
+      aPermissionWasPendingBeforeB,
+      bPermissionWasPending,
+      aCurrentDuringPermission,
+      aCurrentAfterB,
+      bCurrentDuringPermission,
+      handledEvents: appHarness.filesPageHandledEvents.filter(event =>
+        [requestA!.id, requestB!.id].includes(event.id)
+      ),
+      aPostPermissionAck: appHarness.d5aPostPermissionAckIds.has(requestA!.id),
+      bPostPermissionAck: appHarness.d5aPostPermissionAckIds.has(requestB!.id),
+      permissionCalls: affordanceMock(gfs).mock.calls.map(([id]) => id),
+      toastCalls,
+      renameDialogForB: screen.queryByRole('form', { name: 'Rename resource' }) !== null,
+      renameDialogValue:
+        (screen.queryByLabelText('New name') as HTMLInputElement | null)?.value ?? null,
+      renameMutations: renameResource.mock.calls.length,
+      accessState:
+        desktopQueryClient
+          .getQueryCache()
+          .findAll()
+          .find(query => query.queryKey[1] === 'gfs-access')?.state.data ?? null,
+      accessStateAtRevoke,
+      retryListAccessibleCalls,
+      bTargetResolveWasHeld,
+      bCurrentAtTargetAwait,
+      pending: desktopQueryClient.isFetching(),
+      completionOrder: schedulerCompletionOrder.join(' → '),
+      modelExpected: { feedback: model.feedback, ui: model.ui, checks: modelChecks },
+      mountedObserved: { feedback: actualFeedback, ui: actualUi },
+      sensitivity: d5aSensitivityControl(),
+      revokeRetrySensitivity: d5aRevokeRetrySensitivityControl(),
+      violations: [] as string[],
+    }
+    expect(observed.sameFilesOwner).toBe(true)
+    expect(observed.aPermissionWasPendingBeforeB).toBe(true)
+    expect(observed.bPermissionWasPending).toBe(true)
+    expect(observed.permissionCalls).toEqual(expect.arrayContaining([resourceAId, resourceBId]))
+    expect(observed.pending).toBe(0)
+    const violations: string[] = []
+    if (
+      staleA === 'authority' &&
+      (observed.accessStateAtRevoke as { status?: string } | null)?.status !== 'revoked'
+    )
+      violations.push('real current-session authority failure did not revoke access')
+    if (
+      staleA === 'authority' &&
+      (observed.accessState as { status?: string } | null)?.status !== 'active'
+    )
+      violations.push('real Retry file access did not restore the shared active state')
+    if (staleA === 'authority' && observed.retryListAccessibleCalls < 1)
+      violations.push('Retry did not re-enter the real server-backed GFS query path')
+    if (!d5aSensitivityControl()) violations.push('D5a oracle missed stale-feedback sensitivity')
+    if (!d5aRevokeRetrySensitivityControl())
+      violations.push('D5a oracle missed the revoke/Retry revision sensitivity')
+    if (JSON.stringify(actualFeedback) !== JSON.stringify(model.feedback))
+      violations.push('mounted feedback/effects differ from independent D5a A4 oracle')
+    if (actualFeedback.some(item => item.resource === 'unowned'))
+      violations.push('unowned generic feedback was emitted')
+    if (JSON.stringify(actualUi) !== JSON.stringify(model.ui))
+      violations.push('mounted dialog ownership differs from independent D5a A4 oracle')
+    if (observed.aCurrentDuringPermission !== true)
+      violations.push('A lost its App receipt before its permission continuation settled')
+    if (observed.aCurrentAfterB !== false)
+      violations.push('B did not supersede the existing A receipt')
+    if (observed.bCurrentDuringPermission !== true)
+      violations.push(
+        'B did not retain its App receipt while its permission continuation was pending'
+      )
+    // Superseded A settles silently; its request receipt remains canceled and
+    // does not receive an acknowledgement that could clear B.
+    if (!observed.bPostPermissionAck && staleA !== 'authority')
+      violations.push('B continuation did not reach its post-permission terminal acknowledgment')
+    if (staleA === 'denied') {
+      if (
+        toastCalls.some(call => call.message === `You do not have write access to ${fileA.name}.`)
+      )
+        violations.push('stale A denial feedback was emitted')
+    } else if (staleA === 'authority') {
+      if (toastCalls.some(call => call.message.includes(fileA.name)))
+        violations.push('current-session authority failure emitted stale A feedback')
+    } else if (toastCalls.some(call => call.message.includes(fileA.name))) {
+      violations.push('stale A rejection feedback was emitted')
+    }
+    if (currentB === 'denied') {
+      if (
+        toastCalls.filter(call => call.message === `You do not have write access to ${fileB.name}.`)
+          .length !== 1
+      )
+        violations.push('current B denial feedback did not appear exactly once')
+      if (observed.renameDialogForB) violations.push('denied B opened Rename UI')
+    } else if (currentB === 'error') {
+      if (toastCalls.filter(call => call.message.includes(`for ${fileB.name}`)).length !== 1)
+        violations.push('current B permission error did not appear exactly once')
+      if (observed.renameDialogForB) violations.push('failed B opened Rename UI')
+    } else if (staleA === 'authority') {
+      if (observed.renameDialogForB)
+        violations.push('B opened Rename UI after A globally revoked the session')
+      if (toastCalls.some(call => call.message.includes(fileB.name)))
+        violations.push('B emitted action feedback after global revocation')
+    } else {
+      if (!observed.renameDialogForB || observed.renameDialogValue !== fileB.name)
+        violations.push('allowed current B did not open its own Rename UI')
+      if (toastCalls.some(call => call.message.includes(fileA.name)))
+        violations.push('stale A feedback replaced the successful B outcome')
+    }
+    expect(renameResource).not.toHaveBeenCalled()
+    observed.violations = violations
+    console.info('D5a real permission continuation probe', JSON.stringify(observed))
+    if (assertContract) expect(violations).toEqual([])
+    return observed
+  }
+
+  it('reaches held A and B permission continuations before A denial and settles current B denial', async () => {
+    await runD5aPermissionSuccessorProbe('denied', 'denied', 'A-then-B')
+  })
+
+  it('reaches held A and B permission continuations before A rejection and settles current B error', async () => {
+    await runD5aPermissionSuccessorProbe('rejected', 'error', 'A-then-B')
+  })
+
+  it('settles current B successfully before stale A denial without replacing B UI', async () => {
+    await runD5aPermissionSuccessorProbe('denied', 'allowed', 'B-then-A')
+  })
+
+  it('keeps A authority cancellation feedback silent after revocation and Retry', async () => {
+    const observed = await runD5aPermissionSuccessorProbe(
+      'authority',
+      'allowed',
+      'A-then-B',
+      undefined,
+      false
+    )
+    expect(
+      observed.toastCalls.filter(
+        call =>
+          !call.message.includes('first-root.txt') && !call.message.includes('second-root.txt')
+      )
+    ).toEqual([])
+    expect(observed.mountedObserved.feedback).toEqual([])
+    expect(observed.modelExpected.feedback).toEqual([])
+    expect(observed.renameDialogForB).toBe(false)
+    expect(observed.violations).toEqual([])
+  })
+
+  it('fences B target completion across A revoke and Retry at a new access revision', async () => {
+    const targetResolution = deferred<unknown>()
+    const observed = await runD5aPermissionSuccessorProbe(
+      'authority',
+      'allowed',
+      'B-then-A',
+      undefined,
+      true,
+      targetResolution
+    )
+    expect(observed.bTargetResolveWasHeld).toBe(true)
+    expect(observed.bCurrentAtTargetAwait).toBe(true)
+    expect(observed.accessState).toMatchObject({ status: 'active', revokeRevision: 1 })
+    expect(observed.renameDialogForB).toBe(false)
+    expect(observed.renameMutations).toBe(0)
+    expect(observed.violations).toEqual([])
+  })
+
+  it('covers stale A outcomes against every current B outcome in both completion orders', async () => {
+    const matrix = (['denied', 'rejected'] as const).flatMap(staleA =>
+      (['denied', 'error', 'allowed'] as const).flatMap(currentB =>
+        (['A-then-B', 'B-then-A'] as const).map(completionOrder => ({
+          staleA,
+          currentB,
+          completionOrder,
+        }))
+      )
+    )
+    const results = []
+    for (const scenario of matrix) {
+      const observed = await runD5aPermissionSuccessorProbe(
+        scenario.staleA,
+        scenario.currentB,
+        scenario.completionOrder,
+        undefined,
+        false
+      )
+      expect(observed.requestA).not.toBe(observed.requestB)
+      expect(observed.sameFilesOwner).toBe(true)
+      expect(observed.aPermissionWasPendingBeforeB).toBe(true)
+      expect(observed.bPermissionWasPending).toBe(true)
+      expect(observed.pending).toBe(0)
+      expect(observed.completionOrder).toBe(
+        scenario.completionOrder === 'A-then-B' ? 'A → B' : 'B → A'
+      )
+      const staleFeedback =
+        scenario.staleA === 'denied'
+          ? 'stale A denial feedback was emitted'
+          : 'stale A rejection feedback was emitted'
+      expect(observed.violations).not.toContain(staleFeedback)
+      expect(observed.violations).not.toContain(
+        'mounted feedback/effects differ from independent D5a A4 oracle'
+      )
+      const bToasts = observed.toastCalls.filter(call => call.message.includes('second-root.txt'))
+      if (scenario.currentB === 'denied') {
+        expect(bToasts).toEqual([
+          { message: 'You do not have write access to second-root.txt.', tone: 'error' },
+        ])
+        expect(observed.renameDialogForB).toBe(false)
+      } else if (scenario.currentB === 'error') {
+        expect(bToasts).toHaveLength(1)
+        expect(bToasts[0]!.message).toContain('permission service unavailable for second-root.txt')
+        expect(observed.renameDialogForB).toBe(false)
+      } else {
+        expect(observed.renameDialogForB).toBe(true)
+        expect(observed.renameDialogValue).toBe('second-root.txt')
+      }
+      results.push({ ...scenario, violations: observed.violations })
+    }
+    console.info(
+      'D5a stale/current outcome matrix',
+      JSON.stringify({
+        cases: results.length,
+        staleResults: [...new Set(results.map(result => result.staleA))],
+        currentResults: [...new Set(results.map(result => result.currentB))],
+        completionOrders: [...new Set(results.map(result => result.completionOrder))],
+        allObservedRealPendingPair: results.length === 12,
+        expectedRedCases: results.filter(result =>
+          result.violations.some(value => value.startsWith('stale A '))
+        ).length,
+      })
+    )
+    expect(results).toHaveLength(12)
+  })
+
+  it('runs competing D5a permission completions through fc.commands and fc.scheduler', async () => {
+    type Model = {
+      aStarted: boolean
+      bStarted: boolean
+      aQueued: boolean
+      bQueued: boolean
+      drained: boolean
+      requestA?: number
+      requestB?: number
+      events: string[]
+    }
+    type Trace = {
+      scheduler: Scheduler
+      fixture?: Awaited<ReturnType<typeof createD5aGeneratedFixture>>
+      d5a: ReturnType<typeof initialD5a>
+      tasks: Promise<unknown>[]
+      order: string[]
+      violations?: string[]
+      observed?: {
+        violations: string[]
+        aPermissionWasPendingBeforeB: boolean
+        bPermissionWasPending: boolean
+        queryPending: boolean
+        sensitivity: boolean
+      }
+    }
+    class StartPair implements AsyncCommand<Model, Trace> {
+      check(model: Readonly<Model>) {
+        return !model.aStarted && !model.bStarted
+      }
+      async run(model: Model, real: Trace) {
+        real.fixture ??= await createD5aGeneratedFixture()
+        const requestA = await real.fixture.startA()
+        model.aStarted = true
+        model.requestA = requestA.id
+        model.events.push('sidebar-action-A')
+        real.d5a = transitionD5a(real.d5a, {
+          type: 'request',
+          id: requestA.id,
+          resource: 'A',
+          session: 1,
+        })
+        real.d5a = transitionD5a(real.d5a, {
+          type: 'permission-start',
+          id: 101,
+          requestId: requestA.id,
+          resource: 'A',
+          session: 1,
+        })
+        const requestB = await real.fixture.startB()
+        model.bStarted = true
+        model.requestB = requestB.id
+        model.events.push('sidebar-action-B-supersedes-A')
+        real.d5a = transitionD5a(real.d5a, {
+          type: 'request',
+          id: requestB.id,
+          resource: 'B',
+          session: 1,
+        })
+        real.d5a = transitionD5a(real.d5a, {
+          type: 'permission-start',
+          id: 102,
+          requestId: requestB.id,
+          resource: 'B',
+          session: 1,
+        })
+      }
+      toString() {
+        return 'real sidebar A starts pending before successor B supersedes it'
+      }
+    }
+    class QueueA implements AsyncCommand<Model, Trace> {
+      check(model: Readonly<Model>) {
+        return model.aStarted && model.bStarted && !model.aQueued
+      }
+      async run(model: Model, real: Trace) {
+        model.aQueued = true
+        real.tasks.push(
+          real.scheduler.scheduleFunction(async () => {
+            real.order.push('A')
+            await real.fixture!.settleA('denied')
+            real.d5a = transitionD5a(real.d5a, {
+              type: 'permission-settle',
+              id: 101,
+              result: 'denied',
+            })
+            return 'A'
+          })()
+        )
+      }
+      toString() {
+        return 'schedule the held real A permission completion'
+      }
+    }
+    class QueueB implements AsyncCommand<Model, Trace> {
+      check(model: Readonly<Model>) {
+        return model.aStarted && model.bStarted && !model.bQueued
+      }
+      async run(model: Model, real: Trace) {
+        model.bQueued = true
+        real.tasks.push(
+          real.scheduler.scheduleFunction(async () => {
+            real.order.push('B')
+            await real.fixture!.settleB('denied')
+            real.d5a = transitionD5a(real.d5a, {
+              type: 'permission-settle',
+              id: 102,
+              result: 'denied',
+            })
+            return 'B'
+          })()
+        )
+      }
+      toString() {
+        return 'schedule the held real B permission completion'
+      }
+    }
+    class Drain implements AsyncCommand<Model, Trace> {
+      check(model: Readonly<Model>) {
+        return model.aQueued && model.bQueued && !model.drained
+      }
+      async run(model: Model, real: Trace) {
+        await act(async () => {
+          await real.scheduler.waitIdle()
+          await Promise.all(real.tasks)
+        })
+        real.d5a = transitionD5a(real.d5a, { type: 'quiesce' })
+        assertD5a(real.d5a)
+        real.observed = real.fixture!.observeD5a(real.d5a)
+        real.violations = real.observed.violations
+        model.drained = true
+        model.events.push('quiesce-after-A-and-B-terminal-barriers')
+      }
+      toString() {
+        return 'drain scheduled completions and compare mounted A4 state'
+      }
+    }
+    const scenarioArbitrary = fc.tuple(
+      fc.scheduler(),
+      fc.commands([fc.constant(new QueueA()), fc.constant(new QueueB())], {
+        maxCommands: 2,
+        size: '+1',
+      })
+    )
+    const generatedScenarios = fc.sample(scenarioArbitrary, {
+      numRuns: 512,
+      seed: 20261114,
+    })
+    const validScenarios = generatedScenarios.filter(([, generated]) => {
+      const names = [...generated].map(command => command.toString())
+      return (
+        names.some(name => name.startsWith('schedule the held real A')) &&
+        names.some(name => name.startsWith('schedule the held real B'))
+      )
+    })
+    const queueOrders = new Set(
+      validScenarios.map(([, generated]) => {
+        const names = [...generated].map(command => command.toString())
+        return names.findIndex(name => name.startsWith('schedule the held real A')) <
+          names.findIndex(name => name.startsWith('schedule the held real B'))
+          ? 'queue-A-then-B'
+          : 'queue-B-then-A'
+      })
+    )
+    const queueOrderFor = (generated: Iterable<AsyncCommand<Model, Trace>>) => {
+      const names = [...generated].map(command => command.toString())
+      return names.findIndex(name => name.startsWith('schedule the held real A')) <
+        names.findIndex(name => name.startsWith('schedule the held real B'))
+        ? 'queue-A-then-B'
+        : 'queue-B-then-A'
+    }
+    const selectedScenarios = [
+      validScenarios.find(([, generated]) => queueOrderFor(generated) === 'queue-A-then-B'),
+      validScenarios.find(([, generated]) => queueOrderFor(generated) === 'queue-B-then-A'),
+    ].filter((scenario): scenario is (typeof validScenarios)[number] => Boolean(scenario))
+    expect(new Set(selectedScenarios.map(([, commands]) => queueOrderFor(commands))).size).toBe(2)
+    const traces: Array<{ events: string[]; order: string; violations: string[] }> = []
+    for (const [scheduler, generated] of selectedScenarios) {
+      const model: Model = {
+        aStarted: false,
+        bStarted: false,
+        aQueued: false,
+        bQueued: false,
+        drained: false,
+        events: [],
+      }
+      const real: Trace = {
+        scheduler,
+        d5a: initialD5a(),
+        tasks: [],
+        order: [],
+      }
+      await fc.asyncModelRun(() => ({ model, real }), [new StartPair(), ...generated, new Drain()])
+      expect(real.fixture).toBeTruthy()
+      expect(model.events).toEqual([
+        'sidebar-action-A',
+        'sidebar-action-B-supersedes-A',
+        'quiesce-after-A-and-B-terminal-barriers',
+      ])
+      expect(model.requestB).not.toBe(model.requestA)
+      expect(real.observed!.aPermissionWasPendingBeforeB).toBe(true)
+      expect(real.observed!.bPermissionWasPending).toBe(true)
+      expect(real.observed!.queryPending).toBe(false)
+      expect(real.observed!.sensitivity).toBe(true)
+      expect(real.violations).not.toContain('stale A feedback was emitted')
+      traces.push({
+        events: model.events,
+        order: real.order.join(' → '),
+        violations: real.violations ?? [],
+      })
+      cleanup()
+      desktopQueryClient.clear()
+    }
+    console.info('D5a generated command/scheduler coverage', {
+      generatedRuns: generatedScenarios.length,
+      completeHistories: traces.length,
+      zeroCommandHistories: generatedScenarios.filter(([, commands]) => [...commands].length === 0)
+        .length,
+      partialOrRejectedHistories: generatedScenarios.length - validScenarios.length,
+      observedA2Histories: new Set(traces.map(trace => trace.events.join('|'))).size,
+      orders: traces.map(trace => trace.order),
+      queuedOrders: [...queueOrders],
+      staleFeedbackCount: traces.filter(trace =>
+        trace.violations.includes('stale A feedback was emitted')
+      ).length,
+    })
+    expect(traces.length).toBeGreaterThan(0)
+    expect(new Set(traces.map(trace => trace.events.join('|'))).size).toBeGreaterThan(0)
+    expect(traces.every(trace => !trace.violations.includes('stale A feedback was emitted'))).toBe(
+      true
+    )
   })
 })

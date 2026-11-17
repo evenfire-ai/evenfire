@@ -355,12 +355,19 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
         parentResourceId: 'folder-active',
       }),
     ])
+    let finishChildren!: (value: Awaited<ReturnType<typeof listChildrenPage>>) => void
+    const pendingChildren = new Promise<Awaited<ReturnType<typeof listChildrenPage>>>(resolve => {
+      finishChildren = resolve
+    })
     const destinations = await listAccessiblePage([
       accessibleResource('archive-folder', 'Archive', 'directory'),
     ])
     let sourceCalls = 0
     let finishSourceRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
     const moveResource = vi.fn(async () => undefined)
+    const listChildren = vi.fn(async (resourceId: string) =>
+      resourceId === 'folder-active' ? pendingChildren : listChildrenPage([])
+    )
     const affordances = vi.fn(async (resourceId: string) => {
       if (resourceId === 'folder-active') {
         sourceCalls += 1
@@ -378,9 +385,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
         gfs: {
           listAccessible: vi.fn(async () => destinations),
           resolve: vi.fn(async () => folder),
-          listChildren: vi.fn(async (resourceId: string) =>
-            resourceId === 'folder-active' ? children : listChildrenPage([])
-          ),
+          listChildren,
           affordances,
           moveResource,
         },
@@ -389,8 +394,18 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
 
     renderHarness()
     await waitFor(() => expect(sourceCalls).toBe(1))
+    await waitFor(() =>
+      expect(listChildren).toHaveBeenCalledWith('folder-active', 'main', undefined)
+    )
+    expect(screen.queryByRole('button', { name: 'Options for notes.txt' })).toBeNull()
+    expect(screen.getByRole('status', { name: 'Loading files' })).toBeTruthy()
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+      finishChildren(children)
+    })
+    const rowActions = await screen.findByRole('button', { name: 'Options for notes.txt' })
+    expect((rowActions as HTMLButtonElement).disabled).toBe(false)
+    await act(async () => {
+      fireEvent.click(rowActions)
     })
     fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })

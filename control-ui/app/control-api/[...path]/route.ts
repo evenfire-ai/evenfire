@@ -4,7 +4,8 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 const CONTROL_API_INTERNAL_URL = process.env.CONTROL_API_INTERNAL_URL || 'http://127.0.0.1:8090'
-const DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS = 30_000
+// Equals the value deploy/base/control-plane/control-ui.yaml sets.
+const DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS = 300_000
 const DEFAULT_GFS_UPLOAD_PROXY_TIMEOUT_MS = 600_000
 
 // setTimeout / AbortSignal.timeout reject non-integers and values above the 32-bit
@@ -14,9 +15,9 @@ const MAX_PROXY_TIMEOUT_MS = 2_147_483_647
 // Runtime-configurable server-side timeout (NOT NEXT_PUBLIC: read at request time in
 // the control-ui pod, mirroring CONTROL_API_INTERNAL_URL above). GFS uploads send the
 // file base64-encoded, so a ~10 MB payload over the Cloudflare tunnel can exceed the
-// old fixed 30s. Set CONTROL_API_PROXY_TIMEOUT_MS (milliseconds) on the deployment to
-// raise it; an absent, non-integer, non-positive, or out-of-range value falls back to
-// the default.
+// old fixed 30s; the default is 300s. Set CONTROL_API_PROXY_TIMEOUT_MS (milliseconds)
+// on the deployment to change it; an absent, non-integer, non-positive, or
+// out-of-range value falls back to the default.
 //
 // This handler OWNS `/control-api/*`: the next.config.js rewrite for that path was
 // removed (it routed through Next's internal proxy, which silently truncates request

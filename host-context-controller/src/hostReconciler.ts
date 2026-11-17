@@ -23,10 +23,10 @@ import type {
   InfrastructureTelemetryReporter,
 } from './infrastructureTelemetryReporter'
 import {
-  HOST_K8S_REQUEST_TIMEOUT_CODE,
-  HostK8sRequestTimeoutError,
-  makeHostK8sApiClient,
-} from './k8s/hostK8sApiClient'
+  K8S_REQUEST_TIMEOUT_CODE,
+  K8sRequestTimeoutError,
+  makeK8sApiClientWithDeadline,
+} from './k8s/k8sRequestDeadline'
 import {
   SFS_LABEL,
   SFS_NAMESPACE_LABEL,
@@ -654,15 +654,17 @@ export class HostReconciler {
 
   constructor(kc: k8s.KubeConfig, deps?: HostReconcilerDeps) {
     this.appsApi =
-      deps?.appsApi ?? makeHostK8sApiClient(kc, k8s.AppsV1Api, config.hostK8sRequestTimeoutMs)
+      deps?.appsApi ??
+      makeK8sApiClientWithDeadline(kc, k8s.AppsV1Api, config.hostK8sRequestTimeoutMs)
     this.coreApi =
-      deps?.coreApi ?? makeHostK8sApiClient(kc, k8s.CoreV1Api, config.hostK8sRequestTimeoutMs)
+      deps?.coreApi ??
+      makeK8sApiClientWithDeadline(kc, k8s.CoreV1Api, config.hostK8sRequestTimeoutMs)
     this.networkingApi =
       deps?.networkingApi ??
-      makeHostK8sApiClient(kc, k8s.NetworkingV1Api, config.hostK8sRequestTimeoutMs)
+      makeK8sApiClientWithDeadline(kc, k8s.NetworkingV1Api, config.hostK8sRequestTimeoutMs)
     this.rbacApi =
       deps?.rbacApi ??
-      makeHostK8sApiClient(kc, k8s.RbacAuthorizationV1Api, config.hostK8sRequestTimeoutMs)
+      makeK8sApiClientWithDeadline(kc, k8s.RbacAuthorizationV1Api, config.hostK8sRequestTimeoutMs)
     this.kubeConfig = kc
     this.customApiInstance = deps?.customApi
     this.now = deps?.now ?? (() => new Date())
@@ -712,7 +714,7 @@ export class HostReconciler {
   /** CustomObjects API client for Host /status writes (lazily constructed). */
   private get customApi(): k8s.CustomObjectsApi {
     if (!this.customApiInstance) {
-      this.customApiInstance = makeHostK8sApiClient(
+      this.customApiInstance = makeK8sApiClientWithDeadline(
         this.kubeConfig,
         k8s.CustomObjectsApi,
         config.hostK8sRequestTimeoutMs
@@ -1991,8 +1993,8 @@ export class HostReconciler {
       this.codexSnapshot = parseAllowedModelsSnapshot(cm)
     } catch (err) {
       const timeout =
-        err instanceof HostK8sRequestTimeoutError ||
-        (err as { code?: string }).code === HOST_K8S_REQUEST_TIMEOUT_CODE
+        err instanceof K8sRequestTimeoutError ||
+        (err as { code?: string }).code === K8S_REQUEST_TIMEOUT_CODE
       if (timeout) {
         this.lastCodexConfigMap = undefined
         this.codexSnapshot = snapshotFromConfigMapError('timeout')
@@ -3069,7 +3071,11 @@ export class HostReconciler {
         },
       },
       spec: {
-        storageClassName: config.hostWorkspaceStorageClassName,
+        // Unset: omit the field so the cluster's default StorageClass applies.
+        // An explicit "" is kept; in Kubernetes it disables dynamic provisioning.
+        ...(config.hostWorkspaceStorageClassName !== undefined
+          ? { storageClassName: config.hostWorkspaceStorageClassName }
+          : {}),
         accessModes: ['ReadWriteOnce'],
         resources: {
           requests: {
@@ -4125,6 +4131,21 @@ export class HostReconciler {
           revalidate?.()
           if (existing.spec?.volumeName) return
           pvc.metadata!.resourceVersion = existing.metadata?.resourceVersion
+          // Keep what other controllers wrote on the Pending claim: the scheduler's
+          // volume.kubernetes.io/selected-node, the provisioner annotations and the
+          // kubernetes.io/pvc-protection finalizer. buildPvc has none of them.
+          pvc.metadata!.annotations = existing.metadata?.annotations
+          pvc.metadata!.finalizers = existing.metadata?.finalizers
+          // With no class configured the claim defers to the cluster: the
+          // DefaultStorageClass admission plugin sets the class on create, or the
+          // PV controller sets it later. The apiserver allows only nil -> class on
+          // update, so the replace keeps the class the cluster chose.
+          if (
+            config.hostWorkspaceStorageClassName === undefined &&
+            existing.spec?.storageClassName !== undefined
+          ) {
+            pvc.spec!.storageClassName = existing.spec.storageClassName
+          }
           await this.coreApi.replaceNamespacedPersistentVolumeClaim({
             namespace: host.namespace,
             name,

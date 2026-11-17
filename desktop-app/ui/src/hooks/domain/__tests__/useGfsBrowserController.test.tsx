@@ -4258,7 +4258,10 @@ describe('captured GFS authority callbacks', () => {
     expect(client.getQueryData(markerKey)).toEqual({
       pages: [{ items: [{ resourceId: 'replacement-file' }] }],
     })
-    expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scope, 2))).toBe('active')
+    expect(client.getQueryData(desktopQueryKeys.gfsAccessState(scope, 2))).toEqual({
+      status: 'active',
+      revokeRevision: 0,
+    })
     expect(remove).not.toHaveBeenCalled()
     await act(async () => {
       expect(current.handleAuthorityFailure(failure, 'operation', scope, 2)).toBe(true)

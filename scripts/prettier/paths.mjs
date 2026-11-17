@@ -47,7 +47,6 @@ export const rootFormatTargets = [
   'commitlint.config.cjs',
   'package.json',
   'prettier.config.cjs',
-  '.prettierignore',
   'scripts/precommit',
   'scripts/prettier',
 ]

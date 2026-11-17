@@ -174,9 +174,12 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   // still has a health row and therefore an Authorize button — the case this fix
   // restores. A connector that `listConnectors` reports but the catalog does not
   // map to this agent is intentionally NOT this agent's connector and shows no row
-  // here. The only gap is transient: while the catalog is mid-hydration
-  // (`selectedAgentMcpServerMappingAvailable` false) there are no rows and thus no
-  // buttons, which self-heals once the post-auth bootstrap populates the catalog.
+  // here. Two cases lack this agent's mapped rows. While the catalog is
+  // mid-hydration (`selectedAgentMcpServerMappingAvailable` false) there are no
+  // rows and thus no buttons, until the post-auth bootstrap populates the
+  // catalog. A selected agent the catalog does not list shows the global
+  // preview rows when that preview is available, and no rows otherwise, for as
+  // long as the catalog omits it.
   const connectorActionsByName = useMemo(() => {
     if (!selectedAgent) return undefined
     const map = new Map<string, McpServerConnectorAction>()
@@ -200,9 +203,9 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     ? String(agentContextByName[selectedAgent] || '').trim()
     : ''
   // Visible agent name (spec.host) for the workspace hero title. `selectedAgent`
-  // is always a catalog agent, so `agentDisplayByName` is total over it — the
-  // single sanctioned fallback (Decision #6) keeps the id if a display is
-  // missing. Display-only: lookups/actions keep using `selectedAgent`.
+  // may be absent from the catalog, so `agentDisplayByName` can miss it — the
+  // single sanctioned fallback (Decision #6) then keeps the identifier.
+  // Display-only: lookups/actions keep using `selectedAgent`.
   const selectedAgentDisplay = selectedAgent
     ? (agentDisplayByName[selectedAgent] ?? selectedAgent)
     : null

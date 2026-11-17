@@ -575,7 +575,10 @@ describe('FilesPage Move permission generation fencing', () => {
         if (outcome === 'success') expect(invalidateQueries).not.toHaveBeenCalled()
         if (outcome === 'unauthorized') {
           expect(removeQueries).not.toHaveBeenCalled()
-          expect(fixture.queryClient.getQueryData(accessStateKey)).toBe('active')
+          expect(fixture.queryClient.getQueryData(accessStateKey)).toMatchObject({
+            status: 'active',
+            revokeRevision: 0,
+          })
         }
         expect(fixture.moveResource).toHaveBeenCalledWith(
           'file-src',
