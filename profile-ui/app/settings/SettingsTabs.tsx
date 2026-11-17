@@ -7,7 +7,7 @@ import { PROFILE_ROUTES } from '@constants/routes'
 export type SettingsTabKey = 'profile' | 'approvalChannels'
 
 export function SettingsTabs({ active }: { active: SettingsTabKey }) {
-  const { approvalTargets, approvalTargetsLoading } = useProfileAccess()
+  const { approvalTargets } = useProfileAccess()
   const hasApprovalAccess = approvalTargets.length > 0
 
   return (
@@ -20,7 +20,7 @@ export function SettingsTabs({ active }: { active: SettingsTabKey }) {
       >
         Profile
       </Link>
-      {hasApprovalAccess || approvalTargetsLoading ? (
+      {hasApprovalAccess ? (
         <Link
           href={PROFILE_ROUTES.settings.approvalChannels}
           className={`tab-button${active === 'approvalChannels' ? ' is-active' : ''}`}
