@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { GateCause } from '../approval/gateCause'
 import { isDenied } from '../conversation/denialPolicy'
 import { oneShotMatches } from '../extensions/approvalMatch'
 import {
@@ -13,8 +14,8 @@ import { executeSingleTool } from './toolUseLoopSingleTool'
 
 export type ToolCallAdmission =
   | { kind: 'result'; toolResult: ToolResult }
-  | { kind: 'suspend'; approval: PendingApproval }
-  | { kind: 'execute'; call: ToolCall; toolIdentity?: ToolIdentity }
+  | { kind: 'suspend'; approval: PendingApproval; cause?: GateCause }
+  | { kind: 'execute'; call: ToolCall; toolIdentity?: ToolIdentity; cause?: GateCause }
 
 /**
  * A guardrail `ask` card authorizes only the call it shows. For a tool the
@@ -81,7 +82,7 @@ export async function admitToolCall(
   }
 
   let toolIdentity: ToolIdentity | undefined
-  let gate: 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval }
+  let gate: 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval; cause?: GateCause }
   if (config.guardrails) {
     toolIdentity = resolveToolIdentityFromRegistry(call.name, config.toolRegistry, call.arguments)
     const key = `${toolIdentity.provenance}:${toolIdentity.server ?? ''}:${toolIdentity.name}:${JSON.stringify(call.arguments)}`
@@ -148,7 +149,7 @@ export async function admitToolCall(
       if (!denied && pending && oneShotMatches(pending, call.name, call.arguments, call.id)) {
         config.conversation.pending_approval = undefined
         recordDecision('tool', 'ask', decision.source, 'executed', decision.reasonCode, mode)
-        gate = 'proceed'
+        return { kind: 'execute', call, toolIdentity, cause: 'none' }
       } else if (mode === 'unattended') {
         recordDecision('tool', 'deny', decision.source, 'denied', 'approval_unavailable', mode)
         return {
@@ -163,7 +164,10 @@ export async function admitToolCall(
         }
       } else {
         recordDecision('tool', 'ask', decision.source, 'ask', decision.reasonCode, mode)
-        gate = guardrailSuspension(call, config, decision.reasonCode, denied)
+        gate = {
+          ...guardrailSuspension(call, config, decision.reasonCode, denied),
+          cause: 'guardrail_ask',
+        }
       }
     } else {
       recordDecision(
@@ -191,8 +195,13 @@ export async function admitToolCall(
       },
     }
   }
-  if (typeof gate === 'object' && gate.type === 'suspend')
-    return { kind: 'suspend', approval: gate.approval }
+  if (typeof gate === 'object' && gate.type === 'suspend') {
+    return {
+      kind: 'suspend',
+      approval: gate.approval,
+      ...(gate.cause !== undefined ? { cause: gate.cause } : {}),
+    }
+  }
   return { kind: 'execute', call, toolIdentity }
 }
 

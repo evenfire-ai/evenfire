@@ -7,6 +7,7 @@
  * Phase 1: Pure interface definitions — no implementations.
  */
 import type { ImageInputCapability, VisualInputContext } from '../visualInput/policy'
+import type { GateCause } from './approval/gateCause'
 import type { TokenCounter } from './tokenizer/tokenCounter'
 import {
   AgentEvent,
@@ -204,7 +205,7 @@ export interface LoopController {
     toolName: string,
     params: Record<string, unknown>,
     toolCallId?: string
-  ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval }
+  ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval; cause?: GateCause }
   onExhaustion(iteration: number): string
   refreshTools(currentTools: ToolDefinition[]): Promise<ToolDefinition[]>
 }

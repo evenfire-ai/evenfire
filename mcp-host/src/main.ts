@@ -40,6 +40,8 @@ import {
   resolveSessionModel,
 } from './config/modelResolution'
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
+import { applyHostChange } from './core/approval/hostChange'
+import { createHostEventGate } from './core/approval/hostEventGate'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -230,6 +232,7 @@ let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
 // events (the LlmHookWatcher is the primary, immediate path). Host edits also
 // apply immediately via onHostChange.
 let guardrailResolveTimer: ReturnType<typeof setInterval> | null = null
+const hostEventGate = createHostEventGate()
 const GUARDRAIL_RESOLVE_INTERVAL_MS = 300_000
 let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
@@ -779,7 +782,6 @@ async function initializeProvider(
   keys: ApiKeys,
   opts?: { llmConfigChanged?: boolean }
 ): Promise<void> {
-  currentHost = host
   currentKeys = keys
 
   logger.info({ host: host.spec.host }, '[Main] Initializing provider for host:')
@@ -859,17 +861,21 @@ async function initializeProvider(
   } else {
     logger.error({}, '[Main] Failed to initialize LLM provider')
   }
+}
 
-  // Phase 6: Propagate approval config to agent
-  if (agent) {
-    const effectiveApprovalCfg = host.spec.approval || config.approvalConfig
-    agent.setApprovalConfig(effectiveApprovalCfg)
-    validateApprovalConfig(
-      effectiveApprovalCfg,
-      knownNativeToolNames,
-      config.nativeTool.httpAllowlist
-    )
-  }
+/**
+ * Publish this host's approval policy. Effective tools stay
+ * `spec.approval || CLERUM_APPROVAL_CONFIG`. The ceiling and channel cap read
+ * `spec.approval` alone, except dev mode, which passes the env config.
+ * Runs before credential reconciliation so a later event cannot be overwritten
+ * by an older completion.
+ */
+function publishApproval(host: HostCRD): void {
+  if (!agent) return
+  const effective = host.spec.approval || config.approvalConfig
+  const hostSpec = config.devMode ? config.approvalConfig : host.spec.approval
+  agent.setApprovalConfig(effective, hostSpec)
+  validateApprovalConfig(effective, knownNativeToolNames, config.nativeTool.httpAllowlist)
 }
 
 const mcpFleetCoordinator = new AuthoritativeMcpFleetCoordinator(
@@ -1471,66 +1477,66 @@ async function onHostChange(host: HostCRD): Promise<void> {
   }
 
   // R5 — refresh the failover policy BEFORE (re)building the ConfigStore so the
-  // fallback credential slots are loaded. A policy change that alters which
-  // Secret slots are needed forces a ConfigStore rebuild even if provider/
-  // secretRef are unchanged.
+  // fallback credential slots are loaded. Captured before the await so a newer
+  // event can publish its approval policy while this one is still reconciling.
   const prevFallbackSlots = fallbackCredentialSlotsFor(currentPolicy)
-  refreshFailoverPolicy(host)
-  const fallbackSlotsChanged =
-    JSON.stringify(prevFallbackSlots) !== JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
-  if (
-    !configStore ||
-    providerChanged ||
-    secretRefChanged ||
-    connectionRefChanged ||
-    fallbackSlotsChanged
-  ) {
-    logger.info(
-      {},
-      '[Main] Rebuilding ConfigStore (provider/secretRef/connectionRef/failover slots changed)'
-    )
-    await ensureConfigStore(host)
-  }
-  currentKeys = apiKeysFromConfigStore(configStore!)
-  // R5.10 — only a primary credential-surface change (secretRef/provider/grant)
-  // may clear a sticky runtime cooldown; unrelated CR edits must not (see
-  // initializeProvider). A `secretRefChanged` rebuilds the ConfigStore fresh, so
-  // the store.onChange clearCooldown path never fires for it — this covers it.
-  await initializeProvider(host, currentKeys, {
-    llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged,
+  await applyHostChange(host, {
+    gate: hostEventGate,
+    publishApproval,
+    ensureConfigStore: async eventHost => {
+      refreshFailoverPolicy(eventHost)
+      const fallbackSlotsChanged =
+        JSON.stringify(prevFallbackSlots) !==
+        JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
+      if (
+        !configStore ||
+        providerChanged ||
+        secretRefChanged ||
+        connectionRefChanged ||
+        fallbackSlotsChanged
+      ) {
+        logger.info(
+          {},
+          '[Main] Rebuilding ConfigStore (provider/secretRef/connectionRef/failover slots changed)'
+        )
+        await ensureConfigStore(eventHost)
+      }
+      currentKeys = apiKeysFromConfigStore(configStore!)
+    },
+    commitHost: eventHost => {
+      currentHost = eventHost
+      // R5.10 — only a primary credential-surface change may clear a sticky
+      // runtime cooldown. A stale completion does not reach this assignment.
+      return initializeProvider(eventHost, currentKeys, {
+        llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged,
+      }).then(async () => {
+        // PMC-2 — the cached `stable` tier embeds the model+provider runtime line
+        // (see DefaultPromptBuilder). A model/provider/secretRef swap must invalidate
+        // the prompt cache REGARDLESS of personalization, otherwise the next turn
+        // keeps serving the OLD model:/provider: line until eviction.
+        if (providerChanged || secretRefChanged || modelChanged || connectionRefChanged) {
+          promptCache?.invalidateAll('model_change')
+        }
+        if (workspaceProvider && eventHost.spec.personalization?.enabled) {
+          try {
+            await workspaceProvider.collectiveWorkspace.applyAdminIdentityFiles(
+              eventHost.spec.personalization
+            )
+            // T2.2 §5.7 — identity files just got rewritten; drop every cached
+            // `parts` so the next turn rebuilds the `stable` tier from the new
+            // identity content.
+            promptCache?.invalidateAll('identity_reconciled')
+            logger.info({}, '[Main] Identity files reconciled from CRD')
+          } catch (err) {
+            logger.error({ err: err }, '[Main] Failed to apply identity files:')
+          }
+        }
+        // Re-resolve guardrails so a Host.spec.guardrails edit takes effect
+        // without a restart (§8.2 "resolution is live").
+        await applyResolvedGuardrails()
+      })
+    },
   })
-
-  // PMC-2 — the cached `stable` tier embeds the model+provider runtime line
-  // (see DefaultPromptBuilder). A model/provider/secretRef swap must invalidate
-  // the prompt cache REGARDLESS of personalization, otherwise the next turn
-  // keeps serving the OLD model:/provider: line until eviction (generation is
-  // correct — it uses the live provider — but the system prompt mislabels the
-  // model). This is deliberately OUTSIDE the personalization branch below.
-  if (providerChanged || secretRefChanged || modelChanged || connectionRefChanged) {
-    promptCache?.invalidateAll('model_change')
-  }
-
-  // Reconcile admin-managed identity files. This is intentionally keyed off the
-  // Host watch so CRD edits propagate without a pod restart.
-  if (workspaceProvider && host.spec.personalization?.enabled) {
-    try {
-      await workspaceProvider.collectiveWorkspace.applyAdminIdentityFiles(host.spec.personalization)
-      // T2.2 §5.7 — identity files just got rewritten; drop every cached
-      // `parts` so the next turn rebuilds the `stable` tier from the new
-      // identity content. The cache is constructed during initializeAgent()
-      // so by the time onHostChange runs at runtime it is non-null; the `?.`
-      // is defensive for early-boot reconcile paths.
-      promptCache?.invalidateAll('identity_reconciled')
-      logger.info({}, '[Main] Identity files reconciled from CRD')
-    } catch (err) {
-      logger.error({ err: err }, '[Main] Failed to apply identity files:')
-    }
-  }
-
-  // Re-resolve guardrails so a Host.spec.guardrails edit (added/removed hook,
-  // changed digest, capability/failMode change) takes effect without a restart
-  // (§8.2 "resolution is live").
-  await applyResolvedGuardrails()
 }
 
 /**
@@ -1770,9 +1776,14 @@ async function initializeAgent(): Promise<void> {
   // reads the live policy + sticky failover state. Null when no policy.
   agent.setFailoverSupport(currentFailoverSupport)
 
-  // Phase 6: Set approval config
+  // Phase 6: publish approval once. Host changes publish again from onHostChange,
+  // before credential reconciliation. initializeProvider does not.
   const approvalCfg = currentHost?.spec.approval || config.approvalConfig
-  agent.setApprovalConfig(approvalCfg)
+  if (currentHost) publishApproval(currentHost)
+  else {
+    agent.setApprovalConfig(approvalCfg, config.devMode ? config.approvalConfig : undefined)
+    validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
+  }
 
   // Guardrails (spec §5/§6) — resolve installed-hook references (§8.2) into
   // runtime descriptors so the LLM lane actually calls the hook pods.
@@ -1783,7 +1794,6 @@ async function initializeAgent(): Promise<void> {
       GUARDRAIL_RESOLVE_INTERVAL_MS
     )
   }
-  validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
   logger.info(
     {
       detail: config.enableApproval ? 'ENABLED' : 'DISABLED',
@@ -3281,6 +3291,7 @@ async function startDevMode(): Promise<void> {
   // R5 — parse `spec.llmPolicy` (dev mode has no ConfigStore, so fallback
   // providers won't build — failover stays inert, byte-identical to today).
   refreshFailoverPolicy(host)
+  currentHost = host
   await initializeProvider(host, keys)
 
   // Initialize MCP manager
@@ -3349,6 +3360,7 @@ async function startProductionMode(): Promise<void> {
   await ensureConfigStore(host)
   const keys = apiKeysFromConfigStore(configStore!)
 
+  currentHost = host
   await initializeProvider(host, keys)
 
   // §3.14 (stateless agents) — Ready never waits for MCP. The agent and the

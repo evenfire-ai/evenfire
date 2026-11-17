@@ -5,7 +5,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { logger } from '../../../logger'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { ApprovalController } from '../../extensions/approvalController'
@@ -16,7 +15,7 @@ import type { LoopConfig } from '../../orchestration/loopConfig'
 import { admitToolCall } from '../../orchestration/toolCallPolicy'
 import type { Conversation, PendingApproval, ToolCall } from '../../types'
 
-const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'approvalGolden.json')
+const FIXTURE = join(__dirname, 'fixtures', 'approvalGolden.json')
 
 const TOOLS = [
   { name: 'shell_exec', args: { command: 'ls' }, native: true, requiresApproval: true },

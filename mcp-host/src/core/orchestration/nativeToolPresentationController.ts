@@ -19,7 +19,7 @@
 import { BRIDGE_TOOL_NAMES } from '../../capabilities/toolCatalogTools'
 import { logger } from '../../logger'
 import { LoopController } from '../interfaces'
-import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
+import { ChatMessage, ToolDefinition } from '../types'
 import { type NativeToolPresentation, selectDeferredNatives } from './toolPresentationPolicy'
 
 export class NativeToolPresentationController implements LoopController {
@@ -42,11 +42,10 @@ export class NativeToolPresentationController implements LoopController {
     return this.delegate.onTextRejected(content, iteration)
   }
 
-  beforeTool(
-    toolName: string,
-    params: Record<string, unknown>
-  ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
-    return this.delegate.beforeTool(toolName, params)
+  beforeTool(toolName: string, params: Record<string, unknown>, toolCallId?: string) {
+    // Omit an absent id so a two-argument call stays a two-argument call.
+    if (toolCallId === undefined) return this.delegate.beforeTool(toolName, params)
+    return this.delegate.beforeTool(toolName, params, toolCallId)
   }
 
   onExhaustion(iteration: number): string {

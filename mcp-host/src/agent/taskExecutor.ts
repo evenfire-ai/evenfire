@@ -16,6 +16,18 @@ import { maybeWrapHookedLlmPort } from '../core/adapters/hookedLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../core/adapters/toolRegistryAdapter'
 import {
+  type ApprovalConfigSnapshot,
+  normalizeApprovalMode,
+  readChannelCap,
+  readModeCeiling,
+} from '../core/approval/approvalMode'
+import type { ApprovalModeInputs } from '../core/approval/gateCause'
+import { approvalLogId } from '../core/approval/grantMemory'
+import {
+  classifyToolCall,
+  classifierAvailable as isClassifierAvailable,
+} from '../core/approval/shellClassifier'
+import {
   AttachmentReadLedger,
   mergeAttachmentReadLedgerSnapshots,
   readAttachmentReadLedgerSnapshot,
@@ -225,6 +237,11 @@ export interface TaskExecutorDeps {
    */
   contextWindowTokens?: number
   approvalConfig: ApprovalConfig | undefined
+  /**
+   * Live approval snapshot. Interactive tasks read tools, the live set, the
+   * ceiling and the channel cap through this. Absent uses `approvalConfig`.
+   */
+  approvalConfigProvider?: () => ApprovalConfigSnapshot
   guardrailsConfig?: GuardrailsConfig
   coreEvents: SimpleEventEmitter
   cronScheduler: CronScheduler | null
@@ -1789,6 +1806,9 @@ export class TaskExecutor {
     loopConfig.guardrails = buildToolLaneGuardrail(this.deps.guardrailsConfig)
     // §6.3: a run with no human to answer an approval must fail safe to deny.
     loopConfig.executionMode = executionModeForSource(this.task.source)
+    if (appConfig.enableApproval && this.task.source !== 'cron') {
+      loopConfig.approvalMode = this.approvalModeInputs(conversation)
+    }
     loopConfig.skipContextManager =
       opts?.skipContextManager ?? this.conversation?.pending_approval !== undefined
     // T1.5 — pass the storage + taskId down so `executeSingleTool` can persist
@@ -2255,6 +2275,64 @@ export class TaskExecutor {
     }
   }
 
+  private approvalSnapshot(): ApprovalConfigSnapshot {
+    return (
+      this.deps.approvalConfigProvider?.() ?? {
+        effective: this.deps.approvalConfig,
+        hostSpec: this.deps.approvalConfig,
+      }
+    )
+  }
+
+  /** Live membership for clerum__gfs_download. Undefined means the set is empty. */
+  private liveApprovalTools(gfsWorkspace: unknown): ReadonlySet<string> | undefined {
+    const tools = this.approvalSnapshot().effective?.tools
+    if (
+      !gfsWorkspace ||
+      !appConfig.enableApproval ||
+      this.task.source !== 'channel' ||
+      tools?.shell_exec === false
+    ) {
+      return undefined
+    }
+    return new Set(['clerum__gfs_download'])
+  }
+
+  private approvalModeInputs(conversation: Conversation): ApprovalModeInputs {
+    return {
+      storedMode: () => normalizeApprovalMode(conversation.approval_mode),
+      ceiling: () => readModeCeiling(this.approvalSnapshot()),
+      channelCap: () =>
+        readChannelCap(this.approvalSnapshot(), conversation.channel_type ?? undefined),
+      classifierAvailable: args =>
+        isClassifierAvailable(this.deps.llmProvider.getProviderType(), this.deps.modelName, args),
+      classify: (call, description) =>
+        classifyToolCall({
+          toolName: call.name,
+          description,
+          args: call.arguments,
+          provider: this.deps.llmProvider,
+          providerType: this.deps.llmProvider.getProviderType(),
+          modelName: this.deps.modelName,
+          taskSignal: this.abortController.signal,
+          usage: {
+            reporter: this.deps.usageReporter,
+            context: this.buildDefaultUsageContext() ?? {
+              source_kind: 'unknown',
+              traceContext: null,
+              task_id: this.taskId,
+            },
+            staticContext: this.deps.usageStaticContext ?? {
+              host_ref: '',
+              context_ref: null,
+              llm_secret_name: null,
+            },
+          },
+          sessionLogId: approvalLogId(conversation.id),
+        }),
+    }
+  }
+
   private async createToolRegistry(): Promise<TaskToolRegistry> {
     const workflowCallerContext =
       this.workflowCallerContextOverride === undefined
@@ -2373,7 +2451,9 @@ export class TaskExecutor {
     const approvalGate = approvalApplies
       ? new UnifiedApprovalGateController(
           compositeRegistry,
-          this.deps.approvalConfig,
+          interactiveApprovalApplies
+            ? () => this.approvalSnapshot().effective
+            : this.deps.approvalConfig,
           nativeRegistry,
           // Cron×stateless: forces HITL approval for cron_manage create/enable on
           // stateless hosts regardless of the per-tool approval override.
@@ -2385,17 +2465,19 @@ export class TaskExecutor {
           }
         )
       : null
+    const liveApprovalTools = interactiveApprovalApplies
+      ? () => this.liveApprovalTools(gfsWorkspace)
+      : gfsWorkspace &&
+          appConfig.enableApproval &&
+          this.task.source === 'channel' &&
+          this.deps.approvalConfig?.tools?.shell_exec !== false
+        ? new Set(['clerum__gfs_download'])
+        : undefined
     const innerController = approvalGate
       ? new ApprovalController(this.conversation!, approvalGate, {
           honorDenials: !cronManageGateApplies,
           toolRegistry: compositeRegistry,
-          liveApprovalTools:
-            gfsWorkspace &&
-            appConfig.enableApproval &&
-            this.task.source === 'channel' &&
-            this.deps.approvalConfig?.tools?.shell_exec !== false
-              ? new Set(['clerum__gfs_download'])
-              : undefined,
+          liveApprovalTools,
           // The same gate's forced approvals (stateless cron create/enable) run
           // before any stored approval, so none of them can cover such a call.
           forcedApprovalGate: approvalGate,

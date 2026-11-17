@@ -14,11 +14,19 @@ import type { BudgetVerdict } from '../budget/types'
 import { config as appConfig } from '../config'
 import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
+// Phase 6 imports
+import {
+  type ApprovalConfigSnapshot,
+  effectiveApprovalMode,
+  normalizeApprovalMode,
+  readChannelCap,
+  readModeCeiling,
+} from '../core/approval/approvalMode'
+import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
 import { pendingApprovalWireFields } from '../core/conversation/pendingApprovalView'
 import { LlmErrorCode } from '../core/errors'
-// Phase 6 imports
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { STATELESS_CRON_APPROVAL_PROMPT } from '../core/extensions/mcpApprovalGateController'
@@ -244,8 +252,11 @@ export class AgentStateMachine extends EventEmitter {
   // Persistent core event emitter (Gap 3 resolution: bridges agent-level events to SimpleEventEmitter)
   private coreEvents = new SimpleEventEmitter()
 
-  // Phase 6: Approval
+  // Phase 6: Approval. `approvalConfig` is the effective policy (tools and
+  // live-set). `approvalHostSpec` is the Host spec alone, or the dev env
+  // config, and is what the ceiling and channel cap read.
   private approvalConfig: ApprovalConfig | undefined
+  private approvalHostSpec: ApprovalConfig | undefined
   private guardrailsConfig: GuardrailsConfig | undefined
 
   // Phase 7–8: Workspace memory & personalization
@@ -651,9 +662,45 @@ export class AgentStateMachine extends EventEmitter {
     logger.info({ rules: config?.rules?.length ?? 0 }, 'Guardrails configured')
   }
 
-  setApprovalConfig(config: ApprovalConfig | undefined): void {
+  setApprovalConfig(config: ApprovalConfig | undefined, hostSpec?: ApprovalConfig): void {
     this.approvalConfig = config
+    this.approvalHostSpec = hostSpec
     logger.info({ defaultPolicy: config?.defaultPolicy || 'none' }, 'Approval policy configured')
+    this.sweepEffectiveApprovalModes()
+  }
+
+  private approvalSnapshot(): ApprovalConfigSnapshot {
+    return { effective: this.approvalConfig, hostSpec: this.approvalHostSpec }
+  }
+
+  /**
+   * A new config can lower the ceiling or a channel cap for every in-memory
+   * session, including one that makes no tool call before the ceiling returns.
+   * `listByPrefix('')` is the same objects the executors hold.
+   */
+  private sweepEffectiveApprovalModes(): void {
+    const snapshot = this.approvalSnapshot()
+    const ceiling = readModeCeiling(snapshot)
+    for (const { conversation } of this.conversationManager.getStore().listByPrefix('')) {
+      const stored = normalizeApprovalMode(conversation.approval_mode)
+      const effective = effectiveApprovalMode(
+        stored,
+        ceiling,
+        readChannelCap(snapshot, conversation.channel_type ?? undefined)
+      )
+      const synced = syncEffectiveMode(conversation, effective)
+      if (!synced.changed) continue
+      logger.info(
+        {
+          event: 'L2',
+          session: approvalLogId(conversation.id),
+          storedMode: stored,
+          previousEffectiveMode: synced.previous,
+          effectiveApprovalMode: effective,
+        },
+        'Effective approval mode changed'
+      )
+    }
   }
 
   /**
@@ -1545,6 +1592,7 @@ export class AgentStateMachine extends EventEmitter {
       modelName: effective?.model ?? this.modelName,
       contextWindowTokens: effective?.contextWindowTokens,
       approvalConfig: this.approvalConfig,
+      approvalConfigProvider: () => this.approvalSnapshot(),
       guardrailsConfig: this.guardrailsConfig,
       coreEvents: this.coreEvents,
       cronScheduler: this.cronScheduler,
