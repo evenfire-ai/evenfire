@@ -7,11 +7,12 @@
  * control-api/test/contracts.llmModelsSetupEnsure.wire.test.ts →
  * control-api/test/fixtures/wire/llmModelsSetupEnsure.wire.json. It lists one
  * enabled and one disabled row. Never build a row by hand: a state the file
- * lacks is added to the generator.
+ * lacks is added to the generator. Rows go through the same normalizer the
+ * client applies on read, so a test sees what a page gets from getLlmModel.
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { LlmAllowedModel } from '@lib/api'
+import { type LlmAllowedModel, normalizeLlmAllowedModel } from '@lib/api'
 
 type SetupEnsureWire = { list: { status: number; body: { rows: LlmAllowedModel[] } } }
 
@@ -26,5 +27,5 @@ const WIRE = JSON.parse(
 export function llmModelWireRow(enabled: boolean): LlmAllowedModel {
   const row = WIRE.list.body.rows.find(candidate => candidate.enabled === enabled)
   if (!row) throw new Error(`llmModelsSetupEnsure.wire.json has no row with enabled=${enabled}`)
-  return structuredClone(row)
+  return normalizeLlmAllowedModel(structuredClone(row))
 }

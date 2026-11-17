@@ -2299,7 +2299,7 @@ export type LlmAllowedModel = {
  * same before and after the backend change. Defensive on the wire value too —
  * any non-'discovery' source collapses to 'manual'.
  */
-function normalizeLlmAllowedModel(row: LlmAllowedModel): LlmAllowedModel {
+export function normalizeLlmAllowedModel(row: LlmAllowedModel): LlmAllowedModel {
   return {
     ...row,
     source: row.source === 'discovery' ? 'discovery' : 'manual',
