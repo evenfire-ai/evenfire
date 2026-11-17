@@ -2348,8 +2348,10 @@ export class WorkflowRecipeReconciler {
           // Issue #637 — this awaiting-trigger short-circuit also returns before the
           // Step 8 ownership gate, yet the recipe's envSecret/imagePullSecrets
           // workloads were already deployed on the first-deploy pass. Enforce
-          // revocation (teardown only, no redeploy) so a mid-life re-label is honored
-          // even while the workflow idles awaiting its trigger.
+          // revocation so a mid-life re-label is honored even while the workflow
+          // idles awaiting its trigger. Only denied workloads are touched: they are
+          // torn down, except a denied StatefulSet, which is kept and updated
+          // without the denied refs (see enforceActiveWorkflowSecretOwnership).
           const awaitOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, 'active')
           if (awaitOwnership) return awaitOwnership
           return {
@@ -2502,8 +2504,9 @@ export class WorkflowRecipeReconciler {
         await this.ensureSteadyWorkflowRuntimeCredentials(recipe, approvalScopeRecipeName)
         // Issue #637 — this short-circuit runs BEFORE the Step 8 ownership gate to
         // protect the coordinator 409-window. Enforce Secret-ownership revocation on
-        // the active workload(s) (teardown only, no redeploy) and re-seed the
-        // SecretReverseIndex for restart durability. Surface the denial so the
+        // the active workload(s) and re-seed the SecretReverseIndex for restart
+        // durability. Only denied workloads are touched: they are torn down, except
+        // a denied StatefulSet, which is kept and updated without the denied refs. Surface the denial so the
         // operator re-labels the Secret.
         const activeOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, 'active')
         if (activeOwnership) return activeOwnership
@@ -4203,8 +4206,11 @@ export class WorkflowRecipeReconciler {
           // retry re-attempt the revocation. The caller's catch converts a
           // RetryableReconcileError into a degraded result that the watcher requeues.
           // For a StatefulSet revoked in an earlier pass the failed step is its update:
-          // the credential is already gone, and the pass stops here as it does for a
-          // StatefulSet that is not denied (see the `statefulset` rethrow below).
+          // the credential is already gone. The pass stops here, as it does for a
+          // StatefulSet that is not denied (see the `statefulset` rethrow below), but
+          // the error is classified as retryable: the recipe is degraded and
+          // requeued, and an immutable drift does not set the StatefulSetImmutableDrift
+          // condition that the rethrow below produces.
           throw new RetryableReconcileError(
             (revocation.alreadyApplied
               ? `Issue #1349: update of revoked workflow StatefulSet "${workloadId}" failed; requeueing: `
@@ -4592,8 +4598,10 @@ export class WorkflowRecipeReconciler {
         { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
       )) as WorkflowRecipeCRD | undefined
       const storedStatus = stored?.status
-      // Presence and type, not equality: the API server may normalize the
-      // date-time string, and the readers only need the field to be there.
+      // Presence and type, not equality: the readers only need the field to be
+      // there. The API server stores the date-time string as sent (`format` is
+      // validated, not rewritten), which the `test` op of
+      // publishNoSecretBearingWorkloads relies on.
       for (const [key, value] of Object.entries(fragment.terminalRunTeardown ?? {})) {
         const storedValue = (
           storedStatus?.terminalRunTeardown as Record<string, unknown> | undefined
@@ -7348,8 +7356,12 @@ export class WorkflowRecipeReconciler {
    * coordinator's 409-free window. That left a revocation hole: a Secret
    * re-labeled foreign mid-run was never torn down, because the SecretWatcher
    * fan-out routes through that same short-circuited reconcile. This helper runs
-   * ONLY the ownership gate + targeted teardown of denied workloads — it does NOT
-   * redeploy workloads or touch the coordinator, so the 409-window is preserved.
+   * ONLY the ownership gate + targeted teardown of denied workloads, so the
+   * 409-window is preserved: it does not touch the coordinator or any workload
+   * that is not denied. A denied StatefulSet is kept rather than deleted; the
+   * teardown re-renders it without the denied refs, and once its revocation is
+   * recorded each pass still applies spec changes to it through the spec-hash
+   * gate, so its Pods can roll mid-run.
    *
    * Calling `readReferencedSecrets` also re-seeds the `SecretReverseIndex`, so
    * watcher coverage survives a WRC restart for in-flight workflow recipes (the

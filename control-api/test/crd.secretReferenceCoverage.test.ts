@@ -54,8 +54,7 @@ const NON_SECRET_REFERENCE_PATHS = new Set([
   'workflowrecipe.yaml:status.pluginWorkloadSdk.defaultTargetRef',
   // Records the workflow recipes controller writes (issue #1349), not Secret
   // references: a map of workload id to the sha256 digest of the denied Secret
-  // versions, and a boolean. Neither holds a Secret name, and the contract
-  // admits spec paths only.
+  // versions, and a boolean. Neither holds a Secret name.
   'workflowrecipe.yaml:status.secretOwnershipRevocations',
   'workflowrecipe.yaml:status.terminalRunTeardown.noSecretBearingWorkloads',
   'workflowrecipepolicy.yaml:spec.allowContextRef',
