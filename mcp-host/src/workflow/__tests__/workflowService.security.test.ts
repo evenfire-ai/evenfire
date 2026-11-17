@@ -456,8 +456,9 @@ describe('workflow tool allowlist enforced at call time (spec §3.1.2)', () => {
     }
   }
 
-  // The model sees each tool result as `<tool-result server="<name>" …>\n<json>\n</tool-result>`
-  // on the turn after the call (workflowService.ts executeStep tool loop).
+  // The model sees each tool result except a successful step spillover read as
+  // `<tool-result server="<name>" …>\n<json>\n</tool-result>` on the turn after the call
+  // (workflowService.ts executeStep tool loop).
   function toolResultSeenByModel(llm: SingleTurnProvider, toolName: string): unknown {
     const { messages } = providerCall(llm, 1)
     const prefix = `<tool-result server="${toolName}" data-only="true">\n`

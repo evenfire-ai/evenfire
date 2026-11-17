@@ -279,7 +279,9 @@ would otherwise carry, is at least the threshold. For an MCP result made only of
 text blocks the store keeps the tool text (the blocks joined with a line feed);
 for any other result it keeps the JSON-serialized result. The summary, the byte
 ranges read back and the budget count the bytes of the stored string, so a
-stored tool text can be smaller than the threshold. A result fetched when the
+stored tool text can be smaller than the threshold. A successful read enters the
+prompt as the stored text itself, so it adds its byte count plus a fixed frame;
+the summary and failed reads are JSON. A result fetched when the
 next call is sent without tools (the forced final call) stays inline, because
 nothing could read it back. The two byte settings take decimal digits only;
 another form (`1e5`, `0x10000`, `65536.0`) logs a warning and uses the default.

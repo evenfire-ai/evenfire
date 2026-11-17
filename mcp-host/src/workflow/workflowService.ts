@@ -7,6 +7,7 @@
  * - Model/provider can be swapped per-step without restart
  * - SOUL content can be overridden per-step, reverted after execution
  */
+import { randomBytes } from 'node:crypto'
 import { BudgetClient } from '../budget/budgetClient'
 import type { BudgetVerdict } from '../budget/types'
 import { createGetCapabilitiesTool } from '../capabilities/getCapabilitiesTool'
@@ -1334,7 +1335,9 @@ export class WorkflowService {
                 timeoutMs: remainingTimeoutMs(startTime, timeoutMs),
                 signal: abortController.signal,
               })
-              if (spilloverReadOffered && call.name === STEP_SPILLOVER_READ_TOOL_NAME) {
+              const isStepSpilloverRead =
+                spilloverReadOffered && call.name === STEP_SPILLOVER_READ_TOOL_NAME
+              if (isStepSpilloverRead) {
                 // Count the call once, whatever its outcome (the router may have
                 // rejected its arguments before the read tool ran). Record the ref
                 // and byte count, never the blob content, but only for calls made
@@ -1352,8 +1355,24 @@ export class WorkflowService {
               messages.push({ role: 'assistant', content: `Tool call: ${call.name}` })
               // SEC-01 fix: wrap tool results in structural delimiters to prevent prompt
               // injection — MCP server responses are untrusted third-party data.
+              // A successful step spillover read is not serialized, so its line
+              // feeds are real; the frame is advisory, as it already is for a
+              // `</tool-result>` inside any result.
               const serialized = JSON.stringify(result.content)
+              // A successful step read is the one result that enters unserialized: the read
+              // caps count bytes of the stored string, and serializing the slice again would
+              // multiply them by its JSON escape factor. Failures keep the serialized form.
+              const read = isStepSpilloverRead ? (result.content as InternalToolResult) : null
               let toolOutput = serialized
+              let frameTag = 'tool-result'
+              if (read?.success === true && typeof read.content === 'string') {
+                toolOutput = read.content
+                // SEC-01: a raw read keeps its line feeds, so its text could close the frame and
+                // start a line that looks like the host's. The closing tag of a read frame carries
+                // a value drawn after the text was stored, which the text cannot contain except by
+                // chance (64 bits). Advisory, like the frame itself.
+                frameTag = `tool-result-${randomBytes(8).toString('hex')}`
+              }
               // A result fetched when the next call is sent without tools stays
               // inline: nothing could read a stored result back. On the last
               // iteration no call follows, and the store is consulted as before.
@@ -1365,7 +1384,8 @@ export class WorkflowService {
                 // summary and the byte ranges index that text) and the
                 // serialized result otherwise. The decision uses the size of
                 // the serialized text the prompt would carry, and a result
-                // that is not stored keeps exactly that text.
+                // that is not stored keeps exactly that text, except a
+                // successful read, which keeps the text it read.
                 const spill = await stepSpillover.persist({
                   callId: `i${i + 1}c${callIndex}`,
                   toolName: call.name,
@@ -1393,7 +1413,7 @@ export class WorkflowService {
               }
               messages.push({
                 role: 'user',
-                content: `<tool-result server="${call.name}" data-only="true">\n${toolOutput}\n</tool-result>`,
+                content: `<${frameTag} server="${call.name}" data-only="true">\n${toolOutput}\n</${frameTag}>`,
               })
             }
             continue // More iterations needed

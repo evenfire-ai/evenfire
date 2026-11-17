@@ -9,8 +9,8 @@
  * other result it keeps the JSON-serialized result. The model receives a
  * summary of the stored string with the first-party fields (head, tail, size,
  * line count) plus a `spillover_ref` it can read back by byte range of that
- * string with `clerum__spillover_read`. Refs are
- * `spillover://<stepId>/<callId>.json`.
+ * string with `clerum__spillover_read`; a successful read enters the prompt as
+ * that text, not serialized. Refs are `spillover://<stepId>/<callId>.json`.
  *
  * Invariants:
  *   - Nothing is written to disk. The results of an execution are held by that
@@ -21,7 +21,9 @@
  *     fetched when the next call is sent without tools stays inline too,
  *     because nothing could read it back; the step loop does not offer it.
  *   - The read tool only accepts refs of the same step, finds only results of
- *     the same execution, and reads at most the threshold.
+ *     the same execution, and reads at most the threshold in bytes of the
+ *     stored string per call, which is what the read adds to the prompt apart
+ *     from the frame.
  *   - The budget caps the bytes of the stored strings the store holds for one
  *     execution; a result that does not fit stays inline, as without
  *     spillover, and later results that fit are still stored.
@@ -166,7 +168,8 @@ export interface StepSpillover {
   readTool: InternalToolDefinition
   /**
    * Never throws. `content` is the string to store; `inlineBytes` is the size
-   * of the text the caller would otherwise put in the prompt, and decides
+   * of the text the caller would otherwise put in the prompt (the read tool
+   * passes the serialized size; persist returns before reading it), and decides
    * whether the result is stored. When nothing is stored, `text` is `content`
    * unchanged and the caller keeps its own inline text.
    */
