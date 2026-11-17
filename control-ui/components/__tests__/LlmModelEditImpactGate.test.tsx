@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import type { CreateLlmModelInput, LlmAllowedModel } from '@lib/api'
 import { formatApiError, getLlmModel, updateLlmModel } from '@lib/api'
 import EditLlmModelPage from '../../app/llm-models/[id]/edit/page'
+import { llmModelWireRow } from '../../test/fixtures/llmModelRows'
 
 const mockPush = vi.fn()
 const mockShowToast = vi.fn()
@@ -173,12 +174,15 @@ describe('edit page disable impact gate (409 model_in_use → force)', () => {
     await waitFor(() => {
       expect(vi.mocked(updateLlmModel)).toHaveBeenCalledTimes(2)
     })
-    expect(vi.mocked(updateLlmModel).mock.calls[0]).toEqual(['model-1', RENAME_INPUT, {}])
+    // `enabled` did not change, so neither attempt sends it.
+    const { enabled: _unchanged, ...renameBody } = RENAME_INPUT
+    expect(vi.mocked(updateLlmModel).mock.calls[0]).toEqual(['model-1', renameBody, {}])
     expect(vi.mocked(updateLlmModel).mock.calls[1]).toEqual([
       'model-1',
-      RENAME_INPUT,
+      renameBody,
       { force: true },
     ])
+    expect(vi.mocked(updateLlmModel).mock.calls[1][1]).not.toHaveProperty('enabled')
     await waitFor(() => expect(mockPush).toHaveBeenCalled())
   })
 
@@ -238,27 +242,96 @@ describe('edit page authority over enabled (pinEnabled)', () => {
     })
   })
 
-  it('does not pin when only the display name changes on an enabled model', async () => {
-    const input = {
-      provider: 'claude',
-      model: 'claude-haiku-4-5',
-      display_name: 'Haiku (renamed label)',
-      enabled: true,
-    }
-    const sent = await submit(model, input)
-    expect(sent).toEqual(input)
-    expect(sent).not.toHaveProperty('pinEnabled')
+  it('turns a disabled model on without pinning it', async () => {
+    const sent = await submit(
+      { ...model, enabled: false },
+      { provider: 'claude', model: 'claude-haiku-4-5', enabled: true }
+    )
+    expect(sent).toEqual({ provider: 'claude', model: 'claude-haiku-4-5', enabled: true })
+  })
+})
+
+// control-api treats any `enabled` that differs from the locked row as the
+// operator's decision. The catalog sync can flip the row while the page is open,
+// so a metadata-only save must not carry the `enabled` the page loaded: it would
+// undo the sync's change and hand the row to the operator for good. Asserted on
+// the PUT body the real client puts on the wire, over rows control-api generated.
+describe('edit page sends enabled only when the operator changes it', () => {
+  const sentBodies: Array<Record<string, unknown>> = []
+
+  beforeEach(async () => {
+    mockPush.mockClear()
+    mockShowToast.mockClear()
+    sentBodies.length = 0
+    const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    vi.mocked(updateLlmModel).mockReset()
+    vi.mocked(updateLlmModel).mockImplementation(actual.updateLlmModel)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'PUT') sentBodies.push(JSON.parse(String(init.body)))
+        return new Response(JSON.stringify(model), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      })
+    )
   })
 
-  it('does not pin a display-name edit on a row the catalog sync turned off', async () => {
-    const pruned = { ...model, enabled: false, auto_disabled_at: '2026-11-01T00:00:00.000Z' }
-    const input = {
-      provider: 'claude',
-      model: 'claude-haiku-4-5',
-      display_name: 'Haiku (renamed label)',
-      enabled: false,
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  // What the form emits for the loaded row with only the display name edited.
+  function metadataEdit(loaded: LlmAllowedModel): CreateLlmModelInput {
+    return {
+      provider: loaded.provider,
+      model: loaded.model,
+      vendor: loaded.vendor,
+      display_name: 'Renamed label',
+      context_window_tokens: loaded.context_window_tokens,
+      enabled: loaded.enabled,
     }
-    const sent = await submit(pruned, input)
-    expect(sent).not.toHaveProperty('pinEnabled')
+  }
+
+  async function save(loaded: LlmAllowedModel, input: CreateLlmModelInput) {
+    vi.mocked(getLlmModel).mockResolvedValue(loaded)
+    mockSubmitInput = input
+    render(<EditLlmModelPage />)
+    fireEvent.click(await screen.findByRole('button', { name: SUBMIT_LABEL }))
+    await waitFor(() => expect(mockPush).toHaveBeenCalled())
+    expect(sentBodies).toHaveLength(1)
+    return sentBodies[0]
+  }
+
+  it('omits enabled from a metadata-only save of an enabled model', async () => {
+    const loaded = llmModelWireRow(true)
+    const body = await save(loaded, metadataEdit(loaded))
+    expect(body).not.toHaveProperty('enabled')
+    expect(body).not.toHaveProperty('pinEnabled')
+    expect(body).toMatchObject({ display_name: 'Renamed label' })
+  })
+
+  it('omits enabled from a metadata-only save of a disabled model', async () => {
+    const loaded = llmModelWireRow(false)
+    const body = await save(loaded, metadataEdit(loaded))
+    expect(body).not.toHaveProperty('enabled')
+    expect(body).not.toHaveProperty('pinEnabled')
+    expect(body).toMatchObject({ display_name: 'Renamed label' })
+  })
+
+  it('sends enabled:false with the pin when the operator turns an enabled model off', async () => {
+    const loaded = llmModelWireRow(true)
+    const body = await save(loaded, { ...metadataEdit(loaded), enabled: false })
+    expect(body).toMatchObject({ enabled: false, pinEnabled: true })
+  })
+
+  it('sends enabled:true without the pin when the operator turns a disabled model on', async () => {
+    const loaded = llmModelWireRow(false)
+    const body = await save(loaded, { ...metadataEdit(loaded), enabled: true })
+    expect(body).toMatchObject({ enabled: true })
+    expect(body).not.toHaveProperty('pinEnabled')
   })
 })
