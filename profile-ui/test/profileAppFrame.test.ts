@@ -27,7 +27,9 @@ test('root inviteToken redirects stay public without making every root query pub
 })
 
 test('profileRouteForPathname derives the active persistent sidebar route', () => {
-  assert.equal(profileRouteForPathname('/'), 'home')
+  assert.equal(profileRouteForPathname('/'), 'socialChannels')
+  assert.equal(profileRouteForPathname('/channels'), 'socialChannels')
+  assert.equal(profileRouteForPathname('/channels/telegram'), 'socialChannels')
   assert.equal(profileRouteForPathname('/members/member-1'), 'members')
   assert.equal(profileRouteForPathname('/approval-channels'), 'approvalChannels')
   assert.equal(profileRouteForPathname('/connected-accounts'), 'connectedAccounts')

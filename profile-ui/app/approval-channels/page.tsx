@@ -28,10 +28,10 @@ import type { Me, NotificationPreferences } from '@/app/types/profile'
 
 type LoadState = 'loading' | 'ready' | 'error'
 
-function settingsPathForMedium(medium: string): string {
-  if (medium === 'slack') return PROFILE_ROUTES.settings.social('slack')
-  if (medium === 'teams') return PROFILE_ROUTES.settings.social('teams')
-  return PROFILE_ROUTES.settings.social('telegram')
+function channelsPathForMedium(medium: string): string {
+  if (medium === 'slack') return PROFILE_ROUTES.channels.channel('slack')
+  if (medium === 'teams') return PROFILE_ROUTES.channels.channel('teams')
+  return PROFILE_ROUTES.channels.channel('telegram')
 }
 
 function ApprovalChannelsContent() {
@@ -166,7 +166,7 @@ function ApprovalChannelsContent() {
               </div>
               <Button
                 variant="secondary"
-                onClick={() => router.push(settingsPathForMedium(manageMedium))}
+                onClick={() => router.push(channelsPathForMedium(manageMedium))}
               >
                 Manage
               </Button>

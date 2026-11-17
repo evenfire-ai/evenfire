@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { WorkflowApprovalMediumAccount } from '@/app/types/approvalChannels'
-import { TelegramVerificationPanel } from '../../settings/TelegramVerificationPanel'
+import { TelegramVerificationPanel } from '../../channels/TelegramVerificationPanel'
 import { ToastProvider } from '../Toast'
 
 const mocks = vi.hoisted(() => ({

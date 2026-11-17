@@ -92,19 +92,37 @@ describe('Profile Sidebar access-controlled entries', () => {
 })
 
 describe('Profile Sidebar navigation order', () => {
-  it('renders Home first, then the remaining sections alphabetically', () => {
+  it('renders Social channels first, then the remaining sections alphabetically', () => {
     profileAccessState.approvalTargets = [{ id: 'slack-target' }]
     profileAccessState.canManageMembers = true
 
-    render(<Sidebar currentRoute="home" onLogout={vi.fn()} />)
+    render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
 
     expect(screen.getAllByRole('link').map(link => link.textContent?.trim())).toEqual([
-      'Home',
+      'Social channels',
       'Approval Channels',
       'Connected Accounts',
       'Members',
       'Settings',
     ])
+  })
+
+  it('keeps the Social channels entry behind a loading placeholder while access is unresolved', () => {
+    profileAccessState.approvalTargetsLoading = true
+
+    const view = render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
+
+    expect(screen.queryByRole('link', { name: /Social channels/i })).not.toBeInTheDocument()
+    expect(view.container.querySelectorAll('.cu-sidebar__item--loading')).toHaveLength(2)
+  })
+
+  it('hides the Social channels entry when the account has no external channel access', () => {
+    profileAccessState.canManageMembers = true
+
+    render(<Sidebar currentRoute="members" onLogout={vi.fn()} />)
+
+    expect(screen.queryByRole('link', { name: /Social channels/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Members/i })).toBeInTheDocument()
   })
 })
 

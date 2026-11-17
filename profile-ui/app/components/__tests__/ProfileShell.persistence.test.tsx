@@ -30,7 +30,7 @@ vi.mock('@components/Sidebar', () => ({
 }))
 
 vi.mock('@constants/routes', () => ({
-  PROFILE_ROUTES: { home: '/' },
+  PROFILE_ROUTES: { root: '/' },
 }))
 
 afterEach(() => {

@@ -18,13 +18,14 @@ export function isPublicProfileUiRequest(pathname: string, searchParams: URLSear
 }
 
 export type ProfileRouteKey =
-  | 'home'
+  | 'socialChannels'
   | 'members'
   | 'approvalChannels'
   | 'connectedAccounts'
   | 'settings'
 
 export function profileRouteForPathname(pathname: string): ProfileRouteKey {
+  if (pathname === '/channels' || pathname.startsWith('/channels/')) return 'socialChannels'
   if (pathname === '/approval-channels' || pathname.startsWith('/approval-channels/')) {
     return 'approvalChannels'
   }
@@ -33,5 +34,5 @@ export function profileRouteForPathname(pathname: string): ProfileRouteKey {
   }
   if (pathname === '/members' || pathname.startsWith('/members/')) return 'members'
   if (pathname === '/settings' || pathname.startsWith('/settings/')) return 'settings'
-  return 'home'
+  return 'socialChannels'
 }

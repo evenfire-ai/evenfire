@@ -1,6 +1,6 @@
 import React from 'react'
 
-export function IconHome() {
+export function IconSocialChannels() {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -13,9 +13,11 @@ export function IconHome() {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path d="m3 10 9-7 9 7" />
-      <path d="M5 10v10h14V10" />
-      <path d="M9 20v-6h6v6" />
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <path d="m8.59 13.51 6.83 3.98" />
+      <path d="m15.41 6.51-6.82 3.98" />
     </svg>
   )
 }

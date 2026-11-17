@@ -18,9 +18,13 @@ function withQuery(path: string, query?: ProfileRouteQuery): string {
 }
 
 export const PROFILE_ROUTES = {
-  home: '/',
+  root: '/',
   login: (query?: ProfileRouteQuery) => withQuery('/', query),
   approvalChannels: '/approval-channels',
+  channels: {
+    root: '/channels',
+    channel: (network: string) => `/channels/${segment(network)}`,
+  },
   connectedAccounts: '/connected-accounts',
   desktopSetup: '/desktop-setup',
   forgotPassword: (query?: ProfileRouteQuery) => withQuery('/forgot-password', query),
@@ -35,6 +39,5 @@ export const PROFILE_ROUTES = {
   settings: {
     root: '/settings/profile',
     profile: '/settings/profile',
-    social: (network: string) => `/settings/social/${segment(network)}`,
   },
 } as const

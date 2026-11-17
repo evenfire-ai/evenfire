@@ -11,15 +11,12 @@ const mocks = vi.hoisted(() => ({
   buildDesktopEnvironmentLink: vi.fn(),
   checkAuth: vi.fn(),
   confirm: vi.fn(),
-  disconnectWorkflowApprovalMedium: vi.fn(),
   getConfiguredExternalRestApiBaseUrl: vi.fn(),
   getDesktopEnvironment: vi.fn(),
   getMe: vi.fn(),
   isSilentApiError: vi.fn(),
-  listWorkflowApprovalMediums: vi.fn(),
   logout: vi.fn(),
   navigateToDesktopApp: vi.fn(),
-  refreshApprovalTargets: vi.fn(),
   refreshReleaseIdentity: vi.fn(),
   routerPush: vi.fn(),
   routerReplace: vi.fn(),
@@ -70,13 +67,6 @@ vi.mock('@components/ConfirmDialog', () => ({
   useConfirmDialog: () => ({ confirm: mocks.confirm, confirmDialog: null }),
 }))
 
-vi.mock('@components/ProfileAccessContext', () => ({
-  useProfileAccess: () => ({
-    approvalTargets: [],
-    refreshApprovalTargets: mocks.refreshApprovalTargets,
-  }),
-}))
-
 vi.mock('@components/ProfileBodySkeleton', () => ({
   ProfileBodySkeleton: () => null,
 }))
@@ -102,11 +92,6 @@ vi.mock('@lib/api', () => ({
   updateProfile: mocks.updateProfile,
 }))
 
-vi.mock('@lib/approvalChannels', () => ({
-  disconnectWorkflowApprovalMedium: mocks.disconnectWorkflowApprovalMedium,
-  listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums,
-}))
-
 vi.mock('@lib/desktopAppLinks', async importOriginal => {
   const actual = await importOriginal<typeof import('@lib/desktopAppLinks')>()
   return {
@@ -128,8 +113,6 @@ beforeEach(() => {
   mocks.getDesktopEnvironment.mockResolvedValue(desktopEnvironment)
   mocks.getMe.mockResolvedValue(currentUser)
   mocks.isSilentApiError.mockReturnValue(false)
-  mocks.listWorkflowApprovalMediums.mockResolvedValue([])
-  mocks.refreshApprovalTargets.mockResolvedValue([])
 })
 
 afterEach(() => {
@@ -143,7 +126,7 @@ describe('Settings desktop setup handoff', () => {
       'evenfire://desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.com&tenantName=Example+Tenant'
     mocks.buildDesktopEnvironmentLink.mockReturnValue(desktopHref)
 
-    render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+    render(<SettingsContent />)
 
     const setupButton = await screen.findByRole('button', { name: 'Setup desktop app' })
     await waitFor(() => expect(setupButton).toBeEnabled())
@@ -163,7 +146,7 @@ describe('Settings desktop setup handoff', () => {
   it('keeps manual REST setup available while automatic handoff is disabled', async () => {
     vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'false')
 
-    render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+    render(<SettingsContent />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Setup desktop app' }))
 
@@ -194,7 +177,7 @@ describe('Settings password update recovery messaging', () => {
     )
 
     try {
-      render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+      render(<SettingsContent />)
       const openButton = await screen.findByRole('button', { name: 'Update password' })
       fireEvent.click(openButton)
 

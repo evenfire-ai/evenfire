@@ -21,7 +21,7 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
     .filter(([routeKey]) => routeKey !== 'settings')
     .sort(
       ([firstRouteKey, first], [secondRouteKey, second]) =>
-        Number(secondRouteKey === 'home') - Number(firstRouteKey === 'home') ||
+        Number(secondRouteKey === 'socialChannels') - Number(firstRouteKey === 'socialChannels') ||
         first.label.localeCompare(second.label)
     )
   const settings = PROFILE_SIDEBAR_ITEMS.settings
@@ -49,10 +49,14 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
         {navigationItems.map(([routeKey, item]) => {
           const accessLoading =
             (routeKey === 'members' && manageableTeamsLoading && !canManageMembers) ||
-            (routeKey === 'approvalChannels' && approvalTargetsLoading && !hasExternalChannelAccess)
+            (routeKey === 'approvalChannels' &&
+              approvalTargetsLoading &&
+              !hasExternalChannelAccess) ||
+            (routeKey === 'socialChannels' && approvalTargetsLoading && !hasExternalChannelAccess)
           const accessDenied =
             (routeKey === 'members' && !canManageMembers) ||
-            (routeKey === 'approvalChannels' && !hasExternalChannelAccess)
+            (routeKey === 'approvalChannels' && !hasExternalChannelAccess) ||
+            (routeKey === 'socialChannels' && !hasExternalChannelAccess)
 
           if (accessLoading) {
             return (
