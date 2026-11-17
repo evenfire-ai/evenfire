@@ -56,10 +56,13 @@ describe('document read results are unchanged by the M2 measure cuts', () => {
     // The page ends inside the first sheet, so the three later sheets cannot
     // be emitted: the result is the same with or without them. Their 300 rows
     // are each too wide for a page, so probing them would cost about one
-    // measure each (352 in all, against 26 without probing them).
+    // measure each (352). Without those probes the first sheet is 14 measures
+    // and the same page in front of the later sheet envelopes is 26. Removing
+    // every row probe leaves 5 and 17, and the digests still match, so the
+    // exact counts are the liveness witness.
     const [alone, before] = await runFitScenarios(DocumentReadTool, laterSheetScenarios())
     expect(before!.digest).toBe(alone!.digest)
-    expect(alone!.measures).toBeLessThanOrEqual(60)
-    expect(before!.measures).toBeLessThanOrEqual(60)
+    expect(alone!.measures).toBe(14)
+    expect(before!.measures).toBe(26)
   }, 60_000)
 })

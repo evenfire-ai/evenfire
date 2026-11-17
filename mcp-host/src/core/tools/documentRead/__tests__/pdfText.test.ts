@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AttachmentReadLedger } from '../../../attachments/attachmentReadBudget'
+import type { ExecutionContext } from '../../../interfaces'
+import { DocumentReadTool } from '../index'
 import * as pdfLoad from '../pdfLoad'
 import { parsePdfText } from '../pdfText'
-import type { PdfTextJob, PdfTextOutcome } from '../types'
+import type { PdfTextJob, PdfTextOutcome, RunDocumentJob } from '../types'
 import { runDocumentJob } from '../workerRunner'
 import {
+  admittedFile,
+  boundCursor,
   documentLimits,
   emptyPdf,
   encryptedPdf,
@@ -125,17 +130,106 @@ describe('PDF text cuts', () => {
     )
     expect(first).toMatchObject({
       ok: true,
-      pages: [{ page: 1, from: 0, to: 2 }],
+      pages: [{ page: 1, text: 'ab😀cd', from: 0, to: 2 }],
       next: { page: 1, charOffset: 2 },
       stoppedBy: 'max_extracted_chars',
     })
+    if (!first.ok) return
+    // The window the model receives. Without the back-off this is "ab\ud83d".
+    expect(first.pages[0]?.text.slice(first.pages[0].from, first.pages[0].to)).toBe('ab')
     const second = await parsePdfText(
       pdfTextJob(Buffer.alloc(0), {
-        start: { page: 1, charOffset: 2 },
+        start: first.next,
         limits: documentLimits({ maxExtractedChars: 10 }),
       })
     )
-    expect(second).toMatchObject({ ok: true, pages: [{ page: 1, from: 2, to: 6 }] })
+    expect(second).toMatchObject({
+      ok: true,
+      pages: [{ page: 1, text: 'ab😀cd', from: 2, to: 6 }],
+    })
+  })
+
+  it('refuses a cursor inside the surrogate pair through the tool and continues from the backed-off cursor', async () => {
+    const page = {
+      getTextContent: async () => ({ items: [{ str: 'ab😀cd', hasEOL: false }] }),
+      cleanup: () => undefined,
+    }
+    vi.spyOn(pdfLoad, 'withPdfDocument').mockImplementation(async (_job, read) =>
+      read({ numPages: 1, getPage: async () => page } as never)
+    )
+    const file = admittedFile('surrogate-pdf', await textPdf(['placeholder']), 'application/pdf')
+    const runJob: RunDocumentJob = async job => {
+      if (job.kind !== 'pdf_text') throw new Error(`unexpected document job ${job.kind}`)
+      return parsePdfText(job)
+    }
+    const measureResult = (raw: string): number => Math.ceil(Buffer.byteLength(raw, 'utf8') / 4) + 4
+    const context: ExecutionContext = { onOutput: () => undefined, measureResult }
+    const tool = new DocumentReadTool(
+      {
+        content: 'Read the attached document',
+        channelType: 'rpc',
+        channelId: 'document-agent',
+        sender: 'user-document',
+        timestamp: '2026-10-13T10:00:00Z',
+        messageId: 'message-document',
+        hostRef: 'host-document',
+        attachments: [file],
+      },
+      {
+        contextWindowTokens: 20_000,
+        ledger: new AttachmentReadLedger(),
+        redactor: { toolOutputRedactionRanges: () => [] },
+        runJob,
+        limits: documentLimits({ maxExtractedChars: 3 }),
+      }
+    )
+    const first = await tool.execute({ attachmentId: file.id }, context)
+    const firstBody = JSON.parse(first.content) as {
+      status: string
+      pages?: Array<{ text: string }>
+      continuation?: { cursor: string }
+    }
+    expect(first.is_error).toBe(false)
+    expect(firstBody.status).toBe('ok')
+    // Removing the back-off emits the lone high surrogate and a cursor the
+    // next call refuses as invalid_range.
+    expect(firstBody.pages?.[0]?.text).toBe('ab')
+    expect(firstBody.continuation?.cursor).toEqual(expect.any(String))
+
+    const second = await tool.execute(
+      { attachmentId: file.id, cursor: firstBody.continuation!.cursor },
+      context
+    )
+    const secondBody = JSON.parse(second.content) as {
+      status: string
+      reason?: string
+      pages?: Array<{ text: string }>
+    }
+    expect(second.is_error).toBe(false)
+    expect(secondBody.status).toBe('ok')
+    expect(secondBody.pages?.[0]?.text.startsWith('😀')).toBe(true)
+
+    const inside = await new DocumentReadTool(
+      {
+        content: 'Read the attached document',
+        channelType: 'rpc',
+        channelId: 'document-agent',
+        sender: 'user-document',
+        timestamp: '2026-10-13T10:00:00Z',
+        messageId: 'message-document',
+        hostRef: 'host-document',
+        attachments: [file],
+      },
+      {
+        contextWindowTokens: 20_000,
+        ledger: new AttachmentReadLedger(),
+        redactor: { toolOutputRedactionRanges: () => [] },
+        runJob,
+        limits: documentLimits({ maxExtractedChars: 10 }),
+      }
+    ).execute({ attachmentId: file.id, cursor: boundCursor('v1.pdf.1.3', file) }, context)
+    expect(JSON.parse(inside.content)).toMatchObject({ status: 'error', reason: 'invalid_range' })
+    expect(inside.is_error).toBe(true)
   })
 })
 
