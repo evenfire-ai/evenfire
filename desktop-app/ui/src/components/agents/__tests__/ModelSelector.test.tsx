@@ -328,6 +328,26 @@ describe('ModelSelector', () => {
     ).toBe('false')
   })
 
+  it('names a broker Host default that the catalog does not list', async () => {
+    // The runtime dispatches `spec.model.name` even when the allowlist omits
+    // it, so the chip must name that model rather than ask for a pick.
+    await setHookFromStore(
+      baseData({
+        provider: 'codex-subscription',
+        hostDefault: 'gpt-5.6-codex',
+        sessionModel: null,
+        models: [
+          { name: 'gpt-5.3', displayName: 'GPT-5.3' },
+          { name: 'gpt-5.5', displayName: 'GPT-5.5' },
+        ],
+      })
+    )
+    renderSelector()
+    const chip = screen.getByRole('button', { name: /^Model — / })
+    expect(chip.getAttribute('aria-label')).toBe('Model — gpt-5.6-codex')
+    expect(chip.textContent).toBe('gpt-5.6-codex')
+  })
+
   it('shows the Host default on the static chip of a degraded broker-backed Host', async () => {
     // Without an allowlist the Host projects only its default, with unknown
     // image input.
