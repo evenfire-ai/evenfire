@@ -638,7 +638,8 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
     const op: WatchOp = {
       kind,
       seq,
-      // gfsc refuses an x-request-id that is not a uuid.
+      // One id format for log correlation across control-api and gfsc; gfsc
+      // reads accept any header, mutations require a uuid.
       opId: normUid(requestId) ?? randomUUID(),
       added,
       deferred: new Set(),
