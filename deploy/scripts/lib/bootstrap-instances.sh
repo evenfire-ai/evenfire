@@ -111,6 +111,7 @@ apply_bootstrap_instances() (
     if [ -z "$existing" ]; then
       # A preexisting last-applied annotation is rewritten by kubectl create,
       # claiming the initial connectors. Let the first apply establish it instead.
+      # The first apply's missing-last-applied annotation warning is expected.
       # Exclusive create fails if another writer wins the existence race.
       if ! initial="$(jq -c 'del(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])' <<<"$resource")"; then
         printf '[bootstrap-instances] ERROR: cannot prepare initial context1\n' >&2

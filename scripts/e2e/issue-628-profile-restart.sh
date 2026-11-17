@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Restart the already-owned local profile under the caller's existing lease.
+# After return, the caller must restore forwards with branch-profile-pf and run
+# branch-profile-health outside the restart command's bounded process group.
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -108,8 +110,8 @@ fi
 printf 'RESTART_PHASE=running\n'
 
 # Minikube can report a running node before its service Pods are usable. Wait
-# for the same services that branch-profile-pf will forward, without treating
-# a failed API read as an absent optional service.
+# for the same services the caller will forward with branch-profile-pf, without
+# treating a failed API read as an absent optional service.
 readiness_deadline=$((SECONDS + 300))
 wait_for_service_pod control-plane control-ui true
 wait_for_service_pod profiles profile-ui false

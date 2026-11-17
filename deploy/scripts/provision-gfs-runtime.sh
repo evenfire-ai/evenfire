@@ -64,8 +64,8 @@ while [ $# -gt 0 ]; do
       ;;
     --skip-instances)
       # GFS DB provisioning only — do NOT apply the overlay's CRD instances
-      # (Host/Context/CommunicationChannel/GlobalFileSystem). Used by the prod
-      # promotion pipeline, where instance management stays a gated runbook op.
+      # (Host/Context/CommunicationChannel/GlobalFileSystem). Use when the caller
+      # manages those instances in a separate gated step.
       SKIP_INSTANCES="1"
       shift
       ;;
@@ -229,7 +229,7 @@ else
 fi
 
 if [ "$SKIP_INSTANCES" = "1" ]; then
-  # Prod promotion does not manage CR instances here. Credential staging was
+  # This invocation does not manage CR instances. Credential staging was
   # already completed before overlay apply and never triggers a rollout.
   log "Skipping CRD instances apply and GlobalFileSystem readiness wait (--skip-instances)"
 elif [ -d "$INSTANCES_DIR" ]; then

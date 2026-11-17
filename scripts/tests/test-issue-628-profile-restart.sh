@@ -170,7 +170,8 @@ grep -q '^branch-profile-stop$' "$TMP/lost-lease.calls" || fail 'lost-lease case
 printf 'PASS: restart refuses to start if the inherited lease is lost\n'
 
 if run_case start-fails env; then fail 'failed start accepted'; fi
-! grep -q '^branch-profile-pf$' "$TMP/start-fails.calls" || fail 'failed start continued to port-forwards'
+! grep -q -E '^(service-check|pod-check)=' "$TMP/start-fails.calls" || fail 'failed start continued to workload readiness'
+! grep -q '^RESTART_PHASE=running$' "$TMP/start-fails.out" || fail 'failed start was reported as running'
 grep -q '^ISSUE628_RESTART_START_FAILED' "$TMP/start-fails.out" || fail 'failed start lacked its reason'
 printf 'PASS: restart stops after a failed profile start\n'
 
@@ -181,7 +182,8 @@ printf 'PASS: restart rejects an unknown initial node IP\n'
 
 if run_case ip-changes env; then fail 'changed node IP accepted'; fi
 grep -q '^branch-profile-start$' "$TMP/ip-changes.calls" || fail 'IP case did not start the profile'
-! grep -q '^branch-profile-pf$' "$TMP/ip-changes.calls" || fail 'changed IP continued to port-forwards'
+! grep -q -E '^(service-check|pod-check)=' "$TMP/ip-changes.calls" || fail 'changed IP continued to workload readiness'
+! grep -q '^RESTART_PHASE=running$' "$TMP/ip-changes.out" || fail 'changed IP was reported as running'
 grep -q '^ISSUE628_RESTART_IP_CHANGED' "$TMP/ip-changes.out" || fail 'changed IP lacked its reason'
 printf 'PASS: restart fails closed on a changed node IP\n'
 

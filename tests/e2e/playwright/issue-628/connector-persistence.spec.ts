@@ -54,6 +54,7 @@ async function run(
   operation = path.basename(command)
 ): Promise<string> {
   if (testIsStopping()) throw new Error('Profile commands are unavailable after test timeout')
+  let stdout: string
   try {
     const result = await commands.run(() =>
       execFileAsync(command, args, {
@@ -63,8 +64,7 @@ async function run(
         maxBuffer: 2 * 1024 * 1024,
       })
     )
-    if (testIsStopping()) throw new Error('Profile command finished after test timeout')
-    return result.stdout
+    stdout = result.stdout
   } catch (error) {
     const result = error as {
       code?: string | number
@@ -98,6 +98,8 @@ async function run(
         .join(' ')
     )
   }
+  if (testIsStopping()) throw new Error('Profile command finished after test timeout')
+  return stdout
 }
 
 async function onProfile(command: string, args: string[], timeout = 90_000): Promise<string> {
