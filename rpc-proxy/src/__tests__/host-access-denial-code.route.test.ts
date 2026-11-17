@@ -133,7 +133,7 @@ type RouteCase = {
 }
 
 // Every rpc-proxy route that resolves a Host and answers its own authorization
-// 403: the 15 in rpc.ts plus the three streams.
+// 403: the 16 in rpc.ts plus the three streams.
 const DENYING_ROUTES: RouteCase[] = [
   {
     label: 'messages',
@@ -170,6 +170,12 @@ const DENYING_ROUTES: RouteCase[] = [
     method: 'patch',
     path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/name',
     body: { name: 'renamed' },
+  },
+  {
+    label: 'session approval mode',
+    method: 'patch',
+    path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/approval-mode',
+    body: { mode: 'auto' },
   },
   { label: 'models', method: 'get', path: '/rpc/hosts/chatllm/models' },
   {
@@ -518,6 +524,10 @@ describe('an mcp-host 403 never reaches the client with a reserved Host-access c
       hostPath: '/v1/runtime/sessions/agent-a/chat-1/context-breakdown',
     },
     { ...byLabel('session rename'), hostPath: '/v1/runtime/sessions/agent-a/chat-1/name' },
+    {
+      ...byLabel('session approval mode'),
+      hostPath: '/v1/runtime/sessions/agent-a/chat-1/approval-mode',
+    },
     { ...byLabel('models'), hostPath: '/v1/runtime/models' },
     { ...byLabel('set model'), hostPath: '/v1/runtime/model' },
     {

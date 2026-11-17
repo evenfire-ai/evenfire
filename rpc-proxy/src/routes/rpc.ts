@@ -77,6 +77,27 @@ function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
   return Number.isSafeInteger(parsed) ? parsed : null
 }
 
+type ShellAction = 'once' | 'command' | 'shell'
+type ApprovalMode = 'manual' | 'auto' | 'allow_all'
+
+/** Absent is the boolean approve path. Any other value is not a shell answer. */
+function readShellAction(value: unknown): ShellAction | undefined | 'invalid' {
+  if (value === undefined) return undefined
+  if (value === 'once' || value === 'command' || value === 'shell') return value
+  return 'invalid'
+}
+
+/** Stored mode only. The command spelling `allow-all` is not a stored value. */
+function readApprovalMode(value: unknown): ApprovalMode | undefined {
+  if (value === 'manual' || value === 'auto' || value === 'allow_all') return value
+  return undefined
+}
+
+function readApprovalModeBody(body: unknown): ApprovalMode | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+  return readApprovalMode((body as { mode?: unknown }).mode) ?? null
+}
+
 /**
  * Pre-wake host error mapping: fetch timeout → 504, everything else → 502.
  *
@@ -455,6 +476,16 @@ export function createRpcRouter(): Router {
             .json({ error: 'invalid_attachments', message: 'Attachments must be a list.' })
           return
         }
+        // First-message mode. This body is an allowlist: forward approvalMode
+        // only for a stored value when the token also has host:session:write.
+        // Carrying the field without that scope is 403. A message without the
+        // field needs only host:message:invoke. An invalid value is dropped.
+        const carriesApprovalMode = Object.prototype.hasOwnProperty.call(body, 'approvalMode')
+        if (carriesApprovalMode && !auth.scopes.includes('host:session:write')) {
+          res.status(403).json({ error: 'Forbidden: missing scope' })
+          return
+        }
+        const approvalMode = carriesApprovalMode ? readApprovalMode(body.approvalMode) : undefined
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -476,6 +507,7 @@ export function createRpcRouter(): Router {
           ...(typeof body.model === 'string' && body.model.trim()
             ? { model: body.model.trim() }
             : {}),
+          ...(approvalMode ? { approvalMode } : {}),
         }
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
@@ -689,6 +721,13 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'alwaysApprove must be a boolean' })
           return
         }
+        // Optional shell-card answer. Absent stays on the boolean path. Any
+        // other value is 400 so a typo cannot be forwarded as a grant.
+        const shellAction = readShellAction(parsed.shellAction)
+        if (shellAction === 'invalid') {
+          res.status(400).json({ error: 'shellAction must be once, command, or shell' })
+          return
+        }
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
@@ -705,6 +744,7 @@ export function createRpcRouter(): Router {
           userId: auth.sub,
           requestId: parsed.toolCallId || parsed.requestId,
           alwaysApprove,
+          ...(shellAction ? { shellAction } : {}),
         }
         // Wake-eligible finite operation (§11.4): the route scope stays
         // host:approval:write; wake capability rides on the token. A suspended
@@ -1168,6 +1208,94 @@ export function createRpcRouter(): Router {
           )
         } catch (error) {
           respondUpstreamUnavailable(res, error)
+        }
+      } catch (error) {
+        guardedNext(res, next, error)
+      }
+    }
+  )
+
+  // Set a session's stored approval mode. Scope and host access match rename.
+  // Unlike rename this write is wake-eligible: it copies the approve route's
+  // single retry. There is no idempotency key, so a hold re-issues the PATCH
+  // at most once. The body is only { mode }; mcp-host clamps the effective mode.
+  router.patch(
+    '/rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode',
+    requireRpcAuth,
+    requireScope('host:session:write'),
+    jsonBody,
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const hostRef = String(req.params.hostRef || '').trim()
+        const agent = String(req.params.agent || '').trim()
+        const chatId = String(req.params.chatId || '').trim()
+        if (
+          !isSafeUpstreamPathSegment(hostRef) ||
+          !isSafeUpstreamAgentSegment(agent) ||
+          !isSafeUpstreamPathSegment(chatId)
+        ) {
+          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
+          return
+        }
+        const mode = readApprovalModeBody(req.body)
+        if (!mode) {
+          res.status(400).json({ error: 'mode must be manual, auto, or allow_all' })
+          return
+        }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
+        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
+          teamId: auth.teamId,
+        })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
+          return
+        }
+        const baseUrl = host.url.replace(/\/+$/, '')
+        const logHost = hostRef.replace(/[\r\n]/g, '')
+        const logAgent = agent.replace(/[\r\n]/g, '')
+        const logChatId = chatId.replace(/[\r\n]/g, '')
+        console.info(
+          `[RPC_PROXY] user=${auth.sub} host=${logHost} method=set-approval-mode agent=${logAgent} chatId=${logChatId} mode=${mode}`
+        )
+        const upstreamBody = { mode }
+        // Wake-eligible finite operation: scope stays host:session:write.
+        // Waking also needs host:wake:write on the token.
+        const attempt = async (timeoutMs?: number) => {
+          const response = await fetch(
+            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/approval-mode`,
+            {
+              method: 'PATCH',
+              headers: { 'content-type': 'application/json', ...host.headers },
+              body: JSON.stringify(upstreamBody),
+              signal: mutatingCallSignal(timeoutMs, res),
+            }
+          )
+          const body = await readMutatingResponseBody(response)
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
+        }
+        try {
+          await attempt()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
+            attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
         }
       } catch (error) {
         guardedNext(res, next, error)
