@@ -776,20 +776,29 @@ describe('the delete approval names every file', () => {
     expect(generic).toMatch(/^Tool `other_tool` requires approval\. Parameters: /)
   })
 
-  it('shows twenty long names whole, on twenty distinct lines', () => {
+  it('shows twenty long names whole in Desktop, and on twenty distinct shortened lines in Slack', () => {
     const files = Array.from({ length: 20 }, (_, n) => ({
       kind: 'upload',
       name: `${'x'.repeat(250)}${String(n).padStart(5, '0')}`,
     }))
-    for (const lines of [preview(files).text.split('\n'), notification(files).split('\n')]) {
-      const named = lines.filter(line => line.startsWith('upload: '))
-      expect(named).toHaveLength(20)
-      expect(new Set(named).size).toBe(20)
-      named.forEach((line, n) => expect(line).toContain(`"${files[n]!.name}"`))
-      expect(lines.join('\n')).not.toContain('…')
-      expect(lines).toContain('Total files: 20')
-    }
+    const desktop = preview(files).text.split('\n')
+    const whole = desktop.filter(line => line.startsWith('upload: '))
+    expect(whole).toHaveLength(20)
+    whole.forEach((line, n) => expect(line).toContain(`"${files[n]!.name}"`))
+    expect(desktop.join('\n')).not.toContain('…')
+    expect(desktop).toContain('Total files: 20')
     expect(preview(files).truncated).toBe(false)
+    // One Slack message cannot carry the 20 names whole: each keeps its start
+    // and its distinct end around the marker.
+    const slack = notification(files).split('\n')
+    const shortened = slack.filter(line => line.startsWith('upload: '))
+    expect(shortened).toHaveLength(20)
+    expect(new Set(shortened).size).toBe(20)
+    shortened.forEach((line, n) => {
+      expect(line).toMatch(/^upload: "x+"…"x*\d{5}" — /)
+      expect(line).toContain(`${String(n).padStart(5, '0')}"${VALUES}`)
+    })
+    expect(slack.slice(-2)).toEqual(['Total files: 20', SLACK_TRAILER])
   })
 
   it('tells apart files with the same name by size and creation date', () => {
@@ -960,17 +969,28 @@ describe('the delete approval names every file', () => {
     expect(desktop.text.split('\n')[0]).toBe('Delete these files permanently:')
     expect(fileLines(desktop.text).length).toBeGreaterThan(0)
     const marker = 'The list above is cut: it is too long to show whole. Total files: 300.'
-    for (const [policy, trailer] of [
-      ['channel_users', SLACK_TRAILER],
-      ['cli_only', CLI_TRAILER],
+    // A channel with no message limit gets the Desktop card and the marker.
+    for (const [channelType, policy, trailer] of [
+      ['rpc', 'channel_users', REPLY_TRAILER],
+      ['email', 'cli_only', CLI_TRAILER],
     ] as const) {
-      const channel = notification(files, 'slack', policy)
+      const channel = notification(files, channelType, policy)
       expect(channel).toBe(`${desktop.text}\n${marker}\n${trailer}`)
       // The marker, like the instruction, is outside the bound: the card
       // without both stays within it.
       const card = channel.slice(0, -(marker.length + 1 + trailer.length + 1))
       expect(Buffer.byteLength(card, 'utf8')).toBeLessThanOrEqual(APPROVAL_INPUT_PREVIEW_BYTES)
     }
+    // One Slack message names the first files and says how many the request covers.
+    const slack = notification(files, 'slack').split('\n')
+    const named = fileLines(slack.join('\n'))
+    expect(named.length).toBeGreaterThan(0)
+    expect(named.length).toBeLessThan(300)
+    expect(slack.slice(-2)).toEqual([
+      `Only ${named.length} of 300 files are listed by name here: the list is too long for one message. Approving covers all 300 files in the request. To see every name, deny and ask to delete fewer files at a time.`,
+      SLACK_TRAILER,
+    ])
+    expect(slack).not.toContain(marker)
   })
 
   it('marks a schema-valid card that redaction pushed past the bound', () => {
@@ -990,12 +1010,23 @@ describe('the delete approval names every file', () => {
     expect(desktop.truncated).toBe(true)
     expect(Buffer.byteLength(desktop.text, 'utf8')).toBe(APPROVAL_INPUT_PREVIEW_BYTES)
     expect(desktop.text.endsWith('Total files: 20')).toBe(false)
-    const lines = notification(files, 'telegram', 'channel_users', [entry]).split('\n')
-    expect(lines.slice(-2)).toEqual([
+    const email = notification(files, 'email', 'channel_users', [entry]).split('\n')
+    expect(email.slice(-2)).toEqual([
       'The list above is cut: it is too long to show whole. Total files: 20.',
       REPLY_TRAILER,
     ])
-    expect(lines.slice(0, -2).join('\n')).toBe(desktop.text)
+    expect(email.slice(0, -2).join('\n')).toBe(desktop.text)
+    // One Telegram message names the first files and says how many the request covers.
+    const telegram = notification(files, 'telegram', 'channel_users', [entry])
+    const named = telegram.split('\n').filter(line => /^(generated|upload): "/.test(line))
+    expect(named.length).toBeGreaterThan(0)
+    expect(named.length).toBeLessThan(20)
+    expect(telegram.split('\n').slice(-2)).toEqual([
+      `Only ${named.length} of 20 files are listed by name here: the list is too long for one message. Approving covers all 20 files in the request. To see every name, deny and ask to delete fewer files at a time.`,
+      REPLY_TRAILER,
+    ])
+    expect(telegram.length).toBeLessThanOrEqual(4096)
+    expect(telegram).not.toContain(value)
   })
 
   it('adds no line to a card under the bound, whatever the trailer', () => {
@@ -1005,10 +1036,11 @@ describe('the delete approval names every file', () => {
     }))
     const desktop = preview(files)
     expect(desktop.truncated).toBe(false)
+    // Channels with no message limit: the Desktop card and the trailer.
     for (const [channelType, policy, trailer] of [
-      ['slack', 'channel_users', SLACK_TRAILER],
-      ['telegram', 'channel_users', REPLY_TRAILER],
-      ['slack', 'cli_only', CLI_TRAILER],
+      ['rpc', 'channel_users', REPLY_TRAILER],
+      ['email', 'channel_users', REPLY_TRAILER],
+      ['email', 'cli_only', CLI_TRAILER],
     ] as const) {
       const lines = notification(files, channelType, policy).split('\n')
       expect(lines).toHaveLength(23)
@@ -1016,10 +1048,29 @@ describe('the delete approval names every file', () => {
       expect(lines[21]).toBe('Total files: 20')
       expect(lines[22]).toBe(trailer)
     }
+    // One Slack or Telegram message: the names are shortened, and the card
+    // adds the notice before the total.
+    for (const [channelType, policy, trailer] of [
+      ['slack', 'channel_users', SLACK_TRAILER],
+      ['telegram', 'channel_users', REPLY_TRAILER],
+      ['slack', 'cli_only', CLI_TRAILER],
+    ] as const) {
+      const lines = notification(files, channelType, policy).split('\n')
+      expect(lines).toHaveLength(24)
+      expect(lines[0]).toBe('Delete these files permanently:')
+      for (const line of lines.slice(1, 21)) expect(line).toMatch(/^upload: "x+"…"x*\d{5}" — /)
+      expect(lines.slice(21)).toEqual([
+        'Some names are shortened: "…" between two quoted parts marks the missing middle.',
+        'Total files: 20',
+        trailer,
+      ])
+    }
   })
 
-  it('keeps every line of an unredacted schema-valid card within one channel message', () => {
+  it('keeps every line of the widest unredacted schema-valid Desktop card under 2,400 characters', () => {
     // The widest schema-valid name: each character escapes to `\u{E0001}`.
+    // The bound is per line; the channels' one-message cards are tested in
+    // `progress/__tests__/keptFilesDeleteChannelCard.test.ts`.
     const files = Array.from({ length: 20 }, () => ({
       kind: 'generated',
       name: '\u{E0001}'.repeat(255),

@@ -48,7 +48,9 @@ import { logger } from '../logger'
 import { McpManager } from '../mcp'
 import {
   KEPT_FILES_DELETE_APPROVAL_TOOL,
+  approvalCardBudget,
   keptFilesDeleteApprovalCard,
+  keptFilesDeleteChannelNotification,
 } from '../progress/approvalInputPreview'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
@@ -1651,30 +1653,45 @@ export class AgentStateMachine extends EventEmitter {
     }
 
     if (approval.tool_name === KEPT_FILES_DELETE_APPROVAL_TOOL) {
-      // The user approves a permanent delete by the names it lists: the same
-      // card text as the Desktop preview (whole lines instead of the cut
-      // parameter summary, redacted, escaped and cut at
-      // APPROVAL_INPUT_PREVIEW_BYTES), followed by the instruction, which the
-      // cut never reaches. A cut card has lost its last lines, the total
-      // among them, so a line between the card and the instruction says the
-      // list is cut and gives the total, as Desktop marks it `truncated`.
+      // The user approves a permanent delete by the files it lists, one line
+      // each with kind, name, size and date (redacted and escaped), followed
+      // by the instruction.
+      // - Telegram, Slack and Teams show the approval as one message: the
+      //   card is fitted to the channel's limit, measured with the
+      //   instruction, by shortening long names in the middle
+      //   (keptFilesDeleteChannelNotification).
+      // - Any other channel gets the Desktop preview text, cut at
+      //   APPROVAL_INPUT_PREVIEW_BYTES before the instruction. A cut card has
+      //   lost its last lines, the total among them, so a line between the
+      //   card and the instruction says the list is cut and gives the total,
+      //   as Desktop marks it `truncated`.
       const safety = new BasicSafety(this.secretEntriesProvider)
-      const card = keptFilesDeleteApprovalCard(
-        approval.parameters,
-        text => safety.sanitizeOutput(approval.tool_name, text).content
-      )
-      if (card) {
-        return [
-          card.text,
-          ...(card.cut
-            ? [`The list above is cut: it is too long to show whole. Total files: ${card.files}.`]
-            : []),
-          canApproveViaChannel
-            ? channelType === 'slack'
-              ? 'Use the approval controls to continue or cancel.'
-              : 'Reply /approve or /deny to this message.'
-            : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`,
-        ].join('\n')
+      const redact = (text: string) => safety.sanitizeOutput(approval.tool_name, text).content
+      const instruction = canApproveViaChannel
+        ? channelType === 'slack'
+          ? 'Use the approval controls to continue or cancel.'
+          : 'Reply /approve or /deny to this message.'
+        : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`
+      const budget = approvalCardBudget(channelType)
+      if (budget) {
+        const text = keptFilesDeleteChannelNotification(
+          approval.parameters,
+          redact,
+          instruction,
+          budget
+        )
+        if (text !== undefined) return text
+      } else {
+        const card = keptFilesDeleteApprovalCard(approval.parameters, redact)
+        if (card) {
+          return [
+            card.text,
+            ...(card.cut
+              ? [`The list above is cut: it is too long to show whole. Total files: ${card.files}.`]
+              : []),
+            instruction,
+          ].join('\n')
+        }
       }
     }
 

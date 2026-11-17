@@ -1653,8 +1653,12 @@ export const ATTACH_AGAIN_SENTENCE =
 /**
  * `clerum__kept_files_delete`: deletes files the Host keeps for this user,
  * named by kind, id, name, creation date and size from the listing, after the
- * user approves the call on a card that shows the name, size and date. It cannot name a GFS file, a download copy, a workspace file, a file
- * with no record or another user's file: it has no path and no GFS client.
+ * user approves the call on a card that lists the files with their names,
+ * sizes and dates. In Telegram, Slack and Teams the card is one message: long
+ * names are shortened in the middle, and a card that still does not fit lists
+ * only its first files by name and says how many files the request covers.
+ * It cannot name a GFS file, a download copy, a workspace file, a file with no
+ * record or another user's file: it has no path and no GFS client.
  */
 export function buildKeptFilesDeleteTool(
   callerRoot: string | undefined,
@@ -1664,7 +1668,7 @@ export function buildKeptFilesDeleteTool(
     name: KEPT_FILES_DELETE_TOOL,
     description:
       'Delete files this Host keeps for this user, to make room. Name each file by kind, id, name, createdAt and sizeBytes exactly as clerum__kept_files_list gives them; only files with an id can be deleted. ' +
-      'Call it only with the files the user agreed to delete; the user approves the call itself on an approval card that shows each file name, size and creation date. Deleted files cannot be recovered.',
+      'Call it only with the files the user agreed to delete; the user approves the call itself on an approval card that shows each file with its name, size and creation date; in a chat channel the card is one message, so long names are shortened in the middle. Deleted files cannot be recovered.',
     requiresApproval: true,
     parameters: {
       type: 'object',
