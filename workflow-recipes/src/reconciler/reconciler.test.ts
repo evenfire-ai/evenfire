@@ -12548,6 +12548,281 @@ describe('WorkflowRecipeReconciler', () => {
       expect(second.requeueAfterMs).toBeUndefined()
     })
 
+    // R1-M1 — a denied StatefulSet is kept, and after its revocation is recorded
+    // it keeps following the spec through the spec-hash gate: no second Pod
+    // delete, no record write. The three callers of teardownDeniedWorkload.
+    const DENIED_CALLERS = ['non-workflow deploy', 'workflow deploy', 'steady enforcer'] as const
+    type DeniedCaller = (typeof DENIED_CALLERS)[number]
+
+    const dbStatefulSet = (overrides: Record<string, unknown> = {}): WorkloadDef =>
+      ({
+        id: 'db',
+        type: 'statefulset',
+        image: 'postgres:16',
+        port: 5432,
+        envSecret: { name: 'db-creds', keys: [{ secretKey: 'token', envVar: 'TOKEN' }] },
+        ...overrides,
+      }) as WorkloadDef
+
+    /** A recipe whose workloads reach teardownDeniedWorkload through `caller`. */
+    function deniedStatefulSetRecipe(
+      caller: DeniedCaller,
+      workloads: WorkloadDef[]
+    ): WorkflowRecipeCRD {
+      // The instance name assigned when the StatefulSet was first deployed.
+      const workloadInstances = { db: 'test-recipe-db-live' }
+      if (caller === 'non-workflow deploy') {
+        return makeRecipe({
+          spec: { workloads },
+          status: { workloadInstances } as unknown as WorkflowRecipeCRD['status'],
+        })
+      }
+      return runChild(
+        workloads,
+        caller === 'workflow deploy'
+          ? { phase: 'candidate', workloadInstances }
+          : { phase: 'active', workflowExecution: { phase: 'running' }, workloadInstances }
+      )
+    }
+
+    /** Stores `db` as it was rendered while db-creds was accessible; returns its name. */
+    async function storeCredentialedStatefulSet(
+      recipe: WorkflowRecipeCRD,
+      namespace: string = recipe.metadata.namespace
+    ): Promise<string> {
+      const statefulSet = buildStatefulSet(
+        recipe.spec.workloads!.find(w => w.id === 'db') as Parameters<typeof buildStatefulSet>[0],
+        recipe,
+        'minimal',
+        new Map([['db-creds', { state: 'accessible', keys: new Set(['token']) }]])
+      ).statefulSet
+      expect(JSON.stringify(statefulSet.spec?.template)).toContain('db-creds')
+      statefulSet.metadata!.namespace = namespace
+      await mockAppsApi.createNamespacedStatefulSet({ namespace, body: statefulSet })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
+      mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      mockCoreApi.deleteCollectionNamespacedPod.mockClear()
+      return statefulSet.metadata!.name!
+    }
+
+    const statefulSetWrites = () => ({
+      patches: mockAppsApi.patchNamespacedStatefulSet.mock.calls.length,
+      creates: mockAppsApi.createNamespacedStatefulSet.mock.calls.length,
+      podDeletes: mockCoreApi.deleteCollectionNamespacedPod.mock.calls.length,
+    })
+    const statefulSetReads = (name: string) =>
+      mockAppsApi.readNamespacedStatefulSet.mock.calls.filter(([arg]) => arg.name === name).length
+
+    for (const caller of DENIED_CALLERS) {
+      it(`T-R3-M1-1 (${caller}): a StatefulSet revoked for a denial takes a later spec edit through the hash gate, with no Pod delete and no record write`, async () => {
+        const inner = caller === 'non-workflow deploy' ? undefined : stubInner()
+        denySecrets({ 'db-creds': '7' })
+        const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet()])
+        const name = await storeCredentialedStatefulSet(recipe)
+        const namespace = recipe.metadata.namespace
+        const store = installRecipeStore(recipe)
+        const stored = async () =>
+          (await mockAppsApi.readNamespacedStatefulSet({ name, namespace })) as k8s.V1StatefulSet
+        const edited = () => {
+          const next = store.current()
+          next.spec.workloads = [dbStatefulSet({ image: 'postgres:17' })]
+          next.spec.security = { ...next.spec.security, isolationLevel: 'strict' } as never
+          return next
+        }
+
+        // Pass 1 revokes: one credential-free patch, one Pod delete, one record.
+        await reconciler.reconcile(store.current())
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+        const digest = store.current().status?.secretOwnershipRevocations?.['db']
+        expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/)
+        expect(JSON.stringify((await stored()).spec!.template)).not.toContain('db-creds')
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+
+        // Pass 2, same spec. Witness: the pass read the revoked StatefulSet.
+        const readsBeforePass2 = statefulSetReads(name)
+        await reconciler.reconcile(store.current())
+        expect(statefulSetReads(name)).toBeGreaterThan(readsBeforePass2)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+
+        // Pass 3, image and isolation level edited: one more patch, still
+        // credential-free, and the Pods are left to the StatefulSet controller.
+        await reconciler.reconcile(edited())
+        expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
+        const afterEdit = await stored()
+        expect(afterEdit.spec!.template.spec!.containers[0].image).toBe('postgres:17')
+        expect(afterEdit.spec!.template.spec!.securityContext).toEqual(
+          expect.objectContaining({ runAsUser: 65534 })
+        )
+        expect(JSON.stringify(afterEdit.spec!.template)).not.toContain('db-creds')
+
+        // Pass 4, the edited spec again: nothing is written. Witness: the pass
+        // read the StatefulSet.
+        const readsBeforePass4 = statefulSetReads(name)
+        await reconciler.reconcile(edited())
+        expect(statefulSetReads(name)).toBeGreaterThan(readsBeforePass4)
+        expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
+        expect(revocationPatches()).toHaveLength(0)
+        expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(digest)
+        if (caller === 'steady enforcer') expect(inner!.reconcile).not.toHaveBeenCalled()
+
+        // Pass 5, the StatefulSet is gone: a revoked workload is not created.
+        const storeRead = mockAppsApi.readNamespacedStatefulSet.getMockImplementation()!
+        mockAppsApi.readNamespacedStatefulSet.mockImplementation(async (arg: { name: string }) => {
+          if (arg.name === name) throw { code: 404 }
+          return storeRead(arg)
+        })
+        const readsBeforePass5 = statefulSetReads(name)
+        await reconciler.reconcile(edited())
+        expect(statefulSetReads(name)).toBeGreaterThan(readsBeforePass5)
+        expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
+      })
+
+      it(`T-R3-M1-2 (${caller}): a failed update of a revoked StatefulSet is retried and neither deletes its Pods nor writes a record`, async () => {
+        const inner = caller === 'non-workflow deploy' ? undefined : stubInner()
+        denySecrets({ 'db-creds': '7' })
+        // ok-api is ordered after db.
+        const okWorkload = {
+          id: 'ok-api',
+          type: 'deployment',
+          image: 'ok:test',
+          dependsOn: ['db'],
+        } as WorkloadDef
+        const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet(), okWorkload])
+        const name = await storeCredentialedStatefulSet(recipe)
+        const namespace = recipe.metadata.namespace
+        const store = installRecipeStore(recipe)
+        const stored = async () =>
+          (await mockAppsApi.readNamespacedStatefulSet({ name, namespace })) as k8s.V1StatefulSet
+
+        await reconciler.reconcile(store.current())
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+        const digest = store.current().status?.secretOwnershipRevocations?.['db']
+        expect(digest).toMatch(/^sha256:/)
+        const innerCallsAfterRevoke = inner?.reconcile.mock.calls.length ?? 0
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+
+        // The stored StatefulSet drifts on an immutable field, and the spec changes.
+        const drifted = await stored()
+        drifted.spec!.serviceName = 'renamed-by-hand'
+        await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: drifted })
+        const edited = store.current()
+        edited.spec.workloads = [dbStatefulSet({ image: 'postgres:17' }), okWorkload]
+        const errorLog = captureLogger('error')
+
+        const result = await reconciler.reconcile(edited)
+        const errors = errorLog.mock.calls.map(([message, context]) => [
+          message,
+          (context as { err?: Error } | undefined)?.err?.name,
+        ])
+        errorLog.mockRestore()
+
+        // Witness: the update was attempted and refused for the immutable drift.
+        if (caller === 'non-workflow deploy') {
+          expect(errors).toContainEqual([
+            'Update of a revoked StatefulSet failed; will requeue',
+            'ImmutableStatefulSetDriftError',
+          ])
+          expect(result.phase).toBe('degraded')
+          expect(deniedCondition(result)).toBe('True')
+        } else if (caller === 'workflow deploy') {
+          expect(result.message).toMatch(
+            /^Issue #1349: update of revoked workflow StatefulSet "db" failed; requeueing: ImmutableStatefulSetDrift: /
+          )
+          expect(result.phase).toBe('degraded')
+          // The deploy pass stops at the StatefulSet, as it does for a StatefulSet
+          // that is not denied: the inner reconcile is not reached.
+          expect(inner!.reconcile.mock.calls.length).toBe(innerCallsAfterRevoke)
+        } else {
+          expect(errors).toContainEqual([
+            'Update of a revoked StatefulSet failed; requeueing',
+            'ImmutableStatefulSetDriftError',
+          ])
+          expect(result.message).toBe(
+            'EnvSecretOwnershipDenied recheck deferred: update of revoked StatefulSet failed for db — requeuing'
+          )
+          expect(result.skipStatusPatch).toBe(true)
+        }
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+        expect((await stored()).spec!.template.spec!.containers[0].image).toBe('postgres:16')
+        expect(revocationPatches()).toHaveLength(0)
+        expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(digest)
+      })
+    }
+
+    it('T-R3-M1-4: the steady enforcer names a failed teardown and a failed update of a revoked StatefulSet separately', async () => {
+      stubInner()
+      denySecrets({ 'db-creds': '7', 'qa-creds': '7' })
+      const workloads = (image: string) => [
+        dbStatefulSet({ image }),
+        deniedDeployment('qa-api', 'qa-creds'),
+      ]
+      const recipe = deniedStatefulSetRecipe('steady enforcer', workloads('postgres:16'))
+      const name = await storeCredentialedStatefulSet(recipe)
+      const namespace = recipe.metadata.namespace
+      const store = installRecipeStore(recipe)
+
+      await reconciler.reconcile(store.current())
+      // Witness: both workloads were revoked and recorded.
+      expect(Object.keys(store.current().status?.secretOwnershipRevocations ?? {}).sort()).toEqual([
+        'db',
+        'qa-api',
+      ])
+
+      // qa-creds is denied under a new version and the Deployment delete fails;
+      // db stays revoked, its StatefulSet drifted and its spec changed.
+      denySecrets({ 'db-creds': '7', 'qa-creds': '8' })
+      mockAppsApi.deleteNamespacedDeployment.mockRejectedValue({
+        code: 500,
+        message: 'apiserver boom',
+      })
+      const drifted = (await mockAppsApi.readNamespacedStatefulSet({
+        name,
+        namespace,
+      })) as k8s.V1StatefulSet
+      drifted.spec!.serviceName = 'renamed-by-hand'
+      await mockAppsApi.replaceNamespacedStatefulSet({ name, namespace, body: drifted })
+      const edited = store.current()
+      edited.spec.workloads = workloads('postgres:17')
+
+      const result = await reconciler.reconcile(edited)
+
+      expect(result.message).toBe(
+        'EnvSecretOwnershipDenied recheck deferred: teardown failed for qa-api; ' +
+          'update of revoked StatefulSet failed for db — requeuing'
+      )
+      expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+    })
+
+    it('T-R3-M1-3: a revoked transport StatefulSet is updated without deleting its McpServer delegation again', async () => {
+      denySecrets({ 'db-creds': '7' })
+      const transportDb = (overrides: Record<string, unknown> = {}) =>
+        dbStatefulSet({ transport: { type: 'streamableHttp', path: '/mcp' }, ...overrides })
+      const recipe = deniedStatefulSetRecipe('non-workflow deploy', [transportDb()])
+      // A transport workload runs in the controller's own namespace.
+      const name = await storeCredentialedStatefulSet(recipe, 'mcp-server')
+      mockCustomApi.deleteNamespacedCustomObject.mockClear()
+      const store = installRecipeStore(recipe)
+      const delegationDeletes = () =>
+        mockCustomApi.deleteNamespacedCustomObject.mock.calls.filter(
+          ([arg]) => (arg as { plural?: string }).plural === 'mcpservers'
+        ).length
+
+      await reconciler.reconcile(store.current())
+      // Witness: the revocation removed the delegation once.
+      expect(delegationDeletes()).toBe(1)
+      expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+
+      const edited = store.current()
+      edited.spec.workloads = [transportDb({ image: 'postgres:17' })]
+      await reconciler.reconcile(edited)
+
+      // Witness: the pass updated the revoked StatefulSet.
+      expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
+      expect(statefulSetReads(name)).toBeGreaterThan(0)
+      expect(delegationDeletes()).toBe(1)
+    })
+
     /** A Deployment that declares volumeClaimTemplates; only a StatefulSet turns them into PVCs. */
     function deniedDeploymentWithClaims(id: string, secretName: string): WorkloadDef {
       return {

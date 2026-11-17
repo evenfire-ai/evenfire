@@ -3190,8 +3190,9 @@ export class WorkflowRecipeReconciler {
       // reuse that verdict so render and delegation share one source of truth.
       const workloadStatuses: ReconcileResult['workloadStatuses'] = []
       const workloadConditions: StatusCondition[] = []
-      // Issue #637 — set when a denied workload's teardown throws; drives a requeue
-      // (see requeueAfterMs at the return) so the revocation is retried deterministically
+      // Issue #637 — set when a denied workload's teardown throws, or when the update
+      // of a StatefulSet revoked earlier throws; drives a requeue (see requeueAfterMs at
+      // the return) so the failed step is retried deterministically: for a teardown,
       // instead of leaving a foreign-credentialed pod live until the next event.
       let deniedTeardownFailed = false
       const revokedEntries: Record<string, string> = {}
@@ -3210,7 +3211,9 @@ export class WorkflowRecipeReconciler {
           } catch (err) {
             deniedTeardownFailed = true
             createLogger('wrc', recipe.metadata.name).error(
-              'Teardown of denied workload failed; will requeue',
+              revocation.alreadyApplied
+                ? 'Update of a revoked StatefulSet failed; will requeue'
+                : 'Teardown of denied workload failed; will requeue',
               { id: workload.id, err }
             )
           }
@@ -4197,9 +4200,15 @@ export class WorkflowRecipeReconciler {
           // steady-state ownership backstop (workflowNeedsOwnershipBackstop) and this
           // retry re-attempt the revocation. The caller's catch converts a
           // RetryableReconcileError into a degraded result that the watcher requeues.
+          // For a StatefulSet revoked in an earlier pass the failed step is its update:
+          // the credential is already gone, and the pass stops here as it does for a
+          // StatefulSet that is not denied (see the `statefulset` rethrow below).
           throw new RetryableReconcileError(
-            `Issue #637: teardown of denied workflow workload "${workloadId}" failed; ` +
-              `requeueing to retry revocation: ${err instanceof Error ? err.message : String(err)}`,
+            (revocation.alreadyApplied
+              ? `Issue #1349: update of revoked workflow StatefulSet "${workloadId}" failed; requeueing: `
+              : `Issue #637: teardown of denied workflow workload "${workloadId}" failed; ` +
+                'requeueing to retry revocation: ') +
+              (err instanceof Error ? err.message : String(err)),
             { cause: err }
           )
         }
@@ -4659,8 +4668,10 @@ export class WorkflowRecipeReconciler {
    * Issue #1349 — remove the Secret revocation entry of every workload this pass
    * is about to render (each workload it did not deny), before the first render
    * or McpServer delegation. An entry means "torn down for this denial and not
-   * rendered since"; a render ends that, so a later denial of the same Secret
-   * version runs the teardown again instead of being skipped by the gate.
+   * rendered with the denied refs since"; a render ends that, so a later denial of
+   * the same Secret version runs the teardown again instead of being skipped by
+   * the gate. A kept StatefulSet is still updated, without those refs, while its
+   * entry stands.
    *
    * Reads the LIVE object: the pass can run on an object whose in-memory status
    * lacks an entry that is stored. A failed read or patch ends the pass with a
@@ -7371,6 +7382,8 @@ export class WorkflowRecipeReconciler {
     }
 
     const failedTeardowns: string[] = []
+    // StatefulSets revoked in an earlier pass whose update to the current spec failed.
+    const failedUpdates: string[] = []
     const revokedEntries: Record<string, string> = {}
     for (const workload of recipe.spec.workloads ?? []) {
       if (!secretOwnership.deniedWorkloadIds.has(workload.id)) continue
@@ -7394,10 +7407,15 @@ export class WorkflowRecipeReconciler {
         // Teardown FAILED (e.g. RBAC 403 / apiserver 5xx). The foreign credential
         // is still live, so we must NOT report the workload as revoked. Requeue so
         // the next pass retries; the EnvSecretOwnershipDenied condition is written
-        // only once teardown actually succeeds.
-        failedTeardowns.push(workload.id)
+        // only once teardown actually succeeds. When the revocation was recorded in
+        // an earlier pass, the failed step is the update of the kept StatefulSet: the
+        // credential is already gone, and the pass is requeued so the update is
+        // retried.
+        ;(revocation.alreadyApplied ? failedUpdates : failedTeardowns).push(workload.id)
         createLogger('wrc', recipe.metadata.name).error(
-          'Denied workload teardown failed; requeueing',
+          revocation.alreadyApplied
+            ? 'Update of a revoked StatefulSet failed; requeueing'
+            : 'Denied workload teardown failed; requeueing',
           { id: workload.id, name: recipe.metadata.name, err: error }
         )
       }
@@ -7407,11 +7425,18 @@ export class WorkflowRecipeReconciler {
     const revocationRecordStored =
       Object.keys(revokedEntries).length === 0 ||
       (await this.publishStatusRecord(recipe, { secretOwnershipRevocations: revokedEntries }))
-    if (failedTeardowns.length > 0) {
+    if (failedTeardowns.length > 0 || failedUpdates.length > 0) {
       return {
         ...clean,
         needsRequeue: true,
-        requeueReason: `teardown failed for ${failedTeardowns.join(', ')}`,
+        requeueReason: [
+          ...(failedTeardowns.length > 0
+            ? [`teardown failed for ${failedTeardowns.join(', ')}`]
+            : []),
+          ...(failedUpdates.length > 0
+            ? [`update of revoked StatefulSet failed for ${failedUpdates.join(', ')}`]
+            : []),
+        ].join('; '),
       }
     }
     return {
@@ -7471,9 +7496,11 @@ export class WorkflowRecipeReconciler {
 
   /**
    * Issue #1349 — the revocation gate of one denied workload. An entry is removed
-   * before its workload is rendered again ({@link clearSecretRevocationsBeforeRender}),
-   * so a stored entry means the workload was torn down for that denial and not
-   * rendered since. A later denial of a re-labeled Secret carries another
+   * before its workload is rendered with the denied refs again
+   * ({@link clearSecretRevocationsBeforeRender}), so a stored entry means the
+   * workload was torn down for that denial and not rendered with the denied refs
+   * since. A kept StatefulSet is still updated, without those refs, while its
+   * entry stands. A later denial of a re-labeled Secret carries another
    * resourceVersion, hence another digest.
    */
   private secretRevocationFor(
@@ -7501,9 +7528,12 @@ export class WorkflowRecipeReconciler {
    * operator must still rotate the (potentially compromised) Secret.
    *
    * Issue #1349 — `revocation` is this workload's gate (see
-   * {@link secretRevocationFor}): a denial already revoked under the same digest
-   * returns at once, so a steady denial is revoked once per denied Secret version
-   * instead of on every pass.
+   * {@link secretRevocationFor}). A denial already revoked under the same digest
+   * is not torn down again: a deleted workload stays deleted, and a kept
+   * StatefulSet is only brought up to date with the spec through the spec-hash
+   * gate, with no Pod delete. A steady denial is therefore revoked once per denied
+   * Secret version instead of on every pass. A failed update propagates like a
+   * failed teardown, and the caller requeues.
    */
   private async teardownDeniedWorkload(
     workload: WorkloadDef,
@@ -7511,14 +7541,15 @@ export class WorkflowRecipeReconciler {
     secretKeys: rb.SecretKeysByName,
     revocation: SecretRevocationGate
   ): Promise<void> {
-    if (revocation.alreadyApplied) return
+    // A workload the teardown deletes stays deleted while its record stands.
+    if (revocation.alreadyApplied && isDeletedBySecretDenialTeardown(workload)) return
     // Issue #637 — for transport workloads the McpServer CRD + transport Service
     // (in mcp-server) carry the projected envSecret/imagePullSecrets to HCC. The
     // create-time skip only stops NEW foreign refs; on REVOCATION an already
     // materialized McpServer CRD keeps feeding the foreign credential until it is
     // removed. These objects are not stateful, so this runs even when the workload
     // itself is a StatefulSet, which is kept below. Idempotent (404-tolerant).
-    if (workload.transport) {
+    if (!revocation.alreadyApplied && workload.transport) {
       await deleteTransportDelegation(this.delegationDeps, recipe, workload, this.config.namespace)
     }
     const ns = this.resolveWorkloadNamespace(workload, recipe.spec.ui?.workloadRef)
@@ -7529,9 +7560,9 @@ export class WorkflowRecipeReconciler {
     // secretKeyRef) and delete ONLY the managed Pod(s) so they restart from the
     // credential-free template. This stops continued injection; the operator must
     // still rotate the (potentially compromised) Secret to fully remediate. The
-    // re-render ignores the spec hash: a template an older strategic-merge patch
-    // left with the foreign refs carries the desired hash, so the templates are
-    // compared and the whole template is replaced when they differ.
+    // revocation's re-render ignores the spec hash: a template an older
+    // strategic-merge patch left with the foreign refs carries the desired hash, so
+    // the templates are compared and the whole template is replaced when they differ.
     if (!isDeletedBySecretDenialTeardown(workload)) {
       // Issue #1349 — a StatefulSet that was never deployed has nothing to
       // re-render and no Pod to restart. Read it first: ensureStatefulSet creates
@@ -7543,10 +7574,16 @@ export class WorkflowRecipeReconciler {
       if (!existing) return
       const isolationLevel: SecurityIsolationLevel =
         recipe.spec.security?.isolationLevel ?? 'minimal'
+      // A StatefulSet revoked earlier under this digest keeps following the spec:
+      // the update goes through the spec-hash gate like any other StatefulSet
+      // (an unchanged spec writes nothing) and the StatefulSet controller rolls
+      // the Pods. Only the revocation itself ignores the hash and deletes the Pods.
       await this.ensureStatefulSet(workload as StatefulSetDef, recipe, isolationLevel, secretKeys, {
-        ignoreSpecHash: true,
+        ignoreSpecHash: !revocation.alreadyApplied,
       })
-      await this.deleteStatefulSetManagedPods(workload as StatefulSetDef, recipe, ns)
+      if (!revocation.alreadyApplied) {
+        await this.deleteStatefulSetManagedPods(workload as StatefulSetDef, recipe, ns)
+      }
       return
     }
 

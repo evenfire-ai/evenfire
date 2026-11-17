@@ -795,7 +795,9 @@ export interface WorkflowRecipeStatus {
   terminalRunTeardown?: { completedAt: string; noSecretBearingWorkloads?: boolean }
   /**
    * Workload id → digest of the denied Secret versions the workload was torn down
-   * for. An entry is removed before its workload is rendered again.
+   * for. An entry is removed before its workload is rendered with the denied refs
+   * again. A denied StatefulSet is kept and still follows the spec, without the
+   * denied refs.
    */
   secretOwnershipRevocations?: Record<string, string>
 
