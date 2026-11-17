@@ -82,6 +82,12 @@ export class FakeSocket implements WatchSocket {
   ended = 0
   violations: string[] = []
   conn: WatchConnection | null = null
+  /**
+   * Registry clock at the admission, where the open op starts. The open is
+   * admitted only after its session authenticates, so this can be well after
+   * the instant the test called open.
+   */
+  admittedVt: number | null = null
   onFrame: ((frame: Record<string, unknown>, ev: number) => void) | null = null
   private gone: (() => void)[] = []
   private drains: (() => void)[] = []
@@ -510,6 +516,7 @@ export async function createRegistryHarness(adminUrl: string) {
             requestId: opts.requestId ?? randomUUID(),
           })
           for (const c of registry.state.byConnId.values()) if (!before.has(c)) socket.conn = c
+          if (socket.conn) socket.admittedVt = registry.now()
           return p
         })().finally(() => {
           done = true

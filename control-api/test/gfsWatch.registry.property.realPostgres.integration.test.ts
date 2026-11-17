@@ -65,8 +65,12 @@ type ConnModel = {
   openRequestId: string
   maxSeq: number
   lastSeqSeen: number
-  /** Decision frames with their event number. */
-  decisions: { frame: Record<string, unknown>; ev: number }[]
+  /**
+   * Decision frames with their event number and the instant their op started:
+   * a delta queued behind an op in flight, or an open still authenticating,
+   * starts later than the test asked for it.
+   */
+  decisions: { frame: Record<string, unknown>; ev: number; opStartVt: number | null }[]
   /** `accepted` of the newest decision frame received, or null before `ready`. */
   lastAccepted: Set<GfsKey> | null
 }
@@ -180,7 +184,15 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
     const deniedKey = h.key('file', real.fixture.denied)
     m.socket.onFrame = (frame, ev) => {
       if (frame.type === 'ready' || frame.type === 'subscriptions') {
-        m.decisions.push({ frame, ev })
+        // The decision is written before its op ends, so the op is still the connection's.
+        const op = m.socket.conn?.op
+        const opStartVt =
+          frame.type === 'ready'
+            ? m.socket.admittedVt
+            : op?.kind === 'delta'
+              ? op.srvDeadline - h.modules.registry.GFS_WATCH_DELTA_SERVER_DEADLINE_MS
+              : null
+        m.decisions.push({ frame, ev, opStartVt })
         m.lastAccepted = new Set(frame.accepted as GfsKey[])
       }
       if (frame.type !== 'changed') return
@@ -450,7 +462,7 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
 
   function deciderOf(m: ConnModel, k: GfsKey) {
     // The decision frame from which k is accepted without interruption.
-    let start: { frame: Record<string, unknown>; ev: number } | null = null
+    let start: ConnModel['decisions'][number] | null = null
     for (const d of m.decisions) {
       const acc = (d.frame.accepted as string[]).includes(k)
       if (!acc) start = null
@@ -492,7 +504,9 @@ describeRealPostgres('GFS watch registry model (T-M2)', () => {
         }
         const seq = d.frame.type === 'ready' ? 0 : (d.frame.seq as number)
         const opRequestId = seq === 0 ? m.openRequestId : m.puts.get(seq)?.r
-        const vt = seq === 0 ? m.openVt : m.puts.get(seq)?.vt
+        // Anchored where the op takes its snapshot of recent ancestry changes:
+        // when it starts, not when the test sent its command.
+        const vt = d.opStartVt ?? (seq === 0 ? m.openVt : m.puts.get(seq)?.vt)
         const reads = h.reads.filter(
           r => r.rid32 === r32 && r.requestId === opRequestId && r.seq < d.ev
         )
