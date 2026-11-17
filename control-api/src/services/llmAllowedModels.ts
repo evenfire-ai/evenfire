@@ -43,10 +43,13 @@ export type LlmAllowedModel = {
   stale: boolean
   /**
    * When the catalog sync's prune turned this row off for having no consumers;
-   * null otherwise. Cleared when the row is re-enabled, renamed, or an operator
-   * PUT takes authority over `enabled` (changing it or sending `pinEnabled`), so
-   * a non-null value always means "off because of the catalog, still the
-   * catalog's to turn back on".
+   * null otherwise. Cleared by the sync when a live run lists the model again:
+   * it turns the row back on, or, when the provider's auto-enable is off or the
+   * model is not eligible, retires it (leaves it off for good); a run that hits
+   * the auto-enable cap keeps it for a later run. Also cleared by an admin PUT
+   * that renames the row or takes authority over `enabled` (changing it or
+   * sending `pinEnabled`). So a non-null value always means "off because of the
+   * catalog, still the catalog's to turn back on".
    */
   auto_disabled_at: string | null
   /**
