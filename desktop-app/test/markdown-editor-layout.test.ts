@@ -42,8 +42,10 @@ async function openEditor(viewport: { width: number; height: number }) {
               </div>
             </div>
           </header>
-          <div class="da-gfs-markdown-preview-dialog__body da-gfs-markdown-preview-dialog__body--editing">
-            <div id="markdown-editor-host" class="da-gfs-markdown-editor"></div>
+          <div
+            id="markdown-editor-host"
+            class="da-gfs-markdown-preview-dialog__body da-gfs-markdown-preview-dialog__body--editing"
+          >
           </div>
         </div>
       </section>
@@ -106,6 +108,11 @@ describe('EvenDrive Markdown editor layout in Chromium', () => {
     expect(await page.locator('.w-md-editor').count()).toBe(1)
     expect(await input.inputValue()).toBe(longMarkdown)
     expect((await overlay.textContent())?.trimEnd()).toBe(longMarkdown)
+    const editingBodyHeight = (await page
+      .locator('.da-gfs-markdown-preview-dialog__body--editing')
+      .boundingBox())!.height
+    const editorHeight = (await page.locator('.w-md-editor').boundingBox())!.height
+    expect(editorHeight).toBeGreaterThan(editingBodyHeight * 0.8)
     expect(await area.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true)
     expect(
       await page
@@ -139,8 +146,12 @@ describe('EvenDrive Markdown editor layout in Chromium', () => {
     const editorHeightBeforeResize = (await page.locator('.w-md-editor').boundingBox())!.height
     await page.setViewportSize({ width: 900, height: 520 })
     const editorHeightAfterResize = (await page.locator('.w-md-editor').boundingBox())!.height
+    const bodyHeightAfterResize = (await page
+      .locator('.da-gfs-markdown-preview-dialog__body--editing')
+      .boundingBox())!.height
     expect(editorHeightAfterResize).toBeLessThan(editorHeightBeforeResize)
     expect(editorHeightAfterResize).toBeGreaterThan(300)
+    expect(editorHeightAfterResize).toBeGreaterThan(bodyHeightAfterResize * 0.8)
     await page.close()
   })
 })

@@ -64,7 +64,7 @@ export function MarkdownEditorSurface({
   return (
     <div
       aria-disabled={closePending}
-      className="da-gfs-markdown-editor-surface"
+      className="da-gfs-markdown-editor"
       inert={closePending}
     >
       {closePending ? <p role="status">Close authorization pending. Editing is paused.</p> : null}

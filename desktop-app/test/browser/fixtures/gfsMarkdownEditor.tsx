@@ -1,11 +1,20 @@
 import React from 'react'
 import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { GfsMarkdownEditor } from '../../../ui/src/components/GfsMarkdownPreview/MarkdownAdapter'
+import { MarkdownEditorSurface } from '../../../ui/src/components/GfsMarkdownPreview/MarkdownEditorSurface'
 
 function MarkdownEditorHarness({ initialValue }: { initialValue: string }) {
   const [value, setValue] = useState(initialValue)
-  return <GfsMarkdownEditor ariaLabel="Markdown source" onChange={setValue} value={value} />
+  return (
+    <MarkdownEditorSurface
+      binding={null}
+      fileName="about-me.md"
+      mode="edit"
+      owner={undefined}
+      onChange={setValue}
+      value={value}
+    />
+  )
 }
 
 declare global {
