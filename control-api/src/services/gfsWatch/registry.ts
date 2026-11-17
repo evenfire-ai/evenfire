@@ -141,6 +141,11 @@ export type WatchCloseReason =
   | 'deadline'
   | 'internal'
   | 'slow_consumer'
+  // Only at the open, before any frame: the revalidated session is not
+  // current, or its state could not be read. Kept apart from `internal` so a
+  // revocation or a session store outage is not counted as a defect.
+  | 'session_invalid'
+  | 'session_unavailable'
 
 /** Reasons the client is told about before the stream ends. */
 const CLOSING_FRAME_REASONS: ReadonlySet<WatchCloseReason> = new Set([
@@ -1156,15 +1161,15 @@ export function createGfsWatchRegistry(deps: GfsWatchRegistryDeps) {
         return reply(503, 'watch_reopen', DEFAULT_CLOSE_RETRY_AFTER_SEC)
       }
       if (!current.ok) {
-        closeConn(c, 'internal')
+        closeConn(c, 'session_unavailable')
         return { kind: 'classify', origin: 'session', error: (current as { error: unknown }).error }
       }
       if (current.value.status === 'unavailable') {
-        closeConn(c, 'internal')
+        closeConn(c, 'session_unavailable')
         return { kind: 'classify', origin: 'session', error: current.value.error }
       }
       if (current.value.status !== 'current') {
-        closeConn(c, 'internal')
+        closeConn(c, 'session_invalid')
         return reply(401, 'session_invalid')
       }
       const resolved = await rt.step(resolveAuthority(input.authentication), op.signal)

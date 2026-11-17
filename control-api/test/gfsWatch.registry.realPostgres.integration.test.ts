@@ -112,7 +112,7 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     return out
   }
 
-  function deferredSince(before: Record<string, number>, after: Record<string, number>) {
+  function countDelta(before: Record<string, number>, after: Record<string, number>) {
     const out: Record<string, number> = {}
     for (const [cause, n] of Object.entries(after)) {
       const d = n - (before[cause] ?? 0)
@@ -204,7 +204,7 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(new Set(socket.last('ready')!.deferred as string[])).toEqual(
       new Set([h.key('file', a), h.key('file', c)])
     )
-    expect(deferredSince(before, await deferredBy())).toEqual({ gfsc_transient: 2 })
+    expect(countDelta(before, await deferredBy())).toEqual({ gfsc_transient: 2 })
   })
 
   it('delivers a rename of an accepted file and of a child to its directory, after the window (T-SB28)', async () => {
@@ -587,7 +587,7 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect((o.socket.last('ready')!.deferred as string[]).length).toBe(2)
     h.releaseHanging()
     await b.settle()
-    expect(deferredSince(before, await deferredBy())).toEqual({ auth_deadline: 2 })
+    expect(countDelta(before, await deferredBy())).toEqual({ auth_deadline: 2 })
   })
 
   it('ends the op at T_auth while the mint waits, and reads nothing after a close during the mint (T-SB107)', async () => {
@@ -742,8 +742,16 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     b.gates.observe.releaseAll()
   })
 
+  async function disconnectsBy(): Promise<Record<string, number>> {
+    const { values } = await h.modules.metrics.gfsWatchDisconnectsTotal.get()
+    const out: Record<string, number> = {}
+    for (const v of values) out[String(v.labels.reason)] = v.value
+    return out
+  }
+
   it('answers 401 when the session is revoked between authentication and admission (A4)', async () => {
     b = await h.build()
+    const before = await disconnectsBy()
     const user = await h.createUser()
     const authentication = await user.authenticate()
     const userSessions = await import('../src/services/auth/userSessionService.js')
@@ -760,6 +768,29 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     })
     expect(outcome).toEqual({ kind: 'reply', status: 401, code: 'session_invalid' })
     expect(b.registry.state.byConnId.size).toBe(0)
+    expect(countDelta(before, await disconnectsBy())).toEqual({ session_invalid: 1 })
+  })
+
+  it('labels a session whose state cannot be read at the open session_unavailable, not internal', async () => {
+    const { observeExternalSessionCurrentness } =
+      await import('../src/services/auth/externalSessionCurrentnessObserver.js')
+    const unreachable = new Pool({
+      connectionString: 'postgresql://postgres@127.0.0.1:1/unreachable',
+      connectionTimeoutMillis: 500,
+    })
+    try {
+      b = await h.build({
+        observeCurrentness: a => observeExternalSessionCurrentness(a, { db: unreachable }),
+      })
+      const user = await h.createUser()
+      const before = await disconnectsBy()
+      const o = b.open(user, [])
+      expect(await o.outcome).toMatchObject({ kind: 'classify', origin: 'session' })
+      expect(countDelta(before, await disconnectsBy())).toEqual({ session_unavailable: 1 })
+      expect(o.socket.frames).toEqual([])
+    } finally {
+      await unreachable.end()
+    }
   })
 
   it('answers watch_reauthorize to a retained user without spending budget, query or reads (T-SB76)', async () => {
