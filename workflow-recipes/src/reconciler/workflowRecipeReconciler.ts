@@ -5442,8 +5442,7 @@ export class WorkflowRecipeReconciler {
   private async createOrPatchStatefulSet(
     statefulSet: k8s.V1StatefulSet,
     namespace: string,
-    name: string,
-    options: { ignoreSpecHash?: boolean } = {}
+    name: string
   ): Promise<void> {
     const desiredHash = stampSpecHash(statefulSet)
     let existing = await this.readStatefulSetIfPresent(name, namespace)
@@ -5480,7 +5479,7 @@ export class WorkflowRecipeReconciler {
       desiredHash,
       namespace,
       name,
-      options
+      false
     )
   }
 
@@ -5503,16 +5502,14 @@ export class WorkflowRecipeReconciler {
     desiredHash: string,
     namespace: string,
     name: string,
-    options: { ignoreSpecHash?: boolean } = {}
+    ignoreSpecHash: boolean
   ): Promise<void> {
-    // `ignoreSpecHash` (the Secret-denial teardown only): the hash records which
-    // manifest WRC last sent, not what the API server stored. A template that an
-    // older strategic-merge patch left with leftovers carries the desired hash, so
-    // the revocation compares the templates instead of trusting it.
-    if (
-      !options.ignoreSpecHash &&
-      existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash
-    ) {
+    // `ignoreSpecHash` is true only for the first revocation of a Secret denial
+    // (updateKeptStatefulSet): the hash records which manifest WRC last sent, not
+    // what the API server stored. A template that an older strategic-merge patch
+    // left with leftovers carries the desired hash, so the revocation compares the
+    // templates instead of trusting it.
+    if (!ignoreSpecHash && existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash) {
       createLogger('wrc', 'workflow-recipes').info(
         'StatefulSet spec hash unchanged; skipping update',
         { name, namespace }
@@ -7866,8 +7863,10 @@ export class WorkflowRecipeReconciler {
     // the templates are compared and the whole template is replaced when they differ.
     if (!isDeletedBySecretDenialTeardown(workload)) {
       // Issue #1349 — a StatefulSet that was never deployed has nothing to
-      // re-render and no Pod to restart. Read it first: ensureStatefulSet creates
-      // the headless Service and the StatefulSet when they are absent.
+      // re-render and no Pod to restart. Read it once: updateKeptStatefulSet
+      // patches the object read here and never creates it, so a StatefulSet
+      // deleted after this read is not created again (the patch answers 404 and
+      // the caller requeues; the next pass finds it absent).
       const existing = await this.readStatefulSetIfPresent(
         rb.resolveStatefulSetResourceName(recipe, workload.id),
         ns
@@ -7879,9 +7878,14 @@ export class WorkflowRecipeReconciler {
       // the update goes through the spec-hash gate like any other StatefulSet
       // (an unchanged spec writes nothing) and the StatefulSet controller rolls
       // the Pods. Only the revocation itself ignores the hash and deletes the Pods.
-      await this.ensureStatefulSet(workload as StatefulSetDef, recipe, isolationLevel, secretKeys, {
-        ignoreSpecHash: !revocation.alreadyApplied,
-      })
+      await this.updateKeptStatefulSet(
+        workload as StatefulSetDef,
+        recipe,
+        isolationLevel,
+        secretKeys,
+        existing,
+        !revocation.alreadyApplied
+      )
       if (!revocation.alreadyApplied) {
         await this.deleteStatefulSetManagedPods(workload as StatefulSetDef, recipe, ns)
       }
@@ -7971,9 +7975,63 @@ export class WorkflowRecipeReconciler {
     w: StatefulSetDef,
     recipe: WorkflowRecipeCRD,
     level: SecurityIsolationLevel,
-    secretKeys?: rb.SecretKeysByName,
-    options: { ignoreSpecHash?: boolean } = {}
+    secretKeys?: rb.SecretKeysByName
   ): Promise<void> {
+    const { statefulSet, namespace, name } = await this.prepareStatefulSet(
+      w,
+      recipe,
+      level,
+      secretKeys
+    )
+    // Then StatefulSet. StatefulSet immutable fields cannot be full-replaced
+    // safely once PVC-backed workloads exist; patch only mutable fields (the pod
+    // template is replaced whole with a JSON Patch) and surface immutable drift
+    // as status instead of retrying a doomed PUT.
+    await this.createOrPatchStatefulSet(statefulSet, namespace, name)
+  }
+
+  /**
+   * R2-L1 — the update of a StatefulSet kept by a Secret-denial revocation. It
+   * patches `existing`, the object the revocation read, and never creates or
+   * reads the StatefulSet: one deleted after that read is not created again (the
+   * JSON Patch answers 404 and the error propagates to the revocation's caller).
+   * `ignoreSpecHash` is true for the first revocation only.
+   */
+  private async updateKeptStatefulSet(
+    w: StatefulSetDef,
+    recipe: WorkflowRecipeCRD,
+    level: SecurityIsolationLevel,
+    secretKeys: rb.SecretKeysByName,
+    existing: k8s.V1StatefulSet,
+    ignoreSpecHash: boolean
+  ): Promise<void> {
+    const { statefulSet, namespace, name } = await this.prepareStatefulSet(
+      w,
+      recipe,
+      level,
+      secretKeys
+    )
+    const desiredHash = stampSpecHash(statefulSet)
+    await this.reconcileExistingStatefulSet(
+      statefulSet,
+      existing,
+      desiredHash,
+      namespace,
+      name,
+      ignoreSpecHash
+    )
+  }
+
+  /**
+   * Renders `w`'s StatefulSet, runs the PVC ownership preflight and creates or
+   * replaces its headless Service. The StatefulSet itself is left to the caller.
+   */
+  private async prepareStatefulSet(
+    w: StatefulSetDef,
+    recipe: WorkflowRecipeCRD,
+    level: SecurityIsolationLevel,
+    secretKeys: rb.SecretKeysByName | undefined
+  ): Promise<{ statefulSet: k8s.V1StatefulSet; namespace: string; name: string }> {
     const { statefulSet, headlessService } = rb.buildStatefulSet(w, recipe, level, secretKeys, {
       pluginWorkloadSdkEnabled: this.config.pluginWorkloadSdkEnabled,
     })
@@ -8014,11 +8072,7 @@ export class WorkflowRecipeReconciler {
           }),
       }
     )
-    // Then StatefulSet. StatefulSet immutable fields cannot be full-replaced
-    // safely once PVC-backed workloads exist; patch only mutable fields (the pod
-    // template is replaced whole with a JSON Patch) and surface immutable drift
-    // as status instead of retrying a doomed PUT.
-    await this.createOrPatchStatefulSet(statefulSet, ns, stsName, options)
+    return { statefulSet, namespace: ns, name: stsName }
   }
 
   private statefulSetPvcNames(workload: StatefulSetDef, statefulSetName: string): string[] {

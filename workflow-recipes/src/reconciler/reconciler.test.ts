@@ -13405,6 +13405,51 @@ describe('WorkflowRecipeReconciler', () => {
       store.current().status?.conditions?.find(c => c.type === type)
 
     /**
+     * R2-L1 — `name` is deleted right after its next read, as by an operator
+     * between the revocation's read and its write. From then on the API server
+     * answers a read or a JSON Patch of it with 404, and a create is accepted
+     * (recorded; the object counts as present again).
+     */
+    function deleteStatefulSetAfterNextRead(name: string): void {
+      const storeRead = mockAppsApi.readNamespacedStatefulSet.getMockImplementation()!
+      const storePatch = mockAppsApi.patchNamespacedStatefulSet.getMockImplementation()!
+      const storeCreate = mockAppsApi.createNamespacedStatefulSet.getMockImplementation()!
+      let deleted = false
+      let readSinceArmed = false
+      mockAppsApi.readNamespacedStatefulSet.mockImplementation(async (arg: { name: string }) => {
+        if (arg.name !== name) return storeRead(arg)
+        if (deleted) throw { code: 404 }
+        const answer = await storeRead(arg)
+        if (!readSinceArmed) {
+          readSinceArmed = true
+          deleted = true
+        }
+        return answer
+      })
+      mockAppsApi.patchNamespacedStatefulSet.mockImplementation(async (arg: { name: string }) => {
+        if (arg.name === name && deleted) throw { code: 404 }
+        return storePatch(arg)
+      })
+      mockAppsApi.createNamespacedStatefulSet.mockImplementation(
+        async (arg: { body: { metadata: { name: string } } }) => {
+          if (arg.body.metadata.name !== name || !deleted) return storeCreate(arg)
+          deleted = false
+          return {}
+        }
+      )
+    }
+
+    /** The name of `db`'s headless Service, as buildStatefulSet renders it. */
+    function headlessServiceNameOf(recipe: WorkflowRecipeCRD): string {
+      return buildStatefulSet(
+        recipe.spec.workloads!.find(w => w.id === 'db') as Parameters<typeof buildStatefulSet>[0],
+        recipe,
+        'minimal',
+        new Map()
+      ).headlessService.metadata!.name!
+    }
+
+    /**
      * Issue #1518 — the first revocation of `db` meets immutable drift: its stored
      * StatefulSet was given another `serviceName` outside WRC. Runs one pass as the
      * watcher does (reconcile, then publish). Witnesses: the pass read the
@@ -13474,10 +13519,11 @@ describe('WorkflowRecipeReconciler', () => {
         expect(JSON.stringify((await stored()).spec!.template)).not.toContain('db-creds')
         mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
 
-        // Pass 2, same spec. Witness: the pass read the revoked StatefulSet.
+        // Pass 2, same spec. Witness: the pass read the revoked StatefulSet, once
+        // (R2-L1: the update uses the object the revocation read).
         const readsBeforePass2 = statefulSetReads(name)
         await reconciler.reconcile(store.current())
-        expect(statefulSetReads(name)).toBeGreaterThan(readsBeforePass2)
+        expect(statefulSetReads(name)).toBe(readsBeforePass2 + 1)
         expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
 
         // Pass 3, image and isolation level edited: one more patch, still
@@ -13492,10 +13538,10 @@ describe('WorkflowRecipeReconciler', () => {
         expect(JSON.stringify(afterEdit.spec!.template)).not.toContain('db-creds')
 
         // Pass 4, the edited spec again: nothing is written. Witness: the pass
-        // read the StatefulSet.
+        // read the StatefulSet, once.
         const readsBeforePass4 = statefulSetReads(name)
         await reconciler.reconcile(edited())
-        expect(statefulSetReads(name)).toBeGreaterThan(readsBeforePass4)
+        expect(statefulSetReads(name)).toBe(readsBeforePass4 + 1)
         expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
         expect(revocationPatches()).toHaveLength(0)
         expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(digest)
@@ -13511,6 +13557,118 @@ describe('WorkflowRecipeReconciler', () => {
         await reconciler.reconcile(edited())
         expect(statefulSetReads(name)).toBeGreaterThan(readsBeforePass5)
         expect(statefulSetWrites()).toEqual({ patches: 2, creates: 0, podDeletes: 1 })
+      })
+
+      it(`T-L1-1 (${caller}): a StatefulSet deleted after the first revocation read it is not created again, and its revocation is recorded on the next pass`, async () => {
+        if (caller !== 'non-workflow deploy') stubInner()
+        denySecrets({ 'db-creds': '7' })
+        const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet()])
+        const name = await storeCredentialedStatefulSet(recipe)
+        const store = installRecipeStore(recipe)
+        deleteStatefulSetAfterNextRead(name)
+        const errorLog = captureLogger('error')
+        const readsBefore = statefulSetReads(name)
+
+        const result = await reconciler.reconcile(store.current())
+        const errors = errorLog.mock.calls.map(([message, context]) => [
+          message,
+          (context as { err?: { code?: number } } | undefined)?.err?.code,
+        ])
+        errorLog.mockRestore()
+
+        // Witness: the revocation sent its patch to the deleted object and the
+        // caller logged the 404 as a failed teardown.
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 0 })
+        expect(errors).toContainEqual([
+          caller === 'non-workflow deploy'
+            ? 'Teardown of denied workload failed; will requeue'
+            : 'Denied workload teardown failed; requeueing',
+          404,
+        ])
+        expect(statefulSetReads(name)).toBe(readsBefore + 1)
+        if (caller === 'workflow deploy') {
+          expect(result.phase).toBe('degraded')
+          expect(result.message).toMatch(
+            /^Issue #637: teardown of denied workflow workload "db" failed; requeueing to retry revocation: /
+          )
+        }
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(store.current().status?.secretOwnershipRevocations ?? {}).not.toHaveProperty('db')
+
+        // Pass 2 reads the StatefulSet as absent and records the revocation.
+        const readsBeforePass2 = statefulSetReads(name)
+        await reconciler.reconcile(store.current())
+        expect(statefulSetReads(name)).toBe(readsBeforePass2 + 1)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 0 })
+        expect(store.current().status?.secretOwnershipRevocations?.['db']).toMatch(
+          /^sha256:[0-9a-f]{64}$/
+        )
+      })
+
+      it(`T-L1-2 (${caller}): a revoked StatefulSet deleted after the read is not created again when its spec hash is unchanged`, async () => {
+        if (caller !== 'non-workflow deploy') stubInner()
+        denySecrets({ 'db-creds': '7' })
+        const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet()])
+        const name = await storeCredentialedStatefulSet(recipe)
+        const namespace = recipe.metadata.namespace
+        const headlessName = headlessServiceNameOf(recipe)
+        const store = installRecipeStore(recipe)
+
+        // Pass 1 revokes and records the current digest.
+        const pass1Recipe = store.current()
+        const pass1 = await reconciler.reconcile(pass1Recipe)
+        if (caller !== 'workflow deploy') await publishAsWatcher(pass1Recipe, pass1)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+        const digest = store.current().status?.secretOwnershipRevocations?.['db']
+        expect(digest).toMatch(/^sha256:/)
+
+        deleteStatefulSetAfterNextRead(name)
+        const infoLog = captureLogger('info')
+        const readsBefore = statefulSetReads(name)
+        const headlessReadsBefore = readsOf(
+          mockCoreApi.readNamespacedService,
+          headlessName,
+          namespace
+        )
+
+        const result = await reconciler.reconcile(store.current())
+        const hashSkips = infoLog.mock.calls.filter(
+          ([message, context]) =>
+            message === 'StatefulSet spec hash unchanged; skipping update' &&
+            (context as { name?: string } | undefined)?.name === name
+        ).length
+        infoLog.mockRestore()
+
+        // Witness: the update was prepared (headless Service read) and the hash
+        // gate decided on the object the revocation read.
+        expect(readsOf(mockCoreApi.readNamespacedService, headlessName, namespace)).toBe(
+          headlessReadsBefore + 1
+        )
+        expect(hashSkips).toBe(1)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+        expect(statefulSetReads(name)).toBe(readsBefore + 1)
+        expect(result.requeueAfterMs).toBeUndefined()
+        expect(store.current().status?.secretOwnershipRevocations?.['db']).toBe(digest)
+      })
+
+      it(`T-L1-3 (${caller}): a steady revoked StatefulSet is read once per pass`, async () => {
+        if (caller !== 'non-workflow deploy') stubInner()
+        denySecrets({ 'db-creds': '7' })
+        const recipe = deniedStatefulSetRecipe(caller, [dbStatefulSet()])
+        const name = await storeCredentialedStatefulSet(recipe)
+        const store = installRecipeStore(recipe)
+
+        const pass1Recipe = store.current()
+        const pass1 = await reconciler.reconcile(pass1Recipe)
+        if (caller !== 'workflow deploy') await publishAsWatcher(pass1Recipe, pass1)
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
+
+        for (const pass of [2, 3]) {
+          const readsBefore = statefulSetReads(name)
+          await reconciler.reconcile(store.current())
+          expect(statefulSetReads(name), `pass ${pass}`).toBe(readsBefore + 1)
+        }
+        expect(statefulSetWrites()).toEqual({ patches: 1, creates: 0, podDeletes: 1 })
       })
 
       it(`T-1518-2 / T-R3-M1-2 (${caller}): a failed update of a revoked StatefulSet is retried, neither deletes its Pods nor writes a record, and publishes the drift`, async () => {
