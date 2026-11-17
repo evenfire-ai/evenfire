@@ -54,7 +54,7 @@ afterEach(() => {
 })
 
 const DENIED =
-  'This approval request could not be shown here in full, so it was not offered for approval and the action was denied. Nothing was changed.'
+  'This approval request could not be shown here, so it was not offered for approval and the action was denied. Nothing was changed.'
 const NO_PENDING =
   'No pending approval found. Send a message first that triggers a tool requiring approval.'
 const INSTRUCTION = 'Reply /approve or /deny to this message.'

@@ -170,11 +170,11 @@ export const CHANNEL_RESYNC_INTERVAL_MS = 60_000 // 60 seconds
 
 /** Sent when an approval's text could not be read and mcp-host accepted its denial. */
 const TOOL_APPROVAL_NOT_SHOWN_DENIED =
-  'This approval request could not be shown here in full, so it was not offered for approval and the action was denied. Nothing was changed.'
+  'This approval request could not be shown here, so it was not offered for approval and the action was denied. Nothing was changed.'
 
 /** Sent when an approval's text could not be read and mcp-host did not accept its denial. */
 const TOOL_APPROVAL_NOT_SHOWN_STILL_WAITING =
-  'This approval request could not be shown here in full, so it cannot be approved here. It is still waiting on the Host; ask an operator to deny it.'
+  'This approval request could not be shown here, so it cannot be approved here. It is still waiting on the Host; ask an operator to deny it.'
 
 type ToolApprovalDecision = '/approve' | '/approve always' | '/deny'
 

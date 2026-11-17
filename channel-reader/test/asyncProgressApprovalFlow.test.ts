@@ -909,9 +909,9 @@ describe('approval text unavailable at suspension', () => {
   const HOST_TEXT =
     'Delete these files from your kept files:\n- report.pdf\n- notes.txt\nApprove or deny.'
   const DENIED =
-    'This approval request could not be shown here in full, so it was not offered for approval and the action was denied. Nothing was changed.'
+    'This approval request could not be shown here, so it was not offered for approval and the action was denied. Nothing was changed.'
   const STILL_WAITING =
-    'This approval request could not be shown here in full, so it cannot be approved here. It is still waiting on the Host; ask an operator to deny it.'
+    'This approval request could not be shown here, so it cannot be approved here. It is still waiting on the Host; ask an operator to deny it.'
   const NO_PENDING =
     'No pending approval found. Send a message first that triggers a tool requiring approval.'
   const SENDER: Record<Kind, string> = {
