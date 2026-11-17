@@ -44,34 +44,26 @@ export function ChannelsContent({ activeChannel }: { activeChannel: SocialChanne
   )
   const slackTargets = useMemo(() => targets.filter(target => target.medium === 'slack'), [targets])
   const teamsTargets = useMemo(() => targets.filter(target => target.medium === 'teams'), [targets])
-  const telegramAccounts = useMemo(() => {
-    const targetIds = new Set(telegramTargets.map(target => target.id))
-    return accounts.filter(
-      account =>
-        account.medium === 'telegram' &&
-        (account.targets || []).some(target => targetIds.has(target.id))
-    )
-  }, [accounts, telegramTargets])
-  const slackAccounts = useMemo(() => {
-    const targetIds = new Set(slackTargets.map(target => target.id))
-    return accounts.filter(
-      account =>
-        account.medium === 'slack' &&
-        (account.targets || []).some(target => targetIds.has(target.id))
-    )
-  }, [accounts, slackTargets])
-  const teamsAccounts = useMemo(() => {
-    const targetIds = new Set(teamsTargets.map(target => target.id))
-    return accounts.filter(
-      account =>
-        account.medium === 'teams' &&
-        (account.targets || []).some(target => targetIds.has(target.id))
-    )
-  }, [accounts, teamsTargets])
+  const telegramAccounts = useMemo(
+    () => accounts.filter(account => account.medium === 'telegram'),
+    [accounts]
+  )
+  const slackAccounts = useMemo(
+    () => accounts.filter(account => account.medium === 'slack'),
+    [accounts]
+  )
+  const teamsAccounts = useMemo(
+    () => accounts.filter(account => account.medium === 'teams'),
+    [accounts]
+  )
   const visibleSocialTabs = useMemo(
     () =>
-      PROFILE_SOCIAL_CHANNEL_TABS.filter(tab => targets.some(target => target.medium === tab.key)),
-    [targets]
+      PROFILE_SOCIAL_CHANNEL_TABS.filter(
+        tab =>
+          targets.some(target => target.medium === tab.key) ||
+          accounts.some(account => account.medium === tab.key)
+      ),
+    [targets, accounts]
   )
   const currentChannel =
     visibleSocialTabs.find(tab => tab.key === activeChannel) || visibleSocialTabs[0] || null

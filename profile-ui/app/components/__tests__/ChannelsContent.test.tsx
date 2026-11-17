@@ -60,16 +60,24 @@ vi.mock('@lib/api', () => ({
   isSilentApiError: mocks.isSilentApiError,
 }))
 
-vi.mock('@lib/approvalChannels', () => ({
+vi.mock('@lib/approvalChannels', async importOriginal => ({
+  ...(await importOriginal<typeof import('@lib/approvalChannels')>()),
   disconnectWorkflowApprovalMedium: vi.fn(),
   listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums,
 }))
 
-vi.mock('../../channels/TelegramVerificationPanel', () => ({
-  TelegramVerificationPanel: (props: { connectRequestCount?: number }) => (
-    <div data-testid="channel-panel" data-connect-request-count={props.connectRequestCount ?? 0} />
-  ),
-}))
+vi.mock('../../channels/TelegramVerificationPanel', async importOriginal => {
+  const original = await importOriginal<typeof import('../../channels/TelegramVerificationPanel')>()
+  return {
+    TelegramVerificationPanel: (
+      props: React.ComponentProps<typeof original.TelegramVerificationPanel>
+    ) => (
+      <div data-testid="channel-panel" data-connect-request-count={props.connectRequestCount ?? 0}>
+        <original.TelegramVerificationPanel {...props} />
+      </div>
+    ),
+  }
+})
 
 function target(id: string, medium: string): ApprovalChannelTarget {
   return { id, medium } as ApprovalChannelTarget
@@ -87,6 +95,44 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('Social channels section header', () => {
+  it.each([
+    [true, true],
+    [false, true],
+    [true, false],
+    [false, false],
+  ])(
+    'keeps an unassociated account actionable (disabled=%s, targets=%s)',
+    async (disabled, hasTargets) => {
+      if (!hasTargets) profileAccess.targets = []
+      // Frozen wire golden: control-api/test/routes.external.workflowApprovalMediums.test.ts
+      // (includeDisabled), and services.workflowApprovalMediumTelegramVerificationService.test.ts
+      // (unverified transport). Neither producer returns target references here.
+      mocks.listWorkflowApprovalMediums.mockResolvedValue([
+        {
+          id: 'account-1',
+          userId: 'user-1',
+          medium: 'telegram',
+          providerUserId: '777',
+          providerChannelId: '777',
+          providerWorkspaceId: null,
+          disabledAt: disabled ? '2026-06-05T18:00:00.000Z' : null,
+          targets: [],
+        },
+      ])
+      render(<ChannelsContent activeChannel="telegram" />)
+      const action = await screen.findByRole('button', {
+        name: 'Actions for Telegram conversation',
+      })
+      const row = action.closest('tr')!
+      expect(within(row).getByText(disabled ? 'Disconnected' : 'Verified')).toBeInTheDocument()
+      fireEvent.click(action)
+      expect(
+        await screen.findByRole('menuitem', {
+          name: disabled ? 'Remove record' : 'Delete connection',
+        })
+      ).toBeInTheDocument()
+    }
+  )
   it('renders the Connect action to the right of the reload control', async () => {
     const view = render(<ChannelsContent activeChannel="telegram" />)
 
