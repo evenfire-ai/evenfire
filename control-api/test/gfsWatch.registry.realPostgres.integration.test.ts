@@ -12,6 +12,7 @@ import type {
   TestUser,
 } from './helpers/gfsWatchRegistryHarness.js'
 import { type Loaded, loadHelpers } from './helpers/gfsWatchRegistryLoad.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 
 // src/db.ts reads its connection string when first evaluated, and the
@@ -789,7 +790,7 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
       expect(countDelta(before, await disconnectsBy())).toEqual({ session_unavailable: 1 })
       expect(o.socket.frames).toEqual([])
     } finally {
-      await unreachable.end()
+      await endPoolAndWaitForClients(unreachable)
     }
   })
 
