@@ -67,6 +67,18 @@ export function playwrightLaneConfig(env) {
  * Only `run` drives Playwright, so only `run` resolves the lane. `restore`
  * must reach the owned runtime even when the lane variable is stale or wrong.
  */
+/**
+ * The primary checkout that may load local credentials and mutate a
+ * branch-owned profile. `evenfire` is the historical folder name;
+ * `evenfire-open-source` is the checkout name used on disk.
+ */
+export const canonicalCheckoutNames = new Set(['evenfire', 'evenfire-open-source'])
+
+export function assertCanonicalEvenfireCheckout(checkoutDir) {
+  if (!canonicalCheckoutNames.has(path.basename(checkoutDir)))
+    throw new Error('Canonical Evenfire checkout required')
+}
+
 export function selectFixtureAction(argument, env) {
   const action = argument ?? 'run'
   if (!['run', 'restore'].includes(action)) throw new Error('Expected run or restore')
@@ -313,9 +325,7 @@ async function main() {
     '--path-format=absolute',
     '--git-common-dir',
   ]).trim()
-  const canonical = fs.realpathSync(path.dirname(commonDir))
-  if (path.basename(canonical) !== 'evenfire')
-    throw new Error('Canonical Evenfire checkout required')
+  assertCanonicalEvenfireCheckout(fs.realpathSync(path.dirname(commonDir)))
   const branchMake = path.join(root, 'scripts/minikube-profiles/branch.mk')
   const info = command('make', ['-f', branchMake, 'branch-profile-info'])
   if (!info.includes(`profile: ${profile}\n`) || !info.includes(`repo: ${root}\n`))
