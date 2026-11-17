@@ -917,7 +917,8 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
     }
   }
 
-  // S4 was dropped from the spec: stale/disabled rows never reach the wire.
+  // No case here for stale or disabled rows: mcp-host's model projection never
+  // sets those flags on a wire entry, so the store cannot receive them.
   it('S1 — a Codex chat without a selection uses the Host default, not the first row', async () => {
     const { transport } = makeTransport({ getHostModels: async () => brokerResult() })
     await loadHostModels(transport, AGENT, CHAT)
