@@ -24,6 +24,33 @@ import {
 // files. The workspace API checks resolved paths; the shell does not.
 const STATE_DB_COMMAND_PATTERN = /(^|[^A-Za-z0-9_.-])state\.db|\.clerum-state(\/|[^A-Za-z0-9_.-]|$)/
 
+// UX guard for obvious destructive commands. It matches the command text and
+// does not parse the shell. Not a sandbox or a security boundary.
+const SHELL_UX_BLOCK_DEVICE = 'nvme|xvd|sd|hd|vd'
+const SHELL_UX_RECURSIVE_ROOT_DELETE = new RegExp(
+  '(?:^|[^A-Za-z0-9_.-])rm(?=\\s)' +
+    '(?=[^;&|\\n]*?(?:^|\\s)-[A-Za-z]*[rR][A-Za-z]*(?=\\s|$))' +
+    '(?=[^;&|\\n]*?(?:^|\\s)-[A-Za-z]*f[A-Za-z]*(?=\\s|$))' +
+    '(?=[^;&|\\n]*?(?:^|\\s)/(?:\\*(?=\\s|$)|(?=\\s|$)))'
+)
+const SHELL_UX_FORK_BOMB = /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/
+const SHELL_UX_RAW_DISK_WRITE = new RegExp(
+  '(?:^|[^A-Za-z0-9_.-])dd(?=\\s)' +
+    `(?=[^;&|\\n]*?(?:^|\\s)of=(?:["'])?/dev/(?:${SHELL_UX_BLOCK_DEVICE})[A-Za-z0-9]*)` +
+    `|(?:^|[^>])>>?\\|?\\s*(?:["'])?/dev/(?:${SHELL_UX_BLOCK_DEVICE})[A-Za-z0-9]*`
+)
+
+const SHELL_UX_BLOCKED_MESSAGE =
+  'Command blocked: it matches an obvious destructive shell pattern and was not run.'
+
+function shellUxBlocked(command: string): boolean {
+  return (
+    SHELL_UX_RECURSIVE_ROOT_DELETE.test(command) ||
+    SHELL_UX_FORK_BOMB.test(command) ||
+    SHELL_UX_RAW_DISK_WRITE.test(command)
+  )
+}
+
 // Node/libuv error codes (E2BIG, ENOMEM, ERR_INVALID_ARG_VALUE) are fixed
 // identifiers; anything else is not echoed to the model.
 const SPAWN_ERROR_CODE_PATTERN = /^[A-Z0-9_]+$/
@@ -217,6 +244,14 @@ export class ShellTool implements Tool {
           'Command rejected: it references the session state database ' +
           '(state.db* / .clerum-state), which is ' +
           'platform-managed state the agent cannot access.',
+        duration_ms: Date.now() - startTime,
+        is_error: true,
+      }
+    }
+
+    if (shellUxBlocked(command)) {
+      return {
+        content: SHELL_UX_BLOCKED_MESSAGE,
         duration_ms: Date.now() - startTime,
         is_error: true,
       }
