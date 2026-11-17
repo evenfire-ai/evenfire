@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { WorkflowRunArtifact, WorkflowRunListItem } from '../../src/types'
+import { humanClick, humanRecordedPause, humanType, randomInt } from './helpers/humanPacing'
 import { openAgentsPage } from './navigationHelpers.js'
 import {
   EXT_API,
@@ -17,60 +18,7 @@ import {
 } from './workflowUi'
 
 export const CHATLLM_HOST_REF = process.env.E2E_HOST_REF || 'chatllm'
-const HUMAN_E2E_RECORDED = process.env.HUMAN_E2E_RECORDED === '1'
-
-type HumanPacingRange = [number, number]
-
-function randomInt([min, max]: HumanPacingRange): number {
-  return Math.floor(min + Math.random() * (max - min + 1))
-}
-
-export async function humanRecordedPause(range: HumanPacingRange = [220, 520]): Promise<void> {
-  if (!HUMAN_E2E_RECORDED) return
-  await new Promise(resolve => setTimeout(resolve, randomInt(range)))
-}
-
-export async function humanClick(
-  locator: Locator,
-  options: {
-    beforeMs?: HumanPacingRange
-    afterMs?: HumanPacingRange
-    moveSteps?: number
-    clickDelayMs?: number
-  } = {}
-): Promise<void> {
-  if (!HUMAN_E2E_RECORDED) {
-    await locator.click()
-    return
-  }
-
-  await expect(locator).toBeVisible()
-  await locator.scrollIntoViewIfNeeded()
-  await humanRecordedPause(options.beforeMs ?? [260, 720])
-  const box = await locator.boundingBox()
-  if (box) {
-    await locator.page().mouse.move(box.x + box.width / 2, box.y + box.height / 2, {
-      steps: options.moveSteps ?? randomInt([12, 24]),
-    })
-  } else {
-    await locator.hover()
-  }
-  await humanRecordedPause([140, 360])
-  await locator.click({ delay: options.clickDelayMs ?? randomInt([45, 120]) })
-  await humanRecordedPause(options.afterMs ?? [280, 760])
-}
-
-async function humanType(locator: Locator, text: string): Promise<void> {
-  if (!HUMAN_E2E_RECORDED) {
-    await locator.fill(text)
-    return
-  }
-
-  await humanClick(locator, { beforeMs: [180, 420], afterMs: [120, 260] })
-  await locator.fill('')
-  await locator.pressSequentially(text, { delay: randomInt([8, 22]) })
-  await humanRecordedPause([320, 720])
-}
+export { humanClick, humanRecordedPause }
 
 async function humanDownloadClick(locator: Locator): Promise<void> {
   await humanClick(locator, {

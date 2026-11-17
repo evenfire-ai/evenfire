@@ -183,6 +183,42 @@ describe('PluginSdkBroker — request gating', () => {
     expect(prompts).toHaveLength(0)
   })
 
+  it('answers a whitespace-only gfs.list drive as invalid_request without reaching the source', async () => {
+    const listAccessibleGfsResources = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const listGfsChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    await build(fakeSource({ listAccessibleGfsResources, listGfsChildren }))
+
+    const blank = await broker.request(SENDER_ID, {
+      v: 1,
+      capability: 'gfs.list',
+      params: { drive: '   ' },
+    })
+    expect(blank).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_request', retryable: false },
+    })
+    expect(listAccessibleGfsResources).not.toHaveBeenCalled()
+    expect(listGfsChildren).not.toHaveBeenCalled()
+    const lines = await auditLines()
+    expect(lines).toEqual([
+      expect.objectContaining({
+        capability: 'gfs.list',
+        outcome: 'error',
+        code: 'invalid_request',
+      }),
+    ])
+
+    // Liveness witness: the same broker and surface reach the source for a named drive.
+    const named = await broker.request(SENDER_ID, {
+      v: 1,
+      capability: 'gfs.list',
+      params: { drive: 'main' },
+    })
+    expect(named).toMatchObject({ ok: true })
+    expect(listAccessibleGfsResources).toHaveBeenCalledTimes(1)
+    expect(listAccessibleGfsResources).toHaveBeenCalledWith('main', undefined)
+  })
+
   it('fails closed when there is no session', async () => {
     userId = null
     const result = await broker.request(SENDER_ID, { v: 1, capability: 'identity.read' })

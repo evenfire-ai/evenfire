@@ -137,6 +137,15 @@ async function withApps(
     const observations: Observation[] = []
     const app = createApp(new MockGateway() as never)
     const listener = createServer((req, res) => {
+      // Cases address observations by index, so only requests to the route
+      // under test are recorded (any method: one case pipelines a GET to it).
+      // A local port prober (a `GET /` from another process on the host)
+      // otherwise lands between them and shifts every later index.
+      if (req.url !== AUTHORIZE_PATH) {
+        res.statusCode = 404
+        res.end()
+        return
+      }
       const observed: Observation = {
         request: req,
         bodyDataSubscriptions: 0,

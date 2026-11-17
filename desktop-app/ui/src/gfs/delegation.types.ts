@@ -61,6 +61,7 @@ export interface GfsGrantListItem {
   drive: string
   resourceId: string
   subject: { type: string; id?: string }
+  homeOwner?: true
   permissions: string[]
   inherit: boolean
 }
@@ -113,6 +114,7 @@ export interface GfsInheritedAccessSource {
  */
 export interface GfsInheritedAccessItem {
   subject: { type: string; id?: string }
+  homeOwner?: true
   permissions: string[]
   /** Contributing ancestor folder labels, nearest first, deduplicated. */
   inheritedFrom: string[]

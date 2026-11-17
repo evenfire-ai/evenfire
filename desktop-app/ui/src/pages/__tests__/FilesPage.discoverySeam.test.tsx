@@ -17,6 +17,7 @@ import {
   gfsRouteFailureMessage,
   grantsListPage,
   heldAffordances,
+  homeView,
   listAccessiblePage,
   listChildrenPage,
   resolveResource,
@@ -135,6 +136,7 @@ describe('FilesPage against the real GFS browser controller', () => {
       value: {
         auth: { getSessionGeneration: vi.fn(async () => 1) },
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
@@ -189,6 +191,7 @@ describe('FilesPage against the real GFS browser controller', () => {
       value: {
         auth: { getSessionGeneration: vi.fn(async () => 1) },
         gfs: {
+          getHome: vi.fn(async () => homeView()),
           listAccessible,
           resolve: vi.fn(),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),

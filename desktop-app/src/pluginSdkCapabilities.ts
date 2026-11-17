@@ -314,8 +314,13 @@ export const CAPABILITIES: Record<string, CapabilityDescriptor> = {
     cacheTtlMs: 0,
     validate: raw => {
       const record = allowKeys(raw, ['drive', 'resourceId', 'cursor'])
+      const drive = optionalString(record.drive, 'drive', 64)
+      // '' still means "omitted" here (issue #1508). Any other blank value names no drive.
+      if (drive !== undefined && drive.trim() === '') {
+        throw new CapabilityInputError('drive must not be blank')
+      }
       return {
-        drive: optionalString(record.drive, 'drive', 64),
+        drive,
         resourceId: optionalString(record.resourceId, 'resourceId', 128),
         cursor: optionalString(record.cursor, 'cursor', 512),
       }

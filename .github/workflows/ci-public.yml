@@ -463,6 +463,14 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
+      # The step above type-checks the Desktop main process only (desktop-app/tsconfig.json
+      # includes src/**/*.ts), and `vite build` does not type-check. The renderer and its tests
+      # have their own project.
+      - name: Typecheck Desktop renderer (tsc --noEmit -p ui/tsconfig.json)
+        if: matrix.service == 'desktop-app'
+        working-directory: desktop-app
+        run: npx tsc --noEmit -p ui/tsconfig.json
+
   # ─── real-Postgres integration suites ─────────────────────────────────────
   # Runs repository-local *.realPostgres.integration suites against real
   # Postgres 16: the DB migration plus the GFS reader-role / blob-migration / blob-reconciler /
@@ -656,6 +664,7 @@ jobs:
             services.grokProviderAttemptRedemption.realPostgres.integration.test.ts \
             services.controlAdminReplaceInviter.realPostgres.integration.test.ts \
             services.adminAuthDelete.realPostgres.integration.test.ts \
+            services.directory.managerRoles.realPostgres.integration.test.ts \
             services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts \
             services.codexSubscriptionLifecycle.realPostgres.integration.test.ts \
             db.llmProviderAttemptConnectionIntegrity.realPostgres.integration.test.ts \
@@ -669,6 +678,13 @@ jobs:
             services.adminSubscriptionRateLimitMigration.realPostgres.integration.test.ts \
             pluginWorkloadSdkSteplessQuota.realPostgres.integration.test.ts \
             entityChangeFeed.realPostgres.integration.test.ts \
+            gfs.governedRoots.realPostgres.integration.test.ts \
+            gfs.userHomeAcl.realPostgres.integration.test.ts \
+            gfs.userHomeBackfill.realPostgres.integration.test.ts \
+            gfs.userHomeProvisioning.realPostgres.integration.test.ts \
+            gfs.userHomeRecovery.realPostgres.integration.test.ts \
+            gfs.userHomeRetirement.realPostgres.integration.test.ts \
+            gfs.userHomeStartupCost.realPostgres.integration.test.ts \
             routes.mcp-host.renewal.realPostgres.integration.test.ts \
             routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
             oauth.contextGrant.scenarios.realPostgres.integration.test.ts \

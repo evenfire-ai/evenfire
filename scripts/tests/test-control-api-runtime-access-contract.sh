@@ -24,6 +24,7 @@ sentinels=(
   $'mcp_secret_rollback_permits\tlegacy_dml'
   $'gfs_desktop_operator_links\tlink_lifecycle'
   $'desktop_user_retirement_operations\tlink_lifecycle'
+  $'gfs_user_homes\tupsert'
   $'llm_provider_catalog_settings\tupsert'
   $'llm_catalog_dismissed\tappend'
   $'llm_catalog_prune_runs\tappend'

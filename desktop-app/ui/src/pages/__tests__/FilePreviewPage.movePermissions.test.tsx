@@ -551,6 +551,32 @@ describe('FilePreviewPage move permission contract', () => {
     expect(affordances).toHaveBeenCalledTimes(2)
   })
 
+  it.each([
+    [
+      'warn',
+      'a rate limit',
+      "Error invoking remote method 'gfs:affordances': 429 Too Many Requests httpStatus=429 retryAfterSeconds=7",
+    ],
+    [
+      'error',
+      'a server failure',
+      "Error invoking remote method 'gfs:affordances': 503 Service Unavailable httpStatus=503",
+    ],
+  ])('gives the Move permission notice the %s tone for %s', async (tone, _cause, message) => {
+    const source = vi.fn(async () => {
+      throw new Error(message)
+    })
+    installGfs({ source })
+    installController()
+    renderPreview()
+
+    await screen.findByAltText('Preview of diagram.png')
+    const notice = await screen.findByText(/Could not verify move permissions/)
+    const wrapper = notice.closest('[role="alert"]')
+    expect(wrapper?.classList.contains('da-gfs-alert')).toBe(true)
+    expect(notice.closest('.status-banner')?.classList.contains(`tone-${tone}`)).toBe(true)
+  })
+
   it('hides Move until the source parent has server-derived write and delete bits', async () => {
     const { affordances } = installGfs({ source: async () => readOnly })
     installController()
@@ -1361,7 +1387,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       400,
@@ -1435,7 +1461,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const failureMessage = await gfsRouteFailureMessage(
         client =>
           client.moveResource(
-            { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+            { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
             'fixture-session-token'
           ),
         status,
@@ -1503,7 +1529,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       })
       try {
         await client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         )
       } catch (error) {
@@ -1637,7 +1663,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       400,
@@ -1854,7 +1880,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const failureMessage = await gfsRouteFailureMessage(
         client =>
           client.moveResource(
-            { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+            { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
             'fixture-session-token'
           ),
         412,
@@ -1929,7 +1955,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       401,
@@ -2204,7 +2230,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-2', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-2', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       412,
@@ -2311,7 +2337,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const failureMessage = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       400,
@@ -2519,7 +2545,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       const conflict = await gfsRouteFailureMessage(
         client =>
           client.moveResource(
-            { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+            { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
             'fixture-session-token'
           ),
         status,
@@ -2568,7 +2594,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const transportFailure = await gfsRouteFailureMessage(
       client =>
         client.moveResource(
-          { resourceId, destinationId: 'destination-1', ifMatch: 7 },
+          { resourceId, destinationId: 'destination-1', drive: 'main', ifMatch: 7 },
           'fixture-session-token'
         ),
       503,

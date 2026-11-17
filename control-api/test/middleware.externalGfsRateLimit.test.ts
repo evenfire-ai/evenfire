@@ -151,6 +151,7 @@ describe('external GFS rate boundary', () => {
     ],
     ['DELETE', `/uploads/${RESOURCE_ID}`, 'resource-mutation', '/external/gfs/uploads/:id'],
     ['GET', '/resolve', 'resource', '/external/gfs/resolve'],
+    ['GET', '/home', 'resource', '/external/gfs/home'],
     ['GET', '/resources', 'resource', '/external/gfs/resources'],
     [
       'GET',

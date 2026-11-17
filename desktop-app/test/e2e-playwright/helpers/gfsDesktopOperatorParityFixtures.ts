@@ -39,7 +39,7 @@ function configuredUrl(label: string, candidates: Array<string | undefined>): st
   return value.replace(/\/$/, '')
 }
 
-function bcryptHash(password: string): string {
+export function bcryptHash(password: string): string {
   const output = kubectlOut(
     [
       '-n',

@@ -104,6 +104,7 @@ export function FilePreviewPage({
   const previewResourceActions = useFilePreviewResourceActions({
     gfsUri,
     fileName,
+    home: ctrl.home,
     sessionScope: ctrl.sessionScope,
     sessionGeneration: ctrl.sessionGeneration,
     principalScope: ctrl.principalScope,
@@ -365,8 +366,11 @@ export function FilePreviewPage({
       <div className="da-gfs-preview-page">
         {previewResourceActions.dialogs}
         {previewResourceActions.permissionNotices.map(notice => (
-          <div key={notice.id} role={notice.pending ? 'status' : 'alert'}>
-            <StatusBanner tone={notice.pending ? 'info' : 'error'} text={notice.message} />
+          <div className="da-gfs-alert" key={notice.id} role={notice.pending ? 'status' : 'alert'}>
+            <StatusBanner
+              tone={notice.pending ? 'info' : notice.rateLimited ? 'warn' : 'error'}
+              text={notice.message}
+            />
             {!notice.pending ? (
               <Button
                 onClick={() =>

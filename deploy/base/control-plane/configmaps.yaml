@@ -6,6 +6,7 @@ metadata:
   labels:
     app: control-api
 data:
+  GFS_HOME_DRIVE: main
   CONTROL_API_PORT: '8090'
   CONTROL_API_JSON_BODY_LIMIT: 150mb
   CONTROL_API_PG_CONNECTION_STRING: postgres://postgres:postgres@control-postgres.control-plane.svc.cluster.local:5432/profiles

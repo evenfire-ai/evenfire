@@ -5,7 +5,7 @@ import { normalizeGfsResourceName } from '@clerum/gfs-interaction-policy'
 import { Button, IconButton, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { IconClose, IconShare } from '@components/SidebarNav/icons'
-import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
+import { GFS_DEFAULT_DISCOVERY_DRIVE } from '@constants/gfsBrowser'
 import {
   desktopQueryKeys,
   hasGfsSessionGeneration,
@@ -27,6 +27,7 @@ import {
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
+import type { GfsCallerHome } from '@/gfs/callerHome.types'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
@@ -44,6 +45,7 @@ type ResourceAffordances = Awaited<ReturnType<typeof window.clerum.gfs.affordanc
 type FilePreviewResourceActionsProps = {
   gfsUri: string
   fileName: string
+  home: GfsCallerHome
   sessionScope: string
   sessionGeneration: number | null
   principalScope: string | null
@@ -130,6 +132,7 @@ function subjectOptions(
 export function useFilePreviewResourceActions({
   gfsUri,
   fileName,
+  home,
   sessionScope,
   sessionGeneration,
   principalScope,
@@ -185,7 +188,7 @@ export function useFilePreviewResourceActions({
   })
   const resource = resourceQuery.isError ? undefined : resourceQuery.data
   const resourceId = resource?.resourceId ?? ''
-  const drive = resource?.drive ?? GFS_DRIVE_MAIN
+  const drive = resource?.drive ?? GFS_DEFAULT_DISCOVERY_DRIVE
   const affordancesQuery = useQuery({
     queryKey: desktopQueryKeys.gfsAffordances(
       sessionScope,
@@ -215,7 +218,7 @@ export function useFilePreviewResourceActions({
     principalScope,
     resourceId: resource?.resourceId ?? null,
     parentResourceId: sourceParentId,
-    drive: resource?.drive ?? GFS_DRIVE_MAIN,
+    drive,
     version: resource?.version ?? null,
   })
   moveContextRef.current = {
@@ -225,7 +228,7 @@ export function useFilePreviewResourceActions({
     principalScope,
     resourceId: resource?.resourceId ?? null,
     parentResourceId: sourceParentId,
-    drive: resource?.drive ?? GFS_DRIVE_MAIN,
+    drive,
     version: resource?.version ?? null,
   }
   const sourceParentAffordancesQuery = useQuery({
@@ -309,6 +312,7 @@ export function useFilePreviewResourceActions({
           id: 'resource-permissions',
           message: 'Checking file permissions…',
           pending: true,
+          rateLimited: false,
           retry: () =>
             retryPermissionCheck(
               desktopQueryKeys.gfsAffordances(
@@ -325,6 +329,7 @@ export function useFilePreviewResourceActions({
             id: 'resource-permissions',
             message: `Could not verify file permissions: ${describeGfsReadError(affordancesQuery.error).message}`,
             pending: false,
+            rateLimited: describeGfsReadError(affordancesQuery.error).code === 'rate_limited',
             retry: () =>
               retryPermissionCheck(
                 desktopQueryKeys.gfsAffordances(
@@ -343,6 +348,7 @@ export function useFilePreviewResourceActions({
             id: 'move-source-permissions',
             message: 'Checking move permissions…',
             pending: true,
+            rateLimited: false,
             retry: () =>
               retryPermissionCheck(
                 desktopQueryKeys.gfsAffordances(
@@ -359,6 +365,8 @@ export function useFilePreviewResourceActions({
               id: 'move-source-permissions',
               message: `Could not verify move permissions: ${describeGfsReadError(sourceParentAffordancesQuery.error).message}`,
               pending: false,
+              rateLimited:
+                describeGfsReadError(sourceParentAffordancesQuery.error).code === 'rate_limited',
               retry: () =>
                 retryPermissionCheck(
                   desktopQueryKeys.gfsAffordances(
@@ -1619,6 +1627,7 @@ export function useFilePreviewResourceActions({
                   derivationNotice={inheritedAccessNotice}
                   derivationNoticeHint={inheritedAccessNoticeHint}
                   error={grantsQuery.error ? describeGfsGrantError(grantsQuery.error) : null}
+                  home={home}
                   inheritedItems={inheritedQuery.data?.items ?? []}
                   items={grantsQuery.data ?? []}
                   loading={
@@ -1628,6 +1637,7 @@ export function useFilePreviewResourceActions({
                   onChangeRole={handleAccessRoleChange}
                   onRevoke={handleRevokeGrant}
                   onRevokeShare={handleRevokeShare}
+                  resource={{ resourceId: resource.resourceId, drive }}
                   revoking={revokingGrantId !== null}
                   revokingShare={revokingShareId !== null}
                   shareError={sharesQuery.error ? describeGfsGrantError(sharesQuery.error) : null}
@@ -1697,6 +1707,8 @@ export function useFilePreviewResourceActions({
       ) : null}
       {canResolve && moveOpen && resource?.kind === 'file' ? (
         <GfsMoveDialog
+          drive={drive}
+          home={home}
           target={{
             resourceId: resource.resourceId,
             name: resource.name,

@@ -22,6 +22,10 @@ vi.mock('../src/config.js', () => ({
   config: { adminJwtIssuer: 'test-issuer', adminJwtAudience: 'test-audience' },
 }))
 vi.mock('../src/db.js', () => db)
+// Desktop home cleanup is outside the control-admin retirement paths tested here.
+vi.mock('../src/gfs/userHomeProvisioner.js', () => ({
+  retireUserHomeForInactiveUser: vi.fn(),
+}))
 vi.mock('../src/observability/logger.js', () => ({ rootLogger: { warn: vi.fn() } }))
 vi.mock('../src/services/gfsDesktopOperatorLinkService.js', () => ({
   gfsDesktopOperatorLinkService: linkService,

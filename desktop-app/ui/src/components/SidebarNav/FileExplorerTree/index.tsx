@@ -1,11 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import {
   FOLDER_HOVER_EXPAND_DELAY_MS,
-  GFS_DRIVE_MAIN,
+  GFS_ACCESS_REVOKED_BODY,
   GFS_RESOURCE_DRAG_TYPE,
+  GFS_SHARED_WITH_ME_LABEL,
+  GFS_SHARED_WITH_ME_LOCATION,
 } from '@constants/gfsBrowser'
 import {
   desktopQueryKeys,
@@ -22,6 +24,8 @@ import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
+import { GfsHomeStateNotice } from '@/gfs/GfsHomeStateNotice'
+import { callerHomeNotice, callerHomeRootNode, isCallerHomeRoot } from '@/gfs/callerHome'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
@@ -88,7 +92,9 @@ function FileExplorerNode({
   scope,
   sessionGeneration,
   accessActive,
+  homeResourceId,
   expandedIds,
+  section = false,
   selectedId,
   movingResourceId,
   ancestorIds,
@@ -109,26 +115,34 @@ function FileExplorerNode({
 }: FileExplorerNodeProps) {
   const queryClient = useQueryClient()
   const isDirectory = node.kind === 'directory'
+  // Every folder, the section (the caller's home) included, starts collapsed
+  // and lists its children only once the user expands it from its chevron.
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
+  // The treeitem is named by its label alone, not by its toggle and children.
+  const labelId = useId()
   // Server-computed: the row is visible but the session cannot read it (a
   // folder grant without inheritance; a file whose parent does not inherit).
   // Mark it so it does not look actionable, and let the activate handlers
   // refuse it with a toast instead of a later download/preview 403. Absent
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
+  // The home root is governed: the server refuses to move it, so the row is
+  // never a drag source and offers no Move action. A sibling row with the same
+  // owner bits still drags.
+  const isHomeRoot = homeResourceId != null && node.resourceId === homeResourceId
 
   const childQueryKey = desktopQueryKeys.gfsChildren(
     scope,
     node.resourceId,
-    GFS_DRIVE_MAIN,
+    node.drive,
     sessionGeneration
   )
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
-      window.clerum.gfs.listChildren(node.resourceId, GFS_DRIVE_MAIN, pageParam),
+      window.clerum.gfs.listChildren(node.resourceId, node.drive, pageParam),
     // Gate on live access as the controller's own children query does: a revoked
     // session fetches nothing (the subtree also unmounts as accessibleResources
     // empties, but this keeps the guard robust to future refactors).
@@ -138,7 +152,12 @@ function FileExplorerNode({
     // is a persistent surface, so under the app's Infinity staleTime an expanded
     // folder would otherwise serve its first page forever — removed files linger
     // and new files never appear until a hard reload. Revalidate on revisit and
-    // window focus, matching the controller's own children query.
+    // window focus, matching the controller's own children query. The caller's
+    // home (the section) follows the same policy: collapsed, it requests
+    // nothing; expanded, it refreshes on window focus like any other folder.
+    // Collapsing and expanding a node again does not refetch by itself: the
+    // query is only disabled meanwhile, and its data stays fresh under the
+    // Infinity staleTime.
     refetchOnMount: 'always',
     refetchOnWindowFocus: 'always',
     initialPageParam: undefined as string | undefined,
@@ -189,7 +208,9 @@ function FileExplorerNode({
     // (open preview, or download when not previewable) immediately — no delay.
     // A double-click on a file just re-activates it idempotently. onActivateFile
     // also selects the node, so selection still follows a file's single-click.
-    if (!isDirectory) {
+    // A section label opens on click, like "Shared with me"; only its chevron
+    // expands or collapses it.
+    if (!isDirectory || section) {
       runActivate()
       return
     }
@@ -199,7 +220,7 @@ function FileExplorerNode({
       clickTimerRef.current = null
       onToggle(node.resourceId)
     }, DOUBLE_CLICK_DELAY_MS)
-  }, [clearClickTimer, isDirectory, node.resourceId, onToggle, runActivate])
+  }, [clearClickTimer, isDirectory, node.resourceId, onToggle, runActivate, section])
 
   const handleRowDoubleClick = useCallback(() => {
     clearClickTimer()
@@ -219,13 +240,15 @@ function FileExplorerNode({
       }
       // Shift+F10 opens the Move dialog for the focused row — the keyboard
       // path after the visible per-row Move button was rejected as clutter.
+      // A governed home root has no Move action to offer.
       if (event.shiftKey && event.key === 'F10') {
+        if (isHomeRoot) return
         event.preventDefault()
         clearClickTimer()
         onRequestMove(node, ancestorCrumbs)
       }
     },
-    [ancestorCrumbs, clearClickTimer, node, onRequestMove, runActivate]
+    [ancestorCrumbs, clearClickTimer, isHomeRoot, node, onRequestMove, runActivate]
   )
 
   const handleDragStart = useCallback(
@@ -238,7 +261,7 @@ function FileExplorerNode({
   )
 
   const isDirectoryRow = isDirectory
-  const canDrag = isUnreadable !== true && movingResourceId == null
+  const canDrag = isUnreadable !== true && movingResourceId == null && !isHomeRoot
 
   // Hover a collapsed directory for FOLDER_HOVER_EXPAND_DELAY_MS to expand it
   // through its existing loader (rev-2 §4.1). The timer is owned here so a
@@ -343,6 +366,7 @@ function FileExplorerNode({
   return (
     <div
       aria-expanded={isDirectory ? isExpanded : undefined}
+      aria-labelledby={labelId}
       aria-level={level}
       aria-selected={isSelected}
       className="da-file-explorer__item"
@@ -380,18 +404,23 @@ function FileExplorerNode({
           }`}
           color="neutral"
           draggable={canDrag}
+          id={labelId}
           onClick={handleRowClick}
           onDoubleClick={handleRowDoubleClick}
           onDragStart={canDrag ? handleDragStart : undefined}
           onDragEnd={canDrag ? onNodeDragEnd : undefined}
           onKeyDown={handleRowKeyDown}
+          size={section ? 'sm' : undefined}
           title={canDrag ? `Drag ${label} into a folder to move it` : undefined}
           variant="text"
         >
-          <span className="da-file-explorer__icon" aria-hidden="true">
-            {isDirectory ? <IconContexts /> : <GfsFileIcon name={node.name} />}
-          </span>
-          <span className="da-file-explorer__name">{label}</span>
+          {section ? null : (
+            <span className="da-file-explorer__icon" aria-hidden="true">
+              {isDirectory ? <IconContexts /> : <GfsFileIcon name={node.name} />}
+            </span>
+          )}
+          {/* A section label is plain button text, exactly like "Shared with me". */}
+          {section ? label : <span className="da-file-explorer__name">{label}</span>}
           {/* Rendered inside the label so "No access" joins the row's accessible
               name, matching the Files page's row affordance. */}
           {isUnreadable ? (
@@ -402,7 +431,10 @@ function FileExplorerNode({
         </Button>
       </div>
       {isExpanded ? (
-        <div className="da-file-explorer__group" role="group">
+        <div
+          className={`da-file-explorer__group${section ? ' da-file-explorer__group--section' : ''}`}
+          role="group"
+        >
           {loadingChildren ? (
             <p className="da-file-explorer__message muted" role="status">
               Loading…
@@ -418,6 +450,7 @@ function FileExplorerNode({
               dropState={dropStatesByResourceId[child.resourceId]}
               dropStatesByResourceId={dropStatesByResourceId}
               expandedIds={expandedIds}
+              homeResourceId={homeResourceId}
               key={child.resourceId}
               level={level + 1}
               movingResourceId={movingResourceId}
@@ -484,7 +517,7 @@ export function FileExplorerTree({
   const adjudication = useGfsDragAdjudication({
     scope: ctrl.sessionScope,
     sessionGeneration: ctrl.sessionGeneration,
-    drive: GFS_DRIVE_MAIN,
+    drive: ctrl.drive,
     resolve: (uri: string) => window.clerum.gfs.resolve(uri),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
@@ -578,8 +611,8 @@ export function FileExplorerTree({
     setMoveDialogTarget(null)
     setMovePermissionStatus(null)
     // A NEW live session makes any session-ended refusal stale. A transition
-    // TO revoked (scope null) must NOT clear it: that is exactly when the
-    // message has to survive (A11), and the revoked surface below carries it.
+    // TO revoked (scope null) does not clear it; while revoked, the revoked
+    // surface below carries the sentence and the refusal banner is not shown.
     if (liveDragScope !== null) setDropSessionLost(false)
   }, [adjudication.endDragSession, ctrl.sessionGeneration, liveDragScope])
 
@@ -597,12 +630,24 @@ export function FileExplorerTree({
     [dragSession]
   )
 
-  const roots = useMemo(() => sortTreeItems(ctrl.accessibleResources), [ctrl.accessibleResources])
+  // The caller's own ready home is shown once, as "My home"; "Shared with me"
+  // lists only the other roots the caller can reach.
+  const roots = useMemo(
+    () =>
+      sortTreeItems(ctrl.accessibleResources.filter(node => !isCallerHomeRoot(ctrl.home, node))),
+    [ctrl.accessibleResources, ctrl.home]
+  )
+  const homeRoot = useMemo(
+    () => callerHomeRootNode(ctrl.home, ctrl.accessibleResources),
+    [ctrl.accessibleResources, ctrl.home]
+  )
+  const homeNotice = callerHomeNotice(ctrl.home, ctrl.homeError)
 
   /** Cached destination names for the numbered-name ladder and suggestion —
-   * the same shared children cache the Files page seeds its commit from. */
+   * the same shared children cache the Files page seeds its commit from, keyed
+   * by the destination node's own drive. */
   const cachedDestinationNames = useCallback(
-    (destinationId: string): Set<string> => {
+    (destinationId: string, drive: string): Set<string> => {
       if (!ctrl.sessionScope || !isGfsSessionGeneration(ctrl.sessionGeneration)) {
         return new Set()
       }
@@ -610,7 +655,7 @@ export function FileExplorerTree({
         desktopQueryKeys.gfsChildren(
           ctrl.sessionScope,
           destinationId,
-          GFS_DRIVE_MAIN,
+          drive,
           ctrl.sessionGeneration
         )
       )
@@ -678,7 +723,7 @@ export function FileExplorerTree({
       return {
         resourceId: node.resourceId,
         gfsUri: node.gfsUri,
-        drive: node.drive || GFS_DRIVE_MAIN,
+        drive: node.drive,
         kind: node.kind === 'directory' ? 'directory' : 'file',
         name: node.name,
         ...(Number.isSafeInteger(node.version) ? { version: node.version } : {}),
@@ -726,14 +771,13 @@ export function FileExplorerTree({
     [adjudication, dragSession, treeDragSourceFrom]
   )
 
+  /** A provider owns transport identity; the drive is checked per destination
+   * row, never against the controller's open location (the tree's root rows
+   * carry their own drive and no folder need be open). */
   const resolveActiveSource = useCallback((): GfsDragSource | null => {
     if (!dragSession) return draggingSourceRef.current
     const source = dragSession.activeSource()
-    return source &&
-      dragSession.matchesScope(ctrl.sessionScope ?? 'anonymous') &&
-      source.drive === GFS_DRIVE_MAIN
-      ? source
-      : null
+    return source && dragSession.matchesScope(ctrl.sessionScope ?? 'anonymous') ? source : null
   }, [ctrl.sessionScope, dragSession])
 
   const handleNodeDragOver = useCallback(
@@ -747,8 +791,9 @@ export function FileExplorerTree({
       // Self-hover is NO longer skipped: dropping an item onto itself paints
       // the denied verdict with its `self` reason, so the release can explain
       // itself instead of looking dead (UX matrix §5.3). Admission still
-      // refuses the mutation.
-      if (!source || node.kind !== 'directory') return
+      // refuses the mutation. Cross-drive targeting is refused for the same
+      // reason admission refuses it: the destination row owns the drive.
+      if (!source || node.kind !== 'directory' || source.drive !== node.drive) return
       event.preventDefault()
       event.stopPropagation()
       hoverOwnerRef.current = source
@@ -777,6 +822,7 @@ export function FileExplorerTree({
       if (verdict.state === 'checking') {
         adjudication.scheduleColdCheck(
           { resourceId: node.resourceId, name: node.name, kind: node.kind, ancestorIds },
+          node.drive,
           source.parentKnown ? source.parentResourceId : null,
           () => {
             if (hoverOwnerRef.current !== source) return
@@ -842,6 +888,7 @@ export function FileExplorerTree({
               ctrl.moveResource(
                 resourceId,
                 destinationId,
+                source.drive,
                 ifMatch,
                 newName,
                 oldParentId,
@@ -852,7 +899,7 @@ export function FileExplorerTree({
             handleAuthorityFailure: message =>
               ctrl.handleAuthorityFailure(message, 'operation', source.scope),
             convergeCommittedMove: (input, receipt) =>
-              ctrl.convergeCommittedMove(input, receipt, source.scope),
+              ctrl.convergeCommittedMove({ ...input, drive: source.drive }, receipt, source.scope),
             ...(reportOutcomes
               ? {
                   pushToast: (message, tone) => {
@@ -866,7 +913,7 @@ export function FileExplorerTree({
           {
             source,
             destination,
-            occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+            occupiedDestinationNames: cachedDestinationNames(destination.resourceId, source.drive),
             ...(authoritativeSessionGeneration !== undefined
               ? { sessionGeneration: authoritativeSessionGeneration }
               : {}),
@@ -893,7 +940,14 @@ export function FileExplorerTree({
       setDropStatesByResourceId({})
       setDropVerdictAnnouncement('')
       const source = resolveActiveSource()
-      if (!source || node.kind !== 'directory' || movingResourceIdRef.current) return
+      if (
+        !source ||
+        node.kind !== 'directory' ||
+        // The destination row owns the drive: a root drop needs no open folder.
+        source.drive !== node.drive ||
+        movingResourceIdRef.current
+      )
+        return
       const epoch = dragSessionEpochRef.current
       const sessionGeneration = dragSession?.currentGeneration() ?? null
       const scopeAtDrop = liveDragScopeRef.current
@@ -1025,7 +1079,7 @@ export function FileExplorerTree({
         liveAuthorityRef.current.generation
       ) &&
       isDialogCurrent()
-    const drive = target.node.drive || GFS_DRIVE_MAIN
+    const drive = target.node.drive
     setMovePermissionStatus('checking')
 
     try {
@@ -1171,16 +1225,87 @@ export function FileExplorerTree({
 
   return (
     <div className="da-file-explorer">
+      {ctrl.accessState === 'active' ? (
+        <div role="tree" aria-label="File destinations">
+          {homeRoot ? (
+            <FileExplorerNode
+              accessActive={ctrl.accessState === 'active'}
+              ancestorCrumbs={[]}
+              ancestorIds={[]}
+              dragSourceName={dragSourceName}
+              dropState={dropStatesByResourceId[homeRoot.resourceId]}
+              dropStatesByResourceId={dropStatesByResourceId}
+              expandedIds={expandedIds}
+              homeResourceId={homeRoot.resourceId}
+              level={1}
+              section
+              movingResourceId={movingResourceId}
+              node={homeRoot}
+              onActivateFile={handleActivateFile}
+              onActivateFolder={handleActivateFolder}
+              onAuthorityFailure={handleAuthorityFailure}
+              onNodeDragEnd={clearDragState}
+              onNodeDragLeave={handleNodeDragLeave}
+              onNodeDragOver={handleNodeDragOver}
+              onNodeDragStart={handleNodeDragStart}
+              onNodeDrop={handleNodeDrop}
+              onRequestMove={handleRequestMove}
+              onToggle={handleToggle}
+              scope={ctrl.sessionScope ?? 'anonymous'}
+              sessionGeneration={ctrl.sessionGeneration}
+              selectedId={selectedId}
+            />
+          ) : ctrl.home?.state !== 'retired' ? (
+            <Button
+              align="start"
+              block
+              className="da-file-explorer__label"
+              color="neutral"
+              type="button"
+              role="treeitem"
+              aria-label="My home"
+              size="sm"
+              variant="text"
+              disabled
+            >
+              My home
+            </Button>
+          ) : null}
+          {homeNotice ? <GfsHomeStateNotice notice={homeNotice} variant="sidebar" /> : null}
+          <Button
+            align="start"
+            block
+            className="da-file-explorer__label"
+            color="neutral"
+            role="treeitem"
+            size="sm"
+            type="button"
+            variant="text"
+            onClick={() => onOpenFolder(GFS_SHARED_WITH_ME_LOCATION)}
+          >
+            {GFS_SHARED_WITH_ME_LABEL}
+          </Button>
+        </div>
+      ) : null}
       {/* The drop verdict is painted on the target row; this live region is
           its spoken form, so a screen reader learns whether the folder under
           the pointer accepts the move (RP-026). */}
       <p aria-live="polite" className="visually-hidden">
         {dropVerdictAnnouncement}
       </p>
-      {dropSessionLost ? (
-        // Persistent (A11): the refusal outlives the dead gesture and the
-        // revoked tree surface below — it is not a one-shot toast.
-        <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} compact />
+      {dropSessionLost &&
+      ctrl.accessState !== 'revoked' &&
+      previousDragAuthorityRef.current.scope === liveDragScope ? (
+        // Persistent, not a one-shot toast: it explains a drop refused because
+        // the session ended while the revoked surface is not on screen. Once
+        // that surface is shown it carries the sentence, so the banner yields
+        // to it and the sentence is announced once. The drag scope must also
+        // be settled: when access returns, the first render still has the flag
+        // set until the scope effect above clears it, and mounting the banner
+        // for that one commit would announce the sentence again.
+        <div role="alert">
+          <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} compact />
+        </div>
       ) : null}
       {ctrl.accessState === 'revoked' ? (
         // Mirror the Files page's revoked surface, adapted to the sidebar's
@@ -1193,10 +1318,7 @@ export function FileExplorerTree({
               outlives any gesture's ownership, so a drag whose probe died
               stays explained even after the revocation invalidated it. */}
           <p className="da-file-explorer__revoked-body">{GFS_DROP_SESSION_LOST_MESSAGE}</p>
-          <p className="da-file-explorer__revoked-body">
-            Your current session cannot access these files. Sign in again or contact an
-            administrator.
-          </p>
+          <p className="da-file-explorer__revoked-body">{GFS_ACCESS_REVOKED_BODY}</p>
           <Button onClick={() => ctrl.retryAccess()} size="xs" variant="text">
             Retry file access
           </Button>
@@ -1204,7 +1326,12 @@ export function FileExplorerTree({
       ) : ctrl.accessibleNotice ? (
         <p className="da-file-explorer__message muted">{ctrl.accessibleNotice}</p>
       ) : ctrl.accessibleError ? (
-        <StatusBanner tone="error" text={ctrl.accessibleError} compact />
+        // A rate limit is a wait, not a failure: it takes the warning tone.
+        <StatusBanner
+          tone={ctrl.discoveryFailure?.kind === 'rate-limited' ? 'warn' : 'error'}
+          text={ctrl.accessibleError}
+          compact
+        />
       ) : ctrl.loadingAccessible && roots.length === 0 ? (
         <p className="da-file-explorer__message muted" role="status">
           Loading files…
@@ -1225,6 +1352,7 @@ export function FileExplorerTree({
               dropState={dropStatesByResourceId[node.resourceId]}
               dropStatesByResourceId={dropStatesByResourceId}
               expandedIds={expandedIds}
+              homeResourceId={ctrl.home?.resourceId ?? null}
               key={node.resourceId}
               level={1}
               movingResourceId={movingResourceId}
@@ -1290,6 +1418,8 @@ export function FileExplorerTree({
 
       {moveDialogTarget ? (
         <GfsMoveDialog
+          drive={moveDialogTarget.node.drive}
+          home={ctrl.home}
           busy={ctrl.mutating || movePermissionStatus === 'checking'}
           initialCrumbs={moveDialogTarget.initialCrumbs}
           onClose={closeMoveDialog}
@@ -1310,7 +1440,7 @@ export function FileExplorerTree({
             const source: GfsDragSource = {
               resourceId: target.node.resourceId,
               gfsUri: target.node.gfsUri,
-              drive: target.node.drive || GFS_DRIVE_MAIN,
+              drive: target.node.drive,
               kind: target.node.kind === 'directory' ? 'directory' : 'file',
               name: target.node.name,
               ...(Number.isSafeInteger(target.node.version)

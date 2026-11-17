@@ -21,6 +21,7 @@ import {
 } from './chatStoreBinding.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import type { GfsShareOptions } from './gfs/uriHandler.js'
 import {
   abortZipJob,
   appendZipEntry,
@@ -120,6 +121,16 @@ export function registerDeepLinkAcknowledgmentHandlers(
 
 function sanitizeString(input: unknown): string {
   return String(input || '').trim()
+}
+
+// An omitted drive lets the GFS service apply its default. A blank drive is a
+// caller error: it must not be collapsed into "omitted" and land on the
+// default drive, so it fails closed before any GFS request (R2-L8).
+function optionalDriveArg(input: unknown): string | undefined {
+  if (typeof input === 'string' && input.trim() === '') {
+    throw new Error('drive_required: GFS requests require a drive')
+  }
+  return input ? sanitizeString(input) : undefined
 }
 
 // The renderer names each sandbox-ui open so it can tell events of the view
@@ -723,6 +734,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     assertTrustedSender(event)
     return service.listTeamMembers()
   })
+  ipcMain.handle('gfs:getHome', async event => {
+    assertTrustedSender(event)
+    return service.getGfsHome()
+  })
   ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
@@ -776,7 +791,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     'gfs:listAccessible',
     async (event, payload: { drive?: string; cursor?: string }) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
       return service.listAccessibleGfsResources(drive, cursor)
     }
@@ -788,7 +803,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       payload: { resourceId: string; drive?: string; cursor?: string; requestId?: string }
     ) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
       const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
       return runWithGfsAbortSignal(requestId, signal =>
@@ -800,7 +815,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     'gfs:affordances',
     async (event, payload: { resourceId: string; drive?: string }) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.gfsAffordances(sanitizeString(payload?.resourceId), drive)
     }
   )
@@ -901,7 +916,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     'gfs:createFolder',
     async (event, payload: { parentResourceId: string; name: string; drive?: string }) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.createGfsFolder(
         sanitizeString(payload?.parentResourceId),
         sanitizeString(payload?.name),
@@ -916,7 +931,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       payload: { parentResourceId: string; name: string; encodedData: string; drive?: string }
     ) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.createGfsFile(
         sanitizeString(payload?.parentResourceId),
         sanitizeString(payload?.name),
@@ -932,7 +947,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       payload: { parentResourceId: string; name: string; filePath: string; drive?: string }
     ) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.createGfsFileFromPath(
         sanitizeString(payload?.parentResourceId),
         sanitizeString(payload?.name),
@@ -954,7 +969,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       }
     ) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       const resumeUploadId = payload?.resumeUploadId
         ? sanitizeString(payload.resumeUploadId)
         : undefined
@@ -980,7 +995,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       }
     ) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       const resumeUploadId = payload?.resumeUploadId
         ? sanitizeString(payload.resumeUploadId)
         : undefined
@@ -999,13 +1014,13 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       assertTrustedSender(event)
       return service.getGfsUploadSnapshot(
         sanitizeString(payload?.uploadId),
-        payload?.drive ? sanitizeString(payload.drive) : undefined
+        optionalDriveArg(payload?.drive)
       )
     }
   )
   ipcMain.handle('gfs:listUploadSessions', async (event, payload?: { drive?: string }) => {
     assertTrustedSender(event)
-    return service.listGfsUploadSessions(payload?.drive ? sanitizeString(payload.drive) : undefined)
+    return service.listGfsUploadSessions(optionalDriveArg(payload?.drive))
   })
   ipcMain.handle(
     'gfs:pauseUpload',
@@ -1013,7 +1028,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       assertTrustedSender(event)
       return service.pauseGfsUpload(
         sanitizeString(payload?.uploadId),
-        payload?.drive ? sanitizeString(payload.drive) : undefined
+        optionalDriveArg(payload?.drive)
       )
     }
   )
@@ -1023,7 +1038,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       assertTrustedSender(event)
       return service.resumeGfsUpload(
         sanitizeString(payload?.uploadId),
-        payload?.drive ? sanitizeString(payload.drive) : undefined
+        optionalDriveArg(payload?.drive)
       )
     }
   )
@@ -1033,7 +1048,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       assertTrustedSender(event)
       await service.cancelGfsUpload(
         sanitizeString(payload?.uploadId),
-        payload?.drive ? sanitizeString(payload.drive) : undefined
+        optionalDriveArg(payload?.drive)
       )
       return { ok: true }
     }
@@ -1045,7 +1060,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       payload: { resourceId: string; encodedData: string; drive?: string; ifMatch?: number }
     ) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.replaceGfsFile(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.encodedData),
@@ -1061,7 +1076,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       payload: { resourceId: string; filePath: string; drive?: string; ifMatch?: number }
     ) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.replaceGfsFileFromPath(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.filePath),
@@ -1077,7 +1092,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       payload: { resourceId: string; newName: string; drive?: string; ifMatch?: number }
     ) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.renameGfsResource(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.newName),
@@ -1108,7 +1123,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       ) {
         throw new Error('invalid_session_generation')
       }
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.moveGfsResource(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.destinationId),
@@ -1123,7 +1138,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     'gfs:deleteResource',
     async (event, payload: { resourceId: string; drive?: string; ifMatch?: number }) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.deleteGfsResource(
         sanitizeString(payload?.resourceId),
         drive,
@@ -1145,7 +1160,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     ) => {
       assertTrustedSender(event)
       const bits = Array.isArray(payload?.bits) ? payload.bits.map(sanitizeString) : []
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       const inherit = payload?.inherit
       if (inherit !== undefined && typeof inherit !== 'boolean') {
         throw new Error('inherit must be a boolean')
@@ -1163,7 +1178,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     'gfs:listGrants',
     async (event, payload: { resourceId: string; drive?: string }) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.listGfsGrants(sanitizeString(payload?.resourceId), drive)
     }
   )
@@ -1175,7 +1190,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
     'gfs:listShares',
     async (event, payload: { resourceId: string; drive?: string }) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
       return service.listGfsShares(sanitizeString(payload?.resourceId), drive)
     }
   )
@@ -1185,13 +1200,41 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   })
   ipcMain.handle(
     'gfs:createShare',
-    async (event, payload: { resourceId: string; subjectKeys: string[]; drive?: string }) => {
+    async (
+      event,
+      payload: {
+        resourceId: string
+        subjectKeys: string[]
+        drive?: string
+        options?: GfsShareOptions
+      }
+    ) => {
       assertTrustedSender(event)
-      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const drive = optionalDriveArg(payload?.drive)
+      let options: GfsShareOptions | undefined
+      if (payload?.options !== undefined) {
+        if (
+          !Array.isArray(payload.options?.permissions) ||
+          typeof payload.options?.includeDescendants !== 'boolean'
+        ) {
+          throw new Error('Invalid read share options')
+        }
+        const permissions = payload.options.permissions.map(sanitizeString)
+        // An empty permission set is not a read share: the server refuses it
+        // (`permissions_invalid`), so refuse it here before the call.
+        if (
+          permissions.length === 0 ||
+          permissions.some(permission => permission !== 'read' && permission !== 'share')
+        ) {
+          throw new Error('Invalid read share options')
+        }
+        options = { permissions, includeDescendants: payload.options.includeDescendants }
+      }
       return service.createGfsShare(
         sanitizeString(payload?.resourceId),
         sanitizeSubjectKeys(payload?.subjectKeys),
-        drive
+        drive,
+        options
       )
     }
   )

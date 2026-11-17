@@ -29,6 +29,7 @@ gfs_resources	none
 gfs_shares	none
 gfs_upload_parts	none
 gfs_upload_sessions	none
+gfs_user_homes	none
 governed_event_read_v1	none
 governed_event_stream	none
 governed_run_attribution_bindings	none

@@ -134,7 +134,8 @@ Settings for capabilities that need consent. Your app cannot change it.
   `contexts.read`, `mcp.read`, `theme.read`) return `invalid_request` if you
   pass any parameter.
 - **`gfs.list`** accepts only `drive` (max 64 characters), `resourceId` (max 128) and `cursor` (max 512). Pass the previous `nextCursor` to get the next
-  page.
+  page. A `drive` made only of whitespace returns `invalid_request`; an empty
+  string is treated as omitted (issue #1508).
 - **`gfs.read`** requires `uri` (a `gfs://` link, max 2048 characters) and `as`
   (`'text'` or `'dataUrl'`).
   - `as: 'text'` refuses files over 2 MB (`payload_too_large`) and files that

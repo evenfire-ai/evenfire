@@ -1,4 +1,6 @@
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { GfsAbortRegistration } from './gfs/abortTypes.js'
+import type { GfsShareOptions } from './gfs/uriHandler.js'
 import type {
   PluginAuditEntryView,
   PluginConsentRequest,
@@ -125,6 +127,7 @@ declare global {
         switch: (teamId: string) => Promise<SessionState>
       }
       gfs: {
+        getHome: () => Promise<import('./gfs/uriHandler.js').GfsHome>
         getUserNavigationGeneration?: () => number | null
         advanceUserNavigationGeneration?: () => number | null
         copyDeepLink?: (uri: string) => Promise<{ url: string }>
@@ -163,7 +166,7 @@ declare global {
         }>
         download: (
           uri: string,
-          options?: { maxBytes?: number; signal?: AbortSignal }
+          options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration }
         ) => Promise<{
           resource: {
             drive: string
@@ -229,7 +232,7 @@ declare global {
           resourceId: string,
           drive?: string,
           cursor?: string,
-          options?: { signal?: AbortSignal }
+          options?: { registerAbort?: GfsAbortRegistration }
         ) => Promise<{
           items: Array<{
             resourceId: string
@@ -267,7 +270,7 @@ declare global {
             jobId: string,
             name: string,
             uri: string,
-            options?: { maxBytes?: number; signal?: AbortSignal }
+            options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration }
           ) => Promise<{ name: string; bytes: number }>
           finish: (
             jobId: string,
@@ -455,6 +458,7 @@ declare global {
             drive: string
             resourceId: string
             subject: { type: string; id?: string }
+            homeOwner?: true
             permissions: string[]
             inherit: boolean
           }>
@@ -474,7 +478,12 @@ declare global {
           }>
         >
         revokeShare: (shareId: string) => Promise<void>
-        createShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
+        createShare: (
+          resourceId: string,
+          subjectKeys: string[],
+          drive?: string,
+          options?: GfsShareOptions
+        ) => Promise<void>
       }
       agents: {
         listMine: () => Promise<AgentWithMcpServers[]>

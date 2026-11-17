@@ -67,6 +67,13 @@ async function flushMicrotasks() {
 
 describe('gfs producer-side abort (R1-M1)', () => {
   const service = {
+    getGfsHome: vi.fn(async () => ({
+      state: 'pending',
+      drive: null,
+      path: null,
+      resourceId: null,
+      heldPermissions: [],
+    })),
     listGfsChildren: hangingRead(),
     downloadGfsUri: vi.fn(async () => new ArrayBuffer(0)),
   }
@@ -78,6 +85,22 @@ describe('gfs producer-side abort (R1-M1)', () => {
 
   afterEach(() => {
     service.listGfsChildren.mockClear()
+    service.getGfsHome.mockClear()
+  })
+
+  it('requires a trusted sender for home discovery and forwards a trusted request', async () => {
+    await expect(
+      handler('gfs:getHome')({ senderFrame: { url: 'https://untrusted.example' } }, undefined)
+    ).rejects.toThrow()
+    expect(service.getGfsHome).not.toHaveBeenCalled()
+    expect(await handler('gfs:getHome')(trusted, undefined)).toEqual({
+      state: 'pending',
+      drive: null,
+      path: null,
+      resourceId: null,
+      heldPermissions: [],
+    })
+    expect(service.getGfsHome).toHaveBeenCalledTimes(1)
   })
 
   it('aborts the in-flight producer listing when the renderer stops the walk', async () => {

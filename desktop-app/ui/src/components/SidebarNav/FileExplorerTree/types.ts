@@ -10,8 +10,9 @@ import type { Tone } from '@/uiTypes'
  * single-click only toggles expand/collapse inside the tree).
  */
 export interface FileExplorerTreeProps {
-  /** Double-click / Enter on a folder → open (or focus) its files tab. */
-  onOpenFolder: (gfsUri: string) => void
+  /** Double-click / Enter on a folder → open (or focus) its files tab at that
+   *  `gfsUri`; the "Shared with me" label opens `GFS_SHARED_WITH_ME_LOCATION`. */
+  onOpenFolder: (location: string) => void
   /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void
   /** Transient success/error feedback for the download fallback. */
@@ -29,7 +30,16 @@ export interface FileExplorerNodeProps {
   /** Session access is live: gates the per-node children fetch the same way the
    *  controller gates its own children query — a revoked session fetches nothing. */
   accessActive: boolean
+  /** The caller's home root, when one exists. It is a governed root: the server
+   *  refuses to move or rename it, so its row is never a drag source and offers
+   *  no Move action. */
+  homeResourceId: string | null
   expandedIds: ReadonlySet<string>
+  /** Render the node as a section of the tree, like "Shared with me": a label
+   *  with no folder icon, and a chevron that lists its children on demand.
+   *  Activating the label opens the folder and does not expand it. Used for
+   *  the caller's own home. */
+  section?: boolean
   selectedId: string | null
   /** Resource id currently being moved (freezes drag starts), when a move the
    *  tree itself initiated is in flight. */

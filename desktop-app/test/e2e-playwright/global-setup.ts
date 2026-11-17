@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { E2E_TEST_EMAIL } from '../../../tests/e2e/testUser'
+import { awaitPasswordPace } from './helpers/passwordPace'
 
 const configuredAllowedContexts = process.env.E2E_ALLOWED_CONTEXTS?.split(',')
   .map(context => context.trim())
@@ -417,6 +418,7 @@ async function globalSetup(): Promise<void> {
       process.env.ADMIN_PASSWORD ||
       'changeme123!'
 
+    await awaitPasswordPace()
     loginResp = await fetch(`${externalRest}${loginPath}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

@@ -197,6 +197,11 @@ export interface GfsGrantInput {
   inherit?: boolean
 }
 
+export interface GfsShareOptions {
+  permissions: string[]
+  includeDescendants: boolean
+}
+
 export interface GfsShareInput {
   resourceId: string
   drive?: string
@@ -217,6 +222,7 @@ export interface GfsGrantListItem {
   drive: string
   resourceId: string
   subject: { type: string; id?: string }
+  homeOwner?: true
   permissions: string[]
   inherit: boolean
 }
@@ -280,7 +286,31 @@ export interface GfsDeleteInput {
   ifMatch?: number
 }
 
+export interface GfsHome {
+  state: 'ready' | 'pending' | 'conflict' | 'retired'
+  drive: string | null
+  path: string | null
+  resourceId: string | null
+  conflictCode?: string | null
+  heldPermissions: string[]
+}
+
 const DEFAULT_DRIVE = 'main'
+
+/**
+ * An explicit drive must name one. A blank value is a caller error, not an
+ * omitted drive: it fails closed here instead of reaching the server, whose
+ * omitted-drive default would act on `main` (R2-L8).
+ */
+function requireDrive(drive: string): string {
+  if (!drive.trim()) throw new GfsUriError('drive_required: GFS requests require a drive')
+  return drive
+}
+
+/** Omitted drives default to `main` (single-drive contract); blank ones fail closed. */
+function resolveDrive(drive: string | undefined): string {
+  return drive === undefined ? DEFAULT_DRIVE : requireDrive(drive)
+}
 const TRANSPORT_TOKEN_FIELD = ['tok', 'en'].join('') as 'token'
 
 /** Grant/share ids name ACL rows (control-api routes/gfs UUID_RE). */
@@ -316,7 +346,7 @@ async function createGfsResource(
   signal?: AbortSignal
 ): Promise<GfsResourceView> {
   const q = new URLSearchParams()
-  q.set('drive', input.drive ?? DEFAULT_DRIVE)
+  q.set('drive', resolveDrive(input.drive))
   const body: Record<string, unknown> = {
     name: input.name,
     kind: input.kind,
@@ -348,7 +378,7 @@ async function replaceGfsFile(
   signal?: AbortSignal
 ): Promise<GfsResourceView> {
   const q = new URLSearchParams()
-  q.set('drive', input.drive ?? DEFAULT_DRIVE)
+  q.set('drive', resolveDrive(input.drive))
   const body: Record<string, unknown> = {
     contentBase64: input.encodedData,
   }
@@ -378,7 +408,7 @@ async function renameGfsResource(
   session: string
 ): Promise<{ resourceId: string; version: number }> {
   const q = new URLSearchParams()
-  q.set('drive', input.drive ?? DEFAULT_DRIVE)
+  q.set('drive', resolveDrive(input.drive))
   const body: Record<string, unknown> = { newName: input.newName }
   if (input.ifMatch !== undefined) body.ifMatch = input.ifMatch
   const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.resourceId)}?${q.toString()}`
@@ -398,7 +428,7 @@ async function moveGfsResource(
   session: string
 ): Promise<{ resourceId: string; version: number }> {
   const q = new URLSearchParams()
-  q.set('drive', input.drive ?? DEFAULT_DRIVE)
+  q.set('drive', resolveDrive(input.drive))
   const body: Record<string, unknown> = { newParentId: input.destinationId }
   if (input.ifMatch !== undefined) body.ifMatch = input.ifMatch
   if (input.newName !== undefined) body.newName = input.newName
@@ -419,7 +449,7 @@ async function deleteGfsResource(
   session: string
 ): Promise<{ deleted: boolean; resourceId: string }> {
   const q = new URLSearchParams()
-  q.set('drive', input.drive ?? DEFAULT_DRIVE)
+  q.set('drive', resolveDrive(input.drive))
   const body: Record<string, unknown> = {}
   if (input.ifMatch !== undefined) body.ifMatch = input.ifMatch
   const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.resourceId)}?${q.toString()}`
@@ -437,6 +467,18 @@ async function deleteGfsResource(
  */
 export class GfsClient {
   constructor(private readonly transport: GfsTransport) {}
+
+  async getHome(token: string): Promise<GfsHome> {
+    try {
+      return await this.transport.requestJson<GfsHome>(
+        'GET',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/home'),
+        { token }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+  }
 
   /** Resolve a gfs:// URI to its current resource (validates the URI locally first). */
   async resolveUri(uri: string, token: string, signal?: AbortSignal): Promise<ResolvedGfsResource> {
@@ -535,14 +577,17 @@ export class GfsClient {
     opts?: { drive?: string; cursor?: string; signal?: AbortSignal }
   ): Promise<GfsChildrenPage> {
     const q = new URLSearchParams()
-    q.set('drive', opts?.drive ?? DEFAULT_DRIVE)
+    // An omitted drive lets the server apply its documented default.
+    if (opts?.drive !== undefined) q.set('drive', requireDrive(opts.drive))
     if (opts?.cursor) q.set('cursor', opts.cursor)
+    const query = q.toString()
     try {
       const payload = await this.transport.requestJson<GfsEnvelope<GfsChildrenPage>>(
         'GET',
         joinUrl(
           this.transport.baseUrl,
-          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children?${q.toString()}`
+          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children` +
+            (query ? `?${query}` : '')
         ),
         { token, signal: opts?.signal }
       )
@@ -557,12 +602,13 @@ export class GfsClient {
     opts?: { drive?: string; cursor?: string }
   ): Promise<GfsAccessibleResourcesPage> {
     const q = new URLSearchParams()
-    q.set('drive', opts?.drive ?? DEFAULT_DRIVE)
+    if (opts?.drive !== undefined) q.set('drive', requireDrive(opts.drive))
     if (opts?.cursor) q.set('cursor', opts.cursor)
+    const query = q.toString()
     try {
       const payload = await this.transport.requestJson<GfsEnvelope<GfsAccessibleResourcesPage>>(
         'GET',
-        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources?' + q.toString()),
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources' + (query ? `?${query}` : '')),
         { ['token']: session }
       )
       return unwrap(payload)
@@ -579,14 +625,15 @@ export class GfsClient {
   async affordances(
     resourceId: string,
     token: string,
-    drive: string = DEFAULT_DRIVE
+    drive?: string
   ): Promise<GfsHeldAffordances> {
+    const resolvedDrive = resolveDrive(drive)
     try {
       return await this.transport.requestJson<GfsHeldAffordances>(
         'GET',
         joinUrl(
           this.transport.baseUrl,
-          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/affordances?drive=${encodeURIComponent(drive)}`
+          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/affordances?drive=${encodeURIComponent(resolvedDrive)}`
         ),
         { token }
       )
@@ -601,6 +648,7 @@ export class GfsClient {
    * API error here); the UI affordances only HIDE controls the caller can't use.
    */
   async grant(input: GfsGrantInput, token: string): Promise<void> {
+    const drive = resolveDrive(input.drive)
     try {
       await this.transport.requestJson(
         'PUT',
@@ -608,7 +656,7 @@ export class GfsClient {
         {
           token,
           body: {
-            drive: input.drive ?? DEFAULT_DRIVE,
+            drive,
             resourceId: input.resourceId,
             subjects: input.subjects,
             permissions: input.permissions,
@@ -632,7 +680,7 @@ export class GfsClient {
     token: string
   ): Promise<GfsGrantListItem[]> {
     const q = new URLSearchParams()
-    q.set('drive', input.drive ?? DEFAULT_DRIVE)
+    q.set('drive', resolveDrive(input.drive))
     q.set('resourceId', input.resourceId)
     let payload: { items: GfsGrantListItem[] }
     try {
@@ -668,6 +716,7 @@ export class GfsClient {
 
   /** Create a URI share for subjects (same no-escalation engine, isShare=true). */
   async createShare(input: GfsShareInput, token: string): Promise<void> {
+    const drive = resolveDrive(input.drive)
     try {
       await this.transport.requestJson(
         'POST',
@@ -675,7 +724,7 @@ export class GfsClient {
         {
           token,
           body: {
-            drive: input.drive ?? DEFAULT_DRIVE,
+            drive,
             resourceId: input.resourceId,
             subjects: input.subjects,
             permissions: input.permissions,
@@ -693,7 +742,7 @@ export class GfsClient {
     token: string
   ): Promise<GfsShareListItem[]> {
     const q = new URLSearchParams()
-    q.set('drive', input.drive ?? DEFAULT_DRIVE)
+    q.set('drive', resolveDrive(input.drive))
     q.set('resourceId', input.resourceId)
     let payload: { items: GfsShareListItem[] }
     try {

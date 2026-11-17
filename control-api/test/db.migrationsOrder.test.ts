@@ -79,11 +79,16 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 2)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
-    // Later post-dev migrations follow the Task 106 sequence.
-    expect(
-      versions.slice(versions.indexOf(task106.at(-1)!) + 1, versions.indexOf(task106.at(-1)!) + 3)
-    ).toEqual(['0139_llm_catalog_prune_columns', '0140_llm_catalog_prune_episodes'])
-    expect(versions.at(-1)).toBe('0140_llm_catalog_prune_episodes')
+    // Later post-dev migrations follow the Task 106 sequence, and the per-user GFS homes
+    // migration (#1168) follows them and is last.
+    const task106End = versions.indexOf(task106.at(-1)!)
+    expect(versions.slice(task106End + 1, task106End + 3)).toEqual([
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
+    ])
+    const gfsUserHomes = '0141_gfs_user_homes'
+    expect(versions[task106End + 3]).toBe(gfsUserHomes)
+    expect(versions.at(-1)).toBe(gfsUserHomes)
   })
 
   it('keeps legacy aliases unique and distinct from current versions', async () => {

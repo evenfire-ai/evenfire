@@ -389,8 +389,9 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
 
     renderHarness()
     await waitFor(() => expect(sourceCalls).toBe(1))
+    const notesOptions = await screen.findByRole('button', { name: 'Options for notes.txt' })
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+      fireEvent.click(notesOptions)
     })
     fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
@@ -1232,7 +1233,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       screen.getByRole('button', { name: 'Shared with me' }).click()
     })
     expect(await screen.findByText('No shared files yet')).toBeTruthy()
-    expect(tab()).toBe('null|Files')
+    expect(tab()).toBe('evendrive:shared-with-me|Shared with me')
     await waitFor(() => expect(reportOutcome).toHaveBeenCalledWith(1090, 'superseded'))
 
     await act(async () => {
@@ -1257,11 +1258,52 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       resolvePending(pendingFile)
       await Promise.resolve()
     })
-    expect(tab()).toBe('null|Files')
+    expect(tab()).toBe('evendrive:shared-with-me|Shared with me')
     expect(reportExplicitIntent).toHaveBeenCalledOnce()
     expect(reportOutcome).toHaveBeenCalledTimes(1)
     expect(reportOutcome).toHaveBeenCalledWith(1090, 'superseded')
     expect(screen.queryByText('This resource was deleted.')).toBeNull()
+  })
+
+  it('reports the root location when EvenDrive is opened from a seeded Shared with me tab', async () => {
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const resolve = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+    const onExplicitNavigationIntent = vi.fn()
+    renderHarness({ pendingGfsUri: 'evendrive:shared-with-me', onExplicitNavigationIntent })
+    const tab = () => screen.getByTestId('tab-files-1').textContent
+    // Witness: the seeded view reported itself before the crumb is used.
+    await waitFor(() => expect(tab()).toBe('evendrive:shared-with-me|Shared with me'))
+    // Opening the seed is not a user navigation.
+    expect(onExplicitNavigationIntent).not.toHaveBeenCalled()
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'EvenDrive' }).click()
+    })
+
+    // A root tab has no path, and setFilesTabPath titles a nameless location "Files".
+    await waitFor(() => expect(tab()).toBe('null|Files'))
+    // The crumb supersedes any pending deep link or seed.
+    expect(onExplicitNavigationIntent).toHaveBeenCalledOnce()
+    expect(screen.getByRole('button', { name: 'EvenDrive' }).getAttribute('aria-current')).toBe(
+      'page'
+    )
+    expect(resolve).not.toHaveBeenCalled()
   })
 
   it('does not open a late resolve after its pending deep link is cleared', async () => {
@@ -1609,7 +1651,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
 
     await waitFor(() => {
       expect(screen.getByRole('navigation', { name: 'File location' }).textContent).toBe(
-        'Shared with me'
+        'EvenDriveShared with me'
       )
       expect(screen.queryByText('private-notes.md')).toBeNull()
     })

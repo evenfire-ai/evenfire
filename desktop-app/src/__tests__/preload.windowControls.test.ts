@@ -26,6 +26,14 @@ afterEach(() => {
 })
 
 describe('preload window controls contract', () => {
+  it('exposes home discovery through the trusted GFS IPC channel', async () => {
+    await import('../preload.js')
+    const exposed = electron.exposeInMainWorld.mock.calls.find(
+      ([name]) => name === 'clerum'
+    )?.[1] as { gfs: typeof window.clerum.gfs }
+    await exposed.gfs.getHome()
+    expect(electron.invoke).toHaveBeenCalledWith('gfs:getHome')
+  })
   it('exposes the titlebar controls through clerum with matching IPC channels and cleanup', async () => {
     await import('../preload.js')
 

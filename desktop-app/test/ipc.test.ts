@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
 import {
   __setChatStoreBaseDirForTests,
@@ -743,6 +743,103 @@ describe('ipc host status stream handlers', () => {
     expect(result).toEqual({ targets: [], accounts: [] })
   })
 
+  // Every GFS channel that takes a drive: [channel, service method, payload
+  // without drive, index of the drive argument in the service call].
+  const RID = '11111111-1111-1111-1111-111111111111'
+  const GFS_DRIVE_CHANNELS: Array<[string, string, Record<string, unknown>, number]> = [
+    ['gfs:listAccessible', 'listAccessibleGfsResources', {}, 0],
+    ['gfs:listChildren', 'listGfsChildren', { resourceId: RID }, 1],
+    ['gfs:affordances', 'gfsAffordances', { resourceId: RID }, 1],
+    ['gfs:createFolder', 'createGfsFolder', { parentResourceId: RID, name: 'a' }, 2],
+    [
+      'gfs:createFile',
+      'createGfsFile',
+      { parentResourceId: RID, name: 'a.txt', encodedData: 'YQ==' },
+      3,
+    ],
+    [
+      'gfs:createFileFromPath',
+      'createGfsFileFromPath',
+      { parentResourceId: RID, name: 'a.txt', filePath: '/tmp/a.txt' },
+      3,
+    ],
+    [
+      'gfs:startFileUpload',
+      'startGfsFileUpload',
+      { parentResourceId: RID, name: 'a.txt', filePath: '/tmp/a.txt' },
+      3,
+    ],
+    ['gfs:startFileReplace', 'startGfsFileReplace', { resourceId: RID, filePath: '/tmp/a' }, 2],
+    ['gfs:getUploadSnapshot', 'getGfsUploadSnapshot', { uploadId: 'up-1' }, 1],
+    ['gfs:listUploadSessions', 'listGfsUploadSessions', {}, 0],
+    ['gfs:pauseUpload', 'pauseGfsUpload', { uploadId: 'up-1' }, 1],
+    ['gfs:resumeUpload', 'resumeGfsUpload', { uploadId: 'up-1' }, 1],
+    ['gfs:cancelUpload', 'cancelGfsUpload', { uploadId: 'up-1' }, 1],
+    ['gfs:replaceFile', 'replaceGfsFile', { resourceId: RID, encodedData: 'YQ==' }, 2],
+    ['gfs:replaceFileFromPath', 'replaceGfsFileFromPath', { resourceId: RID, filePath: '/a' }, 2],
+    ['gfs:renameResource', 'renameGfsResource', { resourceId: RID, newName: 'b' }, 2],
+    [
+      'gfs:moveResource',
+      'moveGfsResource',
+      { resourceId: RID, destinationId: RID, expectedSessionGeneration: 1 },
+      3,
+    ],
+    ['gfs:deleteResource', 'deleteGfsResource', { resourceId: RID }, 1],
+    ['gfs:grant', 'grantGfs', { resourceId: RID, subjectKeys: ['user:user-1'], bits: ['read'] }, 3],
+    ['gfs:listGrants', 'listGfsGrants', { resourceId: RID }, 1],
+    ['gfs:listShares', 'listGfsShares', { resourceId: RID }, 1],
+    ['gfs:createShare', 'createGfsShare', { resourceId: RID, subjectKeys: ['user:user-1'] }, 2],
+  ]
+
+  // Scans the handler source instead of the table: a new channel that reads a
+  // drive without optionalDriveArg, or that is missing from the table, fails here.
+  it('reads a drive only through optionalDriveArg, in exactly the channels of the table', () => {
+    const ipcSource = readFileSync(new URL('../src/ipc.ts', import.meta.url), 'utf8')
+    const handlers = ipcSource
+      .split(/ipcMain\.handle\(\s*/)
+      .slice(1)
+      .flatMap(chunk => {
+        const channel = /^'([^']+)'/.exec(chunk)?.[1]
+        const reads = chunk.match(/\bpayload\??\.drive\b/g)?.length ?? 0
+        const declares = /\bdrive\??:\s*string\b/.test(chunk)
+        if (!channel || (reads === 0 && !declares)) return []
+        const checked = chunk.match(/optionalDriveArg\(payload\?\.drive\)/g)?.length ?? 0
+        return [{ channel, reads, checked }]
+      })
+    expect(handlers.filter(h => h.reads === 0 || h.reads !== h.checked)).toEqual([])
+    expect(handlers.map(h => h.channel).sort()).toEqual(
+      GFS_DRIVE_CHANNELS.map(([channel]) => channel).sort()
+    )
+  })
+
+  it.each(GFS_DRIVE_CHANNELS)(
+    '%s rejects a blank drive instead of defaulting it (R2-L8)',
+    async (channel, method, payload, driveIndex) => {
+      const mocked = service as unknown as Record<string, ReturnType<typeof vi.fn>>
+      mocked[method] ??= vi.fn()
+      mocked[method].mockReset()
+      mocked[method].mockResolvedValue({})
+      const handler = testState.handlers.get(channel)
+      expect(handler).toBeDefined()
+      const { event } = makeTrustedEvent()
+
+      for (const blank of ['', '   ']) {
+        await expect(
+          Promise.resolve(handler?.(event, { ...payload, drive: blank }))
+        ).rejects.toThrow('drive_required')
+      }
+      expect(mocked[method]).not.toHaveBeenCalled()
+
+      // Liveness witness: the same channel forwards a named drive (trimmed)
+      // and leaves an omitted drive to the service default.
+      await Promise.resolve(handler?.(event, { ...payload, drive: ' main ' }))
+      await Promise.resolve(handler?.(event, { ...payload }))
+      expect(mocked[method]).toHaveBeenCalledTimes(2)
+      expect(mocked[method].mock.calls[0][driveIndex]).toBe('main')
+      expect(mocked[method].mock.calls[1][driveIndex]).toBeUndefined()
+    }
+  )
+
   it('routes GFS grant requests through trusted IPC with sanitized input', async () => {
     service.grantGfs.mockResolvedValue(undefined)
     const { event } = makeTrustedEvent()
@@ -767,6 +864,78 @@ describe('ipc host status stream handlers', () => {
       'main',
       undefined
     )
+  })
+
+  it('forwards a read share with its exact descendant scope and rejects Editor permissions', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:createShare')
+    const payload = {
+      resourceId: ' resource-1 ',
+      subjectKeys: [' user:user-1 '],
+      drive: ' main ',
+      options: { permissions: [' read ', ' share '], includeDescendants: false },
+    }
+    await Promise.resolve(handler?.(event, payload))
+    expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+      permissions: ['read', 'share'],
+      includeDescendants: false,
+    })
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          ...payload,
+          options: { permissions: ['read', 'write'], includeDescendants: false },
+        })
+      )
+    ).rejects.toThrow('Invalid read share options')
+  })
+
+  it('forwards a share-only read role', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:createShare')
+    await Promise.resolve(
+      handler?.(event, {
+        resourceId: 'resource-1',
+        subjectKeys: ['user:user-1'],
+        drive: 'main',
+        options: { permissions: ['share'], includeDescendants: false },
+      })
+    )
+    expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+      permissions: ['share'],
+      includeDescendants: false,
+    })
+  })
+
+  it('rejects an empty read-role intersection before creating the share', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:createShare')
+    const payload = {
+      resourceId: 'resource-1',
+      subjectKeys: ['user:user-1'],
+      drive: 'main',
+      options: { permissions: [], includeDescendants: false },
+    }
+    // The server refuses an empty permission set (`permissions_invalid`), so
+    // the IPC boundary must not dispatch it.
+    await expect(Promise.resolve(handler?.(event, payload))).rejects.toThrow(
+      'Invalid read share options'
+    )
+    expect(service.createGfsShare).not.toHaveBeenCalled()
+
+    // Witness: the same handler and service accept the neighbouring read role,
+    // so the refusal above is the empty set and not a broken call path.
+    await Promise.resolve(
+      handler?.(event, {
+        ...payload,
+        options: { permissions: ['read'], includeDescendants: false },
+      })
+    )
+    expect(service.createGfsShare).toHaveBeenCalledTimes(1)
+    expect(service.createGfsShare).toHaveBeenCalledWith('resource-1', ['user:user-1'], 'main', {
+      permissions: ['read'],
+      includeDescendants: false,
+    })
   })
 
   it('rejects an empty or non-array subjectKeys payload before calling AppService', async () => {

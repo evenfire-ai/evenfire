@@ -17,7 +17,15 @@ import {
   normalizeGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
 import { isEditorGfsPermissions, planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
-import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  Field,
+  IconButton,
+  StatusBanner,
+  TextInput,
+} from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
@@ -34,7 +42,16 @@ import {
   IconOpenRoute,
   IconShare,
 } from '@components/SidebarNav/icons'
-import { GFS_DRIVE_MAIN, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
+import {
+  GFS_ACCESS_REVOKED_BODY,
+  GFS_DEFAULT_DISCOVERY_DRIVE,
+  GFS_EVENDRIVE_ROOT_LABEL,
+  GFS_MY_HOME_DETAIL,
+  GFS_MY_HOME_LABEL,
+  GFS_RESOURCE_DRAG_TYPE,
+  GFS_SHARED_WITH_ME_LABEL,
+  GFS_SHARED_WITH_ME_LOCATION,
+} from '@constants/gfsBrowser'
 import {
   desktopQueryKeys,
   isGfsSessionAuthorityCurrent,
@@ -77,15 +94,27 @@ import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
 import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
+import { GfsHomeStateNotice } from '@/gfs/GfsHomeStateNotice'
 import { GfsInheritedAccessDialog } from '@/gfs/GfsInheritedAccessDialog'
 import type { GfsInheritedAccessDialogRequest } from '@/gfs/GfsInheritedAccessDialog/types'
+import {
+  callerHomeDisplayName,
+  callerHomeNotice,
+  callerHomeRootNode,
+  isCallerHomeRoot,
+} from '@/gfs/callerHome'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
   type GfsDelegationSubjectOption,
   type GfsGrantListItem,
+  permissionsForRole,
 } from '@/gfs/delegation'
-import type { GfsInheritedAccessSource, GfsInheritedCoverageState } from '@/gfs/delegation.types'
+import type {
+  GfsInheritedAccessSource,
+  GfsInheritedCoverageState,
+  GfsShareListItem,
+} from '@/gfs/delegation.types'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
 import type { GfsDragSource, GfsDropVerdict } from '@/gfs/dragSession'
@@ -110,6 +139,16 @@ import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
+
+/** Folders first, then by name (drive as the fallback name). */
+function sortDriveResources(resources: GfsDriveResource[]): GfsDriveResource[] {
+  return [...resources].sort((left, right) => {
+    if (left.kind !== right.kind) {
+      return left.kind === 'directory' ? -1 : 1
+    }
+    return (left.name || left.drive).localeCompare(right.name || right.drive)
+  })
+}
 
 function hasBit(affordances: { held?: string[] } | null | undefined, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
@@ -244,16 +283,17 @@ function mergeErrorMessages(...errors: unknown[]): string | null {
 }
 
 /** A drop destination the drag pipeline can move INTO: a grid folder row or a
- *  breadcrumb crumb. Only the identity fields admission and the commit need. */
-type GfsFolderDropTarget = Pick<GfsDriveResource, 'resourceId' | 'name'> & {
+ *  breadcrumb crumb. Carries the destination's own drive, so admission never
+ *  compares against the open location (a root drop has no folder open). */
+type GfsFolderDropTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'drive'> & {
   kind: 'directory'
 }
 
 /** Any row/header action target — a listing row (GfsDriveResource) or the
  * current breadcrumb (GfsCrumb); both carry the identity fields the delete /
  *  rename / move calls need (kind also powers dialog titles + the move cycle
- *  guard). */
-type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'version'> & {
+ *  guard), and the row's own drive routes the mutation. */
+type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'drive' | 'version'> & {
   kind: 'file' | 'directory'
   /** Present on list rows (GfsBrowserChild) — the move dialog uses it to
    * refuse a no-op move into the folder that already contains the target. */
@@ -377,6 +417,11 @@ export function FilesPage({
   const [renameTarget, setRenameTarget] = useState<GfsActionTarget | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
+  // What the root shows: the EvenDrive overview (the caller's home and what
+  // others share) or only what others share. Seeded from the tab location.
+  const [rootView, setRootView] = useState<'overview' | 'shared'>(() =>
+    pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION ? 'shared' : 'overview'
+  )
   const [pendingGfsDeepLinkFailure, setPendingGfsDeepLinkFailure] = useState<{
     id: number
     message: string
@@ -499,7 +544,7 @@ export function FilesPage({
     }
   }, [])
   const {
-    current,
+    current: locationCurrent,
     crumbs,
     sessionScope,
     accessibleResources,
@@ -515,6 +560,17 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+  // The open location as this page names it: the caller's ready home root is
+  // "My home" on every entry path. Controller state keeps the name it stored.
+  const current = useMemo(() => {
+    if (!locationCurrent) return null
+    const name = callerHomeDisplayName(ctrl.home, {
+      resourceId: locationCurrent.resourceId,
+      drive: ctrl.drive,
+      name: locationCurrent.name,
+    })
+    return name === locationCurrent.name ? locationCurrent : { ...locationCurrent, name }
+  }, [ctrl.drive, ctrl.home, locationCurrent])
   const accessibleRootResourceIds = useMemo(
     () => new Set(accessibleResources.map(resource => resource.resourceId)),
     [accessibleResources]
@@ -575,7 +631,7 @@ export function FilesPage({
           desktopQueryKeys.gfsAffordances(
             sessionScope,
             current.resourceId,
-            GFS_DRIVE_MAIN,
+            ctrl.drive,
             ctrl.sessionGeneration
           )
         )
@@ -592,7 +648,7 @@ export function FilesPage({
   const adjudication = useGfsDragAdjudication({
     scope: sessionScope,
     sessionGeneration: ctrl.sessionGeneration,
-    drive: GFS_DRIVE_MAIN,
+    drive: ctrl.drive,
     resolve: useCallback((uri: string) => window.clerum.gfs.resolve(uri), []),
     // A drag probe that answers 401 is a session failure, not a per-item
     // refusal: the drop is refused AND the session revoked.
@@ -685,7 +741,7 @@ export function FilesPage({
         key: desktopQueryKeys.gfsChildren(
           sessionScope,
           folder.resourceId,
-          GFS_DRIVE_MAIN,
+          folder.drive,
           ctrl.sessionGeneration
         ),
       }))
@@ -714,7 +770,7 @@ export function FilesPage({
           .fetchInfiniteQuery({
             queryKey: key,
             queryFn: ({ pageParam }) =>
-              window.clerum.gfs.listChildren(folder.resourceId, 'main', pageParam),
+              window.clerum.gfs.listChildren(folder.resourceId, folder.drive, pageParam),
             initialPageParam: undefined as string | undefined,
           })
           .catch(() => {
@@ -902,7 +958,7 @@ export function FilesPage({
     resourceId: string,
     resourceName: string,
     requiredBits: string[],
-    drive = GFS_DRIVE_MAIN,
+    drive = ctrl.drive || GFS_DEFAULT_DISCOVERY_DRIVE,
     requiredGrantableBits: string[] = []
   ) => {
     const requestedScope = sessionScope
@@ -979,7 +1035,8 @@ export function FilesPage({
     const allowed = await requireFreshRowPermissions(
       authorityResourceId,
       authorityName,
-      requiredBits
+      requiredBits,
+      target.drive
     )
     if (!allowed) return false
     const latest = rowActionContextRef.current
@@ -1025,6 +1082,7 @@ export function FilesPage({
     hasBit(affordances ?? cachedCurrentAffordances, 'manage_acl')
   const canMoveCurrent = Boolean(
     !accessRevoked &&
+    current?.resourceId !== ctrl.home?.resourceId &&
     current?.parentResourceId &&
     hasGfsMoveSourcePermissions(
       ctrl.moveSourceParentAffordancesById?.[current.parentResourceId]?.held
@@ -1032,6 +1090,14 @@ export function FilesPage({
   )
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
+  // Inside the caller's own home the trail reads "EvenDrive › My home" instead
+  // of "EvenDrive › Shared with me › <home folder>". The ancestor walk stops at
+  // the home, so only the first crumb can be the home root.
+  const homeTrail =
+    crumbs.length > 0 &&
+    isCallerHomeRoot(ctrl.home, { resourceId: crumbs[0]!.resourceId, drive: ctrl.drive })
+  const crumbLabel = (crumb: GfsCrumb, index: number) =>
+    homeTrail && index === 0 ? GFS_MY_HOME_LABEL : crumb.name
   // An incomplete inherited derivation becomes a quiet notice in the Share
   // dialog: an empty derived list alone would silently read as "no one else
   // has access" (R1-M3). R1-H3: rows folded before a walk stop are still
@@ -1141,7 +1207,7 @@ export function FilesPage({
         current.resourceId,
         current.name,
         ['manage_acl'],
-        GFS_DRIVE_MAIN,
+        ctrl.drive,
         bits
       )) ||
       !isDraftCurrent()
@@ -1196,13 +1262,33 @@ export function FilesPage({
     }
   }
 
+  const handleLowerShare = async (item: GfsShareListItem) => {
+    const subjectKey = item.subject.id
+      ? `${item.subject.type}:${item.subject.id}`
+      : item.subject.type
+    const permissions = permissionsForRole('read', false, item.permissions)
+    setUpdatingAccessRole(true)
+    try {
+      await ctrl.createShare([subjectKey], {
+        permissions,
+        includeDescendants: item.includeDescendants,
+      })
+      await Promise.all([ctrl.refreshGrants(), ctrl.refreshShares()])
+    } catch (roleError) {
+      if (failClosedOnAuthorizationError(roleError)) return
+      pushToast?.(describeGfsGrantError(roleError).message, 'error')
+    } finally {
+      setUpdatingAccessRole(false)
+    }
+  }
+
   const handleAccessRoleChange = async (
     item: GfsGrantListItem,
     label: string,
     role: GfsAccessRole
   ) => {
     if (!current) return
-    const freshAuthority = await fetchRowAuthority(current.resourceId, current.name, GFS_DRIVE_MAIN)
+    const freshAuthority = await fetchRowAuthority(current.resourceId, current.name, ctrl.drive)
     if (!freshAuthority) return
     if (!hasBit(freshAuthority, 'manage_acl')) {
       pushToast?.(`You do not have manage access to ${current.name}.`, 'error')
@@ -1303,7 +1389,7 @@ export function FilesPage({
     for (const source of writable) {
       let folderAffordances: { canDelegate: boolean; grantableBits: string[] }
       try {
-        folderAffordances = await window.clerum.gfs.affordances(source.resourceId, GFS_DRIVE_MAIN)
+        folderAffordances = await window.clerum.gfs.affordances(source.resourceId, ctrl.drive)
       } catch (affordancesError) {
         if (failClosedOnAuthorizationError(affordancesError)) return
         pushToast?.(describeGfsGrantError(affordancesError).message, 'error')
@@ -1427,9 +1513,10 @@ export function FilesPage({
             source.resourceId,
             [subjectKey],
             bits,
-            GFS_DRIVE_MAIN,
+            ctrl.drive,
             source.grantInherit === true
           )
+          await ctrl.refreshPermissionState()
           updated += 1
         } catch (updateError) {
           await failPartially(
@@ -1545,7 +1632,7 @@ export function FilesPage({
     setZipJob({ folderName: folder.name, progress: initialProgress })
     try {
       const result = await createGfsFolderZip(
-        { resourceId: folder.resourceId, drive: folder.drive || GFS_DRIVE_MAIN, name: folder.name },
+        { resourceId: folder.resourceId, drive: folder.drive, name: folder.name },
         {
           onProgress: progress => setZipJob({ folderName: folder.name, progress }),
           signal: abortController.signal,
@@ -1687,6 +1774,13 @@ export function FilesPage({
    * re-render cannot reopen it, and failures surface the browser's own error.
    */
   useEffect(() => {
+    if (!pendingGfsUri) return
+    // A view id, not a resource: nothing to resolve. The page is keyed by its
+    // tab, so this seed only arrives on mount, where `rootView` already took it.
+    if (pendingGfsUri === GFS_SHARED_WITH_ME_LOCATION) {
+      onPendingGfsUriHandled?.()
+      return
+    }
     if (!pendingGfsUri || pendingGfsDeepLink) return
     // Re-arm on every non-null seed so a deep-link onto an already-mounted page
     // suppresses the pre-open location the same way the initial mount does.
@@ -1805,6 +1899,10 @@ export function FilesPage({
   // `null` is the virtual root. Deps track the primitive fields so a re-render
   // that leaves the location unchanged does not re-emit.
   const currentGfsUri = current?.gfsUri ?? null
+  // `current` already carries the page's name for the open location, so at the
+  // caller's own ready home root the Files tab reads "My home", not the storage
+  // folder name. The effect below re-emits when the home becomes ready because
+  // the label, not the resource, is the reported name.
   const currentName = current?.name ?? null
   useEffect(() => {
     if (seedPendingRef.current) {
@@ -1816,8 +1914,12 @@ export function FilesPage({
       if (currentGfsUri === null) return
       seedPendingRef.current = false
     }
+    if (currentGfsUri === null && rootView === 'shared') {
+      onLocationChange?.(GFS_SHARED_WITH_ME_LOCATION, GFS_SHARED_WITH_ME_LABEL)
+      return
+    }
     onLocationChange?.(currentGfsUri, currentName)
-  }, [currentGfsUri, currentName, onLocationChange])
+  }, [currentGfsUri, currentName, onLocationChange, rootView])
 
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()
@@ -1949,7 +2051,7 @@ export function FilesPage({
     return {
       resourceId: resource.resourceId,
       gfsUri: resource.gfsUri,
-      drive: resource.drive || GFS_DRIVE_MAIN,
+      drive: resource.drive,
       kind: resource.kind === 'directory' ? 'directory' : 'file',
       name: resource.name,
       ...(Number.isSafeInteger(resource.version) ? { version: resource.version } : {}),
@@ -1963,12 +2065,18 @@ export function FilesPage({
   }
 
   /** A provider owns transport identity; local refs are only a provider-absent fallback. */
-  const resolveActiveSource = (): GfsDragSource | null => {
-    if (!dragSession) return draggingSourceRef.current
+  const resolveActiveSource = (destinationDrive: string): GfsDragSource | null => {
+    if (!dragSession) {
+      const local = draggingSourceRef.current
+      return local && local.drive === destinationDrive ? local : null
+    }
     const source = dragSession.activeSource()
     return source &&
       dragSession.matchesScope(sessionScope ?? 'anonymous') &&
-      source.drive === GFS_DRIVE_MAIN
+      // Admission compares against the DESTINATION's drive, never the open
+      // location: a root listing has no folder open, so the controller's
+      // current drive is empty while every row still carries its own.
+      source.drive === destinationDrive
       ? source
       : null
   }
@@ -2034,7 +2142,7 @@ export function FilesPage({
 
   const handleFolderDragOver = (event: ReactDragEvent<HTMLElement>, folder: GfsDriveResource) => {
     if (!hasDraggedGfsResource(event)) return
-    const source = resolveActiveSource()
+    const source = resolveActiveSource(folder.drive)
     // Self-hover is NO longer skipped: dropping an item onto itself paints the
     // denied verdict with its `self` reason, so the release can explain itself
     // instead of looking dead (UX matrix §5.3). Admission still refuses.
@@ -2070,6 +2178,7 @@ export function FilesPage({
     if (verdict.state === 'checking') {
       adjudication.scheduleColdCheck(
         target,
+        folder.drive,
         source.parentKnown ? source.parentResourceId : null,
         () => {
           if (hoverOwnerRef.current !== source || hoveredFolderRef.current !== folder.resourceId)
@@ -2114,7 +2223,7 @@ export function FilesPage({
     index: number
   ) => {
     if (!hasDraggedGfsResource(event)) return
-    const source = resolveActiveSource()
+    const source = resolveActiveSource(ctrl.drive)
     if (!source) return
     event.preventDefault()
     event.stopPropagation()
@@ -2137,6 +2246,7 @@ export function FilesPage({
     if (verdict.state === 'checking') {
       adjudication.scheduleColdCheck(
         target,
+        ctrl.drive,
         source.parentKnown ? source.parentResourceId : null,
         () => {
           if (hoverOwnerRef.current !== source || hoveredFolderRef.current !== crumb.resourceId)
@@ -2153,15 +2263,10 @@ export function FilesPage({
   }
 
   /** Cached destination names for the suggested numbered-name candidate. */
-  const cachedDestinationNames = (destinationId: string): Set<string> => {
+  const cachedDestinationNames = (destinationId: string, drive: string): Set<string> => {
     if (!sessionScope || !isGfsSessionGeneration(ctrl.sessionGeneration)) return new Set()
     const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsDriveResource[] }> }>(
-      desktopQueryKeys.gfsChildren(
-        sessionScope,
-        destinationId,
-        GFS_DRIVE_MAIN,
-        ctrl.sessionGeneration
-      )
+      desktopQueryKeys.gfsChildren(sessionScope, destinationId, drive, ctrl.sessionGeneration)
     )
     return new Set((cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? []))
   }
@@ -2198,6 +2303,7 @@ export function FilesPage({
             ctrl.moveResource(
               resourceId,
               destinationId,
+              source.drive,
               ifMatch,
               newName,
               oldParentId,
@@ -2214,7 +2320,7 @@ export function FilesPage({
             ),
           ...(authorizeNumberedRename ? { authorizeNumberedRename } : {}),
           convergeCommittedMove: (input, receipt) =>
-            ctrl.convergeCommittedMove(input, receipt, source.scope),
+            ctrl.convergeCommittedMove({ ...input, drive: source.drive }, receipt, source.scope),
           ...(reportOutcomes && pushToast
             ? {
                 pushToast: (message, tone) => {
@@ -2237,7 +2343,7 @@ export function FilesPage({
           source,
           destination,
           ...(expectedSourceSnapshot ? { expectedSourceSnapshot } : {}),
-          occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+          occupiedDestinationNames: cachedDestinationNames(destination.resourceId, source.drive),
           ...(authoritativeSessionGeneration !== undefined
             ? { sessionGeneration: authoritativeSessionGeneration }
             : {}),
@@ -2261,7 +2367,7 @@ export function FilesPage({
     setDragOverFolderId(null)
     setDropStatesById({})
     setDropVerdictAnnouncement('')
-    const source = resolveActiveSource()
+    const source = resolveActiveSource(destination.drive)
     if (!source || destination.kind !== 'directory' || movingResourceRef.current) return
 
     const dragGeneration = dragSessionRef.current
@@ -2457,7 +2563,7 @@ export function FilesPage({
         setRenameOpen(false)
         return
       }
-      await ctrl.renameResource(current.resourceId, name, current.version)
+      await ctrl.renameResource(current.resourceId, name, ctrl.drive, current.version)
       setRenameOpen(false)
       pushToast?.(`Renamed to ${name}`, 'success')
     } catch (renameError) {
@@ -2470,7 +2576,7 @@ export function FilesPage({
     if (!current) return
     if (!(await requireFreshRowPermissions(current.resourceId, current.name, ['delete']))) return
     try {
-      await ctrl.deleteResource(current.resourceId, current.version)
+      await ctrl.deleteResource(current.resourceId, ctrl.drive, current.version)
       setDeleteOpen(false)
       closeManage()
       pushToast?.(`Deleted ${current.name}`, 'success')
@@ -2481,12 +2587,19 @@ export function FilesPage({
   }
 
   const handleDeleteResource = async (resource: GfsActionTarget) => {
-    if (!(await requireFreshRowPermissions(resource.resourceId, resource.name, ['delete']))) {
+    if (
+      !(await requireFreshRowPermissions(
+        resource.resourceId,
+        resource.name,
+        ['delete'],
+        resource.drive
+      ))
+    ) {
       setDeleteTarget(null)
       return
     }
     try {
-      await ctrl.deleteResource(resource.resourceId, resource.version)
+      await ctrl.deleteResource(resource.resourceId, resource.drive, resource.version)
       pushToast?.(`Deleted ${resource.name}`, 'success')
     } catch (deleteError) {
       if (!failClosedOnAuthorizationError(deleteError)) {
@@ -2514,15 +2627,24 @@ export function FilesPage({
     )
   }
 
+  /**
+   * The home root is managed: the server answers `governed_root_immutable` for
+   * a rename, move or delete of it, so the page must not offer those controls.
+   */
+  const isHomeRoot = (resourceId: string): boolean =>
+    ctrl.home?.resourceId != null && resourceId === ctrl.home.resourceId
+
   /** Delete gate for list rows. Shared-with-me rows carry their permission
    * bits directly; child rows use their own server-computed affordances. */
   const rowCanDelete = (resource: GfsDriveResource): boolean => {
+    if (isHomeRoot(resource.resourceId)) return false
     if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'delete')
     return Boolean(resource.permissions?.includes('delete'))
   }
 
   /** Rename needs `write` on the resource itself. */
   const rowCanRename = (resource: GfsDriveResource): boolean => {
+    if (isHomeRoot(resource.resourceId)) return false
     if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'write')
     return Boolean(resource.permissions?.includes('write'))
   }
@@ -2633,13 +2755,13 @@ export function FilesPage({
       const sourceKey = desktopQueryKeys.gfsAffordances(
         sessionScope,
         sourceParentId,
-        GFS_DRIVE_MAIN,
+        target.drive,
         authoritativeSessionGeneration
       )
       const destinationKey = desktopQueryKeys.gfsAffordances(
         sessionScope,
         destinationId,
-        GFS_DRIVE_MAIN,
+        target.drive,
         authoritativeSessionGeneration
       )
       assertGfsAuthorityRetryAllowed(queryClient, sourceKey)
@@ -2647,13 +2769,13 @@ export function FilesPage({
       const [source, destination] = await Promise.all([
         queryClient.fetchQuery({
           queryKey: sourceKey,
-          queryFn: () => window.clerum.gfs.affordances(sourceParentId, GFS_DRIVE_MAIN),
+          queryFn: () => window.clerum.gfs.affordances(sourceParentId, target.drive),
           staleTime: 0,
           retry: false,
         }),
         queryClient.fetchQuery({
           queryKey: destinationKey,
-          queryFn: () => window.clerum.gfs.affordances(destinationId, GFS_DRIVE_MAIN),
+          queryFn: () => window.clerum.gfs.affordances(destinationId, target.drive),
           staleTime: 0,
           retry: false,
         }),
@@ -2691,8 +2813,8 @@ export function FilesPage({
 
       const moveSource: GfsDragSource = {
         resourceId: target.resourceId,
-        gfsUri: `gfs://${GFS_DRIVE_MAIN}/${target.resourceId.replace(/-/g, '').toLowerCase()}`,
-        drive: GFS_DRIVE_MAIN,
+        gfsUri: `gfs://${target.drive}/${target.resourceId.replace(/-/g, '').toLowerCase()}`,
+        drive: target.drive,
         kind: target.kind,
         name: target.name,
         ...(Number.isSafeInteger(target.version) ? { version: target.version } : {}),
@@ -2737,19 +2859,19 @@ export function FilesPage({
           const resourceKey = desktopQueryKeys.gfsAffordances(
             origin.sessionScope,
             target.resourceId,
-            GFS_DRIVE_MAIN,
+            target.drive,
             authoritativeSessionGeneration
           )
           const sourceParentKey = desktopQueryKeys.gfsAffordances(
             origin.sessionScope,
             sourceParentId,
-            GFS_DRIVE_MAIN,
+            target.drive,
             authoritativeSessionGeneration
           )
           const destinationKey = desktopQueryKeys.gfsAffordances(
             origin.sessionScope,
             destinationId,
-            GFS_DRIVE_MAIN,
+            target.drive,
             authoritativeSessionGeneration
           )
           for (const key of [resourceKey, sourceParentKey, destinationKey]) {
@@ -2759,19 +2881,19 @@ export function FilesPage({
             await Promise.all([
               queryClient.fetchQuery({
                 queryKey: resourceKey,
-                queryFn: () => window.clerum.gfs.affordances(target.resourceId, GFS_DRIVE_MAIN),
+                queryFn: () => window.clerum.gfs.affordances(target.resourceId, target.drive),
                 staleTime: 0,
                 retry: false,
               }),
               queryClient.fetchQuery({
                 queryKey: sourceParentKey,
-                queryFn: () => window.clerum.gfs.affordances(sourceParentId, GFS_DRIVE_MAIN),
+                queryFn: () => window.clerum.gfs.affordances(sourceParentId, target.drive),
                 staleTime: 0,
                 retry: false,
               }),
               queryClient.fetchQuery({
                 queryKey: destinationKey,
-                queryFn: () => window.clerum.gfs.affordances(destinationId, GFS_DRIVE_MAIN),
+                queryFn: () => window.clerum.gfs.affordances(destinationId, target.drive),
                 staleTime: 0,
                 retry: false,
               }),
@@ -2874,8 +2996,14 @@ export function FilesPage({
     closeOwnedDialog()
   }
 
+  /** The open location as a row-action target. A crumb carries no drive of its
+   * own — the open location's drive is the controller's current drive. */
+  const currentActionTarget = (): GfsActionTarget | null =>
+    current ? { ...current, drive: ctrl.drive } : null
+
   const requestMoveCurrent = () => {
-    if (current) showMoveDialog(current)
+    const target = currentActionTarget()
+    if (target) showMoveDialog(target)
   }
 
   /** Page-level rename works inline for any row or the current resource; the
@@ -2886,15 +3014,21 @@ export function FilesPage({
     const target = renameTarget
     const requestedName = renameDraft.trim()
     if (!requestedName) return
-    if (!(await requireFreshRowPermissions(target.resourceId, target.name, ['write']))) return
+    if (
+      !(await requireFreshRowPermissions(target.resourceId, target.name, ['write'], target.drive))
+    )
+      return
     try {
       const name = await normalizeGfsResourceName(requestedName)
       if (name === target.name) {
         setRenameTarget(null)
         return
       }
-      if (!(await requireFreshRowPermissions(target.resourceId, target.name, ['write']))) return
-      await ctrl.renameResource(target.resourceId, name, target.version)
+      if (
+        !(await requireFreshRowPermissions(target.resourceId, target.name, ['write'], target.drive))
+      )
+        return
+      await ctrl.renameResource(target.resourceId, name, target.drive, target.version)
       setRenameTarget(null)
       pushToast?.(`Renamed to ${name}`, 'success')
     } catch (renameError) {
@@ -2935,7 +3069,7 @@ export function FilesPage({
     resourceId: crumb.resourceId,
     rid: crumb.resourceId.replace(/-/g, '').toLowerCase(),
     gfsUri: crumb.gfsUri,
-    drive: GFS_DRIVE_MAIN,
+    drive: ctrl.drive,
     parentResourceId: null,
     name: crumb.name,
     kind: 'directory',
@@ -2945,19 +3079,33 @@ export function FilesPage({
   })
 
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
-    const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
-    return [...resources].sort((left, right) => {
-      if (left.kind !== right.kind) {
-        return left.kind === 'directory' ? -1 : 1
-      }
-      return (left.name || left.drive).localeCompare(right.name || right.drive)
-    })
-  }, [accessibleResources, currentIsFile, currentIsFolder, items])
+    if (current) {
+      return currentIsFolder ? sortDriveResources(items) : []
+    }
+    // Root view ("Shared with me"): only what others share with the caller.
+    // The caller's own home is not shared with them; it has its own entry.
+    return sortDriveResources(
+      accessibleResources.filter(resource => !isCallerHomeRoot(ctrl.home, resource))
+    )
+  }, [accessibleResources, ctrl.home, current, currentIsFolder, items])
+  const myHome = useMemo(
+    () =>
+      current || rootView === 'shared' ? null : callerHomeRootNode(ctrl.home, accessibleResources),
+    [accessibleResources, ctrl.home, current, rootView]
+  )
+  // A home that is not ready says so on the overview, with the sidebar's
+  // notice: not in a folder, not in Shared with me, not for a revoked session
+  // (its own surface explains it), and not for a retired home.
+  const myHomeNotice =
+    myHome || current || rootView === 'shared' || accessRevoked || ctrl.home?.state === 'retired'
+      ? null
+      : callerHomeNotice(ctrl.home, ctrl.homeError)
   // The controller owns current-view loading semantics, including the
   // page-wide authority gate and the distinction between initial and
   // background query activity.
   const visibleLoading = loadingCurrentView
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
+  const visibleErrorPresentation = visibleError ? describeGfsReadError(visibleError) : null
   const unavailableLocation = !current && openError === GFS_UNAVAILABLE_LOCATION_MESSAGE
   // Scoped to the root view on purpose: `accessibleError` only reaches
   // `visibleError` when there is no `current`, so the card replaces exactly the
@@ -3044,7 +3192,7 @@ export function FilesPage({
   const openManageCurrent = () => {
     if (!current) return
     void runWithFreshResourcePermissions(
-      current,
+      currentActionTarget()!,
       current.resourceId,
       current.name,
       ['manage_acl'],
@@ -3068,8 +3216,8 @@ export function FilesPage({
           'copy-link': () => void handleCopyLink(current.gfsUri),
           'copy-route': () => void handleCopyRoute(current.gfsUri, current.kind),
           'open-route': () => setOpenLinkOpen(true),
-          rename: () => openRenameTarget(current),
-          move: () => openMoveTarget(current),
+          rename: () => openRenameTarget(currentActionTarget()!),
+          move: () => openMoveTarget(currentActionTarget()!),
           'new-folder': () => openCreateFolder(current.resourceId, current.name),
           'upload-file': () =>
             requestUploadForFolder(
@@ -3095,9 +3243,9 @@ export function FilesPage({
                   else context?.requestFileSelection?.()
                 }
               : undefined,
-          delete: () => void openDeleteTarget(current),
+          delete: () => void openDeleteTarget(currentActionTarget()!),
         },
-        canRename: canWriteCurrent,
+        canRename: canWriteCurrent && !isHomeRoot(current.resourceId),
         canMove: canMoveCurrent,
         canCreateFolder: currentIsFolder && canWriteCurrent,
         canUpload: currentIsFolder && canWriteCurrent,
@@ -3106,7 +3254,7 @@ export function FilesPage({
         canDownload: currentIsFile,
         canDownloadZip: currentIsFolder,
         canReplace: currentIsFile && canWriteCurrent,
-        canDelete: canDeleteCurrent,
+        canDelete: canDeleteCurrent && !isHomeRoot(current.resourceId),
         mutating: ctrl.mutating,
         refreshing: refreshingCurrent,
       })
@@ -3167,12 +3315,12 @@ export function FilesPage({
           'download-zip': canDownloadZip ? () => void handleFolderZipDownload(resource) : undefined,
         },
         canOpenFolder: isDirectory,
-        canRename,
-        canMove: rowCanMove(resource),
+        canRename: canRename && !isHomeRoot(resource.resourceId),
+        canMove: rowCanMove(resource) && !isHomeRoot(resource.resourceId),
         canCreateFolder: canWrite,
         canUpload: canWrite,
         canShare: canManage,
-        canDelete,
+        canDelete: canDelete && !isHomeRoot(resource.resourceId),
         canPreview,
         canDownload,
         canDownloadZip,
@@ -3207,6 +3355,63 @@ export function FilesPage({
       </div>
 
       <div className="page-layout da-gfs-layout">
+        {myHome ? (
+          // A ready home is a move destination: the card takes a dragged row or
+          // tree node like any folder target, and paints the verdict on itself.
+          <section
+            className="page-card da-gfs-my-home"
+            aria-label="My home"
+            title={
+              gfsDropVerdictReason(dropStatesById[myHome.resourceId]) !== undefined
+                ? gfsDropVerdictLiveAnnouncement(
+                    dropStatesById[myHome.resourceId]!,
+                    GFS_MY_HOME_LABEL,
+                    dragSourceName ?? undefined
+                  )
+                : undefined
+            }
+            data-drop-state={dropStatesById[myHome.resourceId]?.state}
+            data-drop-reason={gfsDropVerdictReason(dropStatesById[myHome.resourceId])}
+            onDragEnter={event => handleFolderDragOver(event, myHome)}
+            onDragOver={event => handleFolderDragOver(event, myHome)}
+            onDragLeave={handleFolderDragLeave}
+            onDrop={event =>
+              void handleFolderDrop(event, {
+                resourceId: myHome.resourceId,
+                name: GFS_MY_HOME_LABEL,
+                drive: myHome.drive,
+                kind: 'directory',
+              })
+            }
+          >
+            <Button
+              align="start"
+              className="da-gfs-my-home__open"
+              color="neutral"
+              onClick={() => ctrl.openResource(myHome)}
+              variant="text"
+            >
+              <IconContexts aria-hidden="true" width={16} height={16} />
+              {myHome.name}
+            </Button>
+            <p className="muted da-gfs-my-home__detail">{GFS_MY_HOME_DETAIL}</p>
+          </section>
+        ) : myHomeNotice ? (
+          <section className="page-card da-gfs-my-home" aria-label="My home">
+            <Button
+              align="start"
+              className="da-gfs-my-home__open"
+              color="neutral"
+              disabled
+              variant="text"
+            >
+              <IconContexts aria-hidden="true" width={16} height={16} />
+              {GFS_MY_HOME_LABEL}
+            </Button>
+            <p className="muted da-gfs-my-home__detail">{GFS_MY_HOME_DETAIL}</p>
+            <GfsHomeStateNotice notice={myHomeNotice} variant="page" />
+          </section>
+        ) : null}
         <section
           className="page-card da-gfs-drive"
           aria-label="EvenDrive browser"
@@ -3220,19 +3425,56 @@ export function FilesPage({
             <div className="da-gfs-drive__title-row">
               <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
                 <Button
-                  className="da-gfs-drive__breadcrumb"
+                  className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
                   color="neutral"
-                  disabled={!current}
-                  onClick={() => {
-                    beginExplicitFilesNavigation()
-                    manageReturnCrumbsRef.current = null
-                    setManageOpen(false)
-                    ctrl.reset()
-                  }}
+                  // Every trail starts here; it returns to the overview (My home
+                  // and Shared with me). A view, not a folder: it takes no drops.
+                  // At the overview it is the active crumb, inert but not
+                  // disabled, like "Shared with me" in its own view.
+                  aria-current={!current && rootView === 'overview' ? 'page' : undefined}
+                  disabled={!current && accessRevoked}
+                  onClick={
+                    !current && rootView === 'overview'
+                      ? undefined
+                      : () => {
+                          manageReturnCrumbsRef.current = null
+                          setManageOpen(false)
+                          beginExplicitFilesNavigation()
+                          setRootView('overview')
+                          ctrl.reset()
+                        }
+                  }
                   variant="text"
                 >
-                  Shared with me
+                  {GFS_EVENDRIVE_ROOT_LABEL}
                 </Button>
+                {homeTrail ? null : <IconChevronRight aria-hidden="true" />}
+                {homeTrail ? null : (
+                  <Button
+                    className="da-gfs-drive__breadcrumb da-gfs-drive__breadcrumb--view-root"
+                    color="neutral"
+                    // In the Shared with me view this is the active crumb: inert
+                    // (no click handler) but not disabled, and styled as a view
+                    // root like "My home" at the home root. A revoked session
+                    // offers nothing but retry.
+                    aria-current={!current && rootView === 'shared' ? 'page' : undefined}
+                    disabled={!current && accessRevoked}
+                    onClick={
+                      !current && rootView === 'shared'
+                        ? undefined
+                        : () => {
+                            manageReturnCrumbsRef.current = null
+                            setManageOpen(false)
+                            beginExplicitFilesNavigation()
+                            setRootView('shared')
+                            ctrl.reset()
+                          }
+                    }
+                    variant="text"
+                  >
+                    {GFS_SHARED_WITH_ME_LABEL}
+                  </Button>
+                )}
                 {crumbs.map((crumb, index) => (
                   <span className="da-gfs-drive__crumb-group" key={crumb.resourceId}>
                     <IconChevronRight aria-hidden="true" />
@@ -3248,6 +3490,8 @@ export function FilesPage({
                     ) : (
                       <Button
                         className={`da-gfs-drive__breadcrumb${
+                          homeTrail && index === 0 ? ' da-gfs-drive__breadcrumb--view-root' : ''
+                        }${
                           dragOverFolderId === crumb.resourceId
                             ? ' da-gfs-drive__breadcrumb--allowed'
                             : ''
@@ -3259,7 +3503,7 @@ export function FilesPage({
                           gfsDropVerdictReason(dropStatesById[crumb.resourceId]) !== undefined
                             ? gfsDropVerdictLiveAnnouncement(
                                 dropStatesById[crumb.resourceId]!,
-                                crumb.name,
+                                crumbLabel(crumb, index),
                                 dragSourceName ?? undefined
                               )
                             : undefined
@@ -3280,13 +3524,16 @@ export function FilesPage({
                         onDrop={event =>
                           void handleFolderDrop(event, {
                             resourceId: crumb.resourceId,
-                            name: crumb.name,
+                            name: crumbLabel(crumb, index),
+                            // A crumb is an ancestor of the open location, so it
+                            // lives on the open location's own drive.
+                            drive: ctrl.drive,
                             kind: 'directory',
                           })
                         }
                         variant="text"
                       >
-                        {crumb.name}
+                        {crumbLabel(crumb, index)}
                       </Button>
                     )}
                   </span>
@@ -3343,10 +3590,17 @@ export function FilesPage({
             </div>
           ) : null}
 
-          {dropSessionLost ? (
-            // Persistent (A11): the refusal outlives the dead gesture and the
-            // revoked surface below — it is not a one-shot toast.
-            <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+          {dropSessionLost && !accessRevoked && previousDragScopeRef.current === liveDragScope ? (
+            // Persistent, not a one-shot toast: explains a drop refused because
+            // the session ended while the revoked surface is not on screen. Once
+            // it is, that surface carries the sentence and this banner would
+            // announce it a second time. The scope check keeps it out of the
+            // render in which access returns: the scope effect has not cleared
+            // the flag yet, and inserting the alert there would announce the
+            // ended session right after access came back.
+            <div className="da-gfs-alert" role="alert">
+              <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+            </div>
           ) : null}
           {zipJob ? (
             <div className="da-gfs-zip-progress" role="status" data-testid="gfs-zip-progress">
@@ -3357,20 +3611,25 @@ export function FilesPage({
                     ? `Preparing ${zipJob.folderName}.zip — downloading ${zipJob.progress.filesAdded} of ${zipJob.progress.filesFound} ${zipJob.progress.filesFound === 1 ? 'file' : 'files'}…`
                     : `Preparing ${zipJob.folderName}.zip — assembling archive…`}
               </span>
-              <button
-                type="button"
-                className="da-gfs-zip-progress__stop"
+              <Button
                 aria-label="Stop preparing zip"
+                color="neutral"
                 onClick={() => zipAbortRef.current?.abort()}
+                size="xs"
+                variant="outline"
               >
                 Stop
-              </button>
+              </Button>
             </div>
           ) : null}
 
-          {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
+          {accessibleNotice ? (
+            <div className="da-gfs-alert">
+              <StatusBanner tone="info" text={accessibleNotice} />
+            </div>
+          ) : null}
           {current && loadingAffordances ? (
-            <div role="status">
+            <div className="da-gfs-alert" role="status">
               <StatusBanner tone="info" text={`Checking permissions for ${current.name}…`} />
             </div>
           ) : null}
@@ -3379,9 +3638,9 @@ export function FilesPage({
           (ctrl.affordancesHttpStatus === 429 ||
             ctrl.affordancesHttpStatus === 403 ||
             ctrl.affordancesHttpStatus === 404) ? (
-            <div role="alert">
+            <div className="da-gfs-alert" role="alert">
               <StatusBanner
-                tone="error"
+                tone={ctrl.affordancesHttpStatus === 429 ? 'warn' : 'error'}
                 text={
                   ctrl.affordancesHttpStatus === 429
                     ? 'Too many file requests. Wait before retrying permissions.'
@@ -3392,10 +3651,11 @@ export function FilesPage({
               />
               {ctrl.affordancesHttpStatus === 429 ? (
                 <Button
-                  color="secondary"
                   onClick={() =>
-                    void fetchRowAuthority(current.resourceId, current.name, GFS_DRIVE_MAIN)
+                    void fetchRowAuthority(current.resourceId, current.name, ctrl.drive)
                   }
+                  size="sm"
+                  variant="outline"
                 >
                   Retry permission check
                 </Button>
@@ -3406,15 +3666,21 @@ export function FilesPage({
             if (!status.error || resourceId === current?.resourceId) return null
             const rateLimited = status.rateLimited && status.httpStatus === 429
             return (
-              <div key={resourceId} role="alert">
+              <div className="da-gfs-alert" key={resourceId} role="alert">
                 <StatusBanner tone={rateLimited ? 'warn' : 'error'}>
                   <span>Could not verify Move permissions: {status.error}</span>
                 </StatusBanner>
                 <Button
-                  color="secondary"
                   onClick={() =>
-                    void fetchRowAuthority(resourceId, 'the source folder', GFS_DRIVE_MAIN)
+                    void fetchRowAuthority(
+                      resourceId,
+                      'the source folder',
+                      visibleResources.find(resource => resource.parentResourceId === resourceId)
+                        ?.drive ?? ctrl.drive
+                    )
                   }
+                  size="sm"
+                  variant="outline"
                 >
                   Retry permission check
                 </Button>
@@ -3422,11 +3688,10 @@ export function FilesPage({
             )
           })}
           {pendingGfsDeepLinkFailure ? (
-            <div role="alert">
+            <div className="da-gfs-alert" role="alert">
               <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
               {pendingGfsDeepLinkFailure.retryable ? (
                 <Button
-                  color="secondary"
                   onClick={() => {
                     setPendingGfsDeepLinkFailure(null)
                     setGfsDeepLinkRetry(current => ({
@@ -3444,15 +3709,23 @@ export function FilesPage({
             </div>
           ) : null}
           {unavailableLocation ? (
-            <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
+            <div className="da-gfs-alert" role="alert">
+              <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
+            </div>
           ) : null}
           {visibleError && !accessRevoked && !blockingFailure ? (
             // Presented, not raw. The banner is the non-blocking half of the
             // same read-plane failure the card shows, so it must not be the one
             // surface left leaking `Error invoking remote method '…'` at the
             // user — which is what it did for every failure the card declines
-            // to take over, a rate-limited `Load more` among them.
-            <StatusBanner tone="error" text={describeGfsReadError(visibleError).message} />
+            // to take over, a rate-limited `Load more` among them. A rate limit
+            // is a wait, not a failure: it takes the warning tone.
+            <div className="da-gfs-alert" role="alert">
+              <StatusBanner
+                tone={visibleErrorPresentation?.code === 'rate_limited' ? 'warn' : 'error'}
+                text={visibleErrorPresentation?.message}
+              />
+            </div>
           ) : null}
 
           {accessRevoked ? (
@@ -3460,11 +3733,10 @@ export function FilesPage({
               {/* The revoked surface owns the session-ended sentence (A11): it
                   outlives any gesture's ownership, so a drag whose probe died
                   stays explained even after the revocation invalidated it. */}
-              <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
-              <EmptyState
-                title="File access is not authorized"
-                body="Your current Desktop session cannot access this location. Sign in again or contact an administrator."
-              />
+              <div className="da-gfs-alert" role="alert">
+                <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+              </div>
+              <EmptyState title="File access is not authorized" body={GFS_ACCESS_REVOKED_BODY} />
               <div className="da-gfs-footer-actions">
                 <Button onClick={() => ctrl.retryAccess()} size="sm" variant="outline">
                   Retry file access
@@ -3479,18 +3751,8 @@ export function FilesPage({
               }}
             />
           ) : visibleLoading ? (
-            <div
-              className="da-gfs-loading"
-              role="status"
-              aria-label="Loading files"
-              aria-live="polite"
-            >
-              <span className="da-gfs-loading__dots" aria-hidden="true">
-                <span className="da-gfs-loading__dot" />
-                <span className="da-gfs-loading__dot" />
-                <span className="da-gfs-loading__dot" />
-              </span>
-              <span>Loading files…</span>
+            <div role="status" aria-label="Loading files" aria-live="polite">
+              <EmptyState title="Loading" body="Loading files…" />
             </div>
           ) : currentIsFile ? (
             <div className="da-gfs-current-file">
@@ -3588,8 +3850,14 @@ export function FilesPage({
                           dragSourceName ?? undefined
                         )
                       : undefined
+                  // A bound home root never moves. While it is still listed (a home
+                  // that is not ready) its row stays a drop destination; a ready
+                  // home takes drops on its card and on its crumb.
                   const canDragResource =
-                    resource.readable !== false && movingResourceId === null && !ctrl.mutating
+                    resource.readable !== false &&
+                    movingResourceId === null &&
+                    !ctrl.mutating &&
+                    !isHomeRoot(resource.resourceId)
                   return (
                     <div
                       className="da-grid__row da-grid__row--clickable da-grid__row--compact"
@@ -3647,6 +3915,7 @@ export function FilesPage({
                               void handleFolderDrop(event, {
                                 resourceId: resource.resourceId,
                                 name: resource.name,
+                                drive: resource.drive,
                                 kind: 'directory',
                               })
                           : undefined
@@ -3772,7 +4041,7 @@ export function FilesPage({
 
       {openLinkOpen ? (
         <div
-          className="da-gfs-link-modal"
+          className="da-gfs-manage-modal"
           role="presentation"
           onMouseDown={event => {
             if (event.target === event.currentTarget) setOpenLinkOpen(false)
@@ -3949,6 +4218,7 @@ export function FilesPage({
                     derivationNotice={inheritedAccessNotice}
                     derivationNoticeHint={inheritedAccessNoticeHint}
                     error={grantsError}
+                    home={ctrl.home}
                     inheritedItems={ctrl.inheritedAccess}
                     items={ctrl.grants}
                     loading={
@@ -3962,6 +4232,8 @@ export function FilesPage({
                     onRemoveInherited={handleInheritedRemove}
                     onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
                     onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
+                    onLowerShare={handleLowerShare}
+                    resource={{ resourceId: current.resourceId, drive: ctrl.drive }}
                     revoking={ctrl.revoking}
                     revokingShare={ctrl.revokingShare}
                     shareError={sharesError}
@@ -4044,10 +4316,8 @@ export function FilesPage({
                 void handleCreateFolder()
               }}
             >
-              <label className="da-gfs-new-folder-dialog__field" htmlFor={createFolderInputId}>
-                <span>Folder name</span>
+              <Field label="Folder name" htmlFor={createFolderInputId}>
                 <TextInput
-                  aria-label="Folder name"
                   autoComplete="off"
                   autoFocus
                   disabled={ctrl.mutating}
@@ -4057,7 +4327,7 @@ export function FilesPage({
                   value={createFolderName}
                   onChange={event => setCreateFolderName(event.currentTarget.value)}
                 />
-              </label>
+              </Field>
               {createFolderError ? <StatusBanner tone="error" text={createFolderError} /> : null}
               <footer className="da-gfs-new-folder-dialog__actions">
                 <Button
@@ -4094,6 +4364,8 @@ export function FilesPage({
 
       {moveTarget ? (
         <GfsMoveDialog
+          drive={moveTarget.drive}
+          home={ctrl.home}
           busy={ctrl.mutating || movePermissionStatus === 'checking'}
           initialCrumbs={
             moveTarget.resourceId === current?.resourceId ? crumbs.slice(0, -1) : crumbs

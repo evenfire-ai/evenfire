@@ -1886,11 +1886,12 @@ body.sidebar-resizing {
   line-height: var(--line-height-tight);
 }
 
-/* Sidebar file explorer (spec 18 §3.A) — the accordion panel under "Files". */
+/* Sidebar file explorer (spec 18 §3.A) — the accordion panel under "Files".
+   No indent: its "My home" and "Shared with me" labels start at the left edge
+   of the EvenDrive entry above them. */
 .nav-file-explorer {
   min-width: 0;
   margin: 0 0 var(--space-1) 0;
-  padding-left: var(--sidebar-nav-label-indent);
   /* Claim the sidebar's leftover height so the tree gets real room; the scroll
      is contained to .da-file-explorer below instead of the whole nav column.
      The min-height floor stops expanded siblings (Chat sessions, apps) from
@@ -1981,6 +1982,12 @@ body.sidebar-resizing {
   grid-template-columns: 22px minmax(0, 1fr);
   align-items: center;
   gap: var(--space-0-5);
+}
+
+.da-file-explorer__group--section {
+  margin-left: 0;
+  padding-left: 0;
+  border-left: none;
 }
 
 .da-file-explorer__toggle.ui-icon-button {
@@ -14802,32 +14809,80 @@ pre {
   align-content: stretch;
 }
 
-.da-gfs-workspace-card {
-  display: grid;
-  min-width: 0;
-  align-content: start;
-  gap: var(--space-3);
+/* The caller's own home sits above the "Shared with me" card: it is not shared
+   with the caller, so it is not a row of that listing. */
+.da-gfs-layout:has(> .da-gfs-my-home) {
+  grid-template-rows: auto 1fr;
 }
 
-.da-gfs-workspace-card .page-card__header .muted {
-  margin: var(--space-1) 0 0;
-  max-width: 64ch;
+/* The "My home" card reads like the browser card's header: the title sits at
+   the same inset and size as the "Shared with me" view root, with a muted
+   detail line and any home-state notice under it. */
+.da-gfs-my-home {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+}
+
+.da-gfs-my-home__open.ui-button {
+  justify-self: start;
+  gap: var(--space-2);
+  padding-inline: var(--space-1);
+  color: var(--text);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-medium);
+}
+
+.da-gfs-my-home__detail {
+  margin: 0;
+  padding-inline: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+/* A ready home takes drops on its card. The verdict tints are the breadcrumb
+   ones below: the target gets a 2px accent ring, checking dashes neutrally,
+   ordinary denials read as error, the unknown family warns, and the
+   same-parent no-op stays neutral. */
+.da-gfs-my-home[data-drop-state='checking'] {
+  outline: 2px dashed rgba(var(--accent-rgb), 0.4);
+  outline-offset: -2px;
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-my-home[data-drop-state='allowed'] {
+  outline: 2px solid rgba(var(--accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.da-gfs-my-home[data-drop-state='denied'] {
+  outline: 2px solid rgba(var(--danger-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--danger-rgb), 0.12);
+}
+
+.da-gfs-my-home[data-drop-state='denied'][data-drop-reason='same-parent'] {
+  outline: 2px solid rgba(var(--accent-rgb), 0.35);
+  outline-offset: -2px;
+  background: rgba(var(--edge-rgb), 0.08);
+}
+
+.da-gfs-my-home[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-gfs-my-home[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-gfs-my-home[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-gfs-my-home[data-drop-state='unavailable'] {
+  outline: 2px solid rgba(var(--warning-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--warning-rgb), 0.12);
 }
 
 .da-gfs-eyebrow {
   margin: 0 0 var(--space-0-5);
   color: var(--text-muted);
   font-size: var(--font-size-xs);
-  font-weight: 700;
-  letter-spacing: 0;
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-caps);
   text-transform: uppercase;
-}
-
-.da-gfs-open-link {
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3);
-  background: var(--surface-soft);
 }
 
 .da-gfs-file-picker__row {
@@ -14875,21 +14930,6 @@ pre {
   box-shadow: none;
 }
 
-.da-gfs-current-copy {
-  min-width: 0;
-}
-
-.da-gfs-current-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--space-2);
-}
-
-.da-gfs-file-action {
-  cursor: pointer;
-}
-
 .da-gfs-inline-form {
   display: flex;
   align-items: end;
@@ -14902,50 +14942,10 @@ pre {
   background: var(--surface-soft);
 }
 
-.da-gfs-inline-form__field {
-  display: grid;
-  min-width: min(22rem, 100%);
-  gap: var(--space-1);
-}
-
-.da-gfs-inline-form__field span,
 .da-gfs-inline-form__copy {
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-semibold);
-}
-
-.da-gfs-inline-form__field input {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-}
-
-.da-gfs-inline-form__field input:focus-visible {
-  border-color: var(--focus-ring);
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
-
-.da-gfs-breadcrumb {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-  min-height: calc(var(--space-5) + var(--space-1));
-}
-
-.da-gfs-breadcrumb__item {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.da-gfs-breadcrumb__sep {
-  color: var(--text-muted);
 }
 
 .da-gfs-list__icon {
@@ -14972,7 +14972,7 @@ pre {
 .da-gfs-list__name .ui-button {
   min-width: 0;
   color: var(--text);
-  font-weight: 700;
+  font-weight: var(--font-weight-bold);
 }
 
 .da-gfs-inline-rename {
@@ -15048,22 +15048,6 @@ pre {
 .da-gfs-drive__grid .da-gfs-list__actions > .ui-icon-button:focus-visible {
   opacity: 1;
   pointer-events: auto;
-}
-
-.da-gfs-list__rid {
-  max-width: 8rem;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.da-gfs-section-title {
-  font-size: var(--font-size-lg);
-  margin: 0;
 }
 
 .da-gfs-delegation {
@@ -15228,7 +15212,7 @@ pre {
   flex: 0 0 28px;
   display: grid;
   place-items: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(var(--accent-rgb), 0.18);
   color: var(--accent-strong);
   font-size: var(--font-size-sm);
@@ -15236,13 +15220,13 @@ pre {
 }
 
 .da-gfs-subject-picker__avatar--team {
-  background: rgba(var(--warning-rgb), 0.15);
-  color: var(--warning);
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent-strong);
 }
 
 .da-gfs-subject-picker__avatar--host {
-  background: rgba(var(--success-rgb), 0.16);
-  color: var(--success);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
 .da-gfs-subject-picker__avatar svg {
@@ -15342,11 +15326,7 @@ pre {
   flex-direction: column;
   gap: 0;
   overflow: visible;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
+  padding: 0 0 var(--space-3);
 }
 
 .da-gfs-drive__header.page-card__header {
@@ -15382,6 +15362,9 @@ pre {
   gap: var(--space-0-5);
 }
 
+/* Chevrons sit inside a crumb group or, between the EvenDrive and Shared with
+   me view roots, directly in the trail; both need the icon size. */
+.da-gfs-drive__breadcrumbs > svg,
 .da-gfs-drive__crumb-group > svg {
   width: var(--space-3);
   height: var(--space-3);
@@ -15405,6 +15388,14 @@ pre {
   color: var(--text);
   opacity: 1;
   background: rgba(var(--accent-rgb), 0.1);
+  cursor: default;
+}
+
+/* The open root of a view ("My home", "Shared with me") reads as the view's
+   muted title, not as a highlighted folder crumb. */
+.da-gfs-drive__breadcrumb--view-root.ui-button[aria-current='page'] {
+  color: var(--text-muted);
+  background: transparent;
   cursor: default;
 }
 
@@ -15452,57 +15443,23 @@ pre {
   display: none;
 }
 
-.da-gfs-upload-status {
-  display: grid;
-  gap: var(--space-2);
-  margin: var(--space-3) var(--space-4) 0;
-  padding: var(--space-3);
-  border: 1px solid rgba(var(--accent-rgb), 0.28);
-  border-radius: var(--radius-md);
-  background: rgba(var(--accent-rgb), 0.06);
-}
-
-.da-gfs-upload-status__head,
-.da-gfs-upload-status__actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.da-gfs-upload-status__head {
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.da-gfs-upload-status__head strong {
-  color: var(--text);
-}
-
-.da-gfs-upload-status progress {
-  width: 100%;
-  height: 0.5rem;
-  accent-color: var(--accent-strong);
-}
-
-.da-gfs-upload-status__actions {
-  justify-content: flex-end;
-}
-
-.da-gfs-drive > .status-banner,
-.da-gfs-drive > .empty-state {
+.da-gfs-drive > .empty-state,
+.da-gfs-drive > [role='status'] > .empty-state {
   margin: var(--space-3) var(--space-4);
 }
 
-.da-gfs-loading {
-  min-height: 11rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+/* One wrapper for every persistent Files banner: it carries the live role
+   and the card inset, and stacks a banner with its Retry button. Banners span
+   the card width, like the home-state notice in the "My home" card; the Retry
+   button keeps its own width. */
+.da-gfs-alert {
+  margin: var(--space-3) var(--space-4);
+  display: grid;
   gap: var(--space-2);
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
+}
+
+.da-gfs-alert > .ui-button {
+  justify-self: start;
 }
 
 /* BUG-175 — folder-zip assembly progress strip. */
@@ -15527,64 +15484,16 @@ pre {
   text-overflow: ellipsis;
 }
 
-.da-gfs-zip-progress__stop {
-  appearance: none;
-  flex: 0 0 auto;
-  align-self: center;
-  border: 1px solid rgba(var(--edge-rgb), 0.3);
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: var(--font-size-xs);
-  line-height: 1;
-  padding: var(--space-1) var(--space-1-5);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.da-gfs-zip-progress__stop:hover {
-  border-color: rgba(var(--danger-rgb), 0.5);
-  color: var(--danger);
-}
-
-.da-gfs-zip-progress__stop:focus-visible {
-  outline: 2px solid rgba(var(--focus-rgb), 0.56);
-  outline-offset: 1px;
-}
-
 .da-gfs-zip-progress__label::before {
   content: '';
   flex: 0 0 auto;
   width: var(--space-1);
   height: var(--space-1);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   margin-right: var(--space-1-5);
   display: inline-block;
   animation: da-gfs-loading-dot 1.2s ease-in-out infinite;
-}
-
-.da-gfs-loading__dots {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.da-gfs-loading__dot {
-  width: var(--space-1);
-  height: var(--space-1);
-  border-radius: 999px;
-  background: var(--accent);
-  animation: da-gfs-loading-dot 1.2s ease-in-out infinite;
-}
-
-.da-gfs-loading__dot:nth-child(2) {
-  animation-delay: 0.16s;
-}
-
-.da-gfs-loading__dot:nth-child(3) {
-  animation-delay: 0.32s;
 }
 
 @keyframes da-gfs-loading-dot {
@@ -15599,13 +15508,6 @@ pre {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .da-gfs-loading__dot {
-    animation: none;
-    opacity: 0.62;
-  }
-}
-
 .da-gfs-drive__grid {
   container-type: inline-size;
   min-height: 0;
@@ -15613,7 +15515,7 @@ pre {
   width: auto;
   align-content: start;
   gap: 0;
-  margin: var(--space-2) 0 var(--space-3);
+  margin: var(--space-2) var(--space-4) var(--space-3);
   overflow: visible;
 }
 
@@ -15660,9 +15562,8 @@ pre {
   cursor: grabbing;
 }
 
-.da-gfs-drive__grid .da-grid__row--clickable:hover:enabled {
-  background: var(--grid-card-bg-hover);
-  border-color: var(--grid-card-border);
+.da-gfs-drive__grid .da-grid__row--clickable:hover {
+  background: var(--table-row-hover-bg);
 }
 
 /* ── Files-grid drop-verdict tints (refusal UX matrix §5) ──────────────────
@@ -15780,10 +15681,10 @@ pre {
 }
 
 .da-gfs-resource-menu__trigger.ui-icon-button {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
+  width: var(--control-height-lg);
+  height: var(--control-height-lg);
+  min-width: var(--control-height-lg);
+  min-height: var(--control-height-lg);
   color: var(--text-muted);
 }
 
@@ -15896,17 +15797,6 @@ pre {
   height: 1px;
   margin: var(--space-1) 0;
   background: rgba(var(--edge-rgb), 0.32);
-}
-
-.da-gfs-link-modal {
-  position: fixed;
-  inset: 0;
-  z-index: calc(var(--layer-chat-overlay) + 2);
-  display: grid;
-  place-items: center;
-  padding: var(--space-4);
-  background: rgba(var(--overlay-rgb), 0.18);
-  backdrop-filter: blur(10px);
 }
 
 .da-gfs-link-dialog {
@@ -16069,14 +15959,14 @@ pre {
   min-width: 2.25rem;
   height: 2.25rem;
   padding: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .da-gfs-image-preview-dialog__copy.ui-button,
 .da-gfs-markdown-preview-dialog__copy.ui-button {
   height: 2.25rem;
   padding-inline: var(--space-3);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--text-muted);
 }
 
@@ -16299,14 +16189,6 @@ pre {
 }
 
 .da-gfs-manage-dialog {
-  /* Keep every Share-dialog accent in the blue family while preserving the
-     global semantic palette used by the rest of Desktop. */
-  --success: var(--accent);
-  --success-rgb: var(--accent-rgb);
-  --warning: var(--accent-strong);
-  --warning-rgb: var(--accent-rgb);
-  --danger: var(--accent-strong);
-  --danger-rgb: var(--accent-rgb);
   width: min(720px, 96vw);
   max-height: min(760px, 92vh);
   display: grid;
@@ -16355,7 +16237,7 @@ pre {
   overflow: hidden;
   overflow-wrap: anywhere;
   color: var(--text);
-  font-size: var(--font-size-2xl);
+  font-size: var(--font-size-xl);
   font-weight: var(--font-weight-semibold);
   line-height: var(--line-height-tight);
   text-overflow: ellipsis;
@@ -16412,7 +16294,7 @@ pre {
 }
 
 .da-gfs-move-confirm-dialog .da-gfs-manage-dialog__heading h3 {
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size-xl);
 }
 
 .da-gfs-move-confirm-dialog .da-gfs-manage-dialog__body {
@@ -16459,136 +16341,6 @@ pre {
   font-size: var(--font-size-sm);
 }
 
-.da-gfs-manage-resource-link {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-2-5);
-  border: 1px solid rgba(var(--edge-rgb), 0.24);
-  border-radius: var(--radius-md);
-  background: rgba(var(--overlay-rgb), 0.12);
-}
-
-.da-gfs-manage-resource-link__copy {
-  min-width: 0;
-  flex: 1 1 auto;
-  display: grid;
-  gap: var(--space-0-5);
-}
-
-.da-gfs-manage-resource-link__copy > span {
-  color: var(--text-dim);
-  font-size: var(--font-size-2xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--letter-spacing-caps);
-  text-transform: uppercase;
-}
-
-.da-gfs-manage-resource-link__copy code {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-family: var(--font-family-mono);
-  font-size: var(--font-size-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.da-gfs-current-actions--manage {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.da-gfs-manage-action.ui-button {
-  min-width: 0;
-  min-height: 66px;
-  justify-content: flex-start;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid rgba(var(--edge-rgb), 0.24);
-  border-radius: var(--radius-md);
-  background: rgba(var(--edge-rgb), 0.06);
-  color: var(--text);
-  white-space: normal;
-}
-
-.da-gfs-manage-action.ui-button:hover:enabled,
-.da-gfs-manage-action.da-gfs-file-action:hover,
-.da-gfs-manage-action.da-gfs-file-action:focus-within {
-  border-color: rgba(var(--accent-rgb), 0.42);
-  background: rgba(var(--accent-rgb), 0.1);
-  box-shadow: inset 3px 0 0 rgba(var(--accent-rgb), 0.58);
-}
-
-.da-gfs-manage-action.ui-button:focus-visible,
-.da-gfs-manage-action.da-gfs-file-action:focus-within {
-  outline: 2px solid rgba(var(--focus-rgb), 0.66);
-  outline-offset: 2px;
-}
-
-.da-gfs-manage-action__icon {
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(var(--accent-rgb), 0.24);
-  border-radius: var(--radius-sm);
-  background: rgba(var(--accent-rgb), 0.1);
-  color: var(--accent-strong);
-}
-
-.da-gfs-manage-action__icon svg {
-  width: var(--space-4);
-  height: var(--space-4);
-}
-
-.da-gfs-manage-action__copy {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-0-5);
-  text-align: left;
-}
-
-.da-gfs-manage-action__copy strong {
-  color: var(--text);
-  font-size: var(--font-size-md);
-  font-weight: var(--font-weight-semibold);
-}
-
-.da-gfs-manage-action__copy small {
-  color: var(--text-dim);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-regular);
-  line-height: var(--line-height-normal);
-}
-
-.da-gfs-manage-action--danger.ui-button {
-  color: var(--danger);
-}
-
-.da-gfs-manage-action--danger .da-gfs-manage-action__icon {
-  border-color: rgba(var(--danger-rgb), 0.24);
-  background: rgba(var(--danger-rgb), 0.09);
-  color: var(--danger);
-}
-
-.da-gfs-manage-action--danger.ui-button:hover:enabled {
-  border-color: rgba(var(--danger-rgb), 0.4);
-  background: rgba(var(--danger-rgb), 0.09);
-  box-shadow: inset 3px 0 0 rgba(var(--danger-rgb), 0.6);
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: end;
-  margin: 0;
-  border-color: rgba(var(--accent-rgb), 0.3);
-  background: rgba(var(--accent-rgb), 0.07);
-}
-
 .da-gfs-manage-dialog__body > .da-gfs-inline-form {
   margin: 0;
   border: 0;
@@ -16627,17 +16379,10 @@ pre {
   font-size: var(--font-size-sm);
 }
 
-.da-gfs-new-folder-dialog__form,
-.da-gfs-new-folder-dialog__field {
+.da-gfs-new-folder-dialog__form {
   min-width: 0;
   display: grid;
   gap: var(--space-2);
-}
-
-.da-gfs-new-folder-dialog__field > span {
-  color: var(--text);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
 }
 
 .da-gfs-new-folder-dialog__actions {
@@ -16754,7 +16499,7 @@ pre {
 }
 
 .da-gfs-move-dialog__tree-group {
-  margin-left: 28px;
+  margin-left: var(--control-height);
   padding-left: var(--space-1);
   border-left: 1px solid rgba(var(--edge-rgb), 0.24);
 }
@@ -16844,7 +16589,7 @@ pre {
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--warning);
+  color: var(--accent-strong);
 }
 
 .da-gfs-move-dialog__tree-folder-icon svg {
@@ -16920,15 +16665,7 @@ pre {
 }
 
 .da-gfs-move-dialog__action-buttons .ui-button {
-  border-radius: 999px;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__field {
-  min-width: 0;
-}
-
-.da-gfs-manage-section--actions .da-gfs-inline-form__copy {
-  align-self: center;
+  border-radius: var(--radius-pill);
 }
 
 .da-gfs-manage-section--access .da-gfs-delegation__empty {
@@ -17008,20 +16745,20 @@ pre {
   flex: 0 0 30px;
   display: grid;
   place-items: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(var(--accent-rgb), 0.18);
   color: var(--accent-strong);
 }
 
 .da-gfs-grant-list__avatar--team {
-  background: rgba(var(--warning-rgb), 0.15);
-  color: var(--warning);
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent-strong);
 }
 
 .da-gfs-grant-list__avatar--agent,
 .da-gfs-grant-list__avatar--workflow {
-  background: rgba(var(--success-rgb), 0.16);
-  color: var(--success);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
 .da-gfs-grant-list__avatar svg {
@@ -17226,17 +16963,12 @@ pre {
   /* `.page-card__header` stacks via its own `max-width: 900px` rule, and the
      `da-grid` listings keep their inline `--da-grid-cols` (the flexible name
      column shrinks); neither needs a bespoke reflow here anymore. */
-  .da-gfs-current-actions,
   .da-gfs-file-picker__row {
     display: grid;
   }
 
   .da-gfs-delegation__composer {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .da-gfs-current-copy {
-    max-width: 100%;
   }
 
   .da-gfs-drive__header.page-card__header {
@@ -17353,10 +17085,6 @@ pre {
 
   .da-gfs-move-dialog__action-buttons {
     justify-content: flex-end;
-  }
-
-  .da-gfs-manage-section--actions .da-gfs-inline-form {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

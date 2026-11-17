@@ -35,6 +35,7 @@ vi.mock('@contexts/AuthContext', () => ({ useAuthContext: () => mocks.auth }))
 
 function baseController() {
   return {
+    drive: 'main',
     current: null,
     crumbs: [],
     sessionScope: 'env-1:user-1:team-1',
@@ -511,6 +512,7 @@ for (const surface of ['sidebar', 'files'] as const) {
       expect(h.moveResource).toHaveBeenCalledWith(
         'source',
         'target',
+        'main',
         expect.any(Number),
         undefined,
         'other-parent',
@@ -568,6 +570,7 @@ for (const surface of ['sidebar', 'files'] as const) {
         {
           resourceId: 'source',
           destinationId: 'target',
+          drive: 'main',
           oldParentId: 'grand',
           expectedSessionGeneration: 0,
         },

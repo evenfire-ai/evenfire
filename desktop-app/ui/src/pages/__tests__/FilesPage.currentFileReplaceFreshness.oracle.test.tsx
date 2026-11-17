@@ -295,8 +295,8 @@ describe('FilesPage current-file Replace permission freshness', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     await scenario.user.click(screen.getByRole('button', { name: 'Shared with me' }))
     expect(
-      (screen.getByRole('button', { name: 'Shared with me' }) as HTMLButtonElement).disabled
-    ).toBe(true)
+      screen.getByRole('button', { name: 'Shared with me' }).getAttribute('aria-current')
+    ).toBe('page')
 
     await act(async () => resolveRefresh(allowed))
     await waitFor(() =>

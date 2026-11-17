@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
+import type { GfsAbortRegistration } from './gfs/abortTypes.js'
+import type { GfsShareOptions } from './gfs/uriHandler.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DeepLinkAcknowledgmentAuthority,
@@ -80,26 +82,31 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
 
 /**
  * Producer-side cancellation wiring (folder-zip Stop, R1-M1): a cancellable
- * invoke carries a requestId; if the caller's signal aborts, main aborts the
- * in-flight request. An already-aborted signal never starts producer work —
- * no invoke, no gfs:abort event (R2-L3). Kept INLINE: the sandboxed preload
- * must stay free of relative value imports (self-containment contract).
+ * invoke carries a requestId; the renderer registers an abort callback because
+ * AbortSignal itself cannot retain its methods across contextBridge. An
+ * already-aborted request starts no producer work (R2-L3). Kept INLINE: the
+ * sandboxed preload must stay free of relative value imports.
  */
 function cancellableGfsInvoke<T>(
   channel: string,
   payload: Record<string, unknown>,
-  signal?: AbortSignal
+  registerAbort?: GfsAbortRegistration
 ): Promise<T> {
-  if (!signal) return ipcRenderer.invoke(channel, payload) as Promise<T>
-  if (signal.aborted) {
+  if (!registerAbort) return ipcRenderer.invoke(channel, payload) as Promise<T>
+  const requestId = crypto.randomUUID()
+  let aborted = false
+  let started = false
+  const unregister = registerAbort(() => {
+    if (aborted) return
+    aborted = true
+    if (started) ipcRenderer.send('gfs:abort', { requestId })
+  })
+  if (aborted) {
+    unregister()
     return Promise.reject(new DOMException('Request was stopped before it started.', 'AbortError'))
   }
-  const requestId = crypto.randomUUID()
-  const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
-  signal.addEventListener('abort', onAbort, { once: true })
-  return ipcRenderer
-    .invoke(channel, { ...payload, requestId })
-    .finally(() => signal.removeEventListener('abort', onAbort)) as Promise<T>
+  started = true
+  return ipcRenderer.invoke(channel, { ...payload, requestId }).finally(unregister) as Promise<T>
 }
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
@@ -212,6 +219,7 @@ const clerum = Object.freeze({
     switch: (teamId: string) => ipcRenderer.invoke('team:switch', { teamId }),
   },
   gfs: {
+    getHome: () => ipcRenderer.invoke('gfs:getHome'),
     getUserNavigationGeneration: (): number | null =>
       ipcRenderer.sendSync('gfs:getUserNavigationGeneration'),
     advanceUserNavigationGeneration: (): number | null =>
@@ -230,8 +238,15 @@ const clerum = Object.freeze({
     },
     copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
-    download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
-      cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),
+    download: (
+      uri: string,
+      options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration }
+    ) =>
+      cancellableGfsInvoke(
+        'gfs:download',
+        { uri, maxBytes: options?.maxBytes },
+        options?.registerAbort
+      ),
     downloadPreview: (uri: string, maxBytes: number) =>
       ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
     listAccessible: (drive?: string, cursor?: string) =>
@@ -240,8 +255,13 @@ const clerum = Object.freeze({
       resourceId: string,
       drive?: string,
       cursor?: string,
-      options?: { signal?: AbortSignal }
-    ) => cancellableGfsInvoke('gfs:listChildren', { resourceId, drive, cursor }, options?.signal),
+      options?: { registerAbort?: GfsAbortRegistration }
+    ) =>
+      cancellableGfsInvoke(
+        'gfs:listChildren',
+        { resourceId, drive, cursor },
+        options?.registerAbort
+      ),
     affordances: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
     zipStream: {
@@ -256,12 +276,12 @@ const clerum = Object.freeze({
         jobId: string,
         name: string,
         uri: string,
-        options?: { maxBytes?: number; signal?: AbortSignal }
+        options?: { maxBytes?: number; registerAbort?: GfsAbortRegistration }
       ) =>
         cancellableGfsInvoke(
           'gfs:zipStream:appendFromUri',
           { jobId, name, uri, maxBytes: options?.maxBytes },
-          options?.signal
+          options?.registerAbort
         ),
       finish: (jobId: string, suggestedName: string) =>
         ipcRenderer.invoke('gfs:zipStream:finish', { jobId, suggestedName }),
@@ -305,14 +325,14 @@ const clerum = Object.freeze({
         ifMatch,
         resumeUploadId,
       }),
-    getUploadSnapshot: (uploadId: string, drive = 'main') =>
+    getUploadSnapshot: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId, drive }),
-    listUploadSessions: (drive = 'main') => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
-    pauseUpload: (uploadId: string, drive = 'main') =>
+    listUploadSessions: (drive?: string) => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
+    pauseUpload: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:pauseUpload', { uploadId, drive }),
-    resumeUpload: (uploadId: string, drive = 'main') =>
+    resumeUpload: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
-    cancelUpload: (uploadId: string, drive = 'main') =>
+    cancelUpload: (uploadId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
     replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
@@ -352,11 +372,13 @@ const clerum = Object.freeze({
     listShares: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:listShares', { resourceId, drive }),
     revokeShare: (shareId: string) => ipcRenderer.invoke('gfs:revokeShare', { shareId }),
-    // A desktop share grants READ access only (the minimal shared capability) —
-    // unlike `grant`, it takes no permission bits by design. The server still
-    // enforces the caller holds read + share (no-escalation).
-    createShare: (resourceId: string, subjectKeys: string[], drive?: string) =>
-      ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKeys, drive }),
+    // Share options permit only Read-strength permissions; main validates them.
+    createShare: (
+      resourceId: string,
+      subjectKeys: string[],
+      drive?: string,
+      options?: GfsShareOptions
+    ) => ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKeys, drive, options }),
   },
   agents: {
     listMine: () => ipcRenderer.invoke('agents:listMine'),

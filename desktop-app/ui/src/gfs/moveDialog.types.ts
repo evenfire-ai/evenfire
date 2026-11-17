@@ -1,4 +1,5 @@
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import type { GfsCallerHome } from './callerHome.types'
 
 type GfsMoveDialogBaseProps = {
   /** The resource being moved (kind powers the dialog title + cycle guard).
@@ -12,6 +13,10 @@ type GfsMoveDialogBaseProps = {
   }
   /** Cache scope from useGfsBrowserController — shares the page's gfs queries. */
   sessionScope?: string
+  drive: string
+  /** The caller's own home: listed as the "My home" destination section and
+   *  never under "Shared with me". */
+  home: GfsCallerHome
   /** Published generation that owns all authority reads in this dialog. */
   sessionGeneration: number | null
   /** Dialog-local starting path (typically the page crumbs, minus the target). */

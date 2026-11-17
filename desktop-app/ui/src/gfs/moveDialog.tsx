@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, IconButton, StatusBanner } from '@components/Common'
 import { IconCheck, IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
-import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
+import { GFS_MY_HOME_LABEL } from '@constants/gfsBrowser'
 import {
   desktopQueryKeys,
   isGfsSessionAuthorityCurrent,
@@ -10,6 +10,7 @@ import {
 } from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
+import { callerHomeRootNode, isCallerHomeRoot } from './callerHome'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from './deniedChildren'
 import type { GfsMoveDialogProps, GfsNumberedNameConsent } from './moveDialog.types'
 
@@ -66,13 +67,13 @@ function GfsMoveTreeFolder({
   const childQueryKey = desktopQueryKeys.gfsChildren(
     scope,
     folder.resourceId,
-    GFS_DRIVE_MAIN,
+    folder.drive,
     sessionGeneration
   )
   const childQuery = useInfiniteQuery({
     queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
-      window.clerum.gfs.listChildren(folder.resourceId, GFS_DRIVE_MAIN, pageParam),
+      window.clerum.gfs.listChildren(folder.resourceId, folder.drive, pageParam),
     enabled: Boolean(scope) && isExpanded && isGfsSessionGeneration(sessionGeneration),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
@@ -228,6 +229,8 @@ function GfsMoveTreeFolder({
 export function GfsMoveDialog({
   target,
   sessionScope,
+  drive,
+  home,
   sessionGeneration,
   initialCrumbs,
   onMove,
@@ -238,6 +241,10 @@ export function GfsMoveDialog({
   permissionStatus = null,
   onAuthorityFailure,
 }: GfsMoveDialogProps) {
+  /** One label source for the caller's home root: "My home", never the storage
+   *  folder name. Selection identities stay the resource ids. */
+  const destinationLabel = (resourceId: string, name: string) =>
+    isCallerHomeRoot(home, { resourceId, drive }) ? GFS_MY_HOME_LABEL : name
   const initialDestination = initialCrumbs[initialCrumbs.length - 1]
   // The folder that already contains the target. Row moves carry the real
   // parent id; for the current resource the sliced crumbs end at its parent.
@@ -252,7 +259,7 @@ export function GfsMoveDialog({
         : null
   const currentParentName =
     initialDestination && initialDestination.resourceId === currentParentId
-      ? initialDestination.name
+      ? destinationLabel(currentParentId, initialDestination.name)
       : null
   const scope = sessionScope ?? ''
   const authorityRef = useRef({ scope, generation: sessionGeneration })
@@ -276,7 +283,10 @@ export function GfsMoveDialog({
       initialDestination &&
       initialDestination.resourceId !== target.resourceId &&
       initialDestination.resourceId !== currentParentId
-        ? { resourceId: initialDestination.resourceId, name: initialDestination.name }
+        ? {
+            resourceId: initialDestination.resourceId,
+            name: destinationLabel(initialDestination.resourceId, initialDestination.name),
+          }
         : null
   )
   const [error, setError] = useState<string | null>(null)
@@ -336,11 +346,11 @@ export function GfsMoveDialog({
     settleNumberedNameConsent,
   ])
   const accessibleQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsAccessible(scope, GFS_DRIVE_MAIN, sessionGeneration),
+    queryKey: desktopQueryKeys.gfsAccessible(scope, drive, sessionGeneration),
     queryFn: ({ pageParam }) => {
       const listAccessible = window.clerum?.gfs?.listAccessible
       return typeof listAccessible === 'function'
-        ? listAccessible(GFS_DRIVE_MAIN, pageParam)
+        ? listAccessible(drive, pageParam)
         : Promise.resolve({ items: [], nextCursor: null })
     },
     enabled: Boolean(sessionScope) && isGfsSessionGeneration(sessionGeneration),
@@ -352,7 +362,7 @@ export function GfsMoveDialog({
       .flatMap(page => page.items)
       .map(item => ({
         ...item,
-        drive: item.drive ?? GFS_DRIVE_MAIN,
+        drive: item.drive ?? drive,
         parentResourceId: item.parentResourceId ?? null,
       }))
       .filter(item => item.kind === 'directory')
@@ -364,7 +374,7 @@ export function GfsMoveDialog({
       accessibleFolders.unshift({
         ...currentPathRoot,
         rid: currentPathRoot.resourceId,
-        drive: GFS_DRIVE_MAIN,
+        drive: drive,
         parentResourceId: null,
         path: null,
       })
@@ -373,11 +383,17 @@ export function GfsMoveDialog({
     const roots = accessibleFolders.filter(
       folder => !folder.parentResourceId || !accessibleFolderIds.has(folder.parentResourceId)
     )
-    return folderItems(roots, new Set([target.resourceId]))
-  }, [accessibleQuery.data, initialCrumbs, target.resourceId])
+    const listed = folderItems(roots, new Set([target.resourceId]))
+    // The caller's own home is a destination of its own, never one of the
+    // folders someone shared with the caller (R3-M2).
+    return {
+      homeRoot: callerHomeRootNode(home, listed),
+      sharedRoots: listed.filter(folder => !isCallerHomeRoot(home, folder)),
+    }
+  }, [accessibleQuery.data, drive, home, initialCrumbs, target.resourceId])
 
   const listError = errorMessage(accessibleQuery.error)
-  const loadingRoots = accessibleQuery.isFetching && rootFolders.length === 0
+  const loadingRoots = accessibleQuery.isFetching && rootFolders.sharedRoots.length === 0
   const pathPassesThroughTarget =
     initialCrumbs.some(crumb => crumb.resourceId === target.resourceId) ||
     selectedDestination?.resourceId === target.resourceId
@@ -414,7 +430,10 @@ export function GfsMoveDialog({
     settleNumberedNameConsent(false)
     setError(null)
     setPermissionCheckSucceeded(false)
-    setSelectedDestination({ resourceId: folder.resourceId, name: folder.name })
+    setSelectedDestination({
+      resourceId: folder.resourceId,
+      name: destinationLabel(folder.resourceId, folder.name),
+    })
     setExpandedFolderIds(previous => {
       if (previous.has(folder.resourceId)) return previous
       return new Set(previous).add(folder.resourceId)
@@ -576,6 +595,37 @@ export function GfsMoveDialog({
               </strong>
             </span>
           </div>
+          {rootFolders.homeRoot ? (
+            <>
+              <div className="da-gfs-move-dialog__tree-heading">
+                <span className="da-gfs-move-dialog__tree-heading-copy">
+                  <strong>{GFS_MY_HOME_LABEL}</strong>
+                </span>
+              </div>
+              <div
+                className="da-gfs-move-dialog__tree"
+                role="tree"
+                aria-label="My home destination"
+              >
+                <div className="da-gfs-move-dialog__tree-root">
+                  <GfsMoveTreeFolder
+                    ancestors={new Set()}
+                    expandedFolderIds={expandedFolderIds}
+                    folder={rootFolders.homeRoot}
+                    key={rootFolders.homeRoot.resourceId}
+                    level={1}
+                    onAuthorityFailure={onAuthorityFailure}
+                    onSelect={selectFolder}
+                    onToggle={toggleFolder}
+                    scope={scope}
+                    sessionGeneration={sessionGeneration}
+                    selectedDestination={selectedDestination}
+                    targetResourceId={target.resourceId}
+                  />
+                </div>
+              </div>
+            </>
+          ) : null}
           <div className="da-gfs-move-dialog__tree-heading">
             <span className="da-gfs-move-dialog__tree-heading-copy">
               <strong>Shared with me</strong>
@@ -590,7 +640,7 @@ export function GfsMoveDialog({
               <p className="muted" role="status">
                 Loading folders…
               </p>
-            ) : rootFolders.length === 0 && !accessibleQuery.hasNextPage ? (
+            ) : rootFolders.sharedRoots.length === 0 && !accessibleQuery.hasNextPage ? (
               // A refused listing is not an absence of folders. The banner
               // above already states the failure, so this only has to stop
               // contradicting it — asserting "no folders" next to an error the
@@ -601,7 +651,7 @@ export function GfsMoveDialog({
               </p>
             ) : (
               <div className="da-gfs-move-dialog__tree-root">
-                {rootFolders.map(folder => (
+                {rootFolders.sharedRoots.map(folder => (
                   <GfsMoveTreeFolder
                     ancestors={new Set()}
                     expandedFolderIds={expandedFolderIds}

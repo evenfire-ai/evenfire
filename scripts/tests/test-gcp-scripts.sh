@@ -1589,6 +1589,7 @@ assert_control_api_runtime_access_contract_is_exact() {
     $'plugin_workload_sdk_spend_outcomes\tappend'
     $'gfs_desktop_operator_links\tlink_lifecycle'
     $'desktop_user_retirement_operations\tlink_lifecycle'
+    $'gfs_user_homes\tupsert'
     $'password_identifier_state\tlegacy_dml'
     $'password_admission_rollout_state\tnone'
     $'password_verification_pace\tlegacy_dml'

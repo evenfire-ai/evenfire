@@ -18,6 +18,10 @@ import {
   startEntityChangeDispatcher,
   stopEntityChangeDispatcher,
 } from './services/entityChangeService.js'
+import {
+  startGfsUserHomeReconciler,
+  stopGfsUserHomeReconciler,
+} from './services/gfsUserHomeReconciler.js'
 import { catalogPruneFromGateway } from './services/llmCatalogPrune.js'
 import { syncDiscoveredModels } from './services/llmCatalogSync.js'
 import {
@@ -108,6 +112,7 @@ const shutdown = createShutdownHandler(async () => {
       'oauth-shared-grant-sweep': stopOauthSharedGrantSweepCron,
       'workflow-approval-trace-projector': stopWorkflowApprovalTraceProjector,
       'entity-change-dispatcher': stopEntityChangeDispatcher,
+      'gfs-user-home-reconciler': stopGfsUserHomeReconciler,
       'core-database-pool': () => pool.end(),
       'rate-limit-database-pool': () => rateLimitPool.end(),
       'trace-database-pools': closeTracingPools,
@@ -158,6 +163,7 @@ async function main(): Promise<void> {
   )
   ensureStartupActive()
   startEntityChangeDispatcher()
+  startGfsUserHomeReconciler()
 
   // Observability only (never fatal): report whether this self-hosted deployment
   // holds a registry identity. Auth is derived from credential presence, so a

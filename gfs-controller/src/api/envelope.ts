@@ -68,6 +68,9 @@ export function toResponse(error: unknown): {
   if (code === "path_invalid") {
     return { status: 400, body: { ok: false, error: { code: "path_invalid", message } } };
   }
+  if (code === "23514" && (error as { constraint?: unknown }).constraint === "gfs_governed_root_immutable") {
+    return { status: 409, body: { ok: false, error: { code: "governed_root_immutable", message: "governed root is immutable" } } };
+  }
   return {
     status: 500,
     body: { ok: false, error: { code: "internal", message: "internal server error" } },

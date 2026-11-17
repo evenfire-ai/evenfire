@@ -21,6 +21,7 @@
  * archive.
  */
 import { isRateLimited, parseHttpStatus, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
+import type { GfsAbortRegistration } from '../../../src/gfs/abortTypes'
 import { ZipEntryNameAllocator, foldEntryName } from '../../../src/gfs/zipEntryName'
 import { escapeReservedWindowsDeviceName } from '../../../src/gfs/zipEntryPath'
 import { ZIP_MAX_ENTRIES, ZIP_MAX_TOTAL_BYTES } from '../../../src/gfs/zipLimits'
@@ -293,20 +294,32 @@ function sanitizeArchiveFileName(name: string): string {
   return `${escapeReservedWindowsDeviceName(stem)}${extension}`
 }
 
+/** Keep the signal in the renderer; only functions cross the isolated preload bridge. */
+function registerGfsAbort(signal: AbortSignal | undefined): GfsAbortRegistration | undefined {
+  if (!signal) return undefined
+  return onAbort => {
+    if (signal.aborted) {
+      onAbort()
+      return () => undefined
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    return () => signal.removeEventListener('abort', onAbort)
+  }
+}
+
 export async function createGfsFolderZip(
   folder: GfsZipFolderSource,
   options: CreateGfsFolderZipOptions = {}
 ): Promise<GfsFolderZipResult> {
   const maxTotalBytes = options.limits?.maxTotalBytes ?? GFS_ZIP_MAX_TOTAL_BYTES
   const maxEntries = options.limits?.maxEntries ?? GFS_ZIP_MAX_ENTRIES
-  // Defaults read the real bridge; the walk's AbortSignal rides along on both
-  // call kinds so a Stop cancels the producer-side fetch, not just the
-  // renderer's patience (R1-M1).
+  // The renderer retains the live signal and registers a bridge-safe callback
+  // so Stop also cancels the producer-side fetch (R1-M1).
   const listChildren: GfsFolderZipDeps['listChildren'] =
     options.deps?.listChildren ??
     ((resourceId, drive, cursor, requestOptions) =>
       window.clerum.gfs.listChildren(resourceId, drive, cursor, {
-        signal: requestOptions?.signal ?? options.signal,
+        registerAbort: registerGfsAbort(requestOptions?.signal ?? options.signal),
       }))
   // Default lazily reaches the bridge so a walk that never appends (aborted
   // early, refused at planning) does not require window.clerum to exist.
@@ -315,7 +328,7 @@ export async function createGfsFolderZip(
     appendFromUri: (jobId, name, uri, requestOptions) =>
       window.clerum.gfs.zipStream.appendFromUri(jobId, name, uri, {
         maxBytes: requestOptions?.maxBytes,
-        signal: requestOptions?.signal ?? options.signal,
+        registerAbort: registerGfsAbort(requestOptions?.signal ?? options.signal),
       }),
     finish: (jobId, suggestedName) => window.clerum.gfs.zipStream.finish(jobId, suggestedName),
     abort: jobId => window.clerum.gfs.zipStream.abort(jobId),

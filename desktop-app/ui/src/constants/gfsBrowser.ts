@@ -1,7 +1,7 @@
 export const GFS_BREADCRUMB_MAX_DEPTH = 64
 
-/** Drive the desktop Files page browses (single-drive user plane today). */
-export const GFS_DRIVE_MAIN = 'main'
+/** Cache identity for discovery requests that use the server's default drive. */
+export const GFS_DEFAULT_DISCOVERY_DRIVE = 'main'
 
 /** Internal EvenDrive drag payload type, shared by the Files page and the
  * sidebar file explorer. Carries the resourceId as an identity POINTER only:
@@ -23,3 +23,40 @@ export const DRAG_COLD_CHECK_BUDGET = 8
 
 /** Concurrent cold-hover probe chains per gesture, shared across both surfaces. */
 export const DRAG_COLD_CHECK_MAX_CONCURRENCY = 2
+
+/** Label of the caller's own home wherever EvenDrive shows it as a root. */
+export const GFS_MY_HOME_LABEL = 'My home'
+
+/** Detail line under the "My home" title on the Files page. */
+export const GFS_MY_HOME_DETAIL = 'Your personal folder in EvenDrive.'
+
+/** Home-state notice for a home that is still being provisioned. */
+export const GFS_HOME_PENDING_TEXT = 'Your home folder is being prepared'
+
+/** Home-state notice for a home in conflict, which only an administrator resolves. */
+export const GFS_HOME_CONFLICT_TEXT = 'Your home folder needs attention from an administrator'
+
+/** Body of the revoked-access surface, shared by the Files page and the sidebar. */
+export const GFS_ACCESS_REVOKED_BODY =
+  'Your current session cannot access these files. Sign in again or contact an administrator.'
+
+/** Label of the collection of resources others share with the caller. */
+export const GFS_SHARED_WITH_ME_LABEL = 'Shared with me'
+
+/** Label of the Files trail's first crumb, which opens the EvenDrive overview. */
+export const GFS_EVENDRIVE_ROOT_LABEL = 'EvenDrive'
+
+/**
+ * Identity text of an access row, inside the caller's own home, whose person or
+ * team is in none of the viewer's teams. The surface never shows that member's
+ * name, email or id; the row keeps its role and Remove.
+ */
+export const GFS_OUTSIDE_TEAMS_MEMBER_LABEL = 'Member outside your teams'
+
+/**
+ * Files-tab location of the "Shared with me" view. A `null` location is the
+ * EvenDrive overview (the caller's home plus what others share); this one
+ * lists only what others share. It is a client view id, never a `gfs://` URI,
+ * so it is never resolved against the server.
+ */
+export const GFS_SHARED_WITH_ME_LOCATION = 'evendrive:shared-with-me'

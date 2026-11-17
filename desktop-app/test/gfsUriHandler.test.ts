@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 import {
   GfsClient,
@@ -157,13 +158,55 @@ describe('GfsClient.listChildren', () => {
       ok: true,
       data: { items: [withStamp, CHILD], nextCursor: null },
     })) as GfsTransport['requestJson']
-    const out = await new GfsClient(transport({ requestJson })).listChildren(RID, 'tok')
+    const out = await new GfsClient(transport({ requestJson })).listChildren(RID, 'tok', {
+      drive: 'main',
+    })
     expect(out.items[0]?.updatedAt).toBe('2026-06-01T12:00:00.000Z')
     expect(out.items[1]?.updatedAt).toBeUndefined()
+  })
+
+  it('omits the drive query when none is given and rejects an explicit blank drive', async () => {
+    // `drive` is documented as optional (docs/reference/plugin-ui-sdk.md): the
+    // server applies its own default, exactly as `listAccessible` already does.
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { items: [CHILD], nextCursor: null },
+    })) as GfsTransport['requestJson']
+    const client = new GfsClient(transport({ requestJson }))
+
+    await expect(client.listChildren(RID, 'tok', {})).resolves.toEqual({
+      items: [CHILD],
+      nextCursor: null,
+    })
+    const [, url] = (requestJson as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(url).toBe(`https://api.example/api/v1/me/gfs/resources/${RID}/children`)
+    expect(url).not.toContain('drive=')
+
+    // A blank drive is not an omitted one: it fails closed before any request
+    // instead of reaching the server's default drive (R2-L8).
+    await expect(client.listChildren(RID, 'tok', { drive: '' })).rejects.toThrow('drive_required')
+    expect(requestJson).toHaveBeenCalledTimes(1)
   })
 })
 
 describe('GfsClient.listAccessible', () => {
+  it('omits the drive query when none is provided and retains the cursor', async () => {
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { items: [{ ...CHILD, sources: ['grant'] }], nextCursor: null },
+    })) as GfsTransport['requestJson']
+    const client = new GfsClient(transport({ requestJson }))
+
+    const page = await client.listAccessible('tok', { cursor: 'next-page' })
+
+    expect(page.items).toHaveLength(1)
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      'https://api.example/api/v1/me/gfs/resources?cursor=next-page',
+      { token: 'tok' }
+    )
+  })
+
   it('lists readable GFS resources for the current ordinary user session', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,
@@ -210,7 +253,9 @@ describe('GfsClient.listAccessible', () => {
       },
     })) as GfsTransport['requestJson']
 
-    const out = await new GfsClient(transport({ requestJson })).listAccessible('tok')
+    const out = await new GfsClient(transport({ requestJson })).listAccessible('tok', {
+      drive: 'main',
+    })
 
     expect(out).toEqual({
       items: [operatorChild],
@@ -227,7 +272,7 @@ describe('GfsClient.affordances', () => {
       held: ['read', 'manage_acl'],
       isOperator: false,
     })) as GfsTransport['requestJson']
-    const out = await new GfsClient(transport({ requestJson })).affordances(RID, 'tok')
+    const out = await new GfsClient(transport({ requestJson })).affordances(RID, 'tok', 'main')
     expect(out).toEqual({ held: ['read', 'manage_acl'], isOperator: false })
     expect(requestJson).toHaveBeenCalledWith(
       'GET',
@@ -243,6 +288,7 @@ describe('GfsClient.grant', () => {
     await new GfsClient(transport({ requestJson })).grant(
       {
         resourceId: RID,
+        drive: 'main',
         subjects: [
           { type: 'user', id: 'u2' },
           { type: 'team', id: 't1' },
@@ -274,6 +320,7 @@ describe('GfsClient.grant', () => {
     await new GfsClient(transport({ requestJson })).grant(
       {
         resourceId: RID,
+        drive: 'main',
         subjects: [{ type: 'host', id: '1st:mcp-host/chatllm' }],
         permissions: ['read'],
         inherit: true,
@@ -314,6 +361,7 @@ describe('GfsClient.grant', () => {
       new GfsClient(transport({ requestJson })).grant(
         {
           resourceId: RID,
+          drive: 'main',
           subjects: [
             { type: 'user', id: 'u2' },
             { type: 'user', id: 'u3' },
@@ -383,7 +431,12 @@ describe('GfsClient.grant', () => {
     // verbatim, and the untouched `ApiError` stays reachable as `cause`.
     const rejection = await new GfsClient(transport({ requestJson }))
       .grant(
-        { resourceId: RID, subjects: [{ type: 'user', id: 'u2' }], permissions: ['read'] },
+        {
+          resourceId: RID,
+          drive: 'main',
+          subjects: [{ type: 'user', id: 'u2' }],
+          permissions: ['read'],
+        },
         'tok'
       )
       .then(
@@ -427,9 +480,13 @@ describe('GfsClient.listGrants', () => {
     )
   })
 
-  it('defaults the drive when omitted', async () => {
+  it('defaults the drive when omitted and uses the supplied one', async () => {
     const requestJson = vi.fn(async () => ({ items: [] })) as GfsTransport['requestJson']
     await new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
+    await new GfsClient(transport({ requestJson })).listGrants(
+      { resourceId: RID, drive: 'main' },
+      'tok'
+    )
     expect(requestJson).toHaveBeenCalledWith(
       'GET',
       `https://api.example/api/v1/me/gfs/grants?drive=main&resourceId=${RID}`,
@@ -443,7 +500,10 @@ describe('GfsClient.listGrants', () => {
       error: { code: 'manage_acl_required', message: 'denied' },
     })) as GfsTransport['requestJson']
     await expect(
-      new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
+      new GfsClient(transport({ requestJson })).listGrants(
+        { resourceId: RID, drive: 'main' },
+        'tok'
+      )
     ).rejects.toBeInstanceOf(GfsUriError)
   })
 
@@ -456,7 +516,10 @@ describe('GfsClient.listGrants', () => {
       )
     }) as GfsTransport['requestJson']
     await expect(
-      new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
+      new GfsClient(transport({ requestJson })).listGrants(
+        { resourceId: RID, drive: 'main' },
+        'tok'
+      )
     ).rejects.toThrow(/429 .*retryAfterSeconds=45/)
   })
 
@@ -475,7 +538,7 @@ describe('GfsClient.listGrants', () => {
     }) as GfsTransport['requestJson']
 
     const rejection = await new GfsClient(transport({ requestJson }))
-      .listGrants({ resourceId: RID }, 'tok')
+      .listGrants({ resourceId: RID, drive: 'main' }, 'tok')
       .catch((error: unknown) => error)
 
     const message = (rejection as Error).message
@@ -539,7 +602,10 @@ describe('GfsClient.listShares', () => {
     const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
 
     await expect(
-      new GfsClient(transport({ requestJson })).listShares({ resourceId: RID }, 'tok')
+      new GfsClient(transport({ requestJson })).listShares(
+        { resourceId: RID, drive: 'main' },
+        'tok'
+      )
     ).rejects.toThrow('unexpected gfs shares response: missing items array')
   })
 })
@@ -573,6 +639,7 @@ describe('GfsClient.createShare', () => {
     await new GfsClient(transport({ requestJson })).createShare(
       {
         resourceId: RID,
+        drive: 'main',
         subjects: [
           { type: 'team', id: 't1' },
           { type: 'user', id: 'u2' },
@@ -599,15 +666,40 @@ describe('GfsClient.createShare', () => {
 })
 
 describe('GfsClient resource mutations', () => {
-  it('creates folders and files through the user plane', async () => {
+  it('uses the main drive for resource mutations when drive is omitted', async () => {
     const requestJson = vi.fn(async () => ({
       ok: true,
       data: CHILD,
     })) as GfsTransport['requestJson']
     const client = new GfsClient(transport({ requestJson }))
     await client.createResource({ parentResourceId: RID, name: 'docs', kind: 'directory' }, 'tok')
+    await client.replaceFile({ resourceId: RID, encodedData: 'aGVsbG8=' }, 'tok')
+    await client.renameResource({ resourceId: RID, newName: 'renamed.md' }, 'tok')
+    await client.deleteResource({ resourceId: RID }, 'tok')
+    await client.moveResource({ resourceId: RID, destinationId: RID }, 'tok')
+    const urls = (requestJson as ReturnType<typeof vi.fn>).mock.calls.map(call => call[1])
+    expect(urls).toHaveLength(5)
+    expect(urls.every(url => new URL(url).searchParams.get('drive') === 'main')).toBe(true)
+  })
+
+  it('creates folders and files through the user plane', async () => {
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: CHILD,
+    })) as GfsTransport['requestJson']
+    const client = new GfsClient(transport({ requestJson }))
     await client.createResource(
-      { parentResourceId: RID, name: 'report.md', kind: 'file', encodedData: 'aGVsbG8=' },
+      { parentResourceId: RID, drive: 'main', name: 'docs', kind: 'directory' },
+      'tok'
+    )
+    await client.createResource(
+      {
+        parentResourceId: RID,
+        drive: 'main',
+        name: 'report.md',
+        kind: 'file',
+        encodedData: 'aGVsbG8=',
+      },
       'tok'
     )
     expect(requestJson).toHaveBeenNthCalledWith(
@@ -641,11 +733,22 @@ describe('GfsClient resource mutations', () => {
       data: CHILD,
     })) as GfsTransport['requestJson']
     const client = new GfsClient(transport({ requestJson }))
-    await client.replaceFile({ resourceId: RID, encodedData: 'aGVsbG8=', ifMatch: 1 }, 'tok')
-    await client.renameResource({ resourceId: RID, newName: 'renamed.md', ifMatch: 2 }, 'tok')
-    await client.deleteResource({ resourceId: RID, ifMatch: 3 }, 'tok')
+    await client.replaceFile(
+      { resourceId: RID, drive: 'main', encodedData: 'aGVsbG8=', ifMatch: 1 },
+      'tok'
+    )
+    await client.renameResource(
+      { resourceId: RID, drive: 'main', newName: 'renamed.md', ifMatch: 2 },
+      'tok'
+    )
+    await client.deleteResource({ resourceId: RID, drive: 'main', ifMatch: 3 }, 'tok')
     await client.moveResource(
-      { resourceId: RID, destinationId: '22222222-2222-2222-2222-222222222222', ifMatch: 4 },
+      {
+        resourceId: RID,
+        drive: 'main',
+        destinationId: '22222222-2222-2222-2222-222222222222',
+        ifMatch: 4,
+      },
       'tok'
     )
     expect(requestJson).toHaveBeenNthCalledWith(
@@ -679,6 +782,103 @@ describe('GfsClient resource mutations', () => {
         body: { newParentId: '22222222-2222-2222-2222-222222222222', ifMatch: 4 },
       }
     )
+  })
+})
+
+describe('GfsClient drive arguments (R2-L8)', () => {
+  const SUBJECTS = [{ type: 'user' as const, id: 'u2' }]
+  // Each call takes the drive under test; `undefined` means omitted.
+  const CALLS: Array<[string, (client: GfsClient, drive: string | undefined) => Promise<unknown>]> =
+    [
+      ['listChildren', (c, drive) => c.listChildren(RID, 'tok', { drive })],
+      ['listAccessible', (c, drive) => c.listAccessible('tok', { drive })],
+      ['affordances', (c, drive) => c.affordances(RID, 'tok', drive)],
+      [
+        'createResource',
+        (c, drive) =>
+          c.createResource({ parentResourceId: RID, drive, name: 'd', kind: 'directory' }, 'tok'),
+      ],
+      [
+        'replaceFile',
+        (c, drive) => c.replaceFile({ resourceId: RID, drive, encodedData: 'YQ==' }, 'tok'),
+      ],
+      [
+        'renameResource',
+        (c, drive) => c.renameResource({ resourceId: RID, drive, newName: 'n' }, 'tok'),
+      ],
+      [
+        'moveResource',
+        (c, drive) => c.moveResource({ resourceId: RID, drive, destinationId: RID }, 'tok'),
+      ],
+      ['deleteResource', (c, drive) => c.deleteResource({ resourceId: RID, drive }, 'tok')],
+      [
+        'grant',
+        (c, drive) =>
+          c.grant({ resourceId: RID, drive, subjects: SUBJECTS, permissions: ['read'] }, 'tok'),
+      ],
+      ['listGrants', (c, drive) => c.listGrants({ resourceId: RID, drive }, 'tok')],
+      [
+        'createShare',
+        (c, drive) =>
+          c.createShare(
+            { resourceId: RID, drive, subjects: SUBJECTS, permissions: ['read'] },
+            'tok'
+          ),
+      ],
+      ['listShares', (c, drive) => c.listShares({ resourceId: RID, drive }, 'tok')],
+    ]
+
+  function sentDrive(call: unknown[]): string | null {
+    const url = new URL(String(call[1]))
+    if (url.searchParams.has('drive')) return url.searchParams.get('drive')
+    const body = (call[2] as { body?: { drive?: string } } | undefined)?.body
+    return body?.drive ?? null
+  }
+
+  // Scans the client source for three request shapes: a drive read from the
+  // call input, a `drive` query parameter, and a drive interpolated into a URL.
+  // Stated limit: a drive placed in a JSON body through a local variable is not
+  // scanned; the two such sites (grant, createShare) assign
+  // `const drive = resolveDrive(input.drive)` and are covered by the read rule.
+  it('sends a drive only after requireDrive or resolveDrive checked it', () => {
+    const clientSource = readFileSync(new URL('../src/gfs/uriHandler.ts', import.meta.url), 'utf8')
+    const reads = clientSource.match(/\b(?:input|opts)\??\.drive\b/g) ?? []
+    const checked =
+      clientSource.match(/\b(?:resolveDrive|requireDrive)\((?:input|opts)\.drive\)/g) ?? []
+    const presence = clientSource.match(/\bopts\?\.drive !== undefined/g) ?? []
+    expect(reads.length).toBeGreaterThan(0)
+    expect(reads.length).toBe(checked.length + presence.length)
+    const sinks = clientSource.match(/q\.set\('drive',\s*[^\n]*/g) ?? []
+    expect(sinks.length).toBeGreaterThan(0)
+    expect(
+      sinks.filter(s => !/^q\.set\('drive',\s*(?:resolveDrive|requireDrive)\(/.test(s))
+    ).toEqual([])
+    const interpolated = [
+      ...clientSource.matchAll(/drive=\$\{encodeURIComponent\(([^)]*)\)\}/g),
+    ].map(m => m[1])
+    expect(interpolated.length).toBeGreaterThan(0)
+    expect(interpolated.filter(n => n !== 'resolvedDrive' && n !== 'resource.drive')).toEqual([])
+  })
+
+  it.each(CALLS)('%s rejects a blank drive before any request', async (_name, call) => {
+    const requestJson = vi.fn(async () => ({
+      ok: true,
+      data: { ...CHILD, items: [], nextCursor: null },
+      items: [],
+      held: [],
+      isOperator: false,
+    })) as GfsTransport['requestJson']
+    const client = new GfsClient(transport({ requestJson }))
+
+    for (const blank of ['', '   ']) {
+      await expect(call(client, blank)).rejects.toThrow('drive_required')
+    }
+    expect(requestJson).not.toHaveBeenCalled()
+
+    // Liveness witness: the same call sends a named drive unchanged.
+    await call(client, 'main')
+    expect(requestJson).toHaveBeenCalledTimes(1)
+    expect(sentDrive((requestJson as ReturnType<typeof vi.fn>).mock.calls[0])).toBe('main')
   })
 })
 
@@ -751,8 +951,12 @@ function rateLimitedTransport(): GfsTransport {
 describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
   it('appends retryAfterSeconds to a rate-limited listAccessible rejection', async () => {
     const client = new GfsClient(rateLimitedTransport())
-    await expect(client.listAccessible('sess')).rejects.toThrow(/^429 Too Many Requests/)
-    await expect(client.listAccessible('sess')).rejects.toThrow(/retryAfterSeconds=7/)
+    await expect(client.listAccessible('sess', { drive: 'main' })).rejects.toThrow(
+      /^429 Too Many Requests/
+    )
+    await expect(client.listAccessible('sess', { drive: 'main' })).rejects.toThrow(
+      /retryAfterSeconds=7/
+    )
   })
 
   it('appends retryAfterSeconds to a rate-limited resolveUri rejection', async () => {
@@ -767,12 +971,14 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
 
   it('appends retryAfterSeconds to a rate-limited listChildren rejection', async () => {
     const client = new GfsClient(rateLimitedTransport())
-    await expect(client.listChildren(RID, 'tok')).rejects.toThrow(/retryAfterSeconds=7/)
+    await expect(client.listChildren(RID, 'tok', { drive: 'main' })).rejects.toThrow(
+      /retryAfterSeconds=7/
+    )
   })
 
   it('appends retryAfterSeconds to a rate-limited affordances rejection', async () => {
     const client = new GfsClient(rateLimitedTransport())
-    await expect(client.affordances(RID, 'tok')).rejects.toThrow(/retryAfterSeconds=7/)
+    await expect(client.affordances(RID, 'tok', 'main')).rejects.toThrow(/retryAfterSeconds=7/)
   })
 
   it('gives a non-rate-limited read rejection its status and nothing else', async () => {
@@ -791,7 +997,7 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
     // retryAfterSeconds=0" satisfies it identically — the assertion could not
     // express the exactness its name promises, and survived deleting the
     // feature it guards.
-    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+    await expect(new GfsClient(t).listAccessible('sess', { drive: 'main' })).rejects.toThrow(
       /^403 Forbidden: denied httpStatus=403$/
     )
     expect(t.requestJson).toHaveBeenCalledTimes(1)
@@ -812,7 +1018,9 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
       }) as GfsTransport['requestJson'],
     })
 
-    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(/retryAfterSeconds=11/)
+    await expect(new GfsClient(t).listAccessible('sess', { drive: 'main' })).rejects.toThrow(
+      /retryAfterSeconds=11/
+    )
     expect(t.requestJson).toHaveBeenCalledTimes(1)
   })
 
@@ -838,7 +1046,7 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
     // counterfeit one is gone rather than merely outranked. The status marker
     // sits in front of it, never behind — appending anything after the window
     // would take away the trailing anchor the renderer authenticates it by.
-    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+    await expect(new GfsClient(t).listAccessible('sess', { drive: 'main' })).rejects.toThrow(
       /^429 Too Many Requests: slow down httpStatus=429 retryAfterSeconds=7$/
     )
     expect(t.requestJson).toHaveBeenCalledTimes(1)
@@ -860,7 +1068,7 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
       }) as GfsTransport['requestJson'],
     })
 
-    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+    await expect(new GfsClient(t).listAccessible('sess', { drive: 'main' })).rejects.toThrow(
       /^429 Too Many Requests: slow down httpStatus=429$/
     )
     // Witness: the rejection still reaches the caller and the read really ran,
@@ -883,7 +1091,7 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
       }) as GfsTransport['requestJson'],
     })
 
-    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+    await expect(new GfsClient(t).listAccessible('sess', { drive: 'main' })).rejects.toThrow(
       /^429 Too Many Requests: Too Many Requests httpStatus=429$/
     )
     expect(t.requestJson).toHaveBeenCalledTimes(1)

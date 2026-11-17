@@ -50,6 +50,11 @@ export type MoveCommitOutcome =
     }
   | { status: 'no-op'; message: string }
   | { status: 'conflict-stopped'; message: string }
+  /**
+   * The server refused the move outright (for example a governed home root):
+   * retrying under another name cannot succeed, so no numbered ladder runs.
+   */
+  | { status: 'refused'; message: string }
   | { status: 'changed'; message: string }
   | { status: 'destination-rejected'; message: string }
   | { status: 'source-unavailable'; message: string }
@@ -104,6 +109,20 @@ function messageOf(error: unknown): string {
 
 const CONFLICT_STOPPED_MESSAGE =
   'An item with this name already exists. Choose another folder, or use Move to change its name if you have rename access.'
+
+/**
+ * The server's governed-root verdict: the drive root, `Users`, or a user's home
+ * root is managed and can never be moved or renamed. It arrives as a 409, so it
+ * must be classified BEFORE the name-conflict policy — retrying it under a
+ * numbered name would only repeat the same refusal.
+ */
+const GOVERNED_ROOT_IMMUTABLE_CODE = 'governed_root_immutable'
+const GOVERNED_ROOT_IMMUTABLE_MESSAGE =
+  'This folder is managed by Evenfire and cannot be moved or renamed.'
+
+function isGovernedRootImmutable(error: unknown): boolean {
+  return messageOf(error).includes(GOVERNED_ROOT_IMMUTABLE_CODE)
+}
 
 /**
  * A name conflict is a 409 and nothing else.
@@ -324,6 +343,9 @@ export async function commitGfsMove(
           ? { retryAfterSeconds: parseRetryAfterSeconds(message) ?? undefined }
           : {}),
       }
+    }
+    if (isGovernedRootImmutable(error)) {
+      return { status: 'refused', message: GOVERNED_ROOT_IMMUTABLE_MESSAGE }
     }
     if (!isNameConflictResponse(error, status)) {
       // Transport loss after dispatch: verify the outcome by identity; never

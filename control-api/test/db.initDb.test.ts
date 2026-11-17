@@ -98,6 +98,9 @@ describe('db.initDb', () => {
       expect(index, version).toBeLessThan(devBatchCommit)
     }
     expect(receiptIndex('0137_user_access_foundation')).toBeGreaterThan(devBatchCommit)
+    expect(receiptIndex('0141_gfs_user_homes')).toBeGreaterThan(
+      receiptIndex('0140_llm_catalog_prune_episodes')
+    )
   })
 
   it('applies the triggered_at audit index migration on top of an already-migrated baseline', async () => {

@@ -11,6 +11,7 @@ import {
 } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
+import { GfsUserHomeBlock } from '@components/GfsUserHomeBlock'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
@@ -94,6 +95,9 @@ export default function UserDetailsPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
+  // The home folder field mounts only for the member whose context loaded (never on a 404,
+  // and never for the next member during the render that follows a navigation).
+  const [loadedMemberId, setLoadedMemberId] = useState<string | null>(null)
   const [approvalDmsRefreshDisabled, setApprovalDmsRefreshDisabled] = useState(true)
   const [refreshApprovalDms, setRefreshApprovalDms] = useState<(() => void) | null>(null)
   const [editingContact, setEditingContact] = useState(false)
@@ -274,6 +278,7 @@ export default function UserDetailsPage() {
   }
 
   async function loadData() {
+    const requestedUserId = userId
     setBusy(true)
     setError('')
     try {
@@ -287,7 +292,12 @@ export default function UserDetailsPage() {
         userAgentAccess,
         communicationChannelsData,
       ] = await Promise.all([
-        getAdminUserContext(userId),
+        // The Home folder field needs only the member. Bind it to this request so a failure of
+        // another request on this page cannot hide it.
+        getAdminUserContext(userId).then(memberContext => {
+          setLoadedMemberId(requestedUserId)
+          return memberContext
+        }),
         getContexts(),
         getAdminUserContexts(userId),
         getAdminTeams(),
@@ -801,10 +811,12 @@ export default function UserDetailsPage() {
               </strong>
             </div>
 
-            <div className="cu-field" style={{ marginBottom: 0 }}>
+            <div className="cu-field">
               <div className="cu-field__label">Telegram IDs</div>
               <strong>{telegramIdsDraft.length > 0 ? telegramIdsDraft.join(', ') : 'None'}</strong>
             </div>
+
+            {loadedMemberId === userId ? <GfsUserHomeBlock key={userId} userId={userId} /> : null}
           </div>
 
           {!initialLoading && (

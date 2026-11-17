@@ -6,6 +6,7 @@ metadata:
   labels:
     app: control-api
 data:
+  GFS_HOME_DRIVE: main
   CONTROL_API_PORT: '8090'
   TRACING_ENVIRONMENT: 'local'
   TRACING_CLUSTER_NAME: 'minikube'

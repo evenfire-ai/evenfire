@@ -17,7 +17,7 @@ const ROLE_OPTIONS = [
   { value: 'editor', label: 'Editor' },
 ]
 
-function permissionsForRole(
+export function permissionsForRole(
   role: AccessRole,
   hostOnly: boolean,
   grantableBits: string[]

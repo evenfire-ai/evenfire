@@ -175,6 +175,48 @@ describe('minimize contracts', () => {
   })
 })
 
+describe('gfs.list drive parameter', () => {
+  function validateList(params: unknown) {
+    const descriptor = getCapability('gfs.list')
+    if (!descriptor) throw new Error('missing gfs.list')
+    return descriptor.validate(params)
+  }
+
+  it.each(['   ', '\t', ' \n '])('rejects the whitespace-only drive %j', drive => {
+    expect(() => validateList({ drive })).toThrow(
+      new CapabilityInputError('drive must not be blank')
+    )
+  })
+
+  it('reads an omitted or empty drive as omitted and lists the accessible files without one', async () => {
+    expect(validateList({}).drive).toBeUndefined()
+    expect(validateList({ drive: '' }).drive).toBeUndefined()
+    const calls: unknown[][] = []
+    await run(
+      'gfs.list',
+      { drive: '' },
+      {
+        listAccessibleGfsResources: async (...args: unknown[]) => {
+          calls.push(args)
+          return { items: [], nextCursor: null }
+        },
+      }
+    )
+    expect(calls).toEqual([[undefined, undefined]])
+  })
+
+  it('passes a named drive through unchanged, including surrounding spaces', () => {
+    expect(validateList({ drive: 'main' }).drive).toBe('main')
+    expect(validateList({ drive: ' main ' }).drive).toBe(' main ')
+  })
+
+  it('still rejects a drive over 64 characters', () => {
+    expect(() => validateList({ drive: 'd'.repeat(65) })).toThrow(
+      new CapabilityInputError('drive is too long')
+    )
+  })
+})
+
 describe('gfs.read', () => {
   it('returns a data: URI, because the embed CSP allows data: and not blob:', async () => {
     const result = (await run('gfs.read', { uri: 'gfs://main/a.png', as: 'dataUrl' })) as {
