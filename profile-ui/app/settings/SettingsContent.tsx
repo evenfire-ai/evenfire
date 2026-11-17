@@ -7,6 +7,7 @@ import { useAuth } from '@components/AuthContext'
 import { Button } from '@components/Button'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { FormField } from '@components/FormField'
+import { ModalCloseButton } from '@components/ModalCloseButton'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
 import { TextInput } from '@components/TextInput'
@@ -348,14 +349,7 @@ export function SettingsContent() {
               <h3 id="settings-password-title" className="cu-modal-panel__title">
                 Update password
               </h3>
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost"
-                onClick={closePasswordModal}
-                disabled={passwordBusy}
-              >
-                Close
-              </button>
+              <ModalCloseButton onClose={closePasswordModal} disabled={passwordBusy} />
             </div>
             <div className="cu-modal-panel__body">
               <FormField label="Current password">
@@ -497,9 +491,7 @@ function DesktopSetupModal({
           <h3 id="settings-desktop-setup-title" className="cu-modal-panel__title">
             Setup desktop app
           </h3>
-          <button type="button" className="cu-btn cu-btn--ghost" onClick={onClose} disabled={busy}>
-            Close
-          </button>
+          <ModalCloseButton onClose={onClose} disabled={busy} />
         </div>
         <div className="cu-modal-panel__body">
           <div className="form-field">
@@ -573,9 +565,7 @@ function SettingsEditModal({
           <h3 id="settings-edit-title" className="cu-modal-panel__title">
             {title}
           </h3>
-          <button type="button" className="cu-btn cu-btn--ghost" onClick={onClose} disabled={busy}>
-            Close
-          </button>
+          <ModalCloseButton onClose={onClose} disabled={busy} />
         </div>
         <div className="cu-modal-panel__body">{children}</div>
         <div className="cu-modal-panel__foot">
