@@ -959,6 +959,20 @@ describe('hostModelSelectionStore — broker-backed Host default', () => {
     expect(view.imageBlockMessage).toContain('"gpt-5.5"')
   })
 
+  it('an empty broker default resolves to no model, never the first catalog row', async () => {
+    // A Host written outside control-api can carry an empty `spec.model.name`;
+    // the selector then asks for a pick instead of guessing one.
+    const { transport } = makeTransport({
+      getHostModels: async () => brokerResult({ hostDefault: '' }),
+    })
+    await loadHostModels(transport, AGENT, CHAT)
+
+    const view = getHostModelSelectionSnapshot(AGENT, CHAT)
+    expect(view.data?.models.map(model => model.name)).toEqual(['gpt-5.3', 'gpt-5.5'])
+    expect(view.effectiveModel).toBe('')
+    expect(view.pending).toBe(false)
+  })
+
   it('S5 — a rejected pick during a superseded load falls back to the Host default', async () => {
     const read = deferred<HostModelsResult>()
     const { transport } = makeTransport({
