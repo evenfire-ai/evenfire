@@ -95,9 +95,15 @@ Session revocations and password epochs written by the new control-api are
 ignored by the old one. The release installs one database trigger and its
 function (`gfs_resource_changed_notify` on `gfs_resources`, from `0139`), and
 they stay after a rollback: every write to `gfs_resources` still sends one
-`pg_notify` on the `gfs_resource_changed` channel. The old image does not
-listen on that channel and the function only notifies, so no write fails
-because of it.
+`pg_notify` on the `gfs_resource_changed` channel. No write fails because of
+it: nothing in the old image listens on that channel, and the function only
+calls `pg_notify`, whose payload stays under 140 bytes. It makes the writer's
+commit fail only if the notification queue is full; that queue is a single one
+for the whole cluster (8 GB by default), and a notification leaves it as soon
+as every listening session has read past it, which the old image's listeners
+on other channels (`notification_queued`, `workflow_run_update`) keep doing. The one
+cost is that transactions which notify serialize at commit, because PostgreSQL
+takes a cluster-wide lock to append to the queue.
 
 Logout revokes only the token it receives. A V1 token issued before a team
 switch stays valid until its own expiry (at most 7 days, 604800 s), as on `dev`. A new
