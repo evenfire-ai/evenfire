@@ -147,7 +147,7 @@ it is.
 **Pruning stale models nobody uses.** After each live, plausible run commits,
 the sync disables the models that have been stale for longer than
 `LLM_CATALOG_PRUNE_STALE_GRACE_MS` (default 7 days, counted from when the model
-first went stale; at least 1 hour) and that nobody uses: no Host names them
+first went stale; at least 1 hour, at most 10 years) and that nobody uses: no Host names them
 (`spec.model`, `allowedModels`, fallbacks), no grant names them
 (`allowed_models` or a prompt target), no WorkflowRecipe names them, and no Host
 without a model subset of the same provider offers them. It only touches rows

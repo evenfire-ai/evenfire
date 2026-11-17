@@ -524,10 +524,18 @@ function boundedIntegerFromEnv(name: string, defaultValue: number, maxValue: num
  * for the same reason every other invalid value here is refused: a silently corrected
  * interval leaves the operator's setting and the running behaviour disagreeing forever.
  */
-function intervalMsFromEnv(name: string, defaultValue: number, minValue: number): number {
+function intervalMsFromEnv(
+  name: string,
+  defaultValue: number,
+  minValue: number,
+  maxValue?: number
+): number {
   const value = positiveIntegerFromEnv(name, defaultValue)
   if (value < minValue) {
     throw new Error(`${name} must be an integer >= ${minValue} (milliseconds)`)
+  }
+  if (maxValue !== undefined && value > maxValue) {
+    throw new Error(`${name} must be an integer <= ${maxValue} (milliseconds)`)
   }
   return value
 }
@@ -554,6 +562,10 @@ const LLM_CATALOG_AUTO_ENABLE_MAX_CAP = 1000
 // evidence before the cron could possibly renew it.
 const LLM_CATALOG_IMAGE_EVIDENCE_MIN_TTL_MS = 2 * LLM_CATALOG_SYNC_MIN_INTERVAL_MS
 const LLM_CATALOG_PRUNE_MIN_GRACE_MS = 60 * 60 * 1000
+// The prune subtracts the grace from NOW() in SQL; a value past PostgreSQL's
+// timestamp range boots fine and then aborts every run with 22008. Ten years
+// is far beyond any useful grace and far inside the range.
+const LLM_CATALOG_PRUNE_MAX_GRACE_MS = 10 * 365 * 24 * 60 * 60 * 1000
 // Same ceiling as the auto-enable caps: one run never moves more than this many
 // entries of the allowlist ConfigMap.
 const LLM_CATALOG_PRUNE_MAX_CAP = 1000
@@ -992,7 +1004,8 @@ export const config: Config = {
   llmCatalogPruneStaleGraceMs: intervalMsFromEnv(
     'LLM_CATALOG_PRUNE_STALE_GRACE_MS',
     7 * 24 * 60 * 60 * 1000,
-    LLM_CATALOG_PRUNE_MIN_GRACE_MS
+    LLM_CATALOG_PRUNE_MIN_GRACE_MS,
+    LLM_CATALOG_PRUNE_MAX_GRACE_MS
   ),
   llmCatalogPruneMaxPerRun: boundedIntegerFromEnv(
     'LLM_CATALOG_PRUNE_MAX_PER_RUN',
