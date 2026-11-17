@@ -777,3 +777,53 @@ describe('LlmModelTable rows the catalog sync turned off', () => {
     expect(screen.queryByRole('menuitem', { name: 'Keep disabled' })).not.toBeInTheDocument()
   })
 })
+
+describe('LlmModelTable family rows the catalog sync turned off', () => {
+  function renderFamily(apiKeyPruned: boolean) {
+    const wire = llmModelWireRow(true)
+    const apiKeyRow: LlmAllowedModel = apiKeyPruned
+      ? { ...wire, id: 'oa-key', enabled: false, auto_disabled_at: '2026-11-01T00:00:00.000Z' }
+      : { ...wire, id: 'oa-key' }
+    // Same model through the subscription broker, so the table merges both rows into one line.
+    const subscriptionRow: LlmAllowedModel = {
+      ...wire,
+      id: 'oa-sub',
+      provider: 'codex-subscription',
+    }
+    const onKeepDisabled = vi.fn().mockResolvedValue(undefined)
+    render(
+      <LlmModelTable
+        items={[apiKeyRow, subscriptionRow]}
+        unpricedKeys={new Set()}
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        onKeepDisabled={onKeepDisabled}
+        onRefresh={vi.fn()}
+        deletingId={null}
+        keepingDisabledId={null}
+        refreshing={false}
+        loading={false}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI models' }))
+    fireEvent.click(screen.getByRole('button', { name: `Actions for model openai/${wire.model}` }))
+    return onKeepDisabled
+  }
+
+  it('keeps the API-key row disabled, never the subscription row beside it', () => {
+    const onKeepDisabled = renderFamily(true)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Keep API key disabled' }))
+    expect(onKeepDisabled).toHaveBeenCalledTimes(1)
+    expect(onKeepDisabled).toHaveBeenCalledWith(expect.objectContaining({ id: 'oa-key' }))
+  })
+
+  it('offers no Keep API key disabled when the API-key row was not turned off', () => {
+    renderFamily(false)
+    // The family menu is open; otherwise the absence below proves nothing.
+    expect(screen.getByRole('menuitem', { name: 'Edit API key' })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('menuitem', { name: 'Keep API key disabled' })
+    ).not.toBeInTheDocument()
+  })
+})
