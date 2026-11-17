@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-// Every other suite injects hostResources, so none of them sees the default a
-// Host gets when CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY is unset, as in
-// deploy/base and the minikube overlay.
+// Most suites replace config.hostResources, so they never see the limit a Host
+// gets when CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY is unset, as in
+// deploy/base and the minikube overlay. hostReconciler.mounts.test.ts imports
+// this config and does not assert the memory limit.
 
 const originalEnv = process.env
 
@@ -29,8 +30,19 @@ describe('default Host container resources', () => {
     // 568-598 MiB and 512Mi refused every read. 2Gi is the hosted value.
     const resources = await defaultHostResources()
     expect(resources.limits.memory).toBe('2Gi')
-    // The request stays small: the limit does not reserve node memory.
+    // The request stays 128Mi, so it does not reserve node memory. v0.12.0
+    // and v0.12.1 limit the Host at 512Mi (a 4x ratio); 2Gi makes it 16x.
     expect(resources.requests.memory).toBe('128Mi')
+  })
+
+  it('refuses an empty or invalid Host memory limit when the config loads', async () => {
+    for (const value of ['', 'lots']) {
+      vi.resetModules()
+      process.env = { ...originalEnv, CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY: value }
+      await expect(import('../config')).rejects.toThrow(
+        `CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY must be a Kubernetes quantity, got '${value}'`
+      )
+    }
   })
 
   it('still lets an operator set the Host memory limit', async () => {

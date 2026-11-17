@@ -46,9 +46,13 @@ describe('document read results are unchanged by the M2 measure cuts', () => {
   it('decides rows that are all too wide with about one measure each', async () => {
     // 600 rows, each emitted as []: every one needs its own exact probe, and
     // halving alone spent about two (1,340 measures; review round 2, P2).
+    // `decided(to, probeBase + 1)` is what keeps the turn chain at 516.
+    // Removing it leaves 707 turn measures, still under the old 750 bound,
+    // so the exact turn count is the liveness witness. The fresh chain stays
+    // under 750 either way.
     const runs = await runFitScenarios(DocumentReadTool)
     const measures = Object.fromEntries(runs.map(run => [run.name, run.measures]))
-    expect(measures['xlsx long sheet list, all rows too wide (turn)']).toBeLessThanOrEqual(750)
+    expect(measures['xlsx long sheet list, all rows too wide (turn)']).toBe(516)
     expect(measures['xlsx long sheet list, all rows too wide (fresh)']).toBeLessThanOrEqual(750)
   }, 60_000)
 

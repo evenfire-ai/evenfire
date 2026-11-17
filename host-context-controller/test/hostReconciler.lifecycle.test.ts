@@ -5242,11 +5242,13 @@ describe('HostReconciler storage layout — one shape for every lifecycle', () =
 })
 
 describe('HostReconciler storage layout — upgrade from a v0.11.0 Deployment', () => {
-  // The fixtures are the Deployments v0.11.0's HostReconciler renders for these
-  // Hosts with this file's mocks (dumped from the tag, not written by hand).
-  // v0.10.0 renders the same template: statelessDeployment.ts is identical.
-  // This file's config mock still says 512Mi, which is what the fixtures carry.
-  // The real default is 2Gi, and that drift is what this describe exercises.
+  // The JSON fixtures are Deployments v0.11.0's HostReconciler rendered
+  // (dumped from that tag, not written by hand). v0.10.0 rendered the same
+  // split template. v0.12.0 and v0.12.1 already render workspace-layout-merge
+  // and still default the Host memory limit to 512Mi, so the 2Gi change is
+  // the upgrade from those releases. The v0.11.0 cases stay for a cluster
+  // that still has the split Deployment. This file's config mock says 512Mi;
+  // the real default these tests inject is 2Gi.
   const legacyMemory = config.hostResources.limits.memory
 
   beforeEach(() => {
@@ -5354,6 +5356,48 @@ describe('HostReconciler storage layout — upgrade from a v0.11.0 Deployment', 
     expect(JSON.stringify(replaced)).not.toContain('subPath')
     expect(hostMemoryLimit(replaced)).toBe('2Gi')
     expect(envValue(replaced, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
+
+    await reconciler.reconcile(host)
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(1)
+  })
+
+  it('upgrades a v0.12.x Host from 512Mi to 2Gi and holds a suspended one until wake', async () => {
+    // v0.12.0 and v0.12.1 already render workspace-layout-merge and default
+    // the limit to 512Mi. This builds that shape with this reconciler at
+    // 512Mi, then reconciles it at the 2Gi default. It is not the v0.11.0
+    // split fixture.
+    const host = makeStatelessHost({ name: 'upgrade-v012', status: suspendedStatus(3) })
+    const { reconciler, appsApi, customApi } = createReconciler()
+    config.hostResources.limits.memory = '512Mi'
+    const previous = reconciler.buildDeployment(host)
+    expect(previous.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-merge',
+    ])
+    expect(hostMemoryLimit(previous)).toBe('512Mi')
+    expect(previous.spec?.replicas).toBe(0)
+    config.hostResources.limits.memory = '2Gi'
+
+    customApi.getNamespacedCustomObject.mockImplementation(async () => ({
+      ...hostApiObject(host),
+      status: host.status,
+    }))
+    const live = persistHostDeployment(appsApi, host, previous)
+
+    await reconciler.reconcile(host)
+
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(0)
+    expect(live().spec?.replicas).toBe(0)
+    expect(hostMemoryLimit(live())).toBe('512Mi')
+
+    host.status = { lifecycle: { state: 'active', wakeHandledGeneration: 3 } }
+    await reconciler.reconcile(host)
+
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(1)
+    expect(live().spec?.replicas).toBe(1)
+    expect(hostMemoryLimit(live())).toBe('2Gi')
+    expect(live().spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-merge',
+    ])
 
     await reconciler.reconcile(host)
     expect(replacementsFor(appsApi, host.name)).toHaveLength(1)
