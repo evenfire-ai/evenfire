@@ -43,6 +43,21 @@ export class StepRouterConnectionError extends Error {
   }
 }
 
+// Internal tools are named `clerum__<tool>`, the same `<server>__<tool>` form
+// MCP tools get, so an MCP server with this name would publish tools in the
+// internal name space (duplicate definitions, internal dispatch shadowing the
+// server's tool).
+export const RESERVED_INTERNAL_SERVER_NAME = 'clerum'
+
+export class StepRouterReservedServerNameError extends Error {
+  constructor() {
+    super(
+      `MCP server name '${RESERVED_INTERNAL_SERVER_NAME}' is reserved for the step's internal ${RESERVED_INTERNAL_SERVER_NAME}__* tools; rename the server or workload id in the recipe`
+    )
+    this.name = 'StepRouterReservedServerNameError'
+  }
+}
+
 export class ToolDispatchError extends Error {
   toolName: string
   constructor(toolName: string) {
@@ -113,7 +128,10 @@ export class StepMcpRouter {
 
   /**
    * Register internal tools (clerum__*) that execute locally without MCP connection.
-   * Must be called before connect() so they appear in getFilteredTools().
+   * Tools registered before connect() are kept by it; a tool registered after
+   * connect() (the step spillover read tool) is added to the connected set.
+   * connect() rejects an MCP server named `clerum`, so these names never
+   * collide with a server's tools.
    *
    * The tool's `parameters` JSON Schema is compiled here into the validator
    * that runs before each dispatch (argumentGate.ts, shared with chat). Bad LLM
@@ -142,12 +160,17 @@ export class StepMcpRouter {
 
   /**
    * Connect to all servers declared for this step.
+   * Throws StepRouterReservedServerNameError, before connecting anything, if a
+   * server is named `clerum` (the internal tools' name space).
    * Throws StepRouterConnectionError if any server is unreachable.
    */
   async connect(
     servers: StepMcpServerRef[],
     options: { timeoutMs?: number; signal?: AbortSignal } = {}
   ): Promise<void> {
+    if (servers.some(server => server.name === RESERVED_INTERNAL_SERVER_NAME)) {
+      throw new StepRouterReservedServerNameError()
+    }
     if (this.readBudget.isClosed) this.readBudget = new VisualInputBudget()
     if (servers.length === 0) return
 

@@ -12,7 +12,12 @@ import {
 } from '../../core/spillover'
 import { FinishReason } from '../../core/types'
 import type { SingleTurnProvider } from '../../llm'
-import type { McpClientConnection, McpClientFactory } from '../stepRouter'
+import { logger } from '../../logger'
+import {
+  type McpClientConnection,
+  type McpClientFactory,
+  StepRouterReservedServerNameError,
+} from '../stepRouter'
 import {
   clerumWorkflowStepSpilloverPersistedTotal,
   clerumWorkflowStepSpilloverReadsTotal,
@@ -994,5 +999,42 @@ describe('WorkflowService step spillover — metrics', () => {
     expect(await metricTotal('clerum_spillover_persisted_total')).toBe(before.persisted)
     expect(await metricTotal('clerum_spillover_reads_total')).toBe(before.reads)
     expect(await metricTotal('clerum_tool_output_bytes')).toBe(before.outputBytes)
+  })
+})
+
+describe('WorkflowService step spillover — reserved server name', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('fails a step that binds an MCP server named clerum before any model call', async () => {
+    const llm = mockLlmProvider([{ content: 'done' }])
+    const factory = vi.fn(mockMcpFactory())
+    const svc = new WorkflowService('test-recipe', {
+      llmFactory: () => llm,
+      mcpClientFactory: factory,
+    })
+    svc.configure({ provider: 'openai', model: 'gpt-4', apiKey: 'sk-123' })
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+
+    const res = await svc.executeStep({
+      stepId: STEP_ID,
+      instruction: 'review',
+      mcpServers: [{ name: 'clerum', url: 'http://clerum' }],
+    })
+
+    expect(res.status).toBe('failed')
+    expect(res.error).toContain(new StepRouterReservedServerNameError().message)
+    // Witness: the step reached its error handler with the router's error.
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stepId: STEP_ID,
+        error: new StepRouterReservedServerNameError().message,
+      }),
+      'Step caught error'
+    )
+    expect(factory).not.toHaveBeenCalled()
+    expect(llm.completeSingleTurn).not.toHaveBeenCalled()
+    expect(llm.completeSingleTurnWithTools).not.toHaveBeenCalled()
   })
 })

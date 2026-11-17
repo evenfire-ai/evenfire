@@ -594,7 +594,7 @@ Each entry in `workloads[]`:
 
 ```yaml
 workloads:
-  - id: <unique-name> # Required. Unique within this recipe.
+  - id: <unique-name> # Required. Unique within this recipe. Not `clerum` for a transport workload (Section 3.10).
     type: <workload-type> # Required. deployment|statefulset|cronjob|job|daemonset
     image: <container-image> # Required. Docker image reference.
     imagePullSecrets: # Optional. List of Secret names for private registries.
@@ -1097,6 +1097,8 @@ Names the MCP servers workflow steps may reach. **You usually do not need this**
 | `endpoint` | string | No\*     | MCP HTTP endpoint. Auto-computed for transport workloads. |
 
 \* An entry with no `endpoint` that also does not correspond to a transport workload contributes nothing — the reconciler only merges entries carrying both `id` and `endpoint`.
+
+The server id `clerum` is reserved: the step's internal tools are named `clerum__<tool>`, the same form as a server's tools. A step that lists an `spec.mcpServers` entry or a transport workload with id `clerum` fails before it connects to any server, with `MCP server name 'clerum' is reserved for the step's internal clerum__* tools`.
 
 Auto-computed endpoints take the shape `http://<server>.<namespace>.svc.cluster.local:<port><transport.path|/mcp>`. Workload-derived entries **override** a hand-declared entry with the same `id`.
 

@@ -4,6 +4,7 @@ import {
   type McpClientFactory,
   StepMcpRouter,
   StepRouterConnectionError,
+  StepRouterReservedServerNameError,
   ToolDispatchError,
 } from '../stepRouter'
 import type { AllowedToolsConfig, StepMcpServerRef } from '../types'
@@ -151,6 +152,64 @@ describe('StepMcpRouter.connect', () => {
 
     expect(clientA.connect).toHaveBeenCalledWith(options)
     expect(clientA.listTools).toHaveBeenCalledWith(options)
+  })
+
+  it('rejects a server named clerum before connecting any server', async () => {
+    const web = mockClient([{ name: 'fetch' }])
+    const clerum = mockClient([{ name: 'spillover_read' }])
+    const factory = vi.fn(
+      mockFactory(
+        new Map([
+          ['web', web],
+          ['clerum', clerum],
+        ])
+      )
+    )
+
+    const router = new StepMcpRouter(factory)
+    await expect(
+      router.connect([
+        { name: 'web', url: 'http://web:3000' },
+        { name: 'clerum', url: 'http://clerum:3000' },
+      ])
+    ).rejects.toThrow(new StepRouterReservedServerNameError().message)
+    await expect(
+      router.connect([{ name: 'clerum', url: 'http://clerum:3000' }])
+    ).rejects.toBeInstanceOf(StepRouterReservedServerNameError)
+    expect(factory).not.toHaveBeenCalled()
+    expect(web.connect).not.toHaveBeenCalled()
+    expect(clerum.connect).not.toHaveBeenCalled()
+    expect(router.getFilteredTools()).toEqual([])
+
+    // Witness: the same factory connects the same router once the reserved name
+    // is gone, so the rejection above is the check, not a broken setup.
+    await router.connect([{ name: 'web', url: 'http://web:3000' }])
+    expect(factory).toHaveBeenCalledTimes(1)
+    expect(web.connect).toHaveBeenCalledTimes(1)
+    expect(router.getFilteredTools().map(t => t.name)).toEqual(['web__fetch'])
+  })
+
+  it('accepts server names that only contain clerum or differ in case', async () => {
+    const factory = mockFactory(
+      new Map([
+        ['clerum-tools', mockClient([{ name: 'a' }])],
+        ['my-clerum', mockClient([{ name: 'b' }])],
+        ['Clerum', mockClient([{ name: 'c' }])],
+      ])
+    )
+
+    const router = new StepMcpRouter(factory)
+    await router.connect([
+      { name: 'clerum-tools', url: 'http://a:3000' },
+      { name: 'my-clerum', url: 'http://b:3000' },
+      { name: 'Clerum', url: 'http://c:3000' },
+    ])
+
+    expect(router.getFilteredTools().map(t => t.name)).toEqual([
+      'clerum-tools__a',
+      'my-clerum__b',
+      'Clerum__c',
+    ])
   })
 })
 
