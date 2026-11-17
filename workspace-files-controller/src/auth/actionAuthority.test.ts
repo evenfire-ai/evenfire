@@ -1,7 +1,10 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
-import { hashActionTarget } from '../../../packages/action-context-contracts'
+import {
+  hashActionTarget,
+  validateActionAuthorityCheckpointResponse,
+} from '../../../packages/action-context-contracts'
 import { createWfcAuthorityCheckpointer, parseWfcActionAuthority } from './actionAuthority'
 
 const USER = '11111111-1111-4111-8111-111111111111'
@@ -47,10 +50,19 @@ function authority() {
   )!
 }
 
-function allowedResponse(overrides: Record<string, unknown> = {}) {
+// Setup, not behaviour under test: the Control API checkpoint producer runs in
+// a `tsx` child process. `beforeAll` runs it once, so no test body, mocked
+// request or `it.each` table starts a process. The child has its own
+// `timeout`; a failed or timed-out child fails the hook, and the file with it.
+const PRODUCER_CHILD_TIMEOUT_MS = 240_000
+// The child limit, plus 120 s of margin.
+const PRODUCER_SETUP_TIMEOUT_MS = PRODUCER_CHILD_TIMEOUT_MS + 120_000
+let allowedProducerStdout: string | undefined
+
+function produceAllowed(): string {
   const binding = authority().binding
   const repositoryRoot = resolve(process.cwd(), '..')
-  const output = execFileSync(
+  return execFileSync(
     resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
     [
       resolve(
@@ -79,9 +91,28 @@ function allowedResponse(overrides: Record<string, unknown> = {}) {
         checkedAt: new Date().toISOString(),
       }),
     ],
-    { cwd: repositoryRoot, encoding: 'utf8' }
+    { cwd: repositoryRoot, encoding: 'utf8', timeout: PRODUCER_CHILD_TIMEOUT_MS }
   )
-  return { ...JSON.parse(output), ...overrides }
+}
+
+beforeAll(() => {
+  const stdout = produceAllowed()
+  // The producer must return an allowed checkpoint that satisfies the contract:
+  // the "fails closed" tests below corrupt this response, and they would pass
+  // against an empty one.
+  if (validateActionAuthorityCheckpointResponse(JSON.parse(stdout)).status !== 'allowed') {
+    throw new Error('Control API checkpoint producer did not return an allowed checkpoint')
+  }
+  allowedProducerStdout = stdout
+}, PRODUCER_SETUP_TIMEOUT_MS)
+
+type AllowedResponse = Record<string, unknown> & { attribution: Record<string, unknown> }
+
+function allowedResponse(overrides: Record<string, unknown> = {}): AllowedResponse {
+  if (allowedProducerStdout === undefined) {
+    throw new Error('the allowed checkpoint producer was not set up in beforeAll')
+  }
+  return { ...JSON.parse(allowedProducerStdout), ...overrides }
 }
 
 afterEach(() => vi.unstubAllGlobals())
@@ -111,13 +142,19 @@ describe('workspace filesystem v2 live authority', () => {
   })
 
   it.each([
-    ['unknown keys', { ...allowedResponse(), internal: true }, 200],
+    ['unknown keys', (response: AllowedResponse) => ({ ...response, internal: true }), 200],
     [
       'an invalid denied union arm',
-      { ...allowedResponse(), status: 'denied', code: 'forbidden', destination: null },
+      (response: AllowedResponse) => ({
+        ...response,
+        status: 'denied',
+        code: 'forbidden',
+        destination: null,
+      }),
       403,
     ],
-  ])('fails closed on a producer response with %s', async (_label, body, status) => {
+  ] as const)('fails closed on a producer response with %s', async (_label, corrupt, status) => {
+    const body = corrupt(allowedResponse())
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify(body), { status }))
@@ -204,41 +241,39 @@ describe('workspace filesystem v2 live authority', () => {
   })
 
   it.each([
-    ['authorization revision', { authorizationRevision: `ar1_${'b'.repeat(43)}` }],
-    ['behavior binding', { behaviorBindingHash: `bh2_${'b'.repeat(43)}` }],
-    ['user', { attribution: { ...allowedResponse().attribution, userId: SID } }],
-    ['session', { attribution: { ...allowedResponse().attribution, sid: USER } }],
-    ['session version', { attribution: { ...allowedResponse().attribution, sessionVersion: 5 } }],
+    ['authorization revision', () => ({ authorizationRevision: `ar1_${'b'.repeat(43)}` })],
+    ['behavior binding', () => ({ behaviorBindingHash: `bh2_${'b'.repeat(43)}` })],
+    ['user', (r: AllowedResponse) => ({ attribution: { ...r.attribution, userId: SID } })],
+    ['session', (r: AllowedResponse) => ({ attribution: { ...r.attribution, sid: USER } })],
+    [
+      'session version',
+      (r: AllowedResponse) => ({ attribution: { ...r.attribution, sessionVersion: 5 } }),
+    ],
     [
       'access path',
-      { attribution: { ...allowedResponse().attribution, accessPathId: `ap1_${'b'.repeat(43)}` } },
+      (r: AllowedResponse) => ({
+        attribution: { ...r.attribution, accessPathId: `ap1_${'b'.repeat(43)}` },
+      }),
     ],
     [
       'path kind',
-      {
-        attribution: {
-          ...allowedResponse().attribution,
-          pathKind: 'team',
-          effectiveTeamId: SID,
-        },
-      },
+      (r: AllowedResponse) => ({
+        attribution: { ...r.attribution, pathKind: 'team', effectiveTeamId: SID },
+      }),
     ],
     [
       'effective team',
-      {
-        attribution: {
-          ...allowedResponse().attribution,
-          pathKind: 'team',
-          effectiveTeamId: JTI,
-        },
-      },
+      (r: AllowedResponse) => ({
+        attribution: { ...r.attribution, pathKind: 'team', effectiveTeamId: JTI },
+      }),
     ],
   ] as const)(
     'rejects an independent %s mismatch before filesystem I/O',
     async (_name, mutation) => {
+      const mutated = allowedResponse(mutation(allowedResponse()))
       vi.stubGlobal(
         'fetch',
-        vi.fn(async () => new Response(JSON.stringify(allowedResponse(mutation)), { status: 200 }))
+        vi.fn(async () => new Response(JSON.stringify(mutated), { status: 200 }))
       )
       const value = authority()
       await expect(
