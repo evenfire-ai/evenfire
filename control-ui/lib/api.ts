@@ -2393,8 +2393,9 @@ export async function deleteLlmModel(id: string, opts: { force?: boolean } = {})
 export type ModelHostReference = {
   namespace: string
   name: string
-  // 'primary' | 'allowedModels' | 'fallback' — kept as string[] so an unknown
-  // role from a newer backend renders rather than being dropped.
+  // 'primary' | 'allowedModels' | 'fallback', plus 'implicit' (an all-models
+  // Host) in the attention feed — kept as string[] so an unknown role from a
+  // newer backend renders rather than being dropped.
   roles: string[]
 }
 
@@ -2685,8 +2686,10 @@ export type LlmDiscoveryStatus = {
 
 // Runs the catalog sync. New rows start disabled; only eligible models from a
 // live catalog, for a provider whose auto-enable policy is on, start enabled,
-// up to a per-run cap. Existing rows are never re-evaluated. The body is
-// parsed, not cast: the auto-enable fields are absent on older control-api.
+// up to a per-run cap. Existing rows keep `enabled`, except catalog-managed
+// ones: the run's prune turns off a long-stale row nothing uses, and a pruned
+// row the catalog lists again is decided like a new one. The body is parsed,
+// not cast: the auto-enable fields are absent on older control-api.
 export async function syncDiscovery(): Promise<LlmDiscoverySyncResult> {
   return parseDiscoverySyncResult(await apiSend('POST', '/api/v1/admin/llm-models/discovery/sync'))
 }
