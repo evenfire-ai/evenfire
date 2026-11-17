@@ -147,7 +147,7 @@ function normalizeModelSelectionRevision(raw: number | null | undefined): number
  * string values survive, so a corrupted row can never inject a non-string model
  * into the resolver.
  */
-function parseModelSelections(raw: string | null): Record<string, string> | undefined {
+export function parseModelSelections(raw: string | null): Record<string, string> | undefined {
   if (!raw) return undefined
   try {
     const parsed = JSON.parse(raw) as unknown

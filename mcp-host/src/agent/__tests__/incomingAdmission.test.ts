@@ -6,11 +6,25 @@
  * the caller receives and the witness that the path really ran (the dispatch,
  * the resolver call, or the structured log line the branch had to emit).
  */
-import { type Mock, describe, expect, it, vi } from 'vitest'
+import { type Mock, afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { ApprovalConfigSnapshot } from '../../core/approval/approvalMode'
+import { approvalLogId } from '../../core/approval/grantMemory'
+import { ConversationManager } from '../../core/conversation/conversation'
+import {
+  type StoreHandle,
+  makeSqliteStore,
+} from '../../core/conversation/persistence/__tests__/testHelpers'
 import { FileAttachmentErrorCode } from '../../core/errors'
+import { ConversationState } from '../../core/types'
+import { logger } from '../../logger'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../../server/types'
+import { serializeSessionKey } from '../../session'
 import { type IncomingAdmissionDeps, createIncomingAdmission } from '../incomingAdmission'
+import { applySessionModelSelection } from '../sessionModelSelection'
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
@@ -64,7 +78,12 @@ type Spies = {
   warn: Mock<IncomingAdmissionDeps['logger']['warn']>
 }
 
-function makeAdmission(overrides: Partial<IncomingAdmissionDeps> = {}): {
+function makeAdmission(
+  overrides: Partial<IncomingAdmissionDeps> & {
+    getConversationManager?: () => ConversationManager
+    approvalSnapshot?: () => ApprovalConfigSnapshot
+  } = {}
+): {
   admit: ReturnType<typeof createIncomingAdmission>
   spies: Spies
 } {
@@ -650,5 +669,424 @@ describe('#666 file attachments at admission', () => {
       'Received message'
     )
     expect(admittedLogs(spies)).toHaveLength(0)
+  })
+})
+
+const OPEN_CEILING: ApprovalConfigSnapshot = {
+  effective: { defaultPolicy: 'channel_users', channels: {}, modeCeiling: 'allow_all' },
+  hostSpec: {
+    defaultPolicy: 'cli_only',
+    channels: {
+      telegram: { enabled: true, allowModeChange: true },
+      email: { enabled: true, allowModeChange: true },
+      slack: { enabled: true, allowModeChange: true },
+      teams: { enabled: true, allowModeChange: true },
+    },
+    modeCeiling: 'allow_all',
+  },
+}
+
+const UNSET_CHANNELS: ApprovalConfigSnapshot = {
+  effective: OPEN_CEILING.effective,
+  hostSpec: {
+    defaultPolicy: 'cli_only',
+    channels: {
+      telegram: { enabled: true },
+      email: { enabled: true },
+      slack: { enabled: true },
+      teams: { enabled: true, allowModeChange: true },
+    },
+    modeCeiling: 'allow_all',
+  },
+}
+
+function l1Calls(info: Mock): Array<[Record<string, unknown>, string]> {
+  return info.mock.calls.filter(call => (call[0] as { event?: string }).event === 'L1') as Array<
+    [Record<string, unknown>, string]
+  >
+}
+
+describe('approval mode writers at admission', () => {
+  const open: StoreHandle[] = []
+  const dirs: string[] = []
+
+  function admitWith(
+    manager: ConversationManager,
+    live: ApprovalConfigSnapshot = OPEN_CEILING,
+    overrides: Parameters<typeof makeAdmission>[0] = {}
+  ) {
+    return makeAdmission({
+      getConversationManager: () => manager,
+      approvalSnapshot: () => live,
+      applySessionModelSelection: vi.fn(
+        (userSub, hostRef, chatId, model, expectedRevision, options) =>
+          applySessionModelSelection(
+            {
+              modelCfg: { provider: 'claude', name: 'claude-sonnet-4-5' },
+              allowlistView: {
+                allowlistAvailable: () => true,
+                allowedModels: () => new Map([['claude', [{ model: 'claude-sonnet-4-5' }]]]),
+              },
+              convManager: manager,
+            },
+            userSub,
+            hostRef,
+            chatId,
+            model,
+            expectedRevision,
+            options
+          )
+      ),
+      ...overrides,
+    })
+  }
+
+  afterEach(async () => {
+    for (const handle of open.splice(0)) await handle.shutdown().catch(() => {})
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('stores auto from a first message that also carries a model, before the turn', async () => {
+    const manager = new ConversationManager()
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    const key = serializeSessionKey({
+      userId: 'user-1',
+      channelType: 'rpc',
+      channelId: 'agent-1',
+      threadId: 'chat-1',
+    })
+    const { admit, spies } = admitWith(manager, OPEN_CEILING, {
+      dispatch: vi.fn((): MessageResponse => {
+        const conv = manager.getSessionByKey(key)
+        expect(conv?.approval_mode).toBe('auto')
+        expect(conv?.last_effective_approval_mode).toBe('auto')
+        expect(conv?.modelSelections).toEqual({ claude: 'claude-sonnet-4-5' })
+        return { success: true, taskId: 't-1', status: 'pending' }
+      }),
+    })
+    try {
+      const response = await admit(message({ model: 'claude-sonnet-4-5', approvalMode: 'auto' }))
+      expect(response).toMatchObject({ success: true, taskId: 't-1' })
+      expect(spies.dispatch).toHaveBeenCalledTimes(1)
+      const conv = manager.getSessionByKey(key)
+      expect(conv?.approval_mode).toBe('auto')
+      const l1 = l1Calls(info as unknown as Mock)
+      expect(l1).toHaveLength(1)
+      expect(l1[0]?.[0]).toMatchObject({
+        event: 'L1',
+        writer: 'first_message',
+        requested: 'auto',
+        session: approvalLogId(conv!.id),
+        user: approvalLogId(conv!.user_id ?? ''),
+      })
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('stores auto from a first message that carries only approvalMode', async () => {
+    const manager = new ConversationManager()
+    const key = serializeSessionKey({
+      userId: 'user-1',
+      channelType: 'rpc',
+      channelId: 'agent-1',
+      threadId: 'chat-1',
+    })
+    const { admit, spies } = admitWith(manager)
+    const response = await admit(message({ approvalMode: 'auto' }))
+    expect(response).toMatchObject({ success: true, taskId: 't-1' })
+    expect(spies.applySessionModelSelection).not.toHaveBeenCalled()
+    expect(spies.dispatch).toHaveBeenCalledTimes(1)
+    expect(manager.getSessionByKey(key)?.approval_mode).toBe('auto')
+  })
+
+  it('ignores approvalMode on a cold session and on a second message', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'approval-mode-cold-'))
+    dirs.push(dir)
+    const dbPath = join(dir, 'state.db')
+    const first = makeSqliteStore({ dbPath })
+    open.push(first)
+    const seeded = new ConversationManager(first.store)
+    const key = serializeSessionKey({
+      userId: 'user-1',
+      channelType: 'rpc',
+      channelId: 'agent-1',
+      threadId: 'chat-1',
+    })
+    const created = await seeded.getOrCreate(key, {
+      userId: 'user-1',
+      channelType: 'rpc',
+      channelId: 'agent-1',
+      threadId: 'chat-1',
+      source: 'rpc',
+    })
+    created.task_approved_tools = new Set(['shell_exec', 'cron_manage'])
+    created.auto_shell_grants = { wholeTool: true, commands: new Set(['ls']) }
+    created.last_effective_approval_mode = 'auto'
+    await first.shutdown()
+    open.pop()
+
+    const second = makeSqliteStore({ dbPath })
+    open.push(second)
+    const manager = new ConversationManager(second.store)
+    expect(manager.getSessionByKey(key)).toBeUndefined()
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    const { admit } = admitWith(manager)
+    try {
+      await admit(message({ approvalMode: 'allow_all', content: 'again' }))
+      const conv = manager.getSessionByKey(key)
+      expect(conv?.approval_mode).toBe('manual')
+      expect(l1Calls(info as unknown as Mock)).toHaveLength(0)
+
+      conv!.task_approved_tools = new Set(['shell_exec', 'cron_manage'])
+      conv!.auto_shell_grants = { wholeTool: true, commands: new Set(['ls']) }
+      conv!.last_effective_approval_mode = 'auto'
+      const grants = conv!.auto_shell_grants
+      const task = conv!.task_approved_tools
+      await admit(message({ approvalMode: 'allow_all', content: 'second' }))
+      expect(conv?.approval_mode).toBe('manual')
+      expect(conv?.task_approved_tools).toBe(task)
+      expect(task.has('shell_exec')).toBe(true)
+      expect(conv?.auto_shell_grants).toBe(grants)
+      expect(grants.wholeTool).toBe(true)
+      expect(l1Calls(info as unknown as Mock)).toHaveLength(0)
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('leaves no session when the degraded check refuses a first message', async () => {
+    const manager = new ConversationManager()
+    const { admit, spies } = admitWith(manager, OPEN_CEILING, {
+      degradedReason: () => ({ reason: 'missing_key', message: 'LLM key missing' }),
+    })
+    const response = await admit(message({ approvalMode: 'auto', model: 'claude-sonnet-4-5' }))
+    expect(response).toMatchObject({ success: false, error: { code: 'LLM_KEY_MISSING' } })
+    expect(spies.dispatch).not.toHaveBeenCalled()
+    expect(manager.getStore().listByPrefix('')).toHaveLength(0)
+  })
+
+  it('does not store approvalMode from a channel payload', async () => {
+    const manager = new ConversationManager()
+    const { admit, spies } = admitWith(manager)
+    const response = await admit(
+      message({ channelType: 'slack', channelId: 'C1', approvalMode: 'auto', content: 'hello' })
+    )
+    expect(response).toMatchObject({ success: true })
+    expect(spies.dispatch).toHaveBeenCalledTimes(1)
+    expect(manager.getStore().listByPrefix('')).toHaveLength(0)
+  })
+
+  it('starts no turn and creates an idle row for the messaging command', async () => {
+    const manager = new ConversationManager()
+    const { admit, spies } = admitWith(manager)
+    const response = await admit(
+      message({
+        channelType: 'slack',
+        channelId: 'C1',
+        threadId: 'thread-1',
+        sender: 'slack-user',
+        content: '  Approval-Mode auto  ',
+      })
+    )
+    expect(spies.dispatch).not.toHaveBeenCalled()
+    expect(spies.applySessionModelSelection).not.toHaveBeenCalled()
+    expect(response).toEqual({
+      success: true,
+      status: 'completed',
+      response: 'Approval mode is auto. Effective mode is auto.',
+    })
+    const key = serializeSessionKey({
+      userId: 'slack-user',
+      channelType: 'slack',
+      channelId: 'C1',
+      threadId: 'thread-1',
+    })
+    const conv = manager.getSessionByKey(key)
+    expect(conv?.state).toBe(ConversationState.Idle)
+    expect(conv?.turns).toEqual([])
+    expect(conv?.approval_mode).toBe('auto')
+    expect(conv?.channel_type).toBe('slack')
+  })
+
+  it('stores manual when allowModeChange is unset and when the channel is Teams', async () => {
+    const manager = new ConversationManager()
+    const { admit, spies } = admitWith(manager, UNSET_CHANNELS)
+    const slack = await admit(
+      message({
+        channelType: 'slack',
+        channelId: 'C1',
+        sender: 'slack-user',
+        content: 'approval-mode allow-all',
+      })
+    )
+    const teams = await admit(
+      message({
+        channelType: 'teams',
+        channelId: 'team-1',
+        sender: 'teams-user',
+        messageId: 'msg-teams',
+        content: 'approval-mode allow-all',
+      })
+    )
+    expect(spies.dispatch).not.toHaveBeenCalled()
+    expect(slack).toMatchObject({
+      success: true,
+      response: 'Approval mode is manual. Effective mode is manual.',
+    })
+    expect(teams).toMatchObject({
+      success: true,
+      response: 'Approval mode is manual. Effective mode is manual.',
+    })
+    expect(
+      manager.getSessionByKey(
+        serializeSessionKey({
+          userId: 'slack-user',
+          channelType: 'slack',
+          channelId: 'C1',
+          threadId: 'chat-1',
+        })
+      )?.approval_mode
+    ).toBe('manual')
+    expect(
+      manager.getSessionByKey(
+        serializeSessionKey({
+          userId: 'teams-user',
+          channelType: 'teams',
+          channelId: 'team-1',
+          threadId: 'chat-1',
+        })
+      )?.approval_mode
+    ).toBe('manual')
+  })
+
+  it('reads the cap from the stored channel type, never from the key', async () => {
+    const manager = new ConversationManager()
+    const key = serializeSessionKey({
+      userId: 'slack-user',
+      channelType: 'slack',
+      channelId: 'C1',
+      threadId: 'chat-1',
+    })
+    await manager.getOrCreate(key, { userId: 'slack-user' })
+    const { admit, spies } = admitWith(manager, OPEN_CEILING)
+    const response = await admit(
+      message({
+        channelType: 'slack',
+        channelId: 'C1',
+        sender: 'slack-user',
+        content: 'approval-mode auto',
+      })
+    )
+    expect(spies.dispatch).not.toHaveBeenCalled()
+    expect(response).toMatchObject({
+      response: 'Approval mode is manual. Effective mode is manual.',
+    })
+    expect(manager.getSessionByKey(key)?.approval_mode).toBe('manual')
+    expect(manager.getSessionByKey(key)?.channel_type).toBeUndefined()
+  })
+
+  it('is never recognized on an rpc message', async () => {
+    const manager = new ConversationManager()
+    const { admit, spies } = admitWith(manager)
+    const response = await admit(message({ content: 'approval-mode auto' }))
+    expect(response).toMatchObject({ success: true, taskId: 't-1' })
+    expect(spies.dispatch).toHaveBeenCalledTimes(1)
+    expect(spies.dispatch.mock.calls[0]?.[0].content).toBe('approval-mode auto')
+    expect(manager.getStore().listByPrefix('')).toHaveLength(0)
+  })
+
+  it('rejects an empty channel id and an unknown channel type without a session', async () => {
+    const manager = new ConversationManager()
+    const { admit, spies } = admitWith(manager)
+    const empty = await admit(
+      message({
+        channelType: 'slack',
+        channelId: '  ',
+        sender: 'slack-user',
+        content: 'approval-mode auto',
+      })
+    )
+    const unknown = await admit(
+      message({
+        channelType: 'sms' as IncomingMessage['channelType'],
+        channelId: 'c',
+        sender: 'sms-user',
+        content: 'approval-mode auto',
+      })
+    )
+    expect(empty.success).toBe(false)
+    expect(unknown.success).toBe(false)
+    expect(spies.dispatch).not.toHaveBeenCalled()
+    expect(manager.getStore().listByPrefix('')).toHaveLength(0)
+  })
+
+  it('joins the email subject and body and logs a hashed L1 without those sentinels', async () => {
+    const SUBJECT_SENTINEL = 'subject-sentinel-9f3a'
+    const BODY_SENTINEL = 'body-sentinel-7c2e'
+    const SENDER = 'sender-sentinel@example.test'
+    const THREAD = 'thread-sentinel@example.test'
+    const manager = new ConversationManager()
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    const { admit, spies } = admitWith(manager)
+    try {
+      const response = await admit(
+        message({
+          channelType: 'email',
+          channelId: 'inbox',
+          sender: SENDER,
+          threadId: THREAD,
+          content: `${SUBJECT_SENTINEL}\n${BODY_SENTINEL}`,
+          metadata: { subject: 'approval-mode auto', body: '' },
+        })
+      )
+      expect(spies.dispatch).not.toHaveBeenCalled()
+      expect(response).toMatchObject({
+        success: true,
+        response: 'Approval mode is auto. Effective mode is auto.',
+      })
+      const key = serializeSessionKey({
+        userId: SENDER,
+        channelType: 'email',
+        channelId: 'inbox',
+        threadId: THREAD,
+      })
+      const conv = manager.getSessionByKey(key)
+      expect(conv?.id).toContain(SENDER)
+      expect(conv?.id).toContain(THREAD)
+      expect(conv?.user_id).toBe(SENDER)
+      const l1 = l1Calls(info as unknown as Mock)
+      expect(l1).toHaveLength(1)
+      expect(l1[0]?.[0]).toMatchObject({
+        event: 'L1',
+        writer: 'command',
+        requested: 'auto',
+        session: approvalLogId(conv!.id),
+        user: approvalLogId(conv!.user_id ?? ''),
+        ceiling: 'allow_all',
+        channelCap: 'allow_all',
+        effectiveApprovalMode: 'auto',
+      })
+      const line = JSON.stringify(l1[0])
+      expect(line).not.toContain(SUBJECT_SENTINEL)
+      expect(line).not.toContain(BODY_SENTINEL)
+      expect(line).not.toContain('approval-mode auto')
+      expect(line).not.toContain(SENDER)
+      expect(line).not.toContain(THREAD)
+      const emitted = JSON.stringify([
+        ...info.mock.calls,
+        ...warn.mock.calls,
+        ...spies.info.mock.calls,
+        ...spies.warn.mock.calls,
+      ])
+      expect(emitted).not.toContain(SUBJECT_SENTINEL)
+      expect(emitted).not.toContain(BODY_SENTINEL)
+      expect(emitted).not.toContain(SENDER)
+      expect(emitted).not.toContain(THREAD)
+    } finally {
+      info.mockRestore()
+      warn.mockRestore()
+    }
   })
 })

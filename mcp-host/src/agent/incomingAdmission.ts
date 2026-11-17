@@ -9,12 +9,23 @@
  * from live process state arrives through {@link IncomingAdmissionDeps}; the
  * decision logic here is pure.
  */
+import {
+  type ApprovalConfigSnapshot,
+  type ApprovalMode,
+  effectiveApprovalMode,
+  parseApprovalModeCommand,
+  readChannelCap,
+  readModeCeiling,
+} from '../core/approval/approvalMode'
+import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
+import type { ConversationManager } from '../core/conversation/conversation'
 import { FileReferenceErrorCode, LlmErrorCode } from '../core/errors'
 import {
   chatTransportSupportsImageInput,
   imageInputDenialMessage,
   resolveHostImageInput,
 } from '../llm/imageInput'
+import { logger } from '../logger'
 import type { TaskError } from '../queue/types'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../server/types'
 import { serializeSessionKey } from '../session/types.js'
@@ -81,6 +92,52 @@ export interface IncomingAdmissionDeps {
   logger: {
     info: (obj: Record<string, unknown>, msg: string) => void
     warn: (obj: Record<string, unknown>, msg: string) => void
+  }
+  /** Live session store for the first-message mode and the messaging command. */
+  getConversationManager?: () => ConversationManager
+  /** Live ceiling and channel cap. Read when a writer runs, not at wiring time. */
+  approvalSnapshot?: () => ApprovalConfigSnapshot
+}
+
+const MESSAGING_CHANNELS = new Set(['telegram', 'email', 'slack', 'teams'])
+
+function emailCommandText(message: IncomingMessage): string {
+  const metadata = message.metadata
+  if (metadata && (typeof metadata.subject === 'string' || typeof metadata.body === 'string')) {
+    const subject = typeof metadata.subject === 'string' ? metadata.subject : ''
+    const body = typeof metadata.body === 'string' ? metadata.body : ''
+    return `${subject}\n${body}`
+  }
+  return message.content
+}
+
+/** rpc is never a command. Email matches the subject and body joined by a newline. */
+function approvalCommand(message: IncomingMessage): ApprovalMode | null {
+  if (message.channelType === 'rpc') return null
+  const text = message.channelType === 'email' ? emailCommandText(message) : message.content
+  return parseApprovalModeCommand(text)
+}
+
+function carriedApprovalMode(message: IncomingMessage): ApprovalMode | undefined {
+  if (message.channelType !== 'rpc') return undefined
+  const mode = message.approvalMode
+  if (mode === 'manual' || mode === 'auto' || mode === 'allow_all') return mode
+  return undefined
+}
+
+function approvalModeReply(stored: ApprovalMode, effective: ApprovalMode): string {
+  return `Approval mode is ${stored}. Effective mode is ${effective}.`
+}
+
+function approvalModeStoreFailure(provider: string | undefined): MessageResponse {
+  return {
+    success: false,
+    error: {
+      code: LlmErrorCode.ApiCallFailed,
+      message: 'The approval mode could not be stored.',
+      retryable: true,
+      provider: provider ?? 'unknown',
+    },
   }
 }
 
@@ -219,6 +276,62 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       }
     }
 
+    const command = approvalCommand(normalizedMessage)
+    if (command) {
+      if (
+        !normalizedMessage.channelId.trim() ||
+        !MESSAGING_CHANNELS.has(normalizedMessage.channelType)
+      ) {
+        return {
+          success: false,
+          error: {
+            code: 'INVALID_MESSAGE',
+            message: 'The approval-mode command needs a known channel and channel id.',
+            retryable: false,
+            provider: deps.hostProvider() ?? 'unknown',
+          },
+        }
+      }
+      if (!deps.getConversationManager) return approvalModeStoreFailure(deps.hostProvider())
+      return (async () => {
+        try {
+          const manager = deps.getConversationManager!()
+          const key = serializeSessionKey({
+            userId: normalizedMessage.sender,
+            channelType: normalizedMessage.channelType,
+            channelId: normalizedMessage.channelId,
+            threadId: normalizedMessage.threadId,
+          })
+          const { conversation } = await manager.getOrCreateDetailed(key, {
+            userId: normalizedMessage.sender,
+            channelType: normalizedMessage.channelType,
+            channelId: normalizedMessage.channelId,
+            threadId: normalizedMessage.threadId,
+            source: normalizedMessage.channelType,
+          })
+          const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
+          const stored = await manager.setApprovalMode(
+            conversation,
+            command,
+            {
+              ceiling: readModeCeiling(live),
+              cap: readChannelCap(live, conversation.channel_type),
+            },
+            'command',
+            normalizedMessage.sender
+          )
+          return {
+            success: true,
+            status: 'completed' as const,
+            response: approvalModeReply(stored.approvalMode, stored.effectiveApprovalMode),
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Approval mode command could not be stored')
+          return approvalModeStoreFailure(deps.hostProvider())
+        }
+      })()
+    }
+
     // A successful response names every attachment and file reference the Host
     // accepted, on the sync response and on the async ack alike. Their absence
     // on a send that carried them is how a client detects a Host that dropped
@@ -344,8 +457,55 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     // `conv.modelSelections`) reads the row we just wrote. Fail-OPEN on the
     // message: a rejected/degraded selection is logged and ignored, never dropping
     // the user's turn (fail-closed only on the selection, inside the helper).
+    const applyFirstMessageMode = async (): Promise<MessageResponse | undefined> => {
+      const requested = carriedApprovalMode(normalizedMessage)
+      if (!requested) return undefined
+      if (!deps.getConversationManager) return approvalModeStoreFailure(deps.hostProvider())
+      try {
+        const manager = deps.getConversationManager()
+        const key = serializeSessionKey({
+          userId: normalizedMessage.sender,
+          channelType: 'rpc',
+          channelId: normalizedMessage.channelId,
+          threadId: normalizedMessage.threadId,
+        })
+        const { conversation, created } = await manager.getOrCreateDetailed(key, {
+          userId: normalizedMessage.sender,
+          channelType: 'rpc',
+          channelId: normalizedMessage.channelId,
+          threadId: normalizedMessage.threadId,
+          source: 'rpc',
+          approvalMode: requested,
+        })
+        if (!created) return undefined
+        const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
+        const ceiling = readModeCeiling(live)
+        const cap = readChannelCap(live, conversation.channel_type)
+        const effective = effectiveApprovalMode(requested, ceiling, cap)
+        logger.info(
+          {
+            event: 'L1',
+            session: approvalLogId(conversation.id),
+            user: approvalLogId(conversation.user_id ?? ''),
+            requested,
+            ceiling,
+            channelCap: cap,
+            effectiveApprovalMode: effective,
+            writer: 'first_message',
+          },
+          'Stored approval mode'
+        )
+        syncEffectiveMode(conversation, effective)
+        return undefined
+      } catch (err) {
+        logger.warn({ err }, 'First-message approval mode could not be stored')
+        return approvalModeStoreFailure(deps.hostProvider())
+      }
+    }
+
     const admitAndRun = (): MessageResponse | Promise<MessageResponse> => {
       const piggybackModel = typeof message.model === 'string' ? message.model.trim() : ''
+      const carried = carriedApprovalMode(normalizedMessage)
       if (piggybackModel && normalizedMessage.channelType === 'rpc') {
         // An image the requested model cannot read is refused BEFORE the
         // selection is written: persisting it (and bumping the revision) for a
@@ -367,6 +527,8 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           }
         }
         return (async () => {
+          const modeResult = await applyFirstMessageMode()
+          if (modeResult) return modeResult
           // Hoisted out of the try so the ack below can report the revision the
           // write produced. The send IS the write; its result travels back here.
           let applied: SetModelResult | undefined
@@ -470,6 +632,14 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           return applied?.ok && applied.modelSelectionRevision !== undefined
             ? { ...response, modelSelectionRevision: applied.modelSelectionRevision }
             : response
+        })()
+      }
+
+      if (carried) {
+        return (async () => {
+          const modeResult = await applyFirstMessageMode()
+          if (modeResult) return modeResult
+          return runHandler()
         })()
       }
 

@@ -108,6 +108,12 @@ export interface ConversationSessionSummary {
   cacheTokensReported?: boolean
   /** Server-authoritative session title (spec 15). `undefined` until turn 1. */
   title?: string
+  /** Stored `sessions.approval_mode`. Not the ceiling, cap, or effective mode. */
+  approvalMode?: ApprovalMode
+  /** Stored `sessions.channel_type`. Absent when the column is null. */
+  channelType?: string
+  /** Stored model selections, so a listing can resolve the classifier without a provider. */
+  modelSelections?: Record<string, string>
 }
 
 // NOTE (spec 15 debt): `ConversationSessionMessages` inherits `title?` from the
@@ -193,6 +199,11 @@ function sessionMessagesFromConversation(
     cache_read_tokens: conversation.cache_read_tokens,
     cache_write_tokens: conversation.cache_write_tokens,
     cacheTokensReported: conversation.cacheTokensReported,
+    approvalMode: conversation.approval_mode,
+    ...(conversation.channel_type !== undefined ? { channelType: conversation.channel_type } : {}),
+    ...(conversation.modelSelections !== undefined
+      ? { modelSelections: conversation.modelSelections }
+      : {}),
   }
 }
 
@@ -463,6 +474,13 @@ export class InMemoryConversationStore implements ConversationStore {
         cacheTokensReported: conversation.cacheTokensReported,
         // Auto-title (spec 15) — hot/memory projection.
         title: conversation.title,
+        approvalMode: conversation.approval_mode,
+        ...(conversation.channel_type !== undefined
+          ? { channelType: conversation.channel_type }
+          : {}),
+        ...(conversation.modelSelections !== undefined
+          ? { modelSelections: conversation.modelSelections }
+          : {}),
       })
     }
 

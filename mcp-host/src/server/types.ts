@@ -6,6 +6,7 @@
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import type { ModelWireEntry } from '../config/modelResolution.js'
+import type { ApprovalMode } from '../core/approval/approvalMode'
 import type { ShellCardDescriptor } from '../core/approval/shellCard'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import type { Attachment, TraceContextV1 } from '../core/types'
@@ -54,6 +55,12 @@ export interface IncomingMessage {
    * non-allowlisted value is ignored (fail-open on the message).
    */
   model?: string
+  /**
+   * First Desktop message only. Honoured when this call creates the rpc
+   * session; ignored when the session already exists. A channel payload
+   * cannot store a mode with this field.
+   */
+  approvalMode?: ApprovalMode
   /** Optional CAS base for a visual message's explicit model selection. */
   modelSelectionRevision?: number
   /** Server-owned immutable visual selection; incoming callers cannot set it. */
@@ -557,6 +564,16 @@ export interface SessionStateWire {
   }
   /** Lifetime token totals; omitted when the session has had no LLM call yet. */
   tokens?: SessionTokensWire
+  /** Stored mode. A choice above the ceiling is still this value. */
+  approvalMode: ApprovalMode
+  /** Live Host-spec ceiling. An env-only policy is manual outside dev mode. */
+  modeCeiling: ApprovalMode
+  /** Live cap from the stored channel type, not from the session key. */
+  channelCap: ApprovalMode
+  /** min(stored, ceiling, channel cap), computed on this read. */
+  effectiveApprovalMode: ApprovalMode
+  /** Pure classifier table for the session's current model. No provider is built. */
+  shellClassifierAvailable: boolean
 }
 
 /**
@@ -749,3 +766,26 @@ export type SetTitleHandler = (
   chatId: string,
   title: string
 ) => SetTitleResult | Promise<SetTitleResult>
+
+/**
+ * Result of `PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode`.
+ * `ok` stores `approvalMode` as requested, including a choice above the
+ * ceiling. `invalid_mode` → 400. `not_found` → uniform 404 for a missing or
+ * foreign session, and no row is created.
+ */
+export type SetApprovalModeResult =
+  | {
+      ok: true
+      approvalMode: ApprovalMode
+      modeCeiling: ApprovalMode
+      channelCap: ApprovalMode
+      effectiveApprovalMode: ApprovalMode
+    }
+  | { ok: false; reason: 'invalid_mode' | 'not_found' }
+
+export type SetApprovalModeHandler = (
+  userSub: string,
+  agent: string,
+  chatId: string,
+  mode: string
+) => SetApprovalModeResult | Promise<SetApprovalModeResult>

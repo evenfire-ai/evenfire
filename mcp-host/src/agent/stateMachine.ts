@@ -674,7 +674,7 @@ export class AgentStateMachine extends EventEmitter {
     this.sweepEffectiveApprovalModes()
   }
 
-  private approvalSnapshot(): ApprovalConfigSnapshot {
+  approvalSnapshot(): ApprovalConfigSnapshot {
     return { effective: this.approvalConfig, hostSpec: this.approvalHostSpec }
   }
 

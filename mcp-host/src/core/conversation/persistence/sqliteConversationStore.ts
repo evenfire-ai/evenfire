@@ -27,7 +27,7 @@ import type {
 import { logger } from '../../../logger'
 import { parseSessionKey } from '../../../session/types'
 import { projectGfsApproval } from '../../../visualInput/suspension'
-import type { ApprovalMode } from '../../approval/approvalMode'
+import { type ApprovalMode, normalizeApprovalMode } from '../../approval/approvalMode'
 import { ConversationError, ConversationErrorCode } from '../../errors'
 import {
   type ChatMessage,
@@ -59,6 +59,7 @@ import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
   groupMessagesIntoTurns,
+  parseModelSelections,
   reconstructConversation,
   reconstructPendingApproval,
 } from './reconstruct'
@@ -190,6 +191,20 @@ function conversationStateFromRow(state: string): ConversationState {
     : state === ConversationState.AwaitingApproval
       ? ConversationState.AwaitingApproval
       : ConversationState.Idle
+}
+
+function storedChannelAndModel(
+  cached: Conversation | undefined,
+  session: SessionRow
+): { channelType?: string; modelSelections?: Record<string, string> } {
+  const channelType = cached ? cached.channel_type : (session.channel_type ?? undefined)
+  const modelSelections = cached
+    ? cached.modelSelections
+    : parseModelSelections(session.model_selections ?? null)
+  return {
+    ...(channelType !== undefined ? { channelType } : {}),
+    ...(modelSelections !== undefined ? { modelSelections } : {}),
+  }
 }
 
 export class SqliteConversationStore implements ConversationStore {
@@ -412,6 +427,10 @@ export class SqliteConversationStore implements ConversationStore {
         // `normalizeParityValue` treats a missing title identically to the memory
         // store (which yields undefined); a null would survive and break parity.
         title: cached ? cached.title : (row.session.title ?? undefined),
+        approvalMode: normalizeApprovalMode(
+          cached ? cached.approval_mode : row.session.approval_mode
+        ),
+        ...storedChannelAndModel(cached, row.session),
       })
     }
     return out
@@ -448,6 +467,11 @@ export class SqliteConversationStore implements ConversationStore {
         cache_read_tokens: cached.cache_read_tokens,
         cache_write_tokens: cached.cache_write_tokens,
         cacheTokensReported: cached.cacheTokensReported,
+        approvalMode: cached.approval_mode,
+        ...(cached.channel_type !== undefined ? { channelType: cached.channel_type } : {}),
+        ...(cached.modelSelections !== undefined
+          ? { modelSelections: cached.modelSelections }
+          : {}),
       }
     }
 
@@ -463,6 +487,7 @@ export class SqliteConversationStore implements ConversationStore {
     )
     if (!page || page.session.user_id !== userId) return undefined
 
+    const modelSelections = parseModelSelections(page.session.model_selections ?? null)
     return {
       key: sessionKey,
       agent: parts.agent,
@@ -481,6 +506,9 @@ export class SqliteConversationStore implements ConversationStore {
       cache_read_tokens: page.session.cache_read_tokens,
       cache_write_tokens: page.session.cache_write_tokens,
       cacheTokensReported: page.session.cache_tokens_reported === 1,
+      approvalMode: normalizeApprovalMode(page.session.approval_mode),
+      ...(page.session.channel_type != null ? { channelType: page.session.channel_type } : {}),
+      ...(modelSelections !== undefined ? { modelSelections } : {}),
     }
   }
 

@@ -22,6 +22,7 @@ import { createFileReferenceGfsGate } from './agent/fileReferenceGfsGate'
 import { createIncomingAdmission, replayedIncomingMessage } from './agent/incomingAdmission'
 import { INCOMING_ATTACHMENT_MAX_COUNT } from './agent/incomingAttachments'
 import { IncomingDelivery } from './agent/incomingDelivery'
+import { applySessionApprovalMode } from './agent/sessionApprovalMode'
 import {
   type SessionModelSelectionOptions,
   applySessionModelSelection as applySessionModelSelectionCore,
@@ -2136,6 +2137,8 @@ const prepareIncomingMessage = createIncomingAdmission({
   resolveImageInput,
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
+  getConversationManager: () => agent!.getConversationManager(),
+  approvalSnapshot: () => agent!.approvalSnapshot(),
   fileReferenceGfs: fileReferenceGfsGate,
   gfsSurfaceRuntimeCapability: message => {
     const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
@@ -2766,6 +2769,13 @@ async function startRPCServer(): Promise<void> {
     getConversationManager: () => agent!.getConversationManager(),
     redactToolError,
     redactTitle,
+    approvalSnapshot: () => agent!.approvalSnapshot(),
+    sessionModel: selections => {
+      const provider = currentHost?.spec.model?.provider ?? 'unknown'
+      const hostDefault = currentHost?.spec.model?.name ?? 'unknown'
+      const resolved = resolveSessionModel(hostAllowlistView(), provider, hostDefault, selections)
+      return { providerType: provider, modelName: resolved.model }
+    },
   })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {
@@ -2856,6 +2866,23 @@ async function startRPCServer(): Promise<void> {
   const handleSetTitle = (userSub: string, agentName: string, chatId: string, title: string) =>
     applySessionTitle(userSub, agentName, chatId, title)
 
+  const handleSetApprovalMode = (
+    userSub: string,
+    agentName: string,
+    chatId: string,
+    mode: string
+  ) =>
+    applySessionApprovalMode(
+      {
+        convManager: agent!.getConversationManager(),
+        approvalSnapshot: () => agent!.approvalSnapshot(),
+      },
+      userSub,
+      agentName,
+      chatId,
+      mode
+    )
+
   rpcServer.onMessage(handleIncomingMessage)
   rpcServer.setArtifactSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
   // Generated files are per user: each Desktop user lists and downloads only
@@ -2889,6 +2916,7 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onModelsList(handleModelsList)
   rpcServer.onSetModel(handleSetModel)
   rpcServer.onSetTitle(handleSetTitle)
+  rpcServer.onSetApprovalMode(handleSetApprovalMode)
   // T3.1 — session search REST endpoint. Only wired when the feature is
   // enabled and the SQLite backend is live; otherwise the route returns 501
   // through `handleSessionSearchRoute`.

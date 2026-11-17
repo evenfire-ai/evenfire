@@ -1,3 +1,11 @@
+import {
+  type ApprovalConfigSnapshot,
+  effectiveApprovalMode,
+  normalizeApprovalMode,
+  readChannelCap,
+  readModeCeiling,
+} from '../core/approval/approvalMode'
+import { classifierAvailable } from '../core/approval/shellClassifier'
 import type { ConversationManager } from '../core/conversation/conversation'
 import type {
   ConversationSessionMessages,
@@ -35,10 +43,57 @@ export interface SessionRouteHandlerDeps {
    * over the operator secret list). Non-logging (unlike `redactToolError`).
    */
   redactTitle: (rawTitle: string) => string
+  /**
+   * Live ceiling and channel cap. Read on each request, not captured when the
+   * handler is wired. Absent → manual ceiling.
+   */
+  approvalSnapshot?: () => ApprovalConfigSnapshot
+  /**
+   * Provider id and model name for the session's saved selection. The caller
+   * resolves the model; this handler does not construct a provider per session.
+   */
+  sessionModel?: (selections: Record<string, string> | undefined) => {
+    providerType: string
+    modelName: string
+  }
 }
 
 export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
   const { getConversationManager, redactToolError, redactTitle } = deps
+  const approvalSnapshot =
+    deps.approvalSnapshot ?? (() => ({ effective: undefined, hostSpec: undefined }))
+  const sessionModel =
+    deps.sessionModel ?? (() => ({ providerType: 'unknown', modelName: 'unknown' }))
+
+  const approvalView = (
+    session: Conversation | ConversationSessionSummary | ConversationSessionMessages
+  ) => {
+    const live =
+      'key' in session ? getConversationManager().getSessionByKey(session.key) : undefined
+    const stored = live
+      ? live.approval_mode
+      : 'approvalMode' in session
+        ? session.approvalMode
+        : undefined
+    const channelType = live
+      ? live.channel_type
+      : 'channelType' in session
+        ? session.channelType
+        : undefined
+    const selections = live ? live.modelSelections : session.modelSelections
+    const snapshot = approvalSnapshot()
+    const ceiling = readModeCeiling(snapshot)
+    const cap = readChannelCap(snapshot, channelType)
+    const approvalMode = normalizeApprovalMode(stored)
+    const model = sessionModel(selections)
+    return {
+      approvalMode,
+      modeCeiling: ceiling,
+      channelCap: cap,
+      effectiveApprovalMode: effectiveApprovalMode(approvalMode, ceiling, cap),
+      shellClassifierAvailable: classifierAvailable(model.providerType, model.modelName, {}),
+    }
+  }
 
   // Common projection: state + active task + pending approval + lifetime token
   // totals, shared by the list and messages handlers (RPC token exposure
@@ -94,7 +149,7 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     // session has had an LLM call; cache breakdown included only when the model
     // reports it). See `projectSessionTokens`.
     const tokens = projectSessionTokens(session)
-    return { state, activeTaskId, pendingApproval, tokens }
+    return { state, activeTaskId, pendingApproval, tokens, ...approvalView(session) }
   }
 
   const handleSessionsList = async (

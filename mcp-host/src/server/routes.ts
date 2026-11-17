@@ -31,6 +31,7 @@ import type {
   SessionMessagesHandler,
   SessionSearchHandler,
   SessionsListHandler,
+  SetApprovalModeHandler,
   SetModelHandler,
   SetTitleHandler,
   StatusHandler,
@@ -75,6 +76,7 @@ export type RouteHandlers = {
   modelsListHandler?: ModelsListHandler | null
   setModelHandler?: SetModelHandler | null
   setTitleHandler?: SetTitleHandler | null
+  setApprovalModeHandler?: SetApprovalModeHandler | null
 }
 
 function isSessionOwnershipError(error: unknown): boolean {
@@ -178,6 +180,8 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/sessions/:agent/:chatId/messages': 'Get message history for a session',
       'PATCH /v1/runtime/sessions/:agent/:chatId/name':
         'Rename a session (server-authoritative title)',
+      'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode':
+        'Set the stored approval mode for a session',
       'GET /v1/runtime/sessions/search':
         'Full-text search across past messages of the authenticated user',
       'GET /v1/runtime/models': 'List selectable models for the session (per-session selection)',
@@ -209,6 +213,7 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/sessions': 'onSessionsList(handler)',
       'GET /v1/runtime/sessions/:agent/:chatId/messages': 'onSessionMessages(handler)',
       'PATCH /v1/runtime/sessions/:agent/:chatId/name': 'onSetTitle(handler)',
+      'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode': 'onSetApprovalMode(handler)',
       'GET /v1/runtime/sessions/search': 'onSessionSearch(handler)',
       'GET /v1/runtime/models': 'onModelsList(handler)',
       'POST /v1/runtime/model': 'onSetModel(handler)',
@@ -1576,6 +1581,57 @@ export async function handleSetTitleRoute(
     json(res, 200, { ok: true, title: result.title })
   } catch (error) {
     logger.error({ err: error }, '[Server] Error setting session title')
+    json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+  }
+}
+
+/**
+ * PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode `{ mode }`.
+ * Same ownership as rename: a missing session and another user's session are
+ * both 404, and no row is created. The body is validated again here. The
+ * stored mode is the requested value; the response also carries the live
+ * ceiling, channel cap, and effective mode. The raw body is not logged.
+ */
+export async function handleSetApprovalModeRoute(
+  req: Request,
+  res: Response,
+  handlers: RouteHandlers
+): Promise<void> {
+  try {
+    const caller = getRuntimeCallerContext(req)
+    if (caller?.caller !== 'rpc-proxy' || !caller.userId) {
+      json(res, 401, { error: 'Missing rpc edge caller context' })
+      return
+    }
+    const agent = String(req.params.agent || '').trim()
+    const chatId = String(req.params.chatId || '').trim()
+    if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
+      badRequest(res, 'Invalid agent or chatId')
+      return
+    }
+    if (!handlers.setApprovalModeHandler) {
+      json(res, 501, { error: 'Set approval mode handler not configured' })
+      return
+    }
+    const body = (req.body as Record<string, unknown>) || {}
+    const rawMode = typeof body.mode === 'string' ? body.mode : ''
+    const result = await handlers.setApprovalModeHandler(caller.userId, agent, chatId, rawMode)
+    if (!result.ok) {
+      if (result.reason === 'not_found') {
+        json(res, 404, { error: 'session not found' })
+        return
+      }
+      json(res, 400, { error: 'invalid mode' })
+      return
+    }
+    json(res, 200, {
+      approvalMode: result.approvalMode,
+      modeCeiling: result.modeCeiling,
+      channelCap: result.channelCap,
+      effectiveApprovalMode: result.effectiveApprovalMode,
+    })
+  } catch (error) {
+    logger.error({ err: error }, '[Server] Error setting approval mode')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }
