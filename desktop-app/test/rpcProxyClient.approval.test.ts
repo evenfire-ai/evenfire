@@ -76,6 +76,32 @@ describe('RpcProxyClient — approveToolCall()', () => {
     })
   })
 
+  it('forwards a shell card action and omits an invalid one', async () => {
+    fetchSpy.mockResolvedValueOnce(okResponse())
+    await client.approveToolCall('rpc-token', 'chatllm', 'task-123', 'tc-456', false, 'command')
+    const [, commandInit] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(commandInit.body as string)).toEqual({
+      taskId: 'task-123',
+      toolCallId: 'tc-456',
+      shellAction: 'command',
+    })
+
+    fetchSpy.mockResolvedValueOnce(okResponse())
+    await client.approveToolCall(
+      'rpc-token',
+      'chatllm',
+      'task-123',
+      'tc-456',
+      false,
+      'nope' as 'once'
+    )
+    const [, invalidInit] = fetchSpy.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(invalidInit.body as string)).toEqual({
+      taskId: 'task-123',
+      toolCallId: 'tc-456',
+    })
+  })
+
   it('sends alwaysApprove when the desktop asks to allowlist the tool', async () => {
     fetchSpy.mockResolvedValueOnce(okResponse())
 
@@ -134,6 +160,137 @@ describe('RpcProxyClient — approveToolCall()', () => {
 })
 
 // ── denyToolCall ──────────────────────────────────────────────────────────────
+
+describe('RpcProxyClient — setApprovalMode()', () => {
+  it('PATCHes the approval-mode route with the mode', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      okResponse({
+        approvalMode: 'allow_all',
+        modeCeiling: 'allow_all',
+        channelCap: 'allow_all',
+        effectiveApprovalMode: 'auto',
+      })
+    )
+
+    const result = await client.setApprovalMode(
+      'rpc-token',
+      'chatllm',
+      'chatllm',
+      'chat-1',
+      'allow_all'
+    )
+
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      'http://localhost:8094/api/v1/rpc/hosts/chatllm/sessions/chatllm/chat-1/approval-mode'
+    )
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ mode: 'allow_all' })
+    expect(result).toEqual({
+      approvalMode: 'allow_all',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'auto',
+    })
+  })
+
+  it('keeps a 404 in the error message and does not treat it as success', async () => {
+    fetchSpy.mockResolvedValueOnce(errorResponse(404, 'missing'))
+    await expect(
+      client.setApprovalMode('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'auto')
+    ).rejects.toThrow('Set approval mode failed (404)')
+  })
+})
+
+describe('RpcProxyClient — approval mode session fields', () => {
+  it('keeps shellCard and the five session-read fields', async () => {
+    const shellCard = { channelCommandOffered: false, desktopCommandOffered: false }
+    const fields = {
+      approvalMode: 'auto',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'auto',
+      shellClassifierAvailable: false,
+    }
+    fetchSpy.mockResolvedValueOnce(
+      okResponse({
+        items: [
+          {
+            agent: 'agent-a',
+            chatId: 'chat-a',
+            turnCount: 1,
+            lastActivityAt: '2026-11-17T00:00:00.000Z',
+            ...fields,
+            pendingApproval: {
+              requestId: 'req-1',
+              displayName: 'Shell',
+              shellCard,
+            },
+          },
+        ],
+      })
+    )
+
+    const listed = await client.listSessions('rpc-token', 'host')
+    expect(listed.items[0]).toMatchObject({
+      ...fields,
+      pendingApproval: {
+        requestId: 'req-1',
+        displayName: 'Shell',
+        shellCard,
+      },
+    })
+
+    fetchSpy.mockResolvedValueOnce(
+      okResponse({
+        agent: 'agent-a',
+        chatId: 'chat-a',
+        ...fields,
+        pendingApproval: {
+          requestId: 'req-1',
+          displayName: 'Shell',
+          shellCard: { channelCommandOffered: true, desktopCommandOffered: true },
+        },
+        turns: [],
+      })
+    )
+    const loaded = await client.loadSessionMessages('rpc-token', 'host', 'agent-a', 'chat-a')
+    expect(loaded).toMatchObject({
+      ...fields,
+      pendingApproval: {
+        shellCard: { channelCommandOffered: true, desktopCommandOffered: true },
+      },
+    })
+  })
+
+  it('drops a malformed shell card and an unknown mode without dropping the session', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      okResponse({
+        items: [
+          {
+            agent: 'agent-a',
+            chatId: 'chat-a',
+            turnCount: 1,
+            lastActivityAt: '2026-11-17T00:00:00.000Z',
+            approvalMode: 'yolo',
+            pendingApproval: {
+              requestId: 'req-1',
+              displayName: 'Shell',
+              shellCard: { desktopCommandOffered: 'yes' },
+            },
+          },
+        ],
+      })
+    )
+
+    const listed = await client.listSessions('rpc-token', 'host')
+    expect(listed.items[0]?.pendingApproval).toEqual({
+      requestId: 'req-1',
+      displayName: 'Shell',
+    })
+    expect(listed.items[0]).not.toHaveProperty('approvalMode')
+  })
+})
 
 describe('RpcProxyClient — denyToolCall()', () => {
   it('sends POST to /approvals/deny with { taskId, toolCallId, reason }', async () => {

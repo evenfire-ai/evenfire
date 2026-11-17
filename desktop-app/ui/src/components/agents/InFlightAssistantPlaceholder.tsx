@@ -6,6 +6,7 @@ import type {
 } from '@hooks/domain/approvalDecision'
 import { trackerStateToTaskProgress } from '@hooks/domain/trackerToProgress'
 import type { ApprovalInputPreview } from '@/uiTypes'
+import type { ShellCardDescriptor } from '../../../../src/types'
 import type { AccessCatalog } from '../../../../src/types'
 import { ProgressStepper } from '../ProgressStepper'
 
@@ -35,6 +36,7 @@ interface Props {
     mcpServerName?: string
     alwaysApproveAllowed?: false
     inputPreview?: ApprovalInputPreview
+    shellCard?: ShellCardDescriptor
   }
   agentContextByName?: AccessCatalog['agentContextByName']
 }
@@ -108,7 +110,8 @@ export function InFlightAssistantPlaceholder({
           }
           onAlwaysApprove={
             // The host may refuse to allowlist this call (`alwaysApproveAllowed: false`).
-            si && si.alwaysApproveAllowed !== false
+            // A shell card replaces Always with the shell actions below.
+            si && !si.shellCard && si.alwaysApproveAllowed !== false
               ? () => {
                   return decideApproval({
                     agentRef,
@@ -117,6 +120,21 @@ export function InFlightAssistantPlaceholder({
                     requestId: si.requestId,
                     decision: 'approve',
                     alwaysApprove: true,
+                    source: 'placeholder',
+                  })
+                }
+              : undefined
+          }
+          onShellAction={
+            si?.shellCard
+              ? action => {
+                  return decideApproval({
+                    agentRef,
+                    chatId,
+                    taskId,
+                    requestId: si.requestId,
+                    decision: 'approve',
+                    shellAction: action,
                     source: 'placeholder',
                   })
                 }

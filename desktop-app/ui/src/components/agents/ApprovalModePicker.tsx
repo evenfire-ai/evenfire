@@ -1,0 +1,111 @@
+import { useState } from 'react'
+import { useHostApprovalMode } from '@hooks/useHostApprovalMode'
+import type { ApprovalMode } from '@lib/hostApprovalModeStore'
+
+export interface ApprovalModePickerProps {
+  agentRef: string
+  chatId: string
+}
+
+const ALLOW_ALL_CONFIRM =
+  'Allow all runs tools in this chat without asking, except scheduled tasks. Continue?'
+
+/**
+ * Session approval-mode control, sat next to the model selector.
+ * "Allow all" asks before it writes. Auto and allow-all keep a visible label.
+ * When the session's model cannot run the shell classifier, say so next to
+ * Auto-approve: shell still asks.
+ */
+export function ApprovalModePicker({ agentRef, chatId }: ApprovalModePickerProps) {
+  const selectionChatId = chatId || null
+  const { label, effectiveMode, shellClassifierAvailable, selectMode } = useHostApprovalMode(
+    agentRef,
+    selectionChatId
+  )
+  const [open, setOpen] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const showClassifierNote = effectiveMode === 'auto' && shellClassifierAvailable === false
+
+  const choose = (mode: ApprovalMode) => {
+    setOpen(false)
+    setConfirming(false)
+    void selectMode(mode)
+  }
+
+  return (
+    <div className="approval-mode-picker">
+      {label ? (
+        <span data-testid="approval-mode-label" className="approval-mode-picker-label">
+          {label}
+        </span>
+      ) : null}
+      {showClassifierNote ? (
+        <p data-testid="approval-mode-classifier-note" role="note">
+          shell always asks on this model
+        </p>
+      ) : null}
+      <button
+        type="button"
+        data-testid="approval-mode-picker"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => {
+          setConfirming(false)
+          setOpen(current => !current)
+        }}
+      >
+        {label ?? 'Manual'}
+      </button>
+      {open && !confirming ? (
+        <div role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="approval-mode-option-manual"
+            onClick={() => choose('manual')}
+          >
+            Manual
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="approval-mode-option-auto"
+            onClick={() => choose('auto')}
+          >
+            Auto-approve
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="approval-mode-option-allow-all"
+            onClick={() => setConfirming(true)}
+          >
+            Allow all
+          </button>
+        </div>
+      ) : null}
+      {confirming ? (
+        <div role="dialog" aria-label="Confirm allow all">
+          <p>{ALLOW_ALL_CONFIRM}</p>
+          <button
+            type="button"
+            data-testid="approval-mode-cancel-allow-all"
+            onClick={() => {
+              setConfirming(false)
+              setOpen(false)
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            data-testid="approval-mode-confirm-allow-all"
+            onClick={() => choose('allow_all')}
+          >
+            Allow all
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
+}

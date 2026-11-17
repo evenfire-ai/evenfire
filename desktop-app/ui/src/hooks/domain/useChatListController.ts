@@ -2,6 +2,10 @@ import { type MutableRefObject, useCallback, useEffect, useMemo, useRef, useStat
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import { byUpdatedDesc, mergeByUpdatedDesc, mergeCatalogPage } from '@lib/catalogMerge'
 import { agentChatPlaceholder, remotePlaceholder } from '@lib/chatTitle'
+import {
+  noteHostApprovalModeFromSession,
+  snapshotFromSessionRead,
+} from '@lib/hostApprovalModeStore'
 import type { PendingRename } from '@lib/resolveSessionTitle'
 import type {
   ChatAuthorityScope,
@@ -24,6 +28,23 @@ import { nextCatalogSequence, type useChatStore } from '../useChatStore'
 import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from './sessionFsm'
 
 const SESSION_CATALOG_PAGE_LIMIT = 50
+
+function noteCatalogApprovalModes(
+  agentRef: string,
+  sessions: readonly {
+    chatId: string
+    approvalMode?: unknown
+    modeCeiling?: unknown
+    channelCap?: unknown
+    effectiveApprovalMode?: unknown
+    shellClassifierAvailable?: unknown
+  }[]
+): void {
+  for (const session of sessions) {
+    const approval = snapshotFromSessionRead(session)
+    if (approval) noteHostApprovalModeFromSession(agentRef, session.chatId, approval)
+  }
+}
 
 /** A catalog page and the sequence number of the request that produced it. */
 type IssuedCatalogPage = Awaited<ReturnType<ReturnType<typeof useChatStore>['listSessions']>>
@@ -670,6 +691,7 @@ export function useChatListController({
         // for badges via SERVER_SNAPSHOT (D4 / §4.1 R2 owns "never degrade a live
         // task").
         seedSessionSnapshots(fsm, agentRef, serverSessions)
+        noteCatalogApprovalModes(agentRef, serverSessions)
 
         // Chats the server knows but the local cache doesn't (e.g. created on
         // another device). Post-§7.1 wipe these are normal entries — no
@@ -848,6 +870,7 @@ export function useChatListController({
       chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
       setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
       seedSessionSnapshots(fsm, agentRef, serverSessions)
+      noteCatalogApprovalModes(agentRef, serverSessions)
       setChatList(previous => {
         // The hold is a read-time mask; keep the prior catalog for recovery.
         if (isHostAccessBlocked(agentRef)) return previous
@@ -1748,6 +1771,7 @@ export function useChatListController({
               )
               .map(session => ({ ...session, agentRef }))
             seedSessionSnapshots(fsm, agentRef, sessions)
+            noteCatalogApprovalModes(agentRef, sessions)
             // Hardening: tombstones are read again inside the updater. The filter
             // above already dropped them from `sessions`, and no test deletes a
             // chat between that filter and this updater.

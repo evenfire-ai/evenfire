@@ -40,6 +40,13 @@ import {
 } from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
+  approvalModeForFirstSend,
+  confirmHeldApprovalModeFromSend,
+  migrateHeldApprovalMode,
+  noteHostApprovalModeFromSession,
+  snapshotFromSessionRead,
+} from '@lib/hostApprovalModeStore'
+import {
   confirmHostModelSelectionFromSend,
   dropIgnoredHostModelIntent,
   loadHostModels,
@@ -102,7 +109,11 @@ import {
   createSessionFsmStore,
   projectSessionState,
 } from './sessionFsm'
-import { mapTrackerStatusToProgress, readApprovalInputPreview } from './trackerToProgress'
+import {
+  mapTrackerStatusToProgress,
+  readApprovalInputPreview,
+  readShellCard,
+} from './trackerToProgress'
 import { type TranscriptMemoEntry, createTranscriptMemo, transcriptMemoKey } from './transcriptMemo'
 import type { PushNotificationInput } from './types'
 import {
@@ -2382,6 +2393,11 @@ export function useAgentChatController({
         tokens: resp.tokens,
         snapshotEpoch,
       })
+      const approvalSnapshot = snapshotFromSessionRead(resp)
+      if (approvalSnapshot) {
+        const { agentRef: approvalAgent, chatId: approvalChatId } = parseTaskKey(chatKey)
+        noteHostApprovalModeFromSession(approvalAgent, approvalChatId, approvalSnapshot)
+      }
       // reason:'rejoin' → the coordinator consumes the bounded re-rejoin budget
       // (P1-stall guard). Idempotent when the same task is already attached.
       const attached = tracker.attach(
@@ -3279,6 +3295,10 @@ export function useAgentChatController({
             mcpServerName: state.pendingApproval.mcpServerName,
             alwaysApproveAllowed: state.pendingApproval.alwaysApproveAllowed,
             inputPreview: readApprovalInputPreview(state.pendingApproval.inputPreview),
+            ...(() => {
+              const shellCard = readShellCard(state.pendingApproval.shellCard)
+              return shellCard ? { shellCard } : {}
+            })(),
           }
         : activeFsmApproval
           ? {
@@ -3293,6 +3313,10 @@ export function useAgentChatController({
               mcpServerName: activeFsmApproval.mcpServerName,
               alwaysApproveAllowed: activeFsmApproval.alwaysApproveAllowed,
               inputPreview: readApprovalInputPreview(activeFsmApproval.inputPreview),
+              ...(() => {
+                const shellCard = readShellCard(activeFsmApproval.shellCard)
+                return shellCard ? { shellCard } : {}
+              })(),
             }
           : undefined
       updateMessageProgress(selectedAgent, state.userMessageId, () => ({
@@ -3557,6 +3581,7 @@ export function useAgentChatController({
             chatStore.setPendingModel(sendAgent, chatId, preChatModel)
             chatStore.clearPreChatModel(sendAgent)
           }
+          migrateHeldApprovalMode(sendAgent, chatId)
           if (
             wasSendChatVisible &&
             sendSelectionIntentRevision !== null &&
@@ -3875,6 +3900,7 @@ export function useAgentChatController({
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
         const fileReferences = fileReferencesForSend
+        const heldApprovalMode = sendChatId ? approvalModeForFirstSend(sendAgent, sendChatId) : null
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -3889,6 +3915,7 @@ export function useAgentChatController({
             ? {}
             : { modelSelectionRevision: visualModelRevisionForSend }),
           ...(fileReferences.length > 0 ? { fileReferences } : {}),
+          ...(heldApprovalMode ? { approvalMode: heldApprovalMode } : {}),
         }
 
         // Handed to main from here, even if main refuses it before the POST.
@@ -3907,6 +3934,7 @@ export function useAgentChatController({
         if (!sendStillAuthorized()) return
         const responseRecord = response as Record<string, unknown>
         const ackOk = !responseRecord.error && responseRecord.success !== false
+        if (ackOk && sendChatId) confirmHeldApprovalModeFromSend(sendAgent, sendChatId)
         // #654 H1 — the send IS the write. Its ack carries the revision that
         // write produced, and adopting it is what arms the NEXT conditional
         // write correctly; without it the client keeps the revision it read

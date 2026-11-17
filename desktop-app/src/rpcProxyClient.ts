@@ -3,6 +3,8 @@ import { ApiError, requestJson, withTimeout } from './httpClient.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   ApprovalDecisionResult,
+  ApprovalMode,
+  ApprovalModeResult,
   ContextBreakdownResult,
   HostActivitySnapshot,
   HostMessageRequest,
@@ -22,6 +24,8 @@ import {
   SessionsListQuery,
   SessionsListResult,
   SetHostModelResult,
+  ShellAction,
+  ShellCardDescriptor,
 } from './types.js'
 import { boundedErrorExcerpt, hostAccessDenialMessage } from './upstreamErrors.js'
 
@@ -104,6 +108,73 @@ function optionalWireBoolean(value: unknown, label: string): boolean | undefined
   return value
 }
 
+function parseApprovalMode(value: unknown): ApprovalMode | undefined {
+  if (value === 'manual' || value === 'auto' || value === 'allow_all') return value
+  return undefined
+}
+
+function parseShellAction(value: unknown): ShellAction | undefined {
+  if (value === 'once' || value === 'command' || value === 'shell') return value
+  return undefined
+}
+
+/** A malformed descriptor is dropped. The card then uses today's buttons. */
+function parseShellCard(value: unknown): ShellCardDescriptor | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (
+    typeof record.channelCommandOffered !== 'boolean' ||
+    typeof record.desktopCommandOffered !== 'boolean'
+  ) {
+    return undefined
+  }
+  return {
+    channelCommandOffered: record.channelCommandOffered,
+    desktopCommandOffered: record.desktopCommandOffered,
+  }
+}
+
+function approvalSessionFields(entry: Record<string, unknown>): {
+  approvalMode?: ApprovalMode
+  modeCeiling?: ApprovalMode
+  channelCap?: ApprovalMode
+  effectiveApprovalMode?: ApprovalMode
+  shellClassifierAvailable?: boolean
+} {
+  const approvalMode = parseApprovalMode(entry.approvalMode)
+  const modeCeiling = parseApprovalMode(entry.modeCeiling)
+  const channelCap = parseApprovalMode(entry.channelCap)
+  const effectiveApprovalMode = parseApprovalMode(entry.effectiveApprovalMode)
+  const shellClassifierAvailable =
+    typeof entry.shellClassifierAvailable === 'boolean' ? entry.shellClassifierAvailable : undefined
+  return {
+    ...(approvalMode ? { approvalMode } : {}),
+    ...(modeCeiling ? { modeCeiling } : {}),
+    ...(channelCap ? { channelCap } : {}),
+    ...(effectiveApprovalMode ? { effectiveApprovalMode } : {}),
+    ...(shellClassifierAvailable !== undefined ? { shellClassifierAvailable } : {}),
+  }
+}
+
+function parseApprovalModeResult(value: unknown): ApprovalModeResult | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const fields = approvalSessionFields(value as Record<string, unknown>)
+  if (
+    !fields.approvalMode ||
+    !fields.modeCeiling ||
+    !fields.channelCap ||
+    !fields.effectiveApprovalMode
+  ) {
+    return undefined
+  }
+  return {
+    approvalMode: fields.approvalMode,
+    modeCeiling: fields.modeCeiling,
+    channelCap: fields.channelCap,
+    effectiveApprovalMode: fields.effectiveApprovalMode,
+  }
+}
+
 function parseSessionState(value: unknown, label: string): SessionLifecycleState | undefined {
   if (value === undefined || value === null) return undefined
   if (value === 'idle' || value === 'processing' || value === 'awaiting_approval') return value
@@ -127,12 +198,14 @@ function parsePendingApproval(value: unknown, label: string): PendingApprovalLit
     record.alwaysApproveAllowed,
     `${label}.alwaysApproveAllowed`
   )
+  const shellCard = parseShellCard(record.shellCard)
   return {
     requestId: wireString(record.requestId, `${label}.requestId`),
     displayName: wireString(record.displayName, `${label}.displayName`),
     ...(reason !== undefined ? { reason } : {}),
     ...(mcpServerName !== undefined ? { mcpServerName } : {}),
     ...(alwaysApproveAllowed === false ? { alwaysApproveAllowed: false as const } : {}),
+    ...(shellCard ? { shellCard } : {}),
   }
 }
 
@@ -243,6 +316,7 @@ export function parseSessionsListResult(value: unknown): SessionsListResult {
           ...(entry.tokens != null
             ? { tokens: parseTokens(entry.tokens, `sessions response.items[${index}].tokens`) }
             : {}),
+          ...approvalSessionFields(entry),
         },
       ]
     } catch (error) {
@@ -362,6 +436,7 @@ function parseSessionMessagesResult(
     ...(record.tokens != null
       ? { tokens: parseTokens(record.tokens, 'session messages response.tokens') }
       : {}),
+    ...approvalSessionFields(record),
     turns: record.turns.map((turn, index) => {
       const entry = wireObject(turn, `session messages response.turns[${index}]`)
       return {
@@ -948,8 +1023,10 @@ export class RpcProxyClient {
     hostRef: string,
     taskId: string,
     toolCallId: string,
-    alwaysApprove = false
+    alwaysApprove = false,
+    shellAction?: ShellAction
   ): Promise<ApprovalDecisionResult> {
+    const action = parseShellAction(shellAction)
     const response = await fetch(
       this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/approve`),
       {
@@ -962,6 +1039,7 @@ export class RpcProxyClient {
           taskId,
           toolCallId,
           ...(alwaysApprove ? { alwaysApprove: true } : {}),
+          ...(action ? { shellAction: action } : {}),
         }),
         signal: withTimeout(),
       }
@@ -1343,6 +1421,49 @@ export class RpcProxyClient {
     // Fall back to the requested title if the server echo is missing/illegible,
     // but sanitize that too so the same read-side normalization applies on every path.
     return { title: sanitized ?? sanitizeWireTitle(title) ?? title }
+  }
+
+  /**
+   * Sets the session approval mode. The route wakes, like approve, so the
+   * caller mints `host:session:write` and `host:wake:write`. A 400, 401 or 404
+   * is a definite rejection: the message keeps the status so the renderer can
+   * leave the painted label alone. Any other failure is not proof of the
+   * stored mode.
+   */
+  async setApprovalMode(
+    rpcToken: string,
+    hostRef: string,
+    agent: string,
+    chatId: string,
+    mode: ApprovalMode
+  ): Promise<ApprovalModeResult> {
+    if (mode !== 'manual' && mode !== 'auto' && mode !== 'allow_all') {
+      throw new Error('mode must be manual, auto, or allow_all')
+    }
+    assertSafeRouteSegment('hostRef', hostRef)
+    assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+    assertSafeRouteSegment('chatId', chatId)
+    const response = await fetch(
+      this.url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/approval-mode`
+      ),
+      {
+        method: 'PATCH',
+        headers: { authorization: `Bearer ${rpcToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ mode }),
+        signal: withTimeout(),
+      }
+    )
+    if (!response.ok) {
+      const body = await readErrorBody(response)
+      const hostAccessDenial = hostAccessDenialError(response.status, body)
+      if (hostAccessDenial) throw hostAccessDenial
+      throw new ApiError(`Set approval mode failed (${response.status})`, response.status, body)
+    }
+    const parsed = await response.json().catch(() => undefined)
+    const result = parseApprovalModeResult(parsed)
+    if (!result) throw new Error('Set approval mode failed (invalid response)')
+    return result
   }
 
   async getDesktopStatus(

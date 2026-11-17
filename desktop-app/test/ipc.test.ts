@@ -138,6 +138,7 @@ describe('ipc host status stream handlers', () => {
     getChatDeletionFenceAuthority: vi.fn(),
     loadSessionMessages: vi.fn(),
     renameSession: vi.fn(),
+    setApprovalMode: vi.fn(),
     listWorkflowRuns: vi.fn(),
     listWorkflowRunArtifacts: vi.fn(),
     downloadWorkflowRunArtifact: vi.fn(),
@@ -383,6 +384,109 @@ describe('ipc host status stream handlers', () => {
     } as never)
     // The handler passes only the four positional args; no hostRefs fleet leaks.
     expect(service.renameSession).toHaveBeenCalledWith('chatllm', 'chatllm', 'c1', 'x')
+  })
+
+  it('forwards a valid rpc:setApprovalMode to the service', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:setApprovalMode')
+    service.setApprovalMode.mockResolvedValue({
+      approvalMode: 'auto',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'auto',
+    })
+    await handler?.(event, {
+      hostRef: 'chatllm',
+      agent: 'chatllm',
+      chatId: 'c1',
+      mode: 'auto',
+    })
+    expect(service.setApprovalMode).toHaveBeenCalledWith('chatllm', 'chatllm', 'c1', 'auto')
+  })
+
+  it('rejects an unsafe chatId segment for rpc:setApprovalMode before calling the service', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:setApprovalMode')
+    await expect(
+      Promise.resolve(
+        handler?.(event, { hostRef: 'chatllm', agent: 'chatllm', chatId: '../evil', mode: 'auto' })
+      )
+    ).rejects.toThrow(/unsafe path segment/)
+    expect(service.setApprovalMode).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unknown mode for rpc:setApprovalMode', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:setApprovalMode')
+    await expect(
+      Promise.resolve(
+        handler?.(event, { hostRef: 'chatllm', agent: 'chatllm', chatId: 'c1', mode: 'yolo' })
+      )
+    ).rejects.toThrow('mode must be manual, auto, or allow_all')
+    expect(service.setApprovalMode).not.toHaveBeenCalled()
+  })
+
+  it('ignores a renderer-supplied hostRefs fleet for rpc:setApprovalMode', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:setApprovalMode')
+    service.setApprovalMode.mockResolvedValue({
+      approvalMode: 'manual',
+      modeCeiling: 'manual',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'manual',
+    })
+    await handler?.(event, {
+      hostRef: 'chatllm',
+      agent: 'chatllm',
+      chatId: 'c1',
+      mode: 'manual',
+      hostRefs: ['chatllm', 'other'],
+    } as never)
+    expect(service.setApprovalMode).toHaveBeenCalledWith('chatllm', 'chatllm', 'c1', 'manual')
+  })
+
+  it('forwards a shell card action to approveToolCall', async () => {
+    service.approveToolCall.mockResolvedValue({ success: true })
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:approveToolCall')
+    await Promise.resolve(
+      handler?.(event, {
+        hostRef: 'agent-x',
+        taskId: 'task-1',
+        toolCallId: 'req-1',
+        hostRefs: ['agent-x'],
+        shellAction: 'command',
+      })
+    )
+    expect(service.approveToolCall).toHaveBeenCalledWith(
+      'agent-x',
+      'task-1',
+      'req-1',
+      ['agent-x'],
+      {
+        teamId: undefined,
+        alwaysApprove: false,
+        shellAction: 'command',
+      }
+    )
+  })
+
+  it('drops an invalid shellAction before approveToolCall', async () => {
+    service.approveToolCall.mockResolvedValue({ success: true })
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:approveToolCall')
+    await Promise.resolve(
+      handler?.(event, {
+        hostRef: 'agent-x',
+        taskId: 'task-1',
+        toolCallId: 'req-1',
+        shellAction: 'nope',
+      })
+    )
+    expect(service.approveToolCall).toHaveBeenCalledWith('agent-x', 'task-1', 'req-1', undefined, {
+      teamId: undefined,
+      alwaysApprove: false,
+    })
   })
 
   it('forwards sandbox UI visibility changes from the trusted renderer', async () => {

@@ -8,6 +8,7 @@ import type {
   SessionsListQuery,
   SessionsListResult,
 } from '../../../src/types'
+import { resetHostApprovalModeStore } from '../lib/hostApprovalModeStore'
 import {
   clearPendingModelIntent,
   clearPreChatModelIntent,
@@ -259,6 +260,7 @@ export function useChatStore() {
     // responses. Never carry an unpersisted model choice across logout, user,
     // or team boundaries where the same agent/chat identifiers may reappear.
     resetHostModelSelectionStore()
+    resetHostApprovalModeStore()
   }, [])
 
   // --- Pending (unpersisted) model selections — R2 "Option A" (see the
