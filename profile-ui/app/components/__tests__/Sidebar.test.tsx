@@ -76,18 +76,25 @@ describe('Profile Sidebar access-controlled entries', () => {
     const view = render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
 
     const socialLink = screen.getByRole('link', { name: /Social channels/i })
+    expect(socialLink).toHaveAttribute('href', '/channels')
     expect(socialLink).toHaveAttribute('aria-current', 'page')
     expect(socialLink).toHaveAttribute('data-active', 'true')
     expect(view.container.querySelector('.cu-sidebar__item--loading')).not.toBeInTheDocument()
   })
 
-  it('keeps initial social-channels access unresolved behind a loading placeholder', () => {
+  it('keeps the landing destination available while access is unresolved', () => {
     profileAccessState.approvalTargetsLoading = true
 
     const view = render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
 
-    expect(screen.queryByRole('link', { name: /Social channels/i })).not.toBeInTheDocument()
-    expect(view.container.querySelector('.cu-sidebar__item--loading')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Social channels/i })).toHaveAttribute(
+      'href',
+      '/channels'
+    )
+    expect(screen.getByRole('link', { name: /Social channels/i })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
   })
 
   it('does not render an approval-channels entry; it lives under Settings', () => {
@@ -115,21 +122,30 @@ describe('Profile Sidebar navigation order', () => {
     ])
   })
 
-  it('keeps the Social channels entry behind a loading placeholder while access is unresolved', () => {
+  it('keeps Social channels active while access is unresolved', () => {
     profileAccessState.approvalTargetsLoading = true
 
     const view = render(<Sidebar currentRoute="socialChannels" onLogout={vi.fn()} />)
 
-    expect(screen.queryByRole('link', { name: /Social channels/i })).not.toBeInTheDocument()
-    expect(view.container.querySelectorAll('.cu-sidebar__item--loading')).toHaveLength(1)
+    expect(screen.getByRole('link', { name: /Social channels/i })).toHaveAttribute(
+      'href',
+      '/channels'
+    )
+    expect(screen.getByRole('link', { name: /Social channels/i })).toHaveAttribute(
+      'data-active',
+      'true'
+    )
   })
 
-  it('hides the Social channels entry when the account has no external channel access', () => {
+  it('keeps Social channels reachable when there are no accessible targets', () => {
     profileAccessState.canManageMembers = true
 
     render(<Sidebar currentRoute="members" onLogout={vi.fn()} />)
 
-    expect(screen.queryByRole('link', { name: /Social channels/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Social channels/i })).toHaveAttribute(
+      'href',
+      '/channels'
+    )
     expect(screen.getByRole('link', { name: /Members/i })).toBeInTheDocument()
   })
 })

@@ -10,10 +10,8 @@ import { IconLogout } from './icons'
 import type { ProfileRouteKey, ProfileSidebarItem, SidebarProps } from './types'
 
 export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: SidebarProps) {
-  const { approvalTargets, approvalTargetsLoading, canManageMembers, manageableTeamsLoading } =
-    useProfileAccess()
+  const { canManageMembers, manageableTeamsLoading } = useProfileAccess()
   const { releaseId } = useReleaseIdentity()
-  const hasExternalChannelAccess = approvalTargets.length > 0
 
   const navigationItems = (
     Object.entries(PROFILE_SIDEBAR_ITEMS) as Array<[ProfileRouteKey, ProfileSidebarItem]>
@@ -48,11 +46,8 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
       <nav className="cu-sidebar__nav" aria-label="Main sections">
         {navigationItems.map(([routeKey, item]) => {
           const accessLoading =
-            (routeKey === 'members' && manageableTeamsLoading && !canManageMembers) ||
-            (routeKey === 'socialChannels' && approvalTargetsLoading && !hasExternalChannelAccess)
-          const accessDenied =
-            (routeKey === 'members' && !canManageMembers) ||
-            (routeKey === 'socialChannels' && !hasExternalChannelAccess)
+            routeKey === 'members' && manageableTeamsLoading && !canManageMembers
+          const accessDenied = routeKey === 'members' && !canManageMembers
 
           if (accessLoading) {
             return (
