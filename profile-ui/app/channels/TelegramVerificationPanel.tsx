@@ -18,12 +18,10 @@ import { useToast } from '@components/Toast'
 import {
   IconChatBubble,
   IconCopy,
-  IconPencil,
   IconRobot,
   IconSlack,
   IconTelegram,
   IconTimer,
-  IconTrash,
 } from '@components/icons'
 import {
   approvalAccountBotLabel,
@@ -39,7 +37,6 @@ import {
   targetDetailLabels,
   targetDisplayName,
   teamsVerificationCommand,
-  telegramBotHandle,
   telegramVerificationCommand,
   updateWorkflowApprovalMediumDisplayName,
 } from '@lib/approvalChannels'
