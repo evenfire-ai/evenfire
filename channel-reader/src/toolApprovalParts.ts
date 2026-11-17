@@ -35,6 +35,13 @@ export const TOOL_APPROVAL_NOT_SHOWN_STILL_WAITING =
   'This approval request could not be shown here in full, so it cannot be approved here. It is still waiting on the Host; ask an operator to deny it.'
 
 /**
+ * Sent for a typed decision while a multi-part approval is being sent in the
+ * same chat to the same user: the decision is not applied to an earlier request.
+ */
+export const TOOL_APPROVAL_DELIVERY_IN_PROGRESS =
+  'An approval request is still being sent here. Wait for its last message, then reply /approve or /deny.'
+
+/**
  * `content` as the parts to send in order: whole lines, each part at most
  * `limit.max` by `limit.size`. One part when it fits. Null when it cannot be
  * shown whole: a line over the limit, a part with no visible text, or more

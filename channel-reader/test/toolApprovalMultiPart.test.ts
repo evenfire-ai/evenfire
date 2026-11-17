@@ -284,7 +284,12 @@ function unexpectedRpcCall(name: string) {
 }
 
 /** Starts a task on the progress flow; the approval is offered on `suspend()`. */
-async function startAsync(channelType: ChannelKind, notification: string, taskId: string) {
+async function startAsync(
+  channelType: ChannelKind,
+  notification: string,
+  taskId: string,
+  toMessage: (content: string) => Message = content => messageFor(channelType, content)
+) {
   streamCalls.length = 0
   const rec = recordingAdapter(channelType)
   const { rpc, current } = rpcClientFor(taskId, SENDER[channelType], notification)
@@ -294,7 +299,7 @@ async function startAsync(channelType: ChannelKind, notification: string, taskId
     channels: channelType === 'telegram' ? [telegramChannel()] : [],
     sleep: async () => undefined,
   })
-  await reader.handleMessages([messageFor(channelType, 'clean up my files')])
+  await reader.handleMessages([toMessage('clean up my files')])
   expect(streamCalls).toHaveLength(1)
   const stream = streamCalls[0]!
   // Witness that the adapter is live: the status bubble was sent.
@@ -312,7 +317,7 @@ async function startAsync(channelType: ChannelKind, notification: string, taskId
         displayName: 'Delete kept files',
         reason: 'approval_required',
       }),
-    send: (content: string) => reader.handleMessages([messageFor(channelType, content)]),
+    send: (content: string) => reader.handleMessages([toMessage(content)]),
     end: async () => {
       await stream.fireTerminal({ taskId, status: 'cancelled' })
     },
@@ -2235,5 +2240,340 @@ describe('a task that ends while its approval is delivered or denied', () => {
     await h.send('/approve')
     expect(sentContents(h.rec).at(-1)).toBe(NO_PENDING)
     expect(h.rpc.sendApproval).not.toHaveBeenCalled()
+  })
+})
+
+describe('a typed decision while another approval is being sent', () => {
+  const DELIVERY_IN_PROGRESS =
+    'An approval request is still being sent here. Wait for its last message, then reply /approve or /deny.'
+  const SHORT = `Delete these files permanently:\n${fileLine('notes.txt')}\nTotal files: 1\n${INSTRUCTION}`
+  const TEAMS_PERSONAL_CHAT = 'a:personal-chat-1'
+
+  type Started = Awaited<ReturnType<typeof startAsync>>
+
+  /**
+   * A Teams personal chat message. The reader keys its approvals without a
+   * thread there, while the Host keeps each message as its own thread.
+   */
+  function teamsPersonalMessage(content: string): Message {
+    eventSeq += 1
+    return {
+      channelType: 'teams',
+      channelId: TEAMS_PERSONAL_CHAT,
+      sender: SENDER.teams,
+      content,
+      timestamp: new Date('2026-11-14T12:00:00.000Z'),
+      messageId: `activity-${eventSeq}`,
+      threadId: `activity-${eventSeq}`,
+      providerIdentity: {
+        medium: 'teams',
+        providerUserId: SENDER.teams,
+        providerWorkspaceId: 'tenant-1',
+        providerChannelId: TEAMS_PERSONAL_CHAT,
+        providerChannelType: 'personal',
+        providerEventId: `teams:tenant-1:${TEAMS_PERSONAL_CHAT}:activity-${eventSeq}`,
+      },
+    }
+  }
+
+  /** Starts another task of the same sender in the same chat; returns its stream. */
+  async function nextTask(h: Started, taskId: string, content: string): Promise<StreamCall> {
+    const before = streamCalls.length
+    h.rpc.sendMessage.mockResolvedValueOnce({ success: true, status: 'pending' as const, taskId })
+    await h.send(content)
+    expect(streamCalls).toHaveLength(before + 1)
+    return streamCalls[before]!
+  }
+
+  /** Suspends `stream`'s task on its approval; the fetch answers with `notification`. */
+  function offer(h: Started, stream: StreamCall, notification: string): Promise<void> {
+    const requestId = `approval-${stream.taskId}`
+    h.rpc.getTaskResult.mockResolvedValueOnce({
+      success: true,
+      status: 'waiting_approval' as const,
+      approval: { taskId: stream.taskId, requestId, userId: 'host-user', notification },
+    })
+    return stream.fireSuspended({
+      taskId: stream.taskId,
+      requestId,
+      displayName: 'Delete kept files',
+      reason: 'approval_required',
+    })
+  }
+
+  async function endAll(...streams: StreamCall[]): Promise<void> {
+    for (const stream of streams) {
+      await stream.fireTerminal({ taskId: stream.taskId, status: 'cancelled' })
+    }
+  }
+
+  /** X: a one-message approval on its bubble (call 1). Y: a second task (bubble, call 2). */
+  async function olderAndNewer(
+    channelType: ChannelKind,
+    xCard: string,
+    name: string,
+    toMessage?: (content: string) => Message
+  ) {
+    const h = await startAsync(channelType, xCard, `task-${name}-x`, toMessage)
+    await h.suspend()
+    await settle()
+    // Witness: X is shown on its bubble with its controls.
+    expect(
+      h.rec.editMessage.mock.calls.some(
+        call =>
+          call[1] === `${channelType}-msg-1` &&
+          (call[3]?.telegramInlineKeyboard !== undefined || call[3]?.teamsActions !== undefined)
+      )
+    ).toBe(true)
+    const y = await nextTask(h, `task-${name}-y`, 'clean up more files')
+    return { h, y, xRequest: `approval-task-${name}-x`, yRequest: `approval-task-${name}-y` }
+  }
+
+  for (const row of [
+    { channel: 'telegram' as const, x: SHORT, y: CARD_600, toMessage: undefined },
+    { channel: 'teams' as const, x: CARD_255, y: CARD_TAG, toMessage: teamsPersonalMessage },
+  ]) {
+    it(`A57 ${row.channel}: a typed /approve during the delivery does not approve the older request`, async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const { h, y, yRequest } = await olderAndNewer(
+        row.channel,
+        row.x,
+        `a57-${row.channel}`,
+        row.toMessage
+      )
+      const partHeld = gate()
+      // Calls: X bubble (1), Y bubble (2), Y part 1 (3), Y part 2 (4).
+      h.rec.hooks.set(4, async () => {
+        await partHeld.promise
+        return `${row.channel}-msg-4`
+      })
+      void offer(h, y, row.y)
+      await settle()
+      // Witness: Y's pointer and first part are on screen, part 2 in flight.
+      expect(
+        h.rec.editMessage.mock.calls.some(
+          call => call[1] === `${row.channel}-msg-2` && call[2] === POINTER
+        )
+      ).toBe(true)
+      expect(h.rec.sendMessage).toHaveBeenCalledTimes(4)
+
+      await h.send('/approve')
+      expect(sentContents(h.rec).at(-1)).toBe(DELIVERY_IN_PROGRESS)
+      expect(h.rpc.sendApproval).not.toHaveBeenCalled()
+
+      partHeld.release()
+      await settle()
+      await h.send('/approve')
+      // Witness: once Y's last part was sent, the same command approves Y.
+      expect(h.rpc.sendApproval).toHaveBeenCalledTimes(1)
+      expect(h.rpc.sendApproval.mock.calls[0]![1]).toBe(yRequest)
+      await endAll(h.stream, y)
+    })
+  }
+
+  it('A58 a typed /deny during the delivery does not deny the older request', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { h, y, yRequest } = await olderAndNewer('telegram', SHORT, 'a58')
+    const partHeld = gate()
+    h.rec.hooks.set(4, async () => {
+      await partHeld.promise
+      return 'telegram-msg-4'
+    })
+    void offer(h, y, CARD_600)
+    await settle()
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(4)
+
+    await h.send('/deny')
+    expect(sentContents(h.rec).at(-1)).toBe(DELIVERY_IN_PROGRESS)
+    expect(h.rpc.sendDenial).not.toHaveBeenCalled()
+
+    partHeld.release()
+    await settle()
+    await h.send('/deny')
+    // Witness: once Y's last part was sent, the same command denies Y.
+    expect(h.rpc.sendDenial).toHaveBeenCalledTimes(1)
+    expect(h.rpc.sendDenial.mock.calls[0]![1]).toBe(yRequest)
+    await endAll(h.stream, y)
+  })
+
+  it('A59 the button of the older request still approves it during the delivery', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { h, y, xRequest } = await olderAndNewer('telegram', SHORT, 'a59')
+    const xCard = h.rec.editMessage.mock.calls.find(call => call[3]?.telegramInlineKeyboard)!
+    const xToken = xCard[3]!.telegramInlineKeyboard![0]![0]!.callbackData.split(':')[2]!
+    const partHeld = gate()
+    h.rec.hooks.set(4, async () => {
+      await partHeld.promise
+      return 'telegram-msg-4'
+    })
+    void offer(h, y, CARD_600)
+    await settle()
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(4)
+
+    await h.send(`tool:a:${xToken}`)
+    expect(h.rpc.sendApproval).toHaveBeenCalledTimes(1)
+    expect(h.rpc.sendApproval.mock.calls[0]![1]).toBe(xRequest)
+    partHeld.release()
+    await settle()
+    await endAll(h.stream, y)
+  })
+
+  it('A60 a typed /approve after a failed delivery was denied approves the older request', async () => {
+    silenceErrors()
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { h, y, xRequest } = await olderAndNewer('telegram', SHORT, 'a60')
+    h.rec.hooks.set(4, async () => {
+      throw new Error('provider refused the message')
+    })
+    await offer(h, y, CARD_600)
+    await settle()
+    // Witness: the failed delivery was denied and the user told.
+    expect(sentContents(h.rec).at(-1)).toBe(DENIED)
+
+    await h.send('/approve')
+    expect(h.rpc.sendApproval).toHaveBeenCalledTimes(1)
+    expect(h.rpc.sendApproval.mock.calls[0]![1]).toBe(xRequest)
+    await endAll(h.stream, y)
+  })
+
+  it('A60b a typed /approve while a failed delivery is being denied does not approve the older request', async () => {
+    silenceErrors()
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { h, y, xRequest } = await olderAndNewer('telegram', SHORT, 'a60b')
+    h.rec.hooks.set(4, async () => {
+      throw new Error('provider refused the message')
+    })
+    const denialHeld = gate()
+    h.rpc.sendDenial.mockImplementationOnce(async () => {
+      await denialHeld.promise
+      return { success: true }
+    })
+    void offer(h, y, CARD_600)
+    await settle()
+    // Witness: the denial of Y is in flight.
+    expect(h.rpc.sendDenial).toHaveBeenCalledTimes(1)
+
+    await h.send('/approve')
+    expect(sentContents(h.rec).at(-1)).toBe(DELIVERY_IN_PROGRESS)
+    expect(h.rpc.sendApproval).not.toHaveBeenCalled()
+
+    denialHeld.release()
+    await settle()
+    // Witness: the denial answered and the user was told.
+    expect(sentContents(h.rec)).toContain(DENIED)
+    await h.send('/approve')
+    expect(h.rpc.sendApproval).toHaveBeenCalledTimes(1)
+    expect(h.rpc.sendApproval.mock.calls[0]![1]).toBe(xRequest)
+    await endAll(h.stream, y)
+  })
+
+  it('A61 a typed /approve after a delivery stopped by a cancel approves the older request', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { h, y, xRequest } = await olderAndNewer('telegram', SHORT, 'a61')
+    const partHeld = gate()
+    h.rec.hooks.set(4, async () => {
+      await partHeld.promise
+      return 'telegram-msg-4'
+    })
+    void offer(h, y, CARD_600)
+    await settle()
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(4)
+    await y.fireTerminal({ taskId: y.taskId, status: 'cancelled' })
+    partHeld.release()
+    await settle()
+
+    await h.send('/approve')
+    expect(h.rpc.sendApproval).toHaveBeenCalledTimes(1)
+    expect(h.rpc.sendApproval.mock.calls[0]![1]).toBe(xRequest)
+    await endAll(h.stream)
+  })
+
+  it('A62 a typed /approve during a synchronous delivery does not approve the older request', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const s = syncReader('telegram', SHORT, 'task-a62-x')
+    await s.reader.handleMessages([messageFor('telegram', 'clean up my files')])
+    // Witness: X was sent as one message with its keyboard.
+    expect(s.rec.sendMessage).toHaveBeenCalledTimes(1)
+    expect(s.rec.sendMessage.mock.calls[0]![4]?.telegramInlineKeyboard).toBeDefined()
+    s.rpc.sendMessage.mockResolvedValueOnce({
+      success: true,
+      status: 'waiting_approval' as const,
+      approval: {
+        taskId: 'task-a62-y',
+        requestId: 'approval-task-a62-y',
+        userId: 'host-user-task-a62-y',
+        notification: CARD_255,
+      },
+    })
+    const partHeld = gate()
+    // Calls: X (1), Y part 1 (2), Y part 2 (3).
+    s.rec.hooks.set(3, async () => {
+      await partHeld.promise
+      return 'telegram-msg-3'
+    })
+    const first = s.reader.handleMessages([messageFor('telegram', 'clean up more files')])
+    await settle()
+    expect(s.rec.sendMessage).toHaveBeenCalledTimes(3)
+
+    await s.reader.handleMessages([messageFor('telegram', '/approve')])
+    expect(sentContents(s.rec).at(-1)).toBe(DELIVERY_IN_PROGRESS)
+    expect(s.rpc.sendApproval).not.toHaveBeenCalled()
+
+    partHeld.release()
+    await first
+    await s.reader.handleMessages([messageFor('telegram', '/approve')])
+    // Witness: once Y's last part was sent, the same command approves Y.
+    expect(s.rpc.sendApproval).toHaveBeenCalledTimes(1)
+    expect(s.rpc.sendApproval).toHaveBeenCalledWith(
+      'host-user-task-a62-y',
+      'approval-task-a62-y',
+      false,
+      'telegram',
+      CHANNEL_ID.telegram
+    )
+  })
+
+  it('A63 two deliveries under one key: the notice holds until the second one ends', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { h, y } = await olderAndNewer('telegram', SHORT, 'a63')
+    const z = await nextTask(h, 'task-a63-z', 'clean up even more files')
+    // Calls: X bubble (1), Y bubble (2), Z bubble (3), Y parts (4, 5), Z parts (6, 7).
+    const yHeld = gate()
+    h.rec.hooks.set(5, async () => {
+      await yHeld.promise
+      return 'telegram-msg-5'
+    })
+    void offer(h, y, CARD_255)
+    await settle()
+    const zHeld = gate()
+    h.rec.hooks.set(7, async () => {
+      await zHeld.promise
+      return 'telegram-msg-7'
+    })
+    void offer(h, z, CARD_255)
+    await settle()
+    expect(h.rec.sendMessage).toHaveBeenCalledTimes(7)
+    yHeld.release()
+    await settle()
+
+    await h.send('/approve')
+    expect(sentContents(h.rec).at(-1)).toBe(DELIVERY_IN_PROGRESS)
+    expect(h.rpc.sendApproval).not.toHaveBeenCalled()
+
+    zHeld.release()
+    await settle()
+    await h.send('/approve')
+    // Witness: once Z's last part was sent, the same command approves Z.
+    expect(h.rpc.sendApproval).toHaveBeenCalledTimes(1)
+    expect(h.rpc.sendApproval.mock.calls[0]![1]).toBe('approval-task-a63-z')
+    await endAll(h.stream, y, z)
   })
 })

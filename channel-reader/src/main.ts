@@ -20,6 +20,7 @@ import { createProgressStream } from './progressClient'
 import { formatFinalMessage, formatProgressUpdate } from './progressFormatter'
 import { type ChannelReaderRuntimeSource, MessageResponse, RPCClient } from './rpcClient'
 import {
+  TOOL_APPROVAL_DELIVERY_IN_PROGRESS,
   TOOL_APPROVAL_MAX_PARTS,
   TOOL_APPROVAL_NOT_SHOWN_DENIED,
   TOOL_APPROVAL_NOT_SHOWN_STILL_WAITING,
@@ -410,6 +411,12 @@ export class ChannelReader {
   } | null
   /** Pending approvals keyed by provider conversation/thread and sender. */
   private pendingApprovals: Map<string, PendingApprovalState> = new Map()
+  /**
+   * Multi-part approvals being sent, by pending-approval key: their messages are
+   * visible and their entry is not registered yet. A typed decision under such a
+   * key is not resolved to the entry an earlier approval left there.
+   */
+  private approvalDeliveriesInProgress: Map<string, number> = new Map()
   /** Recently processed provider events keyed by stable provider or channel message identity. */
   private processedProviderEvents: Map<string, ProcessedProviderEvent> = new Map()
   /** Unresolved-sender notices already sent, keyed by workspace + user + channel. */
@@ -1820,6 +1827,26 @@ export class ChannelReader {
     void replaced.clearControls()
   }
 
+  /**
+   * Marks a multi-part approval as being sent under `approvalKey` until the
+   * returned release is called. Two deliveries can overlap under one key, so
+   * the mark is a count.
+   */
+  private beginApprovalDelivery(approvalKey: string): () => void {
+    this.approvalDeliveriesInProgress.set(
+      approvalKey,
+      (this.approvalDeliveriesInProgress.get(approvalKey) ?? 0) + 1
+    )
+    return () => {
+      const remaining = (this.approvalDeliveriesInProgress.get(approvalKey) ?? 0) - 1
+      if (remaining > 0) {
+        this.approvalDeliveriesInProgress.set(approvalKey, remaining)
+      } else {
+        this.approvalDeliveriesInProgress.delete(approvalKey)
+      }
+    }
+  }
+
   private clearPendingApprovalForTask(msg: Message, taskId: string): void {
     const channelScope = this.pendingApprovalChannelScope(msg)
     for (const [key, pending] of this.pendingApprovals) {
@@ -1872,7 +1899,10 @@ export class ChannelReader {
    * adapter): register it, then send it as a reply with the channel's approval
    * controls. Longer: send it as several messages, the controls on the last,
    * and register it only after the last one was sent; if it cannot be shown
-   * whole, deny the request and tell the user.
+   * whole, deny the request and tell the user. From the first part until it is
+   * registered, or its denial and notice were sent, the key is marked as having
+   * a delivery in progress, so a typed decision there is not resolved to an
+   * earlier approval.
    */
   private async deliverSyncToolApproval(
     msg: Message,
@@ -1907,25 +1937,35 @@ export class ChannelReader {
       await this.denyUnshownToolApproval(msg, userId, requestId)
       return
     }
-    let last: ToolApprovalLastPart
+    const releaseDelivery = this.beginApprovalDelivery(approvalKey)
     try {
-      ;({ last } = await this.sendToolApprovalParts(msg, adapter, parts, actionToken))
-    } catch (err) {
-      this.logToolApprovalNotShown(ids, err)
-      await this.denyUnshownToolApproval(msg, userId, requestId)
-      return
+      let last: ToolApprovalLastPart
+      try {
+        ;({ last } = await this.sendToolApprovalParts(msg, adapter, parts, actionToken))
+      } catch (err) {
+        this.logToolApprovalNotShown(ids, err)
+        await this.denyUnshownToolApproval(msg, userId, requestId)
+        return
+      }
+      this.registerPendingApproval(approvalKey, {
+        taskId,
+        requestId,
+        userId,
+        channelType: msg.channelType,
+        channelId: msg.channelId,
+        originalMessage: msg,
+        createdAt: new Date(),
+        actionToken,
+        clearControls: this.toolApprovalControlsClearer(
+          adapter,
+          this.replyChannelId(msg),
+          last,
+          ids
+        ),
+      })
+    } finally {
+      releaseDelivery()
     }
-    this.registerPendingApproval(approvalKey, {
-      taskId,
-      requestId,
-      userId,
-      channelType: msg.channelType,
-      channelId: msg.channelId,
-      originalMessage: msg,
-      createdAt: new Date(),
-      actionToken,
-      clearControls: this.toolApprovalControlsClearer(adapter, this.replyChannelId(msg), last, ids),
-    })
   }
 
   /**
@@ -2316,56 +2356,66 @@ export class ChannelReader {
         // The task ended before the approval could be shown, its final result
         // possibly still being written: the bubble keeps its outcome.
         if (taskEnd) return
-        await editStatus('Approval needed. The request is in the messages below.')
-        let outcome: { stopped: false; last: ToolApprovalLastPart } | { stopped: true }
+        // From the pointer until the request is registered, or its denial and
+        // notice were sent, a typed decision under this key is not resolved to
+        // an earlier approval.
+        const releaseDelivery = this.beginApprovalDelivery(approvalKey)
         try {
-          outcome = await this.sendToolApprovalParts(
-            msg,
-            adapter,
-            parts,
-            actionToken,
-            () => taskEnd !== undefined
-          )
-        } catch (err) {
-          // No approval is offered below any more, so the bubble shows the
-          // progress again. This runs before the denial: an accepted denial
-          // completes the task at the Host, and its final text must not be
-          // overwritten. A task that already ended, its final result possibly
-          // still being written, keeps its outcome.
-          if (!taskEnd) {
-            await editStatus(
-              stream.steps.length > 0 ? formatProgressUpdate(stream.steps) : PROCESSING_STATUS_TEXT
+          await editStatus('Approval needed. The request is in the messages below.')
+          let outcome: { stopped: false; last: ToolApprovalLastPart } | { stopped: true }
+          try {
+            outcome = await this.sendToolApprovalParts(
+              msg,
+              adapter,
+              parts,
+              actionToken,
+              () => taskEnd !== undefined
             )
+          } catch (err) {
+            // No approval is offered below any more, so the bubble shows the
+            // progress again. This runs before the denial: an accepted denial
+            // completes the task at the Host, and its final text must not be
+            // overwritten. A task that already ended, its final result possibly
+            // still being written, keeps its outcome.
+            if (!taskEnd) {
+              await editStatus(
+                stream.steps.length > 0
+                  ? formatProgressUpdate(stream.steps)
+                  : PROCESSING_STATUS_TEXT
+              )
+            }
+            await notShown(err)
+            return
           }
-          await notShown(err)
-          return
+          const clearControls = outcome.stopped
+            ? undefined
+            : this.toolApprovalControlsClearer(adapter, responseChannelId, outcome.last, ids)
+          if (outcome.stopped || taskEnd) {
+            // The task ended during the delivery, its final result possibly still
+            // being written: register nothing and remove the controls if they
+            // were sent.
+            await clearControls?.()
+            return
+          }
+          this.registerPendingApproval(approvalKey, {
+            taskId,
+            requestId: params.requestId,
+            userId: params.userId,
+            channelType: msg.channelType,
+            channelId: msg.channelId,
+            originalMessage: msg,
+            createdAt: new Date(),
+            actionToken,
+            startResultPollingFallback,
+            updateStatusAfterDecision: content => {
+              acceptProgressUpdates = true
+              return editStatus(content)
+            },
+            clearControls,
+          })
+        } finally {
+          releaseDelivery()
         }
-        const clearControls = outcome.stopped
-          ? undefined
-          : this.toolApprovalControlsClearer(adapter, responseChannelId, outcome.last, ids)
-        if (outcome.stopped || taskEnd) {
-          // The task ended during the delivery, its final result possibly still
-          // being written: register nothing and remove the controls if they
-          // were sent.
-          await clearControls?.()
-          return
-        }
-        this.registerPendingApproval(approvalKey, {
-          taskId,
-          requestId: params.requestId,
-          userId: params.userId,
-          channelType: msg.channelType,
-          channelId: msg.channelId,
-          originalMessage: msg,
-          createdAt: new Date(),
-          actionToken,
-          startResultPollingFallback,
-          updateStatusAfterDecision: content => {
-            acceptProgressUpdates = true
-            return editStatus(content)
-          },
-          clearControls,
-        })
       }
 
       const deliverFinalResult = async (): Promise<boolean> => {
@@ -2645,6 +2695,11 @@ export class ChannelReader {
    * acknowledgment. The SSE stream will surface subsequent state transitions
    * (multi-approval, completion) on its own.
    *
+   * A typed command (no action token) is resolved to the entry under the
+   * chat, thread and sender. While a multi-part approval is still being sent
+   * under that key it has no entry yet, so the command is answered with a
+   * notice instead of deciding the entry an earlier approval left there.
+   *
    * For cron tasks: results continue to arrive via pollCronResults on the next
    * poll cycle (cron has no message-thread SSE).
    */
@@ -2664,6 +2719,14 @@ export class ChannelReader {
         : null
     const approvalKey = matched?.[0] ?? contextualKey
     const pending = matched?.[1]
+
+    // A multi-part approval is being sent under this key and is not decidable
+    // yet: a typed decision is not resolved to the entry an earlier approval
+    // left there. A button carries its own token and is not affected.
+    if (!actionToken && pending && this.approvalDeliveriesInProgress.has(contextualKey)) {
+      await this.sendReply(msg, TOOL_APPROVAL_DELIVERY_IN_PROGRESS)
+      return
+    }
 
     if (!pending) {
       console.log(`[Main] No pending approval for ${approvalKey}`)
