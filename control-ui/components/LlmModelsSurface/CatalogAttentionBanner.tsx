@@ -221,9 +221,8 @@ export function CatalogAttentionBanner({
       role="status"
     >
       {nothingPending ? (
-        <span>
-          {reviewed.length} model{reviewed.length === 1 ? '' : 's'} reviewed
-        </span>
+        // Counts items, not models: one model can be reviewed under two kinds.
+        <span>{reviewed.length} reviewed</span>
       ) : (
         <span>Models need review: {segments.join(' · ')}</span>
       )}{' '}

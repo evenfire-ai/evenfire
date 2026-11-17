@@ -417,7 +417,7 @@ describe('catalog attention dialog actions', () => {
     for (const item of items) acked.add(keyOf(item))
     renderSurface()
 
-    const line = await screen.findByText(`${items.length} models reviewed`)
+    const line = await screen.findByText(`${items.length} reviewed`)
     expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
     expect(line.closest('.cu-banner')).not.toHaveClass('cu-banner--warning')
 
@@ -459,7 +459,7 @@ describe('catalog attention dialog actions', () => {
     expect(reviewedSection(dialog)).toContainElement(undo)
     expect(reviewedSection(dialog)).toHaveAttribute('open')
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Done' })).toHaveFocus())
-    expect(screen.getByText(`${items.length} models reviewed`)).toBeInTheDocument()
+    expect(screen.getByText(`${items.length} reviewed`)).toBeInTheDocument()
     expect(screen.queryByText(BANNER_TEXT)).not.toBeInTheDocument()
   })
 })
