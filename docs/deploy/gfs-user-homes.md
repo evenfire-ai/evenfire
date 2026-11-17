@@ -89,8 +89,8 @@ parent of the homes.
    serving; enrollment can create pending rows, but the old Control API does
    not provision homes. The governed-root guard is active after migration.
 3. A database that ran an earlier head of this branch (a branch Minikube
-   profile or a local database) recorded this migration as
-   `0130_gfs_user_homes` or `0131_gfs_user_homes`. On it the migration job
+   profile or a local database) recorded this migration under an earlier
+   version name. On it the migration job
    fails with `relation "gfs_user_homes" already exists`. Delete and recreate
    that database; for a branch profile:
    `CONFIRM_DELETE=<profile> make -f scripts/minikube-profiles/branch.mk branch-profile-delete`.
