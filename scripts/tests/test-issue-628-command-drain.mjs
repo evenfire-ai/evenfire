@@ -54,28 +54,32 @@ set -eu
 printf 'waited\\n' >"$BASH_DONE_FILE"
 `)
   writeFileSync(path.join(scratch, 'child.mjs'), `
-import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, renameSync, writeFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
+// Publish markers by rename so a reader that sees the file sees its content.
+const mark = (file, value) => { writeFileSync(file + '.tmp', value); renameSync(file + '.tmp', file) }
 const expires = Date.now() + 20_000
 if (!existsSync(process.env.LEASE_FILE)) throw new Error('Test lease is missing before child readiness')
 appendFileSync(process.env.WRITES_FILE, 'held\\n')
-writeFileSync(process.env.READY_FILE, 'ready')
+mark(process.env.READY_FILE, 'ready')
 while (!existsSync(process.env.FINISH_FILE) && Date.now() < expires) {
   const state = existsSync(process.env.LEASE_FILE) ? 'held' : 'released'
   appendFileSync(process.env.WRITES_FILE, state + '\\n')
-  if (state === 'released') writeFileSync(process.env.RELEASED_FILE, 'released')
+  if (state === 'released') mark(process.env.RELEASED_FILE, 'released')
   await delay(20)
 }
-writeFileSync(process.env.DONE_FILE, existsSync(process.env.FINISH_FILE) ? 'finished' : 'expired')
+mark(process.env.DONE_FILE, existsSync(process.env.FINISH_FILE) ? 'finished' : 'expired')
 `)
   writeFileSync(path.join(scratch, 'probe.spec.ts'), `
 import { test } from ${JSON.stringify(playwright)}
 import { CommandDrain } from ${JSON.stringify(tracker)}
 import { execFile } from 'node:child_process'
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, renameSync, writeFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
 const execute = promisify(execFile)
+// Publish markers by rename so a reader that sees the file sees its content.
+const mark = (file: string, value: string) => { writeFileSync(file + '.tmp', value); renameSync(file + '.tmp', file) }
 const commands = new CommandDrain()
 async function operation() {
   const inner = [${JSON.stringify(deadline)}, '--timeout-seconds', '25', '--label', 'inner', '--', '/bin/bash', process.env.CHILD_FILE!]
@@ -103,7 +107,7 @@ test.beforeEach(async () => {
 })
 test.afterEach(async () => {
   if (process.env.DRAIN !== 'true') {
-    writeFileSync(process.env.TEARDOWN_FILE!, 'not-drained')
+    mark(process.env.TEARDOWN_FILE!, 'not-drained')
     return
   }
   const closing = commands.close()
@@ -111,16 +115,16 @@ test.afterEach(async () => {
   closing.then(() => { settled = true })
   let blocked = false
   try {
-    await commands.run(async () => { writeFileSync(process.env.EXTRA_FILE!, 'started') })
+    await commands.run(async () => { mark(process.env.EXTRA_FILE!, 'started') })
   } catch (error) {
     blocked = error instanceof Error && error.message === 'Profile command admission is closed'
   }
   if (!blocked) throw new Error('Command admission remained open during teardown')
-  writeFileSync(process.env.BLOCKED_FILE!, 'blocked')
+  mark(process.env.BLOCKED_FILE!, 'blocked')
   if (settled) throw new Error('Drain completed before the active command finished')
-  writeFileSync(process.env.TEARDOWN_FILE!, 'draining')
+  mark(process.env.TEARDOWN_FILE!, 'draining')
   await closing
-  writeFileSync(process.env.DRAINED_FILE!, 'drained')
+  mark(process.env.DRAINED_FILE!, 'drained')
 })
 test('bounded command', async () => {
   await operation()
