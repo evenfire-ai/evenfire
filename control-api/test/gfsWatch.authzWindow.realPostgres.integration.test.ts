@@ -68,6 +68,8 @@ describeRealPostgres('GFS watch authorization window on real Postgres', () => {
   })
 
   afterEach(async () => {
+    // After stop: its stream.closing writes are checked like any other frame.
+    await b?.stop()
     const violations = b?.violations() ?? []
     // I11: a closing frame names nothing but its reason.
     for (const s of sockets.splice(0)) {
@@ -75,7 +77,6 @@ describeRealPostgres('GFS watch authorization window on real Postgres', () => {
         for (const k of Object.keys(f)) if (!CLOSING_KEYS.has(k)) violations.push(`I11: ${k}`)
       }
     }
-    await b?.stop()
     const w = b?.registry.state.windows()
     h.decisions.clear()
     expect(violations).toEqual([])
