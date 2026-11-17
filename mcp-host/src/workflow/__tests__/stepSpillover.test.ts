@@ -329,7 +329,7 @@ describe('createStepSpillover', () => {
       expect(res).toEqual({ success: true, content: content.slice(0, THRESHOLD) })
     })
 
-    it('rejects a range wider than the threshold', async () => {
+    it('rejects a range wider than the threshold with the range width', async () => {
       const spillover = make()
       await spillover.persist({
         callId: 'c1',
@@ -342,8 +342,20 @@ describe('createStepSpillover', () => {
         { ref: 'spillover://review-step/c1.json', range: { start: 0, end: THRESHOLD + 1 } },
         WORKSPACE
       )
-      expect(res.success).toBe(false)
-      expect(res.error).toContain(`end-start <= ${THRESHOLD}`)
+      expect(res).toEqual({
+        success: false,
+        error: `range is ${THRESHOLD + 1} bytes wide; reads are limited to ${THRESHOLD} bytes, pass a range with end-start <= ${THRESHOLD}`,
+      })
+      // Witness that the two branches differ: a whole read of the same blob
+      // still reports the blob size.
+      const whole = await spillover.readTool.execute(
+        { ref: 'spillover://review-step/c1.json' },
+        WORKSPACE
+      )
+      expect(whole).toEqual({
+        success: false,
+        error: `blob is ${THRESHOLD * 3} bytes; pass range {start,end} with end-start <= ${THRESHOLD}`,
+      })
     })
 
     it('surfaces an invalid range as an error', async () => {

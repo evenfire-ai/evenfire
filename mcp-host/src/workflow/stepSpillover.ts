@@ -202,6 +202,10 @@ function tooLargeReadError(size: number, thresholdBytes: number): string {
   return `blob is ${size} bytes; pass range {start,end} with end-start <= ${thresholdBytes}`
 }
 
+function tooWideRangeError(width: number, thresholdBytes: number): string {
+  return `range is ${width} bytes wide; reads are limited to ${thresholdBytes} bytes, pass a range with end-start <= ${thresholdBytes}`
+}
+
 /**
  * The tool text of an MCP result made only of text blocks: the `text` of each
  * block joined with a line feed, as the first-party tool adapter joins them.
@@ -307,7 +311,7 @@ export function createStepSpillover(opts: {
         typeof range.end === 'number' &&
         range.end - range.start > thresholdBytes
       ) {
-        return readError(tooLargeReadError(blob.byte_size, thresholdBytes))
+        return readError(tooWideRangeError(range.end - range.start, thresholdBytes))
       }
 
       const output = await reader.execute(args)
