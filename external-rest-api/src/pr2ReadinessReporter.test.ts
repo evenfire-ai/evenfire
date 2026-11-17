@@ -11,6 +11,10 @@ vi.mock('./config.js', () => ({
 }))
 
 const SOURCE = 'a'.repeat(40)
+// Each Control API parser child has its own limit. The test that starts two of
+// them declares both limits plus 120 s of margin as its timeout.
+const PRODUCER_CHILD_TIMEOUT_MS = 240_000
+const TWO_PRODUCER_CHILDREN_TIMEOUT_MS = 2 * PRODUCER_CHILD_TIMEOUT_MS + 120_000
 
 function parseByControlApi(payload: unknown) {
   const root = resolve(process.cwd(), '..')
@@ -22,7 +26,7 @@ function parseByControlApi(payload: unknown) {
         'external-rest-api',
         JSON.stringify(payload),
       ],
-      { cwd: root, encoding: 'utf8' }
+      { cwd: root, encoding: 'utf8', timeout: PRODUCER_CHILD_TIMEOUT_MS }
     )
   )
 }
@@ -47,24 +51,28 @@ describe('PR2 readiness reporter', () => {
     delete process.env.PR2_READINESS_REPORT_INTERVAL_MS
   })
 
-  it('reports only its two owned hops over the authenticated v2 internal route', async () => {
-    const fetchImpl = vi.fn(async () => new Response(null, { status: 201 }))
-    const stop = startPr2ReadinessReporter(fetchImpl)
-    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
-    stop()
+  it(
+    'reports only its two owned hops over the authenticated v2 internal route',
+    async () => {
+      const fetchImpl = vi.fn(async () => new Response(null, { status: 201 }))
+      const stop = startPr2ReadinessReporter(fetchImpl)
+      await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+      stop()
 
-    const calls = fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>
-    expect(calls.map(([, init]) => JSON.parse(String(init.body)).hop).sort()).toEqual([
-      'external_rest_delegation_transport',
-      'workflow_service_edge',
-    ])
-    for (const [url, init] of calls) {
-      expect(url).toBe('http://control-api.test/api/v1/internal/pr2-readiness/runtime-evidence')
-      expect(new Headers(init.headers).get('authorization')).toBe('Bearer service-token')
-      expect(new Headers(init.headers).get('x-service-token')).toBe('external-rest-api')
-      expect(parseByControlApi(JSON.parse(String(init.body)))).toMatchObject({
-        writer: 'external-rest-api',
-      })
-    }
-  })
+      const calls = fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>
+      expect(calls.map(([, init]) => JSON.parse(String(init.body)).hop).sort()).toEqual([
+        'external_rest_delegation_transport',
+        'workflow_service_edge',
+      ])
+      for (const [url, init] of calls) {
+        expect(url).toBe('http://control-api.test/api/v1/internal/pr2-readiness/runtime-evidence')
+        expect(new Headers(init.headers).get('authorization')).toBe('Bearer service-token')
+        expect(new Headers(init.headers).get('x-service-token')).toBe('external-rest-api')
+        expect(parseByControlApi(JSON.parse(String(init.body)))).toMatchObject({
+          writer: 'external-rest-api',
+        })
+      }
+    },
+    TWO_PRODUCER_CHILDREN_TIMEOUT_MS
+  )
 })
