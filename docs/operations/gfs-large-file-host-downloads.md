@@ -487,7 +487,10 @@ a note when the 64 KiB bound cut it. A channel shows a card longer than one
 message as several messages, split between its lines (Telegram 4096
 characters, Slack 3000 characters, Teams 12,000 bytes of the JSON-encoded
 text), with the approval buttons on the last one; the approval can be given,
-by button or by `/approve`, only after the last message was sent. The card is
+by button or by `/approve`, only after the last message was sent. While those
+messages are being sent, a typed `/approve` or `/deny` from the same user in
+the same chat does not decide an earlier request there and is answered with a
+notice; the buttons of the earlier request keep working. The card is
 not offered when a message cannot be sent, when one line is longer than a
 message (a card the delete accepts reaches this only when redaction lengthens
 a name; Telegram and Slack then refuse it and Teams shows it), when a message
@@ -497,7 +500,8 @@ denies the request at the Host and tells the user. If the Host does not accept
 the denial, the user is told that the request is still waiting on the Host and
 that an operator must deny it. On the progress stream, nothing is sent for a
 task that has already ended; if the task ends while the denial is on its way,
-the denial is sent and no message follows it; and when the Host holds no
+no message follows it, unless the Host accepted the denial and the task ended
+because of it; the user is then told the request could not be shown; and when the Host holds no
 stored approval for the request and rejects the denial, that is only logged.
 The buttons are removed from the last message when the approval is decided,
 when another approval replaces it and when this channel stops offering it, 10
