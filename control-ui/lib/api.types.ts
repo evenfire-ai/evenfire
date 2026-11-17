@@ -58,4 +58,11 @@ export type LlmDiscoverySyncOutcome = {
   heldUndecidable: number
   /** New models not inserted: the run reached its auto-enable cap. */
   deferredByCap: number
+  /**
+   * Rows the sync had turned off for having no consumers, turned back on because
+   * the catalog lists them again. Existing rows, so never part of `added`.
+   */
+  reEnabled: number
+  /** Such rows left off because the run reached its auto-enable cap. */
+  reEnableDeferredByCap: number
 }

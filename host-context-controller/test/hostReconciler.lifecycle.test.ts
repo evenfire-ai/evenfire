@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -5242,77 +5242,166 @@ describe('HostReconciler storage layout — one shape for every lifecycle', () =
 })
 
 describe('HostReconciler storage layout — upgrade from a v0.11.0 Deployment', () => {
-  // The fixtures are the Deployments v0.11.0's HostReconciler renders for these
-  // Hosts with this file's mocks (dumped from the tag, not written by hand).
-  // v0.10.0 renders the same template: statelessDeployment.ts is identical.
+  // The JSON fixtures are Deployments v0.11.0's HostReconciler rendered
+  // (dumped from that tag, not written by hand). v0.10.0 rendered the same
+  // split template. v0.12.0 and v0.12.1 already render workspace-layout-merge
+  // and still default the Host memory limit to 512Mi, so the 2Gi change is
+  // the upgrade from those releases. The v0.11.0 cases stay for a cluster
+  // that still has the split Deployment. This file's config mock says 512Mi;
+  // the real default these tests inject is 2Gi.
+  const legacyMemory = config.hostResources.limits.memory
+
+  beforeEach(() => {
+    config.hostResources.limits.memory = '2Gi'
+  })
+
+  afterEach(() => {
+    config.hostResources.limits.memory = legacyMemory
+  })
+
   const legacy = (file: string): k8s.V1Deployment =>
     JSON.parse(readFileSync(join(__dirname, '__fixtures__', file), 'utf8'))
 
-  const cases = [
-    {
-      state: 'active',
-      host: () => makeStatelessHost({ name: 'upgrade-active' }),
-      fixture: 'v0.11.0-stateless-active-deployment.json',
-      replicas: 1,
-    },
-    {
-      state: 'suspended',
-      host: () => makeStatelessHost({ name: 'upgrade-suspended', status: suspendedStatus(7) }),
-      fixture: 'v0.11.0-stateless-suspended-deployment.json',
-      replicas: 0,
-    },
-  ]
+  function hostMemoryLimit(dep: k8s.V1Deployment): string | undefined {
+    return dep.spec?.template.spec?.containers?.find(container => container.name === 'mcp-host')
+      ?.resources?.limits?.memory
+  }
 
-  it.each(cases)(
-    'replaces the split template of a $state stateless Host once',
-    async ({ host: makeUpgradeHost, fixture, replicas }) => {
-      const host = makeUpgradeHost()
-      const previous = legacy(fixture)
-      // Witness: the fixture carries the v0.11.0 split layout.
-      expect(previous.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
-        'workspace-layout-init',
-      ])
-      expect(previous.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
-        name: 'workspace',
-        mountPath: '/var/lib/clerum/state',
-        subPath: 'state',
-      })
-      expect(previous.spec?.replicas).toBe(replicas)
+  function replacementsFor(appsApi: MockAppsApi, name: string) {
+    return appsApi.replaceNamespacedDeployment.mock.calls.filter(
+      ([request]) => request.name === name
+    )
+  }
 
-      const { reconciler, appsApi, customApi } = createReconciler()
-      customApi.getNamespacedCustomObject.mockResolvedValue({
-        ...hostApiObject(host),
-        status: host.status ?? { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
-      })
-      const live = persistHostDeployment(appsApi, host, previous)
+  it('replaces the split template of an active stateless Host once, at the 2Gi default', async () => {
+    const host = makeStatelessHost({ name: 'upgrade-active' })
+    const previous = legacy('v0.11.0-stateless-active-deployment.json')
+    // Witness: the fixture carries the v0.11.0 split layout and the old limit.
+    expect(previous.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-init',
+    ])
+    expect(previous.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+      name: 'workspace',
+      mountPath: '/var/lib/clerum/state',
+      subPath: 'state',
+    })
+    expect(hostMemoryLimit(previous)).toBe('512Mi')
+    expect(previous.spec?.replicas).toBe(1)
 
-      await reconciler.reconcile(host)
+    const { reconciler, appsApi, customApi } = createReconciler()
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      ...hostApiObject(host),
+      status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+    })
+    const live = persistHostDeployment(appsApi, host, previous)
 
-      const replacements = () =>
-        appsApi.replaceNamespacedDeployment.mock.calls.filter(
-          ([request]) => request.name === host.name
-        )
-      expect(replacements()).toHaveLength(1)
-      const replaced = live()
-      expect(replaced.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
-        'workspace-layout-merge',
-      ])
-      expect(JSON.stringify(replaced)).not.toContain('subPath')
-      expect(replaced.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
-        name: 'workspace',
-        mountPath: '/workspace',
-      })
-      expect(envValue(replaced, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
-      expect(replaced.spec?.strategy).toEqual({ type: 'Recreate' })
-      expect(replaced.spec?.replicas).toBe(replicas)
-      expect(envValue(replaced, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+    await reconciler.reconcile(host)
 
-      // Witness: the replaced template is up to date, so the next reconcile
-      // leaves it alone.
-      await reconciler.reconcile(host)
-      expect(replacements()).toHaveLength(1)
-    }
-  )
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(1)
+    const replaced = live()
+    expect(replaced.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-merge',
+    ])
+    expect(JSON.stringify(replaced)).not.toContain('subPath')
+    expect(replaced.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+      name: 'workspace',
+      mountPath: '/workspace',
+    })
+    expect(envValue(replaced, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
+    expect(replaced.spec?.strategy).toEqual({ type: 'Recreate' })
+    expect(replaced.spec?.replicas).toBe(1)
+    expect(hostMemoryLimit(replaced)).toBe('2Gi')
+    expect(envValue(replaced, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+
+    // Witness: the replaced template is up to date, so the next reconcile
+    // leaves it alone.
+    await reconciler.reconcile(host)
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(1)
+  })
+
+  it('holds a suspended v0.11.0 Host on its old template until wake applies the 2Gi default', async () => {
+    const host = makeStatelessHost({ name: 'upgrade-suspended', status: suspendedStatus(7) })
+    const previous = legacy('v0.11.0-stateless-suspended-deployment.json')
+    expect(hostMemoryLimit(previous)).toBe('512Mi')
+    expect(previous.spec?.replicas).toBe(0)
+
+    const { reconciler, appsApi, customApi } = createReconciler()
+    customApi.getNamespacedCustomObject.mockImplementation(async () => ({
+      ...hostApiObject(host),
+      status: host.status,
+    }))
+    const live = persistHostDeployment(appsApi, host, previous)
+
+    await reconciler.reconcile(host)
+
+    // Resource drift on a suspended Host scales nothing that is already at 0
+    // and does not replace the template. The 512Mi mock hid this: the fixture
+    // matched the mock, so the old test replaced the template immediately.
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(0)
+    expect(live().spec?.replicas).toBe(0)
+    expect(live().spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-init',
+    ])
+    expect(hostMemoryLimit(live())).toBe('512Mi')
+
+    host.status = { lifecycle: { state: 'active', wakeHandledGeneration: 7 } }
+    await reconciler.reconcile(host)
+
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(1)
+    const replaced = live()
+    expect(replaced.spec?.replicas).toBe(1)
+    expect(replaced.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-merge',
+    ])
+    expect(JSON.stringify(replaced)).not.toContain('subPath')
+    expect(hostMemoryLimit(replaced)).toBe('2Gi')
+    expect(envValue(replaced, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
+
+    await reconciler.reconcile(host)
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(1)
+  })
+
+  it('upgrades a v0.12.x Host from 512Mi to 2Gi and holds a suspended one until wake', async () => {
+    // v0.12.0 and v0.12.1 already render workspace-layout-merge and default
+    // the limit to 512Mi. This builds that shape with this reconciler at
+    // 512Mi, then reconciles it at the 2Gi default. It is not the v0.11.0
+    // split fixture.
+    const host = makeStatelessHost({ name: 'upgrade-v012', status: suspendedStatus(3) })
+    const { reconciler, appsApi, customApi } = createReconciler()
+    config.hostResources.limits.memory = '512Mi'
+    const previous = reconciler.buildDeployment(host)
+    expect(previous.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-merge',
+    ])
+    expect(hostMemoryLimit(previous)).toBe('512Mi')
+    expect(previous.spec?.replicas).toBe(0)
+    config.hostResources.limits.memory = '2Gi'
+
+    customApi.getNamespacedCustomObject.mockImplementation(async () => ({
+      ...hostApiObject(host),
+      status: host.status,
+    }))
+    const live = persistHostDeployment(appsApi, host, previous)
+
+    await reconciler.reconcile(host)
+
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(0)
+    expect(live().spec?.replicas).toBe(0)
+    expect(hostMemoryLimit(live())).toBe('512Mi')
+
+    host.status = { lifecycle: { state: 'active', wakeHandledGeneration: 3 } }
+    await reconciler.reconcile(host)
+
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(1)
+    expect(live().spec?.replicas).toBe(1)
+    expect(hostMemoryLimit(live())).toBe('2Gi')
+    expect(live().spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-merge',
+    ])
+
+    await reconciler.reconcile(host)
+    expect(replacementsFor(appsApi, host.name)).toHaveLength(1)
+  })
 })
 
 describe('HostReconciler stateless lifecycle — suspension durability', () => {

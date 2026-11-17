@@ -5,14 +5,16 @@ import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0137_user_access_foundation',
   '0138_legacy_password_security_epoch_backfill',
+  '0139_llm_catalog_prune_columns',
+  '0140_llm_catalog_prune_episodes',
   // Per-user GFS homes (#1168), added after the bound as the comment below requires.
-  '0139_gfs_user_homes',
+  '0141_gfs_user_homes',
 ] as const)
 
 // The one bound between initDb's single dev batch and this runner: every migration
 // up to and including this version runs in the dev batch (db.ts imports it), and
 // this runner owns every version that follows it: the PR1 versions and the
-// migrations added after them (`0139_gfs_user_homes`, #1168). Until this change merges,
+// migrations added after them (`0141_gfs_user_homes`, #1168). Until this change merges,
 // a dev merge that brings new migrations moves this bound to dev's last version and
 // renumbers PR1_MIGRATION_VERSIONS above it, and every dev merge moves the latestDev
 // producer in tests/contracts/certification-inputs.json to dev's tip. After it merges
@@ -112,7 +114,7 @@ async function runBoundedTransaction(db: DbClient, work: () => Promise<void>): P
  * If a PR1 version is renumbered after a shared database recorded it, keep the
  * old version in legacyVersions, or this guard rejects it. The guard knows only
  * the names in EARLIER_PR1_MIGRATION_NAMES: a later migration in the list
- * (`0139_gfs_user_homes`) renumbered without an alias fails in its own DDL instead.
+ * (`0141_gfs_user_homes`) renumbered without an alias fails in its own DDL instead.
  */
 async function assertNoEarlierPr1Head(
   db: DbClient,

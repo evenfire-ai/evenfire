@@ -45,11 +45,13 @@ const FRESH_TABLE_INDEXES = Object.freeze([
 const USER_ACCESS_FOUNDATION_VERSION = '0137_user_access_foundation'
 
 describe('D34 migration execution policy', () => {
-  it('classifies the runner migrations that follow the dev batch', () => {
+  it('classifies the post-dev migrations that follow the dev batch', () => {
     expect(PR1_MIGRATION_VERSIONS).toEqual([
       '0137_user_access_foundation',
       '0138_legacy_password_security_epoch_backfill',
-      '0139_gfs_user_homes',
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
+      '0141_gfs_user_homes',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -523,7 +525,7 @@ describe('PR1 earlier-head guard', () => {
       appliedVersions: new Set([
         '0137_user_access_foundation',
         '0134_legacy_password_security_epoch_backfill',
-        '0139_gfs_user_homes',
+        '0141_gfs_user_homes',
       ]),
       recordMigration: async (_db, version) => {
         recorded.push(version)
@@ -531,7 +533,11 @@ describe('PR1 earlier-head guard', () => {
     })
 
     expect(queries.filter(({ sql }) => sql.includes(EARLIER_HEAD_GUARD_MARKER))).toHaveLength(1)
-    expect(recorded).toEqual(['0138_legacy_password_security_epoch_backfill'])
+    expect(recorded).toEqual([
+      '0138_legacy_password_security_epoch_backfill',
+      '0139_llm_catalog_prune_columns',
+      '0140_llm_catalog_prune_episodes',
+    ])
   })
 })
 

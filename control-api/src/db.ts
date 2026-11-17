@@ -53,6 +53,10 @@ import {
   applyLlmProviderAttemptsGrokBrokerSchema,
 } from './services/grokSubscriptionSchema.js'
 import {
+  applyLlmCatalogPruneColumnsSchema,
+  applyLlmCatalogPruneStateSchema,
+} from './services/llmCatalogPruneStateSchema.js'
+import {
   applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptConnectionIntegritySchema,
   applyLlmProviderAttemptSchema,
@@ -6487,7 +6491,19 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: backfillLegacyPasswordSecurityEpochs,
   },
   {
-    version: '0139_gfs_user_homes',
+    version: '0139_llm_catalog_prune_columns',
+    // The alias is the version an earlier head of this change applied both
+    // parts under, in one migration; such a database already has the columns
+    // and the CHECK, and the next migration is idempotent over it.
+    legacyVersions: ['0139_llm_catalog_prune_state'],
+    apply: applyLlmCatalogPruneColumnsSchema,
+  },
+  {
+    version: '0140_llm_catalog_prune_episodes',
+    apply: applyLlmCatalogPruneStateSchema,
+  },
+  {
+    version: '0141_gfs_user_homes',
     apply: applyGfsUserHomesSchema,
   },
 ]
@@ -6502,9 +6518,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
  *   pairs an operator added by hand (Azure deployments, Bedrock inference
  *   profiles), which the sync would then mark stale. Pairs models.dev does not
  *   list stay `manual` for the same reason. `enabled`, display name and context
- *   window are not written here. The sync never changes `enabled` on an
- *   existing row, and never the display name or context window of an enabled
- *   one; on a disabled one it only fills them while they are NULL.
+ *   window are not written here. The sync changes `enabled` on an existing
+ *   row only through the catalog prune and its re-enable, and only on rows it
+ *   manages (`enabled_managed_by = 'catalog'`), which these pairs are not. It
+ *   never changes the display name or context window of an enabled row; on a
+ *   disabled one it only fills them while they are NULL.
  * - 0044's placeholder prices are left in place. The sync loads a catalog
  *   price only when it inserts the model, and never over an existing price
  *   row. Half of these pairs are seeded allowlist rows the sync will never

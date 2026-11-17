@@ -70,6 +70,7 @@ const ENABLED_ROW = {
   discovered_at: AT,
   last_seen_at: AT,
   stale: false,
+  auto_disabled_at: null,
   image_input: null,
   created_at: AT,
   updated_at: AT,

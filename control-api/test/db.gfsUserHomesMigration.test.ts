@@ -6,7 +6,7 @@ vi.mock('pg', () => ({
   }),
 }))
 
-const VERSION = '0139_gfs_user_homes'
+const VERSION = '0141_gfs_user_homes'
 
 function recordingQuery(appliedVersions: string[]) {
   return vi.fn(async (sql: string) =>
@@ -16,17 +16,17 @@ function recordingQuery(appliedVersions: string[]) {
   )
 }
 
-describe('0139_gfs_user_homes migration', () => {
-  it("registers exactly once, last, immediately after dev's 0138 and with no legacy name", async () => {
+describe('0141_gfs_user_homes migration', () => {
+  it("registers exactly once, last, immediately after dev's 0140 and with no legacy name", async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(migration => migration.version)
     const index = versions.indexOf(VERSION)
 
     expect(index).toBeGreaterThan(0)
-    expect(versions[index - 1]).toBe('0138_legacy_password_security_epoch_backfill')
+    expect(versions[index - 1]).toBe('0140_llm_catalog_prune_episodes')
     expect(index).toBe(versions.length - 1)
     expect(versions.filter(version => version === VERSION)).toHaveLength(1)
-    // The earlier names (0130/0131_gfs_user_homes) ran only on this branch's own
+    // The earlier names (0130/0131/0139_gfs_user_homes) ran only on this branch's own
     // Minikube profiles and local databases. Those are recreated, so no receipt
     // under them is accepted.
     expect(CONTROL_API_MIGRATIONS[index].legacyVersions).toBeUndefined()

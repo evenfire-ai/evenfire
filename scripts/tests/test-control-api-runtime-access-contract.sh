@@ -27,6 +27,7 @@ sentinels=(
   $'gfs_user_homes\tupsert'
   $'llm_provider_catalog_settings\tupsert'
   $'llm_catalog_dismissed\tappend'
+  $'llm_catalog_prune_runs\tappend'
   $'password_identifier_state\tlegacy_dml'
   $'password_verification_pace\tlegacy_dml'
   $'password_verification_work\tinsert_delete'
