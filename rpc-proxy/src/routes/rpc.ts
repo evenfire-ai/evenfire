@@ -2,6 +2,7 @@ import { Router } from 'express'
 import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
 import { config } from '../config.js'
+import { knownDisplayCapabilities } from '../displayCapabilities.js'
 import {
   type AuthedRequest,
   extractAuthToken,
@@ -455,6 +456,7 @@ export function createRpcRouter(): Router {
             .json({ error: 'invalid_attachments', message: 'Attachments must be a list.' })
           return
         }
+        const displayCapabilities = knownDisplayCapabilities(body.displayCapabilities)
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -476,6 +478,10 @@ export function createRpcRouter(): Router {
           ...(typeof body.model === 'string' && body.model.trim()
             ? { model: body.model.trim() }
             : {}),
+          // What the Desktop draws in a reply. Not identity: it only lets the
+          // Host tell the agent it may write, say, a Mermaid diagram. Known
+          // values only; a list with none is omitted.
+          ...(displayCapabilities.length > 0 ? { displayCapabilities } : {}),
         }
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
