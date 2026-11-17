@@ -1066,6 +1066,64 @@ describeRealPostgres('GFS watch registry on real Postgres', () => {
     expect(r.retryAfterMs).toBeGreaterThan(30_000)
   })
 
+  it('adds the read backlog to retryAfterMs of a key deferred by load, and only by load', async () => {
+    b = await h.build()
+    const user = await h.createUser()
+    const busyIds = await Promise.all([1, 2, 3].map(() => h.tree.add('file')))
+    const flaky = await h.tree.add('file')
+    const unminted = await h.tree.add('file')
+    const orphan = await h.tree.add('file')
+    const slow = await h.tree.add('file')
+    // Three reads parked at gfsc and never answered: the process backlog.
+    b.gates.read.mode = 'hold'
+    const busy = b.open(
+      user,
+      busyIds.map(id => h.key('file', id))
+    )
+    await until(() => b.gates.read.held.length === 3)
+    b.gates.read.mode = 'pass'
+    h.decisions.set(h.toRid(flaky), 'unavailable')
+    const loaded = b.open(user, [h.key('file', flaky)])
+    expect(await loaded.outcome).toEqual({ kind: 'stream' })
+    // Its 503 is the only response in the window: 3 pending / (1 per 5 s) = 15 s.
+    expect(loaded.socket.last('ready')).toMatchObject({
+      deferred: [h.key('file', flaky)],
+      retryAfterMs: 15_000,
+    })
+    b.gates.mint.mode = 'fail'
+    const noToken = b.open(user, [h.key('file', unminted)])
+    expect(await noToken.outcome).toEqual({ kind: 'stream' })
+    expect(noToken.socket.last('ready')).toMatchObject({
+      deferred: [h.key('file', unminted)],
+      retryAfterMs: 15_000,
+    })
+    b.gates.mint.mode = 'pass'
+    // T_auth at 2 s: before the busy op's own (6 s) and inside the 5 s window.
+    b.gates.read.mode = 'hold'
+    const late = b.open(user, [h.key('file', slow)], { srvDeadlineMs: 3_000 })
+    await until(() => b.gates.read.held.length === 4)
+    await b.advance(2_000)
+    expect(await late.outcome).toEqual({ kind: 'stream' })
+    expect(late.socket.last('ready')).toMatchObject({
+      deferred: [h.key('file', slow)],
+      retryAfterMs: 15_000,
+    })
+    b.gates.read.mode = 'pass'
+    // Same backlog, but an ancestry failure is not load: the floor stands.
+    b.gates.cte.mode = 'fail'
+    const unloaded = b.open(user, [h.key('file', orphan)])
+    expect(await unloaded.outcome).toEqual({ kind: 'stream' })
+    expect(unloaded.socket.last('ready')).toMatchObject({
+      deferred: [h.key('file', orphan)],
+      retryAfterMs: 1_000,
+    })
+    b.gates.cte.mode = 'pass'
+    b.gates.read.releaseAll()
+    expect(await busy.outcome).toEqual({ kind: 'stream' })
+    await b.settle()
+    expect(restInvariantViolations(b)).toEqual([])
+  })
+
   it('defers a key added right after a move of its ancestor, from the recent-dirty window (T-SB35)', async () => {
     b = await h.build()
     const user = await h.createUser()
