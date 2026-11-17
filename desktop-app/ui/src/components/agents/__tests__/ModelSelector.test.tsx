@@ -326,6 +326,9 @@ describe('ModelSelector', () => {
     expect(
       screen.getByRole('menuitemradio', { name: /GPT-5\.3/ }).getAttribute('aria-checked')
     ).toBe('false')
+    // The check mark is the only marker: the default row carries no tag.
+    expect(screen.queryByText('default')).toBeNull()
+    expect(document.querySelectorAll('.model-selector-item-tag').length).toBe(0)
   })
 
   it('names a broker Host default that the catalog does not list', async () => {
