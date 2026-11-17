@@ -375,6 +375,14 @@ interface SecretRevocationGate {
   alreadyApplied: boolean
 }
 
+/** Issue #1528 — the single live read of the WorkflowRecipe made by a deploy pass. */
+interface DeployPassRecipeRead {
+  /** What recipeStillActive answers for this same response. */
+  stillActive: boolean
+  /** The stored recipe when it is this incarnation and is not being deleted; otherwise null. */
+  live: WorkflowRecipeCRD | null
+}
+
 /** Issue #637 — a denied workload whose revocation failed in a revocation round. */
 interface DeniedRevocationFailure {
   workloadId: string
@@ -2022,6 +2030,21 @@ export class WorkflowRecipeReconciler {
     return this.recipeStillActive(recipe)
   }
 
+  /**
+   * Issue #1528 — recipeStillActive for the workflow deploy: a failed read
+   * requeues instead of failing the run.
+   */
+  private async recipeStillActiveOrRequeue(recipe: WorkflowRecipeCRD): Promise<boolean> {
+    try {
+      return await this.recipeStillActive(recipe)
+    } catch (error) {
+      throw new RetryableReconcileError(
+        `WorkflowRecipe "${recipe.metadata.name}" could not be read during the workflow deploy — requeuing`,
+        { cause: error }
+      )
+    }
+  }
+
   // ─── Namespace Resolution ────────────────────────────────────────
 
   /**
@@ -2753,74 +2776,82 @@ export class WorkflowRecipeReconciler {
       let workflowSecretRevocationRecordPending = false
       // Issue #1349 (D4) — both creation sites (workflow workloads below and the
       // inner reconcile) follow; the record must be gone before either runs.
-      await this.clearTerminalRunTeardownRecordBeforeDeploy(recipe)
-      if (workflowWorkloads.length > 0) {
-        createLogger('wrc', recipe.metadata.name).info('Deploying workflow workloads', {
-          length: workflowWorkloads.length,
-          name,
-        })
-        try {
-          const workflowDeploy = await this.deployWorkflowWorkloads(
-            recipe,
-            name,
-            oauthBrokerTokenReapedEarly
-          )
-          workflowInternalDependencyConditions = workflowDeploy.internalDependencyConditions
-          workflowWorkloadConditions = workflowDeploy.workloadConditions
-          workflowTransportNetworkConditions = workflowDeploy.transportNetworkConditions
-          // Issue #637 — surface the EnvSecretOwnershipDenied condition from the
-          // workflow build path too; previously it was computed and dropped, so a
-          // denied workflow workload degraded silently with no status condition.
-          workflowSecretOwnershipConditions = workflowDeploy.secretOwnershipConditions
-          workflowSecretRevocationRecordPending =
-            workflowDeploy.secretRevocationRecordPending === true
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          const internalDependencyConditions =
-            error instanceof InternalDependencyReconcileError ? error.conditions : undefined
-          const workloadConditions =
-            error instanceof ImmutableStatefulSetDriftError
-              ? [error.condition]
-              : error instanceof DeniedWorkloadRevocationError
-                ? error.driftConditions
-                : undefined
-          if (
-            error instanceof RetryableReconcileError ||
-            error instanceof NetworkPolicyInfraError
-          ) {
-            const safe = this.safeInfrastructureErrorFields(error)
-            const retryableMessage =
-              error instanceof RetryableReconcileError
-                ? message
-                : `Workflow workload infrastructure temporarily unavailable (${safe.errorCode ?? safe.errorName})`
-            // Transient infra failure (e.g. DNS SERVFAIL or a NetworkPolicy
-            // optimistic-concurrency race). Degrade instead of failing and
-            // schedule a deterministic retry before the workflow runs — a
-            // status patch alone only emits a status-only MODIFIED event and
-            // cannot be relied on to enter the full reconcile path again.
-            return {
-              phase: 'degraded' as RecipePhase,
-              message: retryableMessage,
-              workloadStatuses: [],
-              internalDependencyConditions,
-              workloadConditions,
-              requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
-              ...(error instanceof TransportNetworkReadinessPendingError
-                ? { transportNetworkConditions: pendingTransportNetworkConditions(recipe, message) }
-                : {}),
-              ...(error instanceof DeniedWorkloadRevocationError
-                ? { secretOwnershipConditions: error.secretOwnershipConditions }
-                : {}),
-            }
+      // Issue #1528 — the pass reads the live recipe once, here, for the terminal
+      // record clear, the liveness check and the revocation clear. The read and
+      // the clear are inside the `try`, so a failed read or patch ends the pass
+      // `degraded` with a requeue before anything is created.
+      const runScoped = Boolean(recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim())
+      try {
+        if (runScoped || workflowWorkloads.length > 0) {
+          const deployRead = await this.readLiveRecipeForDeployPass(recipe)
+          if (runScoped) {
+            await this.clearTerminalRunTeardownRecordBeforeDeploy(recipe, deployRead.live)
           }
+          if (workflowWorkloads.length > 0) {
+            createLogger('wrc', recipe.metadata.name).info('Deploying workflow workloads', {
+              length: workflowWorkloads.length,
+              name,
+            })
+            const workflowDeploy = await this.deployWorkflowWorkloads(
+              recipe,
+              name,
+              oauthBrokerTokenReapedEarly,
+              deployRead
+            )
+            workflowInternalDependencyConditions = workflowDeploy.internalDependencyConditions
+            workflowWorkloadConditions = workflowDeploy.workloadConditions
+            workflowTransportNetworkConditions = workflowDeploy.transportNetworkConditions
+            // Issue #637 — surface the EnvSecretOwnershipDenied condition from the
+            // workflow build path too; previously it was computed and dropped, so a
+            // denied workflow workload degraded silently with no status condition.
+            workflowSecretOwnershipConditions = workflowDeploy.secretOwnershipConditions
+            workflowSecretRevocationRecordPending =
+              workflowDeploy.secretRevocationRecordPending === true
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const internalDependencyConditions =
+          error instanceof InternalDependencyReconcileError ? error.conditions : undefined
+        const workloadConditions =
+          error instanceof ImmutableStatefulSetDriftError
+            ? [error.condition]
+            : error instanceof DeniedWorkloadRevocationError
+              ? error.driftConditions
+              : undefined
+        if (error instanceof RetryableReconcileError || error instanceof NetworkPolicyInfraError) {
+          const safe = this.safeInfrastructureErrorFields(error)
+          const retryableMessage =
+            error instanceof RetryableReconcileError
+              ? message
+              : `Workflow workload infrastructure temporarily unavailable (${safe.errorCode ?? safe.errorName})`
+          // Transient infra failure (e.g. DNS SERVFAIL or a NetworkPolicy
+          // optimistic-concurrency race). Degrade instead of failing and
+          // schedule a deterministic retry before the workflow runs — a
+          // status patch alone only emits a status-only MODIFIED event and
+          // cannot be relied on to enter the full reconcile path again.
           return {
-            phase: 'failed' as RecipePhase,
-            message,
+            phase: 'degraded' as RecipePhase,
+            message: retryableMessage,
             workloadStatuses: [],
-            workflowPhase: 'failed',
             internalDependencyConditions,
             workloadConditions,
+            requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+            ...(error instanceof TransportNetworkReadinessPendingError
+              ? { transportNetworkConditions: pendingTransportNetworkConditions(recipe, message) }
+              : {}),
+            ...(error instanceof DeniedWorkloadRevocationError
+              ? { secretOwnershipConditions: error.secretOwnershipConditions }
+              : {}),
           }
+        }
+        return {
+          phase: 'failed' as RecipePhase,
+          message,
+          workloadStatuses: [],
+          workflowPhase: 'failed',
+          internalDependencyConditions,
+          workloadConditions,
         }
       }
 
@@ -3222,7 +3253,15 @@ export class WorkflowRecipeReconciler {
             `(transient read error) — requeuing before delegating or rendering workloads`
         )
       }
-      await this.clearSecretRevocationsBeforeRender(recipe, secretOwnership.deniedWorkloadIds)
+      // Issue #1528 — the pass's single live read of the recipe, made also when
+      // every workload is denied. A failed read requeues before anything is
+      // delegated or rendered.
+      const deployRead = await this.readLiveRecipeForDeployPass(recipe)
+      await this.clearSecretRevocationsBeforeRender(
+        recipe,
+        secretOwnership.deniedWorkloadIds,
+        deployRead.live
+      )
 
       // Issue #637 — revoke every denied workload before any workload is delegated
       // or rendered, so a failed pre-deploy, a pending readiness wait or the stale
@@ -4162,7 +4201,8 @@ export class WorkflowRecipeReconciler {
   private async deployWorkflowWorkloads(
     recipe: WorkflowRecipeCRD,
     name: string,
-    oauthBrokerTokenReapedEarly: boolean
+    oauthBrokerTokenReapedEarly: boolean,
+    deployRead: DeployPassRecipeRead
   ): Promise<{
     internalDependencyConditions: StatusCondition[]
     secretOwnershipConditions: StatusCondition[]
@@ -4178,7 +4218,7 @@ export class WorkflowRecipeReconciler {
         secretOwnershipConditions: [],
         workloadConditions: [],
       }
-    if (!(await this.recipeStillActive(recipe))) {
+    if (!deployRead.stillActive) {
       createLogger('wrc', recipe.metadata.name).warn(
         'Skipping workload deployment because the recipe is gone or deleting',
         { name }
@@ -4208,7 +4248,11 @@ export class WorkflowRecipeReconciler {
           `(transient read error) — requeuing before delegating or rendering workloads`
       )
     }
-    await this.clearSecretRevocationsBeforeRender(recipe, secretOwnership.deniedWorkloadIds)
+    await this.clearSecretRevocationsBeforeRender(
+      recipe,
+      secretOwnership.deniedWorkloadIds,
+      deployRead.live
+    )
 
     // Issue #637 — revoke every denied workload before any workload is delegated
     // or rendered. Revocation does not depend on rendering, and a failed
@@ -4287,7 +4331,7 @@ export class WorkflowRecipeReconciler {
     if (preDeployedServers.length > 0) {
       await this.waitForTransportNetworkReadiness(recipe, preDeployedServers, mcpBatchNs)
     }
-    if (!(await this.recipeStillActive(recipe))) {
+    if (!(await this.recipeStillActiveOrRequeue(recipe))) {
       createLogger('wrc', recipe.metadata.name).warn(
         'Skipping workload materialization because the recipe is gone or deleting',
         { name }
@@ -4439,7 +4483,7 @@ export class WorkflowRecipeReconciler {
     // MCP delegation — finalize Context allowlist and McpServer CRDs.
     // Children live in `mcp-server` (mcpBatchNs), not the recipe's own ns.
     if (hasTransport) {
-      if (!(await this.recipeStillActive(recipe))) {
+      if (!(await this.recipeStillActiveOrRequeue(recipe))) {
         createLogger('wrc', recipe.metadata.name).warn(
           'Skipping MCP delegation because the recipe is gone or deleting',
           { name }
@@ -4742,30 +4786,39 @@ export class WorkflowRecipeReconciler {
    * recipe can be deployed again (latched retry, coordinator `recovering`,
    * admin retry), so the next terminal entry tears down what this pass creates.
    *
-   * Reads the LIVE object: a pass can run on an object captured before the run
-   * turned terminal, and its in-memory status would not show the record. A failed
-   * read or patch propagates, so the pass stops before anything is created and
-   * the watcher retries it.
+   * The caller passes `live`, the stored object from the pass's single live read
+   * (issue #1528), and calls this only for a run-scoped recipe: a pass can run on
+   * an object captured before the run turned terminal, and its in-memory status
+   * would not show the record. A null `live` (gone, replaced or being deleted)
+   * clears nothing. A failed patch ends the pass `degraded` with a requeue
+   * before anything is created.
    */
   private async clearTerminalRunTeardownRecordBeforeDeploy(
-    recipe: WorkflowRecipeCRD
+    recipe: WorkflowRecipeCRD,
+    live: WorkflowRecipeCRD | null
   ): Promise<void> {
-    if (!recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()) return
-    const live = await this.readLiveRecipeForRecordClear(recipe)
     if (!live) return
     if (!live.status?.terminalRunTeardown) return
 
-    await this.customApi.patchNamespacedCustomObjectStatus(
-      {
-        group: CRD_GROUP,
-        version: CRD_VERSION,
-        namespace: recipe.metadata.namespace,
-        plural: WORKFLOWRECIPE_PLURAL,
-        name: recipe.metadata.name,
-        body: { status: { terminalRunTeardown: null } },
-      },
-      { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
-    )
+    try {
+      await this.customApi.patchNamespacedCustomObjectStatus(
+        {
+          group: CRD_GROUP,
+          version: CRD_VERSION,
+          namespace: recipe.metadata.namespace,
+          plural: WORKFLOWRECIPE_PLURAL,
+          name: recipe.metadata.name,
+          body: { status: { terminalRunTeardown: null } },
+        },
+        { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+      )
+    } catch (error) {
+      throw new RetryableReconcileError(
+        `Terminal run teardown record of WorkflowRecipe "${recipe.metadata.name}" could not be ` +
+          'cleared — requeuing before deploying the run again',
+        { cause: error }
+      )
+    }
     if (recipe.status) delete recipe.status.terminalRunTeardown
     createLogger('wrc', recipe.metadata.name).info(
       'Cleared terminal run teardown record before re-deploy',
@@ -4782,25 +4835,26 @@ export class WorkflowRecipeReconciler {
    * the gate. A kept StatefulSet is still updated, without those refs, while its
    * entry stands.
    *
-   * Reads the LIVE object: the pass can run on an object whose in-memory status
-   * lacks an entry that is stored. A failed read or patch ends the pass with a
-   * requeue before anything is rendered. Whenever the live read returns the recipe
-   * and no patch failed, the in-memory entries of every rendered id are removed
-   * too, also when no stored entry needed a patch, so a stale in-memory entry
-   * cannot outlive the pass. When the live read finds the recipe gone, replaced or
-   * being deleted, nothing is cleared, in memory or stored.
+   * Works on `live`, the stored object from the pass's single live read (issue
+   * #1528): the pass can run on an object whose in-memory status lacks an entry
+   * that is stored. A failed patch ends the pass with a requeue before anything
+   * is rendered. Whenever `live` is the recipe and no patch failed, the in-memory
+   * entries of every rendered id are removed too, also when no stored entry
+   * needed a patch, so a stale in-memory entry cannot outlive the pass. When
+   * `live` is null (the recipe is gone, replaced or being deleted), nothing is
+   * cleared, in memory or stored.
    */
   private async clearSecretRevocationsBeforeRender(
     recipe: WorkflowRecipeCRD,
-    deniedWorkloadIds: ReadonlySet<string>
+    deniedWorkloadIds: ReadonlySet<string>,
+    live: WorkflowRecipeCRD | null
   ): Promise<void> {
     const rendered = (recipe.spec.workloads ?? [])
       .map(workload => workload.id)
       .filter(id => !deniedWorkloadIds.has(id))
     if (rendered.length === 0) return
+    if (!live) return
     try {
-      const live = await this.readLiveRecipeForRecordClear(recipe)
-      if (!live) return
       const stored = live.status?.secretOwnershipRevocations ?? {}
       const stale = rendered.filter(id => stored[id] !== undefined)
       if (stale.length > 0) {
@@ -4836,13 +4890,16 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
-   * Issue #1349 — the live WorkflowRecipe for a status record clear, or null when
-   * it is gone (404), was replaced (another uid) or is being deleted. Any other
-   * read error propagates.
+   * Issue #1528 — the single live read of the WorkflowRecipe made by a deploy
+   * pass, shared by the terminal record clear, the liveness check before the
+   * workflow deploy and the Secret revocation clear. `stillActive` is what
+   * recipeStillActive answers for this response; `live` is the stored object,
+   * or null when it is gone (404), was replaced (another uid) or is being
+   * deleted. Any other read error requeues the pass.
    */
-  private async readLiveRecipeForRecordClear(
+  private async readLiveRecipeForDeployPass(
     recipe: WorkflowRecipeCRD
-  ): Promise<WorkflowRecipeCRD | null> {
+  ): Promise<DeployPassRecipeRead> {
     let live: WorkflowRecipeCRD
     try {
       live = (await this.customApi.getNamespacedCustomObject({
@@ -4853,11 +4910,21 @@ export class WorkflowRecipeReconciler {
         name: recipe.metadata.name,
       })) as WorkflowRecipeCRD
     } catch (error) {
-      if (getErrorCode(error) === 404) return null
-      throw error
+      if (getErrorCode(error) === 404) return { stillActive: false, live: null }
+      throw new RetryableReconcileError(
+        `WorkflowRecipe "${recipe.metadata.name}" could not be read before deploying — ` +
+          'requeuing before delegating or rendering workloads',
+        { cause: error }
+      )
     }
-    if (live.metadata?.uid !== recipe.metadata.uid || live.metadata?.deletionTimestamp) return null
-    return live
+    const liveUid = live.metadata?.uid
+    const stillActive =
+      !(recipe.metadata.uid && liveUid && recipe.metadata.uid !== liveUid) &&
+      !live.metadata?.deletionTimestamp
+    if (live.metadata?.uid !== recipe.metadata.uid || live.metadata?.deletionTimestamp) {
+      return { stillActive, live: null }
+    }
+    return { stillActive, live }
   }
 
   /**
