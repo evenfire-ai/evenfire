@@ -82,13 +82,15 @@ afterEach(() => {
 })
 
 describe('LlmCatalogAutoEnableDialog', () => {
-  it('explains that only future catalog inserts are affected', async () => {
+  it('explains which models the setting and the sync can change', async () => {
     render(<LlmCatalogAutoEnableDialog open onDismiss={vi.fn()} />)
     const dialog = screen.getByRole('dialog', { name: 'Auto-enable new models' })
     expect(dialog).toHaveTextContent('eligible new models')
     expect(dialog).toHaveTextContent('applies from the next live catalog sync')
-    expect(dialog).toHaveTextContent('keep their current state')
     expect(dialog).toHaveTextContent('never disables a model')
+    expect(dialog).toHaveTextContent('turns off a model the catalog dropped long ago')
+    expect(dialog).toHaveTextContent('this setting decides whether it comes back on')
+    expect(dialog).toHaveTextContent('Models you turned on or off yourself are never changed')
     expect(dialog).toHaveTextContent('a large catalog can take several syncs')
     expect(dialog).not.toHaveTextContent('this deployment')
     await waitFor(() => expect(checkbox('OpenAI')).toBeInTheDocument())

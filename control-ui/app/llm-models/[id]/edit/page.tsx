@@ -16,6 +16,7 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateLlmModelInput,
   type LlmAllowedModel,
+  type UpdateLlmModelInput,
   getLlmModel,
   getModelInUseImpact,
   isLlmModelConfigMapDeferred,
@@ -60,8 +61,20 @@ export default function EditLlmModelPage() {
     }
   }, [id])
 
-  async function handleSubmit(input: CreateLlmModelInput) {
-    await saveWithImpactGate(input, false)
+  // control-api reads any `enabled` that differs from the stored row as the
+  // operator's decision and takes the row away from the catalog sync for good.
+  // The form always carries `enabled` as it loaded, and the sync may have turned
+  // the row on or off since, so resending it would undo that change and pin the
+  // row. Send `enabled` only when the operator flipped the toggle, and always
+  // with the pin: the sync may already have written the same value since the
+  // page loaded, and a flip that equals the stored row changes nothing on its
+  // own, leaving the sync free to undo the operator's choice later.
+  async function handleSubmit({ enabled, ...fields }: CreateLlmModelInput) {
+    if (enabled === undefined || enabled === model?.enabled) {
+      await saveWithImpactGate(fields, false)
+      return
+    }
+    await saveWithImpactGate({ ...fields, enabled, pinEnabled: true }, false)
   }
 
   // A write that pulls a still-referenced pair out of the runtime allowlist is
@@ -71,7 +84,10 @@ export default function EditLlmModelPage() {
   // OLD identity, whose references `impact.provider/impact.model` names. Show the
   // impact and let the operator confirm a forced retry — never force automatically
   // (spec Fase 3/5).
-  async function saveWithImpactGate(input: CreateLlmModelInput, force: boolean) {
+  async function saveWithImpactGate(
+    input: CreateLlmModelInput & Pick<UpdateLlmModelInput, 'pinEnabled'>,
+    force: boolean
+  ) {
     setSaving(true)
     setSaveError('')
     let impact: ReturnType<typeof getModelInUseImpact> = null

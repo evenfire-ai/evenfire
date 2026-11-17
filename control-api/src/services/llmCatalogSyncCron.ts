@@ -6,9 +6,12 @@
  * drives. No HTTP hop, no new auth: the tick calls the service directly. New
  * models land as `source='discovery'`, disabled unless the provider's policy
  * and the per-run caps allow enabling them on insert (see the header of
- * llmCatalogSync.ts); vanished models are only ever flagged `stale=true` (never
- * deleted, never disabled), and only when the §4.5 sanity guards agree the live
- * catalog is trustworthy.
+ * llmCatalogSync.ts); vanished models are flagged `stale=true` (never deleted)
+ * only when the §4.5 sanity guards agree the live catalog is trustworthy, and
+ * the run's prune phase disables the catalog-managed ones that stayed stale past
+ * a grace period with no consumer (llmCatalogPrune.ts). The prune never throws,
+ * so a tick fails only when the reconciliation does, or when the run's final
+ * ConfigMap publication fails (`publishFailed`, owned by the publish retry).
  *
  * Cross-replica dedup: control-api runs multiple replicas, and 24h ticks across
  * them would otherwise pile up redundant runs. Each tick wraps its work in a
