@@ -2365,6 +2365,8 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
       effectiveModel: 'gpt-5.3',
       pending: false,
     })
+    // Showing or sending the default must not persist it as the chat's selection.
+    expect(brokerTransport.setHostModel).not.toHaveBeenCalled()
   })
 
   it('refuses a twenty-first attachment and sends twenty', async () => {
