@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFile } from 'node:child_process'
 import { resolve } from 'node:path'
+import { promisify } from 'node:util'
 import { canonicalResourceIdentity, hashActionTarget } from '@clerum/action-context-contracts'
 import { createWorkflowRunAuthorityCheckpointer } from './workflowActionCheckpointClient'
 
@@ -44,37 +45,78 @@ const run = {
   },
 } as never
 
-function allowedCheckpoint(overrides: Record<string, unknown> = {}) {
+// Setup, not behaviour under test: the Control API checkpoint producer runs in
+// a `tsx` child process. `beforeAll` runs it once, so no test body, mocked
+// request or `it.each` table starts a process. The child has its own
+// `timeout`; a failed or timed-out child fails the hook, and the file with it.
+const PRODUCER_CHILD_TIMEOUT_MS = 240_000
+// The child limit, plus 120 s of margin.
+const PRODUCER_SETUP_TIMEOUT_MS = PRODUCER_CHILD_TIMEOUT_MS + 120_000
+// Longer than the child limit, so a child that finishes inside its limit
+// always leaves the checkpoint valid for the tests that read it.
+const PRODUCED_VALIDITY_MS = 300_000
+const execFileAsync = promisify(execFile)
+let allowedProducerStdout: string | undefined
+
+// The child is awaited, not run with `execFileSync`: under Vitest 3.2 a worker
+// blocked for more than 60 s fails the run with `Timeout calling "onTaskUpdate"`
+// even when every test passed. A child over the limit is terminated and rejected
+// with an error that says so; every other failure is rethrown unchanged.
+async function produceAllowed(): Promise<string> {
   const repositoryRoot = resolve(process.cwd(), '..')
-  const output = execFileSync(
-    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
-    [
-      resolve(
-        repositoryRoot,
-        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
-      ),
-      JSON.stringify({
-        request: {
-          version: 2,
-          principal: { sub: userId, sid, sessionVersion: 3 },
-          delegationJti: run.authority_binding.delegationJti,
-          resource,
-          operationId: 'workflow.trigger',
-          target,
-          targetHash: hashActionTarget(target),
-          accessPathId,
-          authorizationRevision,
-          behaviorBindingHash,
-          domain: { service: 'workflow-recipes', resource, targetHash: hashActionTarget(target) },
-        },
-        destination: null,
-        checkedAt: new Date().toISOString(),
-        validUntil: new Date(Date.now() + 30_000).toISOString(),
-      }),
-    ],
-    { cwd: repositoryRoot, encoding: 'utf8' }
+  const script = resolve(
+    repositoryRoot,
+    'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
   )
-  return { ...JSON.parse(output), ...overrides }
+  try {
+    const { stdout } = await execFileAsync(
+      resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+      [
+        script,
+        JSON.stringify({
+          request: {
+            version: 2,
+            principal: { sub: userId, sid, sessionVersion: 3 },
+            delegationJti: run.authority_binding.delegationJti,
+            resource,
+            operationId: 'workflow.trigger',
+            target,
+            targetHash: hashActionTarget(target),
+            accessPathId,
+            authorizationRevision,
+            behaviorBindingHash,
+            domain: { service: 'workflow-recipes', resource, targetHash: hashActionTarget(target) },
+          },
+          destination: null,
+          checkedAt: new Date().toISOString(),
+          validUntil: new Date(Date.now() + PRODUCED_VALIDITY_MS).toISOString(),
+        }),
+      ],
+      { cwd: repositoryRoot, encoding: 'utf8', timeout: PRODUCER_CHILD_TIMEOUT_MS }
+    )
+    return stdout
+  } catch (error) {
+    if ((error as { killed?: unknown }).killed === true) {
+      throw new Error(
+        `producer child exceeded ${PRODUCER_CHILD_TIMEOUT_MS} ms and was terminated: ${script}`,
+        { cause: error }
+      )
+    }
+    throw error
+  }
+}
+
+beforeAll(async () => {
+  allowedProducerStdout = await produceAllowed()
+}, PRODUCER_SETUP_TIMEOUT_MS)
+
+type AllowedCheckpoint = Record<string, unknown> & { attribution: Record<string, unknown> }
+
+function allowedCheckpoint(overrides: Record<string, unknown> = {}): AllowedCheckpoint {
+  if (allowedProducerStdout === undefined) {
+    throw new Error('the allowed checkpoint producer was not set up in beforeAll')
+  }
+  return { ...JSON.parse(allowedProducerStdout), ...overrides }
 }
 
 describe('workflow action checkpoint client', () => {
@@ -145,25 +187,25 @@ describe('workflow action checkpoint client', () => {
   it.each([
     [
       'a different access path',
-      {
-        attribution: { ...allowedCheckpoint().attribution, accessPathId: `ap1_${'d'.repeat(43)}` },
-      },
+      (response: AllowedCheckpoint) => ({
+        attribution: { ...response.attribution, accessPathId: `ap1_${'d'.repeat(43)}` },
+      }),
     ],
     [
       'a different path kind and team',
-      {
+      (response: AllowedCheckpoint) => ({
         attribution: {
-          ...allowedCheckpoint().attribution,
+          ...response.attribution,
           pathKind: 'team',
           effectiveTeamId: '44444444-4444-4444-8444-444444444444',
         },
-      },
+      }),
     ],
-  ])('rejects an allowed response attributed to %s', async (_label, responseOverride) => {
+  ] as const)('rejects an allowed response attributed to %s', async (_label, responseOverride) => {
+    const mismatched = allowedCheckpoint(responseOverride(allowedCheckpoint()))
     const checkpoint = createWorkflowRunAuthorityCheckpointer({
       fetchImpl: vi.fn(
-        async () =>
-          new Response(JSON.stringify(allowedCheckpoint(responseOverride)), { status: 200 })
+        async () => new Response(JSON.stringify(mismatched), { status: 200 })
       ) as typeof fetch,
     })
 
