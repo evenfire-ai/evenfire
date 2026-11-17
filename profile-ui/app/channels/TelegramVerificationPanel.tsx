@@ -295,17 +295,15 @@ export function TelegramVerificationPanel({
       ) : (
         <TableViewport>
           <DataTable className="eft-table eft-table--wide">
-            {medium === 'telegram' || medium === 'slack' ? (
-              <thead>
-                <tr>
-                  <TableHeaderCell label="Name" />
-                  <TableHeaderCell label="Chat type" />
-                  <TableHeaderCell label={medium === 'slack' ? 'App handle' : 'Bot handle'} />
-                  <TableHeaderCell label="Status" />
-                  <th></th>
-                </tr>
-              </thead>
-            ) : null}
+            <thead>
+              <tr>
+                <TableHeaderCell label="Name" />
+                <TableHeaderCell label="Chat type" />
+                <TableHeaderCell label={medium === 'slack' ? 'App handle' : 'Bot handle'} />
+                <TableHeaderCell label="Status" />
+                <th></th>
+              </tr>
+            </thead>
             <tbody>
               {rows.map(row => {
                 const name = row.account
