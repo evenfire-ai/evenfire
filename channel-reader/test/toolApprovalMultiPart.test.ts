@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { formatProgressUpdate } from '../src/progressFormatter'
+import type { RPCClient } from '../src/rpcClient'
 import type { ChannelAdapter, CommunicationChannelCRD, Message, ProgressStep } from '../src/types'
 
 // Tool approvals longer than one message of the channel: sent as several
@@ -236,14 +237,14 @@ function recordingAdapter(channelType: ChannelKind) {
 function rpcClientFor(taskId: string, userId: string, notification: string) {
   const current = { requestId: `approval-${taskId}`, notification }
   const rpc = {
-    healthCheck: vi.fn(async () => true),
-    sendMessage: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({
+    healthCheck: vi.fn<RPCClient['healthCheck']>(async () => true),
+    sendMessage: vi.fn<RPCClient['sendMessage']>(async () => ({
       success: true,
       status: 'pending' as const,
       taskId,
     })),
-    getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
-    getTaskResult: vi.fn(async () => ({
+    getBaseUrl: vi.fn<RPCClient['getBaseUrl']>(() => 'http://mcp-host.test'),
+    getTaskResult: vi.fn<RPCClient['getTaskResult']>(async () => ({
       success: true,
       status: 'waiting_approval' as const,
       approval: {
@@ -253,13 +254,31 @@ function rpcClientFor(taskId: string, userId: string, notification: string) {
         notification: current.notification,
       },
     })),
-    sendApproval: vi.fn(async () => ({ success: true })),
-    sendDenial: vi.fn(async () => ({ success: true })),
-    sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
-    getCronResults: vi.fn(async () => []),
-    acknowledgeCronResult: vi.fn(),
+    sendApproval: vi.fn<RPCClient['sendApproval']>(async () => ({ success: true })),
+    sendDenial: vi.fn<RPCClient['sendDenial']>(async () => ({ success: true })),
+    sendWorkflowApprovalDecision: vi.fn<RPCClient['sendWorkflowApprovalDecision']>(async () => ({
+      success: true,
+    })),
+    getCronResults: vi.fn<RPCClient['getCronResults']>(async () => []),
+    acknowledgeCronResult: vi.fn<RPCClient['acknowledgeCronResult']>(async () => undefined),
+    // Not reached by these flows; a call fails the test that made it.
+    resolveWorkflowApproval: vi.fn<RPCClient['resolveWorkflowApproval']>(
+      unexpectedRpcCall('resolveWorkflowApproval')
+    ),
+    fetchDeliveries: vi.fn<RPCClient['fetchDeliveries']>(unexpectedRpcCall('fetchDeliveries')),
+    acknowledge: vi.fn<RPCClient['acknowledge']>(unexpectedRpcCall('acknowledge')),
+    fail: vi.fn<RPCClient['fail']>(unexpectedRpcCall('fail')),
+    confirmTelegramChallenge: vi.fn<RPCClient['confirmTelegramChallenge']>(
+      unexpectedRpcCall('confirmTelegramChallenge')
+    ),
   }
   return { rpc, current }
+}
+
+function unexpectedRpcCall(name: string) {
+  return async (): Promise<never> => {
+    throw new Error(`unexpected RPC call in this test: ${name}`)
+  }
 }
 
 /** Starts a task on the progress flow; the approval is offered on `suspend()`. */
@@ -1604,8 +1623,15 @@ describe('a pending approval that another one replaces', () => {
           `A46(${row}) warn names both requests`
         )
         .toBe(true)
+      // No file name of X's card or of Y's card in any warning.
+      const fileNames = [...NAMES_255, ...(card === CARD_Y ? NAMES_Y : ['notes.txt'])]
       for (const line of warnLines) {
-        expect.soft(line, `A46(${row}) warn without file names`).not.toContain('upload: "')
+        expect.soft(line, `A46(${row}) warn without file lines`).not.toContain('upload: "')
+        for (const name of fileNames) {
+          expect
+            .soft(line.includes(name), `A46(${row}) warn names ${name.slice(0, 12)}…`)
+            .toBe(false)
+        }
       }
 
       await s.reader.handleMessages([messageFor('telegram', `tool:a:${xToken}`)])
