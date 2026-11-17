@@ -1,9 +1,11 @@
 // Shared setup for the rpc-proxy tests that call the Control API producer
-// fixtures in a `tsx` child process. The children are setup, not behaviour
-// under test: test files start them from a file-level `beforeAll` and record
-// each result with `recordSetup`, so no child runs inside a request under test
-// or under a test timer. Each test file keeps its own literal producer path,
-// because CI discovers producers by searching `*.test.ts` files.
+// fixtures in a `tsx` child process. Every child is awaited and bounded by
+// `PRODUCER_CHILD_TIMEOUT_MS`. Most test files start their children from a
+// file-level `beforeAll`, and record a result with `recordSetup` when a failed
+// child must fail only the tests that read it. A test that mints its own token
+// runs its child in the test body, under a timeout from `producerBudgetMs`.
+// Each test file keeps its own literal producer path, because CI discovers
+// producers by searching `*.test.ts` files.
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
