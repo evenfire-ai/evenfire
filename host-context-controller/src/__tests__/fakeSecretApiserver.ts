@@ -1,6 +1,7 @@
 import { vi } from 'vitest'
 import type { V1SecretList } from '@kubernetes/client-node'
 import type { SecretList, SecretListPage, WatchLike } from '../informers/secretInformer'
+import { fakeWatchStream } from './fakeWatchStream'
 
 /**
  * A fake apiserver for one namespace's Secrets with real watch semantics
@@ -29,23 +30,13 @@ type Change = {
   name: string
 } & StoredSecret
 
-/**
- * client-node 1.4.0 attaches its line listeners and returns; the replayed
- * events arrive from the response stream after watch() resolved. Deliver the
- * replay after the caller's await resumed, never inside watch().
- */
-async function afterWatchResolves(deliver: () => void): Promise<void> {
-  for (let hop = 0; hop < 3; hop++) await Promise.resolve()
-  deliver()
-}
-
 export function fakeSecretApiserver(namespace: string, initialNames: string[]) {
   let revision = 100
   let uidSequence = 0
   const objects = new Map<string, StoredSecret>()
   const changes: Change[] = []
   const watchCalls: FakeWatchCall[] = []
-  let live: FakeWatchCall | null = null
+  let live: ReturnType<typeof fakeWatchStream> | null = null
   let expireNextResume = false
   const listPageFailures = new Map<number, () => unknown>()
   let listPage = 0
@@ -83,26 +74,25 @@ export function fakeSecretApiserver(namespace: string, initialNames: string[]) {
     const call: FakeWatchCall = { queryParams, cb, done, abort }
     watchCalls.push(call)
     const from = queryParams.resourceVersion
-    if (from === undefined) {
-      const replay = [...objects].map(([name, stored]) => secretObject(name, stored))
-      void afterWatchResolves(() => {
-        for (const object of replay) cb('ADDED', object)
-      })
-    } else if (expireNextResume) {
+    if (from !== undefined && expireNextResume) {
       expireNextResume = false
       // client-node 1.4.0: a non-200 watch response calls done(err) with
       // `statusCode`, then resolves.
       done(Object.assign(new Error('Gone'), { statusCode: 410 }))
       return { abort } as unknown as AbortController
-    } else {
-      const replay = changes
-        .filter(change => change.revision > Number(from))
-        .map(change => [change.type, secretObject(change.name, change)] as const)
-      void afterWatchResolves(() => {
-        for (const [type, object] of replay) cb(type, object)
-      })
     }
-    live = call
+    // The replay is written to the stream first; live changes follow it.
+    const stream = fakeWatchStream(cb, done)
+    if (from === undefined) {
+      for (const [name, stored] of objects) stream.cb('ADDED', secretObject(name, stored))
+    } else {
+      for (const change of changes) {
+        if (change.revision > Number(from)) {
+          stream.cb(change.type, secretObject(change.name, change))
+        }
+      }
+    }
+    live = stream
     return { abort } as unknown as AbortController
   })
 
